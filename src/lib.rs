@@ -1,0 +1,11 @@
+pub mod analysis;
+pub mod audio;
+pub mod config;
+pub mod core;
+pub mod gui;
+pub mod ipc;
+pub mod library;
+pub mod model;
+pub mod mpris;
+pub mod store;
+pub mod terminal;
