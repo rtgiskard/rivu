@@ -1,0 +1,43 @@
+[package]
+name = "rivu"
+version = "0.1.0"
+edition = "2024"
+description = "A local-first music player with a shared Rust core"
+
+[dependencies]
+anyhow = "1"
+blake3 = "1"
+clap = { version = "4", features = ["derive"] }
+cpal = "0.18.2"
+crossbeam-channel = "0.5"
+crossterm = "0.29"
+directories = "6"
+gpui = { git = "https://github.com/zed-industries/zed", rev = "a84689073d296dfd39987bc7dd478e43ef76d83a", default-features = false }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "a84689073d296dfd39987bc7dd478e43ef76d83a", default-features = false, features = ["x11", "wayland"] }
+futures = "0.3"
+opus = "0.4"
+parking_lot = "0.12"
+rand = "0.10.3"
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "crossterm_0_29", "std"] }
+ringbuf = "0.5.2"
+rubato = { version = "5.0.1", default-features = false }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+rustfft = "6"
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+symphonia = { version = "0.6.1", features = ["all"] }
+walkdir = "2"
+toml = "1.1.6"
+tempfile = "3.27"
+zbus = "5.19"
+url = "2"
+unicode-segmentation = "1.13.3"
+image = { version = "0.25", default-features = false }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[patch.crates-io]
+# GPUI schedules nested idle callbacks; use its pinned nonblocking dispatcher.
+calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee14c40066d64777e2a36b6ffcc22590" }
