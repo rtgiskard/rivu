@@ -1,18 +1,21 @@
-use super::{ACCENT, BORDER, Field, GuiApp, MUTED, PANEL, TEXT, button, column, format_time, row};
-use crate::model::{Command, RepeatMode};
+use super::{
+    ACCENT, BORDER, Dragging, Field, GuiApp, MUTED, Measured, PANEL, TEXT, button, column,
+    format_time, row,
+};
+use crate::model::{Command, PlaybackStatus};
 use gpui::{
     AnyElement, Context, Div, ElementId, Render, SharedString, Stateful, Window, div, prelude::*,
     px, rgb, uniform_list,
 };
 use std::path::PathBuf;
 
-const TRACK_HEIGHT: f32 = 42.0;
+pub(super) const TRACK_HEIGHT: f32 = 42.0;
 
-fn caption(text: impl Into<gpui::SharedString>) -> Div {
+pub(super) fn caption(text: impl Into<gpui::SharedString>) -> Div {
     div().text_xs().text_color(rgb(MUTED)).child(text.into())
 }
 
-fn list_row(id: impl Into<ElementId>, selected: bool) -> Stateful<Div> {
+pub(super) fn list_row(id: impl Into<ElementId>, selected: bool) -> Stateful<Div> {
     row()
         .id(id)
         .w_full()
@@ -73,6 +76,106 @@ fn row_text(title: String, detail: String) -> Stateful<Div> {
 }
 
 impl GuiApp {
+    pub(super) fn transport_panel(
+        &mut self,
+        panel_id: u64,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let track = self.state.current_track();
+        let title = track
+            .map(|track| track.title.clone())
+            .unwrap_or_else(|| "Choose something to listen to".into());
+        let artist = track.map(|track| track.artist.clone()).unwrap_or_default();
+        let status = match self.state.status {
+            PlaybackStatus::Playing => "Playing",
+            PlaybackStatus::Paused => "Paused",
+            PlaybackStatus::Stopped => "Stopped",
+        };
+        let duration = self
+            .state
+            .duration
+            .or_else(|| track.and_then(|track| track.duration));
+        let preview_position = self.seek_preview.unwrap_or(self.state.position);
+        let progress = duration
+            .filter(|duration| *duration > 0.)
+            .map_or(0., |duration| (preview_position / duration) as f32);
+        let seek = self.slider(
+            ("seek", panel_id),
+            progress,
+            Dragging::Seek(panel_id),
+            Measured::Seek(panel_id),
+            cx,
+        );
+        let volume = self.slider(
+            ("volume", panel_id),
+            self.state.volume,
+            Dragging::Volume(panel_id),
+            Measured::Volume(panel_id),
+            cx,
+        );
+        column()
+            .id(("transport-panel", panel_id))
+            .size_full()
+            .overflow_y_scroll()
+            .child(
+                row()
+                    .flex_shrink_0()
+                    .flex_wrap()
+                    .child(div().text_xs().text_color(rgb(ACCENT)).child("RIVU"))
+                    .child(div().flex_1().min_w_0().text_xl().truncate().child(title))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(MUTED))
+                            .truncate()
+                            .child(artist),
+                    )
+                    .child(div().text_xs().text_color(rgb(MUTED)).child(status)),
+            )
+            .child(
+                row()
+                    .flex_shrink_0()
+                    .flex_wrap()
+                    .child(button(("previous", panel_id), "󰒮", cx, |this, _, cx| {
+                        this.send(Command::Previous, cx)
+                    }))
+                    .child(button(
+                        ("toggle", panel_id),
+                        if self.state.status == PlaybackStatus::Playing {
+                            "󰏤"
+                        } else {
+                            "󰐊"
+                        },
+                        cx,
+                        |this, _, cx| this.send(Command::Toggle, cx),
+                    ))
+                    .child(button(("stop", panel_id), "󰓛", cx, |this, _, cx| {
+                        this.send(Command::Stop, cx)
+                    }))
+                    .child(button(("next", panel_id), "󰒭", cx, |this, _, cx| {
+                        this.send(Command::Next, cx)
+                    }))
+                    .child(div().w(px(100.)).child(volume))
+                    .child(
+                        div()
+                            .text_xs()
+                            .child(format!("{:.0}%", self.state.volume * 100.)),
+                    ),
+            )
+            .child(
+                row()
+                    .flex_shrink_0()
+                    .flex_wrap()
+                    .child(div().flex_1().min_w(px(60.)).child(seek))
+                    .child(div().text_xs().text_color(rgb(MUTED)).child(format!(
+                        "{} / {}",
+                        format_time(self.seek_preview.unwrap_or(self.state.position)),
+                        duration.map_or("—".into(), format_time)
+                    ))),
+            )
+            .into_any_element()
+    }
     fn panel_field(&self, field: Field, label: &'static str) -> Div {
         column()
             .w_full()
@@ -132,7 +235,7 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let count = self.filtered_rows.len();
-        let mut tools = row().flex_wrap().flex_shrink_0().child(button(
+        let tools = row().flex_wrap().flex_shrink_0().child(button(
             ("scan", panel_id),
             "Scan paths",
             cx,
@@ -150,56 +253,6 @@ impl GuiApp {
                 this.send(Command::Scan { paths }, cx);
             },
         ));
-        if !self.selected.is_empty() {
-            tools = tools
-                .child(button(
-                    ("library-play", panel_id),
-                    "Play",
-                    cx,
-                    |this, _, cx| {
-                        if let Some(track_id) = this.panel_selected_tracks().first().copied() {
-                            this.send(Command::Play { track_id }, cx);
-                        }
-                    },
-                ))
-                .child(button(
-                    ("library-enqueue", panel_id),
-                    "Enqueue",
-                    cx,
-                    |this, _, cx| {
-                        this.send(
-                            Command::Enqueue {
-                                track_ids: this.panel_selected_tracks(),
-                            },
-                            cx,
-                        );
-                    },
-                ))
-                .child(button(
-                    ("library-remove", panel_id),
-                    "Remove",
-                    cx,
-                    |this, _, cx| {
-                        this.send(
-                            Command::RemoveTracks {
-                                track_ids: this.panel_selected_tracks(),
-                            },
-                            cx,
-                        );
-                        this.selected.clear();
-                        cx.notify();
-                    },
-                ))
-                .child(button(
-                    ("library-clear-selection", panel_id),
-                    "Deselect",
-                    cx,
-                    |this, _, cx| {
-                        this.selected.clear();
-                        cx.notify();
-                    },
-                ));
-        }
         let mut panel = column()
             .id(("library-panel", panel_id))
             .size_full()
@@ -921,170 +974,6 @@ impl GuiApp {
                 .min_h_0()
                 .w_full(),
             )
-            .into_any_element()
-    }
-
-    pub(super) fn settings_panel(
-        &mut self,
-        panel_id: u64,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let shuffle = if self.settings_draft.shuffle {
-            "Shuffle: on"
-        } else {
-            "Shuffle: off"
-        };
-        let repeat = match self.settings_draft.repeat {
-            RepeatMode::Off => "Repeat: off",
-            RepeatMode::All => "Repeat: all",
-            RepeatMode::One => "Repeat: one",
-        };
-        let mpris = if self.settings_draft.mpris_enabled {
-            "MPRIS: enabled"
-        } else {
-            "MPRIS: disabled"
-        };
-        let device_height = ((self.state.devices.len() + 1) as f32 * TRACK_HEIGHT).min(126.0);
-        let chosen_device = self.value(Field::ConfigDevice, cx);
-        column()
-            .id(("settings-panel", panel_id))
-            .size_full()
-            .p_3()
-            .overflow_y_scroll()
-            .child(caption("Preferences · changes take effect when saved"))
-            .child(caption(self.state.config_path.to_string_lossy().into_owned()).truncate())
-            .child(
-                row()
-                    .flex_wrap()
-                    .flex_shrink_0()
-                    .child(button(
-                        ("settings-save", panel_id),
-                        "Save & apply",
-                        cx,
-                        |this, _, cx| this.apply_settings(cx),
-                    ))
-                    .child(button(
-                        ("settings-reload", panel_id),
-                        "Reload file",
-                        cx,
-                        |this, _, cx| this.reload_settings(cx),
-                    ))
-                    .child(button(
-                        ("settings-revert", panel_id),
-                        "Discard edits",
-                        cx,
-                        |this, _, cx| this.load_settings(cx),
-                    )),
-            )
-            .child(self.panel_field(
-                Field::ConfigRoots,
-                "Library roots (separate paths with semicolons)",
-            ))
-            .child(self.panel_field(
-                Field::ConfigDevice,
-                "Output device (blank = system default)",
-            ))
-            .child(caption("Available outputs · click to select"))
-            .child(
-                uniform_list(
-                    ("settings-devices", panel_id),
-                    self.state.devices.len() + 1,
-                    cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
-                        range
-                            .filter_map(|index| {
-                                let name = if index == 0 {
-                                    String::new()
-                                } else {
-                                    this.state.devices.get(index - 1)?.clone()
-                                };
-                                let label = if name.is_empty() {
-                                    "System default".to_owned()
-                                } else {
-                                    name.clone()
-                                };
-                                let selected = chosen_device == name;
-                                Some(
-                                    list_row(("output-device", index), selected)
-                                        .child(div().text_sm().truncate().child(label))
-                                        .on_click(cx.listener(
-                                            move |this, _: &gpui::ClickEvent, _, cx| {
-                                                this.settings_draft.output_device =
-                                                    (!name.is_empty()).then(|| name.clone());
-                                                this.set_value(
-                                                    Field::ConfigDevice,
-                                                    name.clone(),
-                                                    cx,
-                                                );
-                                                cx.notify();
-                                            },
-                                        )),
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                    }),
-                )
-                .h(px(device_height))
-                .flex_shrink_0()
-                .w_full(),
-            )
-            .child(self.panel_field(Field::ConfigVolume, "Volume (0–100%)"))
-            .child(
-                row()
-                    .flex_wrap()
-                    .flex_shrink_0()
-                    .child(button(
-                        ("settings-shuffle", panel_id),
-                        shuffle,
-                        cx,
-                        |this, _, cx| {
-                            this.settings_draft.shuffle = !this.settings_draft.shuffle;
-                            cx.notify();
-                        },
-                    ))
-                    .child(button(
-                        ("settings-repeat", panel_id),
-                        repeat,
-                        cx,
-                        |this, _, cx| {
-                            this.settings_draft.repeat = match this.settings_draft.repeat {
-                                RepeatMode::Off => RepeatMode::All,
-                                RepeatMode::All => RepeatMode::One,
-                                RepeatMode::One => RepeatMode::Off,
-                            };
-                            cx.notify();
-                        },
-                    )),
-            )
-            .child(self.panel_field(Field::ConfigScale, "Interface scale (0.75–2.0)"))
-            .child(self.panel_field(Field::ConfigFps, "Analysis frames / second (5–60)"))
-            .child(row().child(button(
-                ("settings-mpris", panel_id),
-                mpris,
-                cx,
-                |this, _, cx| {
-                    this.settings_draft.mpris_enabled = !this.settings_draft.mpris_enabled;
-                    cx.notify();
-                },
-            )))
-            .child(caption(format!(
-                "Media controls: {}",
-                self.state.mpris_status
-            )))
-            .child(div().h(px(1.0)).flex_shrink_0().bg(rgb(BORDER)))
-            .child(row().flex_wrap().child(button(
-                ("settings-reset-workspace", panel_id),
-                "Reset workspace",
-                cx,
-                |this, _, cx| {
-                    this.layout = super::layout::Layout::default();
-                    this.persist_layout(cx);
-                    cx.notify();
-                },
-            )))
-            .child(caption(
-                "Resets panel placement only. Your music and preferences are kept.",
-            ))
             .into_any_element()
     }
 }

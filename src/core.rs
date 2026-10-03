@@ -102,7 +102,7 @@ impl Runtime {
         config.save(config_path)?;
         std::fs::create_dir_all(data_dir)?;
         let store = Store::open(&data_dir.join("library.db"))?;
-        let engine = AudioEngine::new()?;
+        let engine = AudioEngine::new(config.media_read_buffer_mb)?;
         let (sender, receiver) = bounded(64);
         let shared = Arc::new(RwLock::new(AppState::default()));
         let wakeup = Arc::new(RwLock::new(None));
@@ -852,6 +852,7 @@ impl Core {
                 if self.state.selected_device != config.output_device {
                     self.audio(AudioCommand::Device(config.output_device.clone()))?;
                 }
+                self.audio(AudioCommand::MediaReadBuffer(config.media_read_buffer_mb))?;
                 self.audio(AudioCommand::Volume(config.volume))?;
                 self.audio(AudioCommand::AnalysisRate(config.analysis_fps))?;
                 self.state.selected_device.clone_from(&config.output_device);

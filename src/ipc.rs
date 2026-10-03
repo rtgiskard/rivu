@@ -1,6 +1,6 @@
 use crate::{
     core::AppHandle,
-    model::{Command, QueueEntry, Response, Track},
+    model::{AppState, Command, QueueEntry, Response, Track},
 };
 use anyhow::{Context, Result, bail};
 use parking_lot::Mutex;
@@ -14,7 +14,7 @@ use std::{
     },
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Weak,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread::{self, JoinHandle},
@@ -26,30 +26,20 @@ const MAX_RESPONSE: u64 = 64 * 1024 * 1024;
 
 #[derive(Default)]
 struct OverviewCache {
-    library: Option<Arc<Vec<Track>>>,
-    queue: Option<Arc<Vec<QueueEntry>>>,
+    library: Weak<Vec<Track>>,
+    queue: Weak<Vec<QueueEntry>>,
     current: Option<u64>,
     tracks: Arc<Vec<Track>>,
 }
 
 impl OverviewCache {
-    fn compact(&mut self, response: &mut Response) {
-        let state = &mut response.state;
-        let library_changed = self
-            .library
-            .as_ref()
-            .is_none_or(|cached| !Arc::ptr_eq(cached, &state.library));
-        let queue_changed = self
-            .queue
-            .as_ref()
-            .is_none_or(|cached| !Arc::ptr_eq(cached, &state.queue));
+    // Keep only tracks referenced by the queue and current playback; this stays
+    // compact for large libraries while supporting the complete queue view.
+    fn response(&mut self, state: &AppState) -> Response {
+        let library_changed = self.library.as_ptr() != Arc::as_ptr(&state.library);
+        let queue_changed = self.queue.as_ptr() != Arc::as_ptr(&state.queue);
         if library_changed || queue_changed || self.current != state.current_queue_id {
-            let mut ids: HashSet<i64> = state
-                .queue
-                .iter()
-                .take(12)
-                .map(|entry| entry.track_id)
-                .collect();
+            let mut ids: HashSet<i64> = state.queue.iter().map(|entry| entry.track_id).collect();
             if let Some(track) = state.current_track() {
                 ids.insert(track.id);
             }
@@ -61,13 +51,38 @@ impl OverviewCache {
                     .cloned()
                     .collect(),
             );
-            self.library = Some(state.library.clone());
-            self.queue = Some(state.queue.clone());
+            self.library = Arc::downgrade(&state.library);
+            self.queue = Arc::downgrade(&state.queue);
             self.current = state.current_queue_id;
         }
-        state.library = self.tracks.clone();
-        state.playlists = Arc::new(Vec::new());
-        state.history = Arc::new(Vec::new());
+        Response {
+            ok: true,
+            error: None,
+            state: AppState {
+                library: self.tracks.clone(),
+                playlists: Arc::new(Vec::new()),
+                queue: state.queue.clone(),
+                history: Arc::new(Vec::new()),
+                current_queue_id: state.current_queue_id,
+                status: state.status,
+                position: state.position,
+                duration: state.duration,
+                volume: state.volume,
+                shuffle: state.shuffle,
+                repeat: state.repeat,
+                scanning: state.scanning,
+                scan_message: state.scan_message.clone(),
+                last_error: state.last_error.clone(),
+                devices: state.devices.clone(),
+                selected_device: state.selected_device.clone(),
+                revision: state.revision,
+                seek_revision: state.seek_revision,
+                config: state.config.clone(),
+                config_path: state.config_path.clone(),
+                mpris_status: state.mpris_status.clone(),
+                shutting_down: state.shutting_down,
+            },
+        }
     }
 }
 
@@ -200,14 +215,8 @@ fn serve_connection(
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     let bytes = read_message(&mut stream, MAX_REQUEST)?;
     let response = match serde_json::from_slice::<Command>(&bytes) {
-        Ok(command) => {
-            let compact = matches!(command, Command::Overview);
-            let mut response = handle.request(command);
-            if compact {
-                overview.lock().compact(&mut response);
-            }
-            response
-        }
+        Ok(Command::Overview) => overview.lock().response(&handle.state.read()),
+        Ok(command) => handle.request(command),
         Err(error) => Response {
             ok: false,
             error: Some(format!("Invalid command: {error}")),

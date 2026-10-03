@@ -2,7 +2,7 @@
 name = "rivu"
 version = "0.1.0"
 edition = "2024"
-description = "A local-first music player with a shared Rust core"
+description = "A lightweight, local-first Linux music player"
 
 [dependencies]
 anyhow = "1"

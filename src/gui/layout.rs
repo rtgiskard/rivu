@@ -4,6 +4,8 @@
 //! transition preserves a normalized tree: tabs are nonempty, each split has
 //! two children, and each active ID belongs to its tab group. The caller chooses
 //! the persistence path (the desktop uses `workspace.json`).
+//! Versionless workspaces gain a docked Playback panel above their unchanged
+//! tree on load. Versioned workspaces preserve deliberate panel removal.
 
 use std::{
     collections::HashSet,
@@ -49,6 +51,7 @@ pub enum Node {
     Tabs {
         id: u64,
         panels: Vec<Panel>,
+        #[serde(default)]
         active: u64,
     },
 }
@@ -57,6 +60,8 @@ pub enum Node {
 pub struct Layout {
     pub root: Option<Node>,
     pub next_id: u64,
+    #[serde(default)]
+    version: u32,
 }
 
 impl Node {
@@ -236,7 +241,7 @@ impl Default for Layout {
             }],
             active: panel_id,
         };
-        Self {
+        let mut layout = Self {
             root: Some(Node::Split {
                 id: 1,
                 axis: Axis::Horizontal,
@@ -257,11 +262,54 @@ impl Default for Layout {
                 }),
             }),
             next_id: 12,
-        }
+            version: 1,
+        };
+        layout
+            .add_transport()
+            .expect("default workspace has spare IDs");
+        layout
     }
 }
 
 impl Layout {
+    fn add_transport(&mut self) -> Result<()> {
+        let id = self.next_id;
+        let count = if self.root.is_some() { 3 } else { 2 };
+        let next_id = id
+            .checked_add(count)
+            .ok_or_else(|| anyhow!("workspace ID space exhausted"))?;
+        let transport = Node::Tabs {
+            id: id + 1,
+            panels: vec![Panel {
+                id,
+                kind: "transport".into(),
+            }],
+            active: id,
+        };
+        self.root = Some(match self.root.take() {
+            Some(root) => Node::Split {
+                id: id + 2,
+                axis: Axis::Vertical,
+                ratio: 0.25,
+                first: Box::new(transport),
+                second: Box::new(root),
+            },
+            None => transport,
+        });
+        self.next_id = next_id;
+        Ok(())
+    }
+
+    fn migrate(&mut self) -> Result<()> {
+        if self.version == 0 {
+            if !self.panels().iter().any(|panel| panel.kind == "transport") {
+                self.add_transport()?;
+            }
+            self.version = 1;
+        }
+        Ok(())
+    }
+
     fn allocate_ids(&mut self, count: u64) -> u64 {
         let first = self.next_id;
         self.next_id = first
@@ -529,12 +577,15 @@ impl Layout {
     pub fn load(path: &Path) -> Result<Self> {
         let file =
             File::open(path).with_context(|| format!("opening workspace {}", path.display()))?;
-        let layout: Self = serde_json::from_reader(BufReader::new(file))
+        let mut layout: Self = serde_json::from_reader(BufReader::new(file))
             .with_context(|| format!("decoding workspace {}", path.display()))?;
         layout
             .validate()
             .map_err(|error| anyhow!(error))
             .with_context(|| format!("invalid workspace {}", path.display()))?;
+        layout
+            .migrate()
+            .with_context(|| format!("migrating workspace {}", path.display()))?;
         Ok(layout)
     }
 
@@ -610,6 +661,84 @@ mod tests {
             .panel_group(panel)
             .unwrap()
             .id()
+    }
+
+    #[test]
+    fn default_transport_can_move_and_stay_closed_after_reopening() {
+        let mut layout = Layout::default();
+        let transport = layout
+            .active_panels()
+            .into_iter()
+            .find(|panel| panel.kind == "transport")
+            .unwrap()
+            .id;
+        assert!(layout.move_panel(transport, group(&layout, 3), Edge::Bottom, None));
+        layout.validate().unwrap();
+        let encoded = serde_json::to_vec(&layout).unwrap();
+        let mut reopened: Layout = serde_json::from_slice(&encoded).unwrap();
+        reopened.migrate().unwrap();
+        assert_eq!(reopened, layout);
+        assert!(layout.remove(transport));
+        let encoded = serde_json::to_vec(&layout).unwrap();
+        let mut reopened: Layout = serde_json::from_slice(&encoded).unwrap();
+        reopened.migrate().unwrap();
+        assert_eq!(reopened, layout);
+        assert!(
+            !reopened
+                .panels()
+                .iter()
+                .any(|panel| panel.kind == "transport")
+        );
+    }
+
+    #[test]
+    fn legacy_migration_preserves_tree_and_only_adds_transport_once() {
+        let mut original = Layout::default();
+        assert!(original.remove(12));
+        original.add("history", Some(2));
+        assert!(original.set_ratio(1, 0.73));
+        let mut legacy = serde_json::to_value(&original).unwrap();
+        legacy.as_object_mut().unwrap().remove("version");
+        let mut migrated: Layout = serde_json::from_value(legacy).unwrap();
+        migrated.migrate().unwrap();
+        migrated.validate().unwrap();
+        let Some(Node::Split {
+            axis,
+            first,
+            second,
+            ..
+        }) = &migrated.root
+        else {
+            panic!("migration must wrap the existing workspace");
+        };
+        assert_eq!(*axis, Axis::Vertical);
+        assert_eq!(Some(second.as_ref()), original.root.as_ref());
+        assert!(matches!(first.as_ref(), Node::Tabs { panels, active, .. }
+            if panels.len() == 1 && panels[0].kind == "transport" && panels[0].id == *active));
+        assert_eq!(migrated.next_id, original.next_id + 3);
+        let once = migrated.clone();
+        migrated.migrate().unwrap();
+        assert_eq!(migrated, once);
+        migrated.version = 0;
+        migrated.migrate().unwrap();
+        assert_eq!(migrated, once);
+    }
+
+    #[test]
+    fn empty_legacy_workspace_migrates_and_id_exhaustion_is_non_destructive() {
+        let mut empty: Layout = serde_json::from_str(r#"{"root":null,"next_id":1}"#).unwrap();
+        empty.migrate().unwrap();
+        empty.validate().unwrap();
+        assert_eq!(empty.panels().len(), 1);
+        assert_eq!(empty.panels()[0].kind, "transport");
+        let mut exhausted = Layout {
+            root: None,
+            next_id: u64::MAX,
+            version: 0,
+        };
+        let original = exhausted.clone();
+        assert!(exhausted.migrate().is_err());
+        assert_eq!(exhausted, original);
     }
 
     #[test]
@@ -727,7 +856,7 @@ mod tests {
         let mut layout = Layout::default();
         assert!(layout.move_panel(3, 1, Edge::Left, None));
         layout.validate().unwrap();
-        assert_eq!(ids(&layout), vec![3, 6, 9, 11]);
+        assert_eq!(ids(&layout), vec![3, 6, 9, 11, 12]);
         assert!(layout.root.as_ref().unwrap().find(1).is_none());
     }
 
@@ -762,6 +891,7 @@ mod tests {
                     active,
                 }),
                 next_id,
+                version: 1,
             };
             assert!(invalid.validate().is_err());
         }
@@ -844,6 +974,10 @@ mod tests {
         assert!(invalid.save(&path).is_err());
         assert_eq!(Layout::load(&path).unwrap(), layout);
         assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+        let mut legacy = serde_json::to_value(&layout).unwrap();
+        legacy.as_object_mut().unwrap().remove("version");
+        fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert_eq!(Layout::load(&path).unwrap(), layout);
         fs::write(&path, b"{broken").unwrap();
         assert!(Layout::load(&path).is_err());
         fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();

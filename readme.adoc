@@ -1,0 +1,67 @@
+= Rivu
+:toc:
+
+Rivu is a lightweight, local-first music player for Linux.
+
+It provides:
+
+* Managed music library with directory browsing and search
+* Playlists, queue control, playback statistics, and listening history
+* Audio playback through CPAL with PipeWire/ALSA integration
+* Desktop GUI, CLI, TUI, and MPRIS control
+* Movable, persistent TokyoNight workspace
+* Optional Nerd Font symbols in the TUI
+* MP4, MKV, and WebM audio-container import
+
+Rivu is audio-only. Video tracks are not displayed or decoded. It does not use
+FFmpeg, GStreamer, GLib media backends, or external players.
+
+== Build
+
+Rust 1.99.0 and the locked dependency set are required. On Arch Linux:
+
+[source,sh]
+----
+sudo pacman -S --needed rust pkgconf alsa-lib opus fontconfig libxkbcommon-x11 libxcb
+cargo build --release --locked
+----
+
+== Run
+
+[source,sh]
+----
+# Desktop GUI; optionally import files or directories
+./target/release/rivu gui ~/Music
+
+# Headless foreground core
+./target/release/rivu serve ~/Music
+
+# Connect to an existing GUI or core
+./target/release/rivu tui
+----
+
+`gui` and `serve` each start their own core and cannot share the same data
+ directory at the same time. Use `tui` and grouped CLI commands to control an
+ already running instance.
+
+== Configuration
+
+The default configuration file is `~/.config/rivu/config.toml`.
+
+[source,toml]
+----
+media_read_buffer_mb = 2
+nerd_symbols = true
+----
+
+Accepted media read buffer sizes are `1`, `2`, `4`, `8`, and `16` MiB.
+
+== Workspace
+
+The desktop workspace is persisted as `workspace.json`. It stores panel layout,
+split ratios, tab order, and the active tab. Panel IDs are internal runtime
+identities; playback state and library data are stored elsewhere.
+
+== License
+
+GPL-3.0-or-later.

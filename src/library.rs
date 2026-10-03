@@ -1,4 +1,4 @@
-use crate::audio::{MediaInfo, probe};
+use crate::audio::probe;
 use crate::model::{Playlist, Track};
 use anyhow::{Context, Result, anyhow};
 use std::collections::HashMap;
@@ -7,6 +7,21 @@ use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use walkdir::WalkDir;
+
+/// Decoded file metadata shared by scanning, persistence, and playback.
+///
+/// This value contains no decoder or audio-output state; probing supplies it and
+/// the library caches it independently of the playback engine.
+#[derive(Clone, Debug)]
+pub struct MediaInfo {
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub duration: Option<f64>,
+    pub codec: String,
+    pub channels: u16,
+    pub sample_rate: u32,
+}
 
 /// The filesystem information and cached probe result known to the database.
 #[derive(Clone, Debug)]

@@ -26,6 +26,8 @@ pub struct Config {
     pub mpris_enabled: bool,
     pub ui_scale: f32,
     pub analysis_fps: u32,
+    pub media_read_buffer_mb: u32,
+    pub nerd_symbols: bool,
 }
 
 impl Default for Config {
@@ -39,6 +41,8 @@ impl Default for Config {
             mpris_enabled: true,
             ui_scale: 1.0,
             analysis_fps: 20,
+            media_read_buffer_mb: 2,
+            nerd_symbols: true,
         }
     }
 }
@@ -73,6 +77,11 @@ impl Config {
             self.ui_scale.is_finite() && (0.75..=2.0).contains(&self.ui_scale),
             "ui_scale must be finite and between 0.75 and 2.0 (inclusive); got {}",
             self.ui_scale
+        );
+        ensure!(
+            matches!(self.media_read_buffer_mb, 1 | 2 | 4 | 8 | 16),
+            "media_read_buffer_mb must be one of 1, 2, 4, 8, or 16 MiB; got {}",
+            self.media_read_buffer_mb
         );
         ensure!(
             (5..=60).contains(&self.analysis_fps),
@@ -206,6 +215,8 @@ mod tests {
             mpris_enabled: false,
             ui_scale: 1.5,
             analysis_fps: 30,
+            media_read_buffer_mb: 8,
+            nerd_symbols: true,
         };
         config.save(&path).unwrap();
         assert_eq!(Config::load(&path).unwrap(), config);

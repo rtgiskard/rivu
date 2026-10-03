@@ -1,10 +1,10 @@
 mod input;
 mod layout;
 mod panels;
+mod settings;
 mod visuals;
 
 use crate::{
-    config::Config,
     core::AppHandle,
     model::{AppState, Command, PlaybackStatus},
 };
@@ -22,12 +22,12 @@ use std::{
     time::Duration,
 };
 
-const BG: u32 = 0x14171b;
-const PANEL: u32 = 0x1b1f25;
-const BORDER: u32 = 0x303741;
-const TEXT: u32 = 0xd8dfe7;
-const MUTED: u32 = 0x8794a4;
-const ACCENT: u32 = 0x64b9ae;
+const BG: u32 = 0x1a1b26;
+const PANEL: u32 = 0x16161e;
+const BORDER: u32 = 0x3b4261;
+const TEXT: u32 = 0xc0caf5;
+const MUTED: u32 = 0x565f89;
+const ACCENT: u32 = 0x7aa2f7;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Field {
@@ -37,11 +37,6 @@ enum Field {
     Title,
     Artist,
     Album,
-    ConfigRoots,
-    ConfigDevice,
-    ConfigVolume,
-    ConfigScale,
-    ConfigFps,
 }
 
 struct PanelSpec {
@@ -50,6 +45,11 @@ struct PanelSpec {
     render: fn(&mut GuiApp, u64, &mut Window, &mut Context<GuiApp>) -> AnyElement,
 }
 const PANELS: &[PanelSpec] = &[
+    PanelSpec {
+        kind: "transport",
+        title: "Playback",
+        render: GuiApp::transport_panel,
+    },
     PanelSpec {
         kind: "library",
         title: "Library",
@@ -155,7 +155,7 @@ fn button(
         .bg(rgb(PANEL))
         .border_1()
         .border_color(rgb(BORDER))
-        .hover(|style| style.bg(rgb(0x29333d)).border_color(rgb(ACCENT)))
+        .hover(|style| style.bg(rgb(0x292e42)).border_color(rgb(ACCENT)))
         .child(label.into())
         .on_click(cx.listener(move |this, _, window, cx| action(this, window, cx)))
 }
@@ -189,14 +189,14 @@ impl Render for PanelDrag {
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 enum Measured {
     Node(u64),
-    Seek,
-    Volume,
+    Seek(u64),
+    Volume(u64),
 }
 #[derive(Clone, Copy)]
 enum Dragging {
     Split(u64, Axis),
-    Seek,
-    Volume,
+    Seek(u64),
+    Volume(u64),
 }
 
 fn dock_edge(position: Point<Pixels>, bounds: Bounds<Pixels>) -> Edge {
@@ -230,11 +230,13 @@ struct GuiApp {
     filtered_rows: Vec<usize>,
     library_index: HashMap<i64, usize>,
     most_played: Vec<usize>,
-    settings_draft: Config,
+    settings: settings::Settings,
     visuals: visuals::Visuals,
     catalog_open: bool,
     target_group: Option<u64>,
     dragging: Option<Dragging>,
+    seek_preview: Option<f64>,
+    seek_queue_id: Option<u64>,
     measured: Rc<RefCell<HashMap<Measured, Bounds<Pixels>>>>,
     analysis_enabled: bool,
     analysis_sequence: u64,
@@ -280,11 +282,6 @@ impl GuiApp {
             (Field::Title, "Title"),
             (Field::Artist, "Artist"),
             (Field::Album, "Album"),
-            (Field::ConfigRoots, "Library roots separated by ;"),
-            (Field::ConfigDevice, "Default output"),
-            (Field::ConfigVolume, "Volume 0–100"),
-            (Field::ConfigScale, "Interface scale 0.75–2"),
-            (Field::ConfigFps, "Analysis frames/s 5–60"),
         ] {
             inputs.insert(field, cx.new(|cx| Input::new("", placeholder, cx)));
         }
@@ -323,7 +320,7 @@ impl GuiApp {
             }
         }).detach();
         let mut app = Self {
-            settings_draft: state.config.as_ref().clone(),
+            settings: settings::Settings::new(&state.config, cx),
             handle,
             state,
             layout,
@@ -346,11 +343,12 @@ impl GuiApp {
             analysis_enabled: false,
             analysis_sequence: 0,
             window_visible: true,
+            seek_preview: None,
+            seek_queue_id: None,
             _subscriptions: subscriptions,
             ui_font,
         };
         app.rebuild_library(cx);
-        app.load_settings(cx);
         app.sync_analysis(cx);
         app
     }
@@ -441,6 +439,10 @@ impl GuiApp {
     fn refresh(&mut self, cx: &mut Context<Self>) {
         let state = self.handle.snapshot();
         let library_changed = !Arc::ptr_eq(&self.state.library, &state.library);
+        if self.seek_queue_id != state.current_queue_id {
+            self.seek_preview = None;
+            self.seek_queue_id = None;
+        }
         self.state = state;
         if library_changed {
             self.rebuild_library(cx);
@@ -480,87 +482,6 @@ impl GuiApp {
         }
         self.sync_analysis(cx);
         cx.notify();
-    }
-    fn load_settings(&mut self, cx: &mut Context<Self>) {
-        self.settings_draft = self.state.config.as_ref().clone();
-        self.fill_settings(cx);
-    }
-    fn fill_settings(&mut self, cx: &mut Context<Self>) {
-        self.set_value(
-            Field::ConfigRoots,
-            self.settings_draft
-                .library_roots
-                .iter()
-                .map(|path| path.to_string_lossy())
-                .collect::<Vec<_>>()
-                .join(";"),
-            cx,
-        );
-        self.set_value(
-            Field::ConfigDevice,
-            self.settings_draft
-                .output_device
-                .clone()
-                .unwrap_or_default(),
-            cx,
-        );
-        self.set_value(
-            Field::ConfigVolume,
-            format!("{:.0}", self.settings_draft.volume * 100.),
-            cx,
-        );
-        self.set_value(
-            Field::ConfigScale,
-            self.settings_draft.ui_scale.to_string(),
-            cx,
-        );
-        self.set_value(
-            Field::ConfigFps,
-            self.settings_draft.analysis_fps.to_string(),
-            cx,
-        );
-    }
-    fn reload_settings(&mut self, cx: &mut Context<Self>) {
-        match Config::load(&self.state.config_path) {
-            Ok(config) => {
-                self.settings_draft = config.clone();
-                self.fill_settings(cx);
-                self.send(Command::Configure { config }, cx);
-            }
-            Err(error) => {
-                self.error = Some(format!("Reloading settings: {error:#}"));
-                cx.notify();
-            }
-        }
-    }
-    fn apply_settings(&mut self, cx: &mut Context<Self>) {
-        let parsed = (|| -> Result<Config> {
-            let mut config = self.settings_draft.clone();
-            config.library_roots = self
-                .value(Field::ConfigRoots, cx)
-                .split(';')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(PathBuf::from)
-                .collect();
-            let device = self.value(Field::ConfigDevice, cx);
-            config.output_device = (!device.trim().is_empty()).then(|| device.trim().to_owned());
-            config.volume = self.value(Field::ConfigVolume, cx).trim().parse::<f32>()? / 100.;
-            config.ui_scale = self.value(Field::ConfigScale, cx).trim().parse()?;
-            config.analysis_fps = self.value(Field::ConfigFps, cx).trim().parse()?;
-            config.validate()?;
-            Ok(config)
-        })();
-        match parsed {
-            Ok(config) => {
-                self.settings_draft = config.clone();
-                self.send(Command::Configure { config }, cx);
-            }
-            Err(error) => {
-                self.error = Some(format!("Invalid settings: {error:#}"));
-                cx.notify();
-            }
-        }
     }
     fn spectrum_panel(&mut self, id: u64, _: &mut Window, _: &mut Context<Self>) -> AnyElement {
         self.visuals.spectrum(id)
@@ -810,8 +731,8 @@ impl GuiApp {
         };
         let key = match dragging {
             Dragging::Split(id, _) => Measured::Node(id),
-            Dragging::Seek => Measured::Seek,
-            Dragging::Volume => Measured::Volume,
+            Dragging::Seek(id) => Measured::Seek(id),
+            Dragging::Volume(id) => Measured::Volume(id),
         };
         let Some(bounds) = self.measured.borrow().get(&key).copied() else {
             return;
@@ -830,27 +751,42 @@ impl GuiApp {
                     cx.notify();
                 }
             }
-            Dragging::Seek => {
+            Dragging::Seek(_) => {
                 if let Some(duration) = self.state.duration {
                     let fraction =
                         ((position.x - bounds.origin.x) / bounds.size.width).clamp(0., 1.);
-                    self.send(
-                        Command::Seek {
-                            seconds: duration * fraction as f64,
-                        },
-                        cx,
-                    );
+                    self.seek_preview = Some(duration * fraction as f64);
+                    cx.notify();
                 }
             }
-            Dragging::Volume => {
+            Dragging::Volume(_) => {
                 let value = ((position.x - bounds.origin.x) / bounds.size.width).clamp(0., 1.);
                 self.send(Command::Volume { value }, cx);
             }
         }
     }
+    fn finish_drag(&mut self, cx: &mut Context<Self>) {
+        let dragging = self.dragging.take();
+        if matches!(dragging, Some(Dragging::Seek(_))) {
+            if self.seek_queue_id == self.state.current_queue_id {
+                if let Some(seconds) = self.seek_preview.take() {
+                    self.send(Command::Seek { seconds }, cx);
+                }
+            } else {
+                self.seek_preview = None;
+            }
+            self.seek_queue_id = None;
+        } else {
+            self.seek_preview = None;
+            self.seek_queue_id = None;
+        }
+        if matches!(dragging, Some(Dragging::Split(..))) {
+            self.persist_layout(cx);
+        }
+    }
     fn slider(
         &self,
-        id: &'static str,
+        id: impl Into<ElementId>,
         value: f32,
         dragging: Dragging,
         key: Measured,
@@ -884,108 +820,11 @@ impl GuiApp {
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                     this.dragging = Some(dragging);
+                    if matches!(dragging, Dragging::Seek(_)) {
+                        this.seek_queue_id = this.state.current_queue_id;
+                    }
                     this.drag_position(event.position, cx);
                 }),
-            )
-            .into_any_element()
-    }
-    fn transport(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let track = self.state.current_track();
-        let title = track
-            .map(|track| track.title.clone())
-            .unwrap_or_else(|| "Choose something to listen to".into());
-        let artist = track.map(|track| track.artist.clone()).unwrap_or_default();
-        let status = match self.state.status {
-            PlaybackStatus::Playing => "Playing",
-            PlaybackStatus::Paused => "Paused",
-            PlaybackStatus::Stopped => "Stopped",
-        };
-        let duration = self
-            .state
-            .duration
-            .or_else(|| track.and_then(|track| track.duration));
-        let progress = duration
-            .filter(|duration| *duration > 0.)
-            .map_or(0., |duration| (self.state.position / duration) as f32);
-        let seek = self.slider("seek", progress, Dragging::Seek, Measured::Seek, cx);
-        let volume = self.slider(
-            "volume",
-            self.state.volume,
-            Dragging::Volume,
-            Measured::Volume,
-            cx,
-        );
-        column()
-            .px_5()
-            .py_3()
-            .gap_3()
-            .border_b_1()
-            .border_color(rgb(BORDER))
-            .child(
-                row()
-                    .child(div().text_xs().text_color(rgb(ACCENT)).child("RIVU"))
-                    .child(div().flex_1().min_w_0().text_xl().truncate().child(title))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(MUTED))
-                            .truncate()
-                            .child(artist),
-                    )
-                    .child(div().text_xs().text_color(rgb(MUTED)).child(status))
-                    .child(button("catalog", "+ Panel", cx, |this, _, cx| {
-                        this.catalog_open = !this.catalog_open;
-                        cx.notify();
-                    }))
-                    .child(button("settings", "Settings", cx, |this, _, cx| {
-                        this.load_settings(cx);
-                        let id = this
-                            .layout
-                            .panels()
-                            .into_iter()
-                            .find(|panel| panel.kind == "settings")
-                            .map(|panel| panel.id);
-                        if let Some(id) = id {
-                            this.layout.activate(id);
-                        } else {
-                            this.layout.add("settings", this.target_group);
-                        }
-                        this.persist_layout(cx);
-                    })),
-            )
-            .child(
-                row()
-                    .child(button("previous", "Previous", cx, |this, _, cx| {
-                        this.send(Command::Previous, cx)
-                    }))
-                    .child(button(
-                        "toggle",
-                        if self.state.status == PlaybackStatus::Playing {
-                            "Pause"
-                        } else {
-                            "Play"
-                        },
-                        cx,
-                        |this, _, cx| this.send(Command::Toggle, cx),
-                    ))
-                    .child(button("stop", "Stop", cx, |this, _, cx| {
-                        this.send(Command::Stop, cx)
-                    }))
-                    .child(button("next", "Next", cx, |this, _, cx| {
-                        this.send(Command::Next, cx)
-                    }))
-                    .child(div().flex_1().min_w_0().child(seek))
-                    .child(div().text_xs().text_color(rgb(MUTED)).child(format!(
-                        "{} / {}",
-                        format_time(self.state.position),
-                        duration.map_or("—".into(), format_time)
-                    )))
-                    .child(div().w(px(100.)).child(volume))
-                    .child(
-                        div()
-                            .text_xs()
-                            .child(format!("{:.0}%", self.state.volume * 100.)),
-                    ),
             )
             .into_any_element()
     }
@@ -993,7 +832,6 @@ impl GuiApp {
 impl Render for GuiApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         window.set_rem_size(px(16. * self.state.config.ui_scale));
-        let transport = self.transport(cx);
         let root = self.layout.root.take();
         let workspace = root
             .as_ref()
@@ -1022,21 +860,12 @@ impl Render for GuiApp {
             }))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    if this.dragging.take().is_some() {
-                        this.persist_layout(cx);
-                    }
-                }),
+                cx.listener(|this, _, _, cx| this.finish_drag(cx)),
             )
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    if this.dragging.take().is_some() {
-                        this.persist_layout(cx);
-                    }
-                }),
-            )
-            .child(transport);
+                cx.listener(|this, _, _, cx| this.finish_drag(cx)),
+            );
         if self.catalog_open {
             let mut catalog = row().px_5().py_2().flex_wrap();
             for spec in PANELS {
@@ -1065,6 +894,8 @@ impl Render for GuiApp {
         app = app.child(div().flex_1().min_h_0().min_w_0().p_3().child(workspace));
         app.child(
             row()
+                .flex_shrink_0()
+                .flex_wrap()
                 .px_5()
                 .py_1()
                 .text_xs()
@@ -1076,6 +907,25 @@ impl Render for GuiApp {
                     self.state.scan_message.clone()
                 })
                 .child(div().flex_1())
+                .child(button("catalog", "+ Panel", cx, |this, _, cx| {
+                    this.catalog_open = !this.catalog_open;
+                    cx.notify();
+                }))
+                .child(button("settings", "Settings", cx, |this, _, cx| {
+                    this.load_settings(cx);
+                    let id = this
+                        .layout
+                        .panels()
+                        .into_iter()
+                        .find(|panel| panel.kind == "settings")
+                        .map(|panel| panel.id);
+                    if let Some(id) = id {
+                        this.layout.activate(id);
+                    } else {
+                        this.layout.add("settings", this.target_group);
+                    }
+                    this.persist_layout(cx);
+                }))
                 .child("Drag tabs to move · drag dividers to resize · GPUI / wgpu"),
         )
     }

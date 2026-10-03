@@ -1,4 +1,4 @@
-use crate::library::{KnownFile, ScanResult};
+use crate::library::{KnownFile, MediaInfo, ScanResult};
 use crate::model::{HistoryEntry, Playlist, PlaylistEntry, Track};
 use anyhow::{Context, Result, anyhow, bail};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -122,7 +122,7 @@ impl Store {
                 size: r.get::<_, i64>(2)? as u64,
                 modified_ns: r.get(3)?,
                 fingerprint: r.get(4)?,
-                media: Some(crate::audio::MediaInfo {
+                media: Some(MediaInfo {
                     title: r.get(5)?,
                     artist: r.get(6)?,
                     album: r.get(7)?,
@@ -466,7 +466,7 @@ mod tests {
             size: 1,
             modified_ns: 1,
             fingerprint: Some(hash.into()),
-            media: crate::audio::MediaInfo {
+            media: MediaInfo {
                 title: title.into(),
                 artist: String::new(),
                 album: String::new(),

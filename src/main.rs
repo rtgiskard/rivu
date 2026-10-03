@@ -30,28 +30,29 @@ struct Args {
 #[derive(Subcommand)]
 enum Action {
     /// Open the desktop UI and optionally import paths.
-    Gui {
-        paths: Vec<PathBuf>,
-    },
+    Gui { paths: Vec<PathBuf> },
     /// Run the shared core without a GUI (foreground).
-    Serve {
-        paths: Vec<PathBuf>,
-    },
+    Serve { paths: Vec<PathBuf> },
     /// Control the running instance in a minimal terminal UI.
     Tui,
-    /// Import files or directories without blocking playback.
-    Scan {
-        #[arg(required = true)]
-        paths: Vec<PathBuf>,
-        #[arg(long)]
-        wait: bool,
-    },
-    Status,
-    /// List the library, optionally filtered by text.
-    List {
-        #[arg(short, long)]
-        query: Option<String>,
-    },
+    /// Control playback, volume, and audio output devices.
+    #[command(subcommand)]
+    Playback(PlaybackAction),
+    /// Import and manage tracks, inspect metadata, and view listening information.
+    #[command(subcommand)]
+    Library(LibraryAction),
+    /// Manage the current playback queue.
+    #[command(subcommand)]
+    Queue(QueueAction),
+    /// Manage, import, and export playlists.
+    #[command(subcommand)]
+    Playlist(PlaylistAction),
+    /// Shut down the running GUI/headless core.
+    Quit,
+}
+
+#[derive(Subcommand)]
+enum PlaybackAction {
     /// Play a library track ID, or resume the current queue.
     Play {
         track_id: Option<i64>,
@@ -77,10 +78,28 @@ enum Action {
         #[arg(value_enum)]
         mode: Repeat,
     },
-    #[command(subcommand)]
-    Queue(QueueAction),
-    #[command(subcommand)]
-    Playlist(PlaylistAction),
+    /// List available output devices without starting an instance.
+    Devices,
+    /// Select an output device by exact name, or use the default.
+    Device {
+        name: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum LibraryAction {
+    /// Import files or directories without blocking playback.
+    Scan {
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+        #[arg(long)]
+        wait: bool,
+    },
+    /// List the library, optionally filtered by text.
+    List {
+        #[arg(short, long)]
+        query: Option<String>,
+    },
     /// Edit Rivu's library metadata; does not rewrite media files.
     Edit {
         track_id: i64,
@@ -96,22 +115,17 @@ enum Action {
         #[arg(required = true)]
         track_ids: Vec<i64>,
     },
+    /// Show the running instance's playback and library state.
+    Status,
+    /// Show library size and listening totals.
     Stats,
+    /// Show recent listening history.
     History {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
-    Devices,
-    /// Select an output device by exact name, or use the default.
-    Device {
-        name: Option<String>,
-    },
     /// Read real metadata and check decoder support without starting an instance.
-    Probe {
-        path: PathBuf,
-    },
-    /// Shut down the running GUI/headless core.
-    Quit,
+    Probe { path: PathBuf },
 }
 #[derive(Clone, Copy, ValueEnum)]
 enum Switch {
@@ -210,7 +224,7 @@ fn run() -> Result<()> {
         Action::Gui { paths } => start(data_dir, config_path, paths, true),
         Action::Serve { paths } => start(data_dir, config_path, paths, false),
         Action::Tui => terminal::run(&socket),
-        Action::Probe { path } => {
+        Action::Library(LibraryAction::Probe { path }) => {
             let info = audio::probe(&path)?;
             if args.json {
                 println!(
@@ -237,7 +251,7 @@ fn run() -> Result<()> {
             );
             Ok(())
         }
-        Action::Devices => {
+        Action::Playback(PlaybackAction::Devices) => {
             let devices = audio::devices()?;
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&devices)?);
@@ -248,8 +262,10 @@ fn run() -> Result<()> {
             }
             Ok(())
         }
-        Action::Status => show(&ipc::request(&socket, &Command::Status)?, args.json),
-        Action::List { query } => {
+        Action::Library(LibraryAction::Status) => {
+            show(&ipc::request(&socket, &Command::Status)?, args.json)
+        }
+        Action::Library(LibraryAction::List { query }) => {
             let response = checked(ipc::request(&socket, &Command::Status)?)?;
             if args.json {
                 return show(&response, true);
@@ -279,7 +295,7 @@ fn run() -> Result<()> {
             }
             Ok(())
         }
-        Action::Stats => {
+        Action::Library(LibraryAction::Stats) => {
             let response = checked(ipc::request(&socket, &Command::Status)?)?;
             if args.json {
                 return show(&response, true);
@@ -303,7 +319,7 @@ fn run() -> Result<()> {
             );
             Ok(())
         }
-        Action::History { limit } => {
+        Action::Library(LibraryAction::History { limit }) => {
             let response = checked(ipc::request(&socket, &Command::Status)?)?;
             if args.json {
                 return show(&response, true);
@@ -365,12 +381,12 @@ fn run() -> Result<()> {
             }
             Ok(())
         }
-        Action::Edit {
+        Action::Library(LibraryAction::Edit {
             track_id,
             title,
             artist,
             album,
-        } => {
+        }) => {
             let response = checked(ipc::request(&socket, &Command::Status)?)?;
             let track = response
                 .state
@@ -528,23 +544,23 @@ fn show(response: &Response, json: bool) -> Result<()> {
 fn translate(action: Action) -> Result<(Command, bool)> {
     let mut wait = false;
     let command = match action {
-        Action::Scan {
+        Action::Library(LibraryAction::Scan {
             paths,
             wait: should_wait,
-        } => {
+        }) => {
             wait = should_wait;
             Command::Scan { paths }
         }
-        Action::Play { track_id } => {
+        Action::Playback(PlaybackAction::Play { track_id }) => {
             track_id.map_or(Command::Resume, |track_id| Command::Play { track_id })
         }
-        Action::Pause => Command::Pause,
-        Action::Toggle => Command::Toggle,
-        Action::Stop => Command::Stop,
-        Action::Next => Command::Next,
-        Action::Previous => Command::Previous,
-        Action::Seek { seconds } => Command::Seek { seconds },
-        Action::Volume { percent } => {
+        Action::Playback(PlaybackAction::Pause) => Command::Pause,
+        Action::Playback(PlaybackAction::Toggle) => Command::Toggle,
+        Action::Playback(PlaybackAction::Stop) => Command::Stop,
+        Action::Playback(PlaybackAction::Next) => Command::Next,
+        Action::Playback(PlaybackAction::Previous) => Command::Previous,
+        Action::Playback(PlaybackAction::Seek { seconds }) => Command::Seek { seconds },
+        Action::Playback(PlaybackAction::Volume { percent }) => {
             if !percent.is_finite() || !(0.0..=100.0).contains(&percent) {
                 bail!("Volume must be between 0 and 100");
             }
@@ -552,10 +568,10 @@ fn translate(action: Action) -> Result<(Command, bool)> {
                 value: percent / 100.0,
             }
         }
-        Action::Shuffle { mode } => Command::Shuffle {
+        Action::Playback(PlaybackAction::Shuffle { mode }) => Command::Shuffle {
             enabled: matches!(mode, Switch::On),
         },
-        Action::Repeat { mode } => Command::Repeat {
+        Action::Playback(PlaybackAction::Repeat { mode }) => Command::Repeat {
             mode: match mode {
                 Repeat::Off => RepeatMode::Off,
                 Repeat::All => RepeatMode::All,
@@ -601,10 +617,21 @@ fn translate(action: Action) -> Result<(Command, bool)> {
             }
             PlaylistAction::List => unreachable!(),
         },
-        Action::Remove { track_ids } => Command::RemoveTracks { track_ids },
-        Action::Device { name } => Command::Device { name },
+        Action::Library(LibraryAction::Remove { track_ids }) => Command::RemoveTracks { track_ids },
+        Action::Playback(PlaybackAction::Device { name }) => Command::Device { name },
         Action::Quit => Command::Shutdown,
-        _ => bail!("This action is not a playback command"),
+        Action::Gui { .. }
+        | Action::Serve { .. }
+        | Action::Tui
+        | Action::Playback(PlaybackAction::Devices)
+        | Action::Library(
+            LibraryAction::List { .. }
+            | LibraryAction::Edit { .. }
+            | LibraryAction::Status
+            | LibraryAction::Stats
+            | LibraryAction::History { .. }
+            | LibraryAction::Probe { .. },
+        ) => bail!("This action is not a playback command"),
     };
     Ok((command, wait))
 }
