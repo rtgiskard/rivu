@@ -73,6 +73,7 @@ type FCodecName = unsafe extern "C" fn(AVCodecID) -> *const c_char;
 type FProfileName = unsafe extern "C" fn(AVCodecID, c_int) -> *const c_char;
 type FChannelFromIndex = unsafe extern "C" fn(*const AVChannelLayout, u32) -> AVChannel;
 type FVersion = unsafe extern "C" fn() -> u32;
+type FLogSetLevel = unsafe extern "C" fn(c_int);
 struct Functions {
     format_version: FVersion,
     codec_version: FVersion,
@@ -103,6 +104,7 @@ struct Functions {
     codec_name: FCodecName,
     profile_name: FProfileName,
     channel_from_index: FChannelFromIndex,
+    log_set_level: FLogSetLevel,
 }
 struct Runtime {
     // Field order is intentional: Functions never outlive these libraries.
@@ -211,6 +213,7 @@ fn load_runtime() -> Result<Arc<Runtime>> {
             "av_channel_layout_channel_from_index",
             FChannelFromIndex
         ),
+        log_set_level: s!(&util, "av_log_set_level", FLogSetLevel),
     };
     let iterate = s!(&codec, "av_codec_iterate", FCodecIterate);
     let is_decoder = s!(&codec, "av_codec_is_decoder", FCodecIsDecoder);
@@ -237,13 +240,17 @@ fn load_runtime() -> Result<Arc<Runtime>> {
         bail!("FFmpeg runtime has no audio decoders");
     }
     let audio_codecs = CString::new(names)?;
-    Ok(Arc::new(Runtime {
+    let runtime = Arc::new(Runtime {
         _util: util,
         _codec: codec,
         _format: format,
         f,
         audio_codecs,
-    }))
+    });
+    // FFmpeg's default logger writes codec probe failures directly to stderr.
+    // Rivu returns the structured error to the scan result instead.
+    unsafe { (runtime.f.log_set_level)(-8) } // AV_LOG_QUIET
+    Ok(runtime)
 }
 fn runtime() -> Result<Arc<Runtime>> {
     let lock = RUNTIME.get_or_init(|| Mutex::new(None));

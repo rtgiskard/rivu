@@ -562,6 +562,83 @@ impl Source {
         matches!(self.decode, Decode::Ffmpeg(_))
     }
 
+    pub(super) fn waveform(
+        path: &Path,
+        range: Option<super::PlaybackRange>,
+        media_read_buffer_mb: u32,
+        points: usize,
+        ffmpeg_enabled: bool,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<Vec<f32>> {
+        let check_cancelled = || -> Result<()> {
+            if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                bail!("Waveform loading cancelled");
+            }
+            Ok(())
+        };
+        check_cancelled()?;
+        if points == 0 {
+            bail!("Waveform point count must be positive");
+        }
+        let buffer_len = usize::try_from(media_read_buffer_mb)
+            .context("Waveform media buffer size does not fit usize")?
+            .saturating_mul(super::BYTES_PER_MEBIBYTE);
+        let mut source = Self::open(path, buffer_len, ffmpeg_enabled)?;
+        check_cancelled()?;
+        if let Some(range) = range {
+            source.restrict(range)?;
+        }
+        let duration = source
+            .info
+            .duration
+            .filter(|duration| duration.is_finite() && *duration > 0.0)
+            .context("Audio track has no finite duration for waveform")?;
+        let total_frames = (duration * source.info.sample_rate as f64).round().max(1.0) as usize;
+        // Tiny clips must not alternate real samples with artificial empty bins.
+        let points = points.min(total_frames);
+        let mut envelope = vec![0.0_f32; points];
+        let mut frame_index = 0usize;
+        let mut point = 0usize;
+        let mut boundary = total_frames.div_ceil(points);
+        let channels = source.layout().len();
+        loop {
+            check_cancelled()?;
+            let Some(frames) = source.next_frames()? else {
+                break;
+            };
+            check_cancelled()?;
+            let mut offset = 0;
+            while offset < frames.len() {
+                let packet_frames = (frames.len() - offset) / channels;
+                let count = if point + 1 == points {
+                    packet_frames
+                } else {
+                    packet_frames.min(boundary - frame_index)
+                };
+                let end = offset + count * channels;
+                // Keep peaks from every channel (including antiphase stereo),
+                // not a downmix. Reuse decoder storage and divide once per bin,
+                // rather than allocating packet copies or dividing per sample.
+                envelope[point] = frames[offset..end]
+                    .iter()
+                    .filter(|sample| sample.is_finite())
+                    .fold(envelope[point], |peak, sample| peak.max(sample.abs()));
+                offset = end;
+                frame_index += count;
+                if frame_index == boundary && point + 1 < points {
+                    point += 1;
+                    boundary = ((point as u128 + 1) * total_frames as u128)
+                        .div_ceil(points as u128) as usize;
+                }
+            }
+        }
+        check_cancelled()?;
+        if frame_index == 0 {
+            envelope.clear();
+        }
+        Ok(envelope)
+    }
+
     fn read_ffmpeg_next(&mut self) -> Result<bool> {
         loop {
             self.frames.clear();
@@ -927,6 +1004,92 @@ mod tests {
             file.write_all(&value.to_le_bytes()).unwrap();
         }
         file
+    }
+
+    #[test]
+    fn waveform_covers_the_full_file_and_exact_cue_boundaries() {
+        let file = pcm_file();
+        let mut source = Source::open(file.path(), PROBE_BUFFER_LEN, false).unwrap();
+        let reference = decode_remaining(&mut source);
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        for (start, end, points) in [
+            (0_usize, None, 17_usize),
+            (30, Some(80_usize), 97),
+            (80, None, 1600),
+            (30, Some(31), 1600),
+        ] {
+            let range = (start != 0 || end.is_some()).then_some(super::super::PlaybackRange {
+                start_seconds: start as f64 / 75.0,
+                end_seconds: end.map(|end| end as f64 / 75.0),
+            });
+            let samples = &reference[start * 588..end.map_or(reference.len(), |end| end * 588)];
+            let count = points.min(samples.len());
+            let mut expected = vec![0.0_f32; count];
+            for (index, sample) in samples.iter().enumerate() {
+                let bin = index * count / samples.len();
+                expected[bin] = expected[bin].max(sample.abs());
+            }
+            let actual = Source::waveform(file.path(), range, 2, points, false, &cancelled).unwrap();
+            assert_eq!(actual, expected, "CUE range {start}..{end:?}, {points} points");
+        }
+    }
+
+    #[test]
+    fn waveform_keeps_channel_peaks_and_does_not_pad_short_clips() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let frames: [[i16; 2]; 6] = [
+            [8192, -8192],
+            [0, 16384],
+            [-24576, 0],
+            [0, 0],
+            [4096, -4096],
+            [0, i16::MIN],
+        ];
+        let bytes = frames.len() as u32 * 4;
+        let mut header = Vec::new();
+        header.extend_from_slice(b"RIFF");
+        header.extend_from_slice(&(36 + bytes).to_le_bytes());
+        header.extend_from_slice(b"WAVEfmt \x10\0\0\0\x01\0\x02\0");
+        header.extend_from_slice(&48_000_u32.to_le_bytes());
+        header.extend_from_slice(&192_000_u32.to_le_bytes());
+        header.extend_from_slice(b"\x04\0\x10\0data");
+        header.extend_from_slice(&bytes.to_le_bytes());
+        file.write_all(&header).unwrap();
+        for frame in frames {
+            for sample in frame {
+                file.write_all(&sample.to_le_bytes()).unwrap();
+            }
+        }
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        let envelope = Source::waveform(file.path(), None, 2, 1600, false, &cancelled).unwrap();
+        assert_eq!(envelope, [0.25, 0.5, 0.75, 0.0, 0.125, 1.0]);
+    }
+
+    #[test]
+    fn waveform_preserves_float_peaks_above_full_scale() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let samples = [0.25_f32, -1.0, 1.5, -2.0, f32::NAN, f32::INFINITY];
+        let bytes = samples.len() as u32 * 4;
+        file.write_all(b"RIFF").unwrap();
+        file.write_all(&(36 + bytes).to_le_bytes()).unwrap();
+        file.write_all(b"WAVEfmt \x10\0\0\0\x03\0\x01\0").unwrap();
+        file.write_all(&48_000_u32.to_le_bytes()).unwrap();
+        file.write_all(&192_000_u32.to_le_bytes()).unwrap();
+        file.write_all(b"\x04\0\x20\0data").unwrap();
+        file.write_all(&bytes.to_le_bytes()).unwrap();
+        for sample in samples {
+            file.write_all(&sample.to_le_bytes()).unwrap();
+        }
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        let envelope = Source::waveform(file.path(), None, 2, 1600, false, &cancelled).unwrap();
+        assert_eq!(envelope, [0.25, 1.0, 1.5, 2.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn waveform_cancellation_precedes_opening_the_file() {
+        let cancelled = std::sync::atomic::AtomicBool::new(true);
+        let error = Source::waveform(Path::new(""), None, 2, 1600, false, &cancelled).unwrap_err();
+        assert_eq!(error.to_string(), "Waveform loading cancelled");
     }
 
     #[test]

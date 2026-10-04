@@ -558,9 +558,6 @@ fn start(
     }
     if desktop {
         gui::run(runtime.handle.clone(), data_dir.join("workspace.json"))?;
-        if !runtime.handle.snapshot().shutting_down {
-            runtime.handle.send(Command::Shutdown)?;
-        }
     } else {
         println!("Rivu core ready. Data: {}", data_dir.display());
     }

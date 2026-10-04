@@ -13,6 +13,7 @@ use std::{
 #[derive(Clone, Debug, Default)]
 pub struct AnalysisFrame {
     pub sequence: u64,
+    pub sample_rate: u32,
     pub frequencies_hz: Vec<f32>,
     pub spectrum_db: Vec<f32>,
     pub rms_left: f32,
@@ -98,6 +99,22 @@ impl Drop for AnalysisWorker {
     }
 }
 
+fn musical_frequencies(sample_rate: u32, frequencies: &mut Vec<f32>) {
+    frequencies.clear();
+    let nyquist = sample_rate as f32 * 0.5;
+    if nyquist <= 0.0 {
+        return;
+    }
+    for midi in 0.. {
+        let center = 440.0 * 2.0_f32.powf((midi as f32 - 69.0) / 12.0);
+        if center >= nyquist {
+            break;
+        }
+        frequencies.push(center);
+    }
+    frequencies.push(nyquist);
+}
+
 fn analyze(
     mut consumer: HeapCons<TapFrame>,
     control: Arc<AnalysisControl>,
@@ -111,11 +128,9 @@ fn analyze(
         .map(|i| 0.5 - 0.5 * (std::f32::consts::TAU * i as f32 / N as f32).cos())
         .collect();
     let normalization = 2.0 / hann.iter().sum::<f32>();
-    let frequencies: Vec<f32> = (0..126)
-        .map(|midi| 440.0 * 2.0_f32.powf((midi as f32 - 69.0) / 12.0))
-        .collect();
-    let mut bands = vec![(0usize, 0usize); frequencies.len()];
-    let mut levels = vec![-70.0; frequencies.len()];
+    let mut frequencies = Vec::with_capacity(160);
+    let mut bands = Vec::new();
+    let mut levels = Vec::new();
     let mut rolling = vec![[0.0_f32; 2]; N];
     let mut incoming = vec![TapFrame::default(); N];
     let mut head = 0;
@@ -139,6 +154,9 @@ fn analyze(
             sample_rate = new_sample_rate;
             filled = 0;
             head = 0;
+            musical_frequencies(sample_rate, &mut frequencies);
+            bands.resize(frequencies.len(), (0, 0));
+            levels.resize(frequencies.len(), -70.0);
             for (band, center) in bands.iter_mut().zip(&frequencies) {
                 let lo = center * 2.0_f32.powf(-1.0 / 24.0);
                 let hi = center * 2.0_f32.powf(1.0 / 24.0);
@@ -189,9 +207,10 @@ fn analyze(
                 *level = (power.sqrt() * normalization).max(1e-7).log10() * 20.0;
             }
             let mut frame = shared.write();
-            if frame.frequencies_hz.is_empty() {
+            if frame.sample_rate != sample_rate || frame.frequencies_hz.len() != frequencies.len() {
                 frame.frequencies_hz.clone_from(&frequencies);
                 frame.spectrum_db.resize(frequencies.len(), -70.0);
+                frame.sample_rate = sample_rate;
             }
             frame.spectrum_db.copy_from_slice(&levels);
             frame.rms_left = (rms[0] / N as f32).sqrt();
@@ -206,6 +225,18 @@ fn analyze(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn musical_bands_follow_nyquist_across_rate_changes() {
+        let mut frequencies = Vec::new();
+        for rate in [48_000, 8_000, 192_000, 44_100] {
+            musical_frequencies(rate, &mut frequencies);
+            assert_eq!(frequencies.last().copied(), Some(rate as f32 * 0.5));
+            assert!(frequencies.windows(2).all(|pair| pair[0] < pair[1]));
+            assert!(frequencies.contains(&440.0));
+            assert!(frequencies.iter().all(|hz| *hz > 0.0 && *hz <= rate as f32 * 0.5));
+        }
+    }
 
     #[test]
     fn publication_rate_is_validated_and_independent_of_sample_rate() {

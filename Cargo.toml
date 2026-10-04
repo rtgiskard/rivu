@@ -20,7 +20,7 @@ opus = "0.4"
 parking_lot = "0.12"
 rand = "0.10.3"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "crossterm_0_29", "std"] }
-ringbuf = "0.5.2"
+ringbuf = "0.5"
 rubato = { version = "5.0.1", default-features = false }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 rustfft = "6"
@@ -33,7 +33,7 @@ tempfile = "3.27"
 zbus = "5.19"
 url = "2"
 unicode-segmentation = "1.13.3"
-image = { version = "0.25", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 alsa = "0.11"

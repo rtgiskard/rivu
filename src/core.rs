@@ -189,6 +189,9 @@ impl Runtime {
                 let _ = core.engine.commands.send(AudioCommand::FfmpegEnabled(
                     core.state.config.ffmpeg_enabled,
                 ));
+                let _ = core.engine.commands.send(AudioCommand::PipewireAutoMix(
+                    core.state.config.pipewire_auto_mix,
+                ));
                 let _ = core
                     .engine
                     .commands
@@ -1052,7 +1055,7 @@ impl Core {
                 self.audio(AudioCommand::Volume(config.volume))?;
                 self.audio(AudioCommand::AnalysisRate(config.analysis_fps))?;
                 self.audio(AudioCommand::FfmpegEnabled(config.ffmpeg_enabled))?;
-                self.state.selected_device.clone_from(&config.output_device);
+                self.audio(AudioCommand::PipewireAutoMix(config.pipewire_auto_mix))?;
                 self.state.volume = config.volume;
                 if self.state.shuffle != config.shuffle {
                     self.shuffle_bag.clear();

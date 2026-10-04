@@ -6,19 +6,97 @@ The default configuration file is `~/.config/rivu/config.toml`.
 ----
 media_read_buffer_mb = 2
 ffmpeg_enabled = false
+pipewire_auto_mix = true
 play_count_threshold_percent = 20.0
-nerd_symbols = true
+spectrogram_min_hz = 20.0
+spectrogram_max_hz = 20000.0
+analysis_db_range = 70.0
 ----
 
 Accepted media read buffer sizes are `1`, `2`, `4`, `8`, and `16` MiB.
 `play_count_threshold_percent` must be finite and in `[0, 100)`; zero still requires
 some confirmed heard time. Edit it in the configuration file or GUI preferences.
 
+`pipewire_auto_mix` allows PipeWire to remix or downmix channels when enabled;
+it defaults to `true`. Disable it to require an explicit compatible speaker layout
+and reject routes that would lose or remix source channels. The settings panel
+contains the same switch.
+
+== Desktop settings
+
+The bottom-right gear opens a compact settings dialog. Enter library directories
+separated by semicolons. Output devices use a field-anchored dropdown: choose with
+the pointer or Up/Down and Enter; Escape or an outside click closes the dropdown.
+In short windows the fields scroll independently; Apply and Discard stay visible.
+
+Closing the last GUI window does not stop the core, playback, or MPRIS service.
+Rivu continues running until MPRIS `Quit`, `rivu quit`, or another control client
+explicitly shuts it down. MPRIS playback, pause, previous, next, and seeking
+remain available after the GUI closes.
+
+The Shuffle, Repeat, MPRIS, and FFmpeg icon switches modify only the settings draft.
+Highlighting shows the draft's enabled state, not an already-saved change. The
+FFmpeg switch uses the audio-file symbol (Font Awesome U+F1C7), not a VLC logo
+or a bundled image. Its tooltip lists detected library versions on separate lines.
+Apply (check mark) submits the draft and reports the actual save result without
+blocking input. Discard (cross) abandons unapplied edits and closes the dialog.
+Reopening after Escape also reloads the applied configuration. Playback errors
+such as `Queue is empty` stay in the main footer, not the settings feedback area;
+settings errors can be copied in full by clicking their text or copy glyph.
+
+Saving library roots does not scan them or enqueue tracks. In Library, leave the
+path field blank and click `Scan paths` to scan the configured roots, then select
+tracks to play or enqueue. An empty queue does not prevent saving settings.
+
 == Workspace
 
 The desktop workspace is persisted as `workspace.json`. It stores panel layout,
-split ratios, tab order, and the active tab. Panel IDs are internal runtime
-identities; playback state and library data are stored elsewhere.
+split ratios, tab order, per-panel tab-bar visibility, and the workspace lock.
+Runtime node/panel IDs and the ID allocator are not serialized. `active` is a
+zero-based index within its tab group; index zero is omitted. Older ID-based
+workspaces are read and converted when next saved.
+
+Right-click anywhere in a panel to hide or restore its tab bar. The bottom-right
+workspace button combines locking and panel selection: right-click it to toggle
+the persistent lock; left-click while unlocked to add a panel. While locked,
+adding, removing, moving, resizing and changing tab-bar visibility are disabled;
+playback controls and tab selection remain available.
+
+Workspace top, left and right insets and the bottom-right buttons' bottom inset
+are consistently 12 pixels. Panel content has one 12-pixel inset rather than
+nested padding. Split gutters are 8 pixels wide.
+Errors and scan progress use the existing fixed-height footer, never an overlay
+over panels. Click a message or its copy glyph to copy the full text, even when
+the displayed line is truncated. A small, borderless inline cross dismisses an error.
+
+The Waveform panel previews the entire selected/current track, including CUE
+subtrack boundaries. It loads asynchronously and cancels obsolete work; it is
+not a scrolling window of recent playback samples. Floating-point peaks above
+full scale are retained: the view expands its amplitude range uniformly for
+that track instead of flattening individual peaks. Quiet tracks are not boosted,
+and this display scaling does not change playback gain. Spectrum and Spectrogram
+show live analysis instead.
+
+=== Spectrum and Spectrogram
+
+Spectrum uses width-aware, max-pooled musical bands, separated bars and a timed
+peak hold/release inspired by DeaDBeeF's
+https://github.com/cboxdoerfer/ddb_musical_spectrum[Musical Spectrum]. It displays
+the audible frequency range up to the source Nyquist limit, with amplitude labels
+outside the plot. Peak decay is based on elapsed time, not the configured fps.
+
+`spectrogram_min_hz` and `spectrogram_max_hz` select the heatmap's logarithmic
+frequency interval. They must be finite with `0 < min < max`. The rendered range
+is clipped to available analyzer bands and half the output sample rate; an empty
+intersection is reported rather than relabeling unrelated data. Changing these
+settings also remaps cached history while paused and does not crop Spectrum.
+
+`analysis_db_range` is the shared positive, finite dB span for Spectrum's vertical
+scale and Spectrogram's colors. Its default is 70 dB. Spectrum allows headroom
+above 0 dB when needed; the heatmap color scale spans `-analysis_db_range` to 0 dB.
+These are display settings, not audio gain or limiting. Edit them in preferences
+and Apply, or in the configuration file.
+
 
 == Visual assets
 

@@ -27,9 +27,13 @@ pub struct Config {
     pub mpris_enabled: bool,
     pub ui_scale: f32,
     pub analysis_fps: u32,
+    pub spectrogram_min_hz: f32,
+    pub spectrogram_max_hz: f32,
+    pub analysis_db_range: f32,
     pub media_read_buffer_mb: u32,
     pub nerd_symbols: bool,
     pub ffmpeg_enabled: bool,
+    pub pipewire_auto_mix: bool,
 }
 
 impl Default for Config {
@@ -44,9 +48,13 @@ impl Default for Config {
             mpris_enabled: true,
             ui_scale: 1.0,
             analysis_fps: 20,
+            spectrogram_min_hz: 20.0,
+            spectrogram_max_hz: 20_000.0,
+            analysis_db_range: 70.0,
             media_read_buffer_mb: 2,
             nerd_symbols: true,
             ffmpeg_enabled: false,
+            pipewire_auto_mix: true,
         }
     }
 }
@@ -97,6 +105,19 @@ impl Config {
             (5..=60).contains(&self.analysis_fps),
             "analysis_fps must be between 5 and 60 (inclusive); got {}",
             self.analysis_fps
+        );
+        ensure!(
+            self.spectrogram_min_hz.is_finite()
+                && self.spectrogram_max_hz.is_finite()
+                && self.spectrogram_min_hz > 0.0
+                && self.spectrogram_min_hz < self.spectrogram_max_hz,
+            "spectrogram Hz range must be finite with 0 < min < max; got {}..{}",
+            self.spectrogram_min_hz, self.spectrogram_max_hz
+        );
+        ensure!(
+            self.analysis_db_range.is_finite() && self.analysis_db_range > 0.0,
+            "analysis_db_range must be finite and greater than zero; got {}",
+            self.analysis_db_range
         );
         Ok(())
     }
@@ -226,9 +247,13 @@ mod tests {
             mpris_enabled: false,
             ui_scale: 1.5,
             analysis_fps: 30,
+            spectrogram_min_hz: 30.0,
+            spectrogram_max_hz: 18_000.0,
+            analysis_db_range: 80.0,
             media_read_buffer_mb: 8,
             nerd_symbols: true,
             ffmpeg_enabled: true,
+            pipewire_auto_mix: false,
         };
         config.save(&path).unwrap();
         assert_eq!(Config::load(&path).unwrap(), config);
@@ -243,6 +268,19 @@ mod tests {
             );
         }
         directory.close().unwrap();
+    }
+ 
+    #[test]
+    fn pipewire_auto_mix_defaults_and_round_trips() {
+        assert!(Config::default().pipewire_auto_mix);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(&path, "").unwrap();
+        assert!(Config::load(&path).unwrap().pipewire_auto_mix);
+        let mut config = Config::default();
+        config.pipewire_auto_mix = false;
+        config.save(&path).unwrap();
+        assert!(!Config::load(&path).unwrap().pipewire_auto_mix);
     }
 
     #[test]
@@ -302,6 +340,11 @@ mod tests {
             ("ui_scale = inf", "ui_scale"),
             ("analysis_fps = 4", "analysis_fps"),
             ("analysis_fps = 61", "analysis_fps"),
+            ("spectrogram_min_hz = 0", "spectrogram"),
+            ("spectrogram_min_hz = nan", "spectrogram"),
+            ("spectrogram_max_hz = 10\nspectrogram_min_hz = 20", "spectrogram"),
+            ("analysis_db_range = 0", "analysis_db_range"),
+            ("analysis_db_range = inf", "analysis_db_range"),
             ("analysis_fps = -1", "TOML"),
             ("analysis_fps = 5.5", "TOML"),
             ("repeat = 'forever'", "forever"),
@@ -350,6 +393,15 @@ mod tests {
             assert_eq!(Config::load(&path).unwrap(), config);
         }
         directory.close().unwrap();
+    }
+
+    #[test]
+    fn custom_spectrum_range_round_trips() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let config = Config { spectrogram_min_hz: 31.0, spectrogram_max_hz: 19_000.0, analysis_db_range: 55.0, ..Config::default() };
+        config.save(&path).unwrap();
+        assert_eq!(Config::load(&path).unwrap(), config);
     }
 
     #[test]

@@ -23,6 +23,7 @@ pub(super) struct PlaybackOptions {
     pub(super) prior_heard: f64,
     pub(super) media_read_buffer_len: usize,
     pub(super) ffmpeg_enabled: bool,
+    pub(super) pipewire_auto_mix: bool,
 }
 
 pub(super) struct Playback {
@@ -52,6 +53,7 @@ impl Playback {
             prior_heard,
             media_read_buffer_len,
             ffmpeg_enabled,
+            pipewire_auto_mix,
         } = options;
         let mut source = Source::open(&path, media_read_buffer_len, ffmpeg_enabled)?;
         if let Some(range) = range {
@@ -67,6 +69,7 @@ impl Playback {
             source.layout(),
             volume,
             paused,
+            pipewire_auto_mix,
             analyzer,
         )?;
         let converter = Converter::new(source.info().sample_rate, output.rate(), channels)?;
@@ -120,6 +123,10 @@ impl Playback {
 
     pub(super) fn errors(&self) -> &Receiver<cpal::Error> {
         self.output.errors()
+    }
+
+    pub(super) fn notifications(&self) -> &Receiver<()> {
+        self.output.notifications()
     }
 
     pub(super) fn heard(&self) -> f64 {

@@ -179,6 +179,9 @@ impl Converter {
 
 struct OutputShared {
     paused: AtomicBool,
+    pause_settled: AtomicBool,
+    wakeup: crossbeam_channel::Sender<()>,
+    notifications: Receiver<()>,
     heard: AtomicU64,
     retired: AtomicU64,
     xruns: AtomicU64,
@@ -187,13 +190,23 @@ struct OutputShared {
 }
 impl OutputShared {
     fn new(volume: f32, paused: bool) -> Self {
+        let (wakeup, notifications) = bounded(1);
         Self {
             paused: AtomicBool::new(paused),
+            pause_settled: AtomicBool::new(false),
+            wakeup,
+            notifications,
             heard: AtomicU64::new(0),
             retired: AtomicU64::new(0),
             xruns: AtomicU64::new(0),
             timing_error: AtomicU32::new(0),
             volume: AtomicU32::new(volume.to_bits()),
+        }
+    }
+
+    fn fail_timing(&self, code: u32) {
+        if self.timing_error.swap(code, Ordering::AcqRel) != code {
+            let _ = self.wakeup.try_send(());
         }
     }
 }
@@ -254,7 +267,7 @@ impl PlaybackClock {
                 .last_playback
                 .is_some_and(|last| timestamp.playback < last)
         {
-            shared.timing_error.store(1, Ordering::Release);
+            shared.fail_timing(1);
             return;
         }
         self.last_callback = Some(timestamp.callback);
@@ -302,6 +315,7 @@ impl Output {
         source_layout: &[Channel],
         volume: f32,
         paused: bool,
+        pipewire_auto_mix: bool,
         analyzer: &AnalysisWorker,
     ) -> Result<Self> {
         #[cfg(target_os = "linux")]
@@ -312,6 +326,7 @@ impl Output {
                 source_layout,
                 volume,
                 paused,
+                pipewire_auto_mix,
                 analyzer,
             );
         }
@@ -320,7 +335,7 @@ impl Output {
         if source_layout.len() > 2 {
             let id = device.id()?;
             if id.host() == cpal::HostId::Alsa && matches!(id.id(), "default" | "pipewire") {
-                return Self::native(None, source_rate, source_layout, volume, paused, analyzer);
+                return Self::native(None, source_rate, source_layout, volume, paused, pipewire_auto_mix, analyzer);
             }
         }
         let (supported, mapping) = layout::negotiate(&device, source_rate, source_layout)?;
@@ -397,6 +412,7 @@ impl Output {
         source_layout: &[Channel],
         volume: f32,
         paused: bool,
+        pipewire_auto_mix: bool,
         analyzer: &AnalysisWorker,
     ) -> Result<Self> {
         if rate == 0 || source_layout.is_empty() {
@@ -420,7 +436,7 @@ impl Output {
             rate,
             clock: PlaybackClock::new(),
         };
-        let stream = pipewire::NativeStream::open(target, source_layout, callback, error_send)?;
+        let stream = pipewire::NativeStream::open(target, source_layout, pipewire_auto_mix, callback, error_send)?;
         Ok(Self {
             stream: Some(OutputStream::PipeWire { _stream: stream }),
             producer,
@@ -473,7 +489,12 @@ impl Output {
         self.shared.retired.load(Ordering::Acquire) as f64 / self.rate as f64
     }
     pub(super) fn pause(&self, paused: bool) {
+        self.shared.pause_settled.store(false, Ordering::Release);
         self.shared.paused.store(paused, Ordering::Release);
+    }
+
+    pub(super) fn notifications(&self) -> &Receiver<()> {
+        &self.shared.notifications
     }
 
     pub(super) fn check_timing(&self) -> Result<()> {
@@ -547,6 +568,11 @@ impl OutputCallback {
     ) {
         self.clock.advance(timestamp, self.rate, &self.shared);
         let paused = self.shared.paused.load(Ordering::Acquire);
+        if paused && self.clock.pending.is_empty()
+            && !self.shared.pause_settled.swap(true, Ordering::AcqRel)
+        {
+            let _ = self.shared.wakeup.try_send(());
+        }
         let volume = f32::from_bits(self.shared.volume.load(Ordering::Relaxed));
         let analyze = self.control.enabled.load(Ordering::Relaxed);
         let epoch = self.control.epoch.load(Ordering::Relaxed);
@@ -558,7 +584,7 @@ impl OutputCallback {
             (self.consumer.occupied_len() / self.frame.len()).min(data.len() / self.channels)
         };
         if count > 0 && self.clock.pending.len() == self.clock.pending.capacity() {
-            self.shared.timing_error.store(2, Ordering::Release);
+            self.shared.fail_timing(2);
             count = 0;
         }
         data.fill(T::from_sample(0.0));
@@ -673,6 +699,34 @@ mod tests {
         callback.render(&mut data, timestamp(22, 40));
         assert_eq!(output.close(), 0.002);
         assert!(!output.drained());
+    }
+
+    #[test]
+    fn paused_tail_notifies_once_after_audible_frames_then_sleeps() {
+        let (mut output, mut callback, _analyzer) = test_output(1000, false);
+        output.push([[0.5, -0.5]; 4].as_flattened());
+        let mut data = [0.0_f32; 16];
+        callback.render(&mut data, timestamp(0, 20));
+        output.pause(true);
+        callback.render(&mut data, timestamp(21, 40));
+        assert_eq!(output.heard(), 0.001);
+        assert!(output.notifications().try_recv().is_err());
+        callback.render(&mut data, timestamp(24, 44));
+        assert_eq!(output.heard(), 0.004);
+        assert_eq!(output.notifications().try_recv(), Ok(()));
+        callback.render(&mut data, timestamp(50, 70));
+        assert!(output.notifications().try_recv().is_err());
+
+        output.pause(false);
+        output.push([[0.25, -0.25]; 2].as_flattened());
+        callback.render(&mut data, timestamp(60, 80));
+        output.pause(true);
+        callback.render(&mut data, timestamp(82, 102));
+        assert_eq!(output.heard(), 0.006);
+        assert_eq!(output.notifications().try_recv(), Ok(()));
+        callback.render(&mut data, timestamp(81, 101));
+        assert!(output.check_timing().is_err());
+        assert_eq!(output.notifications().try_recv(), Ok(()));
     }
 
     #[test]

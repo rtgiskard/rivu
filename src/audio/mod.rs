@@ -26,13 +26,33 @@ pub fn ffmpeg_status() -> anyhow::Result<String> {
     ffmpeg::availability()
 }
 
+/// Decode a whole-track peak-amplitude envelope without enabling the FFT worker.
+/// Cancellation is checked before opening and between decoded packets.
+pub fn waveform(
+    path: &Path,
+    range: Option<PlaybackRange>,
+    media_read_buffer_mb: u32,
+    points: usize,
+    ffmpeg_enabled: bool,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<Vec<f32>> {
+    source::Source::waveform(
+        path,
+        range,
+        media_read_buffer_mb,
+        points,
+        ffmpeg_enabled,
+        cancelled,
+    )
+}
+
 use crate::analysis::{AnalysisFrame, AnalysisWorker};
 use crate::library::MediaInfo;
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use parking_lot::RwLock;
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
     thread::{self, JoinHandle},
     time::Duration,
@@ -63,6 +83,7 @@ pub enum AudioCommand {
     Analysis(bool),
     MediaReadBuffer(u32),
     FfmpegEnabled(bool),
+    PipewireAutoMix(bool),
     /// Set analyzer publication rate. Values outside 5..=60 fps are ignored.
     AnalysisRate(u32),
     StopAndSnapshot(Sender<(u64, f64)>),

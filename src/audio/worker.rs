@@ -23,8 +23,10 @@ pub(super) struct Worker {
     media_read_buffer_len: usize,
     wanted_analysis: bool,
     ffmpeg_enabled: bool,
+    pipewire_auto_mix: bool,
     last_snapshot: (u64, f64),
     progress: Instant,
+    last_progress: Option<(u64, f64, f64)>,
 }
 impl Worker {
     pub(super) fn new(
@@ -43,8 +45,10 @@ impl Worker {
             media_read_buffer_len,
             wanted_analysis: false,
             ffmpeg_enabled: false,
+            pipewire_auto_mix: true,
             last_snapshot: (0, 0.0),
             progress: Instant::now(),
+            last_progress: None,
         }
     }
     fn event(&self, event: AudioEvent) {
@@ -86,6 +90,7 @@ impl Worker {
             prior_heard,
             media_read_buffer_len: self.media_read_buffer_len,
             ffmpeg_enabled: self.ffmpeg_enabled,
+            pipewire_auto_mix: self.pipewire_auto_mix,
         }
     }
     fn command(&mut self, command: AudioCommand) -> bool {
@@ -121,6 +126,10 @@ impl Worker {
                     });
                     self.event(AudioEvent::DecoderStopped { generation });
                 }
+            }
+            AudioCommand::PipewireAutoMix(enabled) => {
+                self.pipewire_auto_mix = enabled;
+                self.reopen(None);
             }
             AudioCommand::MediaReadBuffer(mebibytes) => {
                 self.media_read_buffer_len = mebibytes as usize * super::BYTES_PER_MEBIBYTE;
@@ -237,13 +246,17 @@ impl Worker {
                 self.fail(error);
                 continue;
             }
-            if self.progress.elapsed() >= Duration::from_millis(100) {
-                let playback = self.playback.as_ref().unwrap();
-                self.event(AudioEvent::Progress {
-                    generation: playback.generation(),
-                    position_seconds: playback.position(),
-                    listened_seconds: playback.heard(),
-                });
+            let playback = self.playback.as_ref().unwrap();
+            if playback.paused() || self.progress.elapsed() >= Duration::from_millis(100) {
+                let snapshot = (playback.generation(), playback.position(), playback.heard());
+                if self.last_progress != Some(snapshot) {
+                    self.event(AudioEvent::Progress {
+                        generation: snapshot.0,
+                        position_seconds: snapshot.1,
+                        listened_seconds: snapshot.2,
+                    });
+                    self.last_progress = Some(snapshot);
+                }
                 self.progress = Instant::now();
             }
             if self.playback.as_ref().unwrap().finished() {
@@ -261,16 +274,32 @@ impl Worker {
             }
             let playback = self.playback.as_ref().unwrap();
             let errors = playback.errors().clone();
-            let interval = Duration::from_millis(if playback.paused() { 100 } else { 10 });
-            select! {
-                recv(self.commands) -> command => {
-                    let Ok(command) = command else { break; };
-                    if !self.command(command) { break; }
+            let notifications = playback.notifications().clone();
+            // Pause waits for commands, errors or the final device-clock tail.
+            // Stable paused playback never schedules a status/GUI polling tick.
+            let command = if playback.paused() {
+                select! {
+                    recv(self.commands) -> command => Some(command),
+                    recv(errors) -> error => {
+                        if let Ok(error) = error { self.fail(anyhow!(error)); }
+                        None
+                    },
+                    recv(notifications) -> _ => None,
                 }
-                recv(errors) -> error => if let Ok(error) = error { self.fail(anyhow!(error)); },
-                // The software-paused stream still runs silent callbacks so its
-                // device clock and fatal errors continue to be observed.
-                default(interval) => (),
+            } else {
+                select! {
+                    recv(self.commands) -> command => Some(command),
+                    recv(errors) -> error => {
+                        if let Ok(error) = error { self.fail(anyhow!(error)); }
+                        None
+                    },
+                    recv(notifications) -> _ => None,
+                    default(Duration::from_millis(10)) => None,
+                }
+            };
+            if let Some(command) = command {
+                let Ok(command) = command else { break; };
+                if !self.command(command) { break; }
             }
         }
         self.stop();

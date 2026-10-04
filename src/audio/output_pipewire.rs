@@ -275,6 +275,7 @@ impl NativeStream {
     pub(super) fn open(
         name: Option<&str>,
         source_layout: &[Channel],
+        auto_mix: bool,
         callback: OutputCallback,
         errors: crossbeam_channel::Sender<cpal::Error>,
     ) -> Result<Self> {
@@ -287,7 +288,7 @@ impl NativeStream {
             .name("rivu-pipewire".into())
             .spawn(move || {
                 if let Err(error) =
-                    run(name.as_deref(), &source_layout, callback, &stopping, &ready)
+                    run(name.as_deref(), &source_layout, auto_mix, callback, &stopping, &ready)
                 {
                     let message = format!("{error:#}");
                     let _ = ready.try_send(Err(message.clone()));
@@ -312,6 +313,7 @@ impl NativeStream {
 fn run(
     name: Option<&str>,
     source_layout: &[Channel],
+    auto_mix: bool,
     mut callback: OutputCallback,
     stop: &AtomicBool,
     ready: &crossbeam_channel::Sender<std::result::Result<(), String>>,
@@ -324,12 +326,21 @@ fn run(
             target.name, target.positions
         )
     })?;
-    callback.mapping = layout::mapping(source_layout, &speakers)
-        .with_context(|| format!("PipeWire sink {} cannot preserve this track", target.name))?;
-    callback.channels = speakers.len();
+    let (stream_layout, mapping, mono) = if auto_mix {
+        (source_layout.to_vec(), Vec::new(), false)
+    } else {
+        let mapping = layout::mapping(source_layout, &speakers)
+            .with_context(|| format!("PipeWire sink {} cannot preserve this track", target.name))?;
+        (
+            speakers.clone(),
+            mapping,
+            speakers == [Channel::FrontCenter] && target.positions.contains("MONO"),
+        )
+    };
+    callback.mapping = mapping;
+    callback.channels = stream_layout.len();
     let rate = callback.rate;
-    let mono = speakers == [Channel::FrontCenter] && target.positions.contains("MONO");
-    let names: Vec<_> = speakers
+    let names: Vec<_> = stream_layout
         .iter()
         .map(|channel| {
             if mono {
@@ -347,17 +358,17 @@ fn run(
             "media.type" => "Audio", "media.category" => "Playback", "media.role" => "Music",
             "application.name" => "Rivu", "node.name" => "rivu-native-output",
             "target.object" => target.serial.as_str(), "node.dont-reconnect" => "true",
-            "node.dont-fallback" => "true", "stream.dont-remix" => "true",
-            "channelmix.disable" => "true", "audio.channels" => speakers.len().to_string(),
+            "node.dont-fallback" => "true", "stream.dont-remix" => (!auto_mix).to_string(),
+            "channelmix.disable" => (!auto_mix).to_string(), "audio.channels" => stream_layout.len().to_string(),
             "audio.position" => format!("[ {positions} ]"), "audio.rate" => rate.to_string(),
         },
     )?;
     let mut info = spa::param::audio::AudioInfoRaw::new();
     info.set_format(spa::param::audio::AudioFormat::F32LE);
     info.set_rate(rate);
-    info.set_channels(speakers.len() as u32);
+    info.set_channels(stream_layout.len() as u32);
     let mut positions = [0; spa::param::audio::MAX_CHANNELS];
-    for (position, speaker) in positions.iter_mut().zip(&speakers) {
+    for (position, speaker) in positions.iter_mut().zip(&stream_layout) {
         *position = spa_position(*speaker);
     }
     if mono {
@@ -371,7 +382,7 @@ fn run(
     let processing = format_ok.clone();
     let rejected = format_error.clone();
     let graph = connection.inventory.clone();
-    let route_ok = Rc::new(Cell::new(false));
+    let route_ok = Rc::new(Cell::new(auto_mix));
     let routed = route_ok.clone();
     let expected_ports = Rc::new(names);
     let processing_ports = expected_ports.clone();
@@ -400,7 +411,7 @@ fn run(
             // Process runs on this dedicated loop, never on the UI/decoder thread.
             // All sample, mapping, analysis and clock storage was preallocated.
             let graph = graph.borrow();
-            if revision != Some(graph.revision) {
+            if !auto_mix && revision != Some(graph.revision) {
                 routed.set(route_matches(
                     &graph,
                     stream.node_id(),
@@ -452,7 +463,7 @@ fn run(
             .iterate(Duration::from_millis(10));
         {
             let graph = connection.inventory.borrow();
-            if observed_revision != Some(graph.revision) {
+            if !auto_mix && observed_revision != Some(graph.revision) {
                 route_ok.set(route_matches(
                     &graph,
                     stream.node_id(),
@@ -474,7 +485,7 @@ fn run(
                 target.name
             );
         }
-        if started && !route_ok.get() {
+        if !auto_mix && started && !route_ok.get() {
             bail!(
                 "PipeWire speaker links changed or disappeared; refusing a partial/remixed route"
             );
@@ -513,7 +524,7 @@ unsafe fn process(stream: &pw::stream::Stream, callback: &mut OutputCallback, ro
         }
         let result = render_buffer(raw, buffer, callback, routed);
         if !result {
-            callback.shared.timing_error.store(3, Ordering::Release);
+            callback.shared.fail_timing(3);
         }
         pw::sys::pw_stream_queue_buffer(raw, buffer);
     }

@@ -1,5 +1,11 @@
 = Playback
 
+The Playback panel's buttons are Shuffle, Previous, Play/Pause, Next, and Repeat.
+Shuffle and Repeat apply immediately; Repeat cycles Off, All, One. These are live
+playback controls, separate from the unapplied draft in the settings dialog.
+Previous restarts the current track when its position exceeds three seconds;
+press it again near the start to select the previous queue entry.
+
 Seeking to the end of a track follows normal queue completion rather than
 reporting a decoder error. If paused, playback stays paused at the end until
 resumed. Opus seeking accounts for decoder preroll without replaying earlier PCM.
@@ -10,6 +16,12 @@ samples before closing the stream. Play counting uses actual heard time confirme
 by the output backend, not the seek position or frames merely queued to the
 device; confirmation is conservative across underruns. Recoverable ALSA underruns
 do not start a new playback.
+
+While paused, the audio worker waits for commands, backend errors, or the last
+audible device-buffer tail to settle. It does not poll or repeatedly broadcast an
+unchanged position to the GUI. Analysis is parked as well. Software-paused output
+backends may still invoke silent audio callbacks, so total process CPU is not
+guaranteed to reach zero on every device/backend.
 
 If the next track cannot be opened after EOF, playback stops and reports the
 error. A manual switch to a missing file does not interrupt the current track.
@@ -28,9 +40,14 @@ change the device signal.
 Unspecified mono/stereo layouts use conventional mono or left/right identities;
 unspecified multichannel layouts are rejected rather than guessed from their size.
 
+PipeWire automatic channel remix is enabled by default. This allows a multichannel
+track to play through a stereo or differently arranged sink using PipeWire's
+channelmix policy. Disable `pipewire_auto_mix` in settings for strict speaker
+preservation; incompatible layouts then fail instead of being remixed.
+
 === Extension audio decoding
 
-Enable `ffmpeg_enabled` in the configuration file to allow
+Enable `ffmpeg_enabled` in preferences or the configuration file to allow
 unsupported native containers/codecs to use the FFmpeg audio backend. Format
 detection uses file contents, not just the extension. Corrupt native streams and
 invalid layouts are errors, not reasons to retry through another decoder.
@@ -51,7 +68,11 @@ The settings status reports missing libraries or incompatible versions. A saved
 enabled setting with an unavailable runtime does not prevent native playback or
 application startup. Disabling the extension stops an active FFmpeg-decoded track,
 but leaves native playback running. Successful library loads are shared; no
+
 FFmpeg library is loaded merely to probe native media while the option is off.
+
+The footer exit button, `rivu quit`, and MPRIS `Quit` stop the core explicitly;
+closing the GUI window alone leaves playback and MPRIS running.
 
 == Runtime decoder dependencies
 

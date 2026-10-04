@@ -31,6 +31,10 @@ rivu --help
 `gui` and `serve` each start a core; do not run both against the same data
  directory. Use the CLI or TUI to control an existing instance.
 
+Closing the GUI window does not stop playback. The core and MPRIS service keep
+running and remain controllable through `rivu tui`, the CLI, or desktop media
+controls. Use `rivu quit` or MPRIS Quit to stop the core.
+
 == Documentation
 
 * link:doc/library.adoc[Library, metadata, playlists, and database maintenance]
