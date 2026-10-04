@@ -33,33 +33,28 @@ struct OverviewCache {
 }
 
 impl OverviewCache {
-    // Keep only tracks referenced by the queue and current playback; this stays
-    // compact for large libraries while supporting the complete queue view.
-    fn response(&mut self, state: &AppState) -> Response {
-        let library_changed = self.library.as_ptr() != Arc::as_ptr(&state.library);
-        let queue_changed = self.queue.as_ptr() != Arc::as_ptr(&state.queue);
-        if library_changed || queue_changed || self.current != state.current_queue_id {
-            let mut ids: HashSet<i64> = state.queue.iter().map(|entry| entry.track_id).collect();
-            if let Some(track) = state.current_track() {
-                ids.insert(track.id);
-            }
-            self.tracks = Arc::new(
-                state
-                    .library
-                    .iter()
-                    .filter(|track| ids.contains(&track.id))
-                    .cloned()
-                    .collect(),
-            );
-            self.library = Arc::downgrade(&state.library);
-            self.queue = Arc::downgrade(&state.queue);
-            self.current = state.current_queue_id;
-        }
+    fn cached(&self, state: &AppState) -> Option<Arc<Vec<Track>>> {
+        let unchanged = self.library.as_ptr() == Arc::as_ptr(&state.library)
+            && self.queue.as_ptr() == Arc::as_ptr(&state.queue)
+            && self.current == state.current_queue_id;
+        unchanged.then(|| self.tracks.clone())
+    }
+
+    fn update(&mut self, state: &AppState, tracks: Arc<Vec<Track>>) {
+        self.library = Arc::downgrade(&state.library);
+        self.queue = Arc::downgrade(&state.queue);
+        self.current = state.current_queue_id;
+        self.tracks = tracks;
+    }
+
+    fn response(state: AppState, tracks: Arc<Vec<Track>>) -> Response {
         Response {
             ok: true,
             error: None,
             state: AppState {
-                library: self.tracks.clone(),
+                library: tracks,
+                library_revision: state.library_revision,
+                library_structure_revision: state.library_structure_revision,
                 playlists: Arc::new(Vec::new()),
                 queue: state.queue.clone(),
                 history: Arc::new(Vec::new()),
@@ -217,7 +212,28 @@ fn serve_connection(
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     let bytes = read_message(&mut stream, MAX_REQUEST)?;
     let response = match serde_json::from_slice::<Command>(&bytes) {
-        Ok(Command::Overview) => overview.lock().response(&handle.state.read()),
+        Ok(Command::Overview) => {
+            let state = handle.snapshot();
+            let cached = overview.lock().cached(&state);
+            let tracks = cached.unwrap_or_else(|| {
+                let mut ids: HashSet<i64> =
+                    state.queue.iter().map(|entry| entry.track_id).collect();
+                if let Some(track) = state.current_track() {
+                    ids.insert(track.id);
+                }
+                let tracks: Arc<Vec<Track>> = Arc::new(
+                    state
+                        .library
+                        .iter()
+                        .filter(|track| ids.contains(&track.id))
+                        .cloned()
+                        .collect(),
+                );
+                overview.lock().update(&state, tracks.clone());
+                tracks
+            });
+            OverviewCache::response(state, tracks)
+        }
         Ok(command) => handle.request(command),
         Err(error) => Response {
             ok: false,

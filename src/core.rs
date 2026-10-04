@@ -243,9 +243,11 @@ impl Runtime {
             .as_ref()
             .is_none_or(|worker| worker.is_finished())
     }
-    pub fn join(&mut self) {
+    pub fn join(&mut self) -> thread::Result<()> {
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+            worker.join()
+        } else {
+            Ok(())
         }
     }
 }
@@ -261,7 +263,7 @@ impl Drop for Runtime {
                 reply: None,
             });
         }
-        self.join();
+        let _ = self.join();
     }
 }
 
@@ -342,16 +344,15 @@ impl Core {
             self.state.last_error = Some(format!("Saving play count: {error:#}"));
         }
         let _ = self.save();
-        let _ = self.engine.commands.send(AudioCommand::Shutdown);
+        let _ = self.engine.send(AudioCommand::Shutdown);
         for worker in self.scan_workers.drain(..) {
             let _ = worker.join();
         }
         self.state.status = PlaybackStatus::Stopped;
+        self.state.shutting_down = true;
         self.publish();
-        if self.state.shutting_down {
-            if let Some(callback) = self.gui_opener.read().clone() {
-                callback();
-            }
+        if let Some(callback) = self.gui_opener.read().clone() {
+            callback();
         }
     }
 
@@ -399,8 +400,17 @@ impl Core {
         self.store
             .set_setting("playback", &serde_json::to_string(&saved)?)
     }
-    fn reload(&mut self) -> Result<()> {
+    fn reload_library(&mut self, structure_changed: bool) -> Result<()> {
         self.state.library = Arc::new(self.store.tracks()?);
+        self.state.library_revision = self.state.library_revision.wrapping_add(1);
+        if structure_changed {
+            self.state.library_structure_revision =
+                self.state.library_structure_revision.wrapping_add(1);
+        }
+        Ok(())
+    }
+    fn reload(&mut self, structure_changed: bool) -> Result<()> {
+        self.reload_library(structure_changed)?;
         self.state.playlists = Arc::new(self.store.playlists()?);
         self.state.history = Arc::new(self.store.history(200)?);
         Ok(())
@@ -541,7 +551,7 @@ impl Core {
         {
             self.store.increment_play_count(playback.track_id)?;
             playback.counted = true;
-            self.state.library = Arc::new(self.store.tracks()?);
+            self.reload_library(false)?;
         }
         Ok(())
     }
@@ -566,7 +576,7 @@ impl Core {
                 .state
                 .duration
                 .filter(|duration| duration.is_finite() && *duration > 0.0));
-        self.state.library = Arc::new(self.store.tracks()?);
+        self.reload_library(false)?;
         self.state.history = Arc::new(self.store.history(200)?);
         self.count_play()
     }
@@ -802,7 +812,7 @@ impl Core {
         if !result.errors().is_empty() {
             self.state.last_error = Some(result.errors().join("\n"));
         }
-        self.reload()?;
+        self.reload(true)?;
         if let Some((name, items)) = scan.import {
             let mut ids = Vec::with_capacity(items.len());
             let by_source: std::collections::HashMap<(&Path, Option<u32>), i64> = self
@@ -1124,7 +1134,7 @@ impl Core {
                 album,
             } => {
                 self.store.edit_track(track_id, &title, &artist, &album)?;
-                self.state.library = Arc::new(self.store.tracks()?);
+                self.reload_library(true)?;
             }
             Command::RemoveTracks { track_ids } => {
                 for id in &track_ids {
@@ -1141,14 +1151,14 @@ impl Core {
                 self.store.remove_tracks(&track_ids)?;
                 Arc::make_mut(&mut self.state.queue).retain(|q| !track_ids.contains(&q.track_id));
                 self.prune_queue_history();
-                self.reload()?;
+                self.reload(true)?;
             }
             Command::SetFavorite {
                 track_ids,
                 favorite,
             } => {
                 self.store.set_favorite(&track_ids, favorite)?;
-                self.state.library = Arc::new(self.store.tracks()?);
+                self.reload_library(false)?;
             }
             Command::RemoveMissingTracks => {
                 let track_ids = self
@@ -1668,7 +1678,7 @@ mod tests {
                 ..ScanResult::default()
             })
             .unwrap();
-        core.reload().unwrap();
+        core.reload(true).unwrap();
         playing(&mut core, 2);
         core.played = vec![1, 2, 3];
         core.played_cursor = 2;
@@ -1725,11 +1735,11 @@ mod tests {
         file.write_all(&200_u32.to_le_bytes()).unwrap();
         file.write_all(&[0; 200]).unwrap();
         drop(file);
-        let mut scanned = library::scan_paths(&[path.clone()], &[], false).unwrap();
+        let mut scanned = library::scan_paths(std::slice::from_ref(&path), &[], false).unwrap();
         let probed_title = scanned.records[0].media.title.clone();
         scanned.records[0].media.title = "Cached metadata".into();
         core.store.apply_scan(&scanned).unwrap();
-        core.reload().unwrap();
+        core.reload(true).unwrap();
         for (force, expected) in [(false, "Cached metadata"), (true, probed_title.as_str())] {
             core.command(Command::Scan {
                 paths: vec![path.clone()],
@@ -2467,7 +2477,7 @@ mod tests {
         playing(&mut core, 1);
         let playlist_id = core.store.create_playlist("missing").unwrap();
         core.store.add_playlist(playlist_id, &[2]).unwrap();
-        core.reload().unwrap();
+        core.reload(true).unwrap();
         let error = core
             .command(Command::PlayPlaylist { playlist_id })
             .unwrap_err();

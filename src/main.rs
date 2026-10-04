@@ -1,5 +1,6 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand, ValueEnum};
+use crossbeam_channel::{bounded, select};
 use rivu::{
     audio, config,
     core::Runtime,
@@ -480,7 +481,7 @@ fn run() -> Result<()> {
             if wait_scan {
                 loop {
                     thread::sleep(Duration::from_millis(200));
-                    let response = checked(ipc::request(&socket, &Command::Status)?)?;
+                    let response = checked(ipc::request(&socket, &Command::Overview)?)?;
                     if !response.state.scanning {
                         if let Some(error) = &response.state.last_error {
                             bail!("{error}");
@@ -534,6 +535,8 @@ fn start(
     let server = ipc::Server::start(socket, listener, runtime.handle.clone())?;
     let media_handle = runtime.handle.clone();
     let media_changes = media_handle.subscribe();
+    let (media_stop, media_stop_receiver) = bounded(1);
+    let media_stop_for_cleanup = media_stop.clone();
     let media_data_dir = data_dir.clone();
     let media_worker = thread::Builder::new()
         .name("rivu-mpris-manager".into())
@@ -561,8 +564,13 @@ fn start(
                     };
                     let _ = media_handle.send(Command::MprisStatus { status });
                 }
-                if media_changes.recv().is_err() {
-                    break;
+                select! {
+                    recv(media_stop_receiver) -> _ => break,
+                    recv(media_changes) -> changed => {
+                        if changed.is_err() {
+                            break;
+                        }
+                    }
                 }
             }
             drop(service);
@@ -578,13 +586,20 @@ fn start(
             force: false,
         })?;
     }
-    if desktop {
-        gui::run(runtime.handle.clone(), data_dir.join("workspace.json"))?;
+    let interface_result = if desktop {
+        gui::run(runtime.handle.clone(), data_dir.join("workspace.json"))
     } else {
         println!("Rivu core ready. Data: {}", data_dir.display());
+        Ok(())
+    };
+    if interface_result.is_err() {
+        let _ = runtime.handle.send(Command::Shutdown);
     }
-    runtime.join();
+    let join_result = runtime.join();
+    let _ = media_stop_for_cleanup.send(());
     let _ = media_worker.join();
+    interface_result?;
+    join_result.map_err(|_| anyhow!("Rivu core worker panicked"))?;
     drop(server);
     Ok(())
 }

@@ -100,6 +100,12 @@ pub struct DatabaseOptimization {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AppState {
     pub library: Arc<Vec<Track>>,
+    /// Changes whenever any persisted track data changes.
+    #[serde(default)]
+    pub library_revision: u64,
+    /// Changes only when the library tree or visible row ordering may change.
+    #[serde(default)]
+    pub library_structure_revision: u64,
     pub playlists: Arc<Vec<Playlist>>,
     pub queue: Arc<Vec<QueueEntry>>,
     pub history: Arc<Vec<HistoryEntry>>,
@@ -129,6 +135,8 @@ impl Default for AppState {
     fn default() -> Self {
         Self {
             library: Arc::new(Vec::new()),
+            library_revision: 0,
+            library_structure_revision: 0,
             playlists: Arc::new(Vec::new()),
             queue: Arc::new(Vec::new()),
             history: Arc::new(Vec::new()),
@@ -345,8 +353,10 @@ mod tests {
 
     #[test]
     fn playback_seek_respects_status_and_boundaries() {
-        let mut state = AppState::default();
-        state.position = 2.0;
+        let mut state = AppState {
+            position: 2.0,
+            ..AppState::default()
+        };
         assert!(playback_key_command("left", &state).is_none());
         state.status = PlaybackStatus::Playing;
         assert!(matches!(
@@ -370,8 +380,10 @@ mod tests {
 
     #[test]
     fn playback_volume_and_repeat_cycle_are_bounded() {
-        let mut state = AppState::default();
-        state.volume = 1.0;
+        let mut state = AppState {
+            volume: 1.0,
+            ..AppState::default()
+        };
         assert!(matches!(
             playback_key_command("]", &state),
             Some(Command::Volume { value }) if value == 1.0

@@ -90,6 +90,9 @@ impl Mpris {
                                 previous_can_raise,
                                 current_can_raise,
                             ) {
+                                let _ = handle.send(Command::MprisStatus {
+                                    status: format!("publisher stopped: {error}"),
+                                });
                                 eprintln!("MPRIS publisher stopped: {error}");
                                 break;
                             }
@@ -184,6 +187,8 @@ struct Player {
 }
 
 impl Player {
+    // Next/Previous and restoring play state are separate core commands; the
+    // interface cannot make this sequence atomic without changing core APIs.
     fn navigate(&self, command: Command) -> fdo::Result<()> {
         let status = self.handle.snapshot().status;
         let state = request(&self.handle, command)?;
