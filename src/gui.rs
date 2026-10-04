@@ -139,6 +139,26 @@ fn row() -> Div {
 fn column() -> Div {
     div().flex().flex_col().min_w_0().min_h_0().gap_2()
 }
+
+struct ButtonTooltip {
+    text: SharedString,
+}
+
+impl Render for ButtonTooltip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .max_w(px(360.))
+            .px_3()
+            .py_2()
+            .bg(rgb(PANEL))
+            .border_1()
+            .border_color(rgb(BORDER))
+            .text_sm()
+            .text_color(rgb(TEXT))
+            .child(self.text.clone())
+    }
+}
+
 fn button(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
@@ -158,6 +178,18 @@ fn button(
         .hover(|style| style.bg(rgb(0x292e42)).border_color(rgb(ACCENT)))
         .child(label.into())
         .on_click(cx.listener(move |this, _, window, cx| action(this, window, cx)))
+}
+
+fn icon_button(
+    id: impl Into<ElementId>,
+    icon: impl Into<SharedString>,
+    hint: impl Into<SharedString>,
+    cx: &mut Context<GuiApp>,
+    action: impl Fn(&mut GuiApp, &mut Window, &mut Context<GuiApp>) + 'static,
+) -> Stateful<Div> {
+    let hint = hint.into();
+    button(id, icon, cx, action)
+        .tooltip(move |_, cx| cx.new(|_| ButtonTooltip { text: hint.clone() }).into())
 }
 fn format_time(seconds: f64) -> String {
     let seconds = if seconds.is_finite() {
@@ -184,6 +216,25 @@ impl Render for PanelDrag {
             .rounded_md()
             .text_color(rgb(TEXT))
             .child(self.title.clone())
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct QueueDrag {
+    pub(super) queue_id: u64,
+}
+
+impl Render for QueueDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_4()
+            .py_2()
+            .bg(rgb(PANEL))
+            .border_1()
+            .border_color(rgb(ACCENT))
+            .rounded_md()
+            .text_color(rgb(TEXT))
+            .child("Move queue entry")
     }
 }
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
@@ -439,7 +490,9 @@ impl GuiApp {
     fn refresh(&mut self, cx: &mut Context<Self>) {
         let state = self.handle.snapshot();
         let library_changed = !Arc::ptr_eq(&self.state.library, &state.library);
-        if self.seek_queue_id != state.current_queue_id {
+        if !matches!(self.dragging, Some(Dragging::Seek(_)))
+            && self.seek_queue_id != state.current_queue_id
+        {
             self.seek_preview = None;
             self.seek_queue_id = None;
         }
@@ -593,6 +646,8 @@ impl GuiApp {
                     let title = panel_spec(&panel.kind)
                         .map_or(panel.kind.as_str(), |spec| spec.title)
                         .to_owned();
+                    let hide_on_right_click =
+                        matches!(panel.kind.as_str(), "spectrum" | "spectrogram");
                     let drag = PanelDrag {
                         panel_id,
                         title: title.clone().into(),
@@ -615,6 +670,17 @@ impl GuiApp {
                                 this.target_group = Some(node_id);
                                 this.persist_layout(cx);
                             }))
+                            .when(hide_on_right_click, |view| {
+                                view.on_mouse_down(
+                                    MouseButton::Right,
+                                    cx.listener(move |this, _, window, cx| {
+                                        window.prevent_default();
+                                        cx.stop_propagation();
+                                        this.layout.remove(panel_id);
+                                        this.persist_layout(cx);
+                                    }),
+                                )
+                            })
                             .on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone()))
                             .on_drop(cx.listener(move |this, drag: &PanelDrag, _, cx| {
                                 this.dock_drop(
@@ -768,14 +834,11 @@ impl GuiApp {
     fn finish_drag(&mut self, cx: &mut Context<Self>) {
         let dragging = self.dragging.take();
         if matches!(dragging, Some(Dragging::Seek(_))) {
-            if self.seek_queue_id == self.state.current_queue_id {
-                if let Some(seconds) = self.seek_preview.take() {
-                    self.send(Command::Seek { seconds }, cx);
-                }
-            } else {
-                self.seek_preview = None;
+            if let (Some(queue_id), Some(seconds)) =
+                (self.seek_queue_id.take(), self.seek_preview.take())
+            {
+                self.send(Command::SeekQueue { queue_id, seconds }, cx);
             }
-            self.seek_queue_id = None;
         } else {
             self.seek_preview = None;
             self.seek_queue_id = None;
@@ -849,6 +912,7 @@ impl Render for GuiApp {
         self.layout.root = root;
         let mut app = column()
             .id("rivu")
+            .relative()
             .size_full()
             .gap_0()
             .bg(rgb(BG))
@@ -865,53 +929,66 @@ impl Render for GuiApp {
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| this.finish_drag(cx)),
-            );
-        if self.catalog_open {
-            let mut catalog = row().px_5().py_2().flex_wrap();
-            for spec in PANELS {
-                let kind = spec.kind;
-                catalog = catalog.child(button(kind, spec.title, cx, move |this, _, cx| {
-                    this.layout.add(kind, this.target_group);
-                    this.catalog_open = false;
-                    this.persist_layout(cx);
-                }));
-            }
-            app = app.child(catalog);
-        }
-        if let Some(error) = self.error.clone().or_else(|| self.state.last_error.clone()) {
-            app = app.child(
+            )
+            .child(div().flex_1().min_h_0().min_w_0().p_3().child(workspace));
+
+        let error = self.error.clone().or_else(|| self.state.last_error.clone());
+        let mut footer = row()
+            .h(px(36.))
+            .flex_shrink_0()
+            .px_5()
+            .py_1()
+            .text_xs()
+            .text_color(rgb(MUTED));
+        if let Some(error) = error {
+            footer = footer.child(
                 row()
-                    .px_5()
-                    .py_2()
+                    .flex_1()
+                    .min_w_0()
+                    .px_2()
                     .bg(rgb(0x422b2a))
-                    .child(div().flex_1().text_sm().child(error))
-                    .child(button("dismiss-error", "Dismiss", cx, |this, _, cx| {
-                        this.error = None;
-                        this.send(Command::DismissError, cx);
-                    })),
+                    .text_color(rgb(TEXT))
+                    .child(div().flex_1().min_w_0().truncate().child(error))
+                    .child(icon_button(
+                        "dismiss-error",
+                        "×",
+                        "Dismiss message",
+                        cx,
+                        |this, _, cx| {
+                            this.error = None;
+                            this.send(Command::DismissError, cx);
+                        },
+                    )),
             );
+        } else if self.state.scanning {
+            footer = footer.child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(rgb(TEXT))
+                    .child(self.state.scan_message.clone()),
+            );
+        } else {
+            footer = footer.child(div().flex_1());
         }
-        app = app.child(div().flex_1().min_h_0().min_w_0().p_3().child(workspace));
-        app.child(
-            row()
-                .flex_shrink_0()
-                .flex_wrap()
-                .px_5()
-                .py_1()
-                .text_xs()
-                .text_color(rgb(MUTED))
-                .child(format!("{} tracks", self.state.library.len()))
-                .child(if self.state.scanning {
-                    "Scanning…".to_owned()
-                } else {
-                    self.state.scan_message.clone()
-                })
-                .child(div().flex_1())
-                .child(button("catalog", "+ Panel", cx, |this, _, cx| {
+        footer = footer
+            .child(icon_button(
+                "catalog",
+                "⊞",
+                "Add panel",
+                cx,
+                |this, _, cx| {
                     this.catalog_open = !this.catalog_open;
                     cx.notify();
-                }))
-                .child(button("settings", "Settings", cx, |this, _, cx| {
+                },
+            ))
+            .child(icon_button(
+                "settings",
+                "⚙",
+                "Settings",
+                cx,
+                |this, _, cx| {
                     this.load_settings(cx);
                     let id = this
                         .layout
@@ -925,9 +1002,36 @@ impl Render for GuiApp {
                         this.layout.add("settings", this.target_group);
                     }
                     this.persist_layout(cx);
-                }))
-                .child("Drag tabs to move · drag dividers to resize · GPUI / wgpu"),
-        )
+                },
+            ));
+        app = app.child(footer);
+
+        if self.catalog_open {
+            let mut choices = row().flex_wrap().gap_1();
+            for spec in PANELS {
+                let kind = spec.kind;
+                choices = choices.child(button(kind, spec.title, cx, move |this, _, cx| {
+                    this.layout.add(kind, this.target_group);
+                    this.catalog_open = false;
+                    this.persist_layout(cx);
+                }));
+            }
+            app = app.child(
+                column()
+                    .absolute()
+                    .bottom(px(36.))
+                    .right_0()
+                    .max_w(px(560.))
+                    .p_3()
+                    .gap_1()
+                    .bg(rgb(PANEL))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .child(div().text_xs().text_color(rgb(MUTED)).child("Add panel"))
+                    .child(choices),
+            );
+        }
+        app
     }
 }
 impl Drop for GuiApp {

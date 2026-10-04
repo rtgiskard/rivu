@@ -1,6 +1,6 @@
 use super::{
-    ACCENT, BORDER, Dragging, Field, GuiApp, MUTED, Measured, PANEL, TEXT, button, column,
-    format_time, row,
+    ACCENT, BORDER, Dragging, Field, GuiApp, MUTED, Measured, PANEL, QueueDrag, TEXT, button,
+    column, format_time, icon_button, row,
 };
 use crate::model::{Command, PlaybackStatus};
 use gpui::{
@@ -122,7 +122,6 @@ impl GuiApp {
                 row()
                     .flex_shrink_0()
                     .flex_wrap()
-                    .child(div().text_xs().text_color(rgb(ACCENT)).child("RIVU"))
                     .child(div().flex_1().min_w_0().text_xl().truncate().child(title))
                     .child(
                         div()
@@ -235,7 +234,7 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let count = self.filtered_rows.len();
-        let tools = row().flex_wrap().flex_shrink_0().child(button(
+        let mut tools = row().flex_wrap().flex_shrink_0().child(button(
             ("scan", panel_id),
             "Scan paths",
             cx,
@@ -253,6 +252,27 @@ impl GuiApp {
                 this.send(Command::Scan { paths }, cx);
             },
         ));
+        if !self.selected.is_empty() {
+            tools = tools
+                .child(button(
+                    ("library-enqueue", panel_id),
+                    "Append selected to queue",
+                    cx,
+                    |this, _, cx| {
+                        let track_ids = this.panel_selected_tracks();
+                        this.send(Command::Enqueue { track_ids }, cx);
+                    },
+                ))
+                .child(button(
+                    ("library-remove", panel_id),
+                    "Remove selected from library (keep files)",
+                    cx,
+                    |this, _, cx| {
+                        let track_ids = this.panel_selected_tracks();
+                        this.send(Command::RemoveTracks { track_ids }, cx);
+                    },
+                ));
+        }
         let mut panel = column()
             .id(("library-panel", panel_id))
             .size_full()
@@ -346,6 +366,40 @@ impl GuiApp {
         }
     }
 
+    fn move_queue_entry(&mut self, source_id: u64, target_id: u64, cx: &mut Context<Self>) {
+        let Some(source_index) = self
+            .state
+            .queue
+            .iter()
+            .position(|entry| entry.id == source_id)
+        else {
+            return;
+        };
+        let Some(target_index) = self
+            .state
+            .queue
+            .iter()
+            .position(|entry| entry.id == target_id)
+        else {
+            return;
+        };
+        if source_index == target_index {
+            return;
+        }
+        let index = if source_index < target_index {
+            target_index - 1
+        } else {
+            target_index
+        };
+        self.send(
+            Command::MoveQueue {
+                queue_id: source_id,
+                index,
+            },
+            cx,
+        );
+    }
+
     pub(super) fn queue_panel(
         &mut self,
         panel_id: u64,
@@ -355,12 +409,13 @@ impl GuiApp {
         let selected = self
             .selected_queue
             .and_then(|id| self.state.queue.iter().position(|entry| entry.id == id));
-        let mut tools = row().flex_wrap().flex_shrink_0();
+        let mut tools = row().flex_shrink_0();
         if let Some(index) = selected {
             tools = tools
-                .child(button(
+                .child(icon_button(
                     ("queue-play", panel_id),
-                    "Play",
+                    "▶",
+                    "Play selected queue entry",
                     cx,
                     |this, _, cx| {
                         if let Some(queue_id) = this.selected_queue {
@@ -368,9 +423,10 @@ impl GuiApp {
                         }
                     },
                 ))
-                .child(button(
+                .child(icon_button(
                     ("queue-remove", panel_id),
-                    "Remove",
+                    "×",
+                    "Remove selected queue entry",
                     cx,
                     |this, _, cx| {
                         if let Some(queue_id) = this.selected_queue.take() {
@@ -379,22 +435,28 @@ impl GuiApp {
                     },
                 ));
             if index > 0 {
-                tools = tools.child(button(("queue-up", panel_id), "Up", cx, |this, _, cx| {
-                    this.move_selected_queue(false, cx)
-                }));
+                tools = tools.child(icon_button(
+                    ("queue-up", panel_id),
+                    "↑",
+                    "Move selected entry up",
+                    cx,
+                    |this, _, cx| this.move_selected_queue(false, cx),
+                ));
             }
             if index + 1 < self.state.queue.len() {
-                tools = tools.child(button(
+                tools = tools.child(icon_button(
                     ("queue-down", panel_id),
-                    "Down",
+                    "↓",
+                    "Move selected entry down",
                     cx,
                     |this, _, cx| this.move_selected_queue(true, cx),
                 ));
             }
         }
         if !self.state.queue.is_empty() {
-            tools = tools.child(button(
+            tools = tools.child(div().flex_1()).child(icon_button(
                 ("queue-clear", panel_id),
+                "⌫",
                 "Clear queue",
                 cx,
                 |this, _, cx| {
@@ -408,7 +470,7 @@ impl GuiApp {
             .size_full()
             .p_3()
             .child(caption(format!(
-                "{} queued · double-click to play an occurrence",
+                "{} queued · drag an entry onto its new position",
                 self.state.queue.len()
             )))
             .child(tools)
@@ -426,6 +488,7 @@ impl GuiApp {
                                 let id = entry.id;
                                 let (title, detail) = this.panel_track_text(entry.track_id);
                                 let playing = this.state.current_queue_id == Some(id);
+                                let drag = QueueDrag { queue_id: id };
                                 Some(
                                     list_row(("queue-entry", id), this.selected_queue == Some(id))
                                         .child(
@@ -457,7 +520,17 @@ impl GuiApp {
                                                 }
                                                 cx.notify();
                                             },
-                                        )),
+                                        ))
+                                        .on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone()))
+                                        .on_drop(cx.listener(
+                                            move |this, drag: &QueueDrag, window, cx| {
+                                                window.prevent_default();
+                                                this.move_queue_entry(drag.queue_id, id, cx);
+                                            },
+                                        ))
+                                        .drag_over::<QueueDrag>(|style, _, _, _| {
+                                            style.bg(rgb(0x293d40))
+                                        }),
                                 )
                             })
                             .collect::<Vec<_>>()
