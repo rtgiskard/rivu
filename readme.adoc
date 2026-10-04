@@ -11,20 +11,21 @@ It provides:
 * Desktop GUI, CLI, TUI, and MPRIS control
 * Movable, persistent TokyoNight workspace
 * Optional Nerd Font symbols in the TUI
-* MP4, MKV, and WebM audio-container import
+* MKV, WebM and MP4 audio-container import
 
 Rivu is audio-only. Video tracks are not displayed or decoded. It does not use
 FFmpeg, GStreamer, GLib media backends, or external players.
 
 == Build
 
-Rust 1.99.0 and the locked dependency set are required. On Arch Linux:
+Install Rust and the system libraries required by the selected GUI and audio backends.
 
 [source,sh]
 ----
-sudo pacman -S --needed rust pkgconf alsa-lib opus fontconfig libxkbcommon-x11 libxcb
-cargo build --release --locked
+sudo pacman -S --needed rust pkgconf alsa-lib opus fontconfig libxkbcommon
+cargo build --release
 ----
+The default GUI build targets Wayland. X11 support is intentionally not enabled by default.
 
 == Run
 
