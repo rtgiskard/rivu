@@ -2,7 +2,7 @@ use crate::{
     core::AppHandle,
     model::{AppState, Command, QueueEntry, Response, Track},
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Error, Result, bail};
 use parking_lot::Mutex;
 use std::{
     collections::HashSet,
@@ -230,6 +230,16 @@ fn serve_connection(
     Ok(())
 }
 
+pub fn is_no_instance(error: &Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+            matches!(
+                io.kind(),
+                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+            )
+        })
+    })
+}
 pub fn request(path: &Path, command: &Command) -> Result<Response> {
     let mut stream = UnixStream::connect(path).with_context(|| {
         format!(

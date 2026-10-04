@@ -41,7 +41,7 @@ impl Mpris {
         let artwork = Arc::new(ArtworkManager::new(data_dir));
         let updates = handle.subscribe();
         let initial = handle.snapshot();
-        let initial_can_raise = can_raise && handle.wakeup_available();
+        let initial_can_raise = can_raise && handle.can_raise();
         // Builder uses DoNotQueue: another Rivu must fail, not silently wait for
         // the name or replace the running player's controls.
         let connection = Builder::session()
@@ -80,7 +80,7 @@ impl Mpris {
                         recv(updates) -> update => {
                             if update.is_err() { break; }
                             let current = handle.snapshot();
-                            let current_can_raise = can_raise && handle.wakeup_available();
+                            let current_can_raise = can_raise && handle.can_raise();
                             if let Err(error) = publish_changes(
                                 &bus,
                                 &previous,
@@ -129,14 +129,14 @@ struct Root {
 #[zbus::interface(name = "org.mpris.MediaPlayer2")]
 impl Root {
     fn raise(&self) -> fdo::Result<()> {
-        if !self.raise_supported || !self.handle.wakeup_available() {
+        if !self.raise_supported || !self.handle.can_raise() {
             return Err(fdo::Error::NotSupported(
-                "Rivu has no graphical window".into(),
+                "Rivu has no graphical host".into(),
             ));
         }
         self.handle.raise().map_err(|error| {
-            if !self.handle.wakeup_available() {
-                fdo::Error::NotSupported("Rivu has no graphical window".into())
+            if !self.handle.can_raise() {
+                fdo::Error::NotSupported("Rivu has no graphical host".into())
             } else {
                 fdo::Error::Failed(error.to_string())
             }
@@ -154,7 +154,7 @@ impl Root {
 
     #[zbus(property)]
     fn can_raise(&self) -> bool {
-        self.raise_supported && self.handle.wakeup_available()
+        self.raise_supported && self.handle.can_raise()
     }
 
     #[zbus(property(emits_changed_signal = "const"))]

@@ -171,12 +171,51 @@ impl AppState {
         self.library.get(index)
     }
 }
+/// Translate a normalized playback key name into the corresponding command.
+///
+/// This is shared by the terminal and GUI frontends so playback controls keep
+/// identical semantics regardless of input surface.
+pub(crate) fn playback_key_command(key: &str, state: &AppState) -> Option<Command> {
+    let seek = |seconds: f64| {
+        (state.status != PlaybackStatus::Stopped).then_some(Command::Seek { seconds })
+    };
+    match key {
+        "space" => Some(Command::Toggle),
+        "n" => Some(Command::Next),
+        "p" => Some(Command::Previous),
+        "left" => seek((state.position - 5.0).max(0.0)),
+        "right" => seek((state.position + 5.0).max(0.0)),
+        "home" => seek(0.0),
+        "end" => state
+            .duration
+            .filter(|duration| duration.is_finite())
+            .and_then(seek),
+        "r" => Some(Command::Repeat {
+            mode: match state.repeat {
+                RepeatMode::Off => RepeatMode::All,
+                RepeatMode::All => RepeatMode::One,
+                RepeatMode::One => RepeatMode::Off,
+            },
+        }),
+        "s" => Some(Command::Shuffle {
+            enabled: !state.shuffle,
+        }),
+        "]" => Some(Command::Volume {
+            value: (state.volume + 0.05).min(1.0),
+        }),
+        "[" => Some(Command::Volume {
+            value: (state.volume - 0.05).max(0.0),
+        }),
+        _ => None,
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum Command {
     Status,
     Overview,
+    ShowWindow,
     OptimizeDatabase,
     SetFavorite {
         track_ids: Vec<i64>,
@@ -219,8 +258,15 @@ pub enum Command {
     RemoveQueue {
         queue_id: u64,
     },
+    RemoveQueueEntries {
+        queue_ids: Vec<u64>,
+    },
     MoveQueue {
         queue_id: u64,
+        index: usize,
+    },
+    MoveQueueEntries {
+        queue_ids: Vec<u64>,
         index: usize,
     },
     ClearQueue,
@@ -291,4 +337,69 @@ pub struct Response {
     pub ok: bool,
     pub error: Option<String>,
     pub state: AppState,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn playback_seek_respects_status_and_boundaries() {
+        let mut state = AppState::default();
+        state.position = 2.0;
+        assert!(playback_key_command("left", &state).is_none());
+        state.status = PlaybackStatus::Playing;
+        assert!(matches!(
+            playback_key_command("left", &state),
+            Some(Command::Seek { seconds }) if seconds == 0.0
+        ));
+        state.position = 12.0;
+        assert!(matches!(
+            playback_key_command("right", &state),
+            Some(Command::Seek { seconds }) if seconds == 17.0
+        ));
+        state.duration = Some(f64::INFINITY);
+        assert!(playback_key_command("end", &state).is_none());
+        state.duration = Some(42.0);
+        assert!(matches!(
+            playback_key_command("end", &state),
+            Some(Command::Seek { seconds }) if seconds == 42.0
+        ));
+        assert!(playback_key_command("unknown", &state).is_none());
+    }
+
+    #[test]
+    fn playback_volume_and_repeat_cycle_are_bounded() {
+        let mut state = AppState::default();
+        state.volume = 1.0;
+        assert!(matches!(
+            playback_key_command("]", &state),
+            Some(Command::Volume { value }) if value == 1.0
+        ));
+        state.volume = 0.0;
+        assert!(matches!(
+            playback_key_command("[", &state),
+            Some(Command::Volume { value }) if value == 0.0
+        ));
+        assert!(matches!(
+            playback_key_command("r", &state),
+            Some(Command::Repeat {
+                mode: RepeatMode::All
+            })
+        ));
+        state.repeat = RepeatMode::All;
+        assert!(matches!(
+            playback_key_command("r", &state),
+            Some(Command::Repeat {
+                mode: RepeatMode::One
+            })
+        ));
+        state.repeat = RepeatMode::One;
+        assert!(matches!(
+            playback_key_command("r", &state),
+            Some(Command::Repeat {
+                mode: RepeatMode::Off
+            })
+        ));
+    }
 }

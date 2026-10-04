@@ -1,6 +1,6 @@
 use crate::{
     ipc,
-    model::{AppState, Command, PlaybackStatus, RepeatMode, Response, Track},
+    model::{AppState, Command, PlaybackStatus, RepeatMode, Response, Track, playback_key_command},
 };
 use anyhow::{Context, Result};
 use crossterm::{
@@ -17,7 +17,7 @@ use ratatui::{
     widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph, Wrap},
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     io::{self, Stdout},
     path::{Path, PathBuf},
     sync::Arc,
@@ -60,41 +60,63 @@ fn run_loop(socket_path: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>
     let mut state = request_state(socket_path)?;
     let mut ui = UiState::default();
     ui.sync_queue(&state, &state);
+    let mut redraw = true;
     loop {
-        terminal.draw(|frame| draw(frame, &state, &mut ui))?;
-        let next = if event::poll(Duration::from_millis(250))? {
-            let Event::Key(key) = event::read()? else {
-                continue;
-            };
-            if key.kind == KeyEventKind::Release {
-                continue;
-            }
-            match ui.key_action(key, &state) {
-                KeyAction::Quit => break,
-                action @ (KeyAction::Search | KeyAction::Tree) => {
-                    let response = ipc::request(socket_path, &Command::Status)?;
-                    if response.ok {
-                        let library = Arc::clone(&response.state.library);
-                        if matches!(action, KeyAction::Tree) {
-                            ui.tree = Some(LibraryTree::new(library));
-                            ui.search = None;
-                        } else {
-                            ui.search = Some(LibrarySearch::new(library));
-                            ui.tree = None;
+        if redraw {
+            terminal.draw(|frame| draw(frame, &state, &mut ui))?;
+            redraw = false;
+        }
+        if event::poll(Duration::from_millis(250))? {
+            let event = event::read()?;
+            match event {
+                Event::Resize(_, _) => {
+                    redraw = true;
+                }
+                Event::Key(key) if key.kind != KeyEventKind::Release => {
+                    let local_revision = ui.local_revision;
+                    let next = match ui.key_action(key, &state) {
+                        KeyAction::Quit => break,
+                        action @ (KeyAction::Search | KeyAction::Tree) => {
+                            let response = ipc::request(socket_path, &Command::Status)?;
+                            if response.ok {
+                                let library = Arc::clone(&response.state.library);
+                                if matches!(action, KeyAction::Tree) {
+                                    ui.tree = Some(LibraryTree::new(library));
+                                    ui.search = None;
+                                } else {
+                                    ui.search = Some(LibrarySearch::new(library));
+                                    ui.tree = None;
+                                }
+                                ui.mark_local_change();
+                            }
+                            ui.accept_response(response)
                         }
+                        KeyAction::Command(command) => {
+                            ui.accept_response(ipc::request(socket_path, &command)?)
+                        }
+                        KeyAction::Ignored => {
+                            if ui.local_revision != local_revision {
+                                redraw = true;
+                            }
+                            continue;
+                        }
+                    };
+                    if ui.local_revision != local_revision || next.revision != state.revision {
+                        redraw = true;
                     }
-                    ui.accept_response(response)
+                    ui.sync_queue(&state, &next);
+                    state = next;
                 }
-                KeyAction::Command(command) => {
-                    ui.accept_response(ipc::request(socket_path, &command)?)
-                }
-                KeyAction::Ignored => continue,
+                _ => {}
             }
         } else {
-            request_state(socket_path)?
-        };
-        ui.sync_queue(&state, &next);
-        state = next;
+            let next = request_state(socket_path)?;
+            if next.revision != state.revision {
+                ui.sync_queue(&state, &next);
+                state = next;
+                redraw = true;
+            }
+        }
     }
     Ok(())
 }
@@ -105,9 +127,15 @@ struct UiState {
     search: Option<LibrarySearch>,
     tree: Option<LibraryTree>,
     message: Option<String>,
+    queue_cache: QueueViewCache,
+    local_revision: u64,
 }
 
 impl UiState {
+    fn mark_local_change(&mut self) {
+        self.local_revision = self.local_revision.wrapping_add(1);
+    }
+
     fn sync_queue(&mut self, previous: &AppState, next: &AppState) {
         let selected = self.queue.selected().unwrap_or(0);
         let queue_id = previous.queue.get(selected).map(|entry| entry.id);
@@ -121,65 +149,119 @@ impl UiState {
     }
 
     fn accept_response(&mut self, response: Response) -> AppState {
-        self.message = if response.ok {
+        let message = if response.ok {
             None
         } else {
             Some(response.error.unwrap_or_else(|| "Command rejected".into()))
         };
+        if self.message != message {
+            self.message = message;
+            self.mark_local_change();
+        }
         response.state
     }
 
     fn key_action(&mut self, key: KeyEvent, state: &AppState) -> KeyAction {
-        if let Some(search) = self.search.as_mut() {
-            match key.code {
-                KeyCode::Esc => self.search = None,
-                KeyCode::Up => move_selection(&mut search.selection, search.matches.len(), false),
-                KeyCode::Down => move_selection(&mut search.selection, search.matches.len(), true),
-                KeyCode::Enter => {
-                    if let Some(index) = search.selection.selected()
-                        && let Some(&track_index) = search.matches.get(index)
-                    {
-                        return KeyAction::Command(Command::Enqueue {
-                            track_ids: vec![search.library[track_index].id],
-                        });
+        if self.search.is_some() {
+            let mut changed = false;
+            let mut command = None;
+            let mut close = false;
+            {
+                let search = self.search.as_mut().expect("search checked above");
+                match key.code {
+                    KeyCode::Esc => close = true,
+                    KeyCode::Up => {
+                        changed =
+                            move_selection(&mut search.selection, search.matches.len(), false);
                     }
-                }
-                KeyCode::Backspace => {
-                    if search.query.pop().is_some() {
+                    KeyCode::Down => {
+                        changed = move_selection(&mut search.selection, search.matches.len(), true);
+                    }
+                    KeyCode::Enter => {
+                        if let Some(index) = search.selection.selected()
+                            && let Some(&track_index) = search.matches.get(index)
+                        {
+                            command = Some(Command::Enqueue {
+                                track_ids: vec![search.library[track_index].id],
+                            });
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        if search.query.pop().is_some() {
+                            search.filter();
+                            changed = true;
+                        }
+                    }
+                    KeyCode::Char(character) => {
+                        search.query.push(character);
                         search.filter();
+                        changed = true;
                     }
+                    _ => {}
                 }
-                KeyCode::Char(character) => {
-                    search.query.push(character);
-                    search.filter();
-                }
-                _ => {}
             }
-            return KeyAction::Ignored;
+            if close {
+                self.search = None;
+                changed = true;
+            }
+            if changed {
+                self.mark_local_change();
+            }
+            return command.map_or(KeyAction::Ignored, KeyAction::Command);
         }
-        if let Some(tree) = self.tree.as_mut() {
-            match key.code {
-                KeyCode::Esc => self.tree = None,
-                KeyCode::Up | KeyCode::Down => {
-                    let len = tree.entries().len();
-                    move_selection(&mut tree.selection, len, key.code == KeyCode::Down);
-                }
-                KeyCode::Enter => {
-                    if let Some(command) = tree.activate() {
-                        return KeyAction::Command(command);
+        if self.tree.is_some() {
+            let mut changed = false;
+            let mut command = None;
+            let mut close = false;
+            let mut delegate = false;
+            {
+                let tree = self.tree.as_mut().expect("tree checked above");
+                match key.code {
+                    KeyCode::Esc => close = true,
+                    KeyCode::Up | KeyCode::Down => {
+                        let len = tree.entries().len();
+                        changed =
+                            move_selection(&mut tree.selection, len, key.code == KeyCode::Down);
                     }
+                    KeyCode::Enter => {
+                        command = tree.activate();
+                        changed = command.is_none();
+                    }
+                    KeyCode::Backspace | KeyCode::Left => changed = tree.parent(),
+                    KeyCode::Char('/') => delegate = true,
+                    _ => delegate = true,
                 }
-                KeyCode::Backspace | KeyCode::Left => tree.parent(),
-                KeyCode::Char('/') => return KeyAction::Search,
-                _ => return key_action(key, state),
             }
-            return KeyAction::Ignored;
+            if close {
+                self.tree = None;
+                changed = true;
+            }
+            if changed {
+                self.mark_local_change();
+            }
+            if delegate {
+                return if key.code == KeyCode::Char('/') {
+                    KeyAction::Search
+                } else {
+                    key_action(key, state)
+                };
+            }
+            return command.map_or(KeyAction::Ignored, KeyAction::Command);
         }
-        match key.code {
+        let changed = match key.code {
             KeyCode::Char('/') => return KeyAction::Search,
             KeyCode::Char('t') => return KeyAction::Tree,
             KeyCode::Up => move_selection(&mut self.queue, state.queue.len(), false),
             KeyCode::Down => move_selection(&mut self.queue, state.queue.len(), true),
+            KeyCode::Enter => {
+                return self
+                    .queue
+                    .selected()
+                    .and_then(|index| state.queue.get(index))
+                    .map_or(KeyAction::Ignored, |entry| {
+                        KeyAction::Command(Command::PlayQueue { queue_id: entry.id })
+                    });
+            }
             KeyCode::Char('d') | KeyCode::Delete => {
                 if let Some(entry) = self
                     .queue
@@ -188,13 +270,16 @@ impl UiState {
                 {
                     return KeyAction::Command(Command::RemoveQueue { queue_id: entry.id });
                 }
+                false
             }
             _ => return key_action(key, state),
+        };
+        if changed {
+            self.mark_local_change();
         }
         KeyAction::Ignored
     }
 }
-
 struct LibrarySearch {
     library: Arc<Vec<Track>>,
     searchable: Vec<String>,
@@ -342,9 +427,9 @@ impl LibraryTree {
         }
     }
 
-    fn parent(&mut self) {
+    fn parent(&mut self) -> bool {
         if self.directory == self.root {
-            return;
+            return false;
         }
         let parent = self.directory.parent().unwrap_or(&self.root).to_path_buf();
         let child = std::mem::replace(&mut self.directory, parent);
@@ -353,20 +438,30 @@ impl LibraryTree {
             .iter()
             .position(|entry| matches!(entry, LibraryTreeEntry::Directory(path) if *path == child));
         self.selection = ListState::default().with_selected(selected);
+        true
     }
 }
 
-fn move_selection(selection: &mut ListState, len: usize, down: bool) {
-    selection.select(if len == 0 {
-        None
+fn move_selection(selection: &mut ListState, len: usize, down: bool) -> bool {
+    if len == 0 {
+        if selection.selected().is_some() {
+            selection.select(None);
+            return true;
+        }
+        return false;
+    }
+    let index = selection.selected().unwrap_or(0);
+    let next = if down {
+        index.saturating_add(1).min(len - 1)
     } else {
-        let index = selection.selected().unwrap_or(0);
-        Some(if down {
-            index.saturating_add(1).min(len - 1)
-        } else {
-            index.saturating_sub(1)
-        })
-    });
+        index.saturating_sub(1)
+    };
+    if selection.selected() == Some(next) {
+        false
+    } else {
+        selection.select(Some(next));
+        true
+    }
 }
 
 enum KeyAction {
@@ -378,45 +473,24 @@ enum KeyAction {
 }
 
 fn key_action(key: KeyEvent, state: &AppState) -> KeyAction {
-    let command = match key.code {
-        KeyCode::Char('q') => return KeyAction::Quit,
-        KeyCode::Char(' ') => Some(Command::Toggle),
-        KeyCode::Char('n') => Some(Command::Next),
-        KeyCode::Char('p') => Some(Command::Previous),
-        KeyCode::Left => seek_command(state, -5.0),
-        KeyCode::Right => seek_command(state, 5.0),
-        KeyCode::Home => seek_to(state, 0.0),
-        KeyCode::End => state
-            .duration
-            .filter(|duration| duration.is_finite())
-            .and_then(|duration| seek_to(state, duration)),
-        KeyCode::Char('r') => Some(Command::Repeat {
-            mode: match state.repeat {
-                RepeatMode::Off => RepeatMode::All,
-                RepeatMode::All => RepeatMode::One,
-                RepeatMode::One => RepeatMode::Off,
-            },
-        }),
-        KeyCode::Char('s') => Some(Command::Shuffle {
-            enabled: !state.shuffle,
-        }),
-        KeyCode::Char(']') => Some(Command::Volume {
-            value: (state.volume + 0.05).min(1.0),
-        }),
-        KeyCode::Char('[') => Some(Command::Volume {
-            value: (state.volume - 0.05).max(0.0),
-        }),
-        _ => None,
+    if key.code == KeyCode::Char('q') {
+        return KeyAction::Quit;
+    }
+
+    let mut encoded = [0_u8; 4];
+    let key_name = match key.code {
+        KeyCode::Char(' ') => "space",
+        KeyCode::Char(character) => {
+            let bytes = character.encode_utf8(&mut encoded).as_bytes();
+            std::str::from_utf8(bytes).expect("char encoding is valid UTF-8")
+        }
+        KeyCode::Left => "left",
+        KeyCode::Right => "right",
+        KeyCode::Home => "home",
+        KeyCode::End => "end",
+        _ => return KeyAction::Ignored,
     };
-    command.map_or(KeyAction::Ignored, KeyAction::Command)
-}
-
-fn seek_to(state: &AppState, seconds: f64) -> Option<Command> {
-    (state.status != PlaybackStatus::Stopped).then_some(Command::Seek { seconds })
-}
-
-fn seek_command(state: &AppState, delta: f64) -> Option<Command> {
-    seek_to(state, (state.position + delta).max(0.0))
+    playback_key_command(key_name, state).map_or(KeyAction::Ignored, KeyAction::Command)
 }
 
 fn request_state(socket_path: &Path) -> Result<AppState> {
@@ -486,14 +560,14 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &AppState, ui: &mut UiState) {
     } else if let Some(tree) = ui.tree.as_mut() {
         draw_tree(frame, left[1], tree, state.config.nerd_symbols);
     } else {
-        draw_queue(frame, left[1], state, &mut ui.queue);
+        draw_queue(frame, left[1], state, &mut ui.queue, &mut ui.queue_cache);
     }
     let keys = if ui.search.is_some() {
         "Type    search library\nBackspace edit query\n↑/↓     select result\nEnter   add to queue\nEsc     return to queue\n\nSearch matches title, artist, album and path."
     } else if ui.tree.is_some() {
         "↑/↓     select entry\nEnter   open directory/add track\nBackspace/← parent directory\nEsc     return to queue\n/       search library\nSpace   play/pause\nn/p     next/previous\n→       seek forward 5 sec\nHome/End seek start/end\nr       repeat mode\ns       shuffle\n[/]     volume\nq       quit"
     } else {
-        "↑/↓     select queue\nd/Del   remove selected\n/       search library\nt       browse library tree\nSpace   play/pause\nn/p     next/previous\n←/→     seek 5 sec\nHome/End seek start/end\nr       repeat mode\ns       shuffle\n[/]     volume\nq       quit"
+        "↑/↓     select queue\nEnter   play selected\nd/Del   remove selected\n/       search library\nt       browse library tree\nSpace   play/pause\nn/p     next/previous\n←/→     seek 5 sec\nHome/End seek start/end\nr       repeat mode\ns       shuffle\n[/]     volume\nq       quit"
     };
     let help = Paragraph::new(keys)
         .wrap(Wrap { trim: true })
@@ -529,21 +603,85 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &AppState, ui: &mut UiState) {
     );
 }
 
+#[derive(Default)]
+struct QueueViewCache {
+    queue: Vec<(u64, i64)>,
+    tracks: Vec<QueueTrackKey>,
+    rows: Vec<String>,
+}
+
+struct QueueTrackKey {
+    id: i64,
+    title: String,
+    artist: String,
+}
+
+impl QueueViewCache {
+    fn matches(&self, state: &AppState) -> bool {
+        self.queue.len() == state.queue.len()
+            && self
+                .queue
+                .iter()
+                .zip(state.queue.iter())
+                .all(|(&(id, track_id), entry)| id == entry.id && track_id == entry.track_id)
+            && self.tracks.len() == state.library.len()
+            && self
+                .tracks
+                .iter()
+                .zip(state.library.iter())
+                .all(|(cached, track)| {
+                    cached.id == track.id
+                        && cached.title == track.title
+                        && cached.artist == track.artist
+                })
+    }
+
+    fn sync(&mut self, state: &AppState) {
+        if self.matches(state) {
+            return;
+        }
+        self.queue = state
+            .queue
+            .iter()
+            .map(|entry| (entry.id, entry.track_id))
+            .collect();
+        self.tracks = state
+            .library
+            .iter()
+            .map(|track| QueueTrackKey {
+                id: track.id,
+                title: track.title.clone(),
+                artist: track.artist.clone(),
+            })
+            .collect();
+        let mut track_index = HashMap::with_capacity(state.library.len());
+        for (index, track) in state.library.iter().enumerate() {
+            track_index.insert(track.id, index);
+        }
+        self.rows = state
+            .queue
+            .iter()
+            .map(|entry| {
+                track_index
+                    .get(&entry.track_id)
+                    .and_then(|&index| state.library.get(index))
+                    .map(|track| format!("{} — {}", track.artist, track.title))
+                    .unwrap_or_else(|| "Missing track".into())
+            })
+            .collect();
+    }
+}
+
 fn draw_queue(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     state: &AppState,
     selection: &mut ListState,
+    cache: &mut QueueViewCache,
 ) {
-    let items = state.queue.iter().map(|entry| {
-        let track = state
-            .library
-            .iter()
-            .find(|track| track.id == entry.track_id);
-        let title = track
-            .map(|track| format!("{} — {}", track.artist, track.title))
-            .unwrap_or_else(|| "Missing track".into());
-        let marker = if state.current_queue_id == Some(entry.id) {
+    cache.sync(state);
+    let items = cache.rows.iter().enumerate().map(|(index, title)| {
+        let marker = if state.current_queue_id == Some(state.queue[index].id) {
             "▶ "
         } else {
             "  "
@@ -679,4 +817,146 @@ fn fmt_time(seconds: f64) -> String {
         return "0:00".into();
     }
     format!("{}:{:02}", (seconds as u64) / 60, (seconds as u64) % 60)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::QueueEntry;
+    use crossterm::event::KeyModifiers;
+
+    fn track(id: i64, artist: &str, title: &str) -> Track {
+        Track {
+            id,
+            path: PathBuf::from(format!("/music/{id}.flac")),
+            fingerprint: None,
+            cue: None,
+            title: title.into(),
+            artist: artist.into(),
+            album: "album".into(),
+            duration: Some(1.0),
+            codec: "flac".into(),
+            channels: 2,
+            sample_rate: 44_100,
+            bitrate_bps: None,
+            track_number: None,
+            disc_number: None,
+            bits_per_sample: None,
+            release_date: None,
+            favorite: false,
+            missing: false,
+            play_count: 0,
+            last_played: None,
+        }
+    }
+
+    #[test]
+    fn revision_unchanged_local_selection_is_visible() {
+        let mut state = AppState::default();
+        state.queue = Arc::new(vec![
+            QueueEntry { id: 1, track_id: 1 },
+            QueueEntry { id: 2, track_id: 2 },
+        ]);
+        let mut ui = UiState::default();
+        ui.sync_queue(&state, &state);
+        let revision = ui.local_revision;
+
+        assert!(matches!(
+            ui.key_action(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &state),
+            KeyAction::Ignored
+        ));
+        assert_eq!(ui.queue.selected(), Some(1));
+        assert_ne!(ui.local_revision, revision);
+    }
+
+    #[test]
+    fn enter_plays_selected_occurrence_after_queue_reorder() {
+        let previous = AppState {
+            queue: Arc::new(vec![
+                QueueEntry {
+                    id: 11,
+                    track_id: 1,
+                },
+                QueueEntry {
+                    id: 22,
+                    track_id: 1,
+                },
+                QueueEntry {
+                    id: 33,
+                    track_id: 2,
+                },
+            ]),
+            current_queue_id: Some(11),
+            ..AppState::default()
+        };
+        let mut ui = UiState::default();
+        ui.sync_queue(&previous, &previous);
+        ui.key_action(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &previous);
+        let mut next = previous.clone();
+        Arc::make_mut(&mut next.queue).rotate_right(1);
+        ui.sync_queue(&previous, &next);
+        assert!(matches!(
+            ui.key_action(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &next),
+            KeyAction::Command(Command::PlayQueue { queue_id: 22 })
+        ));
+        let empty = AppState::default();
+        ui.sync_queue(&next, &empty);
+        assert!(matches!(
+            ui.key_action(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &empty),
+            KeyAction::Ignored
+        ));
+    }
+
+    #[test]
+    fn queue_cache_follows_order_and_metadata_changes() {
+        let mut state = AppState::default();
+        state.library = Arc::new(vec![
+            track(1, "Artist A", "Title A"),
+            track(2, "Artist B", "Title B"),
+        ]);
+        state.queue = Arc::new(vec![
+            QueueEntry {
+                id: 10,
+                track_id: 1,
+            },
+            QueueEntry {
+                id: 20,
+                track_id: 2,
+            },
+        ]);
+        let mut cache = QueueViewCache::default();
+        cache.sync(&state);
+        assert_eq!(
+            cache.rows,
+            vec![
+                "Artist A — Title A".to_owned(),
+                "Artist B — Title B".to_owned()
+            ]
+        );
+
+        state.queue = Arc::new(vec![
+            QueueEntry {
+                id: 20,
+                track_id: 2,
+            },
+            QueueEntry {
+                id: 10,
+                track_id: 1,
+            },
+        ]);
+        cache.sync(&state);
+        assert_eq!(
+            cache.rows,
+            vec![
+                "Artist B — Title B".to_owned(),
+                "Artist A — Title A".to_owned()
+            ]
+        );
+
+        let mut changed = track(1, "Artist A", "Title A (remastered)");
+        changed.album = "new album".into();
+        state.library = Arc::new(vec![changed, track(2, "Artist B", "Title B")]);
+        cache.sync(&state);
+        assert_eq!(cache.rows[1], "Artist A — Title A (remastered)");
+    }
 }

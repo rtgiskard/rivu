@@ -243,7 +243,7 @@ fn run() -> Result<()> {
     let socket = data_dir.join("rivu.sock");
     let action = args.action.unwrap_or(Action::Gui { paths: Vec::new() });
     match action {
-        Action::Gui { paths } => start(data_dir, config_path, paths, true),
+        Action::Gui { paths } => open_gui(data_dir, config_path, paths),
         Action::Serve { paths } => start(data_dir, config_path, paths, false),
         Action::Tui => terminal::run(&socket),
         Action::Library(LibraryAction::Probe { path }) => {
@@ -491,6 +491,27 @@ fn run() -> Result<()> {
             }
             show(&response, args.json)
         }
+    }
+}
+
+fn open_gui(data_dir: PathBuf, config_path: PathBuf, paths: Vec<PathBuf>) -> Result<()> {
+    let socket = data_dir.join("rivu.sock");
+    match ipc::request(&socket, &Command::ShowWindow) {
+        Ok(response) => {
+            checked(response)?;
+            if !paths.is_empty() {
+                checked(ipc::request(
+                    &socket,
+                    &Command::Scan {
+                        paths: paths.into_iter().map(client_path).collect::<Result<_>>()?,
+                        force: false,
+                    },
+                )?)?;
+            }
+            Ok(())
+        }
+        Err(error) if ipc::is_no_instance(&error) => start(data_dir, config_path, paths, true),
+        Err(error) => Err(error),
     }
 }
 

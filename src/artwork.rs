@@ -51,11 +51,16 @@ impl ArtworkManager {
         {
             return cached.uri.clone();
         }
-        let uri = self.embedded_uri(&track.path).or_else(|| self.default_uri.clone());
-        entries.insert(track.id, CachedArtwork {
-            fingerprint: track.fingerprint.clone(),
-            uri: uri.clone(),
-        });
+        let uri = self
+            .embedded_uri(&track.path)
+            .or_else(|| self.default_uri.clone());
+        entries.insert(
+            track.id,
+            CachedArtwork {
+                fingerprint: track.fingerprint.clone(),
+                uri: uri.clone(),
+            },
+        );
         uri
     }
 
@@ -65,13 +70,17 @@ impl ArtworkManager {
         if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
             hint.with_extension(extension);
         }
-        let mut format = get_probe().probe(
-            &hint,
-            MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default()),
-            FormatOptions::default(),
-            MetadataOptions::default(),
-        ).ok()?;
-        let track_id = format.default_track(TrackType::Audio).map(|track| u64::from(track.id));
+        let mut format = get_probe()
+            .probe(
+                &hint,
+                MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default()),
+                FormatOptions::default(),
+                MetadataOptions::default(),
+            )
+            .ok()?;
+        let track_id = format
+            .default_track(TrackType::Audio)
+            .map(|track| u64::from(track.id));
         self.metadata_uri(format.metadata(), track_id)
     }
 
@@ -79,7 +88,9 @@ impl ArtworkManager {
         let mut fallback = None;
         while let Some(revision) = metadata.current() {
             let visuals = revision.media.visuals.iter().chain(
-                revision.per_track.iter()
+                revision
+                    .per_track
+                    .iter()
                     .filter(|track| Some(track.track_id) == track_id)
                     .flat_map(|track| &track.metadata.visuals),
             );
@@ -115,14 +126,19 @@ impl ArtworkManager {
             _ => return None,
         };
         let hash = blake3::hash(&visual.data);
-        let path = self.directory.join("cache").join(format!("{hash}.{extension}"));
+        let path = self
+            .directory
+            .join("cache")
+            .join(format!("{hash}.{extension}"));
         write_image(&path, &visual.data).ok()
     }
 }
 
 fn write_image(path: &Path, data: &[u8]) -> io::Result<String> {
     if !path.is_file() {
-        let parent = path.parent().ok_or_else(|| io::Error::other("Artwork has no directory"))?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| io::Error::other("Artwork has no directory"))?;
         fs::create_dir_all(parent)?;
         // Rename a complete file into place. The cache is disposable: no fsync.
         let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
@@ -201,13 +217,18 @@ mod tests {
 
     #[test]
     fn embedded_picture_is_content_addressed_and_key_uses_only_id_and_fingerprint() {
-        let directory = tempfile::Builder::new().prefix("rivu artwork #").tempdir().unwrap();
+        let directory = tempfile::Builder::new()
+            .prefix("rivu artwork #")
+            .tempdir()
+            .unwrap();
         let source = directory.path().join("track.wav");
         tagged_wav(&source);
         let manager = ArtworkManager::new(directory.path());
         let mut track = track(source);
         let uri = manager.uri_for(&track).unwrap();
-        let expected = directory.path().join("artwork/cache")
+        let expected = directory
+            .path()
+            .join("artwork/cache")
             .join(format!("{}.png", blake3::hash(DEFAULT_IMAGE)));
         assert_eq!(file_path(&uri), expected);
         assert_eq!(fs::read(&expected).unwrap(), DEFAULT_IMAGE);
@@ -244,6 +265,9 @@ mod tests {
         let blocked = directory.path().join("blocked");
         fs::write(&blocked, b"not a directory").unwrap();
         let unavailable = ArtworkManager::new(&blocked);
-        assert_eq!(unavailable.uri_for(&track(directory.path().join("missing"))), None);
+        assert_eq!(
+            unavailable.uri_for(&track(directory.path().join("missing"))),
+            None
+        );
     }
 }

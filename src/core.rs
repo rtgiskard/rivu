@@ -12,6 +12,7 @@ use parking_lot::RwLock;
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -31,8 +32,10 @@ struct Request {
 pub struct AppHandle {
     pub state: Arc<RwLock<AppState>>,
     pub analysis: Arc<RwLock<AnalysisFrame>>,
+    pub waveform: Arc<RwLock<audio::WaveformFrame>>,
     sender: Sender<Request>,
     wakeup: Arc<RwLock<Option<Wakeup>>>,
+    gui_opener: Arc<RwLock<Option<Wakeup>>>,
     subscribers: Arc<RwLock<Vec<Sender<()>>>>,
     raise_requested: Arc<AtomicBool>,
 }
@@ -51,6 +54,30 @@ impl AppHandle {
     }
     pub fn set_wakeup(&self, callback: impl Fn() + Send + Sync + 'static) {
         *self.wakeup.write() = Some(Arc::new(callback));
+        self.notify_subscribers();
+    }
+    pub fn clear_wakeup(&self) {
+        *self.wakeup.write() = None;
+        self.notify_subscribers();
+    }
+    pub fn set_gui_opener(&self, callback: impl Fn() + Send + Sync + 'static) {
+        *self.gui_opener.write() = Some(Arc::new(callback));
+        self.notify_subscribers();
+    }
+    pub fn clear_gui_opener(&self) {
+        *self.gui_opener.write() = None;
+        self.notify_subscribers();
+    }
+    pub fn can_raise(&self) -> bool {
+        self.gui_opener.read().is_some()
+    }
+    fn notify_subscribers(&self) {
+        self.subscribers.write().retain(|sender| {
+            !matches!(
+                sender.try_send(()),
+                Err(crossbeam_channel::TrySendError::Disconnected(_))
+            )
+        });
     }
     pub fn subscribe(&self) -> Receiver<()> {
         let (sender, receiver) = bounded(1);
@@ -58,10 +85,12 @@ impl AppHandle {
         receiver
     }
     pub fn raise(&self) -> Result<()> {
+        let opener = self.gui_opener.read();
+        let callback = opener
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Rivu has no graphical host"))?;
         self.raise_requested.store(true, Ordering::Release);
-        if let Some(callback) = self.wakeup.read().clone() {
-            callback();
-        }
+        callback();
         Ok(())
     }
     pub fn take_raise_request(&self) -> bool {
@@ -112,6 +141,7 @@ impl Runtime {
         let (sender, receiver) = bounded(64);
         let shared = Arc::new(RwLock::new(AppState::default()));
         let wakeup = Arc::new(RwLock::new(None));
+        let gui_opener = Arc::new(RwLock::new(None));
         let subscribers = Arc::new(RwLock::new(Vec::new()));
         let ffmpeg_status = if config.ffmpeg_enabled {
             audio::ffmpeg_status().unwrap_or_else(|error| format!("unavailable: {error:#}"))
@@ -121,8 +151,10 @@ impl Runtime {
         let handle = AppHandle {
             state: shared.clone(),
             analysis: engine.analysis.clone(),
+            waveform: Arc::clone(&engine.waveform),
             sender,
             wakeup: wakeup.clone(),
+            gui_opener: gui_opener.clone(),
             subscribers: subscribers.clone(),
             raise_requested: Arc::new(AtomicBool::new(false)),
         };
@@ -160,6 +192,7 @@ impl Runtime {
                 .filter(|id| initial.queue.iter().any(|entry| entry.id == *id));
         }
         *shared.write() = initial.clone();
+        let raise_requested = handle.raise_requested.clone();
         let worker = thread::Builder::new()
             .name("rivu-core".into())
             .spawn(move || {
@@ -171,7 +204,9 @@ impl Runtime {
                     state: initial,
                     shared,
                     wakeup,
+                    gui_opener,
                     subscribers,
+                    raise_requested,
                     generation: 0,
                     next_queue_id,
                     playback: None,
@@ -189,19 +224,13 @@ impl Runtime {
                 let _ = core.engine.commands.send(AudioCommand::FfmpegEnabled(
                     core.state.config.ffmpeg_enabled,
                 ));
-                let _ = core.engine.commands.send(AudioCommand::PipewireAutoMix(
-                    core.state.config.pipewire_auto_mix,
+                let _ = core.engine.commands.send(AudioCommand::OutputSettings {
+                    device: core.state.selected_device.clone(),
+                    auto_mix: core.state.config.pipewire_auto_mix,
+                });
+                let _ = core.engine.commands.send(AudioCommand::AnalysisSettings(
+                    core.state.config.as_ref().into(),
                 ));
-                let _ = core
-                    .engine
-                    .commands
-                    .send(AudioCommand::AnalysisRate(core.state.config.analysis_fps));
-                if core.state.selected_device.is_some() {
-                    let _ = core
-                        .engine
-                        .commands
-                        .send(AudioCommand::Device(core.state.selected_device.clone()));
-                }
                 core.run(receiver);
             })?;
         Ok(Self {
@@ -258,7 +287,9 @@ struct Core {
     state: AppState,
     shared: Arc<RwLock<AppState>>,
     wakeup: Arc<RwLock<Option<Wakeup>>>,
+    gui_opener: Arc<RwLock<Option<Wakeup>>>,
     subscribers: Arc<RwLock<Vec<Sender<()>>>>,
+    raise_requested: Arc<AtomicBool>,
     generation: u64,
     next_queue_id: u64,
     playback: Option<PlaybackStats>,
@@ -284,10 +315,10 @@ impl Core {
                 recv(requests) -> request => {
                     let Ok(request) = request else { break; };
                     let shutdown = matches!(request.command, Command::Shutdown);
-                    let changed = !matches!(request.command, Command::Status | Command::Overview);
+                    let changed = !matches!(request.command, Command::Status | Command::Overview | Command::ShowWindow);
                     let result = self.command(request.command);
                     if let Err(error) = &result { self.state.last_error = Some(format!("{error:#}")); }
-                    if changed { self.publish(); }
+                    if changed || result.is_err() { self.publish(); }
                     if let Some(reply) = request.reply {
                         let _ = reply.send(Response { ok: result.is_ok(), error: result.err().map(|e| format!("{e:#}")), state: self.state.clone() });
                     }
@@ -317,6 +348,11 @@ impl Core {
         }
         self.state.status = PlaybackStatus::Stopped;
         self.publish();
+        if self.state.shutting_down {
+            if let Some(callback) = self.gui_opener.read().clone() {
+                callback();
+            }
+        }
     }
 
     fn publish(&mut self) {
@@ -332,6 +368,15 @@ impl Core {
         if let Some(callback) = callback {
             callback();
         }
+    }
+    fn request_raise(&self) -> Result<()> {
+        let opener = self.gui_opener.read();
+        let callback = opener
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Rivu has no graphical host"))?;
+        self.raise_requested.store(true, Ordering::Release);
+        callback();
+        Ok(())
     }
     fn save(&mut self) -> Result<()> {
         if self.state.config.volume != self.state.volume
@@ -389,6 +434,38 @@ impl Core {
         }
         self.shuffle_bag.clear();
         Ok(())
+    }
+    fn randomize_queue(&mut self, rng: &mut impl rand::Rng) {
+        if self.state.queue.len() > 1 {
+            Arc::make_mut(&mut self.state.queue).shuffle(rng);
+        }
+    }
+    fn deduplicate_queue(&mut self) {
+        if self.state.queue.len() < 2 {
+            return;
+        }
+        let current = self.state.current_queue_id.and_then(|id| {
+            self.state
+                .queue
+                .iter()
+                .find(|entry| entry.id == id)
+                .map(|entry| (entry.id, entry.track_id))
+        });
+        let mut seen = std::collections::HashSet::with_capacity(self.state.queue.len());
+        Arc::make_mut(&mut self.state.queue).retain_mut(|entry| {
+            if !seen.insert(entry.track_id) {
+                return false;
+            }
+            // Keep the current entry's identity at this track's first position,
+            // even when playback had selected a later duplicate.
+            if let Some((id, track_id)) = current
+                && entry.track_id == track_id
+            {
+                entry.id = id;
+            }
+            true
+        });
+        self.prune_queue_history();
     }
     fn prune_queue_history(&mut self) {
         let queue = &self.state.queue;
@@ -795,6 +872,69 @@ impl Core {
         }
         Ok(())
     }
+    fn remove_queue_entries(&mut self, queue_ids: &[u64]) -> Result<()> {
+        if queue_ids.is_empty() {
+            return Ok(());
+        }
+        let ids = queue_ids.iter().copied().collect::<HashSet<_>>();
+        let found = self
+            .state
+            .queue
+            .iter()
+            .filter(|entry| ids.contains(&entry.id))
+            .count();
+        if found != ids.len() {
+            let missing = ids
+                .iter()
+                .find(|id| !self.state.queue.iter().any(|entry| entry.id == **id))
+                .copied()
+                .expect("bulk queue validation mismatch");
+            bail!("Queue entry not found: {missing}");
+        }
+
+        if self
+            .state
+            .current_queue_id
+            .is_some_and(|id| ids.contains(&id))
+        {
+            self.stop()?;
+            self.state.current_queue_id = None;
+        }
+        Arc::make_mut(&mut self.state.queue).retain(|entry| !ids.contains(&entry.id));
+        self.prune_queue_history();
+        Ok(())
+    }
+
+    fn move_queue_entries(&mut self, queue_ids: &[u64], index: usize) -> Result<()> {
+        if queue_ids.is_empty() {
+            return Ok(());
+        }
+        let ids = queue_ids.iter().copied().collect::<HashSet<_>>();
+        // Validate before make_mut so an invalid request cannot even detach
+        // the shared queue snapshot, let alone mutate playback state.
+        let found = self
+            .state
+            .queue
+            .iter()
+            .filter(|entry| ids.contains(&entry.id))
+            .count();
+        if found != ids.len() {
+            let missing = ids
+                .iter()
+                .find(|id| !self.state.queue.iter().any(|entry| entry.id == **id))
+                .copied()
+                .expect("bulk queue validation mismatch");
+            bail!("Queue entry not found: {missing}");
+        }
+
+        let queue = Arc::make_mut(&mut self.state.queue);
+        let mut selected = Vec::with_capacity(ids.len());
+        selected.extend(queue.extract_if(.., |entry| ids.contains(&entry.id)));
+        let insertion = index.min(queue.len());
+        queue.splice(insertion..insertion, selected);
+        Ok(())
+    }
+
     fn command(&mut self, command: Command) -> Result<()> {
         match command {
             Command::Status | Command::Overview => return Ok(()),
@@ -887,6 +1027,7 @@ impl Core {
                 Arc::make_mut(&mut self.state.queue).retain(|q| q.id != queue_id);
                 self.prune_queue_history();
             }
+            Command::RemoveQueueEntries { queue_ids } => self.remove_queue_entries(&queue_ids)?,
             Command::MoveQueue { queue_id, index } => {
                 let queue = Arc::make_mut(&mut self.state.queue);
                 let old = queue
@@ -899,6 +1040,9 @@ impl Core {
                 let entry = queue.remove(old);
                 queue.insert(index, entry);
             }
+            Command::MoveQueueEntries { queue_ids, index } => {
+                self.move_queue_entries(&queue_ids, index)?;
+            }
             Command::ClearQueue => {
                 self.stop()?;
                 self.state.queue = Arc::new(Vec::new());
@@ -907,6 +1051,8 @@ impl Core {
                 self.played_cursor = 0;
                 self.shuffle_bag.clear();
             }
+            Command::RandomizeQueue => self.randomize_queue(&mut rand::rng()),
+            Command::DeduplicateQueue => self.deduplicate_queue(),
             Command::Shuffle { enabled } => {
                 self.state.shuffle = enabled;
                 self.shuffle_bag.clear();
@@ -1020,7 +1166,10 @@ impl Core {
                 {
                     bail!("Output device not found: {name}");
                 }
-                self.audio(AudioCommand::Device(name.clone()))?;
+                self.audio(AudioCommand::OutputSettings {
+                    device: name.clone(),
+                    auto_mix: self.state.config.pipewire_auto_mix,
+                })?;
                 self.state.selected_device = name;
             }
             Command::Analysis { enabled } => {
@@ -1048,14 +1197,15 @@ impl Core {
                     self.state.ffmpeg_status.clone()
                 };
                 config.save(&self.state.config_path)?;
-                if self.state.selected_device != config.output_device {
-                    self.audio(AudioCommand::Device(config.output_device.clone()))?;
-                }
                 self.audio(AudioCommand::MediaReadBuffer(config.media_read_buffer_mb))?;
                 self.audio(AudioCommand::Volume(config.volume))?;
-                self.audio(AudioCommand::AnalysisRate(config.analysis_fps))?;
+                self.audio(AudioCommand::AnalysisSettings((&config).into()))?;
                 self.audio(AudioCommand::FfmpegEnabled(config.ffmpeg_enabled))?;
-                self.audio(AudioCommand::PipewireAutoMix(config.pipewire_auto_mix))?;
+                self.audio(AudioCommand::OutputSettings {
+                    device: config.output_device.clone(),
+                    auto_mix: config.pipewire_auto_mix,
+                })?;
+                self.state.selected_device = config.output_device.clone();
                 self.state.volume = config.volume;
                 if self.state.shuffle != config.shuffle {
                     self.shuffle_bag.clear();
@@ -1067,6 +1217,7 @@ impl Core {
                 self.state.ffmpeg_status = ffmpeg_status;
                 self.state.config = Arc::new(config);
             }
+            Command::ShowWindow => return self.request_raise(),
             Command::MprisStatus { status } => {
                 self.state.mpris_status = status;
                 return Ok(());
@@ -1152,7 +1303,9 @@ mod tests {
             shared: Arc::new(RwLock::new(state.clone())),
             state,
             wakeup: Arc::new(RwLock::new(None)),
+            gui_opener: Arc::new(RwLock::new(None)),
             subscribers: Arc::new(RwLock::new(Vec::new())),
+            raise_requested: Arc::new(AtomicBool::new(false)),
             generation: 1,
             next_queue_id: 1,
             playback: None,
@@ -1877,6 +2030,179 @@ mod tests {
         assert_ne!(core.generation, generation);
     }
 
+    fn queue_entries(queue: &[QueueEntry]) -> Vec<(u64, i64)> {
+        queue
+            .iter()
+            .map(|entry| (entry.id, entry.track_id))
+            .collect()
+    }
+
+    fn assert_queue_saved(core: &Core) {
+        let saved: Saved =
+            serde_json::from_str(&core.store.get_setting("playback").unwrap().unwrap()).unwrap();
+        assert_eq!(
+            queue_entries(&saved.queue),
+            queue_entries(&core.state.queue)
+        );
+        assert_eq!(saved.current, core.state.current_queue_id);
+    }
+
+    #[test]
+    fn deduplicate_queue_keeps_current_duplicate_at_first_occurrence_and_prunes_history() {
+        let (_directory, mut core) = fixture();
+        // Separate the duplicates to exercise first-occurrence ordering.
+        core.command(Command::MoveQueue {
+            queue_id: 3,
+            index: 4,
+        })
+        .unwrap();
+        playing(&mut core, 3);
+        progress(&mut core, 1.5, 1.5);
+        core.state.shuffle = true;
+        core.played = vec![1, 2, 4, 3, 2, 5];
+        core.played_cursor = 4;
+        core.shuffle_bag = vec![5, 2, 4];
+        let generation = core.generation;
+        let seek_revision = core.state.seek_revision;
+        let next_queue_id = core.next_queue_id;
+        let history = core.store.history(200).unwrap();
+        let old_queue = Arc::clone(&core.state.queue);
+
+        core.command(Command::DeduplicateQueue).unwrap();
+
+        assert_eq!(
+            queue_entries(&core.state.queue),
+            [(1, 1), (3, 2), (4, 3), (5, 4)]
+        );
+        assert_eq!(
+            queue_entries(&old_queue),
+            [(1, 1), (2, 2), (4, 3), (5, 4), (3, 2)]
+        );
+        assert_eq!(core.played, [1, 4, 3, 5]);
+        assert_eq!(core.played_cursor, 3);
+        assert_eq!(core.shuffle_bag, [5, 4]);
+        assert!(core.state.shuffle);
+        assert_eq!(core.state.current_queue_id, Some(3));
+        assert_eq!(core.state.status, PlaybackStatus::Playing);
+        assert_eq!(core.state.position, 1.5);
+        assert_eq!(core.state.duration, Some(10.0));
+        assert_eq!(core.state.seek_revision, seek_revision);
+        assert_eq!(core.generation, generation);
+        assert_eq!(core.next_queue_id, next_queue_id);
+        let playback = core.playback.as_ref().unwrap();
+        assert_eq!(playback.track_id, 2);
+        assert_eq!(playback.heard, 1.5);
+        assert_eq!(playback.position, Some(1.5));
+        assert!(playback.started);
+        assert!(!playback.counted);
+        assert_eq!(
+            core.store.history(200).unwrap()[0].played_at,
+            history[0].played_at
+        );
+        assert_queue_saved(&core);
+        // Navigation still uses the retained history, including the forward gap.
+        missing(&mut core, Command::Previous, 3);
+        missing(&mut core, Command::Next, 4);
+        assert_eq!(core.played_cursor, 3);
+    }
+
+    #[test]
+    fn deduplicate_queue_preserves_first_entries_when_current_is_not_a_later_duplicate() {
+        for current in [None, Some(2), Some(4)] {
+            let (_directory, mut core) = fixture();
+            core.state.current_queue_id = current;
+            core.played = vec![1, 2, 3, 4, 5];
+            core.played_cursor = 2;
+            core.shuffle_bag = vec![5, 4, 3, 2];
+            core.command(Command::DeduplicateQueue).unwrap();
+            assert_eq!(
+                queue_entries(&core.state.queue),
+                [(1, 1), (2, 2), (4, 3), (5, 4)]
+            );
+            assert_eq!(core.state.current_queue_id, current);
+            assert_eq!(core.played, [1, 2, 4, 5]);
+            assert_eq!(core.played_cursor, 2);
+            assert_eq!(core.shuffle_bag, [5, 4, 2]);
+            assert_queue_saved(&core);
+            core.command(Command::DeduplicateQueue).unwrap();
+            assert_eq!(
+                queue_entries(&core.state.queue),
+                [(1, 1), (2, 2), (4, 3), (5, 4)]
+            );
+            assert_eq!(core.played_cursor, 2);
+        }
+    }
+
+    #[test]
+    fn randomize_queue_reorders_entries_without_changing_playback_or_shuffle_history() {
+        use rand::SeedableRng;
+
+        let (_directory, mut core) = fixture();
+        core.enqueue(&[1, 2, 3, 4].repeat(8)).unwrap();
+        playing(&mut core, 3);
+        progress(&mut core, 1.5, 1.5);
+        core.played = vec![1, 2, 3, 4];
+        core.played_cursor = 3;
+        core.shuffle_bag = vec![5, 4];
+        let generation = core.generation;
+        let seek_revision = core.state.seek_revision;
+        let next_queue_id = core.next_queue_id;
+        let original = Arc::clone(&core.state.queue);
+        let mut expected = queue_entries(&original);
+
+        core.randomize_queue(&mut rand::rngs::StdRng::seed_from_u64(42));
+        assert_ne!(queue_entries(&core.state.queue), expected);
+        let mut reordered = queue_entries(&core.state.queue);
+        reordered.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(reordered, expected);
+
+        for shuffle in [false, true] {
+            core.state.shuffle = shuffle;
+            core.command(Command::RandomizeQueue).unwrap();
+            let mut reordered = queue_entries(&core.state.queue);
+            reordered.sort_unstable();
+            assert_eq!(reordered, expected);
+            assert_eq!(core.state.shuffle, shuffle);
+            assert_eq!(core.played, [1, 2, 3, 4]);
+            assert_eq!(core.played_cursor, 3);
+            assert_eq!(core.shuffle_bag, [5, 4]);
+            assert_eq!(core.state.current_queue_id, Some(3));
+            assert_eq!(core.state.status, PlaybackStatus::Playing);
+            assert_eq!(core.state.position, 1.5);
+            assert_eq!(core.state.seek_revision, seek_revision);
+            assert_eq!(core.generation, generation);
+            assert_eq!(core.next_queue_id, next_queue_id);
+            assert_eq!(core.playback.as_ref().unwrap().track_id, 2);
+            assert_eq!(core.playback.as_ref().unwrap().heard, 1.5);
+            assert_queue_saved(&core);
+        }
+        assert_eq!(original.len(), 37);
+        assert_eq!(original[0].id, 1);
+    }
+
+    #[test]
+    fn queue_menu_commands_round_trip_and_allow_empty_or_single_entry_queues() {
+        for (name, command) in [
+            ("randomize_queue", Command::RandomizeQueue),
+            ("deduplicate_queue", Command::DeduplicateQueue),
+        ] {
+            let json = serde_json::json!({ "command": name });
+            assert_eq!(serde_json::to_value(&command).unwrap(), json);
+            let (_directory, mut core) = fixture();
+            for queue in [vec![], vec![QueueEntry { id: 7, track_id: 2 }]] {
+                core.state.queue = Arc::new(queue);
+                let expected = queue_entries(&core.state.queue);
+                core.command(serde_json::from_value(json.clone()).unwrap())
+                    .unwrap();
+                assert_eq!(queue_entries(&core.state.queue), expected);
+                assert_eq!(core.generation, 1);
+                assert_eq!(core.state.status, PlaybackStatus::Stopped);
+                assert_queue_saved(&core);
+            }
+        }
+    }
+
     #[test]
     fn removing_tracks_prunes_unplayed_shuffle_entries_and_duplicates() {
         let (_directory, mut core) = fixture();
@@ -1947,6 +2273,154 @@ mod tests {
     }
 
     #[test]
+    fn moving_bulk_queue_entries_preserves_order_playback_history_and_persistence() {
+        let (_directory, mut core) = fixture();
+        playing(&mut core, 3);
+        progress(&mut core, 1.5, 1.5);
+        core.played = vec![1, 3, 5];
+        core.played_cursor = 2;
+        core.shuffle_bag = vec![5, 4];
+        let generation = core.generation;
+        let history = core.store.history(200).unwrap();
+
+        core.command(Command::MoveQueueEntries {
+            queue_ids: vec![5, 1, 3, 1],
+            index: 1,
+        })
+        .unwrap();
+
+        assert_eq!(
+            queue_entries(&core.state.queue),
+            [(2, 2), (1, 1), (3, 2), (5, 4), (4, 3)]
+        );
+        assert_eq!(core.state.current_queue_id, Some(3));
+        assert_eq!(core.state.status, PlaybackStatus::Playing);
+        assert_eq!(core.generation, generation);
+        assert_eq!(core.played, [1, 3, 5]);
+        assert_eq!(core.played_cursor, 2);
+        assert_eq!(core.shuffle_bag, [5, 4]);
+        assert_eq!(core.state.position, 1.5);
+        assert_eq!(core.playback.as_ref().unwrap().track_id, 2);
+        let current_history = core.store.history(200).unwrap();
+        assert_eq!(current_history.len(), history.len());
+        assert_eq!(current_history[0].track_id, history[0].track_id);
+        assert_eq!(current_history[0].played_at, history[0].played_at);
+        assert_queue_saved(&core);
+
+        core.command(Command::MoveQueueEntries {
+            queue_ids: vec![1, 3, 5],
+            index: usize::MAX,
+        })
+        .unwrap();
+        assert_eq!(
+            queue_entries(&core.state.queue),
+            [(2, 2), (4, 3), (1, 1), (3, 2), (5, 4)]
+        );
+        assert_queue_saved(&core);
+    }
+
+    #[test]
+    fn bulk_queue_invalid_ids_are_atomic_and_do_not_stop_current_playback() {
+        let (_directory, mut core) = fixture();
+        playing(&mut core, 3);
+        let queue = Arc::clone(&core.state.queue);
+        let generation = core.generation;
+        let status = core.state.status;
+        let current = core.state.current_queue_id;
+        let error = core
+            .command(Command::MoveQueueEntries {
+                queue_ids: vec![3, 99, 3],
+                index: 0,
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("99"));
+        assert!(Arc::ptr_eq(&core.state.queue, &queue));
+        assert_eq!(core.state.current_queue_id, current);
+        assert_eq!(core.state.status, status);
+        assert_eq!(core.generation, generation);
+
+        let error = core
+            .command(Command::RemoveQueueEntries {
+                queue_ids: vec![3, 99],
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("99"));
+        assert!(Arc::ptr_eq(&core.state.queue, &queue));
+        assert_eq!(core.state.current_queue_id, current);
+        assert_eq!(core.state.status, status);
+        assert_eq!(core.generation, generation);
+    }
+
+    #[test]
+    fn bulk_remove_stops_only_when_current_entry_is_removed_and_handles_duplicates() {
+        let (_directory, mut core) = fixture();
+        playing(&mut core, 3);
+        core.played = vec![1, 3, 5];
+        core.played_cursor = 2;
+        let generation = core.generation;
+        core.command(Command::RemoveQueueEntries {
+            queue_ids: vec![1, 1],
+        })
+        .unwrap();
+        assert_eq!(
+            queue_entries(&core.state.queue),
+            [(2, 2), (3, 2), (4, 3), (5, 4)]
+        );
+        assert_eq!(core.state.current_queue_id, Some(3));
+        assert_eq!(core.state.status, PlaybackStatus::Playing);
+        assert_eq!(core.generation, generation);
+        assert_eq!(core.played, [3, 5]);
+        assert_eq!(core.played_cursor, 1);
+        assert_queue_saved(&core);
+
+        core.command(Command::RemoveQueueEntries {
+            queue_ids: vec![3, 3],
+        })
+        .unwrap();
+        assert!(!core.state.queue.iter().any(|entry| entry.id == 3));
+        assert_eq!(core.state.current_queue_id, None);
+        assert_eq!(core.state.status, PlaybackStatus::Stopped);
+        assert_ne!(core.generation, generation);
+        assert!(core.playback.is_none());
+        assert_eq!(core.played, [5]);
+        assert_eq!(core.played_cursor, 0);
+        assert_queue_saved(&core);
+    }
+
+    #[test]
+    fn empty_bulk_queue_ids_are_no_ops_and_commands_round_trip() {
+        for (command, expected) in [
+            (
+                Command::RemoveQueueEntries { queue_ids: vec![] },
+                serde_json::json!({
+                    "command": "remove_queue_entries",
+                    "queue_ids": []
+                }),
+            ),
+            (
+                Command::MoveQueueEntries {
+                    queue_ids: vec![],
+                    index: 9,
+                },
+                serde_json::json!({
+                    "command": "move_queue_entries",
+                    "queue_ids": [],
+                    "index": 9
+                }),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(&command).unwrap(), expected);
+            let (_directory, mut core) = fixture();
+            let queue = Arc::clone(&core.state.queue);
+            let generation = core.generation;
+            core.command(command).unwrap();
+            assert!(Arc::ptr_eq(&core.state.queue, &queue));
+            assert_eq!(core.generation, generation);
+            assert_queue_saved(&core);
+        }
+    }
+
+    #[test]
     fn repeat_one_only_repeats_natural_end_and_repeat_all_revisits_singleton() {
         let (_directory, mut core) = fixture();
         playing(&mut core, 1);
@@ -2001,5 +2475,83 @@ mod tests {
         assert_eq!(core.state.status, PlaybackStatus::Stopped);
         assert_eq!(core.state.current_queue_id, None);
         missing(&mut core, Command::Resume, 2);
+    }
+    #[test]
+    fn show_window_rejects_without_host_and_preserves_playback_state() {
+        let (_directory, mut core) = fixture();
+        core.state.status = PlaybackStatus::Playing;
+        core.state.position = 12.5;
+        let queue = core
+            .state
+            .queue
+            .iter()
+            .map(|entry| (entry.id, entry.track_id))
+            .collect::<Vec<_>>();
+        let error = core.command(Command::ShowWindow).unwrap_err();
+        assert!(error.to_string().contains("graphical host"));
+        assert_eq!(core.state.status, PlaybackStatus::Playing);
+        assert_eq!(core.state.position, 12.5);
+        assert_eq!(
+            core.state
+                .queue
+                .iter()
+                .map(|entry| (entry.id, entry.track_id))
+                .collect::<Vec<_>>(),
+            queue
+        );
+    }
+
+    #[test]
+    fn show_window_notifies_registered_host_without_changing_playback() {
+        let (_directory, mut core) = fixture();
+        core.state.status = PlaybackStatus::Paused;
+        core.state.position = 7.25;
+        let queue = core
+            .state
+            .queue
+            .iter()
+            .map(|entry| (entry.id, entry.track_id))
+            .collect::<Vec<_>>();
+        let called = Arc::new(AtomicBool::new(false));
+        let signal = called.clone();
+        *core.gui_opener.write() = Some(Arc::new(move || {
+            signal.store(true, Ordering::Release);
+        }));
+        core.command(Command::ShowWindow).unwrap();
+        assert!(called.load(Ordering::Acquire));
+        assert!(core.raise_requested.swap(false, Ordering::AcqRel));
+        assert_eq!(core.state.status, PlaybackStatus::Paused);
+        assert_eq!(core.state.position, 7.25);
+        assert_eq!(
+            core.state
+                .queue
+                .iter()
+                .map(|entry| (entry.id, entry.track_id))
+                .collect::<Vec<_>>(),
+            queue
+        );
+    }
+
+    #[test]
+    fn shutdown_wakes_registered_host_after_publishing_stopped_state() {
+        let (_directory, mut core) = fixture();
+        let shared = core.shared.clone();
+        let observed = Arc::new(AtomicBool::new(false));
+        let signal = observed.clone();
+        *core.gui_opener.write() = Some(Arc::new(move || {
+            let state = shared.read();
+            if state.shutting_down && state.status == PlaybackStatus::Stopped {
+                signal.store(true, Ordering::Release);
+            }
+        }));
+        let (sender, receiver) = bounded(1);
+        sender
+            .send(Request {
+                command: Command::Shutdown,
+                reply: None,
+            })
+            .unwrap();
+        core.run(receiver);
+        assert!(observed.load(Ordering::Acquire));
     }
 }
