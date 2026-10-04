@@ -73,7 +73,7 @@ const PANELS: &[PanelSpec] = &[
     },
     PanelSpec {
         kind: "history",
-        title: "Listening history",
+        title: "Recent tracks",
         render: GuiApp::history_panel,
     },
     PanelSpec {
@@ -280,6 +280,9 @@ struct GuiApp {
     metadata_track: Option<i64>,
     error: Option<String>,
     filtered_rows: Vec<usize>,
+    favorites_only: bool,
+    missing_only: bool,
+    force_scan: bool,
     library_index: HashMap<i64, usize>,
     most_played: Vec<usize>,
     settings: settings::Settings,
@@ -388,6 +391,9 @@ impl GuiApp {
             metadata_track: None,
             error,
             filtered_rows: Vec::new(),
+            favorites_only: false,
+            missing_only: false,
+            force_scan: false,
             library_index: HashMap::new(),
             most_played: Vec::new(),
             visuals: visuals::Visuals::new(),
@@ -463,13 +469,38 @@ impl GuiApp {
                     .iter()
                     .enumerate()
                     .filter_map(|(index, track)| {
-                        (query.is_empty()
-                            || track.title.to_lowercase().contains(&query)
-                            || track.artist.to_lowercase().contains(&query)
-                            || track.album.to_lowercase().contains(&query))
+                        ((!self.favorites_only || track.favorite)
+                            && (!self.missing_only || track.missing)
+                            && (query.is_empty()
+                                || track.title.to_lowercase().contains(&query)
+                                || track.artist.to_lowercase().contains(&query)
+                                || track.album.to_lowercase().contains(&query)))
                         .then_some(index)
                     }),
             );
+        // Sort only view indices; the core's ID-sorted library remains unchanged.
+        self.filtered_rows.sort_unstable_by(|&left, &right| {
+            let left = &self.state.library[left];
+            let right = &self.state.library[right];
+            left.album
+                .cmp(&right.album)
+                .then_with(|| {
+                    if left.album.is_empty() {
+                        std::cmp::Ordering::Equal
+                    } else {
+                        (
+                            left.disc_number.unwrap_or(u32::MAX),
+                            left.track_number.unwrap_or(u32::MAX),
+                        )
+                            .cmp(&(
+                                right.disc_number.unwrap_or(u32::MAX),
+                                right.track_number.unwrap_or(u32::MAX),
+                            ))
+                    }
+                })
+                .then_with(|| left.title.cmp(&right.title))
+                .then_with(|| left.id.cmp(&right.id))
+        });
     }
     fn select_track(&mut self, id: i64, multi: bool, cx: &mut Context<Self>) {
         if multi {

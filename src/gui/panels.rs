@@ -7,7 +7,10 @@ use gpui::{
     AnyElement, Context, Div, ElementId, Render, SharedString, Stateful, Window, div, prelude::*,
     px, rgb, uniform_list,
 };
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 pub(super) const TRACK_HEIGHT: f32 = 42.0;
 
@@ -73,6 +76,27 @@ fn row_text(title: String, detail: String) -> Stateful<Div> {
             })
             .into()
         })
+}
+
+fn last_played_text(played_at: i64) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .min(i64::MAX as u64) as i64;
+    let Some(age) = now.checked_sub(played_at).filter(|age| *age >= 0) else {
+        return format!("Last played · Unix {played_at}");
+    };
+    let elapsed = if age < 60 {
+        format!("{age}s")
+    } else if age < 3600 {
+        format!("{}m", age / 60)
+    } else if age < 86400 {
+        format!("{}h", age / 3600)
+    } else {
+        format!("{}d", age / 86400)
+    };
+    format!("Last played {elapsed} ago · Unix {played_at}")
 }
 
 impl GuiApp {
@@ -206,7 +230,7 @@ impl GuiApp {
         {
             Some(track) => {
                 let detail = format!(
-                    "{}{}{}  ·  {}{}",
+                    "{}{}{}  ·  {}{}{}",
                     track.artist,
                     if track.artist.is_empty() || track.album.is_empty() {
                         ""
@@ -215,6 +239,10 @@ impl GuiApp {
                     },
                     track.album,
                     format_time(track.duration.unwrap_or(0.0)),
+                    track.bitrate_bps.map_or(String::new(), |bitrate| format!(
+                        "  ·  {:.1} kbps",
+                        bitrate as f64 / 1000.0
+                    )),
                     if track.missing {
                         "  ·  File missing"
                     } else {
@@ -254,9 +282,57 @@ impl GuiApp {
                         .map(PathBuf::from)
                         .collect()
                 };
-                this.send(Command::Scan { paths, force: false }, cx);
+                this.send(
+                    Command::Scan {
+                        paths,
+                        force: this.force_scan,
+                    },
+                    cx,
+                );
             },
         ));
+        tools = tools
+            .child(button(
+                ("library-force-scan", panel_id),
+                if self.force_scan {
+                    "Force metadata rescan: on"
+                } else {
+                    "Force metadata rescan: off"
+                },
+                cx,
+                |this, _, cx| {
+                    this.force_scan = !this.force_scan;
+                    cx.notify();
+                },
+            ))
+            .child(button(
+                ("library-filter-favorites", panel_id),
+                if self.favorites_only {
+                    "Favorites only: on"
+                } else {
+                    "Favorites only: off"
+                },
+                cx,
+                |this, _, cx| {
+                    this.favorites_only = !this.favorites_only;
+                    this.refresh_filter(cx);
+                    cx.notify();
+                },
+            ))
+            .child(button(
+                ("library-filter-missing", panel_id),
+                if self.missing_only {
+                    "Missing only: on"
+                } else {
+                    "Missing only: off"
+                },
+                cx,
+                |this, _, cx| {
+                    this.missing_only = !this.missing_only;
+                    this.refresh_filter(cx);
+                    cx.notify();
+                },
+            ));
         if !self.selected.is_empty() {
             tools = tools
                 .child(button(
@@ -275,6 +351,35 @@ impl GuiApp {
                     |this, _, cx| {
                         let track_ids = this.panel_selected_tracks();
                         this.send(Command::RemoveTracks { track_ids }, cx);
+                    },
+                ));
+            tools = tools
+                .child(button(
+                    ("library-favorite-selected", panel_id),
+                    "Favorite selected",
+                    cx,
+                    |this, _, cx| {
+                        this.send(
+                            Command::SetFavorite {
+                                track_ids: this.panel_selected_tracks(),
+                                favorite: true,
+                            },
+                            cx,
+                        );
+                    },
+                ))
+                .child(button(
+                    ("library-unfavorite-selected", panel_id),
+                    "Unfavorite selected",
+                    cx,
+                    |this, _, cx| {
+                        this.send(
+                            Command::SetFavorite {
+                                track_ids: this.panel_selected_tracks(),
+                                favorite: false,
+                            },
+                            cx,
+                        );
                     },
                 ));
         }
@@ -311,6 +416,7 @@ impl GuiApp {
                                 let track =
                                     this.state.library.get(*this.filtered_rows.get(index)?)?;
                                 let id = track.id;
+                                let favorite = track.favorite;
                                 let (title, detail) = this.panel_track_text(id);
                                 Some(
                                     list_row(
@@ -318,6 +424,26 @@ impl GuiApp {
                                         this.selected.contains(&id),
                                     )
                                     .child(row_text(title, detail))
+                                    .child(icon_button(
+                                        ("library-favorite", id as u64),
+                                        if favorite { "★" } else { "☆" },
+                                        if favorite {
+                                            "Remove favorite"
+                                        } else {
+                                            "Add favorite"
+                                        },
+                                        cx,
+                                        move |this, _, cx| {
+                                            cx.stop_propagation();
+                                            this.send(
+                                                Command::SetFavorite {
+                                                    track_ids: vec![id],
+                                                    favorite: !favorite,
+                                                },
+                                                cx,
+                                            );
+                                        },
+                                    ))
                                     .on_click(cx.listener(
                                         move |this, event: &gpui::ClickEvent, _, cx| {
                                             let modifiers = event.modifiers();
@@ -898,11 +1024,92 @@ impl GuiApp {
             .and_then(|index| self.state.library.get(*index))
         {
             let id = track.id;
+            let favorite = track.favorite;
             panel = panel
                 .child(caption(format!(
-                    "Track #{id} · {} · {} Hz · {} channels",
-                    track.codec, track.sample_rate, track.channels
+                    "Track #{id} · {}",
+                    if track.missing {
+                        "File missing"
+                    } else {
+                        "File available"
+                    }
                 )))
+                .child(caption(format!(
+                    "Codec: {} · Sample rate: {} · Channels: {}",
+                    if track.codec.is_empty() {
+                        "—"
+                    } else {
+                        &track.codec
+                    },
+                    if track.sample_rate == 0 {
+                        "—".into()
+                    } else {
+                        format!("{} Hz", track.sample_rate)
+                    },
+                    if track.channels == 0 {
+                        "—".into()
+                    } else {
+                        track.channels.to_string()
+                    }
+                )))
+                .child(caption(format!(
+                    "Duration: {}",
+                    track.duration.map_or("—".into(), format_time)
+                )))
+                .child(caption(format!(
+                    "Bitrate: {} · Source bits/sample: {}",
+                    track.bitrate_bps.map_or("—".into(), |value| format!(
+                        "{:.1} kbps",
+                        value as f64 / 1000.0
+                    )),
+                    track
+                        .bits_per_sample
+                        .map_or("—".into(), |value| value.to_string())
+                )))
+                .child(caption(format!(
+                    "Disc: {} · Track: {} · Release date: {}",
+                    track
+                        .disc_number
+                        .map_or("—".into(), |value| value.to_string()),
+                    track
+                        .track_number
+                        .map_or("—".into(), |value| value.to_string()),
+                    track.release_date.as_deref().unwrap_or("—")
+                )))
+                .child(caption(format!(
+                    "{} plays · {}",
+                    track.play_count,
+                    track
+                        .last_played
+                        .map_or("Last played —".into(), last_played_text)
+                )))
+                .when_some(track.cue.as_ref(), |panel, cue| {
+                    panel.child(caption(format!(
+                        "CUE: {} · Track {} · {}–{}",
+                        cue.sheet.display(),
+                        cue.number,
+                        format_time(cue.start_seconds()),
+                        cue.end_seconds().map_or("—".into(), format_time)
+                    )))
+                })
+                .child(button(
+                    ("metadata-favorite", panel_id),
+                    if favorite {
+                        "Favorite: on (clear)"
+                    } else {
+                        "Favorite: off (set)"
+                    },
+                    cx,
+                    move |this, _, cx| {
+                        this.send(
+                            Command::SetFavorite {
+                                track_ids: vec![id],
+                                favorite: !favorite,
+                            },
+                            cx,
+                        );
+                    },
+                ))
                 .child(caption(track.path.to_string_lossy().into_owned()).truncate())
                 .child(self.panel_field(Field::Title, "Title"))
                 .child(self.panel_field(Field::Artist, "Artist"))
@@ -959,7 +1166,7 @@ impl GuiApp {
                 self.state.history.len()
             )))
             .when(self.state.history.is_empty(), |panel| {
-                panel.child(caption("Recently played tracks will appear here."))
+                panel.child(caption("Started tracks will appear here once per track."))
             })
             .child(
                 uniform_list(
@@ -971,10 +1178,10 @@ impl GuiApp {
                                 let item = this.state.history.get(index)?;
                                 let track_id = item.track_id;
                                 let mut item_row =
-                                    list_row(("history-entry", item.track_id as u64), false).child(
+                                    list_row(("history-entry", track_id as u64), false).child(
                                         row_text(
                                             item.title.clone(),
-                                            format!("Last played: {}", item.played_at),
+                                            last_played_text(item.played_at),
                                         ),
                                     );
                                 if this.library_index.contains_key(&track_id) {

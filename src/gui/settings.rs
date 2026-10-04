@@ -17,6 +17,7 @@ enum Field {
     Roots,
     Device,
     Volume,
+    PlayCountThreshold,
     Scale,
     Fps,
 }
@@ -35,6 +36,7 @@ impl Settings {
             (Field::Roots, "Library roots separated by ;"),
             (Field::Device, "Default output"),
             (Field::Volume, "Volume 0–100"),
+            (Field::PlayCountThreshold, "Play count threshold 0–<100%"),
             (Field::Scale, "Interface scale 0.75–2"),
             (Field::Fps, "Analysis frames/s 5–60"),
         ] {
@@ -92,6 +94,11 @@ impl Settings {
             format!("{:.0}", self.draft.volume * 100.),
             cx,
         );
+        self.set_value(
+            Field::PlayCountThreshold,
+            self.draft.play_count_threshold_percent.to_string(),
+            cx,
+        );
         self.set_value(Field::Scale, self.draft.ui_scale.to_string(), cx);
         self.set_value(Field::Fps, self.draft.analysis_fps.to_string(), cx);
     }
@@ -108,6 +115,8 @@ impl Settings {
         let device = self.value(Field::Device, cx);
         config.output_device = (!device.trim().is_empty()).then(|| device.trim().to_owned());
         config.volume = self.value(Field::Volume, cx).trim().parse::<f32>()? / 100.;
+        config.play_count_threshold_percent =
+            self.value(Field::PlayCountThreshold, cx).trim().parse()?;
         config.ui_scale = self.value(Field::Scale, cx).trim().parse()?;
         config.analysis_fps = self.value(Field::Fps, cx).trim().parse()?;
         config.validate()?;
@@ -282,6 +291,10 @@ impl GuiApp {
             ))
             .child(device_picker)
             .child(self.settings.field(Field::Volume, "Volume (0–100%)"))
+            .child(self.settings.field(
+                Field::PlayCountThreshold,
+                "Count a play after hearing more than this percentage (0–<100%)",
+            ))
             .child(
                 row()
                     .flex_wrap()
