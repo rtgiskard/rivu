@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, Background, Path, PathBuilder, Pixels, canvas, div, linear_color_stop,
+    Background, Context, Path, PathBuilder, Pixels, Render, Window, canvas, div, linear_color_stop,
     linear_gradient, point, prelude::*, px, rgb,
 };
 
@@ -36,8 +36,10 @@ impl Artwork {
             layers: Rc::new(layers),
         }
     }
+}
 
-    pub(super) fn element(&self) -> AnyElement {
+impl Render for Artwork {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let layers = Rc::clone(&self.layers);
         div()
             .size_full()
@@ -55,8 +57,8 @@ impl Artwork {
                                 (bounds.size.width - side) / 2.,
                                 (bounds.size.height - side) / 2.,
                             );
-                        // Tessellation is cached. GPUI consumes each painted path,
-                        // so only the scene's vertex copy and positioning repeat.
+                        // The enclosing cached view also reuses positioned paths
+                        // until its bounds or inherited text style change.
                         for (geometry, color) in layers.iter() {
                             let mut path = geometry.clone();
                             path.bounds.origin = origin + path.bounds.origin * scale;

@@ -1,82 +1,15 @@
 use super::{
-    ACCENT, BORDER, Dragging, Field, GuiApp, MUTED, Measured, PANEL, QueueDrag, TEXT, button,
-    column, format_time, icon_button, row,
+    library::LibraryDrag,
+    ACCENT, BORDER, Dragging, Field, GuiApp, ListFocus, MUTED, Measured, QueueDrag,
+    button, column, format_time, icon_button, row, row_text,
 };
-use crate::model::{Command, PlaybackStatus};
-use gpui::{
-    AnyElement, Context, Div, ElementId, Render, SharedString, Stateful, Window, div, prelude::*,
-    px, rgb, uniform_list,
-};
+pub(super) use super::{TRACK_HEIGHT, caption, list_row};
+use crate::model::{Command, PlaybackStatus, RepeatMode};
+use gpui::{AnyElement, Context, Div, Window, div, prelude::*, px, rgb, uniform_list};
 use std::{
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
-
-pub(super) const TRACK_HEIGHT: f32 = 42.0;
-
-pub(super) fn caption(text: impl Into<gpui::SharedString>) -> Div {
-    div().text_xs().text_color(rgb(MUTED)).child(text.into())
-}
-
-pub(super) fn list_row(id: impl Into<ElementId>, selected: bool) -> Stateful<Div> {
-    row()
-        .id(id)
-        .w_full()
-        .h(px(TRACK_HEIGHT))
-        .flex_shrink_0()
-        .min_w_0()
-        .px_2()
-        .rounded_sm()
-        .overflow_hidden()
-        .cursor_pointer()
-        .bg(rgb(if selected { 0x293d40 } else { PANEL }))
-        .hover(|style| style.bg(rgb(0x293039)))
-}
-
-struct TrackTooltip {
-    title: SharedString,
-    detail: SharedString,
-}
-
-impl Render for TrackTooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        column()
-            .max_w(px(560.))
-            .px_3()
-            .py_2()
-            .bg(rgb(PANEL))
-            .border_1()
-            .border_color(rgb(BORDER))
-            .text_color(rgb(TEXT))
-            .child(self.title.clone())
-            .child(caption(self.detail.clone()))
-    }
-}
-
-fn row_text(title: String, detail: String) -> Stateful<Div> {
-    let title: SharedString = title.into();
-    let detail: SharedString = detail.into();
-    column()
-        .id("track-text")
-        .flex_1()
-        .gap_0()
-        .overflow_hidden()
-        .child(
-            div()
-                .text_sm()
-                .text_color(rgb(TEXT))
-                .truncate()
-                .child(title.clone()),
-        )
-        .child(caption(detail.clone()).truncate())
-        .tooltip(move |_, cx| {
-            cx.new(|_| TrackTooltip {
-                title: title.clone(),
-                detail: detail.clone(),
-            })
-            .into()
-        })
-}
 
 fn last_played_text(played_at: i64) -> String {
     let now = SystemTime::now()
@@ -138,68 +71,201 @@ impl GuiApp {
             Measured::Volume(panel_id),
             cx,
         );
-        row()
-            .id(("transport-panel", panel_id))
-            .size_full()
-            .items_start()
-            .overflow_y_scroll()
+        let controls = row()
+            .gap_1()
+            .flex_wrap()
+            .justify_center()
             .child(
-                div()
-                    .size(px(64.))
-                    .flex_shrink_0()
-                    .child(self.default_album.element()),
+                icon_button(
+                    ("shuffle", panel_id),
+                    "󰒟",
+                    if self.state.shuffle {
+                        "Shuffle: on (s)"
+                    } else {
+                        "Shuffle: off (s)"
+                    },
+                    cx,
+                    |this, _, cx| {
+                        this.send(
+                            Command::Shuffle {
+                                enabled: !this.state.shuffle,
+                            },
+                            cx,
+                        )
+                    },
+                )
+                .size(gpui::rems(3.))
+                .text_2xl()
+                .when(self.state.shuffle, |view| {
+                    view.text_color(rgb(ACCENT)).border_color(rgb(ACCENT))
+                }),
             )
             .child(
-                column()
-                    .flex_1()
+                icon_button(
+                    ("previous", panel_id),
+                    "󰒮",
+                    "Previous track (p)",
+                    cx,
+                    |this, _, cx| this.send(Command::Previous, cx),
+                )
+                .size(gpui::rems(3.))
+                .text_2xl(),
+            )
+            .child(
+                icon_button(
+                    ("toggle", panel_id),
+                    if self.state.status == PlaybackStatus::Playing {
+                        "󰏤"
+                    } else {
+                        "󰐊"
+                    },
+                    if self.state.status == PlaybackStatus::Playing {
+                        "Pause (space)"
+                    } else {
+                        "Play (space)"
+                    },
+                    cx,
+                    |this, _, cx| this.send(Command::Toggle, cx),
+                )
+                .size(gpui::rems(3.))
+                .text_2xl()
+                .bg(rgb(0x283457))
+                .text_color(rgb(ACCENT)),
+            )
+            .child(
+                icon_button(
+                    ("next", panel_id),
+                    "󰒭",
+                    "Next track (n)",
+                    cx,
+                    |this, _, cx| this.send(Command::Next, cx),
+                )
+                .size(gpui::rems(3.))
+                .text_2xl(),
+            )
+            .child(
+                icon_button(
+                    ("repeat", panel_id),
+                    if self.state.repeat == RepeatMode::One {
+                        "󰑘"
+                    } else {
+                        "󰑖"
+                    },
+                    match self.state.repeat {
+                        RepeatMode::Off => "Repeat: off (r)",
+                        RepeatMode::All => "Repeat: all (r)",
+                        RepeatMode::One => "Repeat: one (r)",
+                    },
+                    cx,
+                    |this, _, cx| {
+                        let mode = match this.state.repeat {
+                            RepeatMode::Off => RepeatMode::All,
+                            RepeatMode::All => RepeatMode::One,
+                            RepeatMode::One => RepeatMode::Off,
+                        };
+                        this.send(Command::Repeat { mode }, cx);
+                    },
+                )
+                .size(gpui::rems(3.))
+                .text_2xl()
+                .when(self.state.repeat != RepeatMode::Off, |view| {
+                    view.text_color(rgb(ACCENT)).border_color(rgb(ACCENT))
+                }),
+            );
+        let volume_control = row()
+            .w(px(172.))
+            .max_w(gpui::relative(1.))
+            .flex_shrink_0()
+            .child(
+                div()
+                    .id(("volume-label", panel_id))
+                    .flex_shrink_0()
+                    .text_lg()
+                    .text_color(rgb(MUTED))
+                    .child(if self.state.config.nerd_symbols {
+                        "󰕾"
+                    } else {
+                        "♪"
+                    })
+                    .tooltip(|_, cx| {
+                        cx.new(|_| super::ButtonTooltip {
+                            text: "Volume ([ / ])".into(),
+                        })
+                        .into()
+                    }),
+            )
+            .child(div().flex_1().min_w_0().child(volume))
+            .child(
+                caption(format!("{:.0}%", self.state.volume * 100.))
+                    .w(px(34.))
+                    .flex_shrink_0(),
+            );
+        div()
+            .id(("transport-panel", panel_id))
+            .size_full()
+            .overflow_y_scroll()
+            .child(
+                row()
+                    .items_center()
                     .child(
-                        row()
-                            .flex_shrink_0()
-                            .flex_wrap()
-                            .child(div().flex_1().min_w_0().text_xl().truncate().child(title))
-                            .child(caption(artist).truncate())
-                            .child(caption(status)),
+                        div().size(px(128.)).flex_shrink_0().child(
+                            self.default_album
+                                .clone()
+                                .cached(gpui::StyleRefinement::default().size_full()),
+                        ),
                     )
                     .child(
-                        row()
-                            .flex_shrink_0()
-                            .flex_wrap()
-                            .child(button(("previous", panel_id), "󰒮", cx, |this, _, cx| {
-                                this.send(Command::Previous, cx)
-                            }))
-                            .child(button(
-                                ("toggle", panel_id),
-                                if self.state.status == PlaybackStatus::Playing {
-                                    "󰏤"
-                                } else {
-                                    "󰐊"
-                                },
-                                cx,
-                                |this, _, cx| this.send(Command::Toggle, cx),
-                            ))
-                            .child(button(("stop", panel_id), "󰓛", cx, |this, _, cx| {
-                                this.send(Command::Stop, cx)
-                            }))
-                            .child(button(("next", panel_id), "󰒭", cx, |this, _, cx| {
-                                this.send(Command::Next, cx)
-                            }))
-                            .child(div().w(px(100.)).child(volume))
+                        column()
+                            .flex_1()
                             .child(
-                                div()
-                                    .text_xs()
-                                    .child(format!("{:.0}%", self.state.volume * 100.)),
+                                row()
+                                    .flex_shrink_0()
+                                    .flex_wrap()
+                                    .child(
+                                        div().flex_1().min_w_0().text_xl().truncate().child(title),
+                                    )
+                                    .child(caption(artist).truncate())
+                                    .child(caption(status)),
+                            )
+                            .child(
+                                row()
+                                    .flex_shrink_0()
+                                    .child(
+                                        div()
+                                            .id(("progress-label", panel_id))
+                                            .flex_shrink_0()
+                                            .text_lg()
+                                            .text_color(rgb(MUTED))
+                                            .child(if self.state.config.nerd_symbols {
+                                                "󰅐"
+                                            } else {
+                                                "◷"
+                                            })
+                                            .tooltip(|_, cx| {
+                                                cx.new(|_| super::ButtonTooltip {
+                                                    text: "Playback progress".into(),
+                                                })
+                                                .into()
+                                            }),
+                                    )
+                                    .child(div().flex_1().min_w_0().child(seek))
+                                    .child(
+                                        caption(format!(
+                                            "{} / {}",
+                                            format_time(preview_position),
+                                            duration.map_or("—".into(), format_time)
+                                        ))
+                                        .flex_shrink_0(),
+                                    ),
+                            )
+                            .child(
+                                row()
+                                    .flex_shrink_0()
+                                    .flex_wrap()
+                                    .justify_between()
+                                    .child(controls)
+                                    .child(volume_control),
                             ),
-                    )
-                    .child(
-                        row()
-                            .flex_shrink_0()
-                            .flex_wrap()
-                            .child(div().flex_1().min_w(px(60.)).child(seek))
-                            .child(div().text_xs().text_color(rgb(MUTED)).child(format!(
-                                "{} / {}",
-                                format_time(self.seek_preview.unwrap_or(self.state.position)),
-                                duration.map_or("—".into(), format_time)
-                            ))),
                     ),
             )
             .into_any_element()
@@ -222,7 +288,7 @@ impl GuiApp {
             .collect()
     }
 
-    fn panel_track_text(&self, track_id: i64) -> (String, String) {
+    pub(super) fn panel_track_text(&self, track_id: i64) -> (String, String) {
         match self
             .library_index
             .get(&track_id)
@@ -386,7 +452,6 @@ impl GuiApp {
         let mut panel = column()
             .id(("library-panel", panel_id))
             .size_full()
-            .p_3()
             .child(self.panel_field(Field::Search, "Search title, artist or album"))
             .child(self.panel_field(
                 Field::Path,
@@ -405,6 +470,12 @@ impl GuiApp {
                 "No matching tracks. Scan a music file or folder to get started.",
             ));
         }
+        if self.library_tree_active {
+            return panel
+                .child(caption("↑/↓ navigate · ←/→ collapse/expand · Space toggles folders · Enter plays"))
+                .child(self.library_tree_list(panel_id, cx))
+                .into_any_element();
+        }
         panel
             .child(
                 uniform_list(
@@ -416,7 +487,6 @@ impl GuiApp {
                                 let track =
                                     this.state.library.get(*this.filtered_rows.get(index)?)?;
                                 let id = track.id;
-                                let favorite = track.favorite;
                                 let (title, detail) = this.panel_track_text(id);
                                 Some(
                                     list_row(
@@ -424,28 +494,10 @@ impl GuiApp {
                                         this.selected.contains(&id),
                                     )
                                     .child(row_text(title, detail))
-                                    .child(icon_button(
-                                        ("library-favorite", id as u64),
-                                        if favorite { "★" } else { "☆" },
-                                        if favorite {
-                                            "Remove favorite"
-                                        } else {
-                                            "Add favorite"
-                                        },
-                                        cx,
-                                        move |this, _, cx| {
-                                            cx.stop_propagation();
-                                            this.send(
-                                                Command::SetFavorite {
-                                                    track_ids: vec![id],
-                                                    favorite: !favorite,
-                                                },
-                                                cx,
-                                            );
-                                        },
-                                    ))
                                     .on_click(cx.listener(
-                                        move |this, event: &gpui::ClickEvent, _, cx| {
+                                        move |this, event: &gpui::ClickEvent, window, cx| {
+                                            this.focus_workspace(window, cx);
+                                            this.list_focus = Some(ListFocus::Library);
                                             let modifiers = event.modifiers();
                                             this.select_track(
                                                 id,
@@ -469,8 +521,28 @@ impl GuiApp {
             .into_any_element()
     }
 
+    fn selected_queue_ids_in_order(&self) -> Vec<u64> {
+        self.state
+            .queue
+            .iter()
+            .filter(|entry| self.selected_queue.contains(&entry.id))
+            .map(|entry| entry.id)
+            .collect()
+    }
+
+    fn selected_queue_single(&self) -> Option<u64> {
+        if self.selected_queue.len() != 1 {
+            return None;
+        }
+        self.state
+            .queue
+            .iter()
+            .find(|entry| self.selected_queue.contains(&entry.id))
+            .map(|entry| entry.id)
+    }
+
     fn move_selected_queue(&mut self, down: bool, cx: &mut Context<Self>) {
-        let Some(queue_id) = self.selected_queue else {
+        let Some(queue_id) = self.selected_queue_single() else {
             return;
         };
         let Some(index) = self
@@ -514,18 +586,36 @@ impl GuiApp {
         else {
             return;
         };
-        if source_index == target_index {
+        if !self.selected_queue.contains(&source_id) || self.selected_queue.len() == 1 {
+            if source_index != target_index {
+                self.send(
+                    Command::MoveQueue {
+                        queue_id: source_id,
+                        index: target_index,
+                    },
+                    cx,
+                );
+            }
             return;
         }
-        let index = if source_index < target_index {
-            target_index - 1
-        } else {
-            target_index
-        };
+        if self.selected_queue.contains(&target_id) {
+            return;
+        }
+        let target_after_removal = self.state.queue[..target_index]
+            .iter()
+            .filter(|entry| !self.selected_queue.contains(&entry.id))
+            .count();
+        let first_index = self
+            .state
+            .queue
+            .iter()
+            .position(|entry| self.selected_queue.contains(&entry.id))
+            .unwrap_or(source_index);
+        let target = target_after_removal + usize::from(target_index > first_index);
         self.send(
-            Command::MoveQueue {
-                queue_id: source_id,
-                index,
+            Command::MoveQueueEntries {
+                queue_ids: self.selected_queue_ids_in_order(),
+                index: target,
             },
             cx,
         );
@@ -537,11 +627,12 @@ impl GuiApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let selected = self
-            .selected_queue
-            .and_then(|id| self.state.queue.iter().position(|entry| entry.id == id));
-        let mut tools = row().flex_shrink_0();
-        if let Some(index) = selected {
+        let selected_id = self.selected_queue_single();
+        let selected_index =
+            selected_id.and_then(|id| self.state.queue.iter().position(|entry| entry.id == id));
+        let selection_count = self.selected_queue.len();
+        let mut tools = row().min_h(px(32.)).flex_wrap().flex_shrink_0();
+        if selection_count > 0 {
             tools = tools
                 .child(icon_button(
                     ("queue-play", panel_id),
@@ -549,7 +640,17 @@ impl GuiApp {
                     "Play selected queue entry",
                     cx,
                     |this, _, cx| {
-                        if let Some(queue_id) = this.selected_queue {
+                        let queue_id = this
+                            .queue_anchor
+                            .filter(|id| this.selected_queue.contains(id))
+                            .or_else(|| {
+                                this.state
+                                    .queue
+                                    .iter()
+                                    .find(|entry| this.selected_queue.contains(&entry.id))
+                                    .map(|entry| entry.id)
+                            });
+                        if let Some(queue_id) = queue_id {
                             this.send(Command::PlayQueue { queue_id }, cx);
                         }
                     },
@@ -557,54 +658,55 @@ impl GuiApp {
                 .child(icon_button(
                     ("queue-remove", panel_id),
                     "×",
-                    "Remove selected queue entry",
+                    "Remove selected queue entries",
                     cx,
                     |this, _, cx| {
-                        if let Some(queue_id) = this.selected_queue.take() {
-                            this.send(Command::RemoveQueue { queue_id }, cx);
+                        let queue_ids = this.selected_queue_ids_in_order();
+                        if !queue_ids.is_empty() {
+                            this.selected_queue.clear();
+                            this.queue_anchor = None;
+                            this.send(Command::RemoveQueueEntries { queue_ids }, cx);
+                            cx.notify();
                         }
                     },
                 ));
-            if index > 0 {
-                tools = tools.child(icon_button(
-                    ("queue-up", panel_id),
-                    "↑",
-                    "Move selected entry up",
-                    cx,
-                    |this, _, cx| this.move_selected_queue(false, cx),
-                ));
+            if let Some(index) = selected_index {
+                if index > 0 {
+                    tools = tools.child(icon_button(
+                        ("queue-up", panel_id),
+                        "↑",
+                        "Move selected entry up",
+                        cx,
+                        |this, _, cx| this.move_selected_queue(false, cx),
+                    ));
+                }
+                if index + 1 < self.state.queue.len() {
+                    tools = tools.child(icon_button(
+                        ("queue-down", panel_id),
+                        "↓",
+                        "Move selected entry down",
+                        cx,
+                        |this, _, cx| this.move_selected_queue(true, cx),
+                    ));
+                }
             }
-            if index + 1 < self.state.queue.len() {
-                tools = tools.child(icon_button(
-                    ("queue-down", panel_id),
-                    "↓",
-                    "Move selected entry down",
-                    cx,
-                    |this, _, cx| this.move_selected_queue(true, cx),
-                ));
-            }
-        }
-        if !self.state.queue.is_empty() {
-            tools = tools.child(div().flex_1()).child(icon_button(
-                ("queue-clear", panel_id),
-                "⌫",
-                "Clear queue",
-                cx,
-                |this, _, cx| {
-                    this.selected_queue = None;
-                    this.send(Command::ClearQueue, cx);
-                },
-            ));
         }
         column()
             .id(("queue-panel", panel_id))
-            .size_full()
-            .p_3()
+            .on_drop(cx.listener(|this, drag: &LibraryDrag, window, cx| {
+                window.prevent_default();
+                let track_ids = this.library_drag_track_ids(&drag.node);
+                if !track_ids.is_empty() {
+                    this.send(Command::Enqueue { track_ids }, cx);
+                }
+            }))
+            .drag_over::<LibraryDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
             .child(caption(format!(
-                "{} queued · drag an entry onto its new position",
-                self.state.queue.len()
+                "{} queued · {} selected · drag an entry onto its new position",
+                self.state.queue.len(),
+                selection_count,
             )))
-            .child(tools)
+            .when(selection_count > 0, |panel| panel.child(tools))
             .when(self.state.queue.is_empty(), |panel| {
                 panel.child(caption("Your queue is empty. Enqueue tracks from Library."))
             })
@@ -621,47 +723,63 @@ impl GuiApp {
                                 let playing = this.state.current_queue_id == Some(id);
                                 let drag = QueueDrag { queue_id: id };
                                 Some(
-                                    list_row(("queue-entry", id), this.selected_queue == Some(id))
-                                        .child(
-                                            div()
-                                                .w(px(32.0))
-                                                .flex_shrink_0()
-                                                .text_xs()
-                                                .whitespace_nowrap()
-                                                .text_color(rgb(if playing {
-                                                    ACCENT
-                                                } else {
-                                                    MUTED
-                                                }))
-                                                .child(if playing {
-                                                    "Now".to_owned()
-                                                } else {
-                                                    (index + 1).to_string()
-                                                }),
-                                        )
-                                        .child(row_text(title, detail))
-                                        .on_click(cx.listener(
-                                            move |this, event: &gpui::ClickEvent, _, cx| {
-                                                this.selected_queue = Some(id);
-                                                if event.click_count() == 2 {
-                                                    this.send(
-                                                        Command::PlayQueue { queue_id: id },
-                                                        cx,
-                                                    );
-                                                }
+                                    list_row(
+                                        ("queue-entry", id),
+                                        this.selected_queue.contains(&id),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(32.0))
+                                            .flex_shrink_0()
+                                            .text_xs()
+                                            .whitespace_nowrap()
+                                            .text_color(rgb(if playing { ACCENT } else { MUTED }))
+                                            .child(if playing {
+                                                "▶".to_owned()
+                                            } else {
+                                                (index + 1).to_string()
+                                            }),
+                                    )
+                                    .child(row_text(title, detail))
+                                    .on_mouse_down(
+                                        gpui::MouseButton::Right,
+                                        cx.listener(move |this, _, window, cx| {
+                                            this.focus_workspace(window, cx);
+                                            this.list_focus = Some(ListFocus::Queue);
+                                            if !this.selected_queue.contains(&id) {
+                                                this.selected_queue.clear();
+                                                this.selected_queue.insert(id);
+                                                this.queue_anchor = Some(id);
                                                 cx.notify();
-                                            },
-                                        ))
-                                        .on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone()))
-                                        .on_drop(cx.listener(
-                                            move |this, drag: &QueueDrag, window, cx| {
-                                                window.prevent_default();
-                                                this.move_queue_entry(drag.queue_id, id, cx);
-                                            },
-                                        ))
-                                        .drag_over::<QueueDrag>(|style, _, _, _| {
-                                            style.bg(rgb(0x293d40))
+                                            }
                                         }),
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, event: &gpui::ClickEvent, window, cx| {
+                                            this.focus_workspace(window, cx);
+                                            this.list_focus = Some(ListFocus::Queue);
+                                            let modifiers = event.modifiers();
+                                            this.select_queue_entry(
+                                                id,
+                                                modifiers.shift,
+                                                modifiers.control || modifiers.platform,
+                                                cx,
+                                            );
+                                            if event.click_count() == 2 {
+                                                this.send(Command::PlayQueue { queue_id: id }, cx);
+                                            }
+                                        },
+                                    ))
+                                    .on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone()))
+                                    .on_drop(cx.listener(
+                                        move |this, drag: &QueueDrag, window, cx| {
+                                            window.prevent_default();
+                                            this.move_queue_entry(drag.queue_id, id, cx);
+                                        },
+                                    ))
+                                    .drag_over::<QueueDrag>(|style, _, _, _| {
+                                        style.bg(rgb(0x293d40))
+                                    }),
                                 )
                             })
                             .collect::<Vec<_>>()
@@ -730,9 +848,10 @@ impl GuiApp {
                 .position(|entry| Some(entry.id) == self.selected_entry)
         });
         let selected_name = selected.map(|playlist| playlist.name.clone());
-        let mut manage = row().flex_wrap().flex_shrink_0().child(button(
+        let mut manage = row().flex_wrap().flex_shrink_0().child(icon_button(
             ("playlist-create", panel_id),
-            "Create",
+            "+",
+            "Create playlist",
             cx,
             |this, _, cx| {
                 let name = this.value(Field::PlaylistName, cx).trim().to_owned();
@@ -745,9 +864,10 @@ impl GuiApp {
         ));
         if let Some(playlist_id) = playlist_id {
             manage = manage
-                .child(button(
+                .child(icon_button(
                     ("playlist-rename", panel_id),
-                    "Rename",
+                    "✎",
+                    "Rename playlist",
                     cx,
                     move |this, _, cx| {
                         let name = this.value(Field::PlaylistName, cx).trim().to_owned();
@@ -758,65 +878,56 @@ impl GuiApp {
                         this.send(Command::RenamePlaylist { playlist_id, name }, cx);
                     },
                 ))
-                .child(button(
+                .child(icon_button(
                     ("playlist-delete", panel_id),
-                    "Delete",
+                    "×",
+                    "Delete playlist",
                     cx,
                     move |this, _, cx| {
-                        this.selected_playlist = None;
-                        this.selected_entry = None;
-                        this.send(Command::DeletePlaylist { playlist_id }, cx);
+                        if entry_count > 0 {
+                            this.playlist_delete_confirm = Some(playlist_id);
+                        } else {
+                            this.selected_playlist = None;
+                            this.selected_entry = None;
+                            this.send(Command::DeletePlaylist { playlist_id }, cx);
+                        }
+                        cx.notify();
                     },
                 ));
         }
-        let mut files = row().flex_wrap().flex_shrink_0().child(button(
+        let mut files = row().flex_wrap().flex_shrink_0().child(icon_button(
             ("playlist-import", panel_id),
-            "Import M3U",
+            "↓",
+            "Choose M3U to import",
             cx,
-            |this, _, cx| {
-                let path = this.value(Field::Path, cx);
-                if path.trim().is_empty() {
-                    this.panel_error("Enter the M3U file path first.", cx);
-                    return;
-                }
-                this.send(
-                    Command::ImportPlaylist {
-                        path: PathBuf::from(path.trim()),
-                        name: None,
-                    },
-                    cx,
-                );
-            },
+            |this, _, cx| this.choose_playlist_import(cx),
         ));
         if let Some(playlist_id) = playlist_id {
-            files = files.child(button(
+            files = files.child(icon_button(
                 ("playlist-export", panel_id),
-                "Export M3U",
+                "↑",
+                "Choose destination for M3U export",
                 cx,
-                move |this, _, cx| {
-                    let path = this.value(Field::Path, cx);
-                    if path.trim().is_empty() {
-                        this.panel_error("Enter the destination M3U file path first.", cx);
-                        return;
-                    }
-                    this.send(
-                        Command::ExportPlaylist {
-                            playlist_id,
-                            path: PathBuf::from(path.trim()),
-                        },
-                        cx,
-                    );
-                },
+                move |this, _, cx| this.choose_playlist_export(playlist_id, cx),
             ));
         }
         let catalog_height = (self.state.playlists.len().max(1) as f32 * TRACK_HEIGHT).min(126.0);
         let mut panel = column()
             .id(("playlists-panel", panel_id))
-            .size_full()
-            .p_3()
+            .on_drop(cx.listener(|this, drag: &LibraryDrag, window, cx| {
+                window.prevent_default();
+                let Some(playlist_id) = this.selected_playlist else {
+                    this.panel_error("Select a playlist before dropping tracks.", cx);
+                    return;
+                };
+                let track_ids = this.library_drag_track_ids(&drag.node);
+                if !track_ids.is_empty() {
+                    this.send(Command::AddPlaylist { playlist_id, track_ids }, cx);
+                }
+            }))
+            .drag_over::<LibraryDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
             .child(self.panel_field(Field::PlaylistName, "Playlist name"))
             .child(manage)
-            .child(self.panel_field(Field::Path, "M3U import / export path"))
             .child(files)
             .child(
                 uniform_list(
@@ -837,8 +948,10 @@ impl GuiApp {
                                         format!("{} tracks", playlist.entries.len()),
                                     ))
                                     .on_click(cx.listener(
-                                        move |this, _: &gpui::ClickEvent, _, cx| {
+                                        move |this, _: &gpui::ClickEvent, window, cx| {
+                                            this.focus_workspace(window, cx);
                                             this.selected_playlist = Some(id);
+                                            this.playlist_delete_confirm = None;
                                             this.selected_entry = None;
                                             if let Some(name) = this
                                                 .state
@@ -864,8 +977,9 @@ impl GuiApp {
         if let Some(playlist_id) = playlist_id {
             let mut tools = row().flex_wrap().flex_shrink_0();
             if entry_count > 0 {
-                tools = tools.child(button(
+                tools = tools.child(icon_button(
                     ("playlist-play", panel_id),
+                    "▷",
                     "Play playlist",
                     cx,
                     move |this, _, cx| {
@@ -874,9 +988,10 @@ impl GuiApp {
                 ));
             }
             if !self.selected.is_empty() {
-                tools = tools.child(button(
+                tools = tools.child(icon_button(
                     ("playlist-add", panel_id),
-                    "Add selected",
+                    "+",
+                    "Add selected tracks",
                     cx,
                     move |this, _, cx| {
                         this.send(
@@ -891,9 +1006,10 @@ impl GuiApp {
             }
             if let Some(index) = selected_index {
                 tools = tools
-                    .child(button(
+                    .child(icon_button(
                         ("entry-play", panel_id),
-                        "Play track",
+                        "▶",
+                        "Play selected track",
                         cx,
                         |this, _, cx| {
                             let track_id = this
@@ -913,25 +1029,32 @@ impl GuiApp {
                             }
                         },
                     ))
-                    .child(button(
+                    .child(icon_button(
                         ("entry-remove", panel_id),
-                        "Remove",
+                        "×",
+                        "Remove selected entry",
                         cx,
                         |this, _, cx| {
                             if let Some(entry_id) = this.selected_entry.take() {
                                 this.send(Command::RemovePlaylistEntry { entry_id }, cx);
+                                cx.notify();
                             }
                         },
                     ));
                 if index > 0 {
-                    tools = tools.child(button(("entry-up", panel_id), "Up", cx, |this, _, cx| {
-                        this.move_selected_playlist_entry(false, cx)
-                    }));
+                    tools = tools.child(icon_button(
+                        ("entry-up", panel_id),
+                        "↑",
+                        "Move selected entry up",
+                        cx,
+                        |this, _, cx| this.move_selected_playlist_entry(false, cx),
+                    ));
                 }
                 if index + 1 < entry_count {
-                    tools = tools.child(button(
+                    tools = tools.child(icon_button(
                         ("entry-down", panel_id),
-                        "Down",
+                        "↓",
+                        "Move selected entry down",
                         cx,
                         |this, _, cx| this.move_selected_playlist_entry(true, cx),
                     ));
@@ -983,7 +1106,8 @@ impl GuiApp {
                                         .child(row_text(title, detail))
                                         .on_click(
                                             cx.listener(
-                                                move |this, event: &gpui::ClickEvent, _, cx| {
+                                                move |this, event: &gpui::ClickEvent, window, cx| {
+                                                    this.focus_workspace(window, cx);
                                                     this.selected_entry = Some(id);
                                                     if event.click_count() == 2 {
                                                         this.send(Command::Play { track_id }, cx);
@@ -1001,6 +1125,40 @@ impl GuiApp {
                     .min_h_0()
                     .w_full(),
                 );
+            if self.playlist_delete_confirm == Some(playlist_id) {
+                panel = panel.child(
+                    column()
+                        .p_2()
+                        .bg(rgb(0x2d2230))
+                        .border_1()
+                        .border_color(rgb(0xf7768e))
+                        .rounded_sm()
+                        .child(caption("This playlist is not empty. Delete it and all entries?"))
+                        .child(
+                            row()
+                                .child(button(
+                                    ("playlist-delete-confirm", playlist_id as u64),
+                                    "Delete playlist",
+                                    cx,
+                                    move |this, _, cx| {
+                                        this.playlist_delete_confirm = None;
+                                        this.selected_playlist = None;
+                                        this.selected_entry = None;
+                                        this.send(Command::DeletePlaylist { playlist_id }, cx);
+                                    },
+                                ))
+                                .child(button(
+                                    ("playlist-delete-cancel", playlist_id as u64),
+                                    "Cancel",
+                                    cx,
+                                    |this, _, cx| {
+                                        this.playlist_delete_confirm = None;
+                                        cx.notify();
+                                    },
+                                )),
+                        ),
+                );
+            }
         } else {
             panel = panel.child(caption("Create, import or select a playlist."));
         }
@@ -1016,7 +1174,6 @@ impl GuiApp {
         let mut panel = column()
             .id(("metadata-panel", panel_id))
             .size_full()
-            .p_3()
             .overflow_y_scroll();
         if let Some(track) = self
             .metadata_track
@@ -1160,7 +1317,6 @@ impl GuiApp {
         column()
             .id(("history-panel", panel_id))
             .size_full()
-            .p_3()
             .child(caption(format!(
                 "Recent tracks · {} tracks · newest first",
                 self.state.history.len()

@@ -1,11 +1,13 @@
-//! Serializable workspace docking, independent of the windowing toolkit.
+//! Workspace docking, independent of the windowing toolkit.
 //!
 //! Node and panel IDs share one monotonically allocated namespace. Every public
 //! transition preserves a normalized tree: tabs are nonempty, each split has
 //! two children, and each active ID belongs to its tab group. The caller chooses
 //! the persistence path (the desktop uses `workspace.json`).
-//! Versionless workspaces gain a docked Playback panel above their unchanged
-//! tree on load. Versioned workspaces preserve deliberate panel removal.
+//! Legacy ID workspaces without a version gain a docked Playback panel above
+//! their unchanged tree. New workspaces preserve deliberate panel removal.
+//! Persistence stores only split/tab structure, panel kinds and group-local
+//! active indices (zero is omitted). Runtime IDs are rebuilt in traversal order.
 
 use std::{
     collections::HashSet,
@@ -18,10 +20,11 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Panel {
     pub id: u64,
     pub kind: String,
+    pub show_tab_bar: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,7 +33,7 @@ pub enum Axis {
     Vertical,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Edge {
     Left,
     Right,
@@ -39,7 +42,7 @@ pub enum Edge {
     Center,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Node {
     Split {
         id: u64,
@@ -51,17 +54,288 @@ pub enum Node {
     Tabs {
         id: u64,
         panels: Vec<Panel>,
-        #[serde(default)]
         active: u64,
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Layout {
     pub root: Option<Node>,
     pub next_id: u64,
-    #[serde(default)]
+    pub locked: bool,
     version: u32,
+}
+
+// The reader alone understands legacy IDs. Runtime docking types deliberately
+// have no serde implementation, so persistence cannot accidentally expose IDs.
+mod workspace {
+    use super::*;
+    use serde::ser::SerializeSeq;
+
+    #[derive(Serialize)]
+    pub(super) struct View<'a> {
+        root: Option<NodeRef<'a>>,
+        version: u32,
+        #[serde(skip_serializing_if = "is_false")]
+        locked: bool,
+    }
+
+    impl<'a> From<&'a Layout> for View<'a> {
+        fn from(layout: &'a Layout) -> Self {
+            Self {
+                root: layout.root.as_ref().map(NodeRef),
+                version: layout.version,
+                locked: layout.locked,
+            }
+        }
+    }
+
+    struct NodeRef<'a>(&'a Node);
+    struct PanelsRef<'a>(&'a [Panel]);
+
+    #[derive(Serialize)]
+    struct PanelView<'a> {
+        kind: &'a str,
+        #[serde(skip_serializing_if = "is_true")]
+        show_tab_bar: bool,
+    }
+
+    #[derive(Serialize)]
+    enum NodeView<'a> {
+        Split {
+            axis: Axis,
+            ratio: f32,
+            first: NodeRef<'a>,
+            second: NodeRef<'a>,
+        },
+        Tabs {
+            panels: PanelsRef<'a>,
+            #[serde(skip_serializing_if = "is_zero")]
+            active: usize,
+        },
+    }
+
+    fn is_zero(index: &usize) -> bool {
+        *index == 0
+    }
+
+    fn is_true(value: &bool) -> bool {
+        *value
+    }
+
+    fn default_tab_bar() -> bool {
+        true
+    }
+
+    impl Serialize for NodeRef<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let view = match self.0 {
+                Node::Split {
+                    axis,
+                    ratio,
+                    first,
+                    second,
+                    ..
+                } => NodeView::Split {
+                    axis: *axis,
+                    ratio: *ratio,
+                    first: NodeRef(first),
+                    second: NodeRef(second),
+                },
+                Node::Tabs { panels, active, .. } => NodeView::Tabs {
+                    panels: PanelsRef(panels),
+                    active: panels
+                        .iter()
+                        .position(|panel| panel.id == *active)
+                        .ok_or_else(|| {
+                            <S::Error as serde::ser::Error>::custom("invalid active panel")
+                        })?,
+                },
+            };
+            view.serialize(serializer)
+        }
+    }
+
+    impl Serialize for PanelsRef<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
+            for panel in self.0 {
+                sequence.serialize_element(&PanelView {
+                    kind: &panel.kind,
+                    show_tab_bar: panel.show_tab_bar,
+                })?;
+            }
+            sequence.end()
+        }
+    }
+
+    #[derive(Deserialize)]
+    pub(super) struct Input {
+        root: Option<NodeInput>,
+        next_id: Option<u64>,
+        version: Option<u32>,
+        #[serde(default)]
+        locked: bool,
+    }
+
+    #[derive(Deserialize)]
+    enum NodeInput {
+        Split {
+            id: Option<u64>,
+            axis: Axis,
+            ratio: f32,
+            first: Box<NodeInput>,
+            second: Box<NodeInput>,
+        },
+        Tabs {
+            id: Option<u64>,
+            panels: Vec<PanelInput>,
+            #[serde(default, deserialize_with = "read_active")]
+            active: Option<u64>,
+        },
+    }
+
+    #[derive(Deserialize)]
+    struct PanelInput {
+        id: Option<u64>,
+        kind: String,
+        #[serde(default = "default_tab_bar")]
+        show_tab_bar: bool,
+    }
+
+    fn is_false(value: &bool) -> bool {
+        !*value
+    }
+
+    fn read_active<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<u64>, D::Error> {
+        u64::deserialize(deserializer).map(Some)
+    }
+
+    fn allocate(next_id: &mut u64) -> Result<u64> {
+        let id = *next_id;
+        *next_id = id
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("workspace ID space exhausted"))?;
+        Ok(id)
+    }
+
+    fn read_id(id: Option<u64>, next_id: &mut u64, legacy: bool) -> Result<u64> {
+        if legacy {
+            id.ok_or_else(|| anyhow!("legacy workspace is missing an ID"))
+        } else if id.is_some() {
+            Err(anyhow!("workspace IDs require the legacy next_id field"))
+        } else {
+            allocate(next_id)
+        }
+    }
+
+    impl NodeInput {
+        fn into_node(self, next_id: &mut u64, legacy: bool) -> Result<Node> {
+            Ok(match self {
+                Self::Split {
+                    id,
+                    axis,
+                    ratio,
+                    first,
+                    second,
+                } => Node::Split {
+                    id: read_id(id, next_id, legacy)?,
+                    axis,
+                    ratio,
+                    first: Box::new(first.into_node(next_id, legacy)?),
+                    second: Box::new(second.into_node(next_id, legacy)?),
+                },
+                Self::Tabs { id, panels, active } => {
+                    let id = read_id(id, next_id, legacy)?;
+                    let panels = panels
+                        .into_iter()
+                        .map(|panel| {
+                            Ok(Panel {
+                                id: read_id(panel.id, next_id, legacy)?,
+                                kind: panel.kind,
+                                show_tab_bar: panel.show_tab_bar,
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    let active = if legacy {
+                        active
+                            .or_else(|| panels.first().map(|panel| panel.id))
+                            .ok_or_else(|| anyhow!("tab group is empty"))?
+                    } else {
+                        let index = active.unwrap_or(0);
+                        usize::try_from(index)
+                            .ok()
+                            .and_then(|index| panels.get(index))
+                            .ok_or_else(|| anyhow!("tab group has invalid active index {index}"))?
+                            .id
+                    };
+                    Node::Tabs { id, panels, active }
+                }
+            })
+        }
+    }
+
+    // Legacy selections are IDs, never indices. Validate those relationships
+    // before discarding IDs, then renumber the migrated tree in preorder.
+    fn renumber(node: &mut Node, next_id: &mut u64) -> Result<()> {
+        match node {
+            Node::Split {
+                id, first, second, ..
+            } => {
+                *id = allocate(next_id)?;
+                renumber(first, next_id)?;
+                renumber(second, next_id)?;
+            }
+            Node::Tabs { id, panels, active } => {
+                *id = allocate(next_id)?;
+                let old_active = *active;
+                for panel in panels {
+                    let selected = panel.id == old_active;
+                    panel.id = allocate(next_id)?;
+                    if selected {
+                        *active = panel.id;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    impl Input {
+        pub(super) fn into_layout(self) -> Result<Layout> {
+            let legacy = self.next_id.is_some();
+            let version = self.version.unwrap_or(if legacy { 0 } else { 1 });
+            let mut next_id = 1;
+            let root = self
+                .root
+                .map(|root| root.into_node(&mut next_id, legacy))
+                .transpose()?;
+            let mut layout = Layout {
+                root,
+                next_id: self.next_id.unwrap_or(next_id),
+                version,
+                locked: self.locked,
+            };
+            layout.validate().map_err(|error| anyhow!(error))?;
+            if legacy {
+                layout.next_id = 1;
+                if let Some(root) = &mut layout.root {
+                    renumber(root, &mut layout.next_id)?;
+                }
+            }
+            layout.migrate()?;
+            // The Playback migration may wrap the root after allocating IDs.
+            if version == 0 {
+                layout.next_id = 1;
+                if let Some(root) = &mut layout.root {
+                    renumber(root, &mut layout.next_id)?;
+                }
+            }
+            Ok(layout)
+        }
+    }
 }
 
 impl Node {
@@ -238,6 +512,7 @@ impl Default for Layout {
             panels: vec![Panel {
                 id: panel_id,
                 kind: kind.to_owned(),
+                show_tab_bar: true,
             }],
             active: panel_id,
         };
@@ -261,6 +536,7 @@ impl Default for Layout {
                     }),
                 }),
             }),
+            locked: false,
             next_id: 12,
             version: 1,
         };
@@ -283,6 +559,7 @@ impl Layout {
             panels: vec![Panel {
                 id,
                 kind: "transport".into(),
+                show_tab_bar: true,
             }],
             active: id,
         };
@@ -327,6 +604,7 @@ impl Layout {
         let panel = Panel {
             id,
             kind: kind.to_owned(),
+            show_tab_bar: true,
         };
         if let Some(root) = self.root.as_mut() {
             let target = target
@@ -496,6 +774,28 @@ impl Layout {
         true
     }
 
+    /// Update an instance's preference, including inactive tabs. Returns false
+    /// only when the panel is missing; moving a panel preserves its preference.
+    pub fn set_tab_bar_visible(&mut self, panel_id: u64, visible: bool) -> bool {
+        fn update(node: &mut Node, panel_id: u64, visible: bool) -> bool {
+            match node {
+                Node::Split { first, second, .. } => {
+                    update(first, panel_id, visible) || update(second, panel_id, visible)
+                }
+                Node::Tabs { panels, .. } => {
+                    let Some(panel) = panels.iter_mut().find(|panel| panel.id == panel_id) else {
+                        return false;
+                    };
+                    panel.show_tab_bar = visible;
+                    true
+                }
+            }
+        }
+        self.root
+            .as_mut()
+            .is_some_and(|root| update(root, panel_id, visible))
+    }
+
     pub fn active_panels(&self) -> Vec<&Panel> {
         let mut panels = Vec::new();
         if let Some(root) = &self.root {
@@ -577,15 +877,11 @@ impl Layout {
     pub fn load(path: &Path) -> Result<Self> {
         let file =
             File::open(path).with_context(|| format!("opening workspace {}", path.display()))?;
-        let mut layout: Self = serde_json::from_reader(BufReader::new(file))
+        let input: workspace::Input = serde_json::from_reader(BufReader::new(file))
             .with_context(|| format!("decoding workspace {}", path.display()))?;
-        layout
-            .validate()
-            .map_err(|error| anyhow!(error))
+        let layout = input
+            .into_layout()
             .with_context(|| format!("invalid workspace {}", path.display()))?;
-        layout
-            .migrate()
-            .with_context(|| format!("migrating workspace {}", path.display()))?;
         Ok(layout)
     }
 
@@ -624,7 +920,8 @@ impl Layout {
         };
         let result = (|| -> Result<()> {
             let mut writer = BufWriter::new(file);
-            serde_json::to_writer_pretty(&mut writer, self).context("encoding workspace")?;
+            serde_json::to_writer_pretty(&mut writer, &workspace::View::from(self))
+                .context("encoding workspace")?;
             writer.write_all(b"\n")?;
             writer.flush().context("flushing workspace")?;
             writer.get_ref().sync_all().context("syncing workspace")?;
@@ -663,6 +960,305 @@ mod tests {
             .id()
     }
 
+    fn encoded(layout: &Layout) -> serde_json::Value {
+        serde_json::to_value(workspace::View::from(layout)).unwrap()
+    }
+
+    fn decoded(value: serde_json::Value) -> Result<Layout> {
+        serde_json::from_value::<workspace::Input>(value)?.into_layout()
+    }
+
+    fn assert_same_layout(actual: &Layout, expected: &Layout) {
+        actual.validate().unwrap();
+        expected.validate().unwrap();
+        assert_eq!(encoded(actual), encoded(expected));
+    }
+
+    // Explicitly model the old wire format; runtime types must not regain serde
+    // implementations just to manufacture migration fixtures.
+    fn legacy_value(layout: &Layout) -> serde_json::Value {
+        fn node_value(node: &Node) -> serde_json::Value {
+            match node {
+                Node::Split {
+                    id,
+                    axis,
+                    ratio,
+                    first,
+                    second,
+                } => serde_json::json!({
+                    "Split": {
+                        "id": id, "axis": axis, "ratio": ratio,
+                        "first": node_value(first), "second": node_value(second)
+                    }
+                }),
+                Node::Tabs { id, panels, active } => serde_json::json!({
+                    "Tabs": {
+                        "id": id, "active": active,
+                        "panels": panels.iter().map(|panel| serde_json::json!({
+                            "id": panel.id, "kind": panel.kind,
+                            "show_tab_bar": panel.show_tab_bar
+                        })).collect::<Vec<_>>()
+                    }
+                }),
+            }
+        }
+        serde_json::json!({
+            "root": layout.root.as_ref().map(node_value),
+            "next_id": layout.next_id,
+            "version": layout.version
+        })
+    }
+
+    #[test]
+    fn workspace_uses_local_indices_and_allocates_preorder_ids() {
+        let value = serde_json::json!({
+            "root": {"Split": {
+                "axis": "Horizontal", "ratio": 0.5,
+                "first": {"Tabs": {
+                    "panels": [{"kind": "library"}, {"kind": "library"}], "active": 1
+                }},
+                "second": {"Tabs": {
+                    "panels": [{"kind": "queue"}, {"kind": "plugin-panel"}], "active": 1
+                }}
+            }},
+            "version": 1
+        });
+        let layout = decoded(value.clone()).unwrap();
+        assert_eq!(encoded(&layout), value);
+        assert_eq!(layout.root.as_ref().unwrap().id(), 1);
+        assert_eq!(group(&layout, 3), 2);
+        assert_eq!(group(&layout, 6), 5);
+        assert_eq!(ids(&layout), vec![3, 4, 6, 7]);
+        assert_eq!(layout.next_id, 8);
+        assert_eq!(
+            layout
+                .active_panels()
+                .iter()
+                .map(|panel| panel.id)
+                .collect::<Vec<_>>(),
+            vec![4, 7]
+        );
+        assert_same_layout(&decoded(encoded(&layout)).unwrap(), &layout);
+
+        let mut defaulted = value;
+        defaulted["root"]["Split"]["first"]["Tabs"]["active"] = 0.into();
+        defaulted["root"]["Split"]["second"]["Tabs"]
+            .as_object_mut()
+            .unwrap()
+            .remove("active");
+        let mut layout = decoded(defaulted).unwrap();
+        assert_eq!(
+            layout
+                .active_panels()
+                .iter()
+                .map(|panel| panel.id)
+                .collect::<Vec<_>>(),
+            vec![3, 6]
+        );
+        let saved = encoded(&layout);
+        assert!(
+            saved["root"]["Split"]["first"]["Tabs"]
+                .get("active")
+                .is_none()
+        );
+        assert!(
+            saved["root"]["Split"]["second"]["Tabs"]
+                .get("active")
+                .is_none()
+        );
+        assert_eq!(layout.add("history", Some(2)), 8);
+        layout.validate().unwrap();
+    }
+
+    #[test]
+    fn new_versionless_and_empty_workspaces_preserve_their_structure() {
+        let layout = decoded(serde_json::json!({
+            "root": {"Tabs": {"panels": [{"kind": "queue"}, {"kind": "history"}]}}
+        }))
+        .unwrap();
+        assert_eq!(layout.panels().len(), 2);
+        assert_eq!(layout.active_panels()[0].kind, "queue");
+        assert!(layout.panels().iter().all(|panel| panel.show_tab_bar));
+        let empty = decoded(serde_json::json!({"root": null})).unwrap();
+        assert!(empty.root.is_none());
+        assert_eq!(empty.next_id, 1);
+        assert_same_layout(&decoded(encoded(&empty)).unwrap(), &empty);
+    }
+
+    #[test]
+    fn workspace_rejects_invalid_indices_and_structure() {
+        let value = serde_json::json!({
+            "root": {"Tabs": {"panels": [{"kind": "library"}, {"kind": "queue"}]}}
+        });
+        for active in [
+            serde_json::json!(2),
+            serde_json::json!(u64::MAX),
+            serde_json::json!(-1),
+            serde_json::json!(0.5),
+            serde_json::json!("1"),
+            serde_json::Value::Null,
+        ] {
+            let mut invalid = value.clone();
+            invalid["root"]["Tabs"]["active"] = active;
+            assert!(decoded(invalid).is_err());
+        }
+        let mut empty = value.clone();
+        empty["root"]["Tabs"]["panels"] = serde_json::json!([]);
+        assert!(decoded(empty).is_err());
+        let mut invalid = value.clone();
+        invalid["root"]["Tabs"]["id"] = 42.into();
+        assert!(decoded(invalid).is_err());
+        let mut invalid = value;
+        invalid["root"]["Tabs"]["panels"][0]["show_tab_bar"] = "false".into();
+        assert!(decoded(invalid).is_err());
+        for ratio in [0.0, 1.0] {
+            assert!(
+                decoded(serde_json::json!({
+                    "root": {"Split": {
+                        "axis": "Vertical", "ratio": ratio,
+                        "first": {"Tabs": {"panels": [{"kind": "queue"}]}},
+                        "second": {"Tabs": {"panels": [{"kind": "history"}]}}
+                    }}
+                }))
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_ids_convert_to_local_selection_and_missing_active_defaults_first() {
+        let legacy = serde_json::json!({
+            "root": {"Split": {
+                "id": 100, "axis": "Vertical", "ratio": 0.5,
+                "first": {"Tabs": {
+                    "id": 200, "panels": [{"id": 400, "kind": "queue"}, {"id": 300, "kind": "queue"}],
+                    "active": 300
+                }},
+                "second": {"Tabs": {
+                    "id": 500, "panels": [{"id": 700, "kind": "library"}, {"id": 600, "kind": "history"}]
+                }}
+            }},
+            "next_id": u64::MAX,
+            "version": 1
+        });
+        let layout = decoded(legacy.clone()).unwrap();
+        assert_eq!(
+            layout
+                .active_panels()
+                .iter()
+                .map(|panel| panel.id)
+                .collect::<Vec<_>>(),
+            vec![4, 6]
+        );
+        assert_eq!(layout.next_id, 8);
+        let saved = encoded(&layout);
+        assert_eq!(saved["root"]["Split"]["first"]["Tabs"]["active"], 1);
+        assert!(
+            saved["root"]["Split"]["second"]["Tabs"]
+                .get("active")
+                .is_none()
+        );
+        assert!(saved.get("next_id").is_none());
+        assert_same_layout(&decoded(saved).unwrap(), &layout);
+        assert!(layout.panels().iter().all(|panel| panel.show_tab_bar));
+        for active in [0, 1, 700, 999] {
+            let mut invalid = legacy.clone();
+            invalid["root"]["Split"]["first"]["Tabs"]["active"] = active.into();
+            assert!(decoded(invalid).is_err());
+        }
+        let mut duplicate = legacy.clone();
+        duplicate["root"]["Split"]["second"]["Tabs"]["panels"][0]["id"] = 400.into();
+        assert!(decoded(duplicate).is_err());
+        let mut invalid_allocator = legacy;
+        invalid_allocator["next_id"] = 700.into();
+        assert!(decoded(invalid_allocator).is_err());
+    }
+
+    #[test]
+    fn tab_bar_visibility_is_per_instance_and_survives_moves_and_roundtrips() {
+        let mut layout = Layout::default();
+        let duplicate = layout.add("library", Some(2));
+        assert!(layout.set_tab_bar_visible(3, false));
+        assert!(layout.set_tab_bar_visible(3, false));
+        assert!(!layout.set_tab_bar_visible(u64::MAX, false));
+        assert!(
+            !layout
+                .panels()
+                .iter()
+                .find(|panel| panel.id == 3)
+                .unwrap()
+                .show_tab_bar
+        );
+        assert!(
+            layout
+                .panels()
+                .iter()
+                .find(|panel| panel.id == duplicate)
+                .unwrap()
+                .show_tab_bar
+        );
+        assert!(!layout.active_panels().iter().any(|panel| panel.id == 3));
+        let reopened = decoded(encoded(&layout)).unwrap();
+        assert_same_layout(&reopened, &layout);
+        let libraries = reopened
+            .panels()
+            .into_iter()
+            .filter(|panel| panel.kind == "library")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            libraries
+                .iter()
+                .map(|panel| panel.show_tab_bar)
+                .collect::<Vec<_>>(),
+            vec![false, true]
+        );
+        assert!(layout.move_panel(3, 5, Edge::Center, None));
+        assert!(
+            !layout
+                .active_panels()
+                .iter()
+                .find(|panel| panel.id == 3)
+                .unwrap()
+                .show_tab_bar
+        );
+        assert_same_layout(&decoded(encoded(&layout)).unwrap(), &layout);
+        assert_same_layout(&decoded(legacy_value(&layout)).unwrap(), &layout);
+        assert!(layout.set_tab_bar_visible(3, true));
+        assert!(layout.panels().iter().all(|panel| panel.show_tab_bar));
+        let mut compact = decoded(serde_json::json!({
+            "root": {"Tabs": {"panels": [{"kind": "queue", "show_tab_bar": false}]}}
+        }))
+        .unwrap();
+        assert_eq!(
+            encoded(&compact)["root"]["Tabs"]["panels"][0]["show_tab_bar"],
+            false
+        );
+        assert!(compact.set_tab_bar_visible(2, true));
+        assert!(
+            encoded(&compact)["root"]["Tabs"]["panels"][0]
+                .get("show_tab_bar")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn workspace_lock_defaults_off_and_roundtrips_without_blocking_tab_selection() {
+        let mut layout = Layout::default();
+        assert!(!layout.locked);
+        assert!(encoded(&layout).get("locked").is_none());
+        assert!(!decoded(encoded(&layout)).unwrap().locked);
+        assert!(!decoded(legacy_value(&layout)).unwrap().locked);
+        let added = layout.add("history", Some(2));
+        layout.locked = true;
+        assert!(layout.activate(3));
+        assert!(!layout.active_panels().iter().any(|panel| panel.id == added));
+        let saved = encoded(&layout);
+        assert_eq!(saved["locked"], true);
+        assert_same_layout(&decoded(saved).unwrap(), &layout);
+        layout.locked = false;
+        assert!(encoded(&layout).get("locked").is_none());
+    }
+
     #[test]
     fn default_transport_can_move_and_stay_closed_after_reopening() {
         let mut layout = Layout::default();
@@ -674,15 +1270,11 @@ mod tests {
             .id;
         assert!(layout.move_panel(transport, group(&layout, 3), Edge::Bottom, None));
         layout.validate().unwrap();
-        let encoded = serde_json::to_vec(&layout).unwrap();
-        let mut reopened: Layout = serde_json::from_slice(&encoded).unwrap();
-        reopened.migrate().unwrap();
-        assert_eq!(reopened, layout);
+        let reopened = decoded(encoded(&layout)).unwrap();
+        assert_same_layout(&reopened, &layout);
         assert!(layout.remove(transport));
-        let encoded = serde_json::to_vec(&layout).unwrap();
-        let mut reopened: Layout = serde_json::from_slice(&encoded).unwrap();
-        reopened.migrate().unwrap();
-        assert_eq!(reopened, layout);
+        let reopened = decoded(encoded(&layout)).unwrap();
+        assert_same_layout(&reopened, &layout);
         assert!(
             !reopened
                 .panels()
@@ -697,10 +1289,9 @@ mod tests {
         assert!(original.remove(12));
         original.add("history", Some(2));
         assert!(original.set_ratio(1, 0.73));
-        let mut legacy = serde_json::to_value(&original).unwrap();
+        let mut legacy = legacy_value(&original);
         legacy.as_object_mut().unwrap().remove("version");
-        let mut migrated: Layout = serde_json::from_value(legacy).unwrap();
-        migrated.migrate().unwrap();
+        let mut migrated = decoded(legacy).unwrap();
         migrated.validate().unwrap();
         let Some(Node::Split {
             axis,
@@ -712,10 +1303,16 @@ mod tests {
             panic!("migration must wrap the existing workspace");
         };
         assert_eq!(*axis, Axis::Vertical);
-        assert_eq!(Some(second.as_ref()), original.root.as_ref());
+        let original_subtree = Layout {
+            root: Some(second.as_ref().clone()),
+            next_id: migrated.next_id,
+            version: 1,
+            locked: false,
+        };
+        assert_same_layout(&original_subtree, &original);
         assert!(matches!(first.as_ref(), Node::Tabs { panels, active, .. }
             if panels.len() == 1 && panels[0].kind == "transport" && panels[0].id == *active));
-        assert_eq!(migrated.next_id, original.next_id + 3);
+        assert_same_layout(&decoded(encoded(&migrated)).unwrap(), &migrated);
         let once = migrated.clone();
         migrated.migrate().unwrap();
         assert_eq!(migrated, once);
@@ -726,8 +1323,7 @@ mod tests {
 
     #[test]
     fn empty_legacy_workspace_migrates_and_id_exhaustion_is_non_destructive() {
-        let mut empty: Layout = serde_json::from_str(r#"{"root":null,"next_id":1}"#).unwrap();
-        empty.migrate().unwrap();
+        let empty = decoded(serde_json::json!({"root": null, "next_id": 1})).unwrap();
         empty.validate().unwrap();
         assert_eq!(empty.panels().len(), 1);
         assert_eq!(empty.panels()[0].kind, "transport");
@@ -735,6 +1331,7 @@ mod tests {
             root: None,
             next_id: u64::MAX,
             version: 0,
+            locked: false,
         };
         let original = exhausted.clone();
         assert!(exhausted.migrate().is_err());
@@ -887,11 +1484,13 @@ mod tests {
                     panels: vec![Panel {
                         id: panel_id,
                         kind: "library".into(),
+                        show_tab_bar: true,
                     }],
                     active,
                 }),
                 next_id,
                 version: 1,
+                locked: false,
             };
             assert!(invalid.validate().is_err());
         }
@@ -943,15 +1542,13 @@ mod tests {
             expected.sort_unstable();
             layout.validate().unwrap();
             assert_eq!(ids(&layout), expected);
-            let encoded = serde_json::to_vec(&layout).unwrap();
-            let reopened: Layout = serde_json::from_slice(&encoded).unwrap();
-            reopened.validate().unwrap();
-            assert_eq!(layout, reopened);
+            let reopened = decoded(encoded(&layout)).unwrap();
+            assert_same_layout(&reopened, &layout);
         }
     }
 
     #[test]
-    fn atomic_save_reopens_exactly_and_invalid_save_preserves_previous_file() {
+    fn atomic_save_preserves_structure_and_invalid_save_preserves_previous_file() {
         static TEST_ID: AtomicU64 = AtomicU64::new(1);
         let directory = std::env::temp_dir().join(format!(
             "rivu-layout-test-{}-{}",
@@ -968,19 +1565,23 @@ mod tests {
         assert!(layout.set_ratio(split, 0.73));
         assert!(layout.activate(3));
         layout.save(&path).unwrap();
-        assert_eq!(Layout::load(&path).unwrap(), layout);
+        assert_same_layout(&Layout::load(&path).unwrap(), &layout);
         let mut invalid = layout.clone();
         invalid.next_id = 1;
         assert!(invalid.save(&path).is_err());
-        assert_eq!(Layout::load(&path).unwrap(), layout);
+        assert_same_layout(&Layout::load(&path).unwrap(), &layout);
         assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
-        let mut legacy = serde_json::to_value(&layout).unwrap();
+        let mut legacy = legacy_value(&layout);
         legacy.as_object_mut().unwrap().remove("version");
         fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
-        assert_eq!(Layout::load(&path).unwrap(), layout);
+        let migrated = Layout::load(&path).unwrap();
+        assert_same_layout(&migrated, &layout);
+        migrated.save(&path).unwrap();
+        let saved: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_same_layout(&decoded(saved).unwrap(), &layout);
         fs::write(&path, b"{broken").unwrap();
         assert!(Layout::load(&path).is_err());
-        fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        fs::write(&path, serde_json::to_vec(&legacy_value(&invalid)).unwrap()).unwrap();
         assert!(Layout::load(&path).is_err());
         fs::remove_dir_all(directory).unwrap();
     }

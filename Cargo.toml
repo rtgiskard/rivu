@@ -14,6 +14,7 @@ crossterm = "0.29"
 directories = "6"
 gpui = { git = "https://github.com/zed-industries/zed", rev = "a84689073d296dfd39987bc7dd478e43ef76d83a", default-features = false }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "a84689073d296dfd39987bc7dd478e43ef76d83a", default-features = false, features = ["wayland"] }
+ashpd = { version = "0.13.13", default-features = false, features = ["async-io", "file_chooser"] }
 futures = "0.3"
 libloading = "0.8"
 opus = "0.4"

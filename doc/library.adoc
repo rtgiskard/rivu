@@ -43,8 +43,16 @@ boundaries, play count, last-played timestamp, and a favorite toggle.
 ./target/release/rivu library clean-missing
 ----
 
-The GUI library offers the same favorite/missing filters, a favorite star per row,
-batch favorite/unfavorite actions for selected tracks, and a force-rescan toggle.
+The GUI library offers favorite/missing filters, batch favorite/unfavorite actions
+for selected tracks, and a force-rescan toggle. Track rows have no inline favorite
+button; this does not change stored favorites.
+
+In the desktop GUI, an unfiltered Library is displayed as a directory-first tree.
+Use Up/Down to move, Left/Right to collapse or expand, Space to toggle a folder,
+and Enter to play a track. Search, Favorites, and Missing filters keep the flat
+filtered list view. Dragging a tree file or directory onto Queue appends all
+matching library tracks; dragging onto a selected Playlist adds them using the
+same track-ID deduplication rules as the existing add action.
 Normal scans reuse valid cached probes; `--force` rereads metadata even when file
 size and modification time are unchanged. Forced scans do not replace track IDs
 or clear user metadata overrides, favorites, play counts, or recent timestamps.

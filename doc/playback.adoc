@@ -6,6 +6,12 @@ playback controls, separate from the unapplied draft in the settings dialog.
 Previous restarts the current track when its position exceeds three seconds;
 press it again near the start to select the previous queue entry.
 
+All five buttons are 1.5 times the standard icon-button size. The 128-pixel left
+artwork approximately matches the information and controls beside it. The seek
+row has a progress icon on the left and `elapsed / total` on the right. Volume
+uses a speaker icon with a tooltip, a separate slider, and its percentage.
+Controls wrap in narrow panels, which can scroll vertically when needed.
+
 Seeking to the end of a track follows normal queue completion rather than
 reporting a decoder error. If paused, playback stays paused at the end until
 resumed. Opus seeking accounts for decoder preroll without replaying earlier PCM.
@@ -30,6 +36,25 @@ guaranteed to reach zero on every device/backend.
 The TUI checks external state every 250 ms while idle, but redraws only after a
 state change, local interaction, or terminal resize. Queue labels are cached by
 content, avoiding repeated library searches and label rebuilding on progress updates.
+In the queue, Up/Down selects an occurrence and Enter plays that occurrence,
+including when the same track appears more than once. Search and directory views
+keep their separate Enter actions (enqueue a result or open a directory).
+Space toggles playback; `n`/`p` chooses next/previous. `q` exits only the TUI;
+the core continues playing.
+
+The GUI shares playback keys with the TUI: Space, `n`/`p`, Left/Right (5 seconds),
+Home/End, `r` (repeat), `s` (shuffle), and `[`/`]` (5% volume). Up/Down and Enter
+operate on the last focused Library or Queue list; `d`/Delete removes selected
+queue occurrences. `/` focuses Library search and `t` activates Library. A missing
+Library panel is added only when the workspace is unlocked. `q` closes the GUI
+window without shutting down the core. Text fields and modal/popup input take
+precedence; Escape dismisses the topmost popup or leaves text-field focus.
+Otherwise Escape clears Library, Queue, and Playlists selections, including the
+queue range anchor, without removing entries or changing playback.
+
+Playlists use the same compact icon buttons and tooltips as Queue for creation,
+renaming, deletion, import/export, playback, adding tracks, removing entries and
+moving entries up/down.
 
 If the next track cannot be opened after EOF, playback stops and reports the
 error. A manual switch to a missing file does not interrupt the current track.
@@ -86,6 +111,34 @@ FFmpeg library is loaded merely to probe native media while the option is off.
 
 The footer exit button, `rivu quit`, and MPRIS `Quit` stop the core explicitly;
 closing the GUI window alone leaves playback and MPRIS running.
+
+== Desktop queue
+
+Click selects one queue occurrence. Ctrl/Cmd-click toggles occurrences;
+Shift-click selects an inclusive range from the selection anchor, and
+Ctrl/Cmd+Shift-click adds that range. Repeated tracks remain independently
+selectable by queue occurrence. Double-click plays the clicked occurrence.
+Right-clicking a selected row preserves the selection; right-clicking another
+row selects only that occurrence before opening the menu.
+
+The toolbar removes all selected occurrences. Dragging a selected row moves the
+whole selection in queue order; dropping on a selected row leaves it unchanged.
+Single-row up/down controls remain available for a single selection.
+
+Queue actions remain available while the workspace layout is locked:
+
+* Randomize queue changes queue order without changing the playing occurrence.
+* Remove duplicates keeps one occurrence per library track, preserving the
+  current playing occurrence when its track is duplicated.
+* Add to playlist lets you choose a target and adds selected tracks in queue order,
+  respecting the playlist's existing track deduplication.
+* Clear queue is the penultimate context-menu item, above the final workspace
+  action/status. It remains available only in the menu and requires confirmation.
+  Cancel leaves the queue and playback unchanged; confirming also stops playback.
+
+Removing a selection that excludes the current occurrence leaves playback alone.
+Removing the current occurrence stops it. Queue transformations preserve remaining
+occurrence identities and remove obsolete selection and navigation references.
 
 == Desktop album artwork
 
