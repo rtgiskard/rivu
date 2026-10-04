@@ -1,122 +1,42 @@
 = Rivu
-:toc:
 
 Rivu is a lightweight, local-first music player for Linux.
 
-It provides:
+* Local library, playlists, favorites, queue control, and play counts
+* Desktop GUI, CLI, TUI, and MPRIS controls
+* Movable TokyoNight workspace and audio visualizations
+* Audio-only playback, including CUE subtracks
 
-* Managed music library with directory browsing and search
-* Playlists, queue control, playback statistics, and listening history
-* Audio playback through CPAL with PipeWire/ALSA integration
-* Desktop GUI, CLI, TUI, and MPRIS control
-* Movable, persistent TokyoNight workspace
-* Optional Nerd Font symbols in the TUI
-* MKV, WebM and MP4 audio-container import
-
-Rivu is audio-only. Video tracks are not displayed or decoded. It does not use
-FFmpeg, GStreamer, GLib media backends, or external players.
-
-== Build
-
-Install Rust and the system libraries required by the selected GUI and audio backends.
+== Build and install
 
 [source,sh]
 ----
 sudo pacman -S --needed rust pkgconf alsa-lib opus fontconfig libxkbcommon
 cargo build --release
-----
-The default GUI build targets Wayland. X11 support is intentionally not enabled by default.
-
-=== Desktop installation
-
-Install the executable, desktop launcher, and application icons for the current user:
-
-[source,sh]
-----
 make install PREFIX="$HOME/.local"
 ----
 
-Ensure `~/.local/bin` is on `PATH`. The launcher and the Wayland window both use
-the `rivu` application ID, so desktops can associate the window with its icon.
-System packaging can set `PREFIX` and `DESTDIR` instead.
-
+The default GUI targets Wayland. Ensure `~/.local/bin` is on `PATH`.
 
 == Run
 
 [source,sh]
 ----
-# Desktop GUI; optionally import files or directories
-./target/release/rivu gui ~/Music
-
-# Headless foreground core
-./target/release/rivu serve ~/Music
-
-# Connect to an existing GUI or core
-./target/release/rivu tui
+rivu gui ~/Music
+rivu serve ~/Music
+rivu tui
+rivu --help
 ----
 
-`gui` and `serve` each start their own core and cannot share the same data
- directory at the same time. Use `tui` and grouped CLI commands to control an
- already running instance.
+`gui` and `serve` each start a core; do not run both against the same data
+ directory. Use the CLI or TUI to control an existing instance.
 
-CLI scan and playlist import/export paths are relative to the CLI's working
-directory, not the running core's directory. Exported M3U8 playlists preserve
-duplicate entries and use paths relative to the actual destination directory,
-including when the destination contains directory symlinks or `..`.
+== Documentation
 
-== Playback
-
-Seeking to the end of a track follows normal queue completion rather than
-reporting a decoder error. If paused, playback stays paused at the end until
-resumed. Opus seeking accounts for decoder preroll without replaying earlier PCM.
-
-Pause uses software gating, including on devices without hardware pause support.
-At EOF, Rivu waits for the output backend's playback clock to pass the final
-samples before closing the stream. Listening totals count confirmed playback,
-not frames merely queued to the device; totals are conservative across underruns.
-Recoverable ALSA underruns do not end the listening session.
-
-If the next track cannot be opened after EOF, playback stops and reports the
-error. A manual switch to a missing file does not interrupt the current track.
-Removing tracks also removes their queue and shuffle-history references.
-
-== Configuration
-
-The default configuration file is `~/.config/rivu/config.toml`.
-
-[source,toml]
-----
-media_read_buffer_mb = 2
-nerd_symbols = true
-----
-
-Accepted media read buffer sizes are `1`, `2`, `4`, `8`, and `16` MiB.
-
-== Workspace
-
-The desktop workspace is persisted as `workspace.json`. It stores panel layout,
-split ratios, tab order, and the active tab. Panel IDs are internal runtime
-identities; playback state and library data are stored elsewhere.
-
-== Visual assets
-
-The logo combines a record and flowing water in the workspace's TokyoNight palette.
-`assets/rivu.svg` is the rounded application icon's vector source;
-`assets/rivu.png` is its 256×256 raster export.
-
-The playback panel draws its text-free default album artwork directly with GPUI
-in `src/gui/artwork.rs`, including when no track is selected. Record grooves and
-river curves are tessellated once per window and reused at the displayed size;
-there are no default-cover image files, PNG decoding, or texture uploads.
-Track-specific album artwork is not currently loaded.
-
-To regenerate the application icon PNG after editing its SVG source (requires librsvg):
-
-[source,sh]
-----
-rsvg-convert -w 256 -h 256 -o assets/rivu.png assets/rivu.svg
-----
-
+* link:doc/library.adoc[Library, metadata, playlists, and database maintenance]
+* link:doc/playback.adoc[Playback and audio output]
+* link:doc/configuration.adoc[Configuration, workspace, and visual assets]
+* link:doc/cue.adoc[CUE import and playlist exchange]
 
 == License
 

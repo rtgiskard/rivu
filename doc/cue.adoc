@@ -1,52 +1,50 @@
-= CUE sheets
+= CUE playback
 
-== Import and playback
+== Import and play
 
 [source,sh]
 ----
-./target/release/rivu library scan album.cue --wait
-./target/release/rivu playlist import album.cue --wait
-./target/release/rivu library list
-./target/release/rivu playback play TRACK_ID
+rivu library scan album.cue --wait
+rivu playlist import album.cue --wait
+rivu library list
+rivu playback play TRACK_ID
 ----
 
-Rivu reads ordinary audio CUE sheets using `FILE`, `TRACK`, `INDEX`, `TITLE`
-and `PERFORMER`. No player-specific directives are required. Single-file and
-multi-file sheets are supported; relative `FILE` paths resolve against the sheet.
-Sources must be supported audio files with a known duration.
+Rivu supports standard audio CUE `FILE`, `TRACK`, `INDEX`, `TITLE`, and `PERFORMER`
+commands, including single-file and multi-file sheets. Relative source paths are
+resolved from the sheet's directory. Sources must be supported audio with a
+readable duration; data tracks are not supported.
 
-Each track has its own library ID, metadata, duration and listening history.
-Playback and seek positions are relative to the track. Audio is decoded directly
-from the source; Rivu does not extract or transcode files.
+Each subtrack has its own library identity and statistics. Playback positions and
+seeks are relative to the subtrack. Audio is decoded directly from the source,
+without splitting or transcoding it. Editing library metadata does not rewrite
+the sheet or audio file.
 
-`INDEX 01` starts a track at 75 CD frames per second. The next track's `INDEX 01`
-in the same `FILE` defines its end; the final track ends at source EOF.
-`INDEX 00` pregaps remain with the preceding track. `PREGAP` and `POSTGAP` do not
-synthesize silence absent from the source. Data tracks are not supported.
+== Boundaries and scanning
 
-UTF-8 (with or without BOM) and BOM-marked UTF-16 are supported. Convert legacy
-encodings to UTF-8 first. Invalid indexes, missing sources and out-of-range
-segments report errors without partially importing a sheet.
+* `INDEX 01` sets the start at 75 CD frames per second. The next track's
+  `INDEX 01` in the same source sets the end; the final track ends at source EOF.
+* `INDEX 00` pregaps belong to the preceding track. `PREGAP` and `POSTGAP` do not
+  synthesize silence absent from the source.
+* UTF-8, with or without BOM, and BOM-marked UTF-16 are supported.
+* Invalid indices, unavailable sources, and out-of-range boundaries reject the
+  entire sheet, not just individual tracks.
+* Rescanning rereads the sheet while retaining matching track IDs and user data.
+  Directory scans avoid additionally importing whole sources represented by CUE
+  tracks. Explicitly scanning a source can still import it as a whole track;
+  existing whole-track records are not removed.
 
-Rescanning rereads sheet edits while preserving track IDs, metadata overrides
-and history. Directory scans avoid additionally importing full source images;
-explicit audio-file scans can add them, and existing whole-file records remain.
+== Playlist exchange
 
-== Playlist interchange
+M3U/M3U8 uses ordinary paths. A CUE path represents all its tracks in sheet order.
+Export therefore writes each complete, contiguous, correctly ordered sheet run
+as one CUE path. Ordinary audio and complete sheets may be mixed.
 
-M3U/M3U8 contains ordinary file paths. A CUE path expands to all its tracks in
-sheet order. Export therefore writes one sheet path for each complete,
-contiguous, correctly ordered occurrence of that sheet. Whole-file entries and
-repeated complete sheets can be mixed without changing playback order.
+Playlists retain the first occurrence of each track ID; repeating a sheet does
+not duplicate its tracks. Queues may contain repeated tracks.
 
-Standard M3U has no syntax for selecting an individual CUE subtrack. Exporting
-partial, duplicated-within-sheet or reordered selections is rejected before the
-destination is opened, rather than inventing a private tag or silently exporting
-the entire album. These selections remain supported inside Rivu's persisted
-playlists and queue. Rescan externally edited sheets before exporting.
-
-== Database compatibility
-
-Libraries upgrade transactionally to schema 2, retaining IDs, queues, playlists,
-metadata overrides and statistics. Schema-1 binaries cannot open an upgraded
-database; retain a backup if downgrading is necessary.
+Standard M3U cannot select individual CUE subtracks. Partial or reordered sheet
+runs cannot be exported losslessly: Rivu reports an error before opening the
+output file, preserving any existing file. It neither emits private directives
+nor silently expands a selection to the whole album. Such selections can still
+be stored inside Rivu. Rescan externally edited sheets before exporting.

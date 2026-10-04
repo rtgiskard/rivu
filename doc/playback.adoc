@@ -1,0 +1,16 @@
+= Playback
+
+Seeking to the end of a track follows normal queue completion rather than
+reporting a decoder error. If paused, playback stays paused at the end until
+resumed. Opus seeking accounts for decoder preroll without replaying earlier PCM.
+
+Pause uses software gating, including on devices without hardware pause support.
+At EOF, Rivu waits for the output backend's playback clock to pass the final
+samples before closing the stream. Play counting uses actual heard time confirmed
+by the output backend, not the seek position or frames merely queued to the
+device; confirmation is conservative across underruns. Recoverable ALSA underruns
+do not start a new playback.
+
+If the next track cannot be opened after EOF, playback stops and reports the
+error. A manual switch to a missing file does not interrupt the current track.
+Removing tracks also removes their queue and shuffle-history references.

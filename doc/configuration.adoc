@@ -1,0 +1,39 @@
+= Configuration and workspace
+
+The default configuration file is `~/.config/rivu/config.toml`.
+
+[source,toml]
+----
+media_read_buffer_mb = 2
+play_count_threshold_percent = 20.0
+nerd_symbols = true
+----
+
+Accepted media read buffer sizes are `1`, `2`, `4`, `8`, and `16` MiB.
+`play_count_threshold_percent` must be finite and in `[0, 100)`; zero still requires
+some confirmed heard time. Edit it in the configuration file or GUI preferences.
+
+== Workspace
+
+The desktop workspace is persisted as `workspace.json`. It stores panel layout,
+split ratios, tab order, and the active tab. Panel IDs are internal runtime
+identities; playback state and library data are stored elsewhere.
+
+== Visual assets
+
+The logo combines a record and flowing water in the workspace's TokyoNight palette.
+`assets/rivu.svg` is the rounded application icon's vector source;
+`assets/rivu.png` is its 256×256 raster export.
+
+The playback panel draws its text-free default album artwork directly with GPUI
+in `src/gui/artwork.rs`, including when no track is selected. Record grooves and
+river curves are tessellated once per window and reused at the displayed size;
+there are no default-cover image files, PNG decoding, or texture uploads.
+Track-specific album artwork is not currently loaded.
+
+To regenerate the application icon PNG after editing its SVG source (requires librsvg):
+
+[source,sh]
+----
+rsvg-convert -w 256 -h 256 -o assets/rivu.png assets/rivu.svg
+----
