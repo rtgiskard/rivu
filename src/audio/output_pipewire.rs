@@ -39,14 +39,21 @@ struct Route {
 struct Inventory {
     sinks: BTreeMap<u32, Sink>,
     default: Option<String>,
+    default_metadata: Option<u32>,
     ports: BTreeMap<u32, String>,
     links: BTreeMap<u32, Route>,
     revision: u64,
 }
 
+// Drop listeners before their bound objects, including on global removal.
+struct BoundProxy {
+    _listener: Box<dyn pw::proxy::Listener>,
+    _proxy: Box<dyn pw::proxy::ProxyT>,
+}
+
 struct Connection {
     _listener: pw::registry::Listener,
-    _proxies: Rc<RefCell<Vec<(Box<dyn pw::proxy::ProxyT>, Box<dyn pw::proxy::Listener>)>>>,
+    _proxies: Rc<RefCell<BTreeMap<u32, BoundProxy>>>,
     mainloop: pw::main_loop::MainLoopRc,
     _context: pw::context::ContextRc,
     core: pw::core::CoreRc,
@@ -62,11 +69,12 @@ impl Connection {
         let core = context.connect_rc(None).context("Connecting to PipeWire")?;
         let registry = core.get_registry_rc()?;
         let inventory = Rc::new(RefCell::new(Inventory::default()));
-        let proxies = Rc::new(RefCell::new(Vec::new()));
+        let proxies = Rc::new(RefCell::new(BTreeMap::new()));
         let weak = registry.downgrade();
         let state = inventory.clone();
         let held = proxies.clone();
         let removed = inventory.clone();
+        let removed_proxies = proxies.clone();
         let listener = registry
             .add_listener_local()
             .global(move |global| {
@@ -129,24 +137,28 @@ impl Connection {
                         let listener = node
                             .add_listener_local()
                             .info(move |info| {
-                                if let Some(props) = info.props() {
-                                    if let Some(sink) = state.borrow_mut().sinks.get_mut(&id) {
-                                        if let Some(positions) = props.get("audio.position") {
-                                            sink.positions = positions.to_owned();
-                                        }
-                                    }
+                                if let Some(props) = info.props()
+                                    && let Some(sink) = state.borrow_mut().sinks.get_mut(&id)
+                                    && let Some(positions) = props.get("audio.position")
+                                {
+                                    sink.positions = positions.to_owned();
                                 }
                             })
                             .register();
-                        held.borrow_mut().push((
-                            Box::new(node) as Box<dyn pw::proxy::ProxyT>,
-                            Box::new(listener) as Box<dyn pw::proxy::Listener>,
-                        ));
+                        held.borrow_mut().insert(
+                            id,
+                            BoundProxy {
+                                _listener: Box::new(listener),
+                                _proxy: Box::new(node),
+                            },
+                        );
                     }
                 } else if global.type_ == pw::types::ObjectType::Metadata
                     && props.get("metadata.name") == Some("default")
                 {
+                    let id = global.id;
                     if let Ok(metadata) = registry.bind::<pw::metadata::Metadata, _>(global) {
+                        state.borrow_mut().default_metadata = Some(id);
                         let state = state.clone();
                         let listener = metadata
                             .add_listener_local()
@@ -166,18 +178,29 @@ impl Connection {
                                 0
                             })
                             .register();
-                        held.borrow_mut().push((
-                            Box::new(metadata) as Box<dyn pw::proxy::ProxyT>,
-                            Box::new(listener) as Box<dyn pw::proxy::Listener>,
-                        ));
+                        held.borrow_mut().insert(
+                            id,
+                            BoundProxy {
+                                _listener: Box::new(listener),
+                                _proxy: Box::new(metadata),
+                            },
+                        );
                     }
                 }
             })
             .global_remove(move |id| {
+                // Release outside the inventory borrow: destroying a proxy may
+                // dispatch callbacks that also need the inventory.
+                let proxy = removed_proxies.borrow_mut().remove(&id);
+                drop(proxy);
                 let mut state = removed.borrow_mut();
                 state.sinks.remove(&id);
                 state.ports.remove(&id);
                 state.links.remove(&id);
+                if state.default_metadata == Some(id) {
+                    state.default_metadata = None;
+                    state.default = None;
+                }
                 state.revision += 1;
             })
             .register();

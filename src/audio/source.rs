@@ -175,7 +175,7 @@ struct OpusDecoder {
 enum Decode {
     Native(Box<dyn AudioDecoder>),
     Opus(OpusDecoder),
-    Ffmpeg(super::ffmpeg::Decoder),
+    Ffmpeg(Box<super::ffmpeg::Decoder>),
 }
 fn decoder(params: &AudioCodecParameters, timestamps_include_delay: bool) -> Result<Decode> {
     if params.codec != CODEC_ID_OPUS {
@@ -303,7 +303,7 @@ impl Source {
         let mut source = Self {
             format: None,
             track: 0,
-            decode: Decode::Ffmpeg(decode),
+            decode: Decode::Ffmpeg(Box::new(decode)),
             time_base: TimeBase::try_new(1, info.sample_rate).unwrap(),
             frames: Vec::with_capacity(8192 * layout.len()),
             frame_start: 0.0,
@@ -636,7 +636,7 @@ impl Source {
             self.frames.extend_from_slice(samples);
             let mut retained_start = packet_start;
             let channels = self.layout.len();
-            if channels == 0 || self.frames.len() % channels != 0 {
+            if channels == 0 || !self.frames.len().is_multiple_of(channels) {
                 bail!("FFmpeg decoder returned incomplete interleaved frames");
             }
             if let Some(end) = self.range_end {
@@ -813,16 +813,9 @@ fn interleave_samples<S: Sample>(audio: &AudioBuffer<S>, output: &mut Vec<f32>)
 where
     f32: FromSample<S>,
 {
-    let channels = audio.spec().channels().count();
-    output.resize(audio.frames() * channels, 0.0);
-    for channel in 0..channels {
-        for (frame, sample) in output
-            .chunks_exact_mut(channels)
-            .zip(audio.plane(channel).unwrap())
-        {
-            frame[channel] = f32::from_sample(*sample);
-        }
-    }
+    output.clear();
+    output.reserve(audio.samples_interleaved());
+    output.extend(audio.iter_interleaved().map(f32::from_sample));
 }
 
 fn interleave_audio(audio: GenericAudioBufferRef<'_>, output: &mut Vec<f32>) {
@@ -845,6 +838,25 @@ mod tests {
     use super::*;
     use std::io::Write;
     use symphonia::core::{checksum::Crc32, io::Monitor};
+
+    #[test]
+    fn native_interleave_reuses_storage_and_replaces_previous_packet() {
+        use symphonia::core::audio::AudioSpec;
+        let mut audio = AudioBuffer::<i16>::new(AudioSpec::new(48_000, Channels::Discrete(2)), 3);
+        audio.resize(1, &[16_384, -16_384]);
+        audio.resize(3, &[8_192, -8_192]);
+        let mut output = Vec::with_capacity(32);
+        let allocation = output.as_ptr();
+        interleave_samples(&audio, &mut output);
+        assert_eq!(output, [0.5, -0.5, 0.25, -0.25, 0.25, -0.25]);
+        audio.resize(1, &[0, 0]);
+        interleave_samples(&audio, &mut output);
+        assert_eq!(output, [0.5, -0.5]);
+        audio.clear();
+        interleave_samples(&audio, &mut output);
+        assert!(output.is_empty());
+        assert_eq!(output.as_ptr(), allocation);
+    }
 
     // A real, seekable Ogg/Opus file without external tools or binary fixtures.
     fn opus_file() -> tempfile::NamedTempFile {
@@ -1112,15 +1124,15 @@ mod tests {
     fn decoded_timestamps_place_cue_seeks_in_the_correct_preview_bins() {
         let file = pcm_file();
         let mut source = Source::open(file.path(), PROBE_BUFFER_LEN, false).unwrap();
-        let range = Some(super::super::PlaybackRange {
+        let range = super::super::PlaybackRange {
             start_seconds: 30.0 / 75.0,
             end_seconds: Some(80.0 / 75.0),
-        });
-        source.restrict(range.unwrap()).unwrap();
+        };
+        source.restrict(range).unwrap();
         let rate = source.info.sample_rate;
         let channels = source.layout.len();
         let mut frame = super::super::WaveformFrame::default();
-        frame.select(file.path(), range, source.info.duration, rate);
+        frame.select(file.path(), Some(range), source.info.duration, rate);
         for target in [0.2, 0.0] {
             source.seek(target).unwrap();
             let (samples, timestamp) = source.next_frames().unwrap().unwrap();

@@ -8,6 +8,7 @@ use std::{
     fs::{self, File},
     io::{self, Write},
     path::{Path, PathBuf},
+    sync::{Arc, OnceLock},
 };
 use symphonia::{
     core::{
@@ -22,7 +23,7 @@ const DEFAULT_IMAGE: &[u8] = include_bytes!("../assets/rivu.png");
 
 struct CachedArtwork {
     fingerprint: Option<String>,
-    uri: Option<String>,
+    uri: OnceLock<Option<String>>,
 }
 
 pub struct ArtworkManager {
@@ -30,7 +31,7 @@ pub struct ArtworkManager {
     default_uri: Option<String>,
     // The lookup key is exactly (track ID, fingerprint). Index by ID and compare
     // the fingerprint in place, avoiding a fingerprint allocation on cache hits.
-    entries: Mutex<HashMap<i64, CachedArtwork>>,
+    entries: Mutex<HashMap<i64, Arc<CachedArtwork>>>,
 }
 
 impl ArtworkManager {
@@ -45,23 +46,31 @@ impl ArtworkManager {
     }
 
     pub fn uri_for(&self, track: &Track) -> Option<String> {
-        let mut entries = self.entries.lock();
-        if let Some(cached) = entries.get(&track.id)
-            && cached.fingerprint == track.fingerprint
-        {
-            return cached.uri.clone();
-        }
-        let uri = self
-            .embedded_uri(&track.path)
-            .or_else(|| self.default_uri.clone());
-        entries.insert(
-            track.id,
-            CachedArtwork {
-                fingerprint: track.fingerprint.clone(),
-                uri: uri.clone(),
-            },
-        );
-        uri
+        let cached = {
+            let mut entries = self.entries.lock();
+            let cached = entries.entry(track.id).or_insert_with(|| {
+                Arc::new(CachedArtwork {
+                    fingerprint: track.fingerprint.clone(),
+                    uri: OnceLock::new(),
+                })
+            });
+            if cached.fingerprint != track.fingerprint {
+                *cached = Arc::new(CachedArtwork {
+                    fingerprint: track.fingerprint.clone(),
+                    uri: OnceLock::new(),
+                });
+            }
+            Arc::clone(cached)
+        };
+        // Same-key requests share one probe without holding the map lock. An
+        // older fingerprint may finish later but cannot replace its successor.
+        cached
+            .uri
+            .get_or_init(|| {
+                self.embedded_uri(&track.path)
+                    .or_else(|| self.default_uri.clone())
+            })
+            .clone()
     }
 
     fn embedded_uri(&self, path: &Path) -> Option<String> {
@@ -249,6 +258,53 @@ mod tests {
         track.id = 3;
         track.fingerprint = Some("original".into());
         assert_eq!(manager.uri_for(&track), manager.default_uri);
+    }
+
+    #[test]
+    fn concurrent_requests_share_a_complete_cached_image() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("track.wav");
+        tagged_wav(&source);
+        let manager = ArtworkManager::new(directory.path());
+        let track = track(source);
+        let barrier = std::sync::Barrier::new(4);
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        manager.uri_for(&track).unwrap()
+                    })
+                })
+                .collect();
+            for handle in handles {
+                let uri = handle.join().unwrap();
+                assert_eq!(fs::read(file_path(&uri)).unwrap(), DEFAULT_IMAGE);
+                assert_eq!(manager.uri_for(&track).as_deref(), Some(uri.as_str()));
+            }
+        });
+    }
+
+    #[test]
+    fn old_fingerprint_cannot_overwrite_new_cache_entry() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = ArtworkManager::new(directory.path());
+        let mut track = track(directory.path().join("missing.wav"));
+        let old = Arc::new(CachedArtwork {
+            fingerprint: track.fingerprint.clone(),
+            uri: OnceLock::new(),
+        });
+        manager.entries.lock().insert(track.id, old.clone());
+        track.fingerprint = Some("new".into());
+        let current_uri = manager.uri_for(&track);
+        old.uri.set(Some("file:///old.png".into())).unwrap();
+        assert_eq!(manager.uri_for(&track), current_uri);
+        let entries = manager.entries.lock();
+        assert!(!Arc::ptr_eq(entries.get(&track.id).unwrap(), &old));
+        assert_eq!(
+            entries.get(&track.id).unwrap().fingerprint,
+            track.fingerprint
+        );
     }
 
     #[test]

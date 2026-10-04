@@ -7,7 +7,7 @@ use super::{
 };
 use crate::analysis::AnalysisWorker;
 use anyhow::anyhow;
-use crossbeam_channel::{Receiver, Sender, select};
+use crossbeam_channel::{Receiver, Sender, TryRecvError, select};
 use parking_lot::RwLock;
 use std::{
     path::PathBuf,
@@ -18,6 +18,7 @@ use std::{
 pub(super) struct Worker {
     commands: Receiver<AudioCommand>,
     events: Sender<AudioEvent>,
+    shutdown: Receiver<()>,
     analyzer: AnalysisWorker,
     waveform: Arc<RwLock<WaveformFrame>>,
     playback: Option<Playback>,
@@ -35,6 +36,7 @@ impl Worker {
     pub(super) fn new(
         commands: Receiver<AudioCommand>,
         events: Sender<AudioEvent>,
+        shutdown: Receiver<()>,
         analyzer: AnalysisWorker,
         waveform: Arc<RwLock<WaveformFrame>>,
         media_read_buffer_len: usize,
@@ -42,6 +44,7 @@ impl Worker {
         Self {
             commands,
             events,
+            shutdown,
             analyzer,
             waveform,
             playback: None,
@@ -57,7 +60,7 @@ impl Worker {
         }
     }
     fn event(&self, event: AudioEvent) {
-        let _ = self.events.send_timeout(event, Duration::from_secs(1));
+        send_event(&self.events, &self.shutdown, event);
     }
     fn stop(&mut self) -> (u64, f64) {
         self.analyzer.set_enabled(false);
@@ -227,14 +230,25 @@ impl Worker {
     }
     pub(super) fn run(mut self) {
         loop {
+            if matches!(self.shutdown.try_recv(), Err(TryRecvError::Disconnected)) {
+                break;
+            }
             while let Ok(command) = self.commands.try_recv() {
+                if matches!(self.shutdown.try_recv(), Err(TryRecvError::Disconnected)) {
+                    self.stop();
+                    return;
+                }
                 if !self.command(command) {
                     return;
                 }
             }
             if self.playback.is_none() {
-                let Ok(command) = self.commands.recv() else {
-                    break;
+                let command = select! {
+                    recv(self.shutdown) -> _ => break,
+                    recv(self.commands) -> command => match command {
+                        Ok(command) => command,
+                        Err(_) => break,
+                    },
                 };
                 if !self.command(command) {
                     break;
@@ -285,6 +299,7 @@ impl Worker {
             // Stable paused playback never schedules a status/GUI polling tick.
             let command = if playback.paused() {
                 select! {
+                    recv(self.shutdown) -> _ => break,
                     recv(self.commands) -> command => Some(command),
                     recv(errors) -> error => {
                         if let Ok(error) = error { self.fail(anyhow!(error)); }
@@ -294,6 +309,7 @@ impl Worker {
                 }
             } else {
                 select! {
+                    recv(self.shutdown) -> _ => break,
                     recv(self.commands) -> command => Some(command),
                     recv(errors) -> error => {
                         if let Ok(error) = error { self.fail(anyhow!(error)); }
@@ -313,5 +329,133 @@ impl Worker {
             }
         }
         self.stop();
+    }
+}
+
+// Backpressure stays on the scheduling thread, never the real-time callback.
+// The bounded channel cannot silently lose lifecycle events while a receiver
+// remains connected. Shutdown explicitly cancels a blocked send.
+fn send_event(events: &Sender<AudioEvent>, shutdown: &Receiver<()>, event: AudioEvent) {
+    if matches!(event, AudioEvent::Progress { .. }) {
+        let _ = events.try_send(event);
+    } else {
+        select! {
+            send(events, event) -> _ => {},
+            recv(shutdown) -> _ => {},
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossbeam_channel::bounded;
+
+    #[test]
+    fn engine_shutdown_and_drop_cancel_full_command_and_event_queues() {
+        use crate::analysis::AnalysisFrame;
+        use crate::audio::AudioEngine;
+        use parking_lot::Mutex;
+
+        for explicit in [false, true] {
+            let (commands, receive) = bounded(1);
+            commands.send(AudioCommand::Pause(true)).unwrap();
+            let (events, event_receive) = bounded(1);
+            events.send(AudioEvent::Ended { generation: 1 }).unwrap();
+            let held_events = event_receive.clone();
+            let (shutdown, cancelled) = bounded(0);
+            let analysis = Arc::new(RwLock::new(AnalysisFrame::default()));
+            let waveform = Arc::new(RwLock::new(WaveformFrame::default()));
+            let worker = Worker::new(
+                receive,
+                events,
+                cancelled,
+                AnalysisWorker::new(analysis.clone()).unwrap(),
+                waveform.clone(),
+                1024,
+            );
+            let worker = std::thread::spawn(move || {
+                worker.event(AudioEvent::Ended { generation: 2 });
+                worker.run();
+            });
+            let engine = AudioEngine {
+                commands,
+                events: event_receive,
+                analysis,
+                waveform,
+                worker: Some(worker),
+                shutdown: Mutex::new(Some(shutdown)),
+            };
+            let (done, completed) = bounded(1);
+            let closer = std::thread::spawn(move || {
+                if explicit {
+                    engine.send(AudioCommand::Shutdown).unwrap();
+                }
+                drop(engine);
+                done.send(()).unwrap();
+            });
+            completed.recv_timeout(Duration::from_secs(2)).unwrap();
+            closer.join().unwrap();
+            assert!(matches!(
+                held_events.try_recv(),
+                Ok(AudioEvent::Ended { generation: 1 })
+            ));
+        }
+    }
+
+    #[test]
+    fn full_event_queue_drops_progress_but_retains_lifecycle_events() {
+        let (events, receive) = bounded(1);
+        let (_stop, shutdown) = bounded(0);
+        events.send(AudioEvent::Ended { generation: 1 }).unwrap();
+        send_event(
+            &events,
+            &shutdown,
+            AudioEvent::Progress {
+                generation: 1,
+                position_seconds: 1.0,
+                listened_seconds: 1.0,
+            },
+        );
+        let sender = std::thread::spawn(move || {
+            send_event(
+                &events,
+                &shutdown,
+                AudioEvent::DecoderStopped { generation: 2 },
+            );
+            send_event(
+                &events,
+                &shutdown,
+                AudioEvent::Failed {
+                    generation: 3,
+                    message: "decoder failed".into(),
+                },
+            );
+        });
+        assert!(matches!(
+            receive.recv().unwrap(),
+            AudioEvent::Ended { generation: 1 }
+        ));
+        assert!(matches!(
+            receive.recv().unwrap(),
+            AudioEvent::DecoderStopped { generation: 2 }
+        ));
+        assert!(matches!(
+            receive.recv().unwrap(),
+            AudioEvent::Failed { generation: 3, .. }
+        ));
+        sender.join().unwrap();
+    }
+
+    #[test]
+    fn shutdown_cancels_a_full_event_queue() {
+        let (events, _receive) = bounded(1);
+        let (stop, shutdown) = bounded::<()>(0);
+        events.send(AudioEvent::Ended { generation: 1 }).unwrap();
+        let sender = std::thread::spawn(move || {
+            send_event(&events, &shutdown, AudioEvent::Ended { generation: 2 });
+        });
+        drop(stop);
+        sender.join().unwrap();
     }
 }

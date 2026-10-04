@@ -9,6 +9,10 @@
 //! Listened time is a conservative, callback-confirmed count; unconfirmed
 //! device buffers on stop or xrun recovery are not counted as heard. Accuracy
 //! at the physical output remains bounded by the backend's playback timestamps.
+//!
+//! Lifecycle events use bounded worker-thread backpressure; progress is best
+//! effort. Consumers must keep draining events while submitting commands.
+//! Shutdown cancels blocked event delivery without involving the output callback.
 
 mod detector;
 mod ffmpeg;
@@ -44,7 +48,7 @@ use crate::analysis::{AnalysisFrame, AnalysisSettings, AnalysisWorker};
 use crate::library::MediaInfo;
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, bounded};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -114,11 +118,13 @@ pub struct AudioEngine {
     pub analysis: Arc<RwLock<AnalysisFrame>>,
     pub waveform: Arc<RwLock<WaveformFrame>>,
     worker: Option<JoinHandle<()>>,
+    shutdown: Mutex<Option<Sender<()>>>,
 }
 impl AudioEngine {
     pub fn new(media_read_buffer_mb: u32) -> Result<Self> {
         let (commands, receive) = bounded(64);
         let (send_events, events) = bounded(128);
+        let (shutdown, cancelled) = bounded(0);
         let analysis = Arc::new(RwLock::new(AnalysisFrame::default()));
         let waveform = Arc::new(RwLock::new(WaveformFrame::default()));
         let worker_waveform = waveform.clone();
@@ -132,6 +138,7 @@ impl AudioEngine {
                 Worker::new(
                     receive,
                     send_events,
+                    cancelled,
                     analyzer,
                     worker_waveform,
                     media_read_buffer_len,
@@ -144,9 +151,14 @@ impl AudioEngine {
             analysis,
             waveform,
             worker: Some(worker),
+            shutdown: Mutex::new(Some(shutdown)),
         })
     }
     pub fn send(&self, command: AudioCommand) -> Result<()> {
+        if matches!(command, AudioCommand::Shutdown) {
+            self.shutdown.lock().take();
+            return Ok(());
+        }
         self.commands.send(command).context("Audio worker stopped")
     }
     pub fn stop_and_snapshot(&self) -> Result<(u64, f64)> {
@@ -159,7 +171,7 @@ impl AudioEngine {
 }
 impl Drop for AudioEngine {
     fn drop(&mut self) {
-        let _ = self.commands.send(AudioCommand::Shutdown);
+        self.shutdown.get_mut().take();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }

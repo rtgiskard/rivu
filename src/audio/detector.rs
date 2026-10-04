@@ -58,7 +58,7 @@ fn scan_region(file: &mut File, offset: u64, length: u64) -> Result<Option<Detec
         if let Some(found) = scan_bytes(&window) {
             return Ok(Some(found));
         }
-        let keep = (MAX_FRAME * 2).min(window.len());
+        let keep = (MAX_FRAME * 3 - 1).min(window.len());
         overlap.clear();
         overlap.extend_from_slice(&window[window.len() - keep..]);
         position += count as u64;
@@ -73,8 +73,12 @@ fn riff_data_regions(file: &mut File) -> Result<Option<Vec<(u64, u64)>>> {
         return Ok(None);
     }
     let mut regions = Vec::new();
+    let limit = file
+        .metadata()?
+        .len()
+        .min(u64::from(u32::from_le_bytes(head[4..8].try_into().unwrap())) + 8);
     let mut cursor = 12u64;
-    loop {
+    while cursor.saturating_add(8) <= limit {
         let mut chunk = [0u8; 8];
         file.seek(SeekFrom::Start(cursor))?;
         if file.read_exact(&mut chunk).is_err() {
@@ -83,7 +87,7 @@ fn riff_data_regions(file: &mut File) -> Result<Option<Vec<(u64, u64)>>> {
         let size = u64::from(u32::from_le_bytes(chunk[4..8].try_into().unwrap()));
         let body = cursor + 8;
         if &chunk[..4] == b"data" {
-            regions.push((body, size));
+            regions.push((body, size.min(limit - body)));
         }
         cursor = body.saturating_add(size).saturating_add(size & 1);
         if regions.len() >= 4 {
@@ -94,10 +98,7 @@ fn riff_data_regions(file: &mut File) -> Result<Option<Vec<(u64, u64)>>> {
 }
 
 fn sync_kind(bytes: &[u8], at: usize) -> Option<bool> {
-    if at + 4 > bytes.len() {
-        return None;
-    }
-    match &bytes[at..at + 4] {
+    match bytes.get(at..at.checked_add(4)?)? {
         [0x7f, 0xfe, 0x80, 0x01] | [0xfe, 0x7f, 0x01, 0x80] => Some(false),
         [0x1f, 0xff, 0xe8, 0x00] | [0xff, 0x1f, 0x00, 0xe8] => Some(true),
         _ => None,
@@ -132,7 +133,7 @@ fn rate(code: u32) -> Option<u32> {
 }
 
 fn header(bytes: &[u8], at: usize, fourteen: bool) -> Option<(usize, Option<u32>)> {
-    if at + 12 > bytes.len() {
+    if bytes.len().checked_sub(at)? < 12 {
         return None;
     }
     let little = little_word(bytes, at);
@@ -175,7 +176,7 @@ fn header(bytes: &[u8], at: usize, fourteen: bool) -> Option<(usize, Option<u32>
     } else {
         // Normalize LE by swapping each complete 16-bit word, then parse the
         // canonical big-endian bitstream. No per-byte bit reversal is valid.
-        let words = source.len().min(normalized.len() / 2 * 2) & !1;
+        let words = source.len().min(normalized.len()) & !1;
         for pos in (0..words).step_by(2) {
             let pair = if little {
                 [source[pos + 1], source[pos]]
@@ -201,16 +202,19 @@ fn scan_bytes(bytes: &[u8]) -> Option<Detection> {
         let Some((frame, sample_rate)) = header(bytes, at, fourteen) else {
             continue;
         };
+        if frame > bytes.len() - at {
+            continue;
+        }
         let mut cursor = at + frame;
         let mut count = 1;
         while count < 3 {
-            if cursor + 4 > bytes.len() || sync_kind(bytes, cursor) != Some(fourteen) {
+            if sync_kind(bytes, cursor) != Some(fourteen) {
                 break;
             }
             let Some((next, next_rate)) = header(bytes, cursor, fourteen) else {
                 break;
             };
-            if next != frame || next_rate != sample_rate {
+            if next != frame || next_rate != sample_rate || next > bytes.len() - cursor {
                 break;
             }
             count += 1;
@@ -230,6 +234,30 @@ fn scan_bytes(bytes: &[u8]) -> Option<Detection> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn truncated_third_frame_is_not_detection() {
+        for mut bytes in [core16(false), core16(true), core14(false), core14(true)] {
+            bytes.pop();
+            assert!(scan_bytes(&bytes).is_none());
+        }
+        assert!(sync_kind(&[], usize::MAX).is_none());
+        assert!(header(&[], usize::MAX, false).is_none());
+    }
+
+    #[test]
+    fn riff_regions_stay_inside_container_and_file() {
+        use std::io::Write;
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(b"RIFF").unwrap();
+        file.write_all(&16_u32.to_le_bytes()).unwrap();
+        file.write_all(b"WAVEdata").unwrap();
+        file.write_all(&1000_u32.to_le_bytes()).unwrap();
+        file.write_all(&[0; 8]).unwrap();
+        assert_eq!(riff_data_regions(&mut file).unwrap(), Some(vec![(20, 4)]));
+        file.set_len(22).unwrap();
+        assert_eq!(riff_data_regions(&mut file).unwrap(), Some(vec![(20, 2)]));
+    }
+
     #[test]
     fn lone_sync_is_not_detection() {
         let mut bytes = vec![0u8; 512];
@@ -257,7 +285,9 @@ mod tests {
             set_bits(out, 46, 14, 95); // 96-byte frame
             set_bits(out, 66, 4, 8); // 44.1 kHz
             if little {
-                for pair in out.chunks_exact_mut(2) {
+                let (pairs, remainder) = out.as_chunks_mut::<2>();
+                debug_assert!(remainder.is_empty());
+                for pair in pairs {
                     pair.swap(0, 1);
                 }
             }

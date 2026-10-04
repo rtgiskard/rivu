@@ -30,17 +30,34 @@ mod layout;
 mod pipewire;
 
 pub fn devices() -> Result<Vec<String>> {
-    let mut names = Vec::new();
-    for device in cpal::default_host().output_devices()? {
-        names.push(device.description()?.name().to_owned());
-    }
+    // A broken host or device description must not hide the other backend.
+    let cpal = cpal::default_host().output_devices().map(|devices| {
+        devices
+            .filter_map(|device| device.description().ok())
+            .map(|description| description.name().to_owned())
+            .collect::<Vec<_>>()
+    });
     #[cfg(target_os = "linux")]
-    if let Ok(native) = pipewire::devices() {
-        names.extend(native);
-    }
+    let mut names = merge_devices(cpal.map_err(Into::into), pipewire::devices())?;
+    #[cfg(not(target_os = "linux"))]
+    let mut names = cpal?;
     names.sort();
     names.dedup();
     Ok(names)
+}
+
+#[cfg(target_os = "linux")]
+fn merge_devices(cpal: Result<Vec<String>>, native: Result<Vec<String>>) -> Result<Vec<String>> {
+    match (cpal, native) {
+        (Ok(mut names), Ok(native)) => {
+            names.extend(native);
+            Ok(names)
+        }
+        (Ok(names), Err(_)) | (Err(_), Ok(names)) => Ok(names),
+        (Err(cpal), Err(native)) => {
+            bail!("Audio device discovery failed: CPAL: {cpal:#}; PipeWire: {native:#}")
+        }
+    }
 }
 
 pub(super) fn validate_device(name: Option<&str>) -> Result<()> {
@@ -55,7 +72,10 @@ fn find_device(name: Option<&str>) -> Result<cpal::Device> {
     let host = cpal::default_host();
     if let Some(name) = name {
         for device in host.output_devices()? {
-            if device.description()?.name() == name {
+            if device
+                .description()
+                .is_ok_and(|description| description.name() == name)
+            {
                 return Ok(device);
             }
         }
@@ -251,7 +271,7 @@ impl PlaybackClock {
         };
         let rate = u128::from(rate.max(1));
         let nanos =
-            u64::try_from((u128::from(previous.frames) * 1_000_000_000 + rate - 1) / rate).ok()?;
+            u64::try_from((u128::from(previous.frames) * 1_000_000_000).div_ceil(rate)).ok()?;
         let end = previous.start.checked_add(Duration::from_nanos(nanos))?;
         Some(if end > predicted { end } else { predicted })
     }
@@ -385,10 +405,11 @@ impl Output {
         let callback = OutputCallback {
             consumer,
             tap: analyzer.producer(),
+            tap_gap: false,
             control: analyzer.control.clone(),
             shared: shared.clone(),
             channels: config.channels as usize,
-            frame: vec![0.0; source_channels],
+            scratch: vec![0.0; source_channels * OutputCallback::BLOCK_FRAMES],
             mapping,
             analysis_weights: analysis_weights(source_layout),
             rate,
@@ -459,10 +480,11 @@ impl Output {
         let callback = OutputCallback {
             consumer,
             tap: analyzer.producer(),
+            tap_gap: false,
             control: analyzer.control.clone(),
             shared: shared.clone(),
             channels: source_channels,
-            frame: vec![0.0; source_channels],
+            scratch: vec![0.0; source_channels * OutputCallback::BLOCK_FRAMES],
             mapping: Vec::new(),
             analysis_weights: analysis_weights(source_layout),
             rate,
@@ -589,16 +611,20 @@ fn analysis_weights(layout: &[Channel]) -> Vec<[f32; 2]> {
 struct OutputCallback {
     consumer: HeapCons<f32>,
     tap: HeapProd<TapFrame>,
+    tap_gap: bool,
     shared: Arc<OutputShared>,
     control: Arc<AnalysisControl>,
     channels: usize,
-    frame: Vec<f32>,
+    scratch: Vec<f32>,
     mapping: Vec<Option<usize>>,
     analysis_weights: Vec<[f32; 2]>,
     rate: u32,
     clock: PlaybackClock,
 }
 impl OutputCallback {
+    // Fixed storage bounds callback memory independently of device buffer size.
+    const BLOCK_FRAMES: usize = 256;
+
     fn render_native(
         &mut self,
         data: &mut [f32],
@@ -629,12 +655,13 @@ impl OutputCallback {
         let volume = f32::from_bits(self.shared.volume.load(Ordering::Relaxed));
         let analyze = self.control.enabled.load(Ordering::Relaxed);
         let epoch = self.control.epoch.load(Ordering::Relaxed);
+        let source_channels = self.analysis_weights.len();
         // Snapshot availability: valid frames form one prefix, even if the
         // producer refills concurrently after an underflow.
         let mut count = if paused || self.shared.timing_error.load(Ordering::Acquire) != 0 {
             0
         } else {
-            (self.consumer.occupied_len() / self.frame.len()).min(data.len() / self.channels)
+            (self.consumer.occupied_len() / source_channels).min(data.len() / self.channels)
         };
         if count > 0 && self.clock.pending.len() == self.clock.pending.capacity() {
             self.shared.fail_timing(2);
@@ -653,22 +680,36 @@ impl OutputCallback {
             None
         };
         data.fill(T::from_sample(0.0));
-        for output in data.chunks_exact_mut(self.channels).take(count) {
-            // One pop publishes consumption of the entire frame, even when
-            // the ring wraps. Scratch storage is allocated before stream start.
-            let consumed = self.consumer.pop_slice(&mut self.frame);
-            debug_assert_eq!(consumed, self.frame.len());
-            if analyze {
-                let mut samples = [0.0; 2];
-                for (sample, weights) in self.frame.iter().zip(&self.analysis_weights) {
-                    samples[0] += sample * weights[0];
-                    samples[1] += sample * weights[1];
+        for block in data[..count * self.channels].chunks_mut(Self::BLOCK_FRAMES * self.channels) {
+            // Publish ring consumption once per block, including wrapped rings.
+            // Scratch is fixed before stream start; every chunk contains whole frames.
+            let samples = block.len() / self.channels * source_channels;
+            let scratch = &mut self.scratch[..samples];
+            let consumed = self.consumer.pop_slice(scratch);
+            debug_assert_eq!(consumed, samples);
+            for (output, frame) in block
+                .chunks_exact_mut(self.channels)
+                .zip(scratch.chunks_exact(source_channels))
+            {
+                if analyze {
+                    let mut samples = [0.0; 2];
+                    for (sample, weights) in frame.iter().zip(&self.analysis_weights) {
+                        samples[0] += sample * weights[0];
+                        samples[1] += sample * weights[1];
+                    }
+                    self.tap_gap = self
+                        .tap
+                        .try_push(TapFrame {
+                            samples,
+                            epoch,
+                            gap: self.tap_gap,
+                        })
+                        .is_err();
                 }
-                let _ = self.tap.try_push(TapFrame { samples, epoch });
-            }
-            for (sample, source) in output.iter_mut().zip(&self.mapping) {
-                if let Some(source) = source {
-                    *sample = T::from_sample((self.frame[*source] * volume).clamp(-1.0, 1.0));
+                for (sample, source) in output.iter_mut().zip(&self.mapping) {
+                    if let Some(source) = source {
+                        *sample = T::from_sample((frame[*source] * volume).clamp(-1.0, 1.0));
+                    }
                 }
             }
         }
@@ -687,6 +728,103 @@ mod tests {
     use super::*;
     use crate::analysis::AnalysisFrame;
     use parking_lot::RwLock;
+
+    #[test]
+    fn block_render_preserves_wrapped_frames_mapping_and_analysis() {
+        let frames = OutputCallback::BLOCK_FRAMES * 2 + 13;
+        let source = [Channel::FrontLeft, Channel::FrontRight];
+        let device = [
+            Channel::FrontRight,
+            Channel::FrontLeft,
+            Channel::FrontCenter,
+        ];
+        let (mut output, mut callback, _analyzer) =
+            test_output_layout(192_000, false, &source, &device, frames * 2);
+        // Offset the ring so the next full write wraps across its allocation.
+        output.push(&[0.0; 34]);
+        callback.render(&mut [0.0_f32; 51], timestamp(0, 20));
+        let (tap, mut analysis) = HeapRb::new(frames).split();
+        callback.tap = tap;
+        callback.control.enabled.store(true, Ordering::Release);
+        let input: Vec<_> = (0..frames)
+            .flat_map(|i| {
+                let value = i as f32 / frames as f32;
+                [value, -value]
+            })
+            .collect();
+        assert_eq!(output.push(&input), frames);
+        let scratch = callback.scratch.as_ptr();
+        let mut data = vec![1.0_f32; (frames + 7) * device.len() + 1];
+        callback.render(&mut data, timestamp(1, 21));
+        for (actual, expected) in data[..frames * device.len()]
+            .chunks_exact(device.len())
+            .zip(input.chunks_exact(source.len()))
+        {
+            assert_eq!(actual, &[expected[1], expected[0], 0.0]);
+            let tap = analysis.try_pop().unwrap();
+            assert_eq!(tap.samples, [expected[0], expected[1]]);
+            assert!(!tap.gap);
+        }
+        assert!(
+            data[frames * device.len()..]
+                .iter()
+                .all(|sample| *sample == 0.0)
+        );
+        assert!(analysis.try_pop().is_none());
+        assert_eq!(callback.consumer.occupied_len(), 0);
+        assert_eq!(callback.scratch.as_ptr(), scratch);
+        assert_eq!(
+            callback.scratch.len(),
+            OutputCallback::BLOCK_FRAMES * source.len()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn device_discovery_keeps_the_working_backend() {
+        assert_eq!(
+            merge_devices(
+                Err(anyhow::anyhow!("CPAL failed")),
+                Ok(vec!["PipeWire: sink".into()])
+            )
+            .unwrap(),
+            ["PipeWire: sink"]
+        );
+        assert_eq!(
+            merge_devices(
+                Ok(vec!["CPAL sink".into()]),
+                Err(anyhow::anyhow!("PipeWire failed"))
+            )
+            .unwrap(),
+            ["CPAL sink"]
+        );
+        assert!(
+            merge_devices(
+                Err(anyhow::anyhow!("CPAL")),
+                Err(anyhow::anyhow!("PipeWire"))
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn tap_overflow_marks_the_next_accepted_frame() {
+        let (mut output, mut callback, _analyzer) = test_output(192_000, false);
+        let (tap, mut samples) = HeapRb::new(1).split();
+        callback.tap = tap;
+        callback.control.enabled.store(true, Ordering::Release);
+        output.push(&[0.5; 6]);
+        callback.render(&mut [0.0_f32; 6], timestamp(0, 20));
+        assert!(!samples.try_pop().unwrap().gap);
+        assert!(callback.tap_gap);
+        output.push(&[0.25; 2]);
+        callback.render(&mut [0.0_f32; 2], timestamp(1, 21));
+        assert!(samples.try_pop().unwrap().gap);
+        assert!(!callback.tap_gap);
+        output.push(&[0.0; 2]);
+        callback.render(&mut [0.0_f32; 2], timestamp(2, 22));
+        assert!(!samples.try_pop().unwrap().gap);
+    }
 
     fn test_output(rate: u32, paused: bool) -> (Output, OutputCallback, AnalysisWorker) {
         let stereo = [Channel::FrontLeft, Channel::FrontRight];
@@ -717,10 +855,11 @@ mod tests {
         let callback = OutputCallback {
             consumer,
             tap: analyzer.producer(),
+            tap_gap: false,
             shared,
             control: analyzer.control.clone(),
             channels: device.len(),
-            frame: vec![0.0; source.len()],
+            scratch: vec![0.0; source.len() * OutputCallback::BLOCK_FRAMES],
             mapping: layout::mapping(source, device).unwrap(),
             analysis_weights: analysis_weights(source),
             rate,
@@ -957,15 +1096,17 @@ mod tests {
             12_000,
             "No padding or filter delay may change the audible duration"
         );
+        let (frames, remainder) = output.as_chunks::<2>();
+        assert!(remainder.is_empty());
         assert!(
-            output
-                .chunks_exact(2)
+            frames
+                .iter()
                 .all(|frame| (frame[0] + frame[1]).abs() < 1e-6)
         );
         let power = |frequency: f32| {
             let mut real = 0.0;
             let mut imag = 0.0;
-            for (index, frame) in output.chunks_exact(2).enumerate() {
+            for (index, frame) in frames.iter().enumerate() {
                 let phase = std::f32::consts::TAU * frequency * index as f32 / 48_000.0;
                 real += frame[0] * phase.cos();
                 imag += frame[0] * phase.sin();

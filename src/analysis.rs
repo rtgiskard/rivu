@@ -57,6 +57,8 @@ impl AnalysisSettings {
 pub(crate) struct TapFrame {
     pub samples: [f32; 2],
     pub epoch: u64,
+    /// The preceding tap frame was dropped; never bridge this gap in an FFT.
+    pub gap: bool,
 }
 
 pub(crate) struct AnalysisControl {
@@ -235,6 +237,13 @@ impl SpectrumAnalyzer {
         self.filled = (self.filled + 1).min(self.rolling.len());
     }
 
+    fn push_tap(&mut self, frame: &TapFrame) {
+        if frame.gap {
+            self.reset();
+        }
+        self.push(frame.samples);
+    }
+
     fn transform(&mut self) -> [f32; 2] {
         let n = self.rolling.len();
         let mut rms = [0.0_f32; 2];
@@ -305,7 +314,9 @@ fn analyze(
         let cycle_start = Instant::now();
         let current_epoch = control.epoch.load(Ordering::Acquire);
         let sample_rate = control.sample_rate.load(Ordering::Acquire);
-        if current_epoch % 2 != 0 || control.epoch.load(Ordering::Acquire) != current_epoch {
+        if !current_epoch.is_multiple_of(2)
+            || control.epoch.load(Ordering::Acquire) != current_epoch
+        {
             thread::park_timeout(Duration::from_millis(1));
             continue;
         }
@@ -330,7 +341,7 @@ fn analyze(
             for frame in &incoming[..count] {
                 if frame.epoch == current_epoch {
                     accepted += 1;
-                    analyzer.push(frame.samples);
+                    analyzer.push_tap(frame);
                 }
             }
         }
@@ -349,6 +360,30 @@ fn analyze(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tap_gap_requires_a_complete_new_window() {
+        let settings = AnalysisSettings {
+            fps: 5,
+            fft_size: 512,
+            ..AnalysisSettings::from(&Config::default())
+        };
+        let mut analyzer = SpectrumAnalyzer::new(settings, 192_000);
+        for _ in 0..settings.fft_size {
+            analyzer.push([1.0; 2]);
+        }
+        analyzer.push_tap(&TapFrame {
+            samples: [0.0; 2],
+            gap: true,
+            ..TapFrame::default()
+        });
+        assert_eq!(analyzer.filled, 1);
+        for _ in 1..settings.fft_size {
+            analyzer.push_tap(&TapFrame::default());
+        }
+        assert_eq!(analyzer.filled, settings.fft_size as usize);
+        assert_eq!(analyzer.transform(), [0.0; 2]);
+    }
 
     #[test]
     fn musical_bands_follow_nyquist_and_density() {

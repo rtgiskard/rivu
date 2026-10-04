@@ -431,39 +431,39 @@ impl Decoder {
                 let name = unsafe { (rt.f.codec_name)((*params).codec_id) };
                 bail!("FFmpeg decoder unavailable for {}", cstr(name));
             }
-            let codec = unsafe { (rt.f.alloc_codec)(decoder) };
+            let mut codec = unsafe { (rt.f.alloc_codec)(decoder) };
             if codec.is_null() {
                 bail!("FFmpeg could not allocate codec context");
             }
-            let packet = unsafe { (rt.f.packet_alloc)() };
-            let frame = unsafe { (rt.f.frame_alloc)() };
+            let mut packet = unsafe { (rt.f.packet_alloc)() };
+            let mut frame = unsafe { (rt.f.frame_alloc)() };
             if packet.is_null() || frame.is_null() {
                 unsafe {
                     if !frame.is_null() {
-                        (rt.f.frame_free)(&mut (frame as *mut AVFrame));
+                        (rt.f.frame_free)(&mut frame);
                     }
                     if !packet.is_null() {
-                        (rt.f.packet_free)(&mut (packet as *mut AVPacket));
+                        (rt.f.packet_free)(&mut packet);
                     }
-                    (rt.f.free_codec)(&mut (codec as *mut AVCodecContext));
+                    (rt.f.free_codec)(&mut codec);
                 }
                 bail!("FFmpeg could not allocate decode buffers");
             }
             let ret = unsafe { (rt.f.params_to_context)(codec, params) };
             if ret < 0 {
                 unsafe {
-                    (rt.f.frame_free)(&mut (frame as *mut AVFrame));
-                    (rt.f.packet_free)(&mut (packet as *mut AVPacket));
-                    (rt.f.free_codec)(&mut (codec as *mut AVCodecContext));
+                    (rt.f.frame_free)(&mut frame);
+                    (rt.f.packet_free)(&mut packet);
+                    (rt.f.free_codec)(&mut codec);
                 }
                 return Err(error_text(&rt, ret, "copy codec parameters"));
             }
             let ret = unsafe { (rt.f.codec_open)(codec, decoder, ptr::null_mut()) };
             if ret < 0 {
                 unsafe {
-                    (rt.f.frame_free)(&mut (frame as *mut AVFrame));
-                    (rt.f.packet_free)(&mut (packet as *mut AVPacket));
-                    (rt.f.free_codec)(&mut (codec as *mut AVCodecContext));
+                    (rt.f.frame_free)(&mut frame);
+                    (rt.f.packet_free)(&mut packet);
+                    (rt.f.free_codec)(&mut codec);
                 }
                 return Err(error_text(&rt, ret, "open audio decoder"));
             }
