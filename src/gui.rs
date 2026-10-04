@@ -284,6 +284,8 @@ struct GuiApp {
     settings: settings::Settings,
     visuals: visuals::Visuals,
     catalog_open: bool,
+    device_popup_open: bool,
+    hidden_tab_bars: HashSet<u64>,
     target_group: Option<u64>,
     dragging: Option<Dragging>,
     seek_preview: Option<f64>,
@@ -388,6 +390,8 @@ impl GuiApp {
             most_played: Vec::new(),
             visuals: visuals::Visuals::new(),
             catalog_open: false,
+            device_popup_open: false,
+            hidden_tab_bars: HashSet::new(),
             target_group: None,
             dragging: None,
             measured: Rc::new(RefCell::new(HashMap::new())),
@@ -634,6 +638,7 @@ impl GuiApp {
             Node::Tabs { id, panels, active } => {
                 let node_id = *id;
                 let active = *active;
+                let tabs_hidden = self.hidden_tab_bars.contains(&node_id);
                 let mut tabs = row()
                     .h(px(36.))
                     .flex_shrink_0()
@@ -646,7 +651,7 @@ impl GuiApp {
                     let title = panel_spec(&panel.kind)
                         .map_or(panel.kind.as_str(), |spec| spec.title)
                         .to_owned();
-                    let hide_on_right_click =
+                    let hide_tab_bar_on_right_click =
                         matches!(panel.kind.as_str(), "spectrum" | "spectrogram");
                     let drag = PanelDrag {
                         panel_id,
@@ -670,14 +675,14 @@ impl GuiApp {
                                 this.target_group = Some(node_id);
                                 this.persist_layout(cx);
                             }))
-                            .when(hide_on_right_click, |view| {
+                            .when(hide_tab_bar_on_right_click, |view| {
                                 view.on_mouse_down(
                                     MouseButton::Right,
                                     cx.listener(move |this, _, window, cx| {
                                         window.prevent_default();
                                         cx.stop_propagation();
-                                        this.layout.remove(panel_id);
-                                        this.persist_layout(cx);
+                                        this.hidden_tab_bars.insert(node_id);
+                                        cx.notify();
                                     }),
                                 )
                             })
@@ -722,7 +727,32 @@ impl GuiApp {
                             })
                     })
                     .unwrap_or_else(|| div().into_any_element());
-                let panel = column()
+                let mut content_area = div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .p_3()
+                    .overflow_hidden()
+                    .child(content);
+                if tabs_hidden {
+                    content_area = content_area.child(
+                        icon_button(
+                            ("show-tabs", node_id),
+                            "▾",
+                            "Show tab bar",
+                            cx,
+                            move |this, _, cx| {
+                                this.hidden_tab_bars.remove(&node_id);
+                                cx.notify();
+                            },
+                        )
+                        .absolute()
+                        .top_0()
+                        .right_0(),
+                    );
+                }
+                let mut panel = column()
                     .id(("group", node_id))
                     .relative()
                     .size_full()
@@ -731,17 +761,12 @@ impl GuiApp {
                     .border_1()
                     .border_color(rgb(BORDER))
                     .rounded_md()
-                    .overflow_hidden()
-                    .child(tabs)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_h_0()
-                            .min_w_0()
-                            .p_3()
-                            .overflow_hidden()
-                            .child(content),
-                    )
+                    .overflow_hidden();
+                if !tabs_hidden {
+                    panel = panel.child(tabs);
+                }
+                panel = panel
+                    .child(content_area)
                     .on_drop(cx.listener(move |this, drag: &PanelDrag, window, cx| {
                         let position = window.mouse_position();
                         let bounds = this

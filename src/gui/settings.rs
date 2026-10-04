@@ -1,5 +1,5 @@
 use super::{
-    BORDER, GuiApp, button, column,
+    BORDER, GuiApp, button, column, icon_button,
     input::Input,
     panels::{TRACK_HEIGHT, caption, list_row},
     row,
@@ -169,8 +169,83 @@ impl GuiApp {
         } else {
             "MPRIS: disabled"
         };
-        let device_height = ((self.state.devices.len() + 1) as f32 * TRACK_HEIGHT).min(126.0);
         let chosen_device = self.settings.value(Field::Device, cx);
+        let mut device_input = div().relative().flex_1().min_w_0().child(
+            self.settings
+                .field(Field::Device, "Output device (blank = system default)"),
+        );
+        if self.device_popup_open {
+            let device_height = ((self.state.devices.len() + 1) as f32 * TRACK_HEIGHT).min(180.0);
+            let devices = uniform_list(
+                ("settings-devices", panel_id),
+                self.state.devices.len() + 1,
+                cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                    range
+                        .filter_map(|index| {
+                            let name = if index == 0 {
+                                String::new()
+                            } else {
+                                this.state.devices.get(index - 1)?.clone()
+                            };
+                            let label = if name.is_empty() {
+                                "System default".to_owned()
+                            } else {
+                                name.clone()
+                            };
+                            let selected = chosen_device == name;
+                            Some(
+                                list_row(("output-device", index), selected)
+                                    .child(div().text_sm().truncate().child(label))
+                                    .on_click(cx.listener(
+                                        move |this, _: &gpui::ClickEvent, _, cx| {
+                                            this.settings.draft.output_device =
+                                                (!name.is_empty()).then(|| name.clone());
+                                            this.settings.set_value(
+                                                Field::Device,
+                                                name.clone(),
+                                                cx,
+                                            );
+                                            this.device_popup_open = false;
+                                            cx.notify();
+                                        },
+                                    )),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                }),
+            )
+            .h(px(device_height))
+            .flex_shrink_0()
+            .w_full();
+            device_input = device_input.child(
+                column()
+                    .absolute()
+                    .top(px(48.))
+                    .left_0()
+                    .w_full()
+                    .max_h(px(220.))
+                    .p_2()
+                    .bg(rgb(super::PANEL))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .child(caption("Available outputs"))
+                    .child(devices),
+            );
+        }
+        let device_picker = row()
+            .w_full()
+            .flex_shrink_0()
+            .child(device_input)
+            .child(icon_button(
+                ("settings-device-popup", panel_id),
+                "⌄",
+                "Choose output device",
+                cx,
+                |this, _, cx| {
+                    this.device_popup_open = !this.device_popup_open;
+                    cx.notify();
+                },
+            ));
         column()
             .id(("settings-panel", panel_id))
             .size_full()
@@ -205,53 +280,7 @@ impl GuiApp {
                 Field::Roots,
                 "Library roots (separate paths with semicolons)",
             ))
-            .child(
-                self.settings
-                    .field(Field::Device, "Output device (blank = system default)"),
-            )
-            .child(caption("Available outputs · click to select"))
-            .child(
-                uniform_list(
-                    ("settings-devices", panel_id),
-                    self.state.devices.len() + 1,
-                    cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
-                        range
-                            .filter_map(|index| {
-                                let name = if index == 0 {
-                                    String::new()
-                                } else {
-                                    this.state.devices.get(index - 1)?.clone()
-                                };
-                                let label = if name.is_empty() {
-                                    "System default".to_owned()
-                                } else {
-                                    name.clone()
-                                };
-                                let selected = chosen_device == name;
-                                Some(
-                                    list_row(("output-device", index), selected)
-                                        .child(div().text_sm().truncate().child(label))
-                                        .on_click(cx.listener(
-                                            move |this, _: &gpui::ClickEvent, _, cx| {
-                                                this.settings.draft.output_device =
-                                                    (!name.is_empty()).then(|| name.clone());
-                                                this.settings.set_value(
-                                                    Field::Device,
-                                                    name.clone(),
-                                                    cx,
-                                                );
-                                                cx.notify();
-                                            },
-                                        )),
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                    }),
-                )
-                .h(px(device_height))
-                .flex_shrink_0()
-                .w_full(),
-            )
+            .child(device_picker)
             .child(self.settings.field(Field::Volume, "Volume (0–100%)"))
             .child(
                 row()
