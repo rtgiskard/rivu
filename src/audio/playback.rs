@@ -84,10 +84,9 @@ impl Playback {
         self.paused
     }
 
-    pub(super) fn pause(&mut self, paused: bool) -> Result<()> {
-        self.output.pause(paused)?;
+    pub(super) fn pause(&mut self, paused: bool) {
+        self.output.pause(paused);
         self.paused = paused;
-        Ok(())
     }
 
     pub(super) fn set_volume(&self, volume: f32) {
@@ -109,6 +108,10 @@ impl Playback {
             .map_or(value, |duration| value.min(duration))
     }
     pub(super) fn fill(&mut self) -> Result<()> {
+        self.output.check_timing()?;
+        if self.paused {
+            return Ok(());
+        }
         while self.output.has_room() {
             if self.offset < self.pending.len() {
                 let count = self.output.push(&self.pending[self.offset..]);
@@ -132,7 +135,7 @@ impl Playback {
         Ok(())
     }
     pub(super) fn finished(&self) -> bool {
-        self.eof && self.offset == self.pending.len() && self.output.drained()
+        !self.paused && self.eof && self.offset == self.pending.len() && self.output.drained()
     }
     pub(super) fn close(&mut self) -> f64 {
         self.prior_heard + self.output.close()

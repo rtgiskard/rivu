@@ -2,6 +2,13 @@
 //!
 //! The worker schedules playback; playback owns the source-to-output pipeline.
 //! Decoder internals and real-time output state remain in their respective modules.
+//!
+//! Pause is software-gated: the device continues receiving silence without
+//! consuming queued music. End-of-track waits for CPAL's stream clock to pass
+//! the final valid frame's predicted playback time, not merely an empty ring.
+//! Listened time is a conservative, callback-confirmed count; unconfirmed
+//! device buffers on stop or xrun recovery are not counted as heard. Accuracy
+//! at the physical output remains bounded by the backend's playback timestamps.
 
 mod output;
 mod playback;

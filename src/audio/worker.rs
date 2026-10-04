@@ -139,12 +139,8 @@ impl Worker {
                 }
             }
             AudioCommand::Pause(paused) => {
-                let result = self
-                    .playback
-                    .as_mut()
-                    .map(|playback| playback.pause(paused));
-                if let Some(Err(error)) = result {
-                    self.fail(error);
+                if let Some(playback) = self.playback.as_mut() {
+                    playback.pause(paused);
                 }
                 self.refresh_analysis();
             }
@@ -201,18 +197,19 @@ impl Worker {
                     return;
                 }
             }
-            if self.playback.is_none()
-                || self
-                    .playback
-                    .as_ref()
-                    .is_some_and(|playback| playback.paused())
-            {
+            if self.playback.is_none() {
                 let Ok(command) = self.commands.recv() else {
                     break;
                 };
                 if !self.command(command) {
                     break;
                 }
+                continue;
+            }
+            // Fatal backend errors must still be delivered while software-paused,
+            // and must not be hidden by an otherwise completed drain.
+            if let Ok(error) = self.playback.as_ref().unwrap().errors().try_recv() {
+                self.fail(anyhow!(error));
                 continue;
             }
             let result = self.playback.as_mut().unwrap().fill();
@@ -244,15 +241,16 @@ impl Worker {
             }
             let playback = self.playback.as_ref().unwrap();
             let errors = playback.errors().clone();
+            let interval = Duration::from_millis(if playback.paused() { 100 } else { 10 });
             select! {
                 recv(self.commands) -> command => {
                     let Ok(command) = command else { break; };
                     if !self.command(command) { break; }
                 }
                 recv(errors) -> error => if let Ok(error) = error { self.fail(anyhow!(error)); },
-                // Poll only during playback: a 250 ms ring absorbs scheduling jitter,
-                // without channel wake-up locks in the real-time PCM callback.
-                default(Duration::from_millis(10)) => (),
+                // The software-paused stream still runs silent callbacks so its
+                // device clock and fatal errors continue to be observed.
+                default(interval) => (),
             }
         }
         self.stop();

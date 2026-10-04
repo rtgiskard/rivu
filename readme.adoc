@@ -51,6 +51,12 @@ Seeking to the end of a track follows normal queue completion rather than
 reporting a decoder error. If paused, playback stays paused at the end until
 resumed. Opus seeking accounts for decoder preroll without replaying earlier PCM.
 
+Pause uses software gating, including on devices without hardware pause support.
+At EOF, Rivu waits for the output backend's playback clock to pass the final
+samples before closing the stream. Listening totals count confirmed playback,
+not frames merely queued to the device; totals are conservative across underruns.
+Recoverable ALSA underruns do not end the listening session.
+
 == Configuration
 
 The default configuration file is `~/.config/rivu/config.toml`.

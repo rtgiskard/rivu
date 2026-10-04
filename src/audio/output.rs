@@ -13,9 +13,12 @@ use rubato::{
     Async, FixedAsync, Resampler, SincInterpolationParameters, SincInterpolationType,
     WindowFunction, audioadapter_buffers::direct::InterleavedSlice,
 };
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+use std::{
+    collections::VecDeque,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+    },
 };
 
 pub fn devices() -> Result<Vec<String>> {
@@ -153,8 +156,102 @@ impl Converter {
 
 struct OutputShared {
     paused: AtomicBool,
-    consumed: AtomicU64,
+    heard: AtomicU64,
+    retired: AtomicU64,
+    xruns: AtomicU64,
+    timing_error: AtomicU32,
     volume: AtomicU32,
+}
+impl OutputShared {
+    fn new(volume: f32, paused: bool) -> Self {
+        Self {
+            paused: AtomicBool::new(paused),
+            heard: AtomicU64::new(0),
+            retired: AtomicU64::new(0),
+            xruns: AtomicU64::new(0),
+            timing_error: AtomicU32::new(0),
+            volume: AtomicU32::new(volume.to_bits()),
+        }
+    }
+}
+
+struct ScheduledFrames {
+    start: cpal::StreamInstant,
+    frames: u64,
+    heard: u64,
+}
+
+// Kept entirely in the PCM callback. Allocation happens before starting the
+// stream; a broken clock / excessive backend queue is reported, never guessed.
+struct PlaybackClock {
+    pending: VecDeque<ScheduledFrames>,
+    last_callback: Option<cpal::StreamInstant>,
+    last_playback: Option<cpal::StreamInstant>,
+    heard: u64,
+    retired: u64,
+    xruns: u64,
+}
+impl PlaybackClock {
+    fn new() -> Self {
+        Self {
+            pending: VecDeque::with_capacity(1024),
+            last_callback: None,
+            last_playback: None,
+            heard: 0,
+            retired: 0,
+            xruns: 0,
+        }
+    }
+
+    fn advance(
+        &mut self,
+        timestamp: cpal::OutputStreamTimestamp,
+        rate: u32,
+        shared: &OutputShared,
+    ) {
+        let xruns = shared.xruns.load(Ordering::Acquire);
+        if self.xruns != xruns {
+            // CPAL may discard device buffers while recovering an xrun. It
+            // cannot report which samples survived: do not count unconfirmed
+            // samples as heard, or wait forever for the discarded buffers.
+            self.retired += self
+                .pending
+                .drain(..)
+                .map(|span| span.frames - span.heard)
+                .sum::<u64>();
+            self.xruns = xruns;
+            // A shorter device queue can move the playback prediction back,
+            // even though the stream's callback clock remains monotonic.
+            self.last_playback = None;
+        }
+        if self
+            .last_callback
+            .is_some_and(|last| timestamp.callback < last)
+            || self
+                .last_playback
+                .is_some_and(|last| timestamp.playback < last)
+        {
+            shared.timing_error.store(1, Ordering::Release);
+            return;
+        }
+        self.last_callback = Some(timestamp.callback);
+        self.last_playback = Some(timestamp.playback);
+        while let Some(span) = self.pending.front_mut() {
+            let elapsed = timestamp.callback.duration_since(span.start);
+            let heard = (elapsed.as_nanos() * u128::from(rate) / 1_000_000_000)
+                .min(u128::from(span.frames)) as u64;
+            let newly_heard = heard - span.heard;
+            self.heard += newly_heard;
+            self.retired += newly_heard;
+            span.heard = heard;
+            if heard != span.frames {
+                break;
+            }
+            self.pending.pop_front();
+        }
+        shared.heard.store(self.heard, Ordering::Release);
+        shared.retired.store(self.retired, Ordering::Release);
+    }
 }
 pub(super) struct Output {
     stream: Option<cpal::Stream>,
@@ -162,6 +259,7 @@ pub(super) struct Output {
     shared: Arc<OutputShared>,
     rate: u32,
     errors: Receiver<cpal::Error>,
+    submitted: u64,
 }
 impl Output {
     pub(super) fn new(
@@ -178,35 +276,27 @@ impl Output {
             bail!("Invalid output device configuration");
         }
         let (producer, consumer) = HeapRb::new((rate / 4).max(2048) as usize).split();
-        let shared = Arc::new(OutputShared {
-            paused: AtomicBool::new(paused),
-            consumed: AtomicU64::new(0),
-            volume: AtomicU32::new(volume.to_bits()),
-        });
+        let shared = Arc::new(OutputShared::new(volume, paused));
         let (error_send, errors) = bounded(4);
         analyzer.reset(rate);
-        let tap = analyzer.producer();
-        let control = analyzer.control.clone();
+        let callback = OutputCallback {
+            consumer,
+            tap: analyzer.producer(),
+            control: analyzer.control.clone(),
+            shared: shared.clone(),
+            channels: config.channels as usize,
+            rate,
+            clock: PlaybackClock::new(),
+        };
+        let shared_errors = shared.clone();
         macro_rules! build {
             ($sample:ty) => {{
-                let shared_callback = shared.clone();
-                let mut consumer = consumer;
-                let mut tap = tap;
-                let channels = config.channels as usize;
+                let mut callback = callback;
                 device.build_output_stream(
                     config,
-                    move |data: &mut [$sample], _| {
-                        render(
-                            data,
-                            channels,
-                            &mut consumer,
-                            &mut tap,
-                            &shared_callback,
-                            &control,
-                        );
-                    },
+                    move |data: &mut [$sample], info| callback.render(data, info.timestamp()),
                     move |error| {
-                        let _ = error_send.try_send(error);
+                        report_stream_error(error, &shared_errors, &error_send);
                     },
                     None,
                 )?
@@ -227,15 +317,16 @@ impl Output {
             cpal::SampleFormat::U64 => build!(u64),
             other => bail!("Unsupported device sample format: {other:?}"),
         };
-        if !paused {
-            stream.play()?;
-        }
+        // Software pause keeps timestamps advancing and never depends on
+        // optional backend / hardware pause support.
+        stream.play()?;
         Ok(Self {
             stream: Some(stream),
             producer,
             shared,
             rate,
             errors,
+            submitted: 0,
         })
     }
     pub(super) fn rate(&self) -> u32 {
@@ -257,26 +348,28 @@ impl Output {
     }
 
     pub(super) fn push(&mut self, frames: &[Stereo]) -> usize {
-        self.producer.push_slice(frames)
+        let count = self.producer.push_slice(frames);
+        self.submitted += count as u64;
+        count
     }
 
     pub(super) fn drained(&self) -> bool {
-        self.producer.occupied_len() == 0
+        self.shared.retired.load(Ordering::Acquire) == self.submitted
     }
 
     pub(super) fn heard(&self) -> f64 {
-        self.shared.consumed.load(Ordering::Acquire) as f64 / self.rate as f64
+        self.shared.heard.load(Ordering::Acquire) as f64 / self.rate as f64
     }
-    pub(super) fn pause(&self, paused: bool) -> Result<()> {
+    pub(super) fn pause(&self, paused: bool) {
         self.shared.paused.store(paused, Ordering::Release);
-        if let Some(stream) = &self.stream {
-            if paused {
-                stream.pause()?;
-            } else {
-                stream.play()?;
-            }
+    }
+
+    pub(super) fn check_timing(&self) -> Result<()> {
+        match self.shared.timing_error.load(Ordering::Acquire) {
+            0 => Ok(()),
+            1 => bail!("Audio output timestamp moved backwards"),
+            _ => bail!("Audio output timing queue exhausted before playback advanced"),
         }
-        Ok(())
     }
     pub(super) fn close(&mut self) -> f64 {
         self.shared.paused.store(true, Ordering::Release);
@@ -284,41 +377,75 @@ impl Output {
         self.heard()
     }
 }
-fn render<T: cpal::Sample + cpal::FromSample<f32>>(
-    data: &mut [T],
-    channels: usize,
-    consumer: &mut HeapCons<Stereo>,
-    tap: &mut HeapProd<TapFrame>,
+fn report_stream_error(
+    error: cpal::Error,
     shared: &OutputShared,
-    control: &AnalysisControl,
+    errors: &crossbeam_channel::Sender<cpal::Error>,
 ) {
-    let paused = shared.paused.load(Ordering::Acquire);
-    let volume = f32::from_bits(shared.volume.load(Ordering::Relaxed));
-    let analyze = control.enabled.load(Ordering::Relaxed);
-    let epoch = control.epoch.load(Ordering::Relaxed);
-    let mut consumed = 0;
-    for output in data.chunks_exact_mut(channels) {
-        let samples = if paused {
-            [0.0; 2]
-        } else if let Some(samples) = consumer.try_pop() {
-            consumed += 1;
-            if analyze {
-                let _ = tap.try_push(TapFrame { samples, epoch });
-            }
-            samples
-        } else {
-            [0.0; 2]
-        };
-        output.fill(T::from_sample(0.0));
-        if channels == 1 {
-            output[0] = T::from_sample(((samples[0] + samples[1]) * 0.5 * volume).clamp(-1.0, 1.0));
-        } else {
-            output[0] = T::from_sample((samples[0] * volume).clamp(-1.0, 1.0));
-            output[1] = T::from_sample((samples[1] * volume).clamp(-1.0, 1.0));
-        }
+    if error.kind() == cpal::ErrorKind::Xrun {
+        shared.xruns.fetch_add(1, Ordering::Release);
+    } else {
+        let _ = errors.try_send(error);
     }
-    if consumed > 0 {
-        shared.consumed.fetch_add(consumed, Ordering::Release);
+}
+
+struct OutputCallback {
+    consumer: HeapCons<Stereo>,
+    tap: HeapProd<TapFrame>,
+    shared: Arc<OutputShared>,
+    control: Arc<AnalysisControl>,
+    channels: usize,
+    rate: u32,
+    clock: PlaybackClock,
+}
+impl OutputCallback {
+    fn render<T: cpal::Sample + cpal::FromSample<f32>>(
+        &mut self,
+        data: &mut [T],
+        timestamp: cpal::OutputStreamTimestamp,
+    ) {
+        self.clock.advance(timestamp, self.rate, &self.shared);
+        let paused = self.shared.paused.load(Ordering::Acquire);
+        let volume = f32::from_bits(self.shared.volume.load(Ordering::Relaxed));
+        let analyze = self.control.enabled.load(Ordering::Relaxed);
+        let epoch = self.control.epoch.load(Ordering::Relaxed);
+        // Snapshot availability: valid frames form one prefix, even if the
+        // producer refills concurrently after an underflow.
+        let mut count = if paused || self.shared.timing_error.load(Ordering::Acquire) != 0 {
+            0
+        } else {
+            self.consumer.occupied_len().min(data.len() / self.channels)
+        };
+        if count > 0 && self.clock.pending.len() == self.clock.pending.capacity() {
+            self.shared.timing_error.store(2, Ordering::Release);
+            count = 0;
+        }
+        for (index, output) in data.chunks_exact_mut(self.channels).enumerate() {
+            let samples = if index < count {
+                let samples = self.consumer.try_pop().expect("available PCM frame");
+                if analyze {
+                    let _ = self.tap.try_push(TapFrame { samples, epoch });
+                }
+                samples
+            } else {
+                [0.0; 2]
+            };
+            output.fill(T::from_sample(0.0));
+            if self.channels == 1 {
+                output[0] =
+                    T::from_sample(((samples[0] + samples[1]) * 0.5 * volume).clamp(-1.0, 1.0));
+            } else {
+                output[0] = T::from_sample((samples[0] * volume).clamp(-1.0, 1.0));
+                output[1] = T::from_sample((samples[1] * volume).clamp(-1.0, 1.0));
+            }
+        }
+        if count > 0 {
+            self.clock.pending.push_back(ScheduledFrames {
+                start: timestamp.playback,
+                frames: count as u64,
+                heard: 0,
+            });
+        }
     }
 }
 
@@ -328,43 +455,145 @@ mod tests {
     use crate::analysis::AnalysisFrame;
     use parking_lot::RwLock;
 
-    #[test]
-    fn heard_frames_exclude_pause_and_underflow() {
+    fn test_output(rate: u32, paused: bool) -> (Output, OutputCallback, AnalysisWorker) {
         let analyzer =
             AnalysisWorker::new(Arc::new(RwLock::new(AnalysisFrame::default()))).unwrap();
-        let mut tap = analyzer.producer();
-        let (mut producer, mut consumer) = HeapRb::new(8).split();
-        let shared = OutputShared {
-            paused: AtomicBool::new(false),
-            consumed: AtomicU64::new(0),
-            volume: AtomicU32::new(1.0f32.to_bits()),
+        let (producer, consumer) = HeapRb::new(64).split();
+        let shared = Arc::new(OutputShared::new(1.0, paused));
+        let (_, errors) = bounded(4);
+        let output = Output {
+            stream: None,
+            producer,
+            shared: shared.clone(),
+            rate,
+            errors,
+            submitted: 0,
         };
-        producer.push_slice(&[[0.25, -0.25]; 3]);
+        let callback = OutputCallback {
+            consumer,
+            tap: analyzer.producer(),
+            shared,
+            control: analyzer.control.clone(),
+            channels: 2,
+            rate,
+            clock: PlaybackClock::new(),
+        };
+        (output, callback, analyzer)
+    }
+
+    fn timestamp(callback_ms: u64, playback_ms: u64) -> cpal::OutputStreamTimestamp {
+        cpal::OutputStreamTimestamp {
+            callback: cpal::StreamInstant::from_millis(callback_ms),
+            playback: cpal::StreamInstant::from_millis(playback_ms),
+        }
+    }
+
+    #[test]
+    fn drain_waits_for_last_valid_frame_not_empty_ring_or_callback_end() {
+        let (mut output, mut callback, _analyzer) = test_output(1000, false);
+        output.push(&[[0.25, -0.25]; 3]);
         let mut data = [0.0_f32; 16];
-        render(
-            &mut data,
-            2,
-            &mut consumer,
-            &mut tap,
-            &shared,
-            &analyzer.control,
-        );
-        assert_eq!(shared.consumed.load(Ordering::Acquire), 3);
+        callback.render(&mut data, timestamp(0, 20));
         assert_eq!(&data[..6], &[0.25, -0.25, 0.25, -0.25, 0.25, -0.25]);
         assert!(data[6..].iter().all(|sample| *sample == 0.0));
-        producer.push_slice(&[[0.5, -0.5]; 2]);
-        shared.paused.store(true, Ordering::Release);
-        render(
-            &mut data,
-            2,
-            &mut consumer,
-            &mut tap,
-            &shared,
-            &analyzer.control,
-        );
-        assert_eq!(shared.consumed.load(Ordering::Acquire), 3);
-        assert_eq!(consumer.occupied_len(), 2);
+        assert_eq!(callback.consumer.occupied_len(), 0);
+        assert!(!output.drained());
+        assert_eq!(output.heard(), 0.0);
+        callback.render(&mut data, timestamp(21, 40));
+        assert_eq!(output.heard(), 0.001);
+        assert!(!output.drained());
+        callback.render(&mut data, timestamp(23, 48));
+        assert!(output.drained());
+        assert_eq!(output.heard(), 0.003);
+    }
+
+    #[test]
+    fn close_does_not_count_device_queued_tail_as_heard() {
+        let (mut output, mut callback, _analyzer) = test_output(1000, false);
+        output.push(&[[0.5, -0.5]; 8]);
+        let mut data = [0.0_f32; 16];
+        callback.render(&mut data, timestamp(0, 20));
+        callback.render(&mut data, timestamp(22, 40));
+        assert_eq!(output.close(), 0.002);
+        assert!(!output.drained());
+    }
+
+    #[test]
+    fn software_pause_preserves_ring_and_resume_excludes_silence() {
+        let (mut output, mut callback, _analyzer) = test_output(1000, true);
+        output.push(&[[0.5, -0.5]; 2]);
+        let mut data = [1.0_f32; 16];
+        callback.render(&mut data, timestamp(0, 20));
+        assert_eq!(callback.consumer.occupied_len(), 2);
         assert!(data.iter().all(|sample| *sample == 0.0));
+        assert_eq!(output.heard(), 0.0);
+        output.pause(false);
+        callback.render(&mut data, timestamp(8, 28));
+        assert_eq!(&data[..4], &[0.5, -0.5, 0.5, -0.5]);
+        output.pause(true);
+        output.push(&[[0.25, -0.25]; 3]);
+        callback.render(&mut data, timestamp(30, 50));
+        assert_eq!(output.heard(), 0.002);
+        assert_eq!(callback.consumer.occupied_len(), 3);
+        assert!(data.iter().all(|sample| *sample == 0.0));
+        output.pause(false);
+        callback.render(&mut data, timestamp(40, 60));
+        assert_eq!(output.heard(), 0.002);
+        callback.render(&mut data, timestamp(63, 83));
+        assert_eq!(output.heard(), 0.005);
+        assert!(output.drained());
+    }
+
+    #[test]
+    fn xrun_recovers_without_counting_unconfirmed_audio_and_fatal_errors_survive() {
+        let (mut output, mut callback, _analyzer) = test_output(1000, false);
+        let (errors, received) = bounded(4);
+        output.push(&[[0.5, -0.5]; 8]);
+        let mut data = [0.0_f32; 16];
+        callback.render(&mut data, timestamp(0, 20));
+        callback.render(&mut data, timestamp(22, 40));
+        report_stream_error(cpal::ErrorKind::Xrun.into(), &output.shared, &errors);
+        assert!(received.try_recv().is_err());
+        output.push(&[[0.25, -0.25]; 3]);
+        // Recovery shortened the device queue: its new prediction precedes
+        // the previous callback's 40 ms playback timestamp.
+        callback.render(&mut data, timestamp(30, 30));
+        assert!(output.check_timing().is_ok());
+        assert_eq!(&data[..6], &[0.25, -0.25, 0.25, -0.25, 0.25, -0.25]);
+        assert_eq!(output.heard(), 0.002);
+        assert!(!output.drained());
+        callback.render(&mut data, timestamp(33, 53));
+        assert!(output.drained());
+        assert_eq!(output.heard(), 0.005);
+        for kind in [
+            cpal::ErrorKind::DeviceNotAvailable,
+            cpal::ErrorKind::BackendError,
+        ] {
+            report_stream_error(kind.into(), &output.shared, &errors);
+            assert_eq!(received.try_recv().unwrap().kind(), kind);
+        }
+    }
+
+    #[test]
+    fn invalid_or_stalled_clock_reports_failure_instead_of_premature_drain() {
+        let (mut output, mut callback, _analyzer) = test_output(1000, false);
+        output.push(&[[0.5, -0.5]; 1]);
+        let mut data = [0.0_f32; 2];
+        callback.render(&mut data, timestamp(10, 30));
+        callback.render(&mut data, timestamp(9, 31));
+        assert!(output.check_timing().is_err());
+        assert_eq!(output.heard(), 0.0);
+        assert!(!output.drained());
+
+        let (mut output, mut callback, _analyzer) = test_output(1000, false);
+        for _ in 0..=callback.clock.pending.capacity() {
+            output.push(&[[0.5, -0.5]; 1]);
+            callback.render(&mut data, timestamp(0, 30));
+        }
+        assert!(output.check_timing().is_err());
+        assert_eq!(output.heard(), 0.0);
+        assert!(!output.drained());
+        assert_eq!(callback.consumer.occupied_len(), 1);
     }
 
     #[test]
