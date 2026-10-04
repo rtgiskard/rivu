@@ -3,6 +3,7 @@
 //! Playback changes come from the core subscription, never a library polling loop.
 
 use crate::{
+    artwork::ArtworkManager,
     core::AppHandle,
     model::{AppState, Command, PlaybackStatus, RepeatMode},
 };
@@ -10,6 +11,7 @@ use anyhow::{Context, Result};
 use crossbeam_channel::{Sender, bounded, select_biased};
 use std::{
     collections::HashMap,
+    path::Path,
     sync::Arc,
     thread::{self, JoinHandle},
     time::Duration,
@@ -35,9 +37,11 @@ pub struct Mpris {
 }
 
 impl Mpris {
-    pub fn start(handle: AppHandle, can_raise: bool) -> Result<Self> {
+    pub fn start(handle: AppHandle, can_raise: bool, data_dir: &Path) -> Result<Self> {
+        let artwork = Arc::new(ArtworkManager::new(data_dir));
         let updates = handle.subscribe();
         let initial = handle.snapshot();
+        let initial_can_raise = can_raise && handle.wakeup_available();
         // Builder uses DoNotQueue: another Rivu must fail, not silently wait for
         // the name or replace the running player's controls.
         let connection = Builder::session()
@@ -50,13 +54,14 @@ impl Mpris {
                 OBJECT_PATH,
                 Root {
                     handle: handle.clone(),
-                    can_raise,
+                    raise_supported: can_raise,
                 },
             )?
             .serve_at(
                 OBJECT_PATH,
                 Player {
                     handle: handle.clone(),
+                    artwork: artwork.clone(),
                 },
             )?
             .build()
@@ -67,19 +72,30 @@ impl Mpris {
             .name("rivu-mpris".into())
             .spawn(move || {
                 let mut previous = initial;
-                let mut metadata = TrackMetadata::from_state(&previous);
+                let mut previous_can_raise = initial_can_raise;
+                let mut metadata = TrackMetadata::from_state(&previous, &artwork);
                 loop {
                     select_biased! {
                         recv(stopped) -> _ => break,
                         recv(updates) -> update => {
                             if update.is_err() { break; }
                             let current = handle.snapshot();
-                            if let Err(error) = publish_changes(&bus, &previous, &current, &mut metadata) {
+                            let current_can_raise = can_raise && handle.wakeup_available();
+                            if let Err(error) = publish_changes(
+                                &bus,
+                                &previous,
+                                &current,
+                                &mut metadata,
+                                &artwork,
+                                previous_can_raise,
+                                current_can_raise,
+                            ) {
                                 eprintln!("MPRIS publisher stopped: {error}");
                                 break;
                             }
                             if current.shutting_down { break; }
                             previous = current;
+                            previous_can_raise = current_can_raise;
                         }
                     }
                 }
@@ -107,20 +123,24 @@ impl Drop for Mpris {
 
 struct Root {
     handle: AppHandle,
-    can_raise: bool,
+    raise_supported: bool,
 }
 
 #[zbus::interface(name = "org.mpris.MediaPlayer2")]
 impl Root {
     fn raise(&self) -> fdo::Result<()> {
-        if !self.can_raise {
+        if !self.raise_supported || !self.handle.wakeup_available() {
             return Err(fdo::Error::NotSupported(
                 "Rivu has no graphical window".into(),
             ));
         }
-        self.handle
-            .raise()
-            .map_err(|error| fdo::Error::Failed(error.to_string()))
+        self.handle.raise().map_err(|error| {
+            if !self.handle.wakeup_available() {
+                fdo::Error::NotSupported("Rivu has no graphical window".into())
+            } else {
+                fdo::Error::Failed(error.to_string())
+            }
+        })
     }
 
     fn quit(&self) -> fdo::Result<()> {
@@ -132,9 +152,9 @@ impl Root {
         true
     }
 
-    #[zbus(property(emits_changed_signal = "const"))]
+    #[zbus(property)]
     fn can_raise(&self) -> bool {
-        self.can_raise
+        self.raise_supported && self.handle.wakeup_available()
     }
 
     #[zbus(property(emits_changed_signal = "const"))]
@@ -160,6 +180,7 @@ impl Root {
 
 struct Player {
     handle: AppHandle,
+    artwork: Arc<ArtworkManager>,
 }
 
 impl Player {
@@ -319,7 +340,7 @@ impl Player {
 
     #[zbus(property)]
     fn metadata(&self) -> Metadata {
-        metadata_map(TrackMetadata::from_state(&self.handle.snapshot()).as_ref())
+        metadata_map(TrackMetadata::from_state(&self.handle.snapshot(), &self.artwork).as_ref())
     }
 
     #[zbus(property(emits_changed_signal = "false"))]
@@ -497,10 +518,11 @@ struct TrackMetadata {
     album: String,
     url: String,
     length: Option<i64>,
+    art_url: Option<String>,
 }
 
 impl TrackMetadata {
-    fn from_state(state: &AppState) -> Option<Self> {
+    fn from_state(state: &AppState, artwork: &ArtworkManager) -> Option<Self> {
         let queue_id = state.current_queue_id?;
         let track = state.current_track()?;
         Some(Self {
@@ -509,6 +531,7 @@ impl TrackMetadata {
             artist: track.artist.clone(),
             album: track.album.clone(),
             url: url::Url::from_file_path(&track.path).ok()?.into(),
+            art_url: artwork.uri_for(track),
             length: state
                 .duration
                 .or(track.duration)
@@ -531,6 +554,9 @@ fn metadata_map(track: Option<&TrackMetadata>) -> Metadata {
         if let Some(length) = track.length {
             metadata.insert("mpris:length".into(), length.into());
         }
+        if let Some(art_url) = &track.art_url {
+            metadata.insert("mpris:artUrl".into(), Str::from(art_url.as_str()).into());
+        }
         metadata.insert("xesam:title".into(), Str::from(track.title.as_str()).into());
         metadata.insert(
             "xesam:artist".into(),
@@ -549,6 +575,9 @@ fn publish_changes(
     previous: &AppState,
     current: &AppState,
     metadata: &mut Option<TrackMetadata>,
+    artwork: &ArtworkManager,
+    previous_can_raise: bool,
+    current_can_raise: bool,
 ) -> zbus::Result<()> {
     let mut changed: HashMap<&str, Value<'_>> = HashMap::new();
     if previous.status != current.status {
@@ -569,7 +598,7 @@ fn publish_changes(
         || !Arc::ptr_eq(&previous.library, &current.library)
         || !Arc::ptr_eq(&previous.queue, &current.queue)
     {
-        let next = TrackMetadata::from_state(current);
+        let next = TrackMetadata::from_state(current, artwork);
         if *metadata != next {
             changed.insert("Metadata", Value::from(metadata_map(next.as_ref())));
             *metadata = next;
@@ -622,6 +651,17 @@ fn publish_changes(
             &(PLAYER_INTERFACE, changed, Vec::<&str>::new()),
         )?;
     }
+    if previous_can_raise != current_can_raise {
+        let mut changed: HashMap<&str, Value<'_>> = HashMap::new();
+        changed.insert("CanRaise", current_can_raise.into());
+        connection.emit_signal(
+            None::<&str>,
+            OBJECT_PATH,
+            "org.freedesktop.DBus.Properties",
+            "PropertiesChanged",
+            &("org.mpris.MediaPlayer2", changed, Vec::<&str>::new()),
+        )?;
+    }
     // Position itself never sends PropertiesChanged. Core explicitly marks
     // discontinuities, including seeks from non-D-Bus clients, so small seeks
     // are not lost to a clock-drift threshold and regular progress stays quiet.
@@ -669,15 +709,22 @@ mod tests {
             album: "Album".into(),
             url: "file:///music/a%20b.flac".into(),
             length: Some(1_250_000),
+            art_url: Some("file:///artwork/cache/cover.png".into()),
         };
         let metadata = metadata_map(Some(&track));
         assert_eq!(metadata["mpris:trackid"].value_signature().to_string(), "o");
         assert_eq!(metadata["mpris:length"].value_signature().to_string(), "x");
         assert_eq!(metadata["xesam:artist"].value_signature().to_string(), "as");
+        assert_eq!(metadata["mpris:artUrl"].value_signature().to_string(), "s");
+        assert_eq!(
+            <&str>::try_from(&metadata["mpris:artUrl"]).unwrap(),
+            "file:///artwork/cache/cover.png",
+        );
         assert_eq!(<&str>::try_from(&metadata["xesam:title"]).unwrap(), "Title");
         assert_eq!(i64::try_from(&metadata["mpris:length"]).unwrap(), 1_250_000);
         assert_ne!(track_path(42), track_path(43));
         let empty = metadata_map(None);
+        assert!(!empty.contains_key("mpris:artUrl"));
         assert_eq!(
             <&ObjectPath<'_>>::try_from(&empty["mpris:trackid"])
                 .unwrap()

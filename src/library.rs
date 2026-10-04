@@ -616,6 +616,7 @@ mod tests {
         Track {
             id,
             path: record.path.clone(),
+            fingerprint: record.fingerprint.clone(),
             title: record.media.title.clone(),
             artist: record.media.artist.clone(),
             album: record.media.album.clone(),
@@ -929,6 +930,7 @@ mod tests {
             .map(|(index, name)| Track {
                 id: index as i64 + 1,
                 path: directory.join(name),
+                fingerprint: None,
                 title: name.into(),
                 artist: if index == 0 {
                     "Artist".into()

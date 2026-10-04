@@ -17,11 +17,19 @@ by the output backend, not the seek position or frames merely queued to the
 device; confirmation is conservative across underruns. Recoverable ALSA underruns
 do not start a new playback.
 
+Backend playback-time predictions can decrease when device latency shrinks.
+Rivu accounts for queued samples in submission order rather than treating this
+as a clock failure; a backwards callback clock still reports an error.
+
 While paused, the audio worker waits for commands, backend errors, or the last
 audible device-buffer tail to settle. It does not poll or repeatedly broadcast an
 unchanged position to the GUI. Analysis is parked as well. Software-paused output
 backends may still invoke silent audio callbacks, so total process CPU is not
 guaranteed to reach zero on every device/backend.
+
+The TUI checks external state every 250 ms while idle, but redraws only after a
+state change, local interaction, or terminal resize. Queue labels are cached by
+content, avoiding repeated library searches and label rebuilding on progress updates.
 
 If the next track cannot be opened after EOF, playback stops and reports the
 error. A manual switch to a missing file does not interrupt the current track.
@@ -29,21 +37,26 @@ Removing tracks also removes their queue and shuffle-history references.
 
 === Native multichannel output
 
-Speaker identities are preserved through decoding, resampling and output;
-5.1, 6.1 and 7.1 are not reduced to stereo. Select an explicit `PipeWire: <node.name>`
-device to address a PipeWire sink. Multichannel playback through the default
-PipeWire ALSA device also uses the native route. The sink must expose every
-source speaker, including LFE and rear center where present. Missing or unknown
-speaker positions, or incompatible routes, produce an error rather than a
-silent downmix. Stereo visualization is a separate analysis branch and does not
-change the device signal.
+Speaker identities are preserved through decoding and resampling. Select an
+explicit `PipeWire: <node.name>` device to address a PipeWire sink. Multichannel
+playback through the default PipeWire ALSA device also uses the native route.
+With `pipewire_auto_mix = false`, the sink must expose every source speaker,
+including LFE and rear center where present; missing or incompatible routes
+produce an error rather than a silent downmix. Stereo visualization is a separate
+analysis branch and does not itself change the device signal.
 Unspecified mono/stereo layouts use conventional mono or left/right identities;
 unspecified multichannel layouts are rejected rather than guessed from their size.
+On Linux, leaving the output device unset now selects the default PipeWire sink
+through the native PipeWire backend. Selecting another device explicitly may use
+CPAL unless it is named `PipeWire: <node.name>`.
 
 PipeWire automatic channel remix is enabled by default. This allows a multichannel
 track to play through a stereo or differently arranged sink using PipeWire's
 channelmix policy. Disable `pipewire_auto_mix` in settings for strict speaker
 preservation; incompatible layouts then fail instead of being remixed.
+When changing the output device and remix mode together, Apply installs the final
+pair before reopening output once. Reapplying an unchanged pair does not reopen
+playback.
 
 === Extension audio decoding
 
@@ -73,6 +86,29 @@ FFmpeg library is loaded merely to probe native media while the option is off.
 
 The footer exit button, `rivu quit`, and MPRIS `Quit` stop the core explicitly;
 closing the GUI window alone leaves playback and MPRIS running.
+
+== Desktop album artwork
+
+MPRIS metadata includes `mpris:artUrl` for the current track. Rivu reads embedded
+pictures exposed by Symphonia's container/track metadata, preferring front-cover
+images. Pictures are not fetched from the network or searched for beside audio
+files. Containers supported only through FFmpeg, external picture links, and
+pictures not exposed by Symphonia use the bundled Rivu icon instead.
+
+Artwork lives below the selected data directory: `artwork/default.png` contains
+the existing bundled `assets/rivu.png` image, and extracted images are stored at
+`artwork/cache/<blake3>.<ext>`. The hash covers the original image bytes, allowing
+identical covers to share one file. Images are not transcoded; recognized PNG,
+JPEG, GIF, WebP, BMP, TIFF, and ICO pictures retain their original format.
+
+The in-memory lookup key is exactly the library track ID and its stored source
+fingerprint. A rescan that changes the fingerprint refreshes the lookup; changing
+the queue occurrence or editing title/artist tags does not re-extract artwork.
+The disposable cache uses complete-file renames without `fsync` and requires no
+SQLite artwork table. Unreadable media, unsupported artwork, or cache-write errors
+fall back to the default image; if that cannot be written either, the art URL is
+omitted. None of these failures prevents playback. Artwork changes are included
+in MPRIS `Metadata` property-change notifications.
 
 == Runtime decoder dependencies
 

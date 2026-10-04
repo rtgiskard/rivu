@@ -513,6 +513,7 @@ fn start(
     let server = ipc::Server::start(socket, listener, runtime.handle.clone())?;
     let media_handle = runtime.handle.clone();
     let media_changes = media_handle.subscribe();
+    let media_data_dir = data_dir.clone();
     let media_worker = thread::Builder::new()
         .name("rivu-mpris-manager".into())
         .spawn(move || {
@@ -526,7 +527,7 @@ fn start(
                 if snapshot.config.mpris_enabled != enabled {
                     enabled = snapshot.config.mpris_enabled;
                     let status = if enabled {
-                        match mpris::Mpris::start(media_handle.clone(), desktop) {
+                        match mpris::Mpris::start(media_handle.clone(), desktop, &media_data_dir) {
                             Ok(started) => {
                                 service = Some(started);
                                 "Connected to desktop media controls".to_owned()

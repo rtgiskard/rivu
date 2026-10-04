@@ -1,4 +1,5 @@
 pub mod analysis;
+pub mod artwork;
 pub mod audio;
 pub mod config;
 pub mod core;

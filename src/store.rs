@@ -207,11 +207,12 @@ impl Store {
         Ok(())
     }
     pub fn tracks(&self) -> Result<Vec<Track>> {
-        let mut q=self.conn.prepare("SELECT id,path,COALESCE(title_override,raw_title),COALESCE(artist_override,raw_artist),COALESCE(album_override,raw_album),duration,codec,channels,sample_rate,missing,play_count,last_played,cue_sheet,cue_number,cue_start_frame,cue_end_frame,bitrate_bps,track_number,disc_number,bits_per_sample,release_date,favorite FROM tracks ORDER BY id")?;
+        let mut q=self.conn.prepare("SELECT id,path,COALESCE(title_override,raw_title),COALESCE(artist_override,raw_artist),COALESCE(album_override,raw_album),duration,codec,channels,sample_rate,missing,play_count,last_played,cue_sheet,cue_number,cue_start_frame,cue_end_frame,bitrate_bps,track_number,disc_number,bits_per_sample,release_date,favorite,fingerprint FROM tracks ORDER BY id")?;
         Ok(q.query_map([], |r| {
             Ok(Track {
                 id: r.get(0)?,
                 path: PathBuf::from(r.get::<_, String>(1)?),
+                fingerprint: r.get(22)?,
                 title: r.get(2)?,
                 artist: r.get(3)?,
                 album: r.get(4)?,

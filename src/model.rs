@@ -24,6 +24,8 @@ pub struct Track {
     pub id: i64,
     pub path: PathBuf,
     #[serde(default)]
+    pub fingerprint: Option<String>,
+    #[serde(default)]
     pub cue: Option<CueSegment>,
     pub title: String,
     pub artist: String,
@@ -222,6 +224,8 @@ pub enum Command {
         index: usize,
     },
     ClearQueue,
+    RandomizeQueue,
+    DeduplicateQueue,
     Shuffle {
         enabled: bool,
     },
