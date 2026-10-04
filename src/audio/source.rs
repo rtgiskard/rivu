@@ -152,6 +152,8 @@ pub(super) struct Source {
     time_base: TimeBase,
     frames: Vec<Stereo>,
     info: MediaInfo,
+    range_start: f64,
+    range_end: Option<f64>,
     seek_target: Option<f64>,
     ready: bool,
     exhausted: bool,
@@ -259,6 +261,8 @@ impl Source {
             decode,
             frames: Vec::with_capacity(8192),
             info,
+            range_start: 0.0,
+            range_end: media_duration,
             seek_target: None,
             ready: false,
             exhausted: false,
@@ -269,6 +273,33 @@ impl Source {
         source.ready = true;
         Ok(source)
     }
+    pub(super) fn restrict(&mut self, range: super::PlaybackRange) -> Result<()> {
+        if !range.start_seconds.is_finite()
+            || range.start_seconds < 0.0
+            || range
+                .end_seconds
+                .is_some_and(|end| !end.is_finite() || end <= range.start_seconds)
+        {
+            bail!("Invalid audio segment bounds");
+        }
+        let end = match (range.end_seconds, self.range_end) {
+            (Some(end), Some(duration)) => {
+                if end > duration + 1.0 / 75.0 {
+                    bail!("Audio segment ends beyond the source duration");
+                }
+                Some(end.min(duration))
+            }
+            (end, duration) => end.or(duration),
+        };
+        if end.is_some_and(|end| range.start_seconds >= end) {
+            bail!("Audio segment starts at or beyond the source end");
+        }
+        self.range_start = range.start_seconds;
+        self.range_end = end;
+        self.info.duration = end.map(|end| end - range.start_seconds);
+        self.seek(0.0)
+    }
+
     pub(super) fn seek(&mut self, target: f64) -> Result<()> {
         let target = self
             .info
@@ -288,6 +319,7 @@ impl Source {
             self.exhausted = true;
             return Ok(());
         }
+        let target = self.range_start + target;
         let preroll = if matches!(self.decode, Decode::Opus(_)) {
             (target - 0.08).max(0.0)
         } else {
@@ -386,15 +418,19 @@ impl Source {
                         (packet_start - opus.timestamp_delay + leading as f64 / 48_000.0).max(0.0);
                 }
             }
-            if let Some(duration) = self.info.duration {
-                let remaining = ((duration - packet_start).max(0.0) * self.info.sample_rate as f64)
-                    .round() as usize;
+            if let Some(end) = self.range_end {
+                let remaining =
+                    ((end - packet_start).max(0.0) * self.info.sample_rate as f64).round() as usize;
+                self.exhausted = remaining <= self.frames.len();
                 self.frames.truncate(remaining);
             }
             if let Some(target) = self.seek_target {
                 let discard = ((target - packet_start).max(0.0) * self.info.sample_rate as f64)
                     .round() as usize;
                 if discard >= self.frames.len() {
+                    if self.exhausted {
+                        return Ok(false);
+                    }
                     continue;
                 }
                 self.frames.copy_within(discard.., 0);
@@ -403,6 +439,9 @@ impl Source {
             }
             if !self.frames.is_empty() {
                 return Ok(true);
+            }
+            if self.exhausted {
+                return Ok(false);
             }
         }
     }
@@ -580,7 +619,10 @@ mod tests {
                         .zip(&reference[candidate..candidate + window.len()])
                         .fold((0.0_f64, 0.0_f64), |(dot, power), (actual, expected)| {
                             let expected = f64::from(expected[0]);
-                            (dot + f64::from(actual[0]) * expected, power + expected * expected)
+                            (
+                                dot + f64::from(actual[0]) * expected,
+                                power + expected * expected,
+                            )
                         });
                     // The actual window's norm is constant across candidates.
                     (candidate, dot / power.sqrt())
@@ -588,7 +630,10 @@ mod tests {
                 .max_by(|(_, left), (_, right)| left.total_cmp(right))
                 .unwrap()
                 .0;
-            assert_eq!(best, offset, "Seek must start at the requested sample for {target}s");
+            assert_eq!(
+                best, offset,
+                "Seek must start at the requested sample for {target}s"
+            );
         }
     }
 
@@ -604,6 +649,72 @@ mod tests {
             source.seek(0.0).unwrap();
             assert_eq!(decode_remaining(&mut source).len(), 96_000);
         }
+    }
+
+    fn pcm_file() -> tempfile::NamedTempFile {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let samples = 88_200_u32;
+        let bytes = samples * 2;
+        let mut header = Vec::new();
+        header.extend_from_slice(b"RIFF");
+        header.extend_from_slice(&(36 + bytes).to_le_bytes());
+        header.extend_from_slice(b"WAVEfmt \x10\0\0\0\x01\0\x01\0");
+        header.extend_from_slice(&44_100_u32.to_le_bytes());
+        header.extend_from_slice(&88_200_u32.to_le_bytes());
+        header.extend_from_slice(b"\x02\0\x10\0data");
+        header.extend_from_slice(&bytes.to_le_bytes());
+        file.write_all(&header).unwrap();
+        for index in 0..samples {
+            let value = ((index * 37) % 32_768) as i16 - 16_384;
+            file.write_all(&value.to_le_bytes()).unwrap();
+        }
+        file
+    }
+
+    #[test]
+    fn cue_ranges_crop_pcm_and_seek_relative_to_track() {
+        let file = pcm_file();
+        let mut full = Source::open(file.path(), PROBE_BUFFER_LEN).unwrap();
+        let reference = decode_remaining(&mut full);
+        for (start_frame, end_frame) in [(0_u64, Some(30_u64)), (30, Some(80)), (80, None)] {
+            let start = (start_frame * 588) as usize;
+            let end = end_frame.map_or(reference.len(), |frame| (frame * 588) as usize);
+            let mut source = Source::open(file.path(), PROBE_BUFFER_LEN).unwrap();
+            source
+                .restrict(super::super::PlaybackRange {
+                    start_seconds: start_frame as f64 / 75.0,
+                    end_seconds: end_frame.map(|frame| frame as f64 / 75.0),
+                })
+                .unwrap();
+            assert!(
+                (source.info().duration.unwrap() - (end - start) as f64 / 44_100.0).abs() < 1e-9
+            );
+            assert_eq!(decode_remaining(&mut source), reference[start..end]);
+            source.seek(0.2).unwrap();
+            assert_eq!(decode_remaining(&mut source), reference[start + 8_820..end]);
+            source.seek(source.info().duration.unwrap()).unwrap();
+            assert!(source.next_frames().unwrap().is_none());
+            source.seek(0.0).unwrap();
+            assert_eq!(decode_remaining(&mut source), reference[start..end]);
+        }
+    }
+
+    #[test]
+    fn cue_opus_preroll_and_end_remain_inside_the_segment() {
+        let file = opus_file();
+        let mut source = Source::open(file.path(), PROBE_BUFFER_LEN).unwrap();
+        source
+            .restrict(super::super::PlaybackRange {
+                start_seconds: 1.0,
+                end_seconds: Some(1.5),
+            })
+            .unwrap();
+        assert_eq!(source.info().duration, Some(0.5));
+        assert_eq!(decode_remaining(&mut source).len(), 24_000);
+        source.seek(0.25).unwrap();
+        assert_eq!(decode_remaining(&mut source).len(), 12_000);
+        source.seek(0.5).unwrap();
+        assert!(source.next_frames().unwrap().is_none());
     }
 
     #[test]

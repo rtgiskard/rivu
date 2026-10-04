@@ -35,9 +35,16 @@ const BYTES_PER_MEBIBYTE: usize = 1024 * 1024;
 
 type Stereo = [f32; 2];
 
+#[derive(Clone, Copy, Debug)]
+pub struct PlaybackRange {
+    pub start_seconds: f64,
+    pub end_seconds: Option<f64>,
+}
+
 pub enum AudioCommand {
     Load {
         path: PathBuf,
+        range: Option<PlaybackRange>,
         generation: u64,
         start_seconds: f64,
         paused: bool,

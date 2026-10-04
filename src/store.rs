@@ -1,5 +1,5 @@
 use crate::library::{KnownFile, MediaInfo, ScanResult};
-use crate::model::{HistoryEntry, Playlist, PlaylistEntry, Track};
+use crate::model::{CueSegment, HistoryEntry, Playlist, PlaylistEntry, Track};
 use anyhow::{Context, Result, anyhow, bail};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::collections::{HashMap, HashSet};
@@ -10,12 +10,103 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct Store {
     conn: Connection,
 }
-#[derive(Clone)]
 struct Existing {
     id: i64,
     path: PathBuf,
     hash: Option<String>,
-    missing: bool,
+    cue: Option<CueSegment>,
+}
+
+#[derive(Hash, PartialEq, Eq)]
+enum TrackIdentity<'a> {
+    File(&'a Path),
+    Cue(&'a Path, u32),
+}
+
+fn identity<'a>(path: &'a Path, cue: Option<&'a CueSegment>) -> TrackIdentity<'a> {
+    match cue {
+        Some(cue) => TrackIdentity::Cue(&cue.sheet, cue.number),
+        None => TrackIdentity::File(path),
+    }
+}
+
+fn cue_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<Option<CueSegment>> {
+    let sheet: Option<String> = row.get(offset)?;
+    sheet
+        .map(|sheet| {
+            Ok(CueSegment {
+                sheet: sheet.into(),
+                number: row.get(offset + 1)?,
+                start_frame: {
+                    let value: i64 = row.get(offset + 2)?;
+                    u64::try_from(value)
+                        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(offset + 2, value))?
+                },
+                end_frame: row
+                    .get::<_, Option<i64>>(offset + 3)?
+                    .map(|value| {
+                        u64::try_from(value).map_err(|_| {
+                            rusqlite::Error::IntegralValueOutOfRange(offset + 3, value)
+                        })
+                    })
+                    .transpose()?,
+            })
+        })
+        .transpose()
+}
+
+fn migrate_v2(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    let high_water: Option<i64> = tx
+        .query_row(
+            "SELECT seq FROM sqlite_sequence WHERE name='tracks'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    // No foreign keys reference tracks: playlist entries and sessions retain their IDs.
+    tx.execute_batch(
+        "
+        CREATE TABLE tracks_v2(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,path TEXT NOT NULL,fingerprint TEXT,
+            file_size INTEGER NOT NULL DEFAULT 0,modified_ns INTEGER NOT NULL DEFAULT 0,
+            raw_title TEXT NOT NULL DEFAULT '',raw_artist TEXT NOT NULL DEFAULT '',
+            raw_album TEXT NOT NULL DEFAULT '',title_override TEXT,artist_override TEXT,
+            album_override TEXT,duration REAL,codec TEXT NOT NULL DEFAULT '',
+            channels INTEGER NOT NULL DEFAULT 0,sample_rate INTEGER NOT NULL DEFAULT 0,
+            missing INTEGER NOT NULL DEFAULT 0,play_count INTEGER NOT NULL DEFAULT 0,
+            listen_seconds REAL NOT NULL DEFAULT 0,last_played INTEGER,
+            cue_sheet TEXT,cue_number INTEGER,cue_start_frame INTEGER,cue_end_frame INTEGER
+        );
+        INSERT INTO tracks_v2(id,path,fingerprint,file_size,modified_ns,raw_title,raw_artist,
+            raw_album,title_override,artist_override,album_override,duration,codec,channels,
+            sample_rate,missing,play_count,listen_seconds,last_played)
+        SELECT id,path,fingerprint,file_size,modified_ns,raw_title,raw_artist,raw_album,
+            title_override,artist_override,album_override,duration,codec,channels,sample_rate,
+            missing,play_count,listen_seconds,last_played FROM tracks;
+        DROP TABLE tracks;
+        ALTER TABLE tracks_v2 RENAME TO tracks;
+        CREATE INDEX tracks_fingerprint ON tracks(fingerprint);
+        CREATE UNIQUE INDEX tracks_path ON tracks(path) WHERE cue_sheet IS NULL;
+        CREATE UNIQUE INDEX tracks_cue ON tracks(cue_sheet,cue_number) WHERE cue_sheet IS NOT NULL;
+    ",
+    )?;
+    if let Some(high_water) = high_water {
+        // MAX(id) is insufficient when the highest issued ID has already been deleted.
+        let updated = tx.execute(
+            "UPDATE sqlite_sequence SET seq=MAX(seq,?) WHERE name='tracks'",
+            [high_water],
+        )?;
+        if updated == 0 {
+            tx.execute(
+                "INSERT INTO sqlite_sequence(name,seq) VALUES('tracks',?)",
+                [high_water],
+            )?;
+        }
+    }
+    tx.execute("UPDATE schema_meta SET value=2 WHERE key='version'", [])?;
+    tx.commit()?;
+    Ok(())
 }
 
 impl Store {
@@ -37,11 +128,14 @@ impl Store {
             [],
             |r| r.get(0),
         )?;
-        if v > 1 {
+        if v > 2 {
             bail!("unsupported schema version {v}");
         }
         if v < 1 {
             c.execute_batch("BEGIN; CREATE TABLE tracks(id INTEGER PRIMARY KEY AUTOINCREMENT,path TEXT NOT NULL UNIQUE,fingerprint TEXT,file_size INTEGER NOT NULL DEFAULT 0,modified_ns INTEGER NOT NULL DEFAULT 0,raw_title TEXT NOT NULL DEFAULT '',raw_artist TEXT NOT NULL DEFAULT '',raw_album TEXT NOT NULL DEFAULT '',title_override TEXT,artist_override TEXT,album_override TEXT,duration REAL,codec TEXT NOT NULL DEFAULT '',channels INTEGER NOT NULL DEFAULT 0,sample_rate INTEGER NOT NULL DEFAULT 0,missing INTEGER NOT NULL DEFAULT 0,play_count INTEGER NOT NULL DEFAULT 0,listen_seconds REAL NOT NULL DEFAULT 0,last_played INTEGER); CREATE INDEX tracks_fingerprint ON tracks(fingerprint); CREATE TABLE playlists(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL); CREATE TABLE playlist_entries(id INTEGER PRIMARY KEY AUTOINCREMENT,playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,track_id INTEGER NOT NULL,position INTEGER NOT NULL); CREATE INDEX playlist_order ON playlist_entries(playlist_id,position,id); CREATE TABLE sessions(id INTEGER PRIMARY KEY AUTOINCREMENT,track_id INTEGER NOT NULL,title TEXT NOT NULL DEFAULT '',started_at INTEGER NOT NULL,ended_at INTEGER,listened_seconds REAL NOT NULL DEFAULT 0,counted INTEGER NOT NULL DEFAULT 0,reason TEXT NOT NULL DEFAULT ''); CREATE INDEX session_order ON sessions(started_at DESC,id DESC); UPDATE schema_meta SET value=1 WHERE key='version'; COMMIT;")?;
+        }
+        if v < 2 {
+            migrate_v2(&c)?;
         }
         c.execute_batch(
             "CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)",
@@ -51,7 +145,7 @@ impl Store {
         Ok(s)
     }
     pub fn tracks(&self) -> Result<Vec<Track>> {
-        let mut q=self.conn.prepare("SELECT id,path,COALESCE(title_override,raw_title),COALESCE(artist_override,raw_artist),COALESCE(album_override,raw_album),duration,codec,channels,sample_rate,missing,play_count,listen_seconds,last_played FROM tracks ORDER BY id")?;
+        let mut q=self.conn.prepare("SELECT id,path,COALESCE(title_override,raw_title),COALESCE(artist_override,raw_artist),COALESCE(album_override,raw_album),duration,codec,channels,sample_rate,missing,play_count,listen_seconds,last_played,cue_sheet,cue_number,cue_start_frame,cue_end_frame FROM tracks ORDER BY id")?;
         Ok(q.query_map([], |r| {
             Ok(Track {
                 id: r.get(0)?,
@@ -67,6 +161,7 @@ impl Store {
                 play_count: r.get::<_, i64>(10)? as u64,
                 listen_seconds: r.get(11)?,
                 last_played: r.get(12)?,
+                cue: cue_from_row(r, 13)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?)
@@ -114,7 +209,7 @@ impl Store {
         .collect::<rusqlite::Result<Vec<_>>>()?)
     }
     pub fn known_files(&self) -> Result<Vec<KnownFile>> {
-        let mut q=self.conn.prepare("SELECT id,path,file_size,modified_ns,fingerprint,raw_title,raw_artist,raw_album,duration,codec,channels,sample_rate FROM tracks")?;
+        let mut q=self.conn.prepare("SELECT id,path,file_size,modified_ns,fingerprint,raw_title,raw_artist,raw_album,duration,codec,channels,sample_rate,cue_sheet,cue_number,cue_start_frame,cue_end_frame FROM tracks")?;
         Ok(q.query_map([], |r| {
             Ok(KnownFile {
                 track_id: r.get(0)?,
@@ -122,6 +217,7 @@ impl Store {
                 size: r.get::<_, i64>(2)? as u64,
                 modified_ns: r.get(3)?,
                 fingerprint: r.get(4)?,
+                cue: cue_from_row(r, 12)?,
                 media: Some(MediaInfo {
                     title: r.get(5)?,
                     artist: r.get(6)?,
@@ -140,75 +236,115 @@ impl Store {
             if r.path.to_str().is_none() {
                 bail!("scan path is not UTF-8: {}", r.path.display());
             }
+            if let Some(cue) = &r.cue {
+                if cue.sheet.to_str().is_none() {
+                    bail!("CUE sheet path is not UTF-8: {}", cue.sheet.display());
+                }
+                i64::try_from(cue.start_frame).context("CUE start frame exceeds database range")?;
+                if let Some(end) = cue.end_frame {
+                    i64::try_from(end).context("CUE end frame exceeds database range")?;
+                }
+            }
         }
         let tx = self.conn.unchecked_transaction()?;
-        let mut q = tx.prepare("SELECT id,path,fingerprint,missing FROM tracks")?;
-        let mut old: Vec<Existing> = q
+        let mut q = tx.prepare("SELECT id,path,fingerprint,cue_sheet,cue_number,cue_start_frame,cue_end_frame FROM tracks")?;
+        let old: Vec<Existing> = q
             .query_map([], |r| {
                 Ok(Existing {
                     id: r.get(0)?,
                     path: PathBuf::from(r.get::<_, String>(1)?),
                     hash: r.get(2)?,
-                    missing: r.get::<_, i64>(3)? != 0,
+                    cue: cue_from_row(r, 3)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(q);
-        let paths: HashSet<PathBuf> = result.records.iter().map(|r| r.path.clone()).collect();
-        for o in &mut old {
-            if !o.missing
-                && result
-                    .roots
-                    .iter()
-                    .any(|x| o.path == *x || o.path.starts_with(x))
-                && !paths.contains(&o.path)
-            {
-                o.missing = true;
-                tx.execute("UPDATE tracks SET missing=1 WHERE id=?", [o.id])?;
-            }
-        }
+        let identities: HashSet<TrackIdentity<'_>> = result
+            .records
+            .iter()
+            .map(|r| identity(&r.path, r.cue.as_ref()))
+            .collect();
+        let suppressed: HashSet<&Path> = result
+            .suppressed_sources
+            .iter()
+            .map(PathBuf::as_path)
+            .collect();
         let candidate_hashes: HashSet<&str> = result
             .records
             .iter()
-            .filter_map(|record| record.fingerprint.as_deref())
+            .filter_map(|r| r.fingerprint.as_deref())
             .collect();
-        let mut bypath = HashMap::new();
-        let mut byhash: HashMap<String, Vec<i64>> = HashMap::new();
+        let mut byidentity = HashMap::new();
+        let mut byhash: HashMap<&str, Vec<&Existing>> = HashMap::new();
         for record in &old {
-            bypath.insert(record.path.clone(), record.id);
-            if !paths.contains(&record.path)
-                && let Some(hash) = &record.hash
-                && candidate_hashes.contains(hash.as_str())
-                && fs::symlink_metadata(&record.path)
+            let key = identity(&record.path, record.cue.as_ref());
+            let owner = record
+                .cue
+                .as_ref()
+                .map_or(record.path.as_path(), |cue| cue.sheet.as_path());
+            if !identities.contains(&key)
+                && let Some(hash) = record.hash.as_deref()
+                && candidate_hashes.contains(hash)
+                && fs::symlink_metadata(owner)
                     .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
             {
-                byhash.entry(hash.clone()).or_default().push(record.id);
+                byhash.entry(hash).or_default().push(record);
             }
+            byidentity.insert(key, record.id);
         }
         let mut seen = HashSet::new();
         for r in &result.records {
-            let id = bypath.get(&r.path).copied().or_else(|| {
-                r.fingerprint.as_ref().and_then(|h| {
-                    byhash.get(h).and_then(|ids| {
-                        (ids.len() == 1 && !seen.contains(&ids[0])).then_some(ids[0])
-                    })
+            let key = identity(&r.path, r.cue.as_ref());
+            let id = byidentity.get(&key).copied().or_else(|| {
+                r.fingerprint.as_deref().and_then(|hash| {
+                    let mut candidates =
+                        byhash
+                            .get(hash)?
+                            .iter()
+                            .filter(|old| match (&old.cue, &r.cue) {
+                                (None, None) => true,
+                                (Some(a), Some(b)) => {
+                                    a.number == b.number
+                                        && a.start_frame == b.start_frame
+                                        && a.end_frame == b.end_frame
+                                }
+                                _ => false,
+                            });
+                    let candidate = candidates.next()?;
+                    (candidates.next().is_none() && !seen.contains(&candidate.id))
+                        .then_some(candidate.id)
                 })
             });
             let m = &r.media;
-            if let Some(id) = id {
-                tx.execute("UPDATE tracks SET path=?,fingerprint=?,file_size=?,modified_ns=?,raw_title=?,raw_artist=?,raw_album=?,duration=?,codec=?,channels=?,sample_rate=?,missing=0 WHERE id=?",params![r.path.to_str(),r.fingerprint.as_deref(),r.size as i64,r.modified_ns,m.title,m.artist,m.album,m.duration,m.codec,m.channels as i64,m.sample_rate as i64,id])?;
-                seen.insert(id);
+            let sheet = r.cue.as_ref().and_then(|cue| cue.sheet.to_str());
+            let number = r.cue.as_ref().map(|cue| cue.number);
+            let start = r.cue.as_ref().map(|cue| cue.start_frame as i64);
+            let end = r
+                .cue
+                .as_ref()
+                .and_then(|cue| cue.end_frame)
+                .map(|end| end as i64);
+            let id = if let Some(id) = id {
+                tx.execute("UPDATE tracks SET path=?,fingerprint=?,file_size=?,modified_ns=?,raw_title=?,raw_artist=?,raw_album=?,duration=?,codec=?,channels=?,sample_rate=?,cue_sheet=?,cue_number=?,cue_start_frame=?,cue_end_frame=?,missing=0 WHERE id=?",params![r.path.to_str(),r.fingerprint.as_deref(),r.size as i64,r.modified_ns,m.title,m.artist,m.album,m.duration,m.codec,m.channels as i64,m.sample_rate as i64,sheet,number,start,end,id])?;
+                id
             } else {
-                tx.execute("INSERT INTO tracks(path,fingerprint,file_size,modified_ns,raw_title,raw_artist,raw_album,duration,codec,channels,sample_rate) VALUES(?,?,?,?,?,?,?,?,?,?,?)",params![r.path.to_str(),r.fingerprint.as_deref(),r.size as i64,r.modified_ns,m.title,m.artist,m.album,m.duration,m.codec,m.channels as i64,m.sample_rate as i64])?;
-                seen.insert(tx.last_insert_rowid());
-            }
+                tx.execute("INSERT INTO tracks(path,fingerprint,file_size,modified_ns,raw_title,raw_artist,raw_album,duration,codec,channels,sample_rate,cue_sheet,cue_number,cue_start_frame,cue_end_frame) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",params![r.path.to_str(),r.fingerprint.as_deref(),r.size as i64,r.modified_ns,m.title,m.artist,m.album,m.duration,m.codec,m.channels as i64,m.sample_rate as i64,sheet,number,start,end])?;
+                tx.last_insert_rowid()
+            };
+            byidentity.insert(key, id);
+            seen.insert(id);
         }
-        for o in old {
+        for o in &old {
+            let owner = o
+                .cue
+                .as_ref()
+                .map_or(o.path.as_path(), |cue| cue.sheet.as_path());
             if !seen.contains(&o.id)
+                && !(o.cue.is_none() && suppressed.contains(o.path.as_path()))
                 && result
                     .roots
                     .iter()
-                    .any(|x| o.path == *x || o.path.starts_with(x))
+                    .any(|root| owner == root || owner.starts_with(root))
             {
                 tx.execute("UPDATE tracks SET missing=1 WHERE id=?", [o.id])?;
             }
@@ -463,6 +599,7 @@ mod tests {
     fn rec(path: &str, hash: &str, title: &str, dur: f64) -> ScanRecord {
         ScanRecord {
             path: path.into(),
+            cue: None,
             size: 1,
             modified_ns: 1,
             fingerprint: Some(hash.into()),
@@ -482,6 +619,7 @@ mod tests {
             roots: vec![PathBuf::from("/music")],
             records,
             errors: vec![],
+            suppressed_sources: Vec::new(),
         }
     }
     fn db(name: &str) -> (PathBuf, Store) {
@@ -584,6 +722,445 @@ mod tests {
             vec![before[3].id, before[1].id]
         );
         drop(store);
+        let _ = fs::remove_file(path);
+    }
+
+    fn legacy_db(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("rivu-{name}-{}.db", std::process::id()));
+        let _ = fs::remove_file(&path);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(r#"
+            CREATE TABLE schema_meta(key TEXT PRIMARY KEY,value INTEGER NOT NULL);
+            INSERT INTO schema_meta VALUES('version',1);
+            CREATE TABLE tracks(id INTEGER PRIMARY KEY AUTOINCREMENT,path TEXT NOT NULL UNIQUE,
+                fingerprint TEXT,file_size INTEGER NOT NULL DEFAULT 0,modified_ns INTEGER NOT NULL DEFAULT 0,
+                raw_title TEXT NOT NULL DEFAULT '',raw_artist TEXT NOT NULL DEFAULT '',raw_album TEXT NOT NULL DEFAULT '',
+                title_override TEXT,artist_override TEXT,album_override TEXT,duration REAL,
+                codec TEXT NOT NULL DEFAULT '',channels INTEGER NOT NULL DEFAULT 0,sample_rate INTEGER NOT NULL DEFAULT 0,
+                missing INTEGER NOT NULL DEFAULT 0,play_count INTEGER NOT NULL DEFAULT 0,
+                listen_seconds REAL NOT NULL DEFAULT 0,last_played INTEGER);
+            CREATE INDEX tracks_fingerprint ON tracks(fingerprint);
+            CREATE TABLE playlists(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL);
+            CREATE TABLE playlist_entries(id INTEGER PRIMARY KEY AUTOINCREMENT,
+                playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
+                track_id INTEGER NOT NULL,position INTEGER NOT NULL);
+            CREATE INDEX playlist_order ON playlist_entries(playlist_id,position,id);
+            CREATE TABLE sessions(id INTEGER PRIMARY KEY AUTOINCREMENT,track_id INTEGER NOT NULL,
+                title TEXT NOT NULL DEFAULT '',started_at INTEGER NOT NULL,ended_at INTEGER,
+                listened_seconds REAL NOT NULL DEFAULT 0,counted INTEGER NOT NULL DEFAULT 0,
+                reason TEXT NOT NULL DEFAULT '');
+            CREATE INDEX session_order ON sessions(started_at DESC,id DESC);
+            CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+            INSERT INTO tracks(id,path,fingerprint,file_size,modified_ns,raw_title,raw_artist,raw_album,
+                title_override,artist_override,album_override,duration,codec,channels,sample_rate,
+                missing,play_count,listen_seconds,last_played)
+                VALUES(7,'/music/legacy.wav','legacy',123,456,'Raw','Raw artist','Raw album',
+                    'Override','Artist','Album',60,'pcm',2,44100,0,3,90,22);
+            INSERT INTO tracks(id,path) VALUES(99,'/music/deleted.wav');
+            DELETE FROM tracks WHERE id=99;
+            INSERT INTO playlists(id,name) VALUES(4,'Saved');
+            INSERT INTO playlist_entries(id,playlist_id,track_id,position) VALUES(11,4,7,0),(12,4,7,1);
+            INSERT INTO sessions(id,track_id,title,started_at,ended_at,listened_seconds,counted,reason)
+                VALUES(20,7,'Snapshot',10,22,30,1,'done');
+            INSERT INTO settings VALUES('queue','{"tracks":[7,7],"current":1}');
+            INSERT INTO settings VALUES('volume','0.6');
+        "#).unwrap();
+        path
+    }
+
+    #[test]
+    fn migration_preserves_ids_overrides_history_playlists_and_settings() {
+        let path = legacy_db("cue-migration");
+        let store = Store::open(&path).unwrap();
+        let track = store.tracks().unwrap().remove(0);
+        assert_eq!(track.id, 7);
+        assert_eq!(
+            (&*track.title, &*track.artist, &*track.album),
+            ("Override", "Artist", "Album")
+        );
+        assert_eq!(
+            (track.play_count, track.listen_seconds, track.last_played),
+            (3, 90.0, Some(22))
+        );
+        assert_eq!(
+            (track.duration, track.channels, track.sample_rate),
+            (Some(60.0), 2, 44100)
+        );
+        assert_eq!(track.codec, "pcm");
+        assert!(!track.missing);
+        assert!(track.cue.is_none());
+        let known = store.known_files().unwrap().remove(0);
+        assert_eq!((known.size, known.modified_ns), (123, 456));
+        assert_eq!(known.fingerprint.as_deref(), Some("legacy"));
+        assert_eq!(known.media.unwrap().title, "Raw");
+        assert!(known.cue.is_none());
+        let playlist = store.playlists().unwrap().remove(0);
+        assert_eq!((playlist.id, playlist.name.as_str()), (4, "Saved"));
+        assert_eq!(
+            playlist
+                .entries
+                .iter()
+                .map(|e| (e.id, e.track_id))
+                .collect::<Vec<_>>(),
+            vec![(11, 7), (12, 7)]
+        );
+        let history = store.history(10).unwrap().remove(0);
+        assert_eq!(
+            (
+                history.id,
+                history.track_id,
+                history.started_at,
+                history.ended_at
+            ),
+            (20, 7, 10, Some(22))
+        );
+        assert_eq!(
+            (
+                history.title.as_str(),
+                history.listened_seconds,
+                history.counted,
+                history.reason.as_str()
+            ),
+            ("Snapshot", 30.0, true, "done")
+        );
+        assert_eq!(
+            store.get_setting("queue").unwrap().as_deref(),
+            Some(r#"{"tracks":[7,7],"current":1}"#)
+        );
+        assert_eq!(store.get_setting("volume").unwrap().as_deref(), Some("0.6"));
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT value FROM schema_meta WHERE key='version'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            2
+        );
+        store
+            .apply_scan(&scan(vec![rec("/music/new.wav", "new", "New", 60.0)]))
+            .unwrap();
+        assert!(
+            store
+                .tracks()
+                .unwrap()
+                .iter()
+                .find(|t| t.path == Path::new("/music/new.wav"))
+                .unwrap()
+                .id
+                > 99
+        );
+        drop(store);
+        assert_eq!(
+            Store::open(&path).unwrap().playlists().unwrap()[0].entries[0].track_id,
+            7
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn migration_preserves_high_water_when_all_tracks_were_deleted() {
+        let path = legacy_db("cue-migration-empty");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("DELETE FROM tracks", []).unwrap();
+        drop(conn);
+        let store = Store::open(&path).unwrap();
+        store
+            .apply_scan(&scan(vec![rec("/music/new.wav", "new", "New", 60.0)]))
+            .unwrap();
+        assert!(store.tracks().unwrap()[0].id > 99);
+        assert_eq!(store.history(10).unwrap()[0].track_id, 7);
+        drop(store);
+        let _ = fs::remove_file(path);
+    }
+
+    fn segment(sheet: &str, number: u32, start: u64, end: Option<u64>) -> ScanRecord {
+        let mut record = rec(
+            "/music/shared.wav",
+            "shared",
+            &format!("Track {number}"),
+            60.0,
+        );
+        record.cue = Some(CueSegment {
+            sheet: sheet.into(),
+            number,
+            start_frame: start,
+            end_frame: end,
+        });
+        record
+    }
+
+    #[test]
+    fn shared_source_segments_keep_independent_ids_overrides_stats_and_missing_state() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let whole = rec("/music/shared.wav", "shared", "Whole", 180.0);
+        let first = segment("/music/a.cue", 1, 0, Some(4500));
+        let second = segment("/music/a.cue", 2, 4500, Some(9000));
+        let other = segment("/music/b.cue", 1, 0, Some(4500));
+        store
+            .apply_scan(&scan(vec![whole, first.clone(), second.clone(), other]))
+            .unwrap();
+        let tracks = store.tracks().unwrap();
+        let ids: Vec<_> = tracks.iter().map(|t| t.id).collect();
+        assert_eq!(ids.iter().collect::<HashSet<_>>().len(), 4);
+        store
+            .edit_track(ids[1], "Custom", "Artist", "Album")
+            .unwrap();
+        let session = store.begin_session(ids[1], 10).unwrap();
+        store
+            .update_session(session, 35.0, Some(11), "done")
+            .unwrap();
+        let playlist = store.create_playlist("Segments").unwrap();
+        store
+            .add_playlist(playlist, &[ids[1], ids[2], ids[1], ids[3]])
+            .unwrap();
+        let mut changed = first;
+        changed.path = "/music/replaced.wav".into();
+        changed.media.title = "New raw title".into();
+        changed.media.duration = Some(59.0);
+        changed.cue.as_mut().unwrap().start_frame = 75;
+        changed.cue.as_mut().unwrap().end_frame = Some(4500);
+        let mut rescan = scan(vec![changed.clone(), second.clone()]);
+        rescan.roots = vec!["/music/a.cue".into()];
+        store.apply_scan(&rescan).unwrap();
+        let after = store.tracks().unwrap();
+        assert_eq!(after.iter().map(|t| t.id).collect::<Vec<_>>(), ids);
+        assert_eq!(after[1].title, "Custom");
+        assert_eq!(after[1].cue, changed.cue);
+        assert_eq!(after[1].path, changed.path);
+        assert_eq!(after[1].duration, Some(59.0));
+        assert_eq!((after[1].play_count, after[1].listen_seconds), (1, 35.0));
+        for index in [0, 2, 3] {
+            assert_eq!(
+                (after[index].play_count, after[index].listen_seconds),
+                (0, 0.0)
+            );
+            assert!(!after[index].missing);
+        }
+        let known = store.known_files().unwrap();
+        let known = known.iter().find(|r| r.track_id == ids[1]).unwrap();
+        assert_eq!(known.cue, changed.cue);
+        assert_eq!(known.media.as_ref().unwrap().title, "New raw title");
+        rescan.records = vec![second];
+        store.apply_scan(&rescan).unwrap();
+        let after = store.tracks().unwrap();
+        assert!(after[1].missing);
+        for index in [0, 2, 3] {
+            assert!(!after[index].missing);
+        }
+        assert_eq!(store.playlists().unwrap()[0].entries.len(), 4);
+        rescan.records.push(changed);
+        store.apply_scan(&rescan).unwrap();
+        assert!(!store.tracks().unwrap()[1].missing);
+        store.remove_tracks(&[ids[1]]).unwrap();
+        assert_eq!(
+            store
+                .tracks()
+                .unwrap()
+                .iter()
+                .map(|t| t.id)
+                .collect::<Vec<_>>(),
+            vec![ids[0], ids[2], ids[3]]
+        );
+        assert_eq!(
+            store.playlists().unwrap()[0]
+                .entries
+                .iter()
+                .map(|e| e.track_id)
+                .collect::<Vec<_>>(),
+            vec![ids[2], ids[3]]
+        );
+        assert_eq!(store.history(10).unwrap()[0].track_id, ids[1]);
+    }
+
+    #[test]
+    fn directory_suppression_preserves_whole_source_but_missing_sheets_mark_segments() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let first = segment("/music/a.cue", 1, 0, Some(4500));
+        store
+            .apply_scan(&scan(vec![
+                rec("/music/shared.wav", "shared", "Whole", 180.0),
+                first.clone(),
+            ]))
+            .unwrap();
+        let mut result = scan(vec![first]);
+        result.suppressed_sources.push("/music/shared.wav".into());
+        store.apply_scan(&result).unwrap();
+        assert!(store.tracks().unwrap().iter().all(|t| !t.missing));
+        result.records.clear();
+        store.apply_scan(&result).unwrap();
+        let tracks = store.tracks().unwrap();
+        assert!(!tracks[0].missing);
+        assert!(tracks[1].missing);
+    }
+
+    #[test]
+    fn fingerprints_never_merge_full_files_or_different_cue_segments() {
+        let root = std::env::temp_dir().join(format!("rivu-cue-matches-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let cases = [
+            (None, Some((1, 0, Some(4500))), false),
+            (Some((1, 0, Some(4500))), None, false),
+            (Some((1, 0, Some(4500))), Some((2, 0, Some(4500))), false),
+            (Some((1, 0, Some(4500))), Some((1, 75, Some(4500))), false),
+            (Some((1, 0, Some(4500))), Some((1, 0, None)), false),
+            (Some((1, 0, Some(4500))), Some((1, 0, Some(4500))), true),
+        ];
+        for (index, (before, after, same_id)) in cases.into_iter().enumerate() {
+            let store = Store::open(Path::new(":memory:")).unwrap();
+            let make_cue = |value: Option<(u32, u64, Option<u64>)>, name: &str| {
+                value.map(|(number, start_frame, end_frame)| CueSegment {
+                    sheet: root.join(format!("{index}-{name}.cue")),
+                    number,
+                    start_frame,
+                    end_frame,
+                })
+            };
+            let mut old = rec("", "same-hash", "Old", 60.0);
+            old.path = root.join(format!("{index}-old.wav"));
+            old.cue = make_cue(before, "old");
+            let mut new = rec("", "same-hash", "New", 60.0);
+            new.path = root.join(format!("{index}-new.wav"));
+            new.cue = make_cue(after, "new");
+            let mut result = scan(vec![old]);
+            result.roots = vec![root.clone()];
+            store.apply_scan(&result).unwrap();
+            let old_id = store.tracks().unwrap()[0].id;
+            result.records = vec![new];
+            store.apply_scan(&result).unwrap();
+            let tracks = store.tracks().unwrap();
+            let new_track = tracks.iter().find(|t| t.title == "New").unwrap();
+            assert_eq!(new_track.id == old_id, same_id, "case {index}");
+            assert_eq!(tracks.len(), if same_id { 1 } else { 2 });
+            assert!(!new_track.missing);
+            if !same_id {
+                assert!(tracks.iter().find(|t| t.id == old_id).unwrap().missing);
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cue_relocation_requires_absent_sheet_not_absent_shared_source() {
+        let root = std::env::temp_dir().join(format!("rivu-cue-move-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let sheet = root.join("old.cue");
+        let source = root.join("shared.wav");
+        fs::write(&sheet, b"sheet").unwrap();
+        fs::write(&source, b"source").unwrap();
+        let mut old = segment(sheet.to_str().unwrap(), 1, 0, Some(4500));
+        old.path = source.clone();
+        let mut moved = old.clone();
+        moved.cue.as_mut().unwrap().sheet = root.join("new.cue");
+        for sheet_exists in [true, false] {
+            let store = Store::open(Path::new(":memory:")).unwrap();
+            let mut result = scan(vec![old.clone()]);
+            result.roots = vec![root.clone()];
+            store.apply_scan(&result).unwrap();
+            let id = store.tracks().unwrap()[0].id;
+            store.edit_track(id, "Override", "Artist", "Album").unwrap();
+            if !sheet_exists {
+                fs::remove_file(&sheet).unwrap();
+            }
+            result.records = vec![moved.clone()];
+            store.apply_scan(&result).unwrap();
+            let tracks = store.tracks().unwrap();
+            let new = tracks.iter().find(|t| t.cue == moved.cue).unwrap();
+            assert_eq!(new.id == id, !sheet_exists);
+            if !sheet_exists {
+                assert_eq!(new.title, "Override");
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ambiguous_cue_relocation_does_not_steal_an_existing_id() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        store
+            .apply_scan(&scan(vec![
+                segment("/music/old-a.cue", 1, 0, Some(4500)),
+                segment("/music/old-b.cue", 1, 0, Some(4500)),
+            ]))
+            .unwrap();
+        let ids: Vec<_> = store.tracks().unwrap().iter().map(|t| t.id).collect();
+        store
+            .apply_scan(&scan(vec![segment("/music/new.cue", 1, 0, Some(4500))]))
+            .unwrap();
+        let tracks = store.tracks().unwrap();
+        assert_eq!(tracks.len(), 3);
+        assert!(!ids.contains(&tracks[2].id));
+    }
+
+    #[test]
+    fn invalid_cue_database_range_leaves_entire_scan_unchanged() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        store
+            .apply_scan(&scan(vec![rec(
+                "/music/original.wav",
+                "old",
+                "Original",
+                60.0,
+            )]))
+            .unwrap();
+        let invalid = segment("/music/a.cue", 1, u64::MAX, None);
+        assert!(
+            store
+                .apply_scan(&scan(vec![
+                    rec("/music/new.wav", "new", "New", 60.0),
+                    invalid
+                ]))
+                .is_err()
+        );
+        let tracks = store.tracks().unwrap();
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].title, "Original");
+        assert!(!tracks[0].missing);
+    }
+
+    #[test]
+    fn failed_migration_rolls_back_schema_rows_and_sequence() {
+        let path = legacy_db("cue-migration-rollback");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("CREATE INDEX tracks_path ON settings(value)", [])
+            .unwrap();
+        drop(conn);
+        assert!(Store::open(&path).is_err());
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT value FROM schema_meta WHERE key='version'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row("SELECT title_override FROM tracks WHERE id=7", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap(),
+            "Override"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT seq FROM sqlite_sequence WHERE name='tracks'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            99
+        );
+        assert!(
+            conn.execute("INSERT INTO tracks(path) VALUES('/music/legacy.wav')", [])
+                .is_err()
+        );
+        conn.execute("DROP INDEX tracks_path", []).unwrap();
+        drop(conn);
+        assert_eq!(Store::open(&path).unwrap().tracks().unwrap()[0].id, 7);
         let _ = fs::remove_file(path);
     }
 }

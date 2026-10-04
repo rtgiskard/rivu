@@ -88,7 +88,7 @@ enum PlaybackAction {
 
 #[derive(Subcommand)]
 enum LibraryAction {
-    /// Import files or directories without blocking playback.
+    /// Import audio files, CUE sheets or directories without blocking playback.
     Scan {
         /// Paths relative to this client's working directory, or absolute paths.
         #[arg(required = true)]
@@ -186,6 +186,7 @@ enum PlaylistAction {
     Play {
         playlist_id: i64,
     },
+    /// Import an M3U/M3U8 playlist or a CUE sheet in track order.
     Import {
         /// Playlist path relative to this client's working directory, or absolute.
         path: PathBuf,

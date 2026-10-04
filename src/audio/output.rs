@@ -360,6 +360,10 @@ impl Output {
     pub(super) fn heard(&self) -> f64 {
         self.shared.heard.load(Ordering::Acquire) as f64 / self.rate as f64
     }
+    pub(super) fn position(&self) -> f64 {
+        // Lost device buffers advance the source cursor, but are not listened time.
+        self.shared.retired.load(Ordering::Acquire) as f64 / self.rate as f64
+    }
     pub(super) fn pause(&self, paused: bool) {
         self.shared.paused.store(paused, Ordering::Release);
     }

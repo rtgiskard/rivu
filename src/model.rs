@@ -1,10 +1,30 @@
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc};
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CueSegment {
+    pub sheet: PathBuf,
+    pub number: u32,
+    pub start_frame: u64,
+    pub end_frame: Option<u64>,
+}
+
+impl CueSegment {
+    pub fn start_seconds(&self) -> f64 {
+        self.start_frame as f64 / 75.0
+    }
+
+    pub fn end_seconds(&self) -> Option<f64> {
+        self.end_frame.map(|frame| frame as f64 / 75.0)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Track {
     pub id: i64,
     pub path: PathBuf,
+    #[serde(default)]
+    pub cue: Option<CueSegment>,
     pub title: String,
     pub artist: String,
     pub album: String,

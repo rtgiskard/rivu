@@ -2,7 +2,7 @@ use crate::{
     analysis::AnalysisFrame,
     audio::{self, AudioCommand, AudioEngine, AudioEvent},
     config::Config,
-    library::{self, ScanResult},
+    library::{self, M3uItem, ScanResult},
     model::*,
     store::Store,
 };
@@ -230,7 +230,7 @@ struct Session {
 }
 struct ScanFinished {
     result: Result<ScanResult>,
-    import: Option<(String, Vec<PathBuf>)>,
+    import: Option<(String, Vec<M3uItem>)>,
 }
 struct Core {
     store: Store,
@@ -405,6 +405,10 @@ impl Core {
         });
         self.audio(AudioCommand::Load {
             path: track.path,
+            range: track.cue.as_ref().map(|cue| audio::PlaybackRange {
+                start_seconds: cue.start_seconds(),
+                end_seconds: cue.end_seconds(),
+            }),
             generation: self.generation,
             start_seconds: 0.0,
             paused: false,
@@ -564,7 +568,7 @@ impl Core {
         self.state.seek_revision = self.state.seek_revision.wrapping_add(1);
         Ok(())
     }
-    fn scan(&mut self, paths: Vec<PathBuf>, import: Option<(String, Vec<PathBuf>)>) -> Result<()> {
+    fn scan(&mut self, paths: Vec<PathBuf>, import: Option<(String, Vec<M3uItem>)>) -> Result<()> {
         if self.state.scanning {
             bail!("A library scan is already running");
         }
@@ -594,17 +598,26 @@ impl Core {
             self.state.last_error = Some(result.errors().join("\n"));
         }
         self.reload()?;
-        if let Some((name, paths)) = scan.import {
-            let mut ids = Vec::with_capacity(paths.len());
-            let by_path: std::collections::HashMap<&Path, i64> = self
+        if let Some((name, items)) = scan.import {
+            let mut ids = Vec::with_capacity(items.len());
+            let by_source: std::collections::HashMap<(&Path, Option<u32>), i64> = self
                 .state
                 .library
                 .iter()
-                .map(|track| (track.path.as_path(), track.id))
+                .filter(|track| !track.missing)
+                .map(|track| {
+                    let key = track
+                        .cue
+                        .as_ref()
+                        .map_or((track.path.as_path(), None), |cue| {
+                            (cue.sheet.as_path(), Some(cue.number))
+                        });
+                    (key, track.id)
+                })
                 .collect();
-            for path in paths {
-                if let Ok(path) = path.canonicalize()
-                    && let Some(id) = by_path.get(path.as_path())
+            for item in items {
+                if let Ok(path) = item.path.canonicalize()
+                    && let Some(id) = by_source.get(&(path.as_path(), item.cue_track))
                 {
                     ids.push(*id);
                 }
@@ -811,15 +824,18 @@ impl Core {
                 if self.state.scanning {
                     bail!("A library scan is already running");
                 }
-                let items = library::import_m3u(&path)?;
-                let paths = items.into_iter().map(|item| item.path).collect::<Vec<_>>();
+                let items = library::import_playlist(&path)?;
+                let paths = items
+                    .iter()
+                    .map(|item| item.path.clone())
+                    .collect::<Vec<_>>();
                 let name = name.unwrap_or_else(|| {
                     path.file_stem()
                         .unwrap_or_default()
                         .to_string_lossy()
                         .into_owned()
                 });
-                self.scan(paths.clone(), Some((name, paths)))?;
+                self.scan(paths, Some((name, items)))?;
             }
             Command::ExportPlaylist { playlist_id, path } => {
                 let playlist = self
@@ -930,9 +946,11 @@ mod tests {
         store
             .apply_scan(&ScanResult {
                 roots: vec![directory.path().to_path_buf()],
+                suppressed_sources: Vec::new(),
                 records: (1..=4)
                     .map(|id| ScanRecord {
                         path: directory.path().join(format!("{id}.wav")),
+                        cue: None,
                         size: 1,
                         modified_ns: 1,
                         fingerprint: None,
@@ -994,6 +1012,65 @@ mod tests {
             core.command(command).unwrap_err().to_string(),
             format!("Missing audio file: {}", path.display())
         );
+    }
+
+    #[test]
+    fn cue_playlist_import_preserves_segment_order_and_duplicates() {
+        let (directory, mut core) = fixture();
+        let sheet = directory.path().join("album.cue");
+        std::fs::write(&sheet, "FILE album.wav WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nINDEX 01 00:05:00\n").unwrap();
+        let items = library::import_playlist(&sheet).unwrap();
+        let records = (1..=2)
+            .map(|number| ScanRecord {
+                path: directory.path().join("album.wav"),
+                cue: Some(CueSegment {
+                    sheet: sheet.clone(),
+                    number,
+                    start_frame: u64::from(number - 1) * 375,
+                    end_frame: if number == 1 { Some(375) } else { None },
+                }),
+                size: 1,
+                modified_ns: 1,
+                fingerprint: None,
+                media: MediaInfo {
+                    title: format!("Part {number}"),
+                    artist: String::new(),
+                    album: "Album".into(),
+                    duration: Some(5.0),
+                    codec: "pcm".into(),
+                    channels: 2,
+                    sample_rate: 48_000,
+                },
+            })
+            .collect();
+        core.finish_scan(ScanFinished {
+            result: Ok(ScanResult {
+                roots: vec![sheet],
+                records,
+                ..ScanResult::default()
+            }),
+            import: Some((
+                "CUE occurrences".into(),
+                vec![items[1].clone(), items[0].clone(), items[1].clone()],
+            )),
+        })
+        .unwrap();
+        let playlist = &core.state.playlists[0];
+        let tracks: Vec<_> = playlist
+            .entries
+            .iter()
+            .map(|entry| core.track(entry.track_id).unwrap())
+            .collect();
+        assert_eq!(
+            tracks
+                .iter()
+                .map(|track| track.title.as_str())
+                .collect::<Vec<_>>(),
+            ["Part 2", "Part 1", "Part 2"]
+        );
+        assert_eq!(tracks[0].id, tracks[2].id);
+        assert_ne!(tracks[0].id, tracks[1].id);
+        assert_ne!(playlist.entries[0].id, playlist.entries[2].id);
     }
 
     #[test]

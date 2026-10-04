@@ -1,7 +1,7 @@
 //! One track's decode-to-output pipeline and audible playback accounting.
 
 use super::{
-    MediaInfo, Stereo,
+    MediaInfo, PlaybackRange, Stereo,
     output::{Converter, Output},
     source::Source,
 };
@@ -14,6 +14,7 @@ const PENDING_BUFFER_CAPACITY: usize = 16_384;
 
 pub(super) struct PlaybackOptions {
     pub(super) path: PathBuf,
+    pub(super) range: Option<PlaybackRange>,
     pub(super) generation: u64,
     pub(super) start: f64,
     pub(super) paused: bool,
@@ -31,6 +32,7 @@ pub(super) struct Playback {
     offset: usize,
     generation: u64,
     path: PathBuf,
+    range: Option<PlaybackRange>,
     base_position: f64,
     prior_heard: f64,
     eof: bool,
@@ -40,6 +42,7 @@ impl Playback {
     pub(super) fn new(options: PlaybackOptions, analyzer: &AnalysisWorker) -> Result<Self> {
         let PlaybackOptions {
             path,
+            range,
             generation,
             start,
             paused,
@@ -49,6 +52,9 @@ impl Playback {
             media_read_buffer_len,
         } = options;
         let mut source = Source::open(&path, media_read_buffer_len)?;
+        if let Some(range) = range {
+            source.restrict(range)?;
+        }
         if start > 0.0 {
             source.seek(start)?;
         }
@@ -62,6 +68,7 @@ impl Playback {
             offset: 0,
             generation,
             path,
+            range,
             base_position: start,
             prior_heard,
             eof: false,
@@ -74,6 +81,10 @@ impl Playback {
 
     pub(super) fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub(super) fn range(&self) -> Option<PlaybackRange> {
+        self.range
     }
 
     pub(super) fn info(&self) -> &MediaInfo {
@@ -101,7 +112,7 @@ impl Playback {
         self.prior_heard + self.output.heard()
     }
     pub(super) fn position(&self) -> f64 {
-        let value = self.base_position + self.output.heard();
+        let value = self.base_position + self.output.position();
         self.source
             .info()
             .duration

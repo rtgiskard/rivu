@@ -2,6 +2,7 @@ pub mod analysis;
 pub mod audio;
 pub mod config;
 pub mod core;
+pub mod cue;
 pub mod gui;
 pub mod ipc;
 pub mod library;

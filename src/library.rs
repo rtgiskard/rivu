@@ -1,7 +1,7 @@
 use crate::audio::probe;
-use crate::model::{Playlist, Track};
-use anyhow::{Context, Result, anyhow};
-use std::collections::HashMap;
+use crate::model::{CueSegment, Playlist, Track};
+use anyhow::{Context, Result, anyhow, bail};
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -32,6 +32,7 @@ pub struct KnownFile {
     pub modified_ns: i64,
     pub fingerprint: Option<String>,
     pub media: Option<MediaInfo>,
+    pub cue: Option<CueSegment>,
 }
 
 #[derive(Clone, Debug)]
@@ -41,6 +42,7 @@ pub struct ScanRecord {
     pub modified_ns: i64,
     pub fingerprint: Option<String>,
     pub media: MediaInfo,
+    pub cue: Option<CueSegment>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -48,6 +50,8 @@ pub struct ScanResult {
     pub roots: Vec<PathBuf>,
     pub records: Vec<ScanRecord>,
     pub errors: Vec<String>,
+    /// Whole sources represented by successfully scanned CUE sheets.
+    pub suppressed_sources: Vec<PathBuf>,
 }
 
 impl ScanResult {
@@ -63,83 +67,165 @@ impl ScanResult {
     }
 }
 
-/// Scan directories and files without touching the database or audio output.
-/// Callers should run this on a worker. A file whose size and mtime are unchanged
-/// reuses its cached fingerprint and probe result; all other files are hashed and
-/// probed, with individual failures retained in `errors`.
+/// Scan directories, audio files and CUE sheets without touching audio output.
+/// CUE metadata is always reread; only unchanged full-source probe results may
+/// be reused. Failed sheets contribute no partial tracks or source suppression.
 pub fn scan_paths(paths: &[PathBuf], known: &[KnownFile]) -> Result<ScanResult> {
-    let mut known_by_path = HashMap::with_capacity(known.len());
+    let mut known_by_path: HashMap<&Path, &KnownFile> = HashMap::with_capacity(known.len());
     for item in known {
-        known_by_path.insert(item.path.as_path(), item);
+        let cached = known_by_path.entry(item.path.as_path()).or_insert(item);
+        if cached.cue.is_some() && item.cue.is_none() {
+            *cached = item;
+        }
     }
-    let mut files = Vec::new();
-    let mut seen_files = std::collections::HashSet::new();
-    let mut roots = Vec::with_capacity(paths.len());
+    let mut files = HashSet::new();
+    let mut explicit_audio = HashSet::new();
+    let mut result = ScanResult::default();
     for requested in paths {
         let root = match fs::canonicalize(requested) {
             Ok(path) => path,
             Err(error) => {
-                roots.push(absolute_hint(requested));
-                files.push(Err(anyhow!("{}: {error}", requested.display())));
+                result.roots.push(absolute_hint(requested));
+                result
+                    .errors
+                    .push(format!("{}: {error}", requested.display()));
                 continue;
             }
         };
-        roots.push(root.clone());
-        let metadata = match fs::metadata(&root) {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                files.push(Err(anyhow!("{}: {error}", requested.display())));
-                continue;
-            }
-        };
-        if metadata.is_file() {
+        result.roots.push(root.clone());
+        if root.is_file() {
             if is_audio_path(&root) {
-                if seen_files.insert(root.clone()) {
-                    files.push(Ok(root));
-                }
+                explicit_audio.insert(root.clone());
+                files.insert(root);
+            } else if is_cue_path(&root) {
+                files.insert(root);
             } else {
-                files.push(Err(anyhow!(
-                    "{} is not a supported audio file or contains no audio",
+                result.errors.push(format!(
+                    "{} is not a supported audio file or CUE sheet",
                     requested.display()
-                )));
+                ));
             }
-            continue;
-        }
-        if metadata.is_dir() {
-            for entry in WalkDir::new(&root).follow_links(false).into_iter() {
+        } else if root.is_dir() {
+            for entry in WalkDir::new(&root).follow_links(false) {
                 match entry {
-                    Ok(entry) if entry.file_type().is_file() && is_audio_path(entry.path()) => {
-                        let path = entry.into_path();
-                        if seen_files.insert(path.clone()) {
-                            files.push(Ok(path));
+                    Ok(entry)
+                        if entry.file_type().is_file()
+                            && (is_audio_path(entry.path()) || is_cue_path(entry.path())) =>
+                    {
+                        match entry.path().canonicalize() {
+                            Ok(path) => {
+                                files.insert(path);
+                            }
+                            Err(error) => result
+                                .errors
+                                .push(format!("{}: {error}", entry.path().display())),
                         }
                     }
                     Ok(_) => {}
-                    Err(error) => files.push(Err(anyhow!("{}: {error}", root.display()))),
+                    Err(error) => result.errors.push(format!("{}: {error}", root.display())),
                 }
             }
         }
     }
-    let mut result = ScanResult {
-        roots,
-        records: Vec::with_capacity(files.len()),
-        errors: Vec::new(),
-    };
-    for file in files {
-        let path = match file {
-            Ok(path) => path,
-            Err(error) => {
-                result.errors.push(format!("{error:#}"));
-                continue;
+    let mut files: Vec<_> = files.into_iter().collect();
+    files.sort();
+    let mut sources = HashMap::new();
+    let mut suppressed = HashSet::new();
+    for sheet in files.iter().filter(|path| is_cue_path(path)) {
+        match scan_cue(sheet, &known_by_path, &mut sources) {
+            Ok(records) => {
+                suppressed.extend(records.iter().map(|record| record.path.clone()));
+                result.records.extend(records);
             }
-        };
-        match scan_file(&path, known_by_path.get(path.as_path()).copied()) {
-            Ok(record) => result.records.push(record),
+            Err(error) => result
+                .errors
+                .push(format!("{}: {error:#}", sheet.display())),
+        }
+    }
+    for path in files.iter().filter(|path| is_audio_path(path)) {
+        if suppressed.contains(path) && !explicit_audio.contains(path) {
+            continue;
+        }
+        match source_record(path, &known_by_path, &mut sources) {
+            Ok(record) => result.records.push(record.clone()),
             Err(error) => result.errors.push(format!("{}: {error:#}", path.display())),
         }
     }
-    result.records.sort_by(|a, b| a.path.cmp(&b.path));
+    suppressed.retain(|path| !explicit_audio.contains(path));
+    result.suppressed_sources = suppressed.into_iter().collect();
+    result.suppressed_sources.sort();
+    result.records.sort_by(|a, b| {
+        let identity = |record: &ScanRecord| record.cue.as_ref().map(|cue| cue.number).unwrap_or(0);
+        let a_path = a.cue.as_ref().map_or(&a.path, |cue| &cue.sheet);
+        let b_path = b.cue.as_ref().map_or(&b.path, |cue| &cue.sheet);
+        a_path
+            .cmp(b_path)
+            .then_with(|| identity(a).cmp(&identity(b)))
+    });
     Ok(result)
+}
+
+fn source_record<'a>(
+    path: &Path,
+    known: &HashMap<&Path, &KnownFile>,
+    sources: &'a mut HashMap<PathBuf, std::result::Result<ScanRecord, String>>,
+) -> Result<&'a ScanRecord> {
+    sources
+        .entry(path.to_path_buf())
+        .or_insert_with(|| {
+            scan_file(path, known.get(path).copied()).map_err(|error| format!("{error:#}"))
+        })
+        .as_ref()
+        .map_err(|error| anyhow!("{error}"))
+}
+
+fn scan_cue(
+    path: &Path,
+    known: &HashMap<&Path, &KnownFile>,
+    sources: &mut HashMap<PathBuf, std::result::Result<ScanRecord, String>>,
+) -> Result<Vec<ScanRecord>> {
+    let sheet = crate::cue::read(path)?;
+    let mut records = Vec::with_capacity(sheet.tracks.len());
+    for track in sheet.tracks {
+        let source = track
+            .file
+            .canonicalize()
+            .with_context(|| format!("resolve CUE source {}", track.file.display()))?;
+        let mut record = source_record(&source, known, sources)?.clone();
+        let duration = record
+            .media
+            .duration
+            .filter(|duration| duration.is_finite() && *duration > 0.0)
+            .with_context(|| format!("CUE source {} has no finite duration", source.display()))?;
+        let start = track.start_frame as f64 / 75.0;
+        let end = track
+            .end_frame
+            .map_or(duration, |frame| frame as f64 / 75.0);
+        if start >= duration || end <= start || end > duration + 1.0 / 75.0 {
+            bail!(
+                "CUE track {} has invalid boundaries {start}..{end} for source duration {duration}",
+                track.number
+            );
+        }
+        record.media.duration = Some(end.min(duration) - start);
+        record.media.title = track
+            .title
+            .unwrap_or_else(|| format!("Track {:02}", track.number));
+        if let Some(artist) = track.performer.as_ref().or(sheet.performer.as_ref()) {
+            record.media.artist.clone_from(artist);
+        }
+        if let Some(album) = &sheet.title {
+            record.media.album.clone_from(album);
+        }
+        record.cue = Some(CueSegment {
+            sheet: path.to_path_buf(),
+            number: track.number,
+            start_frame: track.start_frame,
+            end_frame: track.end_frame,
+        });
+        records.push(record);
+    }
+    Ok(records)
 }
 
 fn scan_file(path: &Path, known: Option<&KnownFile>) -> Result<ScanRecord> {
@@ -152,28 +238,32 @@ fn scan_file(path: &Path, known: Option<&KnownFile>) -> Result<ScanRecord> {
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map(|duration| duration.as_nanos().min(i64::MAX as u128) as i64)
         .unwrap_or(0);
-    if let Some(known) = known
-        && known.size == size
-        && known.modified_ns == modified_ns
-        && let (Some(fingerprint), Some(media)) = (&known.fingerprint, &known.media)
+    let unchanged = known.filter(|known| known.size == size && known.modified_ns == modified_ns);
+    let media = match unchanged
+        .filter(|known| known.cue.is_none())
+        .and_then(|known| known.media.as_ref())
     {
-        return Ok(ScanRecord {
-            path: path.to_path_buf(),
-            size,
-            modified_ns,
-            fingerprint: Some(fingerprint.clone()),
-            media: media.clone(),
-        });
-    }
-    let media = probe(path).with_context(|| "probe audio")?;
-    let fingerprint = hash_file(path)?;
+        Some(media) => media.clone(),
+        None => probe(path).with_context(|| "probe audio")?,
+    };
+    let fingerprint = match unchanged.and_then(|known| known.fingerprint.as_ref()) {
+        Some(fingerprint) => fingerprint.clone(),
+        None => hash_file(path)?,
+    };
     Ok(ScanRecord {
         path: path.to_path_buf(),
         size,
         modified_ns,
         fingerprint: Some(fingerprint),
         media,
+        cue: None,
     })
+}
+
+fn is_cue_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("cue"))
 }
 
 fn hash_file(path: &Path) -> Result<String> {
@@ -224,9 +314,32 @@ fn is_audio_path(path: &Path) -> bool {
 pub struct M3uItem {
     pub path: PathBuf,
     pub name: Option<String>,
+    pub cue_track: Option<u32>,
 }
 
-/// Read a UTF-8 M3U/M3U8 file. Relative paths are resolved against its parent.
+/// Import a CUE sheet in sheet order, or a UTF-8 M3U/M3U8 playlist.
+pub fn import_playlist(path: &Path) -> Result<Vec<M3uItem>> {
+    if is_cue_path(path) {
+        cue_items(path)
+    } else {
+        import_m3u(path)
+    }
+}
+
+fn cue_items(path: &Path) -> Result<Vec<M3uItem>> {
+    Ok(crate::cue::read(path)?
+        .tracks
+        .into_iter()
+        .map(|track| M3uItem {
+            path: path.to_path_buf(),
+            name: track.title,
+            cue_track: Some(track.number),
+        })
+        .collect())
+}
+
+/// Read a UTF-8 M3U/M3U8 file, expanding bare CUE paths. Relative paths are
+/// resolved against its parent. CUE paths always refer to the complete sheet.
 pub fn import_m3u(path: &Path) -> Result<Vec<M3uItem>> {
     let bytes = fs::read(path).with_context(|| format!("read playlist {}", path.display()))?;
     let text = std::str::from_utf8(bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes))
@@ -234,6 +347,7 @@ pub fn import_m3u(path: &Path) -> Result<Vec<M3uItem>> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let mut pending_name = None;
     let mut entries = Vec::new();
+    let mut sheets = HashMap::new();
     for raw_line in text.lines() {
         let line = raw_line.trim_end_matches('\r');
         if line.is_empty() {
@@ -252,10 +366,22 @@ pub fn import_m3u(path: &Path) -> Result<Vec<M3uItem>> {
         } else {
             parent.join(item_path)
         };
-        entries.push(M3uItem {
-            path: item_path,
-            name: pending_name.take(),
-        });
+        let name = pending_name.take();
+        if is_cue_path(&item_path) {
+            let items = match sheets.entry(item_path.clone()) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(cue_items(&item_path)?)
+                }
+            };
+            entries.extend(items.iter().cloned());
+        } else {
+            entries.push(M3uItem {
+                path: item_path,
+                name,
+                cue_track: None,
+            });
+        }
     }
     Ok(entries)
 }
@@ -265,6 +391,56 @@ pub fn import_m3u(path: &Path) -> Result<Vec<M3uItem>> {
 /// so `..` and directory symlinks retain their filesystem meaning.
 pub fn export_m3u(path: &Path, playlist: &Playlist, tracks: &[Track]) -> Result<()> {
     let by_id: HashMap<i64, &Track> = tracks.iter().map(|track| (track.id, track)).collect();
+    // Resolve every occurrence before opening the destination. Standard M3U has
+    // no syntax for selecting a CUE subtrack, so only complete sheet runs can
+    // be represented without changing what will play on reimport.
+    let mut sheets = HashMap::new();
+    let mut output = Vec::new();
+    let mut index = 0;
+    while index < playlist.entries.len() {
+        let track = *by_id
+            .get(&playlist.entries[index].track_id)
+            .context("Playlist contains a missing library track")?;
+        if let Some(cue) = &track.cue {
+            let sheet = match sheets.entry(cue.sheet.as_path()) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(crate::cue::read(&cue.sheet)?)
+                }
+            };
+            for (offset, expected) in sheet.tracks.iter().enumerate() {
+                let selected = playlist
+                    .entries
+                    .get(index + offset)
+                    .and_then(|entry| by_id.get(&entry.track_id))
+                    .copied();
+                let matches = selected.is_some_and(|selected| {
+                    selected.cue.as_ref().is_some_and(|segment| {
+                        segment.sheet == cue.sheet
+                            && segment.number == expected.number
+                            && segment.start_frame == expected.start_frame
+                            && segment.end_frame == expected.end_frame
+                    })
+                });
+                if !matches {
+                    bail!(
+                        "Standard M3U cannot represent partial or reordered CUE tracks; include every track from {} in sheet order",
+                        cue.sheet.display()
+                    );
+                }
+                if expected.file.canonicalize()? != selected.unwrap().path {
+                    bail!(
+                        "CUE source changed; rescan {} before exporting",
+                        cue.sheet.display()
+                    );
+                }
+            }
+            index += sheet.tracks.len();
+        } else {
+            index += 1;
+        }
+        output.push(track);
+    }
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -275,28 +451,29 @@ pub fn export_m3u(path: &Path, playlist: &Playlist, tracks: &[Track]) -> Result<
     let file = File::create(path).with_context(|| format!("create playlist {}", path.display()))?;
     let mut writer = BufWriter::new(file);
     writer.write_all(b"#EXTM3U\n")?;
-    for entry in &playlist.entries {
-        let Some(track) = by_id.get(&entry.track_id) else {
+    for track in output {
+        if let Some(cue) = &track.cue {
+            write_relative_path(&mut writer, &parent, &cue.sheet)?;
             continue;
-        };
+        }
         let duration = track
             .duration
             .map(|seconds| seconds.max(0.0).round() as i64)
             .unwrap_or(-1);
-        let display_name = if track.artist.is_empty() {
-            track.title.as_str()
-        } else if track.title.is_empty() {
-            track.artist.as_str()
-        } else {
-            // Keep the conventional artist - title label without changing stored metadata.
-            // This is deliberately borrowed, avoiding an allocation for the common case below.
-            writer.write_all(
-                format!("#EXTINF:{duration},{} - {}\n", track.artist, track.title).as_bytes(),
+        if !track.artist.is_empty() && !track.title.is_empty() {
+            writeln!(
+                writer,
+                "#EXTINF:{duration},{} - {}",
+                track.artist, track.title
             )?;
-            write_relative_path(&mut writer, &parent, &track.path)?;
-            continue;
-        };
-        writer.write_all(format!("#EXTINF:{duration},{display_name}\n").as_bytes())?;
+        } else {
+            let name = if track.artist.is_empty() {
+                &track.title
+            } else {
+                &track.artist
+            };
+            writeln!(writer, "#EXTINF:{duration},{name}")?;
+        }
         write_relative_path(&mut writer, &parent, &track.path)?;
     }
     writer.flush().context("flush playlist")?;
@@ -354,6 +531,346 @@ mod tests {
     use super::*;
     use crate::model::PlaylistEntry;
 
+    // Mono PCM WAVs with exactly 100 samples per CD frame, no audio device.
+    fn wav(path: &Path, frames: u32) -> Result<()> {
+        let data_len = frames * 100 * 2;
+        let mut file = File::create(path)?;
+        file.write_all(b"RIFF")?;
+        file.write_all(&(36 + data_len).to_le_bytes())?;
+        file.write_all(b"WAVEfmt ")?;
+        file.write_all(&16_u32.to_le_bytes())?;
+        file.write_all(&1_u16.to_le_bytes())?;
+        file.write_all(&1_u16.to_le_bytes())?;
+        file.write_all(&7500_u32.to_le_bytes())?;
+        file.write_all(&15000_u32.to_le_bytes())?;
+        file.write_all(&2_u16.to_le_bytes())?;
+        file.write_all(&16_u16.to_le_bytes())?;
+        file.write_all(b"data")?;
+        file.write_all(&data_len.to_le_bytes())?;
+        file.write_all(&vec![0; data_len as usize])?;
+        Ok(())
+    }
+
+    fn two_track_sheet(path: &Path) -> Result<()> {
+        fs::write(
+            path,
+            "TITLE \"Album\"\nPERFORMER \"Sheet artist\"\nFILE \"audio.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"First\"\n    PERFORMER \"Track artist\"\n    INDEX 01 00:00:00\n  TRACK 02 AUDIO\n    INDEX 00 00:00:60\n    INDEX 01 00:01:00\n",
+        )?;
+        Ok(())
+    }
+
+    fn known_records(records: &[ScanRecord]) -> Vec<KnownFile> {
+        records
+            .iter()
+            .enumerate()
+            .map(|(index, record)| KnownFile {
+                track_id: index as i64 + 1,
+                path: record.path.clone(),
+                size: record.size,
+                modified_ns: record.modified_ns,
+                fingerprint: record.fingerprint.clone(),
+                media: Some(record.media.clone()),
+                cue: record.cue.clone(),
+            })
+            .collect()
+    }
+
+    fn track_from_record(id: i64, record: &ScanRecord) -> Track {
+        Track {
+            id,
+            path: record.path.clone(),
+            title: record.media.title.clone(),
+            artist: record.media.artist.clone(),
+            album: record.media.album.clone(),
+            duration: record.media.duration,
+            codec: record.media.codec.clone(),
+            channels: record.media.channels,
+            sample_rate: record.media.sample_rate,
+            cue: record.cue.clone(),
+            missing: false,
+            play_count: 0,
+            listen_seconds: 0.0,
+            last_played: None,
+        }
+    }
+
+    #[test]
+    fn cue_single_source_tracks_have_relative_duration_and_metadata() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let audio = directory.path().join("audio.wav");
+        let sheet = directory.path().join("album.CUE");
+        wav(&audio, 225)?;
+        two_track_sheet(&sheet)?;
+        let result = scan_paths(&[sheet.clone()], &[])?;
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.records.len(), 2);
+        let first = &result.records[0];
+        let second = &result.records[1];
+        assert_eq!(first.path, audio.canonicalize()?);
+        assert_eq!(second.path, first.path);
+        assert_eq!(first.media.title, "First");
+        assert_eq!(first.media.artist, "Track artist");
+        assert_eq!(second.media.title, "Track 02");
+        assert_eq!(second.media.artist, "Sheet artist");
+        assert_eq!(first.media.album, "Album");
+        assert_eq!(first.media.duration, Some(1.0));
+        assert_eq!(second.media.duration, Some(2.0));
+        assert_eq!(
+            first.cue.as_ref().unwrap(),
+            &CueSegment {
+                sheet: sheet.canonicalize()?,
+                number: 1,
+                start_frame: 0,
+                end_frame: Some(75),
+            }
+        );
+        assert_eq!(second.cue.as_ref().unwrap().start_frame, 75);
+        assert_eq!(second.cue.as_ref().unwrap().end_frame, None);
+        Ok(())
+    }
+
+    #[test]
+    fn cue_multiple_files_reset_indexes_and_keep_sheet_order() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        wav(&directory.path().join("z.wav"), 150)?;
+        wav(&directory.path().join("a.wav"), 225)?;
+        let sheet = directory.path().join("multi.cue");
+        fs::write(
+            &sheet,
+            "FILE \"z.wav\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nINDEX 01 00:01:00\nFILE \"a.wav\" WAVE\nTRACK 03 AUDIO\nINDEX 01 00:00:00\nTRACK 04 AUDIO\nINDEX 01 00:02:00\n",
+        )?;
+        let result = scan_paths(&[sheet], &[])?;
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.records.len(), 4);
+        assert_eq!(
+            result
+                .records
+                .iter()
+                .map(|record| record.cue.as_ref().unwrap().number)
+                .collect::<Vec<_>>(),
+            [1, 2, 3, 4]
+        );
+        assert_eq!(
+            result
+                .records
+                .iter()
+                .map(|record| record.media.duration)
+                .collect::<Vec<_>>(),
+            [Some(1.0), Some(1.0), Some(2.0), Some(1.0)]
+        );
+        assert_eq!(result.records[1].cue.as_ref().unwrap().end_frame, None);
+        assert_eq!(result.records[2].cue.as_ref().unwrap().start_frame, 0);
+        assert_eq!(result.suppressed_sources.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn cue_rescan_rereads_sheet_and_never_reuses_segment_as_full_media() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let audio = directory.path().join("audio.wav");
+        let sheet = directory.path().join("album.cue");
+        wav(&audio, 225)?;
+        two_track_sheet(&sheet)?;
+        let original = scan_paths(&[sheet.clone()], &[])?;
+        assert!(original.errors.is_empty(), "{:?}", original.errors);
+        let known = known_records(&original.records);
+        let full = scan_paths(&[audio.clone()], &known)?;
+        assert!(full.errors.is_empty(), "{:?}", full.errors);
+        assert_eq!(full.records.len(), 1);
+        assert_eq!(full.records[0].media.duration, Some(3.0));
+        assert!(full.records[0].cue.is_none());
+        fs::write(
+            &sheet,
+            "TITLE \"Edited album\"\nFILE \"audio.wav\" WAVE\nTRACK 01 AUDIO\nTITLE \"Renamed\"\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nINDEX 01 00:02:00\n",
+        )?;
+        for cache in [&known, &known_records(&full.records)] {
+            let rescanned = scan_paths(&[sheet.clone()], cache)?;
+            assert!(rescanned.errors.is_empty(), "{:?}", rescanned.errors);
+            assert_eq!(rescanned.records.len(), 2);
+            assert_eq!(rescanned.records[0].media.title, "Renamed");
+            assert_eq!(rescanned.records[0].media.album, "Edited album");
+            assert_eq!(
+                rescanned.records[0].media.artist,
+                full.records[0].media.artist
+            );
+            assert_eq!(rescanned.records[0].media.duration, Some(2.0));
+            assert_eq!(rescanned.records[1].media.duration, Some(1.0));
+            assert_eq!(
+                rescanned.records[0].fingerprint,
+                original.records[0].fingerprint
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cue_missing_source_and_out_of_bounds_fail_atomically() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        wav(&directory.path().join("audio.wav"), 150)?;
+        let sheet = directory.path().join("broken.cue");
+        for invalid in [
+            "FILE \"missing.wav\" WAVE\nTRACK 02 AUDIO\nINDEX 01 00:00:00\n",
+            "TRACK 02 AUDIO\nINDEX 01 00:02:00\n",
+            "TRACK 02 AUDIO\nINDEX 01 00:02:02\n",
+            "TRACK 02 AUDIO\nINDEX 01 00:00:00\n",
+        ] {
+            fs::write(
+                &sheet,
+                format!("FILE \"audio.wav\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n{invalid}"),
+            )?;
+            let result = scan_paths(&[sheet.clone()], &[])?;
+            assert!(result.records.is_empty());
+            assert_eq!(result.errors.len(), 1);
+            assert!(result.suppressed_sources.is_empty());
+            let directory_scan = scan_paths(&[directory.path().to_path_buf()], &[])?;
+            assert_eq!(directory_scan.records.len(), 1);
+            assert!(directory_scan.records[0].cue.is_none());
+            assert!(directory_scan.suppressed_sources.is_empty());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cue_directory_suppresses_sources_but_explicit_audio_survives() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let audio = directory.path().join("audio.wav");
+        let sheet = directory.path().join("album.cue");
+        wav(&audio, 225)?;
+        wav(&directory.path().join("unrelated.wav"), 75)?;
+        two_track_sheet(&sheet)?;
+        let result = scan_paths(&[directory.path().to_path_buf(), sheet.clone()], &[])?;
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.records.len(), 3);
+        assert_eq!(
+            result
+                .records
+                .iter()
+                .filter(|record| record.cue.is_none())
+                .count(),
+            1
+        );
+        assert_eq!(result.suppressed_sources, [audio.canonicalize()?]);
+        let explicit = scan_paths(
+            &[directory.path().to_path_buf(), audio.clone(), sheet, audio],
+            &[],
+        )?;
+        assert!(explicit.errors.is_empty(), "{:?}", explicit.errors);
+        assert_eq!(explicit.records.len(), 4);
+        assert_eq!(
+            explicit
+                .records
+                .iter()
+                .filter(|record| record.cue.is_none())
+                .count(),
+            2
+        );
+        assert!(explicit.suppressed_sources.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn standard_cue_paths_roundtrip_complete_sheets_and_repeated_occurrences() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let audio = directory.path().join("audio.wav");
+        let sheet = directory.path().join("#album.cue");
+        wav(&audio, 225)?;
+        two_track_sheet(&sheet)?;
+        let scan = scan_paths(&[sheet.clone(), audio], &[])?;
+        let tracks: Vec<_> = scan
+            .records
+            .iter()
+            .enumerate()
+            .map(|(index, record)| track_from_record(index as i64 + 1, record))
+            .collect();
+        let mut sequence: Vec<_> = tracks
+            .iter()
+            .filter(|track| track.cue.is_some())
+            .map(|track| track.id)
+            .collect();
+        sequence.extend(sequence.clone());
+        sequence.push(tracks.iter().find(|track| track.cue.is_none()).unwrap().id);
+        let playlist = Playlist {
+            id: 1,
+            name: "Standard CUE references".into(),
+            entries: sequence
+                .iter()
+                .enumerate()
+                .map(|(index, id)| PlaylistEntry {
+                    id: index as i64 + 1,
+                    track_id: *id,
+                })
+                .collect(),
+        };
+        let path = directory.path().join("playlist.m3u8");
+        export_m3u(&path, &playlist, &tracks)?;
+        let imported = import_playlist(&path)?;
+        assert_eq!(imported.len(), sequence.len());
+        for (item, id) in imported.iter().zip(sequence) {
+            let track = tracks.iter().find(|track| track.id == id).unwrap();
+            assert_eq!(item.cue_track, track.cue.as_ref().map(|cue| cue.number));
+            assert_eq!(
+                item.path.canonicalize()?,
+                *track.cue.as_ref().map_or(&track.path, |cue| &cue.sheet)
+            );
+        }
+        // Ordinary path entries, usable without interpreting player-specific tags.
+        let text = fs::read_to_string(&path)?;
+        assert_eq!(
+            text.lines().filter(|line| *line == "./#album.cue").count(),
+            2
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unrepresentable_cue_exports_preserve_existing_destination() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        wav(&directory.path().join("audio.wav"), 225)?;
+        let sheet = directory.path().join("album.cue");
+        two_track_sheet(&sheet)?;
+        let scan = scan_paths(&[sheet.clone()], &[])?;
+        let tracks: Vec<_> = scan
+            .records
+            .iter()
+            .enumerate()
+            .map(|(index, record)| track_from_record(index as i64 + 1, record))
+            .collect();
+        let path = directory.path().join("existing.m3u8");
+        fs::write(&path, "original playlist\n")?;
+        for sequence in [vec![1], vec![2], vec![2, 1], vec![1, 1, 2]] {
+            let playlist = Playlist {
+                id: 1,
+                name: "Partial CUE".into(),
+                entries: sequence
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, track_id)| PlaylistEntry {
+                        id: index as i64 + 1,
+                        track_id,
+                    })
+                    .collect(),
+            };
+            assert!(export_m3u(&path, &playlist, &tracks).is_err());
+            assert_eq!(fs::read_to_string(&path)?, "original playlist\n");
+        }
+        // A sheet changed outside Rivu must not silently change exported ranges.
+        let playlist = Playlist {
+            id: 1,
+            name: "Stale sheet".into(),
+            entries: vec![
+                PlaylistEntry { id: 1, track_id: 1 },
+                PlaylistEntry { id: 2, track_id: 2 },
+            ],
+        };
+        fs::write(
+            &sheet,
+            fs::read_to_string(&sheet)?.replace("00:01:00", "00:02:00"),
+        )?;
+        assert!(export_m3u(&path, &playlist, &tracks).is_err());
+        assert_eq!(fs::read_to_string(&path)?, "original playlist\n");
+        Ok(())
+    }
+
     fn assert_playlist_roundtrip(path: &Path) -> Result<()> {
         let directory = path.parent().unwrap().canonicalize()?;
         let tracks: Vec<_> = ["#song.wav", "other song.wav"]
@@ -377,6 +894,7 @@ mod tests {
                 play_count: 0,
                 listen_seconds: 0.0,
                 last_played: None,
+                cue: None,
             })
             .collect();
         for track in &tracks {
@@ -404,6 +922,7 @@ mod tests {
         assert_eq!(imported.len(), 3);
         for (item, index) in imported.iter().zip([0, 1, 0]) {
             assert_eq!(item.path.canonicalize()?, tracks[index].path);
+            assert_eq!(item.cue_track, None);
         }
         assert_eq!(imported[0].name.as_deref(), Some("Artist - #song.wav"));
         assert_eq!(imported[1].name.as_deref(), Some("other song.wav"));

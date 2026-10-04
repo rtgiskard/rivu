@@ -67,6 +67,7 @@ impl Worker {
     fn playback_options(
         &self,
         path: PathBuf,
+        range: Option<super::PlaybackRange>,
         generation: u64,
         start: f64,
         paused: bool,
@@ -74,6 +75,7 @@ impl Worker {
     ) -> PlaybackOptions {
         PlaybackOptions {
             path,
+            range,
             generation,
             start,
             paused,
@@ -115,13 +117,14 @@ impl Worker {
             }
             AudioCommand::Load {
                 path,
+                range,
                 generation,
                 start_seconds,
                 paused,
             } => {
                 self.stop();
                 match Playback::new(
-                    self.playback_options(path, generation, start_seconds, paused, 0.0),
+                    self.playback_options(path, range, generation, start_seconds, paused, 0.0),
                     &self.analyzer,
                 ) {
                     Ok(playback) => {
@@ -164,6 +167,7 @@ impl Worker {
             match Playback::new(
                 self.playback_options(
                     old.path().to_owned(),
+                    old.range(),
                     generation,
                     position,
                     old.paused(),
