@@ -1,10 +1,13 @@
 PREFIX ?= /usr/local
 DESTDIR ?=
 
-.PHONY: all install
+.PHONY: all clean install
 
 all:
 	cargo build --release
+
+clean:
+	cargo clean
 
 install: all
 	install -Dm755 target/release/rivu "$(DESTDIR)$(PREFIX)/bin/rivu"
