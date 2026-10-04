@@ -57,6 +57,10 @@ samples before closing the stream. Listening totals count confirmed playback,
 not frames merely queued to the device; totals are conservative across underruns.
 Recoverable ALSA underruns do not end the listening session.
 
+If the next track cannot be opened after EOF, playback stops and reports the
+error. A manual switch to a missing file does not interrupt the current track.
+Removing tracks also removes their queue and shuffle-history references.
+
 == Configuration
 
 The default configuration file is `~/.config/rivu/config.toml`.
