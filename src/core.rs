@@ -18,7 +18,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 type Wakeup = Arc<dyn Fn() + Send + Sync>;
@@ -69,6 +69,7 @@ impl AppHandle {
     }
     pub fn request(&self, command: Command) -> Response {
         let (tx, rx) = bounded(1);
+        let maintenance = matches!(command, Command::OptimizeDatabase);
         let result = self.sender.send_timeout(
             Request {
                 command,
@@ -83,12 +84,17 @@ impl AppHandle {
                 state: self.snapshot(),
             };
         }
-        rx.recv_timeout(Duration::from_secs(12))
-            .unwrap_or_else(|error| Response {
-                ok: false,
-                error: Some(format!("Core response timed out: {error}")),
-                state: self.snapshot(),
-            })
+        let response = if maintenance {
+            rx.recv().map_err(|error| error.to_string())
+        } else {
+            rx.recv_timeout(Duration::from_secs(12))
+                .map_err(|error| error.to_string())
+        };
+        response.unwrap_or_else(|error| Response {
+            ok: false,
+            error: Some(format!("Core response unavailable: {error}")),
+            state: self.snapshot(),
+        })
     }
 }
 
@@ -162,8 +168,7 @@ impl Runtime {
                     subscribers,
                     generation: 0,
                     next_queue_id,
-                    session: None,
-                    stats_tick: Instant::now(),
+                    playback: None,
                     scan_tx,
                     scan_rx,
                     scan_workers: Vec::new(),
@@ -224,9 +229,12 @@ struct Saved {
     queue: Vec<QueueEntry>,
     current: Option<u64>,
 }
-struct Session {
-    id: i64,
+struct PlaybackStats {
+    track_id: i64,
     heard: f64,
+    position: Option<f64>,
+    started: bool,
+    counted: bool,
 }
 struct ScanFinished {
     result: Result<ScanResult>,
@@ -241,8 +249,7 @@ struct Core {
     subscribers: Arc<RwLock<Vec<Sender<()>>>>,
     generation: u64,
     next_queue_id: u64,
-    session: Option<Session>,
-    stats_tick: Instant,
+    playback: Option<PlaybackStats>,
     scan_tx: Sender<ScanFinished>,
     scan_rx: Receiver<ScanFinished>,
     scan_workers: Vec<JoinHandle<()>>,
@@ -288,8 +295,8 @@ impl Core {
                 }
             }
         }
-        if let Err(error) = self.finish_session("shutdown") {
-            self.state.last_error = Some(format!("Saving listening session: {error:#}"));
+        if let Err(error) = self.stop() {
+            self.state.last_error = Some(format!("Saving play count: {error:#}"));
         }
         let _ = self.save();
         let _ = self.engine.commands.send(AudioCommand::Shutdown);
@@ -398,11 +405,7 @@ impl Core {
         if !track.path.is_file() {
             bail!("Missing audio file: {}", track.path.display());
         }
-        self.finish_session("changed")?;
-        self.session = Some(Session {
-            id: self.store.begin_session(track.id, now())?,
-            heard: 0.0,
-        });
+        self.stop()?;
         self.audio(AudioCommand::Load {
             path: track.path,
             range: track.cue.as_ref().map(|cue| audio::PlaybackRange {
@@ -412,13 +415,14 @@ impl Core {
             generation: self.generation,
             start_seconds: 0.0,
             paused: false,
-        })
-        .or_else(|error| {
-            self.finish_session("failed")
-                .with_context(|| format!("{error:#}"))?;
-            Err(error)
         })?;
-        self.stats_tick = Instant::now();
+        self.playback = Some(PlaybackStats {
+            track_id: track.id,
+            heard: 0.0,
+            position: None,
+            started: false,
+            counted: false,
+        });
         self.state.current_queue_id = Some(queue_id);
         self.state.duration = track.duration;
         self.state.status = PlaybackStatus::Playing;
@@ -431,36 +435,138 @@ impl Core {
         self.shuffle_bag.retain(|id| *id != queue_id);
         self.save()
     }
-    fn finish_session(&mut self, reason: &str) -> Result<()> {
-        let snapshot = self.engine.stop_and_snapshot();
+    fn count_play(&mut self) -> Result<()> {
+        let Some(duration) = self
+            .state
+            .duration
+            .filter(|duration| duration.is_finite() && *duration > 0.0)
+        else {
+            return Ok(());
+        };
+        let Some(playback) = &mut self.playback else {
+            return Ok(());
+        };
+        if playback.started
+            && !playback.counted
+            && playback.heard > duration * self.state.config.play_count_threshold_percent / 100.0
+        {
+            self.store.increment_play_count(playback.track_id)?;
+            playback.counted = true;
+            self.state.library = Arc::new(self.store.tracks()?);
+        }
+        Ok(())
+    }
+    fn playback_started(&mut self, info: library::MediaInfo) -> Result<()> {
+        let Some(playback) = &mut self.playback else {
+            return Ok(());
+        };
+        if playback.started {
+            return Ok(());
+        }
+        if let Err(error) = self.store.mark_played(playback.track_id, now()) {
+            // Rejected bookkeeping must not be revived by another queued start
+            // or counted from the successful audio output's final snapshot.
+            self.playback = None;
+            return Err(error);
+        }
+        playback.started = true;
+        self.state.duration = info
+            .duration
+            .filter(|duration| duration.is_finite() && *duration > 0.0)
+            .or(self
+                .state
+                .duration
+                .filter(|duration| duration.is_finite() && *duration > 0.0));
+        self.state.library = Arc::new(self.store.tracks()?);
+        self.state.history = Arc::new(self.store.history(200)?);
+        self.count_play()
+    }
+    fn playback_progress(&mut self, position: f64, heard: f64) -> Result<()> {
+        if let Some(playback) = &mut self.playback
+            && playback.started
+        {
+            if position.is_finite() {
+                self.state.position = position;
+                playback.position = Some(position);
+            }
+            if heard.is_finite() {
+                playback.heard = playback.heard.max(heard);
+            }
+            self.count_play()?;
+        }
+        Ok(())
+    }
+    fn drain_playback_events(&mut self, generation: u64) -> Result<()> {
+        while let Ok(event) = self.engine.events.try_recv() {
+            match event {
+                AudioEvent::Started {
+                    generation: event_generation,
+                    info,
+                } if event_generation == generation => self.playback_started(info)?,
+                AudioEvent::Progress {
+                    generation: event_generation,
+                    position_seconds,
+                    listened_seconds,
+                } if event_generation == generation => {
+                    self.playback_progress(position_seconds, listened_seconds)?;
+                }
+                // The output is retiring: terminal events must never advance
+                // the queue, recursively stop the worker, or revive playback.
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+    fn finish_playback(
+        &mut self,
+        snapshot: Result<Option<(u64, f64)>>,
+        natural: bool,
+    ) -> Result<()> {
         let generation = self.generation;
-        // Once output has been stopped, later database/load errors must not leave
-        // a resumable-looking state or allow queued events to revive old playback.
+        // A request can beat a queued Started even though the worker has already
+        // played audio. Acknowledged stops make that queued bookkeeping safe to
+        // consume before generation fencing; errors still fence below.
+        let bookkeeping = if snapshot.is_ok() {
+            self.drain_playback_events(generation)
+        } else {
+            Ok(())
+        };
+        // Fence queued events even when stopping or saving the count fails.
         self.generation = self.generation.wrapping_add(1);
         self.state.status = PlaybackStatus::Stopped;
         self.state.position = 0.0;
         self.state.seek_revision = self.state.seek_revision.wrapping_add(1);
-        let (snapshot_generation, heard) = snapshot?;
-        if snapshot_generation == generation
-            && let Some(session) = &mut self.session
-        {
-            session.heard = session.heard.max(heard);
+        let snapshot = snapshot?;
+        if let Some(playback) = &mut self.playback {
+            if let Some((snapshot_generation, heard)) = snapshot
+                && snapshot_generation == generation
+                && heard.is_finite()
+            {
+                playback.heard = playback.heard.max(heard);
+            }
+            if natural
+                && !self
+                    .state
+                    .duration
+                    .is_some_and(|duration| duration.is_finite() && duration > 0.0)
+            {
+                // Only backend-confirmed position at EOF can resolve an unknown
+                // duration; a seek target or accumulated heard time cannot.
+                self.state.duration = playback.position.filter(|position| *position > 0.0);
+            }
         }
-        if let Some(session) = &self.session {
-            self.store
-                .update_session(session.id, session.heard, Some(now()), reason)?;
-            self.session = None;
-            self.state.library = Arc::new(self.store.tracks()?);
-            self.state.history = Arc::new(self.store.history(200)?);
-        }
+        bookkeeping?;
+        self.count_play()?;
+        self.playback = None;
         Ok(())
     }
-    fn stop(&mut self, reason: &str) -> Result<()> {
-        self.finish_session(reason)
+    fn stop(&mut self) -> Result<()> {
+        let snapshot = self.engine.stop_and_snapshot().map(Some);
+        self.finish_playback(snapshot, false)
     }
     fn advance(&mut self, natural: bool) -> Result<()> {
         if self.state.queue.is_empty() {
-            return self.stop("empty_queue");
+            return self.stop();
         }
         let current = self.state.current_queue_id;
         if natural
@@ -518,7 +624,7 @@ impl Core {
                 return self.start(self.state.queue[0].id, true);
             }
         }
-        self.stop("queue_finished")
+        self.stop()
     }
     fn previous(&mut self) -> Result<()> {
         if self.state.position > 3.0 {
@@ -568,14 +674,23 @@ impl Core {
         self.state.seek_revision = self.state.seek_revision.wrapping_add(1);
         Ok(())
     }
-    fn scan(&mut self, paths: Vec<PathBuf>, import: Option<(String, Vec<M3uItem>)>) -> Result<()> {
+    fn scan(
+        &mut self,
+        paths: Vec<PathBuf>,
+        import: Option<(String, Vec<M3uItem>)>,
+        force: bool,
+    ) -> Result<()> {
         if self.state.scanning {
             bail!("A library scan is already running");
         }
         if paths.is_empty() {
             bail!("No files or directories supplied");
         }
-        let known = self.store.known_files()?;
+        let known = if force {
+            Vec::new()
+        } else {
+            self.store.known_files()?
+        };
         let sender = self.scan_tx.clone();
         let worker = thread::Builder::new()
             .name("rivu-scan".into())
@@ -634,36 +749,28 @@ impl Core {
     fn audio_event(&mut self, event: AudioEvent) -> Result<()> {
         match event {
             AudioEvent::Started { generation, info } if generation == self.generation => {
-                self.state.duration = info.duration;
+                if let Err(error) = self.playback_started(info) {
+                    self.stop().with_context(|| format!("{error:#}"))?;
+                    return Err(error);
+                }
             }
             AudioEvent::Progress {
                 generation,
                 position_seconds,
                 listened_seconds,
             } if generation == self.generation => {
-                if position_seconds.is_finite() {
-                    self.state.position = position_seconds;
-                }
-                if let Some(session) = &mut self.session {
-                    if listened_seconds.is_finite() {
-                        session.heard = session.heard.max(listened_seconds);
-                    }
-                    if self.stats_tick.elapsed() >= Duration::from_secs(1) {
-                        self.store
-                            .update_session(session.id, session.heard, None, "playing")?;
-                        self.stats_tick = Instant::now();
-                    }
-                }
+                self.playback_progress(position_seconds, listened_seconds)?;
             }
             AudioEvent::Ended { generation } if generation == self.generation => {
-                self.finish_session("completed")?;
+                let snapshot = self.engine.stop_and_snapshot().map(Some);
+                self.finish_playback(snapshot, true)?;
                 self.advance(true)?;
             }
             AudioEvent::Failed {
                 generation,
                 message,
             } if generation == self.generation => {
-                self.stop("failed").with_context(|| message.clone())?;
+                self.stop().with_context(|| message.clone())?;
                 self.state.last_error = Some(message);
             }
             _ => {}
@@ -673,7 +780,7 @@ impl Core {
     fn command(&mut self, command: Command) -> Result<()> {
         match command {
             Command::Status | Command::Overview => return Ok(()),
-            Command::Scan { paths } => self.scan(paths, None)?,
+            Command::Scan { paths, force } => self.scan(paths, None, force)?,
             Command::Play { track_id } => {
                 self.track(track_id)?;
                 let existing = self
@@ -705,7 +812,7 @@ impl Core {
                 if ids.is_empty() {
                     bail!("Playlist is empty");
                 }
-                self.stop("playlist_changed")?;
+                self.stop()?;
                 self.state.queue = Arc::new(Vec::new());
                 self.state.current_queue_id = None;
                 self.played.clear();
@@ -739,7 +846,7 @@ impl Core {
                     Command::Resume
                 });
             }
-            Command::Stop => self.stop("stopped")?,
+            Command::Stop => self.stop()?,
             Command::Next => self.advance(false)?,
             Command::Previous => self.previous()?,
             Command::Seek { seconds } => self.seek(seconds)?,
@@ -756,7 +863,7 @@ impl Core {
                     bail!("Queue entry not found");
                 }
                 if self.state.current_queue_id == Some(queue_id) {
-                    self.stop("removed_from_queue")?;
+                    self.stop()?;
                     self.state.current_queue_id = None;
                 }
                 Arc::make_mut(&mut self.state.queue).retain(|q| q.id != queue_id);
@@ -775,7 +882,7 @@ impl Core {
                 queue.insert(index, entry);
             }
             Command::ClearQueue => {
-                self.stop("queue_cleared")?;
+                self.stop()?;
                 self.state.queue = Arc::new(Vec::new());
                 self.state.current_queue_id = None;
                 self.played.clear();
@@ -835,7 +942,7 @@ impl Core {
                         .to_string_lossy()
                         .into_owned()
                 });
-                self.scan(paths, Some((name, items)))?;
+                self.scan(paths, Some((name, items)), false)?;
             }
             Command::ExportPlaylist { playlist_id, path } => {
                 let playlist = self
@@ -864,13 +971,30 @@ impl Core {
                     .current_track()
                     .is_some_and(|track| track_ids.contains(&track.id))
                 {
-                    self.stop("removed_from_library")?;
+                    self.stop()?;
                     self.state.current_queue_id = None;
                 }
                 self.store.remove_tracks(&track_ids)?;
                 Arc::make_mut(&mut self.state.queue).retain(|q| !track_ids.contains(&q.track_id));
                 self.prune_queue_history();
                 self.reload()?;
+            }
+            Command::SetFavorite {
+                track_ids,
+                favorite,
+            } => {
+                self.store.set_favorite(&track_ids, favorite)?;
+                self.state.library = Arc::new(self.store.tracks()?);
+            }
+            Command::RemoveMissingTracks => {
+                let track_ids = self
+                    .state
+                    .library
+                    .iter()
+                    .filter(|track| track.missing)
+                    .map(|track| track.id)
+                    .collect();
+                return self.command(Command::RemoveTracks { track_ids });
             }
             Command::Device { name } => {
                 if let Some(name) = &name
@@ -924,9 +1048,19 @@ impl Core {
                 }
                 return Ok(());
             }
+            Command::OptimizeDatabase => {
+                self.state.database_optimization = None;
+                if self.state.status != PlaybackStatus::Stopped || self.state.scanning {
+                    bail!("Database optimization requires stopped playback and no active scan");
+                }
+                self.state.database_optimization = Some(self.store.optimize()?);
+                // Saving playback here would immediately create new WAL pages
+                // after maintenance has truncated them.
+                return Ok(());
+            }
             Command::Shutdown => {
                 self.state.shutting_down = true;
-                self.stop("shutdown")?;
+                self.stop()?;
             }
         }
         self.save()
@@ -941,6 +1075,10 @@ mod tests {
     // An idle real audio worker handles stop/snapshot, but these tests never load
     // audio. Missing-file errors expose the selected entry without opening CPAL.
     fn fixture() -> (tempfile::TempDir, Core) {
+        fixture_with_duration(Some(10.0))
+    }
+
+    fn fixture_with_duration(duration: Option<f64>) -> (tempfile::TempDir, Core) {
         let directory = tempfile::tempdir().unwrap();
         let store = Store::open(Path::new(":memory:")).unwrap();
         store
@@ -958,10 +1096,15 @@ mod tests {
                             title: format!("Track {id}"),
                             artist: String::new(),
                             album: String::new(),
-                            duration: Some(10.0),
+                            duration,
                             codec: "pcm".into(),
                             channels: 2,
                             sample_rate: 48000,
+                            bitrate_bps: None,
+                            track_number: None,
+                            disc_number: None,
+                            bits_per_sample: None,
+                            release_date: None,
                         },
                     })
                     .collect(),
@@ -983,8 +1126,7 @@ mod tests {
             subscribers: Arc::new(RwLock::new(Vec::new())),
             generation: 1,
             next_queue_id: 1,
-            session: None,
-            stats_tick: Instant::now(),
+            playback: None,
             scan_tx,
             scan_rx,
             scan_workers: Vec::new(),
@@ -996,26 +1138,566 @@ mod tests {
         (directory, core)
     }
 
-    fn playing(core: &mut Core, queue_id: u64) {
+    fn pending(core: &mut Core, queue_id: u64) {
         core.state.current_queue_id = Some(queue_id);
         core.state.status = PlaybackStatus::Playing;
-        let track_id = core.state.current_track().unwrap().id;
-        core.session = Some(Session {
-            id: core.store.begin_session(track_id, now()).unwrap(),
-            heard: 2.0,
+        let (track_id, duration) = {
+            let track = core.state.current_track().unwrap();
+            (track.id, track.duration)
+        };
+        core.state.duration = duration;
+        core.playback = Some(PlaybackStats {
+            track_id,
+            heard: 0.0,
+            position: None,
+            started: false,
+            counted: false,
         });
+    }
+
+    fn started_event(core: &Core, duration: Option<f64>) -> AudioEvent {
+        let track = core.state.current_track().unwrap();
+        AudioEvent::Started {
+            generation: core.generation,
+            info: MediaInfo {
+                title: track.title.clone(),
+                artist: track.artist.clone(),
+                album: track.album.clone(),
+                duration,
+                codec: track.codec.clone(),
+                channels: track.channels,
+                sample_rate: track.sample_rate,
+                bitrate_bps: None,
+                track_number: None,
+                disc_number: None,
+                bits_per_sample: None,
+                release_date: None,
+            },
+        }
+    }
+
+    fn started(core: &mut Core, duration: Option<f64>) -> Result<()> {
+        core.audio_event(started_event(core, duration))
+    }
+
+    fn playing(core: &mut Core, queue_id: u64) {
+        pending(core, queue_id);
+        started(core, Some(10.0)).unwrap();
+    }
+
+    fn progress(core: &mut Core, position_seconds: f64, listened_seconds: f64) {
+        core.audio_event(AudioEvent::Progress {
+            generation: core.generation,
+            position_seconds,
+            listened_seconds,
+        })
+        .unwrap();
+    }
+
+    fn play_count(core: &Core, track_id: i64) -> u64 {
+        core.store
+            .tracks()
+            .unwrap()
+            .iter()
+            .find(|track| track.id == track_id)
+            .unwrap()
+            .play_count
     }
 
     fn missing(core: &mut Core, command: Command, track_id: i64) {
         let path = core.track(track_id).unwrap().path.clone();
+        let error = core.command(command).unwrap_err();
+        assert!(format!("{error:#}").contains(&path.display().to_string()));
+    }
+
+    #[test]
+    fn successful_start_records_recent_once_and_twenty_percent_is_strict() {
+        let (_directory, mut core) = fixture();
+        pending(&mut core, 1);
+        assert!(core.store.history(200).unwrap().is_empty());
+        started(&mut core, Some(10.0)).unwrap();
+        assert_eq!(core.store.history(200).unwrap()[0].track_id, 1);
+        assert_eq!(play_count(&core, 1), 0);
+
+        // A duplicate Started must not refresh last-played a second time.
+        core.store.mark_played(1, 7).unwrap();
+        started(&mut core, Some(10.0)).unwrap();
+        assert_eq!(core.store.history(200).unwrap()[0].played_at, 7);
+        progress(&mut core, 9.0, 2.0);
+        progress(&mut core, 9.0, f64::NAN);
+        progress(&mut core, 9.0, f64::INFINITY);
+        assert_eq!(play_count(&core, 1), 0);
+        progress(&mut core, 9.0, 2.000_001);
+        assert_eq!(play_count(&core, 1), 1);
+    }
+
+    #[test]
+    fn configured_threshold_controls_counting_including_zero_percent() {
+        for percent in [0.0, 50.0, 99.0] {
+            let (_directory, mut core) = fixture();
+            Arc::make_mut(&mut core.state.config).play_count_threshold_percent = percent;
+            playing(&mut core, 1);
+            let boundary = 10.0 * percent / 100.0;
+            progress(&mut core, 10.0, boundary);
+            assert_eq!(play_count(&core, 1), 0);
+            progress(&mut core, 10.0, boundary + 0.000_001);
+            assert_eq!(play_count(&core, 1), 1);
+        }
+    }
+
+    #[test]
+    fn repeated_progress_pause_seek_and_resume_count_only_once() {
+        let (_directory, mut core) = fixture();
+        playing(&mut core, 1);
+        core.store.mark_played(1, 7).unwrap();
+        progress(&mut core, 1.0, 1.0);
+        core.command(Command::Pause).unwrap();
+        progress(&mut core, 1.0, 1.0);
+        core.command(Command::Seek { seconds: 9.0 }).unwrap();
+        assert_eq!(play_count(&core, 1), 0);
+        core.command(Command::Resume).unwrap();
+        progress(&mut core, 9.5, 1.5);
+        core.command(Command::Seek { seconds: 0.0 }).unwrap();
+        progress(&mut core, 0.5, 2.0);
+        assert_eq!(play_count(&core, 1), 0);
+        progress(&mut core, 1.0, 2.5);
+        for _ in 0..3 {
+            core.command(Command::Pause).unwrap();
+            core.command(Command::Resume).unwrap();
+            core.command(Command::Seek { seconds: 5.0 }).unwrap();
+            progress(&mut core, 5.0, 2.0);
+            progress(&mut core, 8.0, 8.0);
+        }
+        core.stop().unwrap();
+        assert_eq!(play_count(&core, 1), 1);
+        assert_eq!(core.store.history(200).unwrap()[0].played_at, 7);
+    }
+
+    #[test]
+    fn failed_load_and_stale_events_neither_count_nor_record_recent() {
+        let (_directory, mut core) = fixture();
+        pending(&mut core, 1);
+        let generation = core.generation;
+        let track = core.state.current_track().unwrap();
+        core.audio_event(AudioEvent::Started {
+            generation: generation.wrapping_sub(1),
+            info: MediaInfo {
+                title: track.title.clone(),
+                artist: track.artist.clone(),
+                album: track.album.clone(),
+                duration: Some(10.0),
+                codec: track.codec.clone(),
+                channels: track.channels,
+                sample_rate: track.sample_rate,
+                bitrate_bps: None,
+                track_number: None,
+                disc_number: None,
+                bits_per_sample: None,
+                release_date: None,
+            },
+        })
+        .unwrap();
+        progress(&mut core, 10.0, 10.0);
+        core.audio_event(AudioEvent::Failed {
+            generation,
+            message: "Decoder failed".into(),
+        })
+        .unwrap();
+        assert_eq!(core.state.status, PlaybackStatus::Stopped);
+        assert_eq!(core.state.last_error.as_deref(), Some("Decoder failed"));
+        assert_ne!(core.generation, generation);
+        core.audio_event(AudioEvent::Progress {
+            generation,
+            position_seconds: 10.0,
+            listened_seconds: 10.0,
+        })
+        .unwrap();
+        assert_eq!(core.state.position, 0.0);
+        assert_eq!(play_count(&core, 1), 0);
+        assert!(core.store.history(200).unwrap().is_empty());
+    }
+
+    #[test]
+    fn final_stop_snapshot_counts_only_matching_generation_above_boundary() {
+        for (heard, stale, expected) in [(2.0, false, 0), (2.01, false, 1), (10.0, true, 0)] {
+            let (_directory, mut core) = fixture();
+            playing(&mut core, 1);
+            progress(&mut core, 2.0, 2.0);
+            let generation = core.generation;
+            let snapshot_generation = if stale { generation - 1 } else { generation };
+            core.finish_playback(Ok(Some((snapshot_generation, heard))), false)
+                .unwrap();
+            assert_eq!(play_count(&core, 1), expected);
+            assert_eq!(core.state.status, PlaybackStatus::Stopped);
+            assert_ne!(core.generation, generation);
+            assert!(core.playback.is_none());
+            core.audio_event(AudioEvent::Progress {
+                generation,
+                position_seconds: 10.0,
+                listened_seconds: 10.0,
+            })
+            .unwrap();
+            assert_eq!(play_count(&core, 1), expected);
+        }
+    }
+
+    #[test]
+    fn stop_ack_records_queued_start_and_snapshot_without_terminal_navigation() {
+        for (heard, expected) in [(2.0, 0), (2.01, 1)] {
+            let (_directory, mut core) = fixture();
+            pending(&mut core, 1);
+            let generation = core.generation;
+            let (sender, events) = bounded(8);
+            core.engine.events = events;
+            sender.send(started_event(&core, Some(10.0))).unwrap();
+            sender.send(started_event(&core, Some(10.0))).unwrap();
+            sender
+                .send(AudioEvent::Progress {
+                    generation,
+                    position_seconds: 9.0,
+                    listened_seconds: 2.0,
+                })
+                .unwrap();
+            sender
+                .send(AudioEvent::Progress {
+                    generation: generation - 1,
+                    position_seconds: 10.0,
+                    listened_seconds: 10.0,
+                })
+                .unwrap();
+            sender.send(AudioEvent::Ended { generation }).unwrap();
+            sender
+                .send(AudioEvent::Failed {
+                    generation,
+                    message: "Retired failure".into(),
+                })
+                .unwrap();
+            core.finish_playback(Ok(Some((generation, heard))), false)
+                .unwrap();
+            assert_eq!(play_count(&core, 1), expected);
+            assert_eq!(core.store.history(200).unwrap().len(), 1);
+            assert_eq!(core.store.history(200).unwrap()[0].track_id, 1);
+            assert_eq!(core.state.status, PlaybackStatus::Stopped);
+            assert_eq!(core.state.current_queue_id, Some(1));
+            assert_eq!(core.state.position, 0.0);
+            assert!(core.state.last_error.is_none());
+            assert_eq!(core.generation, generation.wrapping_add(1));
+            assert!(core.playback.is_none());
+        }
+    }
+
+    #[test]
+    fn queued_start_rejection_fences_once_without_recursive_stop_or_count() {
+        let (_directory, mut core) = fixture();
+        pending(&mut core, 1);
+        let generation = core.generation;
+        let (sender, events) = bounded(4);
+        core.engine.events = events;
+        sender.send(started_event(&core, Some(10.0))).unwrap();
+        sender
+            .send(AudioEvent::Progress {
+                generation,
+                position_seconds: 10.0,
+                listened_seconds: 10.0,
+            })
+            .unwrap();
+        sender.send(AudioEvent::Ended { generation }).unwrap();
+        core.store.remove_tracks(&[1]).unwrap();
+        assert!(
+            core.finish_playback(Ok(Some((generation, 10.0))), false)
+                .is_err()
+        );
+        assert_eq!(core.generation, generation.wrapping_add(1));
+        assert_eq!(core.state.status, PlaybackStatus::Stopped);
+        assert!(core.playback.is_none());
+        while let Ok(event) = core.engine.events.try_recv() {
+            core.audio_event(event).unwrap();
+        }
+        assert!(core.store.history(200).unwrap().is_empty());
+        assert_eq!(play_count(&core, 2), 0);
+    }
+
+    #[test]
+    fn database_optimization_requires_stopped_playback_and_no_scan() {
+        let (_directory, mut core) = fixture();
+        playing(&mut core, 1);
+        core.state.database_optimization = Some(DatabaseOptimization {
+            database_bytes_before: 1,
+            database_bytes_after: 1,
+            wal_bytes_before: 1,
+            wal_bytes_after: 0,
+        });
+        assert!(core.command(Command::OptimizeDatabase).is_err());
+        assert!(core.state.database_optimization.is_none());
+        core.command(Command::Pause).unwrap();
+        assert!(core.command(Command::OptimizeDatabase).is_err());
+        core.stop().unwrap();
+        core.state.scanning = true;
+        assert!(core.command(Command::OptimizeDatabase).is_err());
+        core.state.scanning = false;
+        let saved = core.store.get_setting("playback").unwrap();
+        core.enqueue(&[4]).unwrap();
+        core.command(Command::OptimizeDatabase).unwrap();
+        assert!(core.state.database_optimization.is_some());
+        assert_eq!(core.store.get_setting("playback").unwrap(), saved);
+        assert_eq!(core.store.history(200).unwrap()[0].track_id, 1);
+        assert_eq!(play_count(&core, 1), 0);
+    }
+
+    #[test]
+    fn favorite_updates_preserve_counts_and_recent_history() {
+        let (_directory, mut core) = fixture();
+        playing(&mut core, 1);
+        progress(&mut core, 3.0, 3.0);
+        let played_at = core.store.history(200).unwrap()[0].played_at;
+        core.command(Command::SetFavorite {
+            track_ids: vec![1, 2],
+            favorite: true,
+        })
+        .unwrap();
+        assert!(core.track(1).unwrap().favorite);
+        assert!(core.track(2).unwrap().favorite);
+        assert!(!core.track(3).unwrap().favorite);
+        core.command(Command::SetFavorite {
+            track_ids: vec![1],
+            favorite: false,
+        })
+        .unwrap();
+        assert!(!core.track(1).unwrap().favorite);
+        assert!(core.track(2).unwrap().favorite);
+        assert_eq!(play_count(&core, 1), 1);
+        assert_eq!(core.store.history(200).unwrap()[0].played_at, played_at);
+        assert_eq!(core.state.status, PlaybackStatus::Playing);
+    }
+
+    #[test]
+    fn removing_missing_tracks_reuses_queue_playlist_and_recent_cleanup_without_disk_deletes() {
+        let (_directory, mut core) = fixture();
+        let kept_path = core.track(1).unwrap().path.clone();
+        std::fs::write(&kept_path, b"Do not delete").unwrap();
+        let playlist_id = core.store.create_playlist("Mixed availability").unwrap();
+        core.store.add_playlist(playlist_id, &[1, 2]).unwrap();
+        core.store
+            .apply_scan(&ScanResult {
+                roots: vec![core.track(2).unwrap().path.clone()],
+                ..ScanResult::default()
+            })
+            .unwrap();
+        core.reload().unwrap();
+        playing(&mut core, 2);
+        core.played = vec![1, 2, 3];
+        core.played_cursor = 2;
+        core.command(Command::RemoveMissingTracks).unwrap();
         assert_eq!(
-            core.command(command).unwrap_err().to_string(),
-            format!("Missing audio file: {}", path.display())
+            core.state
+                .library
+                .iter()
+                .map(|track| track.id)
+                .collect::<Vec<_>>(),
+            [1, 3, 4]
+        );
+        assert_eq!(
+            core.state
+                .queue
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            [1, 4, 5]
+        );
+        assert_eq!(
+            core.state.playlists[0]
+                .entries
+                .iter()
+                .map(|entry| entry.track_id)
+                .collect::<Vec<_>>(),
+            [1]
+        );
+        assert_eq!(core.played, [1]);
+        assert_eq!(core.played_cursor, 1);
+        assert_eq!(core.state.current_queue_id, None);
+        assert_eq!(core.state.status, PlaybackStatus::Stopped);
+        assert!(core.state.history.is_empty());
+        assert_eq!(std::fs::read(&kept_path).unwrap(), b"Do not delete");
+    }
+
+    #[test]
+    fn forced_scan_reprobes_unchanged_files_instead_of_reusing_cached_metadata() {
+        use std::io::Write;
+        let (_directory, mut core) = fixture();
+        let path = core.track(1).unwrap().path.clone();
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(b"RIFF").unwrap();
+        file.write_all(&236_u32.to_le_bytes()).unwrap();
+        file.write_all(b"WAVEfmt ").unwrap();
+        file.write_all(&16_u32.to_le_bytes()).unwrap();
+        file.write_all(&1_u16.to_le_bytes()).unwrap();
+        file.write_all(&1_u16.to_le_bytes()).unwrap();
+        file.write_all(&7500_u32.to_le_bytes()).unwrap();
+        file.write_all(&15000_u32.to_le_bytes()).unwrap();
+        file.write_all(&2_u16.to_le_bytes()).unwrap();
+        file.write_all(&16_u16.to_le_bytes()).unwrap();
+        file.write_all(b"data").unwrap();
+        file.write_all(&200_u32.to_le_bytes()).unwrap();
+        file.write_all(&[0; 200]).unwrap();
+        drop(file);
+        let mut scanned = library::scan_paths(&[path.clone()], &[]).unwrap();
+        let probed_title = scanned.records[0].media.title.clone();
+        scanned.records[0].media.title = "Cached metadata".into();
+        core.store.apply_scan(&scanned).unwrap();
+        core.reload().unwrap();
+        for (force, expected) in [(false, "Cached metadata"), (true, probed_title.as_str())] {
+            core.command(Command::Scan {
+                paths: vec![path.clone()],
+                force,
+            })
+            .unwrap();
+            let finished = core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            core.finish_scan(finished).unwrap();
+            core.state.scanning = false;
+            assert_eq!(core.track(1).unwrap().title, expected);
+        }
+    }
+
+    #[test]
+    fn stale_events_cannot_count_or_stop_new_playback() {
+        let (_directory, mut core) = fixture();
+        playing(&mut core, 1);
+        let generation = core.generation;
+        core.stop().unwrap();
+        playing(&mut core, 2);
+        core.audio_event(AudioEvent::Progress {
+            generation,
+            position_seconds: 10.0,
+            listened_seconds: 10.0,
+        })
+        .unwrap();
+        core.audio_event(AudioEvent::Ended { generation }).unwrap();
+        core.audio_event(AudioEvent::Failed {
+            generation,
+            message: "Old failure".into(),
+        })
+        .unwrap();
+        assert_eq!(core.state.status, PlaybackStatus::Playing);
+        assert_eq!(core.state.position, 0.0);
+        assert!(core.state.last_error.is_none());
+        assert_eq!(play_count(&core, 1), 0);
+        assert_eq!(play_count(&core, 2), 0);
+        progress(&mut core, 3.0, 3.0);
+        assert_eq!(play_count(&core, 2), 1);
+    }
+
+    #[test]
+    fn started_uses_valid_decoder_duration_or_keeps_known_metadata_duration() {
+        for duration in [
+            None,
+            Some(f64::NAN),
+            Some(0.0),
+            Some(f64::INFINITY),
+            Some(5.0),
+        ] {
+            let (_directory, mut core) = fixture();
+            pending(&mut core, 1);
+            started(&mut core, duration).unwrap();
+            let expected_duration = if duration == Some(5.0) { 5.0 } else { 10.0 };
+            assert_eq!(core.state.duration, Some(expected_duration));
+            let boundary = expected_duration * 20.0 / 100.0;
+            progress(&mut core, expected_duration, boundary);
+            assert_eq!(play_count(&core, 1), 0);
+            progress(&mut core, expected_duration, boundary + 0.000_001);
+            assert_eq!(play_count(&core, 1), 1);
+        }
+    }
+
+    #[test]
+    fn rejected_recent_update_stops_without_counting_the_start() {
+        let (_directory, mut core) = fixture();
+        pending(&mut core, 1);
+        let generation = core.generation;
+        core.store.remove_tracks(&[1]).unwrap();
+        assert!(started(&mut core, Some(10.0)).is_err());
+        assert_eq!(core.state.status, PlaybackStatus::Stopped);
+        assert_ne!(core.generation, generation);
+        assert!(core.playback.is_none());
+        assert!(core.store.history(200).unwrap().is_empty());
+        assert_eq!(play_count(&core, 2), 0);
+    }
+
+    #[test]
+    fn unknown_duration_waits_for_natural_eof_and_uses_confirmed_position() {
+        for (heard, expected) in [(2.0, 0), (2.01, 1), (8.0, 1)] {
+            let (_directory, mut core) = fixture_with_duration(None);
+            pending(&mut core, 1);
+            started(&mut core, None).unwrap();
+            progress(&mut core, 10.0, heard);
+            assert_eq!(play_count(&core, 1), 0);
+            let generation = core.generation;
+            assert!(core.audio_event(AudioEvent::Ended { generation }).is_err());
+            assert_eq!(play_count(&core, 1), expected);
+            assert_eq!(core.state.duration, Some(10.0));
+            assert_eq!(core.state.status, PlaybackStatus::Stopped);
+        }
+    }
+
+    #[test]
+    fn unknown_duration_never_uses_seek_targets_heard_time_or_manual_stop() {
+        let (_directory, mut core) = fixture_with_duration(None);
+        pending(&mut core, 1);
+        started(&mut core, None).unwrap();
+        core.command(Command::Seek { seconds: 10.0 }).unwrap();
+        progress(&mut core, f64::NAN, 8.0);
+        let generation = core.generation;
+        assert!(core.audio_event(AudioEvent::Ended { generation }).is_err());
+        assert_eq!(play_count(&core, 1), 0);
+        assert_eq!(core.state.duration, None);
+
+        pending(&mut core, 1);
+        started(&mut core, None).unwrap();
+        progress(&mut core, 10.0, 8.0);
+        core.stop().unwrap();
+        assert_eq!(play_count(&core, 1), 0);
+    }
+
+    #[test]
+    fn m3u_playlist_deduplicates_in_first_occurrence_order_without_deduplicating_queue() {
+        let (directory, mut core) = fixture();
+        for track_id in [1, 2, 3] {
+            std::fs::write(&core.track(track_id).unwrap().path, []).unwrap();
+        }
+        let path = directory.path().join("duplicates.m3u");
+        std::fs::write(&path, "2.wav\n1.wav\n2.wav\n3.wav\n1.wav\n").unwrap();
+        core.finish_scan(ScanFinished {
+            result: Ok(ScanResult::default()),
+            import: Some((
+                "First occurrences".into(),
+                library::import_playlist(&path).unwrap(),
+            )),
+        })
+        .unwrap();
+        assert_eq!(
+            core.state.playlists[0]
+                .entries
+                .iter()
+                .map(|entry| entry.track_id)
+                .collect::<Vec<_>>(),
+            [2, 1, 3]
+        );
+        core.command(Command::Enqueue {
+            track_ids: vec![2, 1, 2, 3, 1],
+        })
+        .unwrap();
+        assert_eq!(
+            core.state
+                .queue
+                .iter()
+                .skip(5)
+                .map(|entry| entry.track_id)
+                .collect::<Vec<_>>(),
+            [2, 1, 2, 3, 1]
         );
     }
 
     #[test]
-    fn cue_playlist_import_preserves_segment_order_and_duplicates() {
+    fn cue_playlist_import_deduplicates_segments_in_first_occurrence_order() {
         let (directory, mut core) = fixture();
         let sheet = directory.path().join("album.cue");
         std::fs::write(&sheet, "FILE album.wav WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nINDEX 01 00:05:00\n").unwrap();
@@ -1040,6 +1722,11 @@ mod tests {
                     codec: "pcm".into(),
                     channels: 2,
                     sample_rate: 48_000,
+                    bitrate_bps: None,
+                    track_number: None,
+                    disc_number: None,
+                    bits_per_sample: None,
+                    release_date: None,
                 },
             })
             .collect();
@@ -1066,11 +1753,10 @@ mod tests {
                 .iter()
                 .map(|track| track.title.as_str())
                 .collect::<Vec<_>>(),
-            ["Part 2", "Part 1", "Part 2"]
+            ["Part 2", "Part 1"]
         );
-        assert_eq!(tracks[0].id, tracks[2].id);
         assert_ne!(tracks[0].id, tracks[1].id);
-        assert_ne!(playlist.entries[0].id, playlist.entries[2].id);
+        assert_ne!(playlist.entries[0].id, playlist.entries[1].id);
     }
 
     #[test]
@@ -1085,8 +1771,8 @@ mod tests {
         assert!(error.to_string().contains("2.wav"));
         assert_eq!(core.state.status, PlaybackStatus::Stopped);
         assert_eq!(core.state.position, 0.0);
-        assert!(core.session.is_none());
-        assert_eq!(core.store.history(1).unwrap()[0].reason, "completed");
+        assert!(core.playback.is_none());
+        assert_eq!(core.store.history(1).unwrap()[0].track_id, 1);
         assert_ne!(core.generation, generation);
         core.audio_event(AudioEvent::Progress {
             generation,
@@ -1107,21 +1793,23 @@ mod tests {
         playing(&mut core, 1);
         core.state.position = 4.0;
         let generation = core.generation;
-        let session = core.session.as_ref().unwrap().id;
+        let played_at = core.store.history(1).unwrap()[0].played_at;
         missing(&mut core, Command::Next, 2);
         assert_eq!(core.state.status, PlaybackStatus::Playing);
         assert_eq!(core.state.current_queue_id, Some(1));
         assert_eq!(core.state.position, 4.0);
         assert_eq!(core.generation, generation);
-        assert_eq!(core.session.as_ref().unwrap().id, session);
-        assert!(core.store.history(1).unwrap()[0].ended_at.is_none());
+        assert_eq!(core.playback.as_ref().unwrap().track_id, 1);
+        assert_eq!(core.store.history(1).unwrap()[0].played_at, played_at);
     }
 
     #[test]
-    fn session_save_failure_still_stops_and_preserves_audio_error() {
+    fn count_save_failure_still_stops_and_preserves_audio_error() {
         let (_directory, mut core) = fixture();
         playing(&mut core, 1);
-        core.session.as_mut().unwrap().id = i64::MAX;
+        let playback = core.playback.as_mut().unwrap();
+        playback.track_id = i64::MAX;
+        playback.heard = 3.0;
         let generation = core.generation;
         let error = core
             .audio_event(AudioEvent::Failed {
@@ -1229,17 +1917,21 @@ mod tests {
     }
 
     #[test]
-    fn failed_session_creation_after_stopping_does_not_report_playing() {
+    fn duplicate_queue_entries_count_as_separate_plays_but_share_recent_history() {
         let (_directory, mut core) = fixture();
-        playing(&mut core, 1);
-        std::fs::write(&core.track(2).unwrap().path, []).unwrap();
-        // The selected track vanishes from storage before its session starts.
-        core.store.remove_tracks(&[2]).unwrap();
-        let error = core.command(Command::Next).unwrap_err();
-        assert!(error.to_string().contains("track 2 does not exist"));
-        assert_eq!(core.state.status, PlaybackStatus::Stopped);
-        assert!(core.session.is_none());
-        assert_eq!(core.store.history(1).unwrap()[0].reason, "changed");
+        playing(&mut core, 2);
+        progress(&mut core, 3.0, 3.0);
+        assert_eq!(play_count(&core, 2), 1);
+        core.stop().unwrap();
+        playing(&mut core, 3);
+        progress(&mut core, 3.0, 3.0);
+        progress(&mut core, 8.0, 8.0);
+        assert_eq!(play_count(&core, 2), 2);
+        let history = core.store.history(200).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].track_id, 2);
+        assert_eq!(core.state.queue[1].track_id, core.state.queue[2].track_id);
+        assert_ne!(core.state.queue[1].id, core.state.queue[2].id);
     }
 
     #[test]

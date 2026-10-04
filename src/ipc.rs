@@ -80,6 +80,7 @@ impl OverviewCache {
                 config: state.config.clone(),
                 config_path: state.config_path.clone(),
                 mpris_status: state.mpris_status.clone(),
+                database_optimization: state.database_optimization.clone(),
                 shutting_down: state.shutting_down,
             },
         }
@@ -235,7 +236,11 @@ pub fn request(path: &Path, command: &Command) -> Result<Response> {
             path.display()
         )
     })?;
-    stream.set_read_timeout(Some(Duration::from_secs(15)))?;
+    stream.set_read_timeout(if matches!(command, Command::OptimizeDatabase) {
+        None
+    } else {
+        Some(Duration::from_secs(15))
+    })?;
     stream.set_write_timeout(Some(Duration::from_secs(3)))?;
     serde_json::to_writer(&mut stream, command)?;
     stream.write_all(b"\n")?;

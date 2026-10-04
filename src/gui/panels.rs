@@ -254,7 +254,7 @@ impl GuiApp {
                         .map(PathBuf::from)
                         .collect()
                 };
-                this.send(Command::Scan { paths }, cx);
+                this.send(Command::Scan { paths, force: false }, cx);
             },
         ));
         if !self.selected.is_empty() {
@@ -955,11 +955,11 @@ impl GuiApp {
             .size_full()
             .p_3()
             .child(caption(format!(
-                "Recent listening · {} sessions · newest first",
+                "Recent tracks · {} tracks · newest first",
                 self.state.history.len()
             )))
             .when(self.state.history.is_empty(), |panel| {
-                panel.child(caption("Listening sessions will appear here."))
+                panel.child(caption("Recently played tracks will appear here."))
             })
             .child(
                 uniform_list(
@@ -971,19 +971,10 @@ impl GuiApp {
                                 let item = this.state.history.get(index)?;
                                 let track_id = item.track_id;
                                 let mut item_row =
-                                    list_row(("history-entry", item.id as u64), false).child(
+                                    list_row(("history-entry", item.track_id as u64), false).child(
                                         row_text(
                                             item.title.clone(),
-                                            format!(
-                                                "{} listened · {} · {}",
-                                                format_time(item.listened_seconds),
-                                                item.reason,
-                                                if item.counted {
-                                                    "counted play"
-                                                } else {
-                                                    "not counted"
-                                                }
-                                            ),
+                                            format!("Last played: {}", item.played_at),
                                         ),
                                     );
                                 if this.library_index.contains_key(&track_id) {
@@ -1006,7 +997,7 @@ impl GuiApp {
                 .w_full(),
             )
             .child(div().h(px(1.0)).flex_shrink_0().bg(rgb(BORDER)))
-            .child(caption("Most played · ranked by completed play count"))
+            .child(caption("Most played · ranked by play count"))
             .child(
                 uniform_list(
                     ("most-played-rows", panel_id),
@@ -1029,11 +1020,7 @@ impl GuiApp {
                                     )
                                     .child(row_text(
                                         track.title.clone(),
-                                        format!(
-                                            "{} plays · {} listened",
-                                            track.play_count,
-                                            format_time(track.listen_seconds)
-                                        ),
+                                        format!("{} plays", track.play_count),
                                     ))
                                     .on_click(cx.listener(
                                         move |this, event: &gpui::ClickEvent, _, cx| {

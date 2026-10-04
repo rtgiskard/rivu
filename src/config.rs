@@ -23,6 +23,7 @@ pub struct Config {
     pub volume: f32,
     pub shuffle: bool,
     pub repeat: RepeatMode,
+    pub play_count_threshold_percent: f64,
     pub mpris_enabled: bool,
     pub ui_scale: f32,
     pub analysis_fps: u32,
@@ -38,6 +39,7 @@ impl Default for Config {
             volume: 0.7,
             shuffle: false,
             repeat: RepeatMode::Off,
+            play_count_threshold_percent: 20.0,
             mpris_enabled: true,
             ui_scale: 1.0,
             analysis_fps: 20,
@@ -72,6 +74,12 @@ impl Config {
             self.volume.is_finite() && (0.0..=1.0).contains(&self.volume),
             "volume must be finite and between 0.0 and 1.0 (inclusive); got {}",
             self.volume
+        );
+        ensure!(
+            self.play_count_threshold_percent.is_finite()
+                && (0.0..100.0).contains(&self.play_count_threshold_percent),
+            "play_count_threshold_percent must be finite and at least 0.0 but less than 100.0; got {}",
+            self.play_count_threshold_percent
         );
         ensure!(
             self.ui_scale.is_finite() && (0.75..=2.0).contains(&self.ui_scale),
@@ -212,6 +220,7 @@ mod tests {
             volume: 0.25,
             shuffle: true,
             repeat: RepeatMode::All,
+            play_count_threshold_percent: 35.5,
             mpris_enabled: false,
             ui_scale: 1.5,
             analysis_fps: 30,
@@ -264,6 +273,26 @@ mod tests {
             ("volume = nan", "volume"),
             ("volume = inf", "volume"),
             ("volume = -inf", "volume"),
+            (
+                "play_count_threshold_percent = -0.01",
+                "play_count_threshold_percent",
+            ),
+            (
+                "play_count_threshold_percent = 100.0",
+                "play_count_threshold_percent",
+            ),
+            (
+                "play_count_threshold_percent = nan",
+                "play_count_threshold_percent",
+            ),
+            (
+                "play_count_threshold_percent = inf",
+                "play_count_threshold_percent",
+            ),
+            (
+                "play_count_threshold_percent = -inf",
+                "play_count_threshold_percent",
+            ),
             ("ui_scale = 0.74", "ui_scale"),
             ("ui_scale = 2.01", "ui_scale"),
             ("ui_scale = nan", "ui_scale"),
@@ -302,6 +331,21 @@ mod tests {
             }
         }
         assert_eq!(entries(directory.path()), vec![path]);
+        directory.close().unwrap();
+    }
+
+    #[test]
+    fn play_count_threshold_boundaries_round_trip() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        for play_count_threshold_percent in [0.0, f64::from_bits(100.0_f64.to_bits() - 1)] {
+            let config = Config {
+                play_count_threshold_percent,
+                ..Config::default()
+            };
+            config.save(&path).unwrap();
+            assert_eq!(Config::load(&path).unwrap(), config);
+        }
         directory.close().unwrap();
     }
 

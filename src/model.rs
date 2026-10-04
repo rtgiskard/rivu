@@ -32,9 +32,14 @@ pub struct Track {
     pub codec: String,
     pub channels: u16,
     pub sample_rate: u32,
+    pub bitrate_bps: Option<u64>,
+    pub track_number: Option<u32>,
+    pub disc_number: Option<u32>,
+    pub bits_per_sample: Option<u32>,
+    pub release_date: Option<String>,
+    pub favorite: bool,
     pub missing: bool,
     pub play_count: u64,
-    pub listen_seconds: f64,
     pub last_played: Option<i64>,
 }
 
@@ -77,14 +82,17 @@ pub enum RepeatMode {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HistoryEntry {
-    pub id: i64,
     pub track_id: i64,
     pub title: String,
-    pub started_at: i64,
-    pub ended_at: Option<i64>,
-    pub listened_seconds: f64,
-    pub counted: bool,
-    pub reason: String,
+    pub played_at: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DatabaseOptimization {
+    pub database_bytes_before: u64,
+    pub database_bytes_after: u64,
+    pub wal_bytes_before: u64,
+    pub wal_bytes_after: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -110,6 +118,7 @@ pub struct AppState {
     pub config: Arc<crate::config::Config>,
     pub config_path: PathBuf,
     pub mpris_status: String,
+    pub database_optimization: Option<DatabaseOptimization>,
     pub shutting_down: bool,
 }
 
@@ -137,6 +146,7 @@ impl Default for AppState {
             config: Arc::new(crate::config::Config::default()),
             config_path: PathBuf::new(),
             mpris_status: String::new(),
+            database_optimization: None,
             shutting_down: false,
         }
     }
@@ -163,8 +173,16 @@ impl AppState {
 pub enum Command {
     Status,
     Overview,
+    OptimizeDatabase,
+    SetFavorite {
+        track_ids: Vec<i64>,
+        favorite: bool,
+    },
+    RemoveMissingTracks,
     Scan {
         paths: Vec<PathBuf>,
+        #[serde(default)]
+        force: bool,
     },
     Play {
         track_id: i64,

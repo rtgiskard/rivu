@@ -18,6 +18,14 @@ pub struct MediaInfo {
     pub artist: String,
     pub album: String,
     pub duration: Option<f64>,
+    /// Encoded audio bitrate in bits/s, when stream metadata supplies it.
+    pub bitrate_bps: Option<u64>,
+    pub track_number: Option<u32>,
+    pub disc_number: Option<u32>,
+    /// Source PCM/lossless precision, never the decoder's output sample width.
+    pub bits_per_sample: Option<u32>,
+    /// Original date precision is retained (e.g. year, year-month, or full date).
+    pub release_date: Option<String>,
     pub codec: String,
     pub channels: u16,
     pub sample_rate: u32,
@@ -208,6 +216,7 @@ fn scan_cue(
             );
         }
         record.media.duration = Some(end.min(duration) - start);
+        record.media.track_number = Some(track.number);
         record.media.title = track
             .title
             .unwrap_or_else(|| format!("Track {:02}", track.number));
@@ -386,21 +395,31 @@ pub fn import_m3u(path: &Path) -> Result<Vec<M3uItem>> {
     Ok(entries)
 }
 
-/// Write an UTF-8 M3U8, retaining every playlist entry including duplicates.
+/// Write an UTF-8 M3U8, retaining only the first occurrence of each track ID.
 /// Resolve the existing output directory physically before making paths relative,
 /// so `..` and directory symlinks retain their filesystem meaning.
 pub fn export_m3u(path: &Path, playlist: &Playlist, tracks: &[Track]) -> Result<()> {
     let by_id: HashMap<i64, &Track> = tracks.iter().map(|track| (track.id, track)).collect();
-    // Resolve every occurrence before opening the destination. Standard M3U has
+    let mut seen = HashSet::new();
+    let entries: Vec<&Track> = playlist
+        .entries
+        .iter()
+        .filter(|entry| seen.insert(entry.track_id))
+        .map(|entry| {
+            by_id
+                .get(&entry.track_id)
+                .copied()
+                .context("Playlist contains a missing library track")
+        })
+        .collect::<Result<_>>()?;
+    // Resolve every unique track before opening the destination. Standard M3U has
     // no syntax for selecting a CUE subtrack, so only complete sheet runs can
     // be represented without changing what will play on reimport.
     let mut sheets = HashMap::new();
     let mut output = Vec::new();
     let mut index = 0;
-    while index < playlist.entries.len() {
-        let track = *by_id
-            .get(&playlist.entries[index].track_id)
-            .context("Playlist contains a missing library track")?;
+    while index < entries.len() {
+        let track = entries[index];
         if let Some(cue) = &track.cue {
             let sheet = match sheets.entry(cue.sheet.as_path()) {
                 std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
@@ -409,11 +428,7 @@ pub fn export_m3u(path: &Path, playlist: &Playlist, tracks: &[Track]) -> Result<
                 }
             };
             for (offset, expected) in sheet.tracks.iter().enumerate() {
-                let selected = playlist
-                    .entries
-                    .get(index + offset)
-                    .and_then(|entry| by_id.get(&entry.track_id))
-                    .copied();
+                let selected = entries.get(index + offset).copied();
                 let matches = selected.is_some_and(|selected| {
                     selected.cue.as_ref().is_some_and(|segment| {
                         segment.sheet == cue.sheet
@@ -583,13 +598,18 @@ mod tests {
             artist: record.media.artist.clone(),
             album: record.media.album.clone(),
             duration: record.media.duration,
+            bitrate_bps: record.media.bitrate_bps,
+            track_number: record.media.track_number,
+            disc_number: record.media.disc_number,
+            bits_per_sample: record.media.bits_per_sample,
+            release_date: record.media.release_date.clone(),
+            favorite: false,
             codec: record.media.codec.clone(),
             channels: record.media.channels,
             sample_rate: record.media.sample_rate,
             cue: record.cue.clone(),
             missing: false,
             play_count: 0,
-            listen_seconds: 0.0,
             last_played: None,
         }
     }
@@ -615,6 +635,11 @@ mod tests {
         assert_eq!(first.media.album, "Album");
         assert_eq!(first.media.duration, Some(1.0));
         assert_eq!(second.media.duration, Some(2.0));
+        assert_eq!(first.media.bitrate_bps, Some(120_000));
+        assert_eq!(second.media.bitrate_bps, first.media.bitrate_bps);
+        assert_eq!(first.media.bits_per_sample, Some(16));
+        assert_eq!(first.media.track_number, Some(1));
+        assert_eq!(second.media.track_number, Some(2));
         assert_eq!(
             first.cue.as_ref().unwrap(),
             &CueSegment {
@@ -769,7 +794,7 @@ mod tests {
     }
 
     #[test]
-    fn standard_cue_paths_roundtrip_complete_sheets_and_repeated_occurrences() -> Result<()> {
+    fn standard_cue_paths_roundtrip_complete_sheets_with_track_deduplication() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let audio = directory.path().join("audio.wav");
         let sheet = directory.path().join("#album.cue");
@@ -788,6 +813,7 @@ mod tests {
             .map(|track| track.id)
             .collect();
         sequence.extend(sequence.clone());
+        sequence.insert(1, sequence[0]);
         sequence.push(tracks.iter().find(|track| track.cue.is_none()).unwrap().id);
         let playlist = Playlist {
             id: 1,
@@ -804,8 +830,9 @@ mod tests {
         let path = directory.path().join("playlist.m3u8");
         export_m3u(&path, &playlist, &tracks)?;
         let imported = import_playlist(&path)?;
-        assert_eq!(imported.len(), sequence.len());
-        for (item, id) in imported.iter().zip(sequence) {
+        let expected = [sequence[0], sequence[2], *sequence.last().unwrap()];
+        assert_eq!(imported.len(), expected.len());
+        for (item, id) in imported.iter().zip(expected) {
             let track = tracks.iter().find(|track| track.id == id).unwrap();
             assert_eq!(item.cue_track, track.cue.as_ref().map(|cue| cue.number));
             assert_eq!(
@@ -817,7 +844,7 @@ mod tests {
         let text = fs::read_to_string(&path)?;
         assert_eq!(
             text.lines().filter(|line| *line == "./#album.cue").count(),
-            2
+            1
         );
         Ok(())
     }
@@ -837,7 +864,7 @@ mod tests {
             .collect();
         let path = directory.path().join("existing.m3u8");
         fs::write(&path, "original playlist\n")?;
-        for sequence in [vec![1], vec![2], vec![2, 1], vec![1, 1, 2]] {
+        for sequence in [vec![1], vec![2], vec![2, 1]] {
             let playlist = Playlist {
                 id: 1,
                 name: "Partial CUE".into(),
@@ -887,12 +914,17 @@ mod tests {
                 },
                 album: String::new(),
                 duration: Some(2.0),
+                bitrate_bps: None,
+                track_number: None,
+                disc_number: None,
+                bits_per_sample: None,
+                release_date: None,
+                favorite: false,
                 codec: "wav".into(),
                 channels: 2,
                 sample_rate: 48_000,
                 missing: false,
                 play_count: 0,
-                listen_seconds: 0.0,
                 last_played: None,
                 cue: None,
             })
@@ -903,7 +935,7 @@ mod tests {
         let playlist = Playlist {
             id: 1,
             name: "Roundtrip".into(),
-            entries: [1, 2, 1]
+            entries: [2, 1, 2, 1]
                 .into_iter()
                 .enumerate()
                 .map(|(index, track_id)| PlaylistEntry {
@@ -916,22 +948,21 @@ mod tests {
         let text = fs::read_to_string(path)?;
         assert_eq!(
             text.lines().filter(|line| *line == "./#song.wav").count(),
-            2
+            1
         );
         let imported = import_m3u(path)?;
-        assert_eq!(imported.len(), 3);
-        for (item, index) in imported.iter().zip([0, 1, 0]) {
+        assert_eq!(imported.len(), 2);
+        for (item, index) in imported.iter().zip([1, 0]) {
             assert_eq!(item.path.canonicalize()?, tracks[index].path);
             assert_eq!(item.cue_track, None);
         }
-        assert_eq!(imported[0].name.as_deref(), Some("Artist - #song.wav"));
-        assert_eq!(imported[1].name.as_deref(), Some("other song.wav"));
-        assert_eq!(imported[2].name, imported[0].name);
+        assert_eq!(imported[0].name.as_deref(), Some("other song.wav"));
+        assert_eq!(imported[1].name.as_deref(), Some("Artist - #song.wav"));
         Ok(())
     }
 
     #[test]
-    fn m3u_roundtrip_preserves_hash_paths_and_duplicates() -> Result<()> {
+    fn m3u_roundtrip_preserves_hash_paths_and_first_track_order() -> Result<()> {
         let directory = tempfile::tempdir()?;
         assert_playlist_roundtrip(&directory.path().join("playlist.m3u8"))
     }

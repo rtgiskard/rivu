@@ -29,13 +29,7 @@ pub fn probe(path: &Path) -> Result<MediaInfo> {
     Ok(Source::open(path, PROBE_BUFFER_LEN)?.info)
 }
 
-fn metadata_tags(
-    mut metadata: Metadata<'_>,
-    track: u32,
-    title: &mut Option<String>,
-    artist: &mut Option<String>,
-    album: &mut Option<String>,
-) {
+fn metadata_tags(mut metadata: Metadata<'_>, track: u32, info: &mut MediaInfo) {
     while let Some(revision) = metadata.current() {
         let track_tags = revision
             .per_track
@@ -44,9 +38,25 @@ fn metadata_tags(
             .flat_map(|metadata| &metadata.metadata.tags);
         for tag in revision.media.tags.iter().chain(track_tags) {
             match tag.std.as_ref() {
-                Some(StandardTag::TrackTitle(value)) => *title = Some(value.as_ref().clone()),
-                Some(StandardTag::Artist(value)) => *artist = Some(value.as_ref().clone()),
-                Some(StandardTag::Album(value)) => *album = Some(value.as_ref().clone()),
+                Some(StandardTag::TrackTitle(value)) => info.title = value.as_ref().clone(),
+                Some(StandardTag::Artist(value)) => info.artist = value.as_ref().clone(),
+                Some(StandardTag::Album(value)) => info.album = value.as_ref().clone(),
+                Some(StandardTag::TrackNumber(value)) => {
+                    info.track_number = u32::try_from(*value).ok().filter(|value| *value > 0);
+                }
+                Some(StandardTag::DiscNumber(value)) => {
+                    info.disc_number = u32::try_from(*value).ok().filter(|value| *value > 0);
+                }
+                Some(StandardTag::ReleaseDate(value) | StandardTag::RecordingDate(value))
+                    if !value.trim().is_empty() =>
+                {
+                    info.release_date = Some(value.trim().to_owned());
+                }
+                Some(StandardTag::ReleaseYear(value) | StandardTag::RecordingYear(value))
+                    if *value > 0 && info.release_date.is_none() =>
+                {
+                    info.release_date = Some(value.to_string());
+                }
                 _ => (),
             }
         }
@@ -73,6 +83,56 @@ fn duration(track: &Track, rate: u32) -> Option<f64> {
         return base.calc_duration(duration).map(seconds);
     }
     track.num_frames.map(|frames| frames as f64 / rate as f64)
+}
+
+fn pcm_bitrate(params: &AudioCodecParameters) -> Option<u64> {
+    use symphonia::core::codecs::audio::well_known as codec;
+
+    // Encoded sample width, not decoded precision (e.g. G.711 decodes to 16 bits).
+    // Symphonia 0.6 has no compressed-stream bitrate in AudioCodecParameters.
+    let bits = match params.codec {
+        codec::CODEC_ID_PCM_S8
+        | codec::CODEC_ID_PCM_U8
+        | codec::CODEC_ID_PCM_ALAW
+        | codec::CODEC_ID_PCM_MULAW => 8_u64,
+        codec::CODEC_ID_PCM_S16LE
+        | codec::CODEC_ID_PCM_S16BE
+        | codec::CODEC_ID_PCM_U16LE
+        | codec::CODEC_ID_PCM_U16BE => 16,
+        codec::CODEC_ID_PCM_S24LE
+        | codec::CODEC_ID_PCM_S24BE
+        | codec::CODEC_ID_PCM_U24LE
+        | codec::CODEC_ID_PCM_U24BE => 24,
+        codec::CODEC_ID_PCM_S32LE
+        | codec::CODEC_ID_PCM_S32BE
+        | codec::CODEC_ID_PCM_U32LE
+        | codec::CODEC_ID_PCM_U32BE
+        | codec::CODEC_ID_PCM_F32LE
+        | codec::CODEC_ID_PCM_F32BE => 32,
+        codec::CODEC_ID_PCM_F64LE | codec::CODEC_ID_PCM_F64BE => 64,
+        _ => return None,
+    };
+    bits.checked_mul(u64::from(params.sample_rate?))?
+        .checked_mul(params.channels.as_ref()?.count() as u64)
+        .filter(|bitrate| *bitrate > 0)
+}
+
+fn source_bits_per_sample(params: &AudioCodecParameters) -> Option<u32> {
+    use symphonia::core::codecs::audio::well_known as codec;
+
+    let lossless = matches!(
+        params.codec,
+        codec::CODEC_ID_FLAC
+            | codec::CODEC_ID_ALAC
+            | codec::CODEC_ID_WAVPACK
+            | codec::CODEC_ID_MONKEYS_AUDIO
+            | codec::CODEC_ID_TTA
+    );
+    if pcm_bitrate(params).is_some() || lossless {
+        params.bits_per_sample.filter(|bits| *bits > 0)
+    } else {
+        None
+    }
 }
 
 struct OpusDecoder {
@@ -198,14 +258,6 @@ impl Source {
                 format!("No supported audio decoder: {}", errors.join("; "))
             }
         })?;
-        let (mut title, mut artist, mut album) = (None, None, None);
-        metadata_tags(
-            format.metadata(),
-            track,
-            &mut title,
-            &mut artist,
-            &mut album,
-        );
         let is_opus = params.codec == CODEC_ID_OPUS;
         let rate = if is_opus {
             48_000
@@ -238,22 +290,27 @@ impl Source {
             media_duration =
                 media_duration.map(|value| (value - opus.initial_skip as f64 / 48_000.0).max(0.0));
         }
-        let info = MediaInfo {
-            title: title.unwrap_or_else(|| {
-                path.file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned()
-            }),
-            artist: artist.unwrap_or_default(),
-            album: album.unwrap_or_default(),
+        let mut info = MediaInfo {
+            title: path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+            artist: String::new(),
+            album: String::new(),
             duration: media_duration,
+            bitrate_bps: pcm_bitrate(&params),
+            track_number: None,
+            disc_number: None,
+            bits_per_sample: source_bits_per_sample(&params),
+            release_date: None,
             codec,
             channels: params
                 .channels
                 .map_or(0, |channels| channels.count() as u16),
             sample_rate: rate,
         };
+        metadata_tags(format.metadata(), track, &mut info);
         let mut source = Self {
             time_base: track_time_base.unwrap_or_else(|| TimeBase::try_new(1, rate).unwrap()),
             format,
@@ -675,6 +732,8 @@ mod tests {
     fn cue_ranges_crop_pcm_and_seek_relative_to_track() {
         let file = pcm_file();
         let mut full = Source::open(file.path(), PROBE_BUFFER_LEN).unwrap();
+        assert_eq!(full.info().bitrate_bps, Some(705_600));
+        assert_eq!(full.info().bits_per_sample, Some(16));
         let reference = decode_remaining(&mut full);
         for (start_frame, end_frame) in [(0_u64, Some(30_u64)), (30, Some(80)), (80, None)] {
             let start = (start_frame * 588) as usize;
@@ -710,6 +769,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(source.info().duration, Some(0.5));
+        assert_eq!(source.info().bitrate_bps, None);
+        assert_eq!(source.info().bits_per_sample, None);
         assert_eq!(decode_remaining(&mut source).len(), 24_000);
         source.seek(0.25).unwrap();
         assert_eq!(decode_remaining(&mut source).len(), 12_000);

@@ -95,11 +95,18 @@ enum LibraryAction {
         paths: Vec<PathBuf>,
         #[arg(long)]
         wait: bool,
+        /// Reprobe metadata even when file size and modification time are unchanged.
+        #[arg(long)]
+        force: bool,
     },
     /// List the library, optionally filtered by text.
     List {
         #[arg(short, long)]
         query: Option<String>,
+        #[arg(long)]
+        favorites: bool,
+        #[arg(long)]
+        missing: bool,
     },
     /// Edit Rivu's library metadata; does not rewrite media files.
     Edit {
@@ -116,17 +123,28 @@ enum LibraryAction {
         #[arg(required = true)]
         track_ids: Vec<i64>,
     },
+    /// Set or clear favorites without modifying media files.
+    Favorite {
+        #[arg(required = true)]
+        track_ids: Vec<i64>,
+        #[arg(long, value_enum)]
+        set: Switch,
+    },
+    /// Remove missing library records and their references, never media files.
+    CleanMissing,
     /// Show the running instance's playback and library state.
     Status,
-    /// Show library size and listening totals.
+    /// Show library size and aggregate play counts.
     Stats,
-    /// Show recent listening history.
+    /// Show recently started tracks, once per track.
     History {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
     /// Read real metadata and check decoder support without starting an instance.
     Probe { path: PathBuf },
+    /// Reclaim database space and refresh query statistics; stop playback and scans first.
+    Optimize,
 }
 #[derive(Clone, Copy, ValueEnum)]
 enum Switch {
@@ -237,12 +255,15 @@ fn run() -> Result<()> {
                         "path": path, "title": info.title, "artist": info.artist, "album": info.album,
                         "codec": info.codec, "channels": info.channels, "sample_rate": info.sample_rate,
                         "duration": info.duration,
+                        "bitrate_bps": info.bitrate_bps, "bits_per_sample": info.bits_per_sample,
+                        "track_number": info.track_number, "disc_number": info.disc_number,
+                        "release_date": info.release_date,
                     }))?
                 );
                 return Ok(());
             }
             println!(
-                "{}\n  title: {}\n  artist: {}\n  album: {}\n  codec: {}\n  channels: {}\n  sample rate: {} Hz\n  duration: {}",
+                "{}\n  title: {}\n  artist: {}\n  album: {}\n  codec: {}\n  channels: {}\n  sample rate: {} Hz\n  duration: {}\n  bitrate: {}\n  source bits/sample: {}\n  track number: {}\n  disc number: {}\n  release date: {}",
                 path.display(),
                 info.title,
                 info.artist,
@@ -251,7 +272,18 @@ fn run() -> Result<()> {
                 info.channels,
                 info.sample_rate,
                 info.duration
-                    .map_or("unknown".into(), |value| format!("{value:.3} s"))
+                    .map_or("unknown".into(), |value| format!("{value:.3} s")),
+                info.bitrate_bps.map_or("—".into(), |value| format!(
+                    "{:.1} kbps",
+                    value as f64 / 1000.0
+                )),
+                info.bits_per_sample
+                    .map_or("—".into(), |value| value.to_string()),
+                info.track_number
+                    .map_or("—".into(), |value| value.to_string()),
+                info.disc_number
+                    .map_or("—".into(), |value| value.to_string()),
+                info.release_date.as_deref().unwrap_or("—"),
             );
             Ok(())
         }
@@ -269,32 +301,46 @@ fn run() -> Result<()> {
         Action::Library(LibraryAction::Status) => {
             show(&ipc::request(&socket, &Command::Status)?, args.json)
         }
-        Action::Library(LibraryAction::List { query }) => {
-            let response = checked(ipc::request(&socket, &Command::Status)?)?;
+        Action::Library(LibraryAction::List {
+            query,
+            favorites,
+            missing,
+        }) => {
+            let mut response = checked(ipc::request(&socket, &Command::Status)?)?;
+            let query = query.unwrap_or_default().to_lowercase();
+            let tracks = response.state.library.iter().filter(|track| {
+                (!favorites || track.favorite)
+                    && (!missing || track.missing)
+                    && (query.is_empty()
+                        || format!(
+                            "{} {} {} {}",
+                            track.title,
+                            track.artist,
+                            track.album,
+                            track.path.display()
+                        )
+                        .to_lowercase()
+                        .contains(&query))
+            });
             if args.json {
+                let library = tracks.cloned().collect();
+                response.state.library = std::sync::Arc::new(library);
                 return show(&response, true);
             }
-            let query = query.unwrap_or_default().to_lowercase();
-            for track in response.state.library.iter().filter(|track| {
-                query.is_empty()
-                    || format!(
-                        "{} {} {} {}",
-                        track.title,
-                        track.artist,
-                        track.album,
-                        track.path.display()
-                    )
-                    .to_lowercase()
-                    .contains(&query)
-            }) {
+            for track in tracks {
                 println!(
-                    "{}\t{}\t{}\t{}\t{}{}",
+                    "{}\t{}\t{}\t{}\t{}{}{}\t{}",
                     track.id,
                     track.title,
                     track.artist,
                     track.album,
                     track.path.display(),
-                    if track.missing { " [missing]" } else { "" }
+                    if track.missing { " [missing]" } else { "" },
+                    if track.favorite { " [favorite]" } else { "" },
+                    track.bitrate_bps.map_or("—".into(), |value| format!(
+                        "{:.1} kbps",
+                        value as f64 / 1000.0
+                    ))
                 );
             }
             Ok(())
@@ -305,21 +351,14 @@ fn run() -> Result<()> {
                 return show(&response, true);
             }
             println!(
-                "Tracks: {}\nPlays: {}\nListened: {:.2} hours",
+                "Tracks: {}\nPlays: {}",
                 response.state.library.len(),
                 response
                     .state
                     .library
                     .iter()
                     .map(|t| t.play_count)
-                    .sum::<u64>(),
-                response
-                    .state
-                    .library
-                    .iter()
-                    .map(|t| t.listen_seconds)
-                    .sum::<f64>()
-                    / 3600.0
+                    .sum::<u64>()
             );
             Ok(())
         }
@@ -329,14 +368,7 @@ fn run() -> Result<()> {
                 return show(&response, true);
             }
             for entry in response.state.history.iter().take(limit) {
-                println!(
-                    "{}\t{}\t{:.2}s\t{}\t{}",
-                    entry.started_at,
-                    entry.title,
-                    entry.listened_seconds,
-                    if entry.counted { "counted" } else { "partial" },
-                    entry.reason
-                );
+                println!("{}\t{}\t{}", entry.played_at, entry.track_id, entry.title);
             }
             Ok(())
         }
@@ -405,6 +437,32 @@ fn run() -> Result<()> {
                 album: album.unwrap_or_else(|| track.album.clone()),
             };
             show(&ipc::request(&socket, &command)?, args.json)
+        }
+        Action::Library(LibraryAction::Optimize) => {
+            let response = checked(ipc::request(&socket, &Command::OptimizeDatabase)?)?;
+            if args.json {
+                return show(&response, true);
+            }
+            let report = response
+                .state
+                .database_optimization
+                .as_ref()
+                .context("Database optimization returned no size report")?;
+            let before = report
+                .database_bytes_before
+                .saturating_add(report.wal_bytes_before);
+            let after = report
+                .database_bytes_after
+                .saturating_add(report.wal_bytes_after);
+            println!(
+                "Database optimization completed\nDatabase: {} -> {} bytes\nWAL: {} -> {} bytes\nReclaimed total: {} bytes",
+                report.database_bytes_before,
+                report.database_bytes_after,
+                report.wal_bytes_before,
+                report.wal_bytes_after,
+                before.saturating_sub(after)
+            );
+            Ok(())
         }
         action => {
             let (command, wait_scan) = translate(action)?;
@@ -486,6 +544,7 @@ fn start(
     if !paths.is_empty() {
         runtime.handle.send(Command::Scan {
             paths: paths.into_iter().map(client_path).collect::<Result<_>>()?,
+            force: false,
         })?;
     }
     if desktop {
@@ -562,13 +621,16 @@ fn client_path(path: PathBuf) -> Result<PathBuf> {
 fn translate(action: Action) -> Result<(Command, bool)> {
     let mut wait = false;
     let command = match action {
+        Action::Library(LibraryAction::Optimize) => Command::OptimizeDatabase,
         Action::Library(LibraryAction::Scan {
             paths,
             wait: should_wait,
+            force,
         }) => {
             wait = should_wait;
             Command::Scan {
                 paths: paths.into_iter().map(client_path).collect::<Result<_>>()?,
+                force,
             }
         }
         Action::Playback(PlaybackAction::Play { track_id }) => {
@@ -642,6 +704,11 @@ fn translate(action: Action) -> Result<(Command, bool)> {
             PlaylistAction::List => unreachable!(),
         },
         Action::Library(LibraryAction::Remove { track_ids }) => Command::RemoveTracks { track_ids },
+        Action::Library(LibraryAction::Favorite { track_ids, set }) => Command::SetFavorite {
+            track_ids,
+            favorite: matches!(set, Switch::On),
+        },
+        Action::Library(LibraryAction::CleanMissing) => Command::RemoveMissingTracks,
         Action::Playback(PlaybackAction::Device { name }) => Command::Device { name },
         Action::Quit => Command::Shutdown,
         Action::Gui { .. }
@@ -675,11 +742,13 @@ mod tests {
                 absolute.clone(),
             ],
             wait: true,
+            force: true,
         }))?;
-        let Command::Scan { paths } = command else {
+        let Command::Scan { paths, force } = command else {
             panic!("expected scan command");
         };
         assert!(wait);
+        assert!(force);
         assert_eq!(
             paths,
             [
