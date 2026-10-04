@@ -253,6 +253,7 @@ pub(super) struct Source {
     decode: Decode,
     time_base: TimeBase,
     frames: Vec<f32>,
+    frame_start: f64,
     layout: Vec<Channel>,
     info: MediaInfo,
     range_start: f64,
@@ -305,6 +306,7 @@ impl Source {
             decode: Decode::Ffmpeg(decode),
             time_base: TimeBase::try_new(1, info.sample_rate).unwrap(),
             frames: Vec::with_capacity(8192 * layout.len()),
+            frame_start: 0.0,
             layout,
             info,
             range_start: 0.0,
@@ -439,6 +441,7 @@ impl Source {
             track,
             decode,
             frames: Vec::with_capacity(8192),
+            frame_start: 0.0,
             layout: Vec::new(),
             info,
             range_start: 0.0,
@@ -548,14 +551,15 @@ impl Source {
         &self.layout
     }
 
-    /// Returns the primed first packet before advancing the decoder.
-    pub(super) fn next_frames(&mut self) -> Result<Option<&[f32]>> {
+    /// Returns PCM and its first sample's segment-relative decoded timestamp.
+    /// The primed first packet is returned before advancing the decoder.
+    pub(super) fn next_frames(&mut self) -> Result<Option<(&[f32], f64)>> {
         if self.ready {
             self.ready = false;
         } else if !self.read_next()? {
             return Ok(None);
         }
-        Ok(Some(&self.frames))
+        Ok(Some((&self.frames, self.frame_start)))
     }
 
     pub(super) fn uses_ffmpeg(&self) -> bool {
@@ -566,10 +570,9 @@ impl Source {
         path: &Path,
         range: Option<super::PlaybackRange>,
         media_read_buffer_mb: u32,
-        points: usize,
         ffmpeg_enabled: bool,
         cancelled: &std::sync::atomic::AtomicBool,
-    ) -> Result<Vec<f32>> {
+    ) -> Result<super::WaveformFrame> {
         let check_cancelled = || -> Result<()> {
             if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
                 bail!("Waveform loading cancelled");
@@ -577,9 +580,6 @@ impl Source {
             Ok(())
         };
         check_cancelled()?;
-        if points == 0 {
-            bail!("Waveform point count must be positive");
-        }
         let buffer_len = usize::try_from(media_read_buffer_mb)
             .context("Waveform media buffer size does not fit usize")?
             .saturating_mul(super::BYTES_PER_MEBIBYTE);
@@ -588,55 +588,39 @@ impl Source {
         if let Some(range) = range {
             source.restrict(range)?;
         }
-        let duration = source
-            .info
-            .duration
-            .filter(|duration| duration.is_finite() && *duration > 0.0)
-            .context("Audio track has no finite duration for waveform")?;
-        let total_frames = (duration * source.info.sample_rate as f64).round().max(1.0) as usize;
-        // Tiny clips must not alternate real samples with artificial empty bins.
-        let points = points.min(total_frames);
-        let mut envelope = vec![0.0_f32; points];
-        let mut frame_index = 0usize;
-        let mut point = 0usize;
-        let mut boundary = total_frames.div_ceil(points);
-        let channels = source.layout().len();
+        source.scan_waveform(path, range, cancelled)
+    }
+
+    fn scan_waveform(
+        &mut self,
+        path: &Path,
+        range: Option<super::PlaybackRange>,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<super::WaveformFrame> {
+        let check_cancelled = || -> Result<()> {
+            if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                bail!("Waveform loading cancelled");
+            }
+            Ok(())
+        };
+        let mut frame = super::WaveformFrame::default();
+        let sample_rate = self.info.sample_rate;
+        let channels = self.layout.len();
+        frame.select(path, range, self.info.duration, sample_rate);
+        let mut end_seconds = 0.0_f64;
         loop {
             check_cancelled()?;
-            let Some(frames) = source.next_frames()? else {
+            let Some((samples, start_seconds)) = self.next_frames()? else {
                 break;
             };
-            check_cancelled()?;
-            let mut offset = 0;
-            while offset < frames.len() {
-                let packet_frames = (frames.len() - offset) / channels;
-                let count = if point + 1 == points {
-                    packet_frames
-                } else {
-                    packet_frames.min(boundary - frame_index)
-                };
-                let end = offset + count * channels;
-                // Keep peaks from every channel (including antiphase stereo),
-                // not a downmix. Reuse decoder storage and divide once per bin,
-                // rather than allocating packet copies or dividing per sample.
-                envelope[point] = frames[offset..end]
-                    .iter()
-                    .filter(|sample| sample.is_finite())
-                    .fold(envelope[point], |peak, sample| peak.max(sample.abs()));
-                offset = end;
-                frame_index += count;
-                if frame_index == boundary && point + 1 < points {
-                    point += 1;
-                    boundary = ((point as u128 + 1) * total_frames as u128)
-                        .div_ceil(points as u128) as usize;
-                }
-            }
+            frame.push(start_seconds, samples, sample_rate, channels);
+            let end_frame =
+                (start_seconds * sample_rate as f64).round() + (samples.len() / channels) as f64;
+            end_seconds = end_seconds.max(end_frame / sample_rate as f64);
         }
         check_cancelled()?;
-        if frame_index == 0 {
-            envelope.clear();
-        }
-        Ok(envelope)
+        frame.finish_scan(end_seconds);
+        Ok(frame)
     }
 
     fn read_ffmpeg_next(&mut self) -> Result<bool> {
@@ -650,6 +634,7 @@ impl Source {
                 return Ok(false);
             };
             self.frames.extend_from_slice(samples);
+            let mut retained_start = packet_start;
             let channels = self.layout.len();
             if channels == 0 || self.frames.len() % channels != 0 {
                 bail!("FFmpeg decoder returned incomplete interleaved frames");
@@ -672,9 +657,11 @@ impl Source {
                 }
                 self.frames.copy_within(discard.., 0);
                 self.frames.truncate(self.frames.len() - discard);
+                retained_start += (discard / channels) as f64 / self.info.sample_rate as f64;
                 self.seek_target = None;
             }
             if !self.frames.is_empty() {
+                self.frame_start = retained_start - self.range_start;
                 return Ok(true);
             }
             if self.exhausted {
@@ -771,9 +758,11 @@ impl Source {
                 }
                 self.frames.copy_within(discard.., 0);
                 self.frames.truncate(self.frames.len() - discard);
+                packet_start += (discard / self.layout.len()) as f64 / self.info.sample_rate as f64;
                 self.seek_target = None;
             }
             if !self.frames.is_empty() {
+                self.frame_start = packet_start - self.range_start;
                 return Ok(true);
             }
             if self.exhausted {
@@ -922,7 +911,7 @@ mod tests {
 
     fn decode_remaining(source: &mut Source) -> Vec<f32> {
         let mut samples = Vec::new();
-        while let Some(frames) = source.next_frames().unwrap() {
+        while let Some((frames, _)) = source.next_frames().unwrap() {
             samples.extend_from_slice(frames);
         }
         samples
@@ -1012,25 +1001,31 @@ mod tests {
         let mut source = Source::open(file.path(), PROBE_BUFFER_LEN, false).unwrap();
         let reference = decode_remaining(&mut source);
         let cancelled = std::sync::atomic::AtomicBool::new(false);
-        for (start, end, points) in [
-            (0_usize, None, 17_usize),
-            (30, Some(80_usize), 97),
-            (80, None, 1600),
-            (30, Some(31), 1600),
+        for (start, end) in [
+            (0_usize, None),
+            (30, Some(80_usize)),
+            (80, None),
+            (30, Some(31)),
         ] {
             let range = (start != 0 || end.is_some()).then_some(super::super::PlaybackRange {
                 start_seconds: start as f64 / 75.0,
                 end_seconds: end.map(|end| end as f64 / 75.0),
             });
             let samples = &reference[start * 588..end.map_or(reference.len(), |end| end * 588)];
-            let count = points.min(samples.len());
+            let count = 1600.min(samples.len());
             let mut expected = vec![0.0_f32; count];
             for (index, sample) in samples.iter().enumerate() {
                 let bin = index * count / samples.len();
                 expected[bin] = expected[bin].max(sample.abs());
             }
-            let actual = Source::waveform(file.path(), range, 2, points, false, &cancelled).unwrap();
-            assert_eq!(actual, expected, "CUE range {start}..{end:?}, {points} points");
+            let actual = Source::waveform(file.path(), range, 2, false, &cancelled).unwrap();
+            assert_eq!(
+                actual.peaks,
+                expected.into_iter().map(Some).collect::<Vec<_>>(),
+                "CUE range {start}..{end:?}"
+            );
+            assert!(actual.complete);
+            assert!(actual.matches(file.path(), range));
         }
     }
 
@@ -1061,8 +1056,18 @@ mod tests {
             }
         }
         let cancelled = std::sync::atomic::AtomicBool::new(false);
-        let envelope = Source::waveform(file.path(), None, 2, 1600, false, &cancelled).unwrap();
-        assert_eq!(envelope, [0.25, 0.5, 0.75, 0.0, 0.125, 1.0]);
+        let envelope = Source::waveform(file.path(), None, 2, false, &cancelled).unwrap();
+        assert_eq!(
+            envelope.peaks,
+            [
+                Some(0.25),
+                Some(0.5),
+                Some(0.75),
+                Some(0.0),
+                Some(0.125),
+                Some(1.0)
+            ]
+        );
     }
 
     #[test]
@@ -1081,15 +1086,140 @@ mod tests {
             file.write_all(&sample.to_le_bytes()).unwrap();
         }
         let cancelled = std::sync::atomic::AtomicBool::new(false);
-        let envelope = Source::waveform(file.path(), None, 2, 1600, false, &cancelled).unwrap();
-        assert_eq!(envelope, [0.25, 1.0, 1.5, 2.0, 0.0, 0.0]);
+        let envelope = Source::waveform(file.path(), None, 2, false, &cancelled).unwrap();
+        assert_eq!(
+            envelope.peaks,
+            [
+                Some(0.25),
+                Some(1.0),
+                Some(1.5),
+                Some(2.0),
+                Some(0.0),
+                Some(0.0)
+            ]
+        );
+        assert_eq!(envelope.max_peak, 2.0);
     }
 
     #[test]
     fn waveform_cancellation_precedes_opening_the_file() {
         let cancelled = std::sync::atomic::AtomicBool::new(true);
-        let error = Source::waveform(Path::new(""), None, 2, 1600, false, &cancelled).unwrap_err();
+        let error = Source::waveform(Path::new(""), None, 2, false, &cancelled).unwrap_err();
         assert_eq!(error.to_string(), "Waveform loading cancelled");
+    }
+
+    #[test]
+    fn decoded_timestamps_place_cue_seeks_in_the_correct_preview_bins() {
+        let file = pcm_file();
+        let mut source = Source::open(file.path(), PROBE_BUFFER_LEN, false).unwrap();
+        let range = Some(super::super::PlaybackRange {
+            start_seconds: 30.0 / 75.0,
+            end_seconds: Some(80.0 / 75.0),
+        });
+        source.restrict(range.unwrap()).unwrap();
+        let rate = source.info.sample_rate;
+        let channels = source.layout.len();
+        let mut frame = super::super::WaveformFrame::default();
+        frame.select(file.path(), range, source.info.duration, rate);
+        for target in [0.2, 0.0] {
+            source.seek(target).unwrap();
+            let (samples, timestamp) = source.next_frames().unwrap().unwrap();
+            assert!((timestamp - target).abs() < 1e-9);
+            frame.push(timestamp, samples, rate, channels);
+            if target > 0.0 {
+                let first = (target * rate as f64).round() as usize * frame.peaks.len()
+                    / (frame.duration.unwrap() * rate as f64).round() as usize;
+                assert!(frame.peaks[..first].iter().all(Option::is_none));
+                assert!(frame.peaks[first].is_some());
+            } else {
+                assert!(frame.peaks[0].is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn manual_scan_without_duration_uses_real_pcm_and_finishes_at_eof() {
+        let file = pcm_file();
+        let mut source = Source::open(file.path(), PROBE_BUFFER_LEN, false).unwrap();
+        source.info.duration = None;
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        let frame = source.scan_waveform(file.path(), None, &cancelled).unwrap();
+        assert!(frame.complete);
+        assert_eq!(frame.duration, Some(2.0));
+        assert!(frame.span_seconds >= 2.0 && frame.span_seconds < 2.04);
+        assert!(frame.peaks.len() <= 1600);
+        assert!(frame.peaks.iter().all(Option::is_some));
+        assert!(frame.peaks.iter().flatten().any(|peak| *peak >= 0.49));
+    }
+
+    #[test]
+    fn continuous_playback_finalizes_known_and_unknown_cue_previews_at_eof() {
+        let file = pcm_file();
+        let cue = super::super::PlaybackRange {
+            start_seconds: 30.0 / 75.0,
+            end_seconds: Some(80.0 / 75.0),
+        };
+        for range in [None, Some(cue)] {
+            for unknown in [false, true] {
+                let mut source = Source::open(file.path(), PROBE_BUFFER_LEN, false).unwrap();
+                if let Some(range) = range {
+                    source.restrict(range).unwrap();
+                }
+                let expected_duration = source.info.duration.unwrap();
+                if unknown {
+                    source.info.duration = None;
+                }
+                let rate = source.info.sample_rate;
+                let channels = source.layout.len();
+                let mut frame = super::super::WaveformFrame::default();
+                frame.select(file.path(), range, source.info.duration, rate);
+                let mut coverage = super::super::waveform::WaveformCoverage::new(0.0);
+                while let Some((samples, timestamp)) = source.next_frames().unwrap() {
+                    coverage.record(timestamp, samples.len() / channels, rate);
+                    frame.push(timestamp, samples, rate, channels);
+                }
+                coverage.finish(&mut frame);
+                assert!(frame.complete);
+                assert!((frame.duration.unwrap() - expected_duration).abs() < 1e-9);
+                assert!(frame.span_seconds >= expected_duration);
+                assert!(frame.span_seconds - expected_duration < 0.04);
+                assert!(frame.peaks.iter().all(Option::is_some));
+                let revision = frame.revision;
+                coverage.finish(&mut frame);
+                assert_eq!(frame.revision, revision);
+            }
+        }
+    }
+
+    #[test]
+    fn seeked_decoder_eof_keeps_cached_peaks_and_unknown_intervals_incomplete() {
+        let file = pcm_file();
+        let mut source = Source::open(file.path(), PROBE_BUFFER_LEN, false).unwrap();
+        source.info.duration = None;
+        let rate = source.info.sample_rate;
+        let channels = source.layout.len();
+        let mut frame = super::super::WaveformFrame::default();
+        frame.select(file.path(), None, None, rate);
+        let (samples, timestamp) = source.next_frames().unwrap().unwrap();
+        let first_count = samples.len().min(441 * channels);
+        frame.push(timestamp, &samples[..first_count], rate, channels);
+        let first_peak = frame.peaks[0];
+        assert!(first_peak.is_some());
+        source.seek(1.0).unwrap();
+        let mut coverage = super::super::waveform::WaveformCoverage::new(1.0);
+        while let Some((samples, timestamp)) = source.next_frames().unwrap() {
+            coverage.record(timestamp, samples.len() / channels, rate);
+            frame.push(timestamp, samples, rate, channels);
+        }
+        let revision = frame.revision;
+        coverage.finish(&mut frame);
+        assert!(!frame.complete);
+        assert_eq!(frame.duration, None);
+        assert_eq!(frame.span_seconds, 60.0);
+        assert_eq!(frame.revision, revision);
+        assert_eq!(frame.peaks[0], first_peak);
+        assert!(frame.peaks[1..26].iter().all(Option::is_none));
+        assert!(frame.peaks[26].is_some());
     }
 
     #[test]

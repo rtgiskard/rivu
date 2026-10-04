@@ -1,14 +1,19 @@
 //! One track's decode-to-output pipeline and audible playback accounting.
 
 use super::{
-    MediaInfo, PlaybackRange,
+    MediaInfo, PlaybackRange, WaveformFrame,
     output::{Converter, Output},
     source::Source,
+    waveform::WaveformCoverage,
 };
 use crate::analysis::AnalysisWorker;
 use anyhow::Result;
 use crossbeam_channel::Receiver;
-use std::path::{Path, PathBuf};
+use parking_lot::RwLock;
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 const PENDING_BUFFER_CAPACITY: usize = 16_384;
 
@@ -39,9 +44,15 @@ pub(super) struct Playback {
     prior_heard: f64,
     eof: bool,
     paused: bool,
+    waveform: Arc<RwLock<WaveformFrame>>,
+    waveform_coverage: WaveformCoverage,
 }
 impl Playback {
-    pub(super) fn new(options: PlaybackOptions, analyzer: &AnalysisWorker) -> Result<Self> {
+    pub(super) fn new(
+        options: PlaybackOptions,
+        analyzer: &AnalysisWorker,
+        waveform: Arc<RwLock<WaveformFrame>>,
+    ) -> Result<Self> {
         let PlaybackOptions {
             path,
             range,
@@ -73,6 +84,12 @@ impl Playback {
             analyzer,
         )?;
         let converter = Converter::new(source.info().sample_rate, output.rate(), channels)?;
+        waveform.write().select(
+            &path,
+            range,
+            source.info().duration,
+            source.info().sample_rate,
+        );
         Ok(Self {
             source,
             output,
@@ -86,6 +103,8 @@ impl Playback {
             prior_heard,
             eof: false,
             paused,
+            waveform,
+            waveform_coverage: WaveformCoverage::new(start),
         })
     }
     pub(super) fn generation(&self) -> u64 {
@@ -145,6 +164,7 @@ impl Playback {
             return Ok(());
         }
         let channels = self.source.layout().len();
+        let sample_rate = self.source.info().sample_rate;
         while self.output.has_room() {
             if self.offset_frames < self.pending.len() / channels {
                 let count = self
@@ -160,10 +180,19 @@ impl Playback {
             }
             self.pending.clear();
             self.offset_frames = 0;
-            if let Some(frames) = self.source.next_frames()? {
+            if let Some((frames, start_seconds)) = self.source.next_frames()? {
+                self.waveform_coverage
+                    .record(start_seconds, frames.len() / channels, sample_rate);
+                self.waveform
+                    .write()
+                    .push(start_seconds, frames, sample_rate, channels);
                 self.converter.push(frames, &mut self.pending)?;
             } else {
                 self.converter.finish(&mut self.pending)?;
+                let mut waveform = self.waveform.write();
+                if waveform.matches(&self.path, self.range) {
+                    self.waveform_coverage.finish(&mut waveform);
+                }
                 self.eof = true;
             }
         }

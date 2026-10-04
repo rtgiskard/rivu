@@ -253,8 +253,8 @@ pub(super) fn devices() -> Result<Vec<String>> {
         .collect())
 }
 
-pub(super) fn validate(name: &str) -> Result<()> {
-    Connection::new()?.target(Some(name)).map(|_| ())
+pub(super) fn validate(name: Option<&str>) -> Result<()> {
+    Connection::new()?.target(name).map(|_| ())
 }
 
 pub(super) struct NativeStream {
@@ -287,9 +287,14 @@ impl NativeStream {
         let thread = std::thread::Builder::new()
             .name("rivu-pipewire".into())
             .spawn(move || {
-                if let Err(error) =
-                    run(name.as_deref(), &source_layout, auto_mix, callback, &stopping, &ready)
-                {
+                if let Err(error) = run(
+                    name.as_deref(),
+                    &source_layout,
+                    auto_mix,
+                    callback,
+                    &stopping,
+                    &ready,
+                ) {
                     let message = format!("{error:#}");
                     let _ = ready.try_send(Err(message.clone()));
                     let _ = errors.try_send(cpal::Error::with_message(
@@ -327,7 +332,11 @@ fn run(
         )
     })?;
     let (stream_layout, mapping, mono) = if auto_mix {
-        (source_layout.to_vec(), Vec::new(), false)
+        (
+            source_layout.to_vec(),
+            (0..source_layout.len()).map(Some).collect(),
+            false,
+        )
     } else {
         let mapping = layout::mapping(source_layout, &speakers)
             .with_context(|| format!("PipeWire sink {} cannot preserve this track", target.name))?;
@@ -562,7 +571,6 @@ unsafe fn render_buffer(
         };
         let samples =
             std::slice::from_raw_parts_mut(data.data.cast::<f32>(), frames * callback.channels);
-        samples.fill(0.0);
         let mut time = std::mem::zeroed::<pw::sys::pw_time>();
         if pw::sys::pw_stream_get_time_n(stream, &mut time, std::mem::size_of::<pw::sys::pw_time>())
             < 0
@@ -572,9 +580,7 @@ unsafe fn render_buffer(
         let Some(timestamp) = output_timestamp(&time, callback.rate) else {
             return false;
         };
-        if routed {
-            callback.render(samples, timestamp);
-        }
+        callback.render_native(samples, timestamp, routed);
         (*data.chunk).stride = stride as i32;
         (*data.chunk).size = (frames * stride) as u32;
         (*buffer).size = frames as u64;

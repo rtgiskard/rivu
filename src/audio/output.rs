@@ -19,6 +19,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
+    time::Duration,
 };
 
 #[path = "output_layout.rs"]
@@ -44,8 +45,8 @@ pub fn devices() -> Result<Vec<String>> {
 
 pub(super) fn validate_device(name: Option<&str>) -> Result<()> {
     #[cfg(target_os = "linux")]
-    if let Some(name) = name.and_then(|name| name.strip_prefix(pipewire::PREFIX)) {
-        return pipewire::validate(name);
+    if name.is_none() || name.is_some_and(|name| name.starts_with(pipewire::PREFIX)) {
+        return pipewire::validate(name.and_then(|name| name.strip_prefix(pipewire::PREFIX)));
     }
     find_device(name).map(|_| ())
 }
@@ -218,11 +219,13 @@ struct ScheduledFrames {
 }
 
 // Kept entirely in the PCM callback. Allocation happens before starting the
-// stream; a broken clock / excessive backend queue is reported, never guessed.
+// stream; a broken callback clock / excessive backend queue is reported, never
+// guessed. Backend playback predictions may move backwards when latency changes;
+// queued spans are kept in submission order below instead of treating that
+// backend estimate as a clock failure.
 struct PlaybackClock {
     pending: VecDeque<ScheduledFrames>,
     last_callback: Option<cpal::StreamInstant>,
-    last_playback: Option<cpal::StreamInstant>,
     heard: u64,
     retired: u64,
     xruns: u64,
@@ -232,11 +235,25 @@ impl PlaybackClock {
         Self {
             pending: VecDeque::with_capacity(1024),
             last_callback: None,
-            last_playback: None,
             heard: 0,
             retired: 0,
             xruns: 0,
         }
+    }
+
+    fn schedule_start(
+        &self,
+        predicted: cpal::StreamInstant,
+        rate: u32,
+    ) -> Option<cpal::StreamInstant> {
+        let Some(previous) = self.pending.back() else {
+            return Some(predicted);
+        };
+        let rate = u128::from(rate.max(1));
+        let nanos =
+            u64::try_from((u128::from(previous.frames) * 1_000_000_000 + rate - 1) / rate).ok()?;
+        let end = previous.start.checked_add(Duration::from_nanos(nanos))?;
+        Some(if end > predicted { end } else { predicted })
     }
 
     fn advance(
@@ -256,22 +273,17 @@ impl PlaybackClock {
                 .map(|span| span.frames - span.heard)
                 .sum::<u64>();
             self.xruns = xruns;
-            // A shorter device queue can move the playback prediction back,
-            // even though the stream's callback clock remains monotonic.
-            self.last_playback = None;
         }
+        // PipeWire's playback prediction includes queue and device latency;
+        // either can shrink without the callback clock moving backwards.
         if self
             .last_callback
             .is_some_and(|last| timestamp.callback < last)
-            || self
-                .last_playback
-                .is_some_and(|last| timestamp.playback < last)
         {
             shared.fail_timing(1);
             return;
         }
         self.last_callback = Some(timestamp.callback);
-        self.last_playback = Some(timestamp.playback);
         while let Some(span) = self.pending.front_mut() {
             let elapsed = timestamp.callback.duration_since(span.start);
             let heard = (elapsed.as_nanos() * u128::from(rate) / 1_000_000_000)
@@ -319,6 +331,18 @@ impl Output {
         analyzer: &AnalysisWorker,
     ) -> Result<Self> {
         #[cfg(target_os = "linux")]
+        if name.is_none() {
+            return Self::native(
+                None,
+                source_rate,
+                source_layout,
+                volume,
+                paused,
+                pipewire_auto_mix,
+                analyzer,
+            );
+        }
+        #[cfg(target_os = "linux")]
         if let Some(target) = name.and_then(|name| name.strip_prefix(pipewire::PREFIX)) {
             return Self::native(
                 Some(target),
@@ -335,7 +359,15 @@ impl Output {
         if source_layout.len() > 2 {
             let id = device.id()?;
             if id.host() == cpal::HostId::Alsa && matches!(id.id(), "default" | "pipewire") {
-                return Self::native(None, source_rate, source_layout, volume, paused, pipewire_auto_mix, analyzer);
+                return Self::native(
+                    None,
+                    source_rate,
+                    source_layout,
+                    volume,
+                    paused,
+                    pipewire_auto_mix,
+                    analyzer,
+                );
             }
         }
         let (supported, mapping) = layout::negotiate(&device, source_rate, source_layout)?;
@@ -436,7 +468,13 @@ impl Output {
             rate,
             clock: PlaybackClock::new(),
         };
-        let stream = pipewire::NativeStream::open(target, source_layout, pipewire_auto_mix, callback, error_send)?;
+        let stream = pipewire::NativeStream::open(
+            target,
+            source_layout,
+            pipewire_auto_mix,
+            callback,
+            error_send,
+        )?;
         Ok(Self {
             stream: Some(OutputStream::PipeWire { _stream: stream }),
             producer,
@@ -561,6 +599,20 @@ struct OutputCallback {
     clock: PlaybackClock,
 }
 impl OutputCallback {
+    fn render_native(
+        &mut self,
+        data: &mut [f32],
+        timestamp: cpal::OutputStreamTimestamp,
+        routed: bool,
+    ) {
+        if routed {
+            self.render(data, timestamp);
+        } else {
+            // Keep unconfirmed PipeWire routes silent without consuming PCM.
+            data.fill(0.0);
+        }
+    }
+
     fn render<T: cpal::Sample + cpal::FromSample<f32>>(
         &mut self,
         data: &mut [T],
@@ -568,7 +620,8 @@ impl OutputCallback {
     ) {
         self.clock.advance(timestamp, self.rate, &self.shared);
         let paused = self.shared.paused.load(Ordering::Acquire);
-        if paused && self.clock.pending.is_empty()
+        if paused
+            && self.clock.pending.is_empty()
             && !self.shared.pause_settled.swap(true, Ordering::AcqRel)
         {
             let _ = self.shared.wakeup.try_send(());
@@ -587,6 +640,18 @@ impl OutputCallback {
             self.shared.fail_timing(2);
             count = 0;
         }
+        let start = if count > 0 {
+            match self.clock.schedule_start(timestamp.playback, self.rate) {
+                Some(start) => Some(start),
+                None => {
+                    self.shared.fail_timing(3);
+                    count = 0;
+                    None
+                }
+            }
+        } else {
+            None
+        };
         data.fill(T::from_sample(0.0));
         for output in data.chunks_exact_mut(self.channels).take(count) {
             // One pop publishes consumption of the entire frame, even when
@@ -607,9 +672,9 @@ impl OutputCallback {
                 }
             }
         }
-        if count > 0 {
+        if let Some(start) = start {
             self.clock.pending.push_back(ScheduledFrames {
-                start: timestamp.playback,
+                start,
                 frames: count as u64,
                 heard: 0,
             });
@@ -668,6 +733,12 @@ mod tests {
         cpal::OutputStreamTimestamp {
             callback: cpal::StreamInstant::from_millis(callback_ms),
             playback: cpal::StreamInstant::from_millis(playback_ms),
+        }
+    }
+    fn timestamp_nanos(callback: u64, playback: u64) -> cpal::OutputStreamTimestamp {
+        cpal::OutputStreamTimestamp {
+            callback: cpal::StreamInstant::from_nanos(callback),
+            playback: cpal::StreamInstant::from_nanos(playback),
         }
     }
 
@@ -753,6 +824,66 @@ mod tests {
         callback.render(&mut data, timestamp(63, 83));
         assert_eq!(output.heard(), 0.005);
         assert!(output.drained());
+    }
+
+    #[test]
+    fn native_unrouted_buffer_is_silent_without_consuming_then_routes_pcm() {
+        let (mut output, mut callback, _analyzer) = test_output(1000, false);
+        output.push([[0.5, -0.5]; 2].as_flattened());
+        let mut data = [1.0_f32; 4];
+
+        callback.render_native(&mut data, timestamp(0, 20), false);
+        assert!(data.iter().all(|sample| *sample == 0.0));
+        assert_eq!(callback.consumer.occupied_len(), 4);
+        assert_eq!(output.heard(), 0.0);
+
+        callback.render_native(&mut data, timestamp(1, 21), true);
+        assert_eq!(data, [0.5, -0.5, 0.5, -0.5]);
+        assert_eq!(callback.consumer.occupied_len(), 0);
+    }
+
+    #[test]
+    fn playback_prediction_retreat_keeps_submission_order_and_drain() {
+        let (mut output, mut callback, _analyzer) = test_output(1000, false);
+        output.push([[0.5, -0.5]; 8].as_flattened());
+        let mut data = [0.0_f32; 8];
+
+        // A latency reduction pulls the backend estimate backwards while the
+        // first queued span is still pending. This is not a callback-clock
+        // regression and must not make the second span audible early.
+        callback.render(&mut data, timestamp(0, 100));
+        callback.render(&mut data, timestamp(1, 50));
+        callback.render(&mut data, timestamp(60, 60));
+        assert!(output.check_timing().is_ok());
+        assert_eq!(output.heard(), 0.0);
+
+        callback.render(&mut data, timestamp(108, 108));
+        assert!(output.check_timing().is_ok());
+        assert_eq!(output.heard(), 0.008);
+        assert!(output.drained());
+    }
+
+    #[test]
+    fn non_integer_frame_duration_never_hears_or_drains_early() {
+        let (mut output, mut callback, _analyzer) = test_output(44_100, false);
+        output.push([[0.5, -0.5]; 2].as_flattened());
+        let mut data = [0.0_f32; 2];
+
+        callback.render(&mut data, timestamp_nanos(0, 1_000_000));
+        callback.render(&mut data, timestamp_nanos(1, 0));
+
+        // ceil(1e9 / 44100) = 22676 ns; at 22675 ns no frame may be heard.
+        callback.render(&mut data, timestamp_nanos(1_022_675, 1_022_675));
+        assert_eq!(output.heard(), 0.0);
+        assert!(!output.drained());
+
+        callback.render(&mut data, timestamp_nanos(1_022_676, 1_022_676));
+        assert_eq!(output.heard(), 1.0 / 44_100.0);
+        assert!(!output.drained());
+
+        callback.render(&mut data, timestamp_nanos(1_045_352, 1_045_352));
+        assert!(output.drained());
+        assert_eq!(output.heard(), 2.0 / 44_100.0);
     }
 
     #[test]

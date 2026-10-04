@@ -16,37 +16,31 @@ mod format;
 mod output;
 mod playback;
 mod source;
+mod waveform;
 mod worker;
 
 use format::Channel;
 pub use output::devices;
 pub use source::probe;
+pub use waveform::WaveformFrame;
 
 pub fn ffmpeg_status() -> anyhow::Result<String> {
     ffmpeg::availability()
 }
 
-/// Decode a whole-track peak-amplitude envelope without enabling the FFT worker.
-/// Cancellation is checked before opening and between decoded packets.
+/// Scan a full envelope only for an explicit user request. Normal playback
+/// publishes peaks directly from its existing decoded PCM instead.
 pub fn waveform(
     path: &Path,
     range: Option<PlaybackRange>,
     media_read_buffer_mb: u32,
-    points: usize,
     ffmpeg_enabled: bool,
     cancelled: &std::sync::atomic::AtomicBool,
-) -> Result<Vec<f32>> {
-    source::Source::waveform(
-        path,
-        range,
-        media_read_buffer_mb,
-        points,
-        ffmpeg_enabled,
-        cancelled,
-    )
+) -> Result<WaveformFrame> {
+    source::Source::waveform(path, range, media_read_buffer_mb, ffmpeg_enabled, cancelled)
 }
 
-use crate::analysis::{AnalysisFrame, AnalysisWorker};
+use crate::analysis::{AnalysisFrame, AnalysisSettings, AnalysisWorker};
 use crate::library::MediaInfo;
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, bounded};
@@ -61,7 +55,7 @@ use worker::Worker;
 
 const BYTES_PER_MEBIBYTE: usize = 1024 * 1024;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PlaybackRange {
     pub start_seconds: f64,
     pub end_seconds: Option<f64>,
@@ -79,13 +73,15 @@ pub enum AudioCommand {
     Stop,
     Seek(f64),
     Volume(f32),
-    Device(Option<String>),
+    OutputSettings {
+        device: Option<String>,
+        auto_mix: bool,
+    },
     Analysis(bool),
     MediaReadBuffer(u32),
     FfmpegEnabled(bool),
-    PipewireAutoMix(bool),
-    /// Set analyzer publication rate. Values outside 5..=60 fps are ignored.
-    AnalysisRate(u32),
+    /// Update analysis only; never reopen the decoder or output stream.
+    AnalysisSettings(AnalysisSettings),
     StopAndSnapshot(Sender<(u64, f64)>),
     Shutdown,
 }
@@ -116,6 +112,7 @@ pub struct AudioEngine {
     pub commands: Sender<AudioCommand>,
     pub events: Receiver<AudioEvent>,
     pub analysis: Arc<RwLock<AnalysisFrame>>,
+    pub waveform: Arc<RwLock<WaveformFrame>>,
     worker: Option<JoinHandle<()>>,
 }
 impl AudioEngine {
@@ -123,6 +120,8 @@ impl AudioEngine {
         let (commands, receive) = bounded(64);
         let (send_events, events) = bounded(128);
         let analysis = Arc::new(RwLock::new(AnalysisFrame::default()));
+        let waveform = Arc::new(RwLock::new(WaveformFrame::default()));
+        let worker_waveform = waveform.clone();
         let analyzer = AnalysisWorker::new(analysis.clone())?;
         let media_read_buffer_len = usize::try_from(media_read_buffer_mb)
             .expect("media read buffer size does not fit usize")
@@ -130,12 +129,20 @@ impl AudioEngine {
         let worker = thread::Builder::new()
             .name("rivu-audio".into())
             .spawn(move || {
-                Worker::new(receive, send_events, analyzer, media_read_buffer_len).run()
+                Worker::new(
+                    receive,
+                    send_events,
+                    analyzer,
+                    worker_waveform,
+                    media_read_buffer_len,
+                )
+                .run()
             })?;
         Ok(Self {
             commands,
             events,
             analysis,
+            waveform,
             worker: Some(worker),
         })
     }

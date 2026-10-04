@@ -1,15 +1,17 @@
 //! Command handling, playback lifecycle, refill scheduling, and analyzer policy.
 
 use super::{
-    AudioCommand, AudioEvent,
+    AudioCommand, AudioEvent, WaveformFrame,
     output::validate_device,
     playback::{Playback, PlaybackOptions},
 };
 use crate::analysis::AnalysisWorker;
 use anyhow::anyhow;
 use crossbeam_channel::{Receiver, Sender, select};
+use parking_lot::RwLock;
 use std::{
     path::PathBuf,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -17,6 +19,7 @@ pub(super) struct Worker {
     commands: Receiver<AudioCommand>,
     events: Sender<AudioEvent>,
     analyzer: AnalysisWorker,
+    waveform: Arc<RwLock<WaveformFrame>>,
     playback: Option<Playback>,
     device: Option<String>,
     volume: f32,
@@ -33,12 +36,14 @@ impl Worker {
         commands: Receiver<AudioCommand>,
         events: Sender<AudioEvent>,
         analyzer: AnalysisWorker,
+        waveform: Arc<RwLock<WaveformFrame>>,
         media_read_buffer_len: usize,
     ) -> Self {
         Self {
             commands,
             events,
             analyzer,
+            waveform,
             playback: None,
             device: None,
             volume: 0.7,
@@ -110,10 +115,9 @@ impl Worker {
                 self.wanted_analysis = enabled;
                 self.refresh_analysis();
             }
-            AudioCommand::AnalysisRate(rate) if (5..=60).contains(&rate) => {
-                self.analyzer.set_rate(rate);
+            AudioCommand::AnalysisSettings(settings) => {
+                self.analyzer.configure(settings);
             }
-            AudioCommand::AnalysisRate(_) => {}
             AudioCommand::FfmpegEnabled(enabled) => {
                 self.ffmpeg_enabled = enabled;
                 if !enabled && self.playback.as_ref().is_some_and(Playback::uses_ffmpeg) {
@@ -126,10 +130,6 @@ impl Worker {
                     });
                     self.event(AudioEvent::DecoderStopped { generation });
                 }
-            }
-            AudioCommand::PipewireAutoMix(enabled) => {
-                self.pipewire_auto_mix = enabled;
-                self.reopen(None);
             }
             AudioCommand::MediaReadBuffer(mebibytes) => {
                 self.media_read_buffer_len = mebibytes as usize * super::BYTES_PER_MEBIBYTE;
@@ -151,6 +151,7 @@ impl Worker {
                 match Playback::new(
                     self.playback_options(path, range, generation, start_seconds, paused, 0.0),
                     &self.analyzer,
+                    self.waveform.clone(),
                 ) {
                     Ok(playback) => {
                         self.event(AudioEvent::Started {
@@ -173,12 +174,16 @@ impl Worker {
                 self.refresh_analysis();
             }
             AudioCommand::Seek(seconds) => self.reopen(Some(seconds)),
-            AudioCommand::Device(name) => {
-                if let Err(error) = validate_device(name.as_deref()) {
-                    self.fail(error);
-                } else {
-                    self.device = name;
-                    self.reopen(None);
+            AudioCommand::OutputSettings { device, auto_mix } => {
+                let device_changed = self.device != device;
+                if device_changed || self.pipewire_auto_mix != auto_mix {
+                    if device_changed && let Err(error) = validate_device(device.as_deref()) {
+                        self.fail(error);
+                    } else {
+                        self.device = device;
+                        self.pipewire_auto_mix = auto_mix;
+                        self.reopen(None);
+                    }
                 }
             }
         }
@@ -199,6 +204,7 @@ impl Worker {
                     heard,
                 ),
                 &self.analyzer,
+                self.waveform.clone(),
             ) {
                 Ok(playback) => self.playback = Some(playback),
                 Err(error) => {
@@ -298,8 +304,12 @@ impl Worker {
                 }
             };
             if let Some(command) = command {
-                let Ok(command) = command else { break; };
-                if !self.command(command) { break; }
+                let Ok(command) = command else {
+                    break;
+                };
+                if !self.command(command) {
+                    break;
+                }
             }
         }
         self.stop();
