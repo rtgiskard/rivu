@@ -203,6 +203,27 @@ fn read_message(stream: &mut UnixStream, limit: u64) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+fn overview_response(state: AppState, overview: &Mutex<OverviewCache>) -> Response {
+    let cached = overview.lock().cached(&state);
+    let tracks = cached.unwrap_or_else(|| {
+        let mut ids: HashSet<i64> = state.queue.iter().map(|entry| entry.track_id).collect();
+        if let Some(track) = state.current_track() {
+            ids.insert(track.id);
+        }
+        let tracks: Arc<Vec<Track>> = Arc::new(
+            state
+                .library
+                .iter()
+                .filter(|track| ids.contains(&track.id))
+                .cloned()
+                .collect(),
+        );
+        overview.lock().update(&state, tracks.clone());
+        tracks
+    });
+    OverviewCache::response(state, tracks)
+}
+
 fn serve_connection(
     mut stream: UnixStream,
     handle: &AppHandle,
@@ -212,29 +233,16 @@ fn serve_connection(
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     let bytes = read_message(&mut stream, MAX_REQUEST)?;
     let response = match serde_json::from_slice::<Command>(&bytes) {
-        Ok(Command::Overview) => {
-            let state = handle.snapshot();
-            let cached = overview.lock().cached(&state);
-            let tracks = cached.unwrap_or_else(|| {
-                let mut ids: HashSet<i64> =
-                    state.queue.iter().map(|entry| entry.track_id).collect();
-                if let Some(track) = state.current_track() {
-                    ids.insert(track.id);
-                }
-                let tracks: Arc<Vec<Track>> = Arc::new(
-                    state
-                        .library
-                        .iter()
-                        .filter(|track| ids.contains(&track.id))
-                        .cloned()
-                        .collect(),
-                );
-                overview.lock().update(&state, tracks.clone());
-                tracks
-            });
-            OverviewCache::response(state, tracks)
+        Ok(Command::Overview) => overview_response(handle.snapshot(), overview),
+        Ok(Command::Status) => handle.request(Command::Status),
+        Ok(command) => {
+            let response = handle.request(command);
+            if response.ok {
+                overview_response(response.state, overview)
+            } else {
+                response
+            }
         }
-        Ok(command) => handle.request(command),
         Err(error) => Response {
             ok: false,
             error: Some(format!("Invalid command: {error}")),
