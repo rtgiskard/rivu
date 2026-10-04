@@ -10,7 +10,8 @@ pipewire_auto_mix = true
 play_count_threshold_percent = 20.0
 spectrogram_min_hz = 20.0
 spectrogram_max_hz = 20000.0
-analysis_db_range = 70.0
+spectrogram_db_range = 70.0
+spectrum_db_range = 70.0
 ----
 
 Accepted media read buffer sizes are `1`, `2`, `4`, `8`, and `16` MiB.
@@ -27,22 +28,37 @@ contains the same switch.
 The bottom-right gear opens a compact settings dialog. Enter library directories
 separated by semicolons. Output devices use a field-anchored dropdown: choose with
 the pointer or Up/Down and Enter; Escape or an outside click closes the dropdown.
-In short windows the fields scroll independently; Apply and Discard stay visible.
+General and Visualizations have separate pages; visual settings are grouped into
+Common, Spectrum, Spectrogram, and Waveform. In short windows only the fields
+scroll; navigation and Apply/Discard stay visible. Function switches use twice
+the normal icon-button size and wrap when necessary. The General switch group
+has 24 logical pixels of spacing from the preceding input at the default scale.
 
-Closing the last GUI window does not stop the core, playback, or MPRIS service.
-Rivu continues running until MPRIS `Quit`, `rivu quit`, or another control client
-explicitly shuts it down. MPRIS playback, pause, previous, next, and seeking
-remain available after the GUI closes.
+Closing the last GUI window releases the view and window drawing resources but
+keeps the core, playback, MPRIS service, and GUI host running. There is no hidden
+window or background GUI progress/analysis polling. Playback, pause, previous,
+next, and seeking remain available through the CLI, TUI, and MPRIS.
+Run `rivu gui` with the same data directory or use MPRIS `Raise` to recreate the
+window; repeated requests focus the existing window without changing playback.
+`CanRaise` stays true while the graphical host exists, even without a window.
+`rivu quit`, MPRIS `Quit`, or explicit application quit shuts down both lifetimes.
 
-The Shuffle, Repeat, MPRIS, and FFmpeg icon switches modify only the settings draft.
+Pure `serve` mode has no graphical host: `CanRaise` is false, and both `Raise`
+and `rivu gui` report that the running core has no graphical host rather than
+starting a second core. Stop that headless instance before starting a GUI.
+
+The Shuffle, Repeat, MPRIS, FFmpeg, and PipeWire remix switches modify only the settings draft.
 Highlighting shows the draft's enabled state, not an already-saved change. The
-FFmpeg switch uses the audio-file symbol (Font Awesome U+F1C7), not a VLC logo
-or a bundled image. Its tooltip lists detected library versions on separate lines.
+FFmpeg switch uses Nerd Fonts `nf-linux-ffmpeg` (U+F384); PipeWire remix uses U+F101E.
+Both explicitly use Symbols Nerd Font. FFmpeg's tooltip lists detected library
+versions on separate lines.
 Apply (check mark) submits the draft and reports the actual save result without
 blocking input. Discard (cross) abandons unapplied edits and closes the dialog.
 Reopening after Escape also reloads the applied configuration. Playback errors
 such as `Queue is empty` stay in the main footer, not the settings feedback area;
 settings errors can be copied in full by clicking their text or copy glyph.
+Replies from a previous dialog session do not mark a reopened draft as saved.
+Discard does not cancel an Apply request already submitted to the core.
 
 Saving library roots does not scan them or enqueue tracks. In Library, leave the
 path field blank and click `Scan paths` to scan the configured roots, then select
@@ -61,6 +77,8 @@ workspace button combines locking and panel selection: right-click it to toggle
 the persistent lock; left-click while unlocked to add a panel. While locked,
 adding, removing, moving, resizing and changing tab-bar visibility are disabled;
 playback controls and tab selection remain available.
+Context menus use full-width, borderless rows with hover feedback, a single outer
+frame, and separators between track actions and workspace actions.
 
 Workspace top, left and right insets and the bottom-right buttons' bottom inset
 are consistently 12 pixels. Panel content has one 12-pixel inset rather than
@@ -69,13 +87,39 @@ Errors and scan progress use the existing fixed-height footer, never an overlay
 over panels. Click a message or its copy glyph to copy the full text, even when
 the displayed line is truncated. A small, borderless inline cross dismisses an error.
 
-The Waveform panel previews the entire selected/current track, including CUE
-subtrack boundaries. It loads asynchronously and cancels obsolete work; it is
-not a scrolling window of recent playback samples. Floating-point peaks above
+The Waveform panel uses a whole-track timeline for the selected/current track,
+including CUE subtrack boundaries. By default it reuses PCM from playback buffer
+decoding instead of opening another decoder or reading the whole file ahead.
+Decoded intervals appear progressively; unknown intervals remain blank. Seeking
+retains earlier peaks without inventing data in skipped intervals. Peak storage
+is bounded to 1600 bins; this is not a scrolling recent-sample visualization.
+
+Right-click the Waveform panel and choose `Load full waveform now` for an
+immediate asynchronous whole-file scan. Changing the source cancels obsolete
+manual work; hiding a panel does not restart or cancel it. Closing the window
+cancels unfinished manual work, while decoded preview data remains in the core.
+Floating-point peaks above
 full scale are retained: the view expands its amplitude range uniformly for
 that track instead of flattening individual peaks. Quiet tracks are not boosted,
 and this display scaling does not change playback gain. Spectrum and Spectrogram
 show live analysis instead.
+Metadata, favorite, display-setting, and visibility changes reuse existing data.
+External file edits are not watched; use `Load full waveform now` to refresh
+the preview on demand.
+
+Each visible Waveform panel caches its width-dependent peak columns and colors.
+Progress updates reuse those columns; resizing rebuilds only the affected panel's
+columns. Removing or hiding a panel releases its drawing cache without discarding
+the shared progressive or completed whole-track preview.
+The playback cursor is a configurable waterline with a soft glow and droplet
+marker (mint by default). The entire background, including the played region,
+uses the same `visual_background` as Spectrum and Spectrogram; there is no tint.
+It follows playback and seeking, stays within the panel at both endpoints, and
+has no independent animation while paused.
+
+GUI playback/analysis refreshes reuse the current state snapshot when the core
+revision is unchanged and avoid repainting unchanged analysis frames. User input
+and window activation remain immediate.
 
 === Spectrum and Spectrogram
 
@@ -84,18 +128,75 @@ peak hold/release inspired by DeaDBeeF's
 https://github.com/cboxdoerfer/ddb_musical_spectrum[Musical Spectrum]. It displays
 the audible frequency range up to the source Nyquist limit, with amplitude labels
 outside the plot. Peak decay is based on elapsed time, not the configured fps.
+Waveform, Spectrum, and Spectrogram share `visual_background` (`#08090c` by default).
+Colors use `#RRGGBB` notation. `analysis_fps` accepts 5–60 updates per second.
+Empty and waiting states share the same small UI text style (14 pixels at default
+scale), muted color, and 12-pixel inset. Text scales with the UI and wraps in narrow
+panels; axis labels retain their separate smaller drawing style.
+All three views share a fixed plugin-inspired gradient: deep blue, cyan, green,
+yellow, orange, red. Spectrogram maps intensity onto this gradient; silence stays
+dark. There are no Palette selectors.
 
-`spectrogram_min_hz` and `spectrogram_max_hz` select the heatmap's logarithmic
-frequency interval. They must be finite with `0 < min < max`. The rendered range
-is clipped to available analyzer bands and half the output sample rate; an empty
-intersection is reported rather than relabeling unrelated data. Changing these
-settings also remaps cached history while paused and does not crop Spectrum.
+Spectrum's independent settings are:
 
-`analysis_db_range` is the shared positive, finite dB span for Spectrum's vertical
-scale and Spectrogram's colors. Its default is 70 dB. Spectrum allows headroom
-above 0 dB when needed; the heatmap color scale spans `-analysis_db_range` to 0 dB.
-These are display settings, not audio gain or limiting. Edit them in preferences
-and Apply, or in the configuration file.
+* `spectrum_style`: `bars` (default), `outline`, `led`, `line`, or `solid`.
+  These draw filled bars, outlined bars, segmented LED bars, a connected line,
+  or a filled continuous spectrum. Style changes also redraw a paused frame.
+* `spectrum_min_hz` / `spectrum_max_hz`: frequency interval, default 20–20000 Hz.
+* `spectrum_db_range`: amplitude span, 1–160 dB, default 70.
+* `spectrum_fft_size`: 512, 1024, 2048, 4096, 8192 (default), 16384, or 32768.
+* `spectrum_window`: `hann`, `blackman_harris` (default), or `none`.
+* `spectrum_bands_per_octave`: 1–48, default 24.
+* `spectrum_bars`: `0` (automatic) or 1–512; narrow panels cap the count.
+* `spectrum_bar_width`: 1–20 pixels, default 3, controls automatic density.
+* `spectrum_gap`: 0–8 pixels, default 1, reduced to keep bars visible.
+* `spectrum_interpolate` and `spectrum_log_scale`: enabled by default.
+* `spectrum_peaks`: peak markers, enabled by default.
+* `spectrum_peak_hold_ms`: 0–2000 ms; default 400.
+* `spectrum_bar_hold_ms`: 0–2000 ms; default 0.
+* `spectrum_peak_gravity` / `spectrum_bar_gravity`: 0–500 dB/s², default 50.
+  These accelerate the fall after the hold; zero snaps to the current level.
+* `spectrum_smoothing_ms`: 0–1000 ms, default 80, smooths release while retaining
+  immediate attacks. Motion follows audio time and freezes while paused.
+* `spectrum_grid`: faint horizontal references, independent of labels.
+* `spectrum_labels`: axis labels, enabled by default; bottom frequencies show only
+  the two endpoints, never a midpoint.
+
+Spectrogram has separate frequency and display settings:
+
+* `spectrogram_min_hz` / `spectrogram_max_hz`: frequency interval, default 20–20000 Hz.
+* `spectrogram_log_scale`: logarithmic when true (default), linear otherwise.
+* `spectrogram_db_range`: independent color span, 1–160 dB, default 70.
+* `spectrogram_history_seconds`: 5–120 audio seconds, default 10, independent of
+  refresh rate and panel width. Unavailable history remains blank.
+* `spectrogram_labels`: show endpoint frequency labels, default true.
+
+Both frequency intervals require finite `0 < min < max <= 384000`. Rendering
+clips each interval to available analyzer bands and the source Nyquist limit;
+empty intersections report an error instead of relabeling unrelated data.
+Spectrum permits headroom above 0 dB; Spectrogram colors span its negative dB
+range through 0 dB. The heatmap has no reference lines and labels only its endpoints.
+
+`waveform_cursor_color` defaults to `#73daca`; `waveform_glow` accepts 0–2
+(default 1). `waveform_labels` controls endpoint time labels and defaults to true.
+Appearance changes reuse decoded preview data. Visual Boolean settings use
+highlighted icon switches with explanatory On/Off tooltips.
+
+Apply validates and saves all pages together; navigating between pages preserves
+the draft. Display-only changes do not reopen the decoder or audio output.
+Cached Spectrogram history is remapped for range and axis changes even while
+paused. Older `analysis_db_range` configuration migrates to both independent
+dB ranges on load; explicit new ranges take precedence, and saves use only the new keys.
+Previously saved Palette and played-region tint keys are discarded on load and
+omitted on the next save;
+other settings are preserved.
+The former constant peak-release speed is not reinterpreted as acceleration;
+old release keys are removed, and absent gravity settings use 50 dB/s².
+
+`nerd_symbols` defaults on only when installed Nerd Font families are detected
+through fontconfig. Detection is cached; a missing detector or no matching fonts
+defaults it off. A saved explicit preference takes precedence. The General page
+provides a Nerd Symbols switch; non-Nerd symbols remain usable when disabled.
 
 
 == Visual assets
@@ -109,6 +210,8 @@ in `src/gui/artwork.rs`, including when no track is selected. Record grooves and
 river curves are tessellated once per window and reused at the displayed size;
 there are no default-cover image files, PNG decoding, or texture uploads.
 Track-specific album artwork is not currently loaded.
+GPUI also caches the positioned artwork between layout/style changes, avoiding
+repeated path copying and vertex transforms during playback and analysis updates.
 
 To regenerate the application icon PNG after editing its SVG source (requires librsvg):
 
