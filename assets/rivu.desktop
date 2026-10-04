@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Rivu
+Comment=Local-first music player
+Exec=rivu gui %F
+Icon=rivu
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+StartupWMClass=rivu

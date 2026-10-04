@@ -114,64 +114,69 @@ impl GuiApp {
             Measured::Volume(panel_id),
             cx,
         );
-        column()
+        row()
             .id(("transport-panel", panel_id))
             .size_full()
+            .items_start()
             .overflow_y_scroll()
             .child(
-                row()
+                div()
+                    .size(px(64.))
                     .flex_shrink_0()
-                    .flex_wrap()
-                    .child(div().flex_1().min_w_0().text_xl().truncate().child(title))
+                    .child(self.default_album.element()),
+            )
+            .child(
+                column()
+                    .flex_1()
                     .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(MUTED))
-                            .truncate()
-                            .child(artist),
+                        row()
+                            .flex_shrink_0()
+                            .flex_wrap()
+                            .child(div().flex_1().min_w_0().text_xl().truncate().child(title))
+                            .child(caption(artist).truncate())
+                            .child(caption(status)),
                     )
-                    .child(div().text_xs().text_color(rgb(MUTED)).child(status)),
-            )
-            .child(
-                row()
-                    .flex_shrink_0()
-                    .flex_wrap()
-                    .child(button(("previous", panel_id), "󰒮", cx, |this, _, cx| {
-                        this.send(Command::Previous, cx)
-                    }))
-                    .child(button(
-                        ("toggle", panel_id),
-                        if self.state.status == PlaybackStatus::Playing {
-                            "󰏤"
-                        } else {
-                            "󰐊"
-                        },
-                        cx,
-                        |this, _, cx| this.send(Command::Toggle, cx),
-                    ))
-                    .child(button(("stop", panel_id), "󰓛", cx, |this, _, cx| {
-                        this.send(Command::Stop, cx)
-                    }))
-                    .child(button(("next", panel_id), "󰒭", cx, |this, _, cx| {
-                        this.send(Command::Next, cx)
-                    }))
-                    .child(div().w(px(100.)).child(volume))
                     .child(
-                        div()
-                            .text_xs()
-                            .child(format!("{:.0}%", self.state.volume * 100.)),
+                        row()
+                            .flex_shrink_0()
+                            .flex_wrap()
+                            .child(button(("previous", panel_id), "󰒮", cx, |this, _, cx| {
+                                this.send(Command::Previous, cx)
+                            }))
+                            .child(button(
+                                ("toggle", panel_id),
+                                if self.state.status == PlaybackStatus::Playing {
+                                    "󰏤"
+                                } else {
+                                    "󰐊"
+                                },
+                                cx,
+                                |this, _, cx| this.send(Command::Toggle, cx),
+                            ))
+                            .child(button(("stop", panel_id), "󰓛", cx, |this, _, cx| {
+                                this.send(Command::Stop, cx)
+                            }))
+                            .child(button(("next", panel_id), "󰒭", cx, |this, _, cx| {
+                                this.send(Command::Next, cx)
+                            }))
+                            .child(div().w(px(100.)).child(volume))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .child(format!("{:.0}%", self.state.volume * 100.)),
+                            ),
+                    )
+                    .child(
+                        row()
+                            .flex_shrink_0()
+                            .flex_wrap()
+                            .child(div().flex_1().min_w(px(60.)).child(seek))
+                            .child(div().text_xs().text_color(rgb(MUTED)).child(format!(
+                                "{} / {}",
+                                format_time(self.seek_preview.unwrap_or(self.state.position)),
+                                duration.map_or("—".into(), format_time)
+                            ))),
                     ),
-            )
-            .child(
-                row()
-                    .flex_shrink_0()
-                    .flex_wrap()
-                    .child(div().flex_1().min_w(px(60.)).child(seek))
-                    .child(div().text_xs().text_color(rgb(MUTED)).child(format!(
-                        "{} / {}",
-                        format_time(self.seek_preview.unwrap_or(self.state.position)),
-                        duration.map_or("—".into(), format_time)
-                    ))),
             )
             .into_any_element()
     }

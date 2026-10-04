@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none">
+  <title>Rivu</title>
+  <desc>A blue record with a mint river flowing across it, on a midnight rounded square.</desc>
+  <defs>
+    <linearGradient id="record" x1="156" y1="120" x2="372" y2="352" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7aa2f7"/>
+      <stop offset="1" stop-color="#bb9af7"/>
+    </linearGradient>
+    <linearGradient id="river" x1="116" y1="340" x2="396" y2="284" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7dcfff"/>
+      <stop offset="1" stop-color="#73daca"/>
+    </linearGradient>
+  </defs>
+  <rect x="16" y="16" width="480" height="480" rx="108" fill="#1a1b26"/>
+  <circle cx="256" cy="236" r="120" stroke="url(#record)" stroke-width="32"/>
+  <circle cx="256" cy="236" r="78" stroke="#7aa2f7" stroke-opacity=".28" stroke-width="8"/>
+  <circle cx="256" cy="236" r="16" fill="#73daca"/>
+  <path d="M116 324C158 282 202 282 244 324S330 366 396 300" stroke="#1a1b26" stroke-width="56" stroke-linecap="round"/>
+  <path d="M116 324C158 282 202 282 244 324S330 366 396 300" stroke="url(#river)" stroke-width="28" stroke-linecap="round"/>
+  <path d="M136 382C176 350 208 354 244 382S320 410 364 376" stroke="url(#river)" stroke-width="16" stroke-linecap="round"/>
+</svg>

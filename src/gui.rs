@@ -1,3 +1,4 @@
+mod artwork;
 mod input;
 mod layout;
 mod panels;
@@ -283,6 +284,7 @@ struct GuiApp {
     most_played: Vec<usize>,
     settings: settings::Settings,
     visuals: visuals::Visuals,
+    default_album: artwork::Artwork,
     catalog_open: bool,
     device_popup_open: bool,
     hidden_tab_bars: HashSet<u64>,
@@ -389,6 +391,7 @@ impl GuiApp {
             library_index: HashMap::new(),
             most_played: Vec::new(),
             visuals: visuals::Visuals::new(),
+            default_album: artwork::Artwork::new(),
             catalog_open: false,
             device_popup_open: false,
             hidden_tab_bars: HashSet::new(),
