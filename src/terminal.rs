@@ -3,6 +3,7 @@ use crate::{
     model::{AppState, Command, PlaybackStatus, RepeatMode, Response, Track, playback_key_command},
 };
 use anyhow::{Context, Result};
+use crossbeam_channel::{Receiver, bounded};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
     execute,
@@ -73,22 +74,52 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
     first.map_or(Ok(()), Err)
 }
 
+fn spawn_watcher(socket_path: &Path, revision: u64) -> Receiver<Result<Response, String>> {
+    let socket_path = socket_path.to_owned();
+    let (sender, receiver) = bounded(1);
+    std::thread::spawn(move || {
+        let mut revision = revision;
+        loop {
+            match ipc::watch(&socket_path, revision) {
+                Ok(response) => {
+                    revision = response.state.revision;
+                    if sender.send(Ok(response)).is_err() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let _ = sender.send(Err(format!("TUI state watcher stopped: {error:#}")));
+                    break;
+                }
+            }
+        }
+    });
+    receiver
+}
+
 fn run_loop(socket_path: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
     let mut state = request_state(socket_path)?;
+    let updates = spawn_watcher(socket_path, state.revision);
     let mut ui = UiState::default();
     ui.sync_queue(&state, &state);
     let mut redraw = true;
     loop {
+        while let Ok(update) = updates.try_recv() {
+            let response = update.map_err(anyhow::Error::msg)?;
+            if response.ok && response.state.revision != state.revision {
+                ui.sync_queue(&state, &response.state);
+                state = response.state;
+                redraw = true;
+            }
+        }
         if redraw {
             terminal.draw(|frame| draw(frame, &state, &mut ui))?;
             redraw = false;
         }
-        if event::poll(Duration::from_millis(250))? {
+        if event::poll(Duration::from_millis(50))? {
             let event = event::read()?;
             match event {
-                Event::Resize(_, _) => {
-                    redraw = true;
-                }
+                Event::Resize(_, _) => redraw = true,
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     let local_revision = ui.local_revision;
                     let next = match ui.key_action(key, &state) {
@@ -112,26 +143,16 @@ fn run_loop(socket_path: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>
                             ui.accept_response(ipc::request(socket_path, &command)?)
                         }
                         KeyAction::Ignored => {
-                            if ui.local_revision != local_revision {
-                                redraw = true;
-                            }
+                            redraw |= ui.local_revision != local_revision;
                             continue;
                         }
                     };
-                    if ui.local_revision != local_revision || next.revision != state.revision {
-                        redraw = true;
-                    }
+                    redraw |=
+                        ui.local_revision != local_revision || next.revision != state.revision;
                     ui.sync_queue(&state, &next);
                     state = next;
                 }
                 _ => {}
-            }
-        } else {
-            let next = request_state(socket_path)?;
-            if next.revision != state.revision {
-                ui.sync_queue(&state, &next);
-                state = next;
-                redraw = true;
             }
         }
     }

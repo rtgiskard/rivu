@@ -4,6 +4,7 @@ use crate::{
 };
 use anyhow::{Context, Error, Result, bail};
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     fs,
@@ -23,6 +24,18 @@ use std::{
 
 const MAX_REQUEST: u64 = 64 * 1024;
 const MAX_RESPONSE: u64 = 64 * 1024 * 1024;
+#[derive(Deserialize)]
+#[serde(tag = "request", rename_all = "snake_case")]
+enum WireRequest {
+    Command { command: Command },
+    Watch { revision: u64 },
+}
+#[derive(Serialize)]
+#[serde(tag = "request", rename_all = "snake_case")]
+enum WireCommand<'a> {
+    Command { command: &'a Command },
+    Watch { revision: u64 },
+}
 
 #[derive(Default)]
 struct OverviewCache {
@@ -224,6 +237,23 @@ fn overview_response(state: AppState, overview: &Mutex<OverviewCache>) -> Respon
     OverviewCache::response(state, tracks)
 }
 
+fn wait_for_revision(
+    handle: &AppHandle,
+    revision: u64,
+    overview: &Mutex<OverviewCache>,
+) -> Response {
+    let updates = handle.subscribe();
+    loop {
+        let state = handle.snapshot();
+        if state.revision != revision || state.shutting_down {
+            return overview_response(state, overview);
+        }
+        if updates.recv().is_err() {
+            return overview_response(handle.snapshot(), overview);
+        }
+    }
+}
+
 fn serve_connection(
     mut stream: UnixStream,
     handle: &AppHandle,
@@ -232,10 +262,14 @@ fn serve_connection(
     stream.set_read_timeout(Some(Duration::from_secs(3)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     let bytes = read_message(&mut stream, MAX_REQUEST)?;
-    let response = match serde_json::from_slice::<Command>(&bytes) {
-        Ok(Command::Overview) => overview_response(handle.snapshot(), overview),
-        Ok(Command::Status) => handle.request(Command::Status),
-        Ok(command) => {
+    let response = match serde_json::from_slice::<WireRequest>(&bytes) {
+        Ok(WireRequest::Command {
+            command: Command::Overview,
+        }) => overview_response(handle.snapshot(), overview),
+        Ok(WireRequest::Command {
+            command: Command::Status,
+        }) => handle.request(Command::Status),
+        Ok(WireRequest::Command { command }) => {
             let response = handle.request(command);
             if response.ok {
                 overview_response(response.state, overview)
@@ -243,6 +277,7 @@ fn serve_connection(
                 response
             }
         }
+        Ok(WireRequest::Watch { revision }) => wait_for_revision(handle, revision, overview),
         Err(error) => Response {
             ok: false,
             error: Some(format!("Invalid command: {error}")),
@@ -264,6 +299,20 @@ pub fn is_no_instance(error: &Error) -> bool {
         })
     })
 }
+pub fn watch(path: &Path, revision: u64) -> Result<Response> {
+    let mut stream = UnixStream::connect(path).with_context(|| {
+        format!(
+            "Cannot connect to Rivu at {}. Start `rivu` or `rivu serve` first.",
+            path.display()
+        )
+    })?;
+    stream.set_write_timeout(Some(Duration::from_secs(3)))?;
+    serde_json::to_writer(&mut stream, &WireCommand::Watch { revision })?;
+    stream.write_all(b"\n")?;
+    let response: Response = serde_json::from_slice(&read_message(&mut stream, MAX_RESPONSE)?)?;
+    Ok(response)
+}
+
 pub fn request(path: &Path, command: &Command) -> Result<Response> {
     let mut stream = UnixStream::connect(path).with_context(|| {
         format!(
@@ -277,7 +326,7 @@ pub fn request(path: &Path, command: &Command) -> Result<Response> {
         Some(Duration::from_secs(15))
     })?;
     stream.set_write_timeout(Some(Duration::from_secs(3)))?;
-    serde_json::to_writer(&mut stream, command)?;
+    serde_json::to_writer(&mut stream, &WireCommand::Command { command })?;
     stream.write_all(b"\n")?;
     let response: Response = serde_json::from_slice(&read_message(&mut stream, MAX_RESPONSE)?)?;
     Ok(response)
