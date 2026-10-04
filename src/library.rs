@@ -261,12 +261,20 @@ pub fn import_m3u(path: &Path) -> Result<Vec<M3uItem>> {
 }
 
 /// Write an UTF-8 M3U8, retaining every playlist entry including duplicates.
+/// Resolve the existing output directory physically before making paths relative,
+/// so `..` and directory symlinks retain their filesystem meaning.
 pub fn export_m3u(path: &Path, playlist: &Playlist, tracks: &[Track]) -> Result<()> {
     let by_id: HashMap<i64, &Track> = tracks.iter().map(|track| (track.id, track)).collect();
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let parent = parent
+        .canonicalize()
+        .with_context(|| format!("resolve playlist directory {}", parent.display()))?;
     let file = File::create(path).with_context(|| format!("create playlist {}", path.display()))?;
     let mut writer = BufWriter::new(file);
     writer.write_all(b"#EXTM3U\n")?;
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
     for entry in &playlist.entries {
         let Some(track) = by_id.get(&entry.track_id) else {
             continue;
@@ -285,11 +293,11 @@ pub fn export_m3u(path: &Path, playlist: &Playlist, tracks: &[Track]) -> Result<
             writer.write_all(
                 format!("#EXTINF:{duration},{} - {}\n", track.artist, track.title).as_bytes(),
             )?;
-            write_relative_path(&mut writer, parent, &track.path)?;
+            write_relative_path(&mut writer, &parent, &track.path)?;
             continue;
         };
         writer.write_all(format!("#EXTINF:{duration},{display_name}\n").as_bytes())?;
-        write_relative_path(&mut writer, parent, &track.path)?;
+        write_relative_path(&mut writer, &parent, &track.path)?;
     }
     writer.flush().context("flush playlist")?;
     Ok(())
@@ -303,6 +311,10 @@ fn write_relative_path(writer: &mut BufWriter<File>, parent: &Path, track: &Path
             display_path.display()
         )
     })?;
+    // A leading hash is an M3U directive, not a filename, unless prefixed.
+    if text.starts_with('#') {
+        writer.write_all(b"./")?;
+    }
     writer.write_all(text.as_bytes())?;
     writer.write_all(b"\n")?;
     Ok(())
@@ -312,7 +324,6 @@ fn path_relative_to(parent: &Path, target: &Path) -> PathBuf {
     if !target.is_absolute() {
         return target.to_path_buf();
     }
-    let parent = absolute_hint(parent);
     let parent_components: Vec<_> = parent.components().collect();
     let target_components: Vec<_> = target.components().collect();
     let mut common = 0;
@@ -335,5 +346,91 @@ fn path_relative_to(parent: &Path, target: &Path) -> PathBuf {
         PathBuf::from(".")
     } else {
         relative
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::PlaylistEntry;
+
+    fn assert_playlist_roundtrip(path: &Path) -> Result<()> {
+        let directory = path.parent().unwrap().canonicalize()?;
+        let tracks: Vec<_> = ["#song.wav", "other song.wav"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| Track {
+                id: index as i64 + 1,
+                path: directory.join(name),
+                title: name.into(),
+                artist: if index == 0 {
+                    "Artist".into()
+                } else {
+                    String::new()
+                },
+                album: String::new(),
+                duration: Some(2.0),
+                codec: "wav".into(),
+                channels: 2,
+                sample_rate: 48_000,
+                missing: false,
+                play_count: 0,
+                listen_seconds: 0.0,
+                last_played: None,
+            })
+            .collect();
+        for track in &tracks {
+            fs::write(&track.path, b"playlist path fixture")?;
+        }
+        let playlist = Playlist {
+            id: 1,
+            name: "Roundtrip".into(),
+            entries: [1, 2, 1]
+                .into_iter()
+                .enumerate()
+                .map(|(index, track_id)| PlaylistEntry {
+                    id: index as i64 + 1,
+                    track_id,
+                })
+                .collect(),
+        };
+        export_m3u(path, &playlist, &tracks)?;
+        let text = fs::read_to_string(path)?;
+        assert_eq!(
+            text.lines().filter(|line| *line == "./#song.wav").count(),
+            2
+        );
+        let imported = import_m3u(path)?;
+        assert_eq!(imported.len(), 3);
+        for (item, index) in imported.iter().zip([0, 1, 0]) {
+            assert_eq!(item.path.canonicalize()?, tracks[index].path);
+        }
+        assert_eq!(imported[0].name.as_deref(), Some("Artist - #song.wav"));
+        assert_eq!(imported[1].name.as_deref(), Some("other song.wav"));
+        assert_eq!(imported[2].name, imported[0].name);
+        Ok(())
+    }
+
+    #[test]
+    fn m3u_roundtrip_preserves_hash_paths_and_duplicates() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        assert_playlist_roundtrip(&directory.path().join("playlist.m3u8"))
+    }
+
+    #[test]
+    fn m3u_roundtrip_resolves_parent_components() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        fs::create_dir(directory.path().join("sub"))?;
+        assert_playlist_roundtrip(&directory.path().join("sub/../playlist.m3u8"))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn m3u_roundtrip_resolves_symlink_before_parent_component() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let nested = directory.path().join("physical/nested");
+        fs::create_dir_all(&nested)?;
+        std::os::unix::fs::symlink(nested, directory.path().join("link"))?;
+        assert_playlist_roundtrip(&directory.path().join("link/../playlist.m3u8"))
     }
 }

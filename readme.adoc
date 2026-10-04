@@ -45,6 +45,11 @@ The default GUI build targets Wayland. X11 support is intentionally not enabled 
  directory at the same time. Use `tui` and grouped CLI commands to control an
  already running instance.
 
+CLI scan and playlist import/export paths are relative to the CLI's working
+directory, not the running core's directory. Exported M3U8 playlists preserve
+duplicate entries and use paths relative to the actual destination directory,
+including when the destination contains directory symlinks or `..`.
+
 == Playback
 
 Seeking to the end of a track follows normal queue completion rather than

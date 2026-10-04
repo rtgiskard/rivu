@@ -90,6 +90,7 @@ enum PlaybackAction {
 enum LibraryAction {
     /// Import files or directories without blocking playback.
     Scan {
+        /// Paths relative to this client's working directory, or absolute paths.
         #[arg(required = true)]
         paths: Vec<PathBuf>,
         #[arg(long)]
@@ -186,6 +187,7 @@ enum PlaylistAction {
         playlist_id: i64,
     },
     Import {
+        /// Playlist path relative to this client's working directory, or absolute.
         path: PathBuf,
         #[arg(long)]
         name: Option<String>,
@@ -194,6 +196,7 @@ enum PlaylistAction {
     },
     Export {
         playlist_id: i64,
+        /// Destination relative to this client's working directory; need not exist.
         path: PathBuf,
     },
 }
@@ -480,7 +483,9 @@ fn start(
         paths
     };
     if !paths.is_empty() {
-        runtime.handle.send(Command::Scan { paths })?;
+        runtime.handle.send(Command::Scan {
+            paths: paths.into_iter().map(client_path).collect::<Result<_>>()?,
+        })?;
     }
     if desktop {
         gui::run(runtime.handle.clone(), data_dir.join("workspace.json"))?;
@@ -541,6 +546,18 @@ fn show(response: &Response, json: bool) -> Result<()> {
     }
     Ok(())
 }
+// Resolve against the caller's cwd, without expanding or canonicalizing input.
+// In particular, playlist export destinations need not exist yet.
+fn client_path(path: PathBuf) -> Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(std::env::current_dir()
+            .context("resolve client working directory")?
+            .join(path))
+    }
+}
+
 fn translate(action: Action) -> Result<(Command, bool)> {
     let mut wait = false;
     let command = match action {
@@ -549,7 +566,9 @@ fn translate(action: Action) -> Result<(Command, bool)> {
             wait: should_wait,
         }) => {
             wait = should_wait;
-            Command::Scan { paths }
+            Command::Scan {
+                paths: paths.into_iter().map(client_path).collect::<Result<_>>()?,
+            }
         }
         Action::Playback(PlaybackAction::Play { track_id }) => {
             track_id.map_or(Command::Resume, |track_id| Command::Play { track_id })
@@ -610,11 +629,15 @@ fn translate(action: Action) -> Result<(Command, bool)> {
                 wait: should_wait,
             } => {
                 wait = should_wait;
-                Command::ImportPlaylist { path, name }
+                Command::ImportPlaylist {
+                    path: client_path(path)?,
+                    name,
+                }
             }
-            PlaylistAction::Export { playlist_id, path } => {
-                Command::ExportPlaylist { playlist_id, path }
-            }
+            PlaylistAction::Export { playlist_id, path } => Command::ExportPlaylist {
+                playlist_id,
+                path: client_path(path)?,
+            },
             PlaylistAction::List => unreachable!(),
         },
         Action::Library(LibraryAction::Remove { track_ids }) => Command::RemoveTracks { track_ids },
@@ -634,4 +657,66 @@ fn translate(action: Action) -> Result<(Command, bool)> {
         ) => bail!("This action is not a playback command"),
     };
     Ok((command, wait))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scan_paths_are_anchored_without_expansion() -> Result<()> {
+        let cwd = std::env::current_dir()?;
+        let absolute = cwd.join("absolute.wav");
+        let (command, wait) = translate(Action::Library(LibraryAction::Scan {
+            paths: vec![
+                "music/../song.wav".into(),
+                "~/song.wav".into(),
+                absolute.clone(),
+            ],
+            wait: true,
+        }))?;
+        let Command::Scan { paths } = command else {
+            panic!("expected scan command");
+        };
+        assert!(wait);
+        assert_eq!(
+            paths,
+            [
+                cwd.join("music/../song.wav"),
+                cwd.join("~/song.wav"),
+                absolute
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn playlist_paths_are_anchored_without_requiring_destination() -> Result<()> {
+        let cwd = std::env::current_dir()?;
+        let directory = tempfile::tempdir_in(&cwd)?;
+        let relative = directory.path().strip_prefix(&cwd)?.join("new.m3u8");
+        assert!(!relative.exists());
+        let (command, wait) = translate(Action::Playlist(PlaylistAction::Export {
+            playlist_id: 7,
+            path: relative.clone(),
+        }))?;
+        let Command::ExportPlaylist { playlist_id, path } = command else {
+            panic!("expected export command");
+        };
+        assert_eq!(playlist_id, 7);
+        assert_eq!(path, cwd.join(&relative));
+        assert!(!wait);
+        let (command, wait) = translate(Action::Playlist(PlaylistAction::Import {
+            path: relative.clone(),
+            name: Some("Imported".into()),
+            wait: true,
+        }))?;
+        let Command::ImportPlaylist { path, name } = command else {
+            panic!("expected import command");
+        };
+        assert_eq!(path, cwd.join(relative));
+        assert_eq!(name.as_deref(), Some("Imported"));
+        assert!(wait);
+        Ok(())
+    }
 }
