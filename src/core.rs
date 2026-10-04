@@ -113,6 +113,11 @@ impl Runtime {
         let shared = Arc::new(RwLock::new(AppState::default()));
         let wakeup = Arc::new(RwLock::new(None));
         let subscribers = Arc::new(RwLock::new(Vec::new()));
+        let ffmpeg_status = if config.ffmpeg_enabled {
+            audio::ffmpeg_status().unwrap_or_else(|error| format!("unavailable: {error:#}"))
+        } else {
+            "disabled".to_owned()
+        };
         let handle = AppHandle {
             state: shared.clone(),
             analysis: engine.analysis.clone(),
@@ -132,6 +137,7 @@ impl Runtime {
             selected_device: config.output_device.clone(),
             config: Arc::new(config),
             config_path: config_path.to_path_buf(),
+            ffmpeg_status,
             ..AppState::default()
         };
         if let Some(json) = store.get_setting("playback")? {
@@ -180,6 +186,9 @@ impl Runtime {
                     .engine
                     .commands
                     .send(AudioCommand::Volume(core.state.volume));
+                let _ = core.engine.commands.send(AudioCommand::FfmpegEnabled(
+                    core.state.config.ffmpeg_enabled,
+                ));
                 let _ = core
                     .engine
                     .commands
@@ -691,11 +700,12 @@ impl Core {
         } else {
             self.store.known_files()?
         };
+        let ffmpeg_enabled = self.state.config.ffmpeg_enabled;
         let sender = self.scan_tx.clone();
         let worker = thread::Builder::new()
             .name("rivu-scan".into())
             .spawn(move || {
-                let result = library::scan_paths(&paths, &known);
+                let result = library::scan_paths(&paths, &known, ffmpeg_enabled);
                 let _ = sender.send(ScanFinished { result, import });
             })?;
         self.scan_workers.retain(|worker| !worker.is_finished());
@@ -772,6 +782,11 @@ impl Core {
             } if generation == self.generation => {
                 self.stop().with_context(|| message.clone())?;
                 self.state.last_error = Some(message);
+            }
+            AudioEvent::DecoderStopped { generation } if generation == self.generation => {
+                // The worker has already stopped and may still be sending
+                // events while handling Configure; do not wait on a command.
+                self.finish_playback(Ok(None), false)?;
             }
             _ => {}
         }
@@ -1020,6 +1035,15 @@ impl Core {
                 {
                     bail!("Output device not found: {device}");
                 }
+                let enabling_ffmpeg = config.ffmpeg_enabled && !self.state.config.ffmpeg_enabled;
+                let ffmpeg_status = if !config.ffmpeg_enabled {
+                    "disabled".to_owned()
+                } else if enabling_ffmpeg {
+                    audio::ffmpeg_status()
+                        .context("FFmpeg extension audio decoding is unavailable")?
+                } else {
+                    self.state.ffmpeg_status.clone()
+                };
                 config.save(&self.state.config_path)?;
                 if self.state.selected_device != config.output_device {
                     self.audio(AudioCommand::Device(config.output_device.clone()))?;
@@ -1027,6 +1051,7 @@ impl Core {
                 self.audio(AudioCommand::MediaReadBuffer(config.media_read_buffer_mb))?;
                 self.audio(AudioCommand::Volume(config.volume))?;
                 self.audio(AudioCommand::AnalysisRate(config.analysis_fps))?;
+                self.audio(AudioCommand::FfmpegEnabled(config.ffmpeg_enabled))?;
                 self.state.selected_device.clone_from(&config.output_device);
                 self.state.volume = config.volume;
                 if self.state.shuffle != config.shuffle {
@@ -1036,6 +1061,7 @@ impl Core {
                 }
                 self.state.shuffle = config.shuffle;
                 self.state.repeat = config.repeat;
+                self.state.ffmpeg_status = ffmpeg_status;
                 self.state.config = Arc::new(config);
             }
             Command::MprisStatus { status } => {
@@ -1372,6 +1398,9 @@ mod tests {
                     message: "Retired failure".into(),
                 })
                 .unwrap();
+            sender
+                .send(AudioEvent::DecoderStopped { generation })
+                .unwrap();
             core.finish_playback(Ok(Some((generation, heard))), false)
                 .unwrap();
             assert_eq!(play_count(&core, 1), expected);
@@ -1540,7 +1569,7 @@ mod tests {
         file.write_all(&200_u32.to_le_bytes()).unwrap();
         file.write_all(&[0; 200]).unwrap();
         drop(file);
-        let mut scanned = library::scan_paths(&[path.clone()], &[]).unwrap();
+        let mut scanned = library::scan_paths(&[path.clone()], &[], false).unwrap();
         let probed_title = scanned.records[0].media.title.clone();
         scanned.records[0].media.title = "Cached metadata".into();
         core.store.apply_scan(&scanned).unwrap();
@@ -1655,6 +1684,27 @@ mod tests {
         progress(&mut core, 10.0, 8.0);
         core.stop().unwrap();
         assert_eq!(play_count(&core, 1), 0);
+    }
+
+    #[test]
+    fn stopped_decoder_final_progress_counts_once_and_fences_late_events() {
+        let (_directory, mut core) = fixture();
+        playing(&mut core, 1);
+        progress(&mut core, 2.0, 2.0);
+        progress(&mut core, 2.1, 2.1);
+        let generation = core.generation;
+        core.audio_event(AudioEvent::DecoderStopped { generation })
+            .unwrap();
+        core.audio_event(AudioEvent::Progress {
+            generation,
+            position_seconds: 10.0,
+            listened_seconds: 10.0,
+        })
+        .unwrap();
+        assert_eq!(core.state.status, PlaybackStatus::Stopped);
+        assert_eq!(core.state.position, 0.0);
+        assert!(core.playback.is_none());
+        assert_eq!(play_count(&core, 1), 1);
     }
 
     #[test]

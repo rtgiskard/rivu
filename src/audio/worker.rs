@@ -22,6 +22,7 @@ pub(super) struct Worker {
     volume: f32,
     media_read_buffer_len: usize,
     wanted_analysis: bool,
+    ffmpeg_enabled: bool,
     last_snapshot: (u64, f64),
     progress: Instant,
 }
@@ -41,6 +42,7 @@ impl Worker {
             volume: 0.7,
             media_read_buffer_len,
             wanted_analysis: false,
+            ffmpeg_enabled: false,
             last_snapshot: (0, 0.0),
             progress: Instant::now(),
         }
@@ -83,6 +85,7 @@ impl Worker {
             volume: self.volume,
             prior_heard,
             media_read_buffer_len: self.media_read_buffer_len,
+            ffmpeg_enabled: self.ffmpeg_enabled,
         }
     }
     fn command(&mut self, command: AudioCommand) -> bool {
@@ -106,6 +109,19 @@ impl Worker {
                 self.analyzer.set_rate(rate);
             }
             AudioCommand::AnalysisRate(_) => {}
+            AudioCommand::FfmpegEnabled(enabled) => {
+                self.ffmpeg_enabled = enabled;
+                if !enabled && self.playback.as_ref().is_some_and(Playback::uses_ffmpeg) {
+                    let position = self.playback.as_ref().unwrap().position();
+                    let (generation, heard) = self.stop();
+                    self.event(AudioEvent::Progress {
+                        generation,
+                        position_seconds: position,
+                        listened_seconds: heard,
+                    });
+                    self.event(AudioEvent::DecoderStopped { generation });
+                }
+            }
             AudioCommand::MediaReadBuffer(mebibytes) => {
                 self.media_read_buffer_len = mebibytes as usize * super::BYTES_PER_MEBIBYTE;
             }

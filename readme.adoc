@@ -11,7 +11,7 @@ Rivu is a lightweight, local-first music player for Linux.
 
 [source,sh]
 ----
-sudo pacman -S --needed rust pkgconf alsa-lib opus fontconfig libxkbcommon
+sudo pacman -S --needed rust pkgconf alsa-lib libpipewire clang ffmpeg opus fontconfig libxkbcommon
 cargo build --release
 make install PREFIX="$HOME/.local"
 ----

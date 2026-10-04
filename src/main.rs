@@ -14,7 +14,7 @@ use std::{path::PathBuf, thread, time::Duration};
     name = "rivu",
     version,
     about = "A quiet, local-first music player",
-    long_about = "Rivu plays local audio with a shared Rust core. Run without a subcommand for the desktop UI; CLI and TUI control that same instance. No FFmpeg or GStreamer backend."
+    long_about = "Rivu plays local audio with a shared Rust core. Run without a subcommand for the desktop UI; CLI and TUI control that same instance. Optional FFmpeg extension audio decoding is loaded only when enabled."
 )]
 struct Args {
     #[arg(long, global = true, value_name = "DIRECTORY")]
@@ -247,23 +247,31 @@ fn run() -> Result<()> {
         Action::Serve { paths } => start(data_dir, config_path, paths, false),
         Action::Tui => terminal::run(&socket),
         Action::Library(LibraryAction::Probe { path }) => {
-            let info = audio::probe(&path)?;
+            let probe_config = config::Config::load(&config_path)?;
+            let ffmpeg_enabled = probe_config.ffmpeg_enabled;
+            let decoder_status = if ffmpeg_enabled {
+                audio::ffmpeg_status().unwrap_or_else(|error| format!("unavailable: {error:#}"))
+            } else {
+                "disabled".to_owned()
+            };
+            let info = audio::probe(&path, ffmpeg_enabled)?;
             if args.json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
                         "path": path, "title": info.title, "artist": info.artist, "album": info.album,
                         "codec": info.codec, "channels": info.channels, "sample_rate": info.sample_rate,
-                        "duration": info.duration,
+                        "duration": info.duration, "ffmpeg_enabled": ffmpeg_enabled,
                         "bitrate_bps": info.bitrate_bps, "bits_per_sample": info.bits_per_sample,
                         "track_number": info.track_number, "disc_number": info.disc_number,
                         "release_date": info.release_date,
+                        "ffmpeg_status": decoder_status,
                     }))?
                 );
                 return Ok(());
             }
             println!(
-                "{}\n  title: {}\n  artist: {}\n  album: {}\n  codec: {}\n  channels: {}\n  sample rate: {} Hz\n  duration: {}\n  bitrate: {}\n  source bits/sample: {}\n  track number: {}\n  disc number: {}\n  release date: {}",
+                "{}\n  title: {}\n  artist: {}\n  album: {}\n  codec: {}\n  channels: {}\n  sample rate: {} Hz\n  duration: {}\n  bitrate: {}\n  source bits/sample: {}\n  track number: {}\n  disc number: {}\n  release date: {}\n  FFmpeg extension audio decoding: {}",
                 path.display(),
                 info.title,
                 info.artist,
@@ -284,6 +292,7 @@ fn run() -> Result<()> {
                 info.disc_number
                     .map_or("—".into(), |value| value.to_string()),
                 info.release_date.as_deref().unwrap_or("—"),
+                decoder_status,
             );
             Ok(())
         }
@@ -597,6 +606,7 @@ fn show(response: &Response, json: bool) -> Result<()> {
         if !state.scan_message.is_empty() {
             println!("{}", state.scan_message);
         }
+        println!("FFmpeg extension audio decoding: {}", state.ffmpeg_status);
         if let Some(error) = &state.last_error {
             eprintln!("{error}");
         }

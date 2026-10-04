@@ -5,6 +5,7 @@ The default configuration file is `~/.config/rivu/config.toml`.
 [source,toml]
 ----
 media_read_buffer_mb = 2
+ffmpeg_enabled = false
 play_count_threshold_percent = 20.0
 nerd_symbols = true
 ----

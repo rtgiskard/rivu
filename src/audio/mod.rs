@@ -10,13 +10,21 @@
 //! device buffers on stop or xrun recovery are not counted as heard. Accuracy
 //! at the physical output remains bounded by the backend's playback timestamps.
 
+mod detector;
+mod ffmpeg;
+mod format;
 mod output;
 mod playback;
 mod source;
 mod worker;
 
+use format::Channel;
 pub use output::devices;
 pub use source::probe;
+
+pub fn ffmpeg_status() -> anyhow::Result<String> {
+    ffmpeg::availability()
+}
 
 use crate::analysis::{AnalysisFrame, AnalysisWorker};
 use crate::library::MediaInfo;
@@ -32,8 +40,6 @@ use std::{
 use worker::Worker;
 
 const BYTES_PER_MEBIBYTE: usize = 1024 * 1024;
-
-type Stereo = [f32; 2];
 
 #[derive(Clone, Copy, Debug)]
 pub struct PlaybackRange {
@@ -56,6 +62,7 @@ pub enum AudioCommand {
     Device(Option<String>),
     Analysis(bool),
     MediaReadBuffer(u32),
+    FfmpegEnabled(bool),
     /// Set analyzer publication rate. Values outside 5..=60 fps are ignored.
     AnalysisRate(u32),
     StopAndSnapshot(Sender<(u64, f64)>),
@@ -73,6 +80,9 @@ pub enum AudioEvent {
         listened_seconds: f64,
     },
     Ended {
+        generation: u64,
+    },
+    DecoderStopped {
         generation: u64,
     },
     Failed {

@@ -1,7 +1,7 @@
 //! One track's decode-to-output pipeline and audible playback accounting.
 
 use super::{
-    MediaInfo, PlaybackRange, Stereo,
+    MediaInfo, PlaybackRange,
     output::{Converter, Output},
     source::Source,
 };
@@ -22,14 +22,15 @@ pub(super) struct PlaybackOptions {
     pub(super) volume: f32,
     pub(super) prior_heard: f64,
     pub(super) media_read_buffer_len: usize,
+    pub(super) ffmpeg_enabled: bool,
 }
 
 pub(super) struct Playback {
     source: Source,
     output: Output,
     converter: Converter,
-    pending: Vec<Stereo>,
-    offset: usize,
+    pending: Vec<f32>,
+    offset_frames: usize,
     generation: u64,
     path: PathBuf,
     range: Option<PlaybackRange>,
@@ -50,22 +51,31 @@ impl Playback {
             volume,
             prior_heard,
             media_read_buffer_len,
+            ffmpeg_enabled,
         } = options;
-        let mut source = Source::open(&path, media_read_buffer_len)?;
+        let mut source = Source::open(&path, media_read_buffer_len, ffmpeg_enabled)?;
         if let Some(range) = range {
             source.restrict(range)?;
         }
         if start > 0.0 {
             source.seek(start)?;
         }
-        let output = Output::new(device.as_deref(), volume, paused, analyzer)?;
-        let converter = Converter::new(source.info().sample_rate, output.rate())?;
+        let channels = source.layout().len();
+        let output = Output::new(
+            device.as_deref(),
+            source.info().sample_rate,
+            source.layout(),
+            volume,
+            paused,
+            analyzer,
+        )?;
+        let converter = Converter::new(source.info().sample_rate, output.rate(), channels)?;
         Ok(Self {
             source,
             output,
             converter,
-            pending: Vec::with_capacity(PENDING_BUFFER_CAPACITY),
-            offset: 0,
+            pending: Vec::with_capacity(PENDING_BUFFER_CAPACITY * channels),
+            offset_frames: 0,
             generation,
             path,
             range,
@@ -89,6 +99,10 @@ impl Playback {
 
     pub(super) fn info(&self) -> &MediaInfo {
         self.source.info()
+    }
+
+    pub(super) fn uses_ffmpeg(&self) -> bool {
+        self.source.uses_ffmpeg()
     }
 
     pub(super) fn paused(&self) -> bool {
@@ -123,11 +137,14 @@ impl Playback {
         if self.paused {
             return Ok(());
         }
+        let channels = self.source.layout().len();
         while self.output.has_room() {
-            if self.offset < self.pending.len() {
-                let count = self.output.push(&self.pending[self.offset..]);
-                self.offset += count;
-                if self.offset < self.pending.len() {
+            if self.offset_frames < self.pending.len() / channels {
+                let count = self
+                    .output
+                    .push(&self.pending[self.offset_frames * channels..]);
+                self.offset_frames += count;
+                if self.offset_frames < self.pending.len() / channels {
                     return Ok(());
                 }
             }
@@ -135,7 +152,7 @@ impl Playback {
                 return Ok(());
             }
             self.pending.clear();
-            self.offset = 0;
+            self.offset_frames = 0;
             if let Some(frames) = self.source.next_frames()? {
                 self.converter.push(frames, &mut self.pending)?;
             } else {
@@ -146,7 +163,10 @@ impl Playback {
         Ok(())
     }
     pub(super) fn finished(&self) -> bool {
-        !self.paused && self.eof && self.offset == self.pending.len() && self.output.drained()
+        !self.paused
+            && self.eof
+            && self.offset_frames == self.pending.len() / self.source.layout().len()
+            && self.output.drained()
     }
     pub(super) fn close(&mut self) -> f64 {
         self.prior_heard + self.output.close()

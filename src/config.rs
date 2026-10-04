@@ -29,6 +29,7 @@ pub struct Config {
     pub analysis_fps: u32,
     pub media_read_buffer_mb: u32,
     pub nerd_symbols: bool,
+    pub ffmpeg_enabled: bool,
 }
 
 impl Default for Config {
@@ -45,6 +46,7 @@ impl Default for Config {
             analysis_fps: 20,
             media_read_buffer_mb: 2,
             nerd_symbols: true,
+            ffmpeg_enabled: false,
         }
     }
 }
@@ -226,6 +228,7 @@ mod tests {
             analysis_fps: 30,
             media_read_buffer_mb: 8,
             nerd_symbols: true,
+            ffmpeg_enabled: true,
         };
         config.save(&path).unwrap();
         assert_eq!(Config::load(&path).unwrap(), config);

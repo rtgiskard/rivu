@@ -80,6 +80,7 @@ impl OverviewCache {
                 config: state.config.clone(),
                 config_path: state.config_path.clone(),
                 mpris_status: state.mpris_status.clone(),
+                ffmpeg_status: state.ffmpeg_status.clone(),
                 database_optimization: state.database_optimization.clone(),
                 shutting_down: state.shutting_down,
             },

@@ -78,7 +78,11 @@ impl ScanResult {
 /// Scan directories, audio files and CUE sheets without touching audio output.
 /// CUE metadata is always reread; only unchanged full-source probe results may
 /// be reused. Failed sheets contribute no partial tracks or source suppression.
-pub fn scan_paths(paths: &[PathBuf], known: &[KnownFile]) -> Result<ScanResult> {
+pub fn scan_paths(
+    paths: &[PathBuf],
+    known: &[KnownFile],
+    ffmpeg_enabled: bool,
+) -> Result<ScanResult> {
     let mut known_by_path: HashMap<&Path, &KnownFile> = HashMap::with_capacity(known.len());
     for item in known {
         let cached = known_by_path.entry(item.path.as_path()).or_insert(item);
@@ -140,7 +144,7 @@ pub fn scan_paths(paths: &[PathBuf], known: &[KnownFile]) -> Result<ScanResult> 
     let mut sources = HashMap::new();
     let mut suppressed = HashSet::new();
     for sheet in files.iter().filter(|path| is_cue_path(path)) {
-        match scan_cue(sheet, &known_by_path, &mut sources) {
+        match scan_cue(sheet, &known_by_path, &mut sources, ffmpeg_enabled) {
             Ok(records) => {
                 suppressed.extend(records.iter().map(|record| record.path.clone()));
                 result.records.extend(records);
@@ -154,7 +158,7 @@ pub fn scan_paths(paths: &[PathBuf], known: &[KnownFile]) -> Result<ScanResult> 
         if suppressed.contains(path) && !explicit_audio.contains(path) {
             continue;
         }
-        match source_record(path, &known_by_path, &mut sources) {
+        match source_record(path, &known_by_path, &mut sources, ffmpeg_enabled) {
             Ok(record) => result.records.push(record.clone()),
             Err(error) => result.errors.push(format!("{}: {error:#}", path.display())),
         }
@@ -177,11 +181,13 @@ fn source_record<'a>(
     path: &Path,
     known: &HashMap<&Path, &KnownFile>,
     sources: &'a mut HashMap<PathBuf, std::result::Result<ScanRecord, String>>,
+    ffmpeg_enabled: bool,
 ) -> Result<&'a ScanRecord> {
     sources
         .entry(path.to_path_buf())
         .or_insert_with(|| {
-            scan_file(path, known.get(path).copied()).map_err(|error| format!("{error:#}"))
+            scan_file(path, known.get(path).copied(), ffmpeg_enabled)
+                .map_err(|error| format!("{error:#}"))
         })
         .as_ref()
         .map_err(|error| anyhow!("{error}"))
@@ -191,6 +197,7 @@ fn scan_cue(
     path: &Path,
     known: &HashMap<&Path, &KnownFile>,
     sources: &mut HashMap<PathBuf, std::result::Result<ScanRecord, String>>,
+    ffmpeg_enabled: bool,
 ) -> Result<Vec<ScanRecord>> {
     let sheet = crate::cue::read(path)?;
     let mut records = Vec::with_capacity(sheet.tracks.len());
@@ -199,7 +206,7 @@ fn scan_cue(
             .file
             .canonicalize()
             .with_context(|| format!("resolve CUE source {}", track.file.display()))?;
-        let mut record = source_record(&source, known, sources)?.clone();
+        let mut record = source_record(&source, known, sources, ffmpeg_enabled)?.clone();
         let duration = record
             .media
             .duration
@@ -237,7 +244,7 @@ fn scan_cue(
     Ok(records)
 }
 
-fn scan_file(path: &Path, known: Option<&KnownFile>) -> Result<ScanRecord> {
+fn scan_file(path: &Path, known: Option<&KnownFile>, ffmpeg_enabled: bool) -> Result<ScanRecord> {
     let metadata =
         fs::metadata(path).with_context(|| format!("read metadata for {}", path.display()))?;
     let size = metadata.len();
@@ -251,9 +258,10 @@ fn scan_file(path: &Path, known: Option<&KnownFile>) -> Result<ScanRecord> {
     let media = match unchanged
         .filter(|known| known.cue.is_none())
         .and_then(|known| known.media.as_ref())
+        .filter(|media| !ffmpeg_enabled || (media.channels != 0 && media.sample_rate != 0))
     {
         Some(media) => media.clone(),
-        None => probe(path).with_context(|| "probe audio")?,
+        None => probe(path, ffmpeg_enabled).with_context(|| "probe audio")?,
     };
     let fingerprint = match unchanged.and_then(|known| known.fingerprint.as_ref()) {
         Some(fingerprint) => fingerprint.clone(),
@@ -300,22 +308,36 @@ fn is_audio_path(path: &Path) -> bool {
     matches!(
         extension.to_ascii_lowercase().as_str(),
         "aac"
+            | "ac3"
             | "aiff"
             | "aif"
             | "alac"
             | "ape"
+            | "caf"
+            | "dff"
+            | "dsf"
+            | "dts"
+            | "dtshd"
+            | "eac3"
             | "flac"
             | "m4a"
             | "mka"
             | "mkv"
+            | "mlp"
             | "mp3"
             | "mp4"
             | "oga"
             | "ogg"
             | "opus"
+            | "shn"
+            | "tak"
+            | "thd"
+            | "truehd"
+            | "tta"
             | "wav"
             | "wave"
             | "webm"
+            | "wma"
     )
 }
 
@@ -621,7 +643,7 @@ mod tests {
         let sheet = directory.path().join("album.CUE");
         wav(&audio, 225)?;
         two_track_sheet(&sheet)?;
-        let result = scan_paths(&[sheet.clone()], &[])?;
+        let result = scan_paths(&[sheet.clone()], &[], false)?;
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         assert_eq!(result.records.len(), 2);
         let first = &result.records[0];
@@ -664,7 +686,7 @@ mod tests {
             &sheet,
             "FILE \"z.wav\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nINDEX 01 00:01:00\nFILE \"a.wav\" WAVE\nTRACK 03 AUDIO\nINDEX 01 00:00:00\nTRACK 04 AUDIO\nINDEX 01 00:02:00\n",
         )?;
-        let result = scan_paths(&[sheet], &[])?;
+        let result = scan_paths(&[sheet], &[], false)?;
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         assert_eq!(result.records.len(), 4);
         assert_eq!(
@@ -696,10 +718,10 @@ mod tests {
         let sheet = directory.path().join("album.cue");
         wav(&audio, 225)?;
         two_track_sheet(&sheet)?;
-        let original = scan_paths(&[sheet.clone()], &[])?;
+        let original = scan_paths(&[sheet.clone()], &[], false)?;
         assert!(original.errors.is_empty(), "{:?}", original.errors);
         let known = known_records(&original.records);
-        let full = scan_paths(&[audio.clone()], &known)?;
+        let full = scan_paths(&[audio.clone()], &known, false)?;
         assert!(full.errors.is_empty(), "{:?}", full.errors);
         assert_eq!(full.records.len(), 1);
         assert_eq!(full.records[0].media.duration, Some(3.0));
@@ -709,7 +731,7 @@ mod tests {
             "TITLE \"Edited album\"\nFILE \"audio.wav\" WAVE\nTRACK 01 AUDIO\nTITLE \"Renamed\"\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nINDEX 01 00:02:00\n",
         )?;
         for cache in [&known, &known_records(&full.records)] {
-            let rescanned = scan_paths(&[sheet.clone()], cache)?;
+            let rescanned = scan_paths(&[sheet.clone()], cache, false)?;
             assert!(rescanned.errors.is_empty(), "{:?}", rescanned.errors);
             assert_eq!(rescanned.records.len(), 2);
             assert_eq!(rescanned.records[0].media.title, "Renamed");
@@ -743,11 +765,11 @@ mod tests {
                 &sheet,
                 format!("FILE \"audio.wav\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n{invalid}"),
             )?;
-            let result = scan_paths(&[sheet.clone()], &[])?;
+            let result = scan_paths(&[sheet.clone()], &[], false)?;
             assert!(result.records.is_empty());
             assert_eq!(result.errors.len(), 1);
             assert!(result.suppressed_sources.is_empty());
-            let directory_scan = scan_paths(&[directory.path().to_path_buf()], &[])?;
+            let directory_scan = scan_paths(&[directory.path().to_path_buf()], &[], false)?;
             assert_eq!(directory_scan.records.len(), 1);
             assert!(directory_scan.records[0].cue.is_none());
             assert!(directory_scan.suppressed_sources.is_empty());
@@ -763,7 +785,7 @@ mod tests {
         wav(&audio, 225)?;
         wav(&directory.path().join("unrelated.wav"), 75)?;
         two_track_sheet(&sheet)?;
-        let result = scan_paths(&[directory.path().to_path_buf(), sheet.clone()], &[])?;
+        let result = scan_paths(&[directory.path().to_path_buf(), sheet.clone()], &[], false)?;
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         assert_eq!(result.records.len(), 3);
         assert_eq!(
@@ -778,6 +800,7 @@ mod tests {
         let explicit = scan_paths(
             &[directory.path().to_path_buf(), audio.clone(), sheet, audio],
             &[],
+            false,
         )?;
         assert!(explicit.errors.is_empty(), "{:?}", explicit.errors);
         assert_eq!(explicit.records.len(), 4);
@@ -800,7 +823,7 @@ mod tests {
         let sheet = directory.path().join("#album.cue");
         wav(&audio, 225)?;
         two_track_sheet(&sheet)?;
-        let scan = scan_paths(&[sheet.clone(), audio], &[])?;
+        let scan = scan_paths(&[sheet.clone(), audio], &[], false)?;
         let tracks: Vec<_> = scan
             .records
             .iter()
@@ -855,7 +878,7 @@ mod tests {
         wav(&directory.path().join("audio.wav"), 225)?;
         let sheet = directory.path().join("album.cue");
         two_track_sheet(&sheet)?;
-        let scan = scan_paths(&[sheet.clone()], &[])?;
+        let scan = scan_paths(&[sheet.clone()], &[], false)?;
         let tracks: Vec<_> = scan
             .records
             .iter()

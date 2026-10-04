@@ -14,3 +14,64 @@ do not start a new playback.
 If the next track cannot be opened after EOF, playback stops and reports the
 error. A manual switch to a missing file does not interrupt the current track.
 Removing tracks also removes their queue and shuffle-history references.
+
+=== Native multichannel output
+
+Speaker identities are preserved through decoding, resampling and output;
+5.1, 6.1 and 7.1 are not reduced to stereo. Select an explicit `PipeWire: <node.name>`
+device to address a PipeWire sink. Multichannel playback through the default
+PipeWire ALSA device also uses the native route. The sink must expose every
+source speaker, including LFE and rear center where present. Missing or unknown
+speaker positions, or incompatible routes, produce an error rather than a
+silent downmix. Stereo visualization is a separate analysis branch and does not
+change the device signal.
+Unspecified mono/stereo layouts use conventional mono or left/right identities;
+unspecified multichannel layouts are rejected rather than guessed from their size.
+
+=== Extension audio decoding
+
+Enable `ffmpeg_enabled` in the configuration file to allow
+unsupported native containers/codecs to use the FFmpeg audio backend. Format
+detection uses file contents, not just the extension. Corrupt native streams and
+invalid layouts are errors, not reasons to retry through another decoder.
+
+DTS carried inside a PCM-labelled WAV is detected before native playback. With
+the extension disabled it can be listed as DTS, with unknown channel metadata,
+but cannot be played as PCM noise. Enabling the decoder and rescanning enriches
+the cached metadata, including the decoded DTS-ES layout. Old probe-cache entries
+are invalidated without changing track identity or user metadata.
+
+The DTS guard validates consecutive frames in bounded, incremental data windows;
+it stops when identified rather than reading the entire probe budget first.
+Decoding reuses PCM buffers and dispatches sample conversion once per frame.
+Seeking uses the container's seek operation with bounded decoder preroll, not an
+unconditional decode from the beginning of an album.
+
+The settings status reports missing libraries or incompatible versions. A saved
+enabled setting with an unavailable runtime does not prevent native playback or
+application startup. Disabling the extension stops an active FFmpeg-decoded track,
+but leaves native playback running. Successful library loads are shared; no
+FFmpeg library is loaded merely to probe native media while the option is off.
+
+== Runtime decoder dependencies
+
+Clean builds require FFmpeg development headers and pkg-config files, plus
+libclang. `build.rs` generates Rust ABI declarations into Cargo's `OUT_DIR`;
+generated bindings are not stored in the source tree or tracked by Git.
+Generation selects the decoder's required ABI types and constants, recursively
+retaining complete layouts for accessed structures. Pointer-only handles are
+opaque, and unused C function declarations are not generated.
+Cargo reuses the generated file while the build script, included headers and
+tracked build environment remain unchanged. Cleaning the build cache requires
+generation again. A build-script rerun also requires the development environment.
+
+The currently validated build target is little-endian x86-64 Linux with FFmpeg 9
+headers (libavutil 61, libavcodec 63, libavformat 63). Other header ABI families
+are explicitly rejected until adapted and validated. Runtime library names and
+the required ABI majors come from the generated header constants; minor and
+patch versions need not match. Changing ABI major requires rebuilding with an
+adapted backend, or retaining compatible runtime libraries.
+
+The executable still loads FFmpeg dynamically: the build script does not emit
+FFmpeg linker directives. Runtime FFmpeg libraries are optional when extension
+decoding is disabled; enabling it checks library versions and required symbols.

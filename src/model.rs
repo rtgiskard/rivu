@@ -118,6 +118,7 @@ pub struct AppState {
     pub config: Arc<crate::config::Config>,
     pub config_path: PathBuf,
     pub mpris_status: String,
+    pub ffmpeg_status: String,
     pub database_optimization: Option<DatabaseOptimization>,
     pub shutting_down: bool,
 }
@@ -146,6 +147,7 @@ impl Default for AppState {
             config: Arc::new(crate::config::Config::default()),
             config_path: PathBuf::new(),
             mpris_status: String::new(),
+            ffmpeg_status: "disabled".into(),
             database_optimization: None,
             shutting_down: false,
         }

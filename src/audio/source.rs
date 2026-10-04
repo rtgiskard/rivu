@@ -1,32 +1,61 @@
-//! Container probing, decoding, seeking, and packet-accurate stereo samples.
+//! Container probing, decoding, seeking, and packet-accurate native-channel samples.
 
-use super::{BYTES_PER_MEBIBYTE, MediaInfo, Stereo};
-use anyhow::{Context, Result, bail};
+use super::{BYTES_PER_MEBIBYTE, Channel, MediaInfo};
+use anyhow::{Context, Result, anyhow, bail};
 use std::{fs::File, path::Path};
-use symphonia::core::{
-    audio::{
-        Audio, AudioBuffer, ChannelLabel, Channels, GenericAudioBufferRef, Position,
-        conv::FromSample, sample::Sample,
-    },
-    codecs::{
-        CodecParameters,
+use symphonia::core::errors::Error as SymphoniaError;
+use symphonia::{
+    core::{
         audio::{
-            AudioCodecParameters, AudioDecoder, AudioDecoderOptions, CODEC_ID_NULL_AUDIO,
-            well_known::CODEC_ID_OPUS,
+            Audio, AudioBuffer, ChannelLabel, Channels, GenericAudioBufferRef, Position,
+            conv::FromSample, sample::Sample,
         },
+        codecs::{
+            CodecParameters,
+            audio::{
+                AudioCodecParameters, AudioDecoder, AudioDecoderOptions, CODEC_ID_NULL_AUDIO,
+                well_known::CODEC_ID_OPUS,
+            },
+        },
+        formats::{FormatOptions, FormatReader, SeekMode, SeekTo, Track, TrackType, probe::Hint},
+        io::{MediaSourceStream, MediaSourceStreamOptions},
+        meta::{Metadata, MetadataOptions, StandardTag},
+        units::{Time, TimeBase},
     },
-    formats::probe::Hint,
-    formats::{FormatOptions, FormatReader, SeekMode, SeekTo, Track, TrackType},
-    io::{MediaSourceStream, MediaSourceStreamOptions},
-    meta::{Metadata, MetadataOptions, StandardTag},
-    units::{Time, TimeBase},
+    default::{get_codecs, get_probe},
 };
-use symphonia::default::{get_codecs, get_probe};
 
 const PROBE_BUFFER_LEN: usize = 2 * BYTES_PER_MEBIBYTE;
 
-pub fn probe(path: &Path) -> Result<MediaInfo> {
-    Ok(Source::open(path, PROBE_BUFFER_LEN)?.info)
+pub fn probe(path: &Path, ffmpeg_enabled: bool) -> Result<MediaInfo> {
+    let detected = super::detector::scan(path)?;
+    if let Some(detection) = detected {
+        if !ffmpeg_enabled {
+            let title = path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            return Ok(MediaInfo {
+                title,
+                artist: String::new(),
+                album: String::new(),
+                duration: None,
+                bitrate_bps: None,
+                track_number: None,
+                disc_number: None,
+                bits_per_sample: None,
+                release_date: None,
+                codec: detection.codec.into(),
+                channels: detection.channels.unwrap_or(0),
+                sample_rate: detection.sample_rate.unwrap_or(0),
+            });
+        }
+        return Ok(
+            Source::open_with_detection(path, PROBE_BUFFER_LEN, true, Some(detection))?.info,
+        );
+    }
+    Ok(Source::open_with_detection(path, PROBE_BUFFER_LEN, ffmpeg_enabled, None)?.info)
 }
 
 fn metadata_tags(mut metadata: Metadata<'_>, track: u32, info: &mut MediaInfo) {
@@ -146,6 +175,7 @@ struct OpusDecoder {
 enum Decode {
     Native(Box<dyn AudioDecoder>),
     Opus(OpusDecoder),
+    Ffmpeg(super::ffmpeg::Decoder),
 }
 fn decoder(params: &AudioCodecParameters, timestamps_include_delay: bool) -> Result<Decode> {
     if params.codec != CODEC_ID_OPUS {
@@ -161,10 +191,13 @@ fn decoder(params: &AudioCodecParameters, timestamps_include_delay: bool) -> Res
         bail!("Invalid Opus identification header");
     }
     let channels = head[9] as usize;
-    if !(1..=2).contains(&channels) || head[18] != 0 {
-        bail!(
-            "This Opus channel mapping is not supported; mono/stereo mapping family 0 is supported"
-        );
+    if channels == 0 || (head[18] == 0 && channels > 2) {
+        bail!("Invalid Opus channel count for its mapping family");
+    }
+    if head[18] != 0 {
+        return Err(anyhow!(UnsupportedNative(
+            "Native Opus supports mono/stereo mapping family 0".into()
+        )));
     }
     // MP4 dOps uses big-endian fields and version 0; Ogg/Matroska OpusHead
     // uses little-endian fields and version 1.
@@ -205,12 +238,22 @@ fn decoder(params: &AudioCodecParameters, timestamps_include_delay: bool) -> Res
     }))
 }
 
+#[derive(Debug)]
+struct UnsupportedNative(String);
+impl std::fmt::Display for UnsupportedNative {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for UnsupportedNative {}
+
 pub(super) struct Source {
-    format: Box<dyn FormatReader>,
+    format: Option<Box<dyn FormatReader>>,
     track: u32,
     decode: Decode,
     time_base: TimeBase,
-    frames: Vec<Stereo>,
+    frames: Vec<f32>,
+    layout: Vec<Channel>,
     info: MediaInfo,
     range_start: f64,
     range_end: Option<f64>,
@@ -219,23 +262,88 @@ pub(super) struct Source {
     exhausted: bool,
 }
 impl Source {
-    pub(super) fn open(path: &Path, buffer_len: usize) -> Result<Self> {
+    pub(super) fn open(path: &Path, buffer_len: usize, ffmpeg_enabled: bool) -> Result<Self> {
+        let detected = super::detector::scan(path)?;
+        Self::open_with_detection(path, buffer_len, ffmpeg_enabled, detected)
+    }
+
+    fn open_with_detection(
+        path: &Path,
+        buffer_len: usize,
+        ffmpeg_enabled: bool,
+        detected: Option<super::detector::Detection>,
+    ) -> Result<Self> {
+        if detected.is_some() {
+            if !ffmpeg_enabled {
+                bail!("Compressed audio requires the FFmpeg extension decoder");
+            }
+            return Self::open_ffmpeg(path);
+        }
+        match Self::open_native(path, buffer_len) {
+            Ok(source) => Ok(source),
+            Err(native_error) if ffmpeg_enabled && native_error.downcast_ref::<UnsupportedNative>().is_some() => {
+                Self::open_ffmpeg(path).with_context(|| format!("Native decoder rejected the audio ({native_error:#}); FFmpeg extension failed"))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn open_ffmpeg(path: &Path) -> Result<Self> {
+        let path = path
+            .canonicalize()
+            .with_context(|| format!("Opening {}", path.display()))?;
+        let decode = super::ffmpeg::Decoder::open(&path)?;
+        let info = decode.info().clone();
+        let layout = decode.layout().to_vec();
+        if info.sample_rate == 0 || layout.is_empty() {
+            bail!("FFmpeg decoder returned incomplete audio metadata");
+        }
+        let duration = info.duration;
+        let mut source = Self {
+            format: None,
+            track: 0,
+            decode: Decode::Ffmpeg(decode),
+            time_base: TimeBase::try_new(1, info.sample_rate).unwrap(),
+            frames: Vec::with_capacity(8192 * layout.len()),
+            layout,
+            info,
+            range_start: 0.0,
+            range_end: duration,
+            seek_target: None,
+            ready: false,
+            exhausted: false,
+        };
+        if !source.read_next()? {
+            bail!("FFmpeg audio stream contains no samples");
+        }
+        source.ready = true;
+        Ok(source)
+    }
+
+    fn open_native(path: &Path, buffer_len: usize) -> Result<Self> {
         let file = File::open(path).with_context(|| format!("Opening {}", path.display()))?;
         let mut hint = Hint::new();
         if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
             hint.with_extension(extension);
         }
-        let mut format = get_probe().probe(
+        let mut format = match get_probe().probe(
             &hint,
             MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions { buffer_len }),
             FormatOptions::default(),
             MetadataOptions::default(),
-        )?;
+        ) {
+            Ok(format) => format,
+            Err(SymphoniaError::Unsupported(error)) => {
+                return Err(anyhow!(UnsupportedNative(error.to_string())));
+            }
+            Err(error) => return Err(error.into()),
+        };
         let default = format.default_track(TrackType::Audio).map(|track| track.id);
         let mut candidates = format.tracks().iter().collect::<Vec<_>>();
         candidates.sort_by_key(|track| Some(track.id) != default);
         let mut chosen = None;
         let mut errors = Vec::new();
+        let mut invalid = None;
         for track in candidates {
             let Some(params) = track.codec_params.as_ref().and_then(CodecParameters::audio) else {
                 continue;
@@ -248,15 +356,29 @@ impl Source {
                     chosen = Some((track.id, params.clone(), track.time_base, decode));
                     break;
                 }
-                Err(error) => errors.push(format!("{:?}: {error}", params.codec)),
+                Err(error)
+                    if error.is::<UnsupportedNative>()
+                        || error.downcast_ref::<SymphoniaError>().is_some_and(|error| {
+                            matches!(error, SymphoniaError::Unsupported(_))
+                        }) =>
+                {
+                    errors.push(format!("{:?}: {error}", params.codec));
+                }
+                Err(error) => {
+                    invalid.get_or_insert_with(|| {
+                        error.context(format!("Opening {:?} audio", params.codec))
+                    });
+                }
             }
         }
-        let (track, params, track_time_base, decode) = chosen.with_context(|| {
-            if errors.is_empty() {
-                "Container has no audio track".into()
-            } else {
-                format!("No supported audio decoder: {}", errors.join("; "))
-            }
+        let (track, params, track_time_base, decode) = chosen.ok_or_else(|| {
+            invalid.unwrap_or_else(|| {
+                anyhow!(UnsupportedNative(if errors.is_empty() {
+                    "Container has no supported native audio track".into()
+                } else {
+                    format!("No supported native audio decoder: {}", errors.join("; "))
+                }))
+            })
         })?;
         let is_opus = params.codec == CODEC_ID_OPUS;
         let rate = if is_opus {
@@ -313,10 +435,11 @@ impl Source {
         metadata_tags(format.metadata(), track, &mut info);
         let mut source = Self {
             time_base: track_time_base.unwrap_or_else(|| TimeBase::try_new(1, rate).unwrap()),
-            format,
+            format: Some(format),
             track,
             decode,
             frames: Vec::with_capacity(8192),
+            layout: Vec::new(),
             info,
             range_start: 0.0,
             range_end: media_duration,
@@ -363,8 +486,6 @@ impl Source {
             .duration
             .map_or(target, |duration| target.min(duration))
             .max(0.0);
-        // Many demuxers reject the exclusive end timestamp. It is a valid
-        // player position, but there are no samples left to request there.
         if self
             .info
             .duration
@@ -377,18 +498,30 @@ impl Source {
             return Ok(());
         }
         let target = self.range_start + target;
+        if let Decode::Ffmpeg(decoder) = &mut self.decode {
+            decoder.seek(target)?;
+            self.frames.clear();
+            self.ready = false;
+            self.seek_target = Some(target);
+            self.exhausted = false;
+            return Ok(());
+        }
         let preroll = if matches!(self.decode, Decode::Opus(_)) {
             (target - 0.08).max(0.0)
         } else {
             target
         };
-        let sought = self.format.seek(
-            SeekMode::Accurate,
-            SeekTo::Time {
-                time: Time::try_from_secs_f64(preroll).context("Invalid seek time")?,
-                track_id: Some(self.track),
-            },
-        )?;
+        let sought = self
+            .format
+            .as_mut()
+            .context("Native source has no format reader")?
+            .seek(
+                SeekMode::Accurate,
+                SeekTo::Time {
+                    time: Time::try_from_secs_f64(preroll).context("Invalid seek time")?,
+                    track_id: Some(self.track),
+                },
+            )?;
         match &mut self.decode {
             Decode::Native(decoder) => decoder.reset(),
             Decode::Opus(opus) => {
@@ -399,6 +532,7 @@ impl Source {
                     0
                 };
             }
+            Decode::Ffmpeg(_) => unreachable!(),
         }
         self.frames.clear();
         self.ready = false;
@@ -410,8 +544,12 @@ impl Source {
         &self.info
     }
 
+    pub(super) fn layout(&self) -> &[Channel] {
+        &self.layout
+    }
+
     /// Returns the primed first packet before advancing the decoder.
-    pub(super) fn next_frames(&mut self) -> Result<Option<&[Stereo]>> {
+    pub(super) fn next_frames(&mut self) -> Result<Option<&[f32]>> {
         if self.ready {
             self.ready = false;
         } else if !self.read_next()? {
@@ -420,15 +558,70 @@ impl Source {
         Ok(Some(&self.frames))
     }
 
+    pub(super) fn uses_ffmpeg(&self) -> bool {
+        matches!(self.decode, Decode::Ffmpeg(_))
+    }
+
+    fn read_ffmpeg_next(&mut self) -> Result<bool> {
+        loop {
+            self.frames.clear();
+            let Some((samples, packet_start)) = (match &mut self.decode {
+                Decode::Ffmpeg(decoder) => decoder.next_frames()?,
+                _ => unreachable!(),
+            }) else {
+                self.exhausted = true;
+                return Ok(false);
+            };
+            self.frames.extend_from_slice(samples);
+            let channels = self.layout.len();
+            if channels == 0 || self.frames.len() % channels != 0 {
+                bail!("FFmpeg decoder returned incomplete interleaved frames");
+            }
+            if let Some(end) = self.range_end {
+                let remaining =
+                    ((end - packet_start).max(0.0) * self.info.sample_rate as f64).round() as usize;
+                self.exhausted = remaining <= self.frames.len() / channels;
+                self.frames.truncate(remaining.saturating_mul(channels));
+            }
+            if let Some(target) = self.seek_target {
+                let discard = (((target - packet_start).max(0.0) * self.info.sample_rate as f64)
+                    .round() as usize)
+                    .saturating_mul(channels);
+                if discard >= self.frames.len() {
+                    if self.exhausted {
+                        return Ok(false);
+                    }
+                    continue;
+                }
+                self.frames.copy_within(discard.., 0);
+                self.frames.truncate(self.frames.len() - discard);
+                self.seek_target = None;
+            }
+            if !self.frames.is_empty() {
+                return Ok(true);
+            }
+            if self.exhausted {
+                return Ok(false);
+            }
+        }
+    }
+
     fn read_next(&mut self) -> Result<bool> {
         if self.exhausted {
             return Ok(false);
+        }
+        if matches!(self.decode, Decode::Ffmpeg(_)) {
+            return self.read_ffmpeg_next();
         }
         loop {
             // Seeking can discard whole packets (including Opus preroll).
             // Never append the next packet onto samples already discarded.
             self.frames.clear();
-            let Some(packet) = self.format.next_packet()? else {
+            let format = self
+                .format
+                .as_mut()
+                .context("Native source has no format reader")?;
+            let Some(packet) = format.next_packet()? else {
                 self.exhausted = true;
                 return Ok(false);
             };
@@ -446,8 +639,9 @@ impl Source {
                     if audio.spec().rate() != self.info.sample_rate {
                         bail!("Sample rate changes within this track are unsupported");
                     }
-                    self.info.channels = audio.spec().channels().count() as u16;
-                    mix_audio(audio, &mut self.frames);
+                    update_layout(audio.spec().channels(), &mut self.layout)?;
+                    self.info.channels = self.layout.len() as u16;
+                    interleave_audio(audio, &mut self.frames);
                     packet_start += self
                         .time_base
                         .calc_duration(packet.trim_start)
@@ -465,25 +659,33 @@ impl Source {
                     let end = count
                         .saturating_sub(trim_samples(self.time_base, packet.trim_end, 48_000)?)
                         .max(leading);
-                    self.frames.extend(
-                        opus.samples[leading * opus.channels..end * opus.channels]
-                            .chunks_exact(opus.channels)
-                            .map(|samples| [samples[0], samples[opus.channels - 1]]),
+                    self.frames.extend_from_slice(
+                        &opus.samples[leading * opus.channels..end * opus.channels],
                     );
+                    if self.layout.is_empty() {
+                        self.layout = if opus.channels == 1 {
+                            vec![Channel::FrontCenter]
+                        } else {
+                            vec![Channel::FrontLeft, Channel::FrontRight]
+                        };
+                    }
                     self.info.channels = opus.channels as u16;
                     packet_start =
                         (packet_start - opus.timestamp_delay + leading as f64 / 48_000.0).max(0.0);
                 }
+                Decode::Ffmpeg(_) => unreachable!(),
             }
             if let Some(end) = self.range_end {
                 let remaining =
                     ((end - packet_start).max(0.0) * self.info.sample_rate as f64).round() as usize;
-                self.exhausted = remaining <= self.frames.len();
-                self.frames.truncate(remaining);
+                self.exhausted = remaining <= self.frames.len() / self.layout.len();
+                self.frames
+                    .truncate(remaining.saturating_mul(self.layout.len()));
             }
             if let Some(target) = self.seek_target {
-                let discard = ((target - packet_start).max(0.0) * self.info.sample_rate as f64)
-                    .round() as usize;
+                let discard = (((target - packet_start).max(0.0) * self.info.sample_rate as f64)
+                    .round() as usize)
+                    .saturating_mul(self.layout.len());
                 if discard >= self.frames.len() {
                     if self.exhausted {
                         return Ok(false);
@@ -504,72 +706,71 @@ impl Source {
     }
 }
 
-fn mix_samples<S: Sample>(audio: &AudioBuffer<S>, output: &mut Vec<Stereo>)
+fn update_layout(channels: &Channels, layout: &mut Vec<Channel>) -> Result<()> {
+    let count = channels.count();
+    if count == 0 {
+        bail!("Decoded audio has no channels");
+    }
+    let initial = layout.is_empty();
+    if !initial && layout.len() != count {
+        bail!("Channel layout changes within this track are unsupported");
+    }
+    for index in 0..count {
+        let position = match channels {
+            Channels::Positioned(positions) => positions.iter().nth(index),
+            Channels::Custom(labels) => match labels[index] {
+                ChannelLabel::Positioned(position) => Some(position),
+                _ => None,
+            },
+            Channels::Discrete(1) => Some(Position::FRONT_CENTER),
+            Channels::Discrete(2) => Some(if index == 0 {
+                Position::FRONT_LEFT
+            } else {
+                Position::FRONT_RIGHT
+            }),
+            _ => None,
+        };
+        let channel = position
+            .filter(|position| position.bits().count_ones() == 1)
+            .and_then(|position| Channel::from_standard_index(position.bits().trailing_zeros()))
+            .context("Audio has an unsupported or unspecified speaker position; refusing to guess its routing")?;
+        if initial {
+            layout.push(channel);
+        } else if layout[index] != channel {
+            bail!("Channel layout changes within this track are unsupported");
+        }
+    }
+    Ok(())
+}
+
+fn interleave_samples<S: Sample>(audio: &AudioBuffer<S>, output: &mut Vec<f32>)
 where
     f32: FromSample<S>,
 {
-    let channels = audio.spec().channels();
-    if channels.count() == 1 {
-        output.extend(audio.plane(0).unwrap().iter().map(|sample| {
-            let value = f32::from_sample(*sample);
-            [value, value]
-        }));
-    } else if channels.count() == 2 {
-        output.extend(
-            audio
-                .plane(0)
-                .unwrap()
-                .iter()
-                .zip(audio.plane(1).unwrap())
-                .map(|(left, right)| [f32::from_sample(*left), f32::from_sample(*right)]),
-        );
-    } else {
-        output.resize(audio.frames(), [0.0; 2]);
-        let mut sum = [0.0_f32; 2];
-        for index in 0..channels.count() {
-            let position = match channels {
-                Channels::Positioned(positions) => positions.iter().nth(index),
-                Channels::Custom(labels) => match labels[index] {
-                    ChannelLabel::Positioned(position) => Some(position),
-                    _ => None,
-                },
-                _ => None,
-            };
-            let weight = match position {
-                Some(Position::FRONT_LEFT) => [1.0, 0.0],
-                Some(Position::FRONT_RIGHT) => [0.0, 1.0],
-                Some(Position::LFE1) | Some(Position::LFE2) => [0.0, 0.0],
-                Some(Position::REAR_LEFT) | Some(Position::SIDE_LEFT) => [0.707, 0.0],
-                Some(Position::REAR_RIGHT) | Some(Position::SIDE_RIGHT) => [0.0, 0.707],
-                _ => [0.707, 0.707],
-            };
-            sum[0] += weight[0];
-            sum[1] += weight[1];
-            for (frame, sample) in output.iter_mut().zip(audio.plane(index).unwrap()) {
-                let value = f32::from_sample(*sample);
-                frame[0] += value * weight[0];
-                frame[1] += value * weight[1];
-            }
-        }
-        let scale = [sum[0].max(1.0).recip(), sum[1].max(1.0).recip()];
-        for frame in output {
-            frame[0] *= scale[0];
-            frame[1] *= scale[1];
+    let channels = audio.spec().channels().count();
+    output.resize(audio.frames() * channels, 0.0);
+    for channel in 0..channels {
+        for (frame, sample) in output
+            .chunks_exact_mut(channels)
+            .zip(audio.plane(channel).unwrap())
+        {
+            frame[channel] = f32::from_sample(*sample);
         }
     }
 }
-fn mix_audio(audio: GenericAudioBufferRef<'_>, output: &mut Vec<Stereo>) {
+
+fn interleave_audio(audio: GenericAudioBufferRef<'_>, output: &mut Vec<f32>) {
     match audio {
-        GenericAudioBufferRef::U8(audio) => mix_samples(audio, output),
-        GenericAudioBufferRef::U16(audio) => mix_samples(audio, output),
-        GenericAudioBufferRef::U24(audio) => mix_samples(audio, output),
-        GenericAudioBufferRef::U32(audio) => mix_samples(audio, output),
-        GenericAudioBufferRef::S8(audio) => mix_samples(audio, output),
-        GenericAudioBufferRef::S16(audio) => mix_samples(audio, output),
-        GenericAudioBufferRef::S24(audio) => mix_samples(audio, output),
-        GenericAudioBufferRef::S32(audio) => mix_samples(audio, output),
-        GenericAudioBufferRef::F32(audio) => mix_samples(audio, output),
-        GenericAudioBufferRef::F64(audio) => mix_samples(audio, output),
+        GenericAudioBufferRef::U8(audio) => interleave_samples(audio, output),
+        GenericAudioBufferRef::U16(audio) => interleave_samples(audio, output),
+        GenericAudioBufferRef::U24(audio) => interleave_samples(audio, output),
+        GenericAudioBufferRef::U32(audio) => interleave_samples(audio, output),
+        GenericAudioBufferRef::S8(audio) => interleave_samples(audio, output),
+        GenericAudioBufferRef::S16(audio) => interleave_samples(audio, output),
+        GenericAudioBufferRef::S24(audio) => interleave_samples(audio, output),
+        GenericAudioBufferRef::S32(audio) => interleave_samples(audio, output),
+        GenericAudioBufferRef::F32(audio) => interleave_samples(audio, output),
+        GenericAudioBufferRef::F64(audio) => interleave_samples(audio, output),
     }
 }
 
@@ -642,7 +843,7 @@ mod tests {
         file
     }
 
-    fn decode_remaining(source: &mut Source) -> Vec<Stereo> {
+    fn decode_remaining(source: &mut Source) -> Vec<f32> {
         let mut samples = Vec::new();
         while let Some(frames) = source.next_frames().unwrap() {
             samples.extend_from_slice(frames);
@@ -653,7 +854,7 @@ mod tests {
     #[test]
     fn opus_seek_discards_whole_preroll_packets_without_reusing_pcm() {
         let file = opus_file();
-        let mut source = Source::open(file.path(), PROBE_BUFFER_LEN).unwrap();
+        let mut source = Source::open(file.path(), PROBE_BUFFER_LEN, false).unwrap();
         let reference = decode_remaining(&mut source);
         assert_eq!(reference.len(), 96_000);
         for target in [1.0, 0.0, 1.137] {
@@ -675,9 +876,9 @@ mod tests {
                         .iter()
                         .zip(&reference[candidate..candidate + window.len()])
                         .fold((0.0_f64, 0.0_f64), |(dot, power), (actual, expected)| {
-                            let expected = f64::from(expected[0]);
+                            let expected = f64::from(*expected);
                             (
-                                dot + f64::from(actual[0]) * expected,
+                                dot + f64::from(*actual) * expected,
                                 power + expected * expected,
                             )
                         });
@@ -697,7 +898,7 @@ mod tests {
     #[test]
     fn seek_to_duration_is_exhausted_and_can_seek_back() {
         let file = opus_file();
-        let mut source = Source::open(file.path(), PROBE_BUFFER_LEN).unwrap();
+        let mut source = Source::open(file.path(), PROBE_BUFFER_LEN, false).unwrap();
         let duration = source.info().duration.unwrap();
         for target in [duration, duration + 1.0] {
             source.seek(target).unwrap();
@@ -731,14 +932,14 @@ mod tests {
     #[test]
     fn cue_ranges_crop_pcm_and_seek_relative_to_track() {
         let file = pcm_file();
-        let mut full = Source::open(file.path(), PROBE_BUFFER_LEN).unwrap();
+        let mut full = Source::open(file.path(), PROBE_BUFFER_LEN, false).unwrap();
         assert_eq!(full.info().bitrate_bps, Some(705_600));
         assert_eq!(full.info().bits_per_sample, Some(16));
         let reference = decode_remaining(&mut full);
         for (start_frame, end_frame) in [(0_u64, Some(30_u64)), (30, Some(80)), (80, None)] {
             let start = (start_frame * 588) as usize;
             let end = end_frame.map_or(reference.len(), |frame| (frame * 588) as usize);
-            let mut source = Source::open(file.path(), PROBE_BUFFER_LEN).unwrap();
+            let mut source = Source::open(file.path(), PROBE_BUFFER_LEN, false).unwrap();
             source
                 .restrict(super::super::PlaybackRange {
                     start_seconds: start_frame as f64 / 75.0,
@@ -761,7 +962,7 @@ mod tests {
     #[test]
     fn cue_opus_preroll_and_end_remain_inside_the_segment() {
         let file = opus_file();
-        let mut source = Source::open(file.path(), PROBE_BUFFER_LEN).unwrap();
+        let mut source = Source::open(file.path(), PROBE_BUFFER_LEN, false).unwrap();
         source
             .restrict(super::super::PlaybackRange {
                 start_seconds: 1.0,
@@ -821,6 +1022,38 @@ mod tests {
         assert_eq!(
             trim_samples(TimeBase::try_new(1, 48_000).unwrap(), duration, 48_000).unwrap(),
             10
+        );
+    }
+    #[test]
+    fn unsupported_opus_mapping_is_not_a_corrupt_header() {
+        let mut header = vec![0; 27];
+        header[..8].copy_from_slice(b"OpusHead");
+        header[8] = 1;
+        header[9] = 6;
+        header[18] = 1;
+        header[19] = 4;
+        header[20] = 2;
+        header[21..].copy_from_slice(&[0, 4, 1, 2, 3, 5]);
+        let mut params = AudioCodecParameters::new();
+        params
+            .for_codec(CODEC_ID_OPUS)
+            .with_extra_data(header.clone().into_boxed_slice());
+        assert!(
+            decoder(&params, true)
+                .err()
+                .unwrap()
+                .is::<UnsupportedNative>()
+        );
+
+        // Family zero cannot describe six channels, so retrying another
+        // decoder must not turn a malformed native stream into "unsupported".
+        header[18] = 0;
+        params.with_extra_data(header.into_boxed_slice());
+        assert!(
+            !decoder(&params, true)
+                .err()
+                .unwrap()
+                .is::<UnsupportedNative>()
         );
     }
 }
