@@ -45,6 +45,12 @@ The default GUI build targets Wayland. X11 support is intentionally not enabled 
  directory at the same time. Use `tui` and grouped CLI commands to control an
  already running instance.
 
+== Playback
+
+Seeking to the end of a track follows normal queue completion rather than
+reporting a decoder error. If paused, playback stays paused at the end until
+resumed. Opus seeking accounts for decoder preroll without replaying earlier PCM.
+
 == Configuration
 
 The default configuration file is `~/.config/rivu/config.toml`.

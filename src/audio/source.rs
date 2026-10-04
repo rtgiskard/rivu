@@ -154,6 +154,7 @@ pub(super) struct Source {
     info: MediaInfo,
     seek_target: Option<f64>,
     ready: bool,
+    exhausted: bool,
 }
 impl Source {
     pub(super) fn open(path: &Path, buffer_len: usize) -> Result<Self> {
@@ -260,6 +261,7 @@ impl Source {
             info,
             seek_target: None,
             ready: false,
+            exhausted: false,
         };
         if !source.read_next()? {
             bail!("Audio track contains no decodable samples");
@@ -273,6 +275,19 @@ impl Source {
             .duration
             .map_or(target, |duration| target.min(duration))
             .max(0.0);
+        // Many demuxers reject the exclusive end timestamp. It is a valid
+        // player position, but there are no samples left to request there.
+        if self
+            .info
+            .duration
+            .is_some_and(|duration| target >= duration)
+        {
+            self.frames.clear();
+            self.ready = false;
+            self.seek_target = None;
+            self.exhausted = true;
+            return Ok(());
+        }
         let preroll = if matches!(self.decode, Decode::Opus(_)) {
             (target - 0.08).max(0.0)
         } else {
@@ -299,6 +314,7 @@ impl Source {
         self.frames.clear();
         self.ready = false;
         self.seek_target = Some(target);
+        self.exhausted = false;
         Ok(())
     }
     pub(super) fn info(&self) -> &MediaInfo {
@@ -316,9 +332,15 @@ impl Source {
     }
 
     fn read_next(&mut self) -> Result<bool> {
-        self.frames.clear();
+        if self.exhausted {
+            return Ok(false);
+        }
         loop {
+            // Seeking can discard whole packets (including Opus preroll).
+            // Never append the next packet onto samples already discarded.
+            self.frames.clear();
             let Some(packet) = self.format.next_packet()? else {
+                self.exhausted = true;
                 return Ok(false);
             };
             if packet.track_id != self.track {
@@ -458,6 +480,131 @@ fn mix_audio(audio: GenericAudioBufferRef<'_>, output: &mut Vec<Stereo>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use symphonia::core::{checksum::Crc32, io::Monitor};
+
+    // A real, seekable Ogg/Opus file without external tools or binary fixtures.
+    fn opus_file() -> tempfile::NamedTempFile {
+        fn page(file: &mut File, sequence: u32, flags: u8, granule: u64, packet: &[u8]) {
+            let segments = packet.len() / 255 + 1;
+            let mut page = Vec::with_capacity(27 + segments + packet.len());
+            page.extend_from_slice(b"OggS\0");
+            page.push(flags);
+            page.extend_from_slice(&granule.to_le_bytes());
+            page.extend_from_slice(&1_u32.to_le_bytes());
+            page.extend_from_slice(&sequence.to_le_bytes());
+            page.extend_from_slice(&[0; 4]);
+            page.push(segments as u8);
+            page.extend(std::iter::repeat_n(255, segments - 1));
+            page.push((packet.len() % 255) as u8);
+            page.extend_from_slice(packet);
+            let mut crc = Crc32::new(0);
+            crc.process_buf_bytes(&page);
+            page[22..26].copy_from_slice(&crc.crc().to_le_bytes());
+            file.write_all(&page).unwrap();
+        }
+
+        let mut file = tempfile::Builder::new().suffix(".opus").tempfile().unwrap();
+        let mut encoder =
+            opus::Encoder::new(48_000, opus::Channels::Mono, opus::Application::Audio).unwrap();
+        let preskip = encoder.get_lookahead().unwrap() as u16;
+        let mut header = [0_u8; 19];
+        header[..8].copy_from_slice(b"OpusHead");
+        header[8] = 1;
+        header[9] = 1;
+        header[10..12].copy_from_slice(&preskip.to_le_bytes());
+        header[12..16].copy_from_slice(&48_000_u32.to_le_bytes());
+        page(file.as_file_mut(), 0, 2, 0, &header);
+        page(file.as_file_mut(), 1, 0, 0, b"OpusTags\0\0\0\0\0\0\0\0");
+        let total = 96_000 + usize::from(preskip);
+        let packets = total.div_ceil(960);
+        let mut encoded = [0_u8; 4000];
+        // Nonperiodic input gives cross-correlation a unique sample alignment,
+        // unlike a tone whose adjacent periods can look almost identical.
+        let mut noise = 0x1234_5678_u32;
+        for index in 0..packets {
+            let input: [f32; 960] = std::array::from_fn(|offset| {
+                let sample = index * 960 + offset;
+                if sample >= 96_000 {
+                    0.0
+                } else {
+                    noise ^= noise << 13;
+                    noise ^= noise >> 17;
+                    noise ^= noise << 5;
+                    noise as i32 as f32 / i32::MAX as f32 * 0.5
+                }
+            });
+            let count = encoder.encode_float(&input, &mut encoded).unwrap();
+            page(
+                file.as_file_mut(),
+                index as u32 + 2,
+                if index + 1 == packets { 4 } else { 0 },
+                ((index + 1) * 960).min(total) as u64,
+                &encoded[..count],
+            );
+        }
+        file
+    }
+
+    fn decode_remaining(source: &mut Source) -> Vec<Stereo> {
+        let mut samples = Vec::new();
+        while let Some(frames) = source.next_frames().unwrap() {
+            samples.extend_from_slice(frames);
+        }
+        samples
+    }
+
+    #[test]
+    fn opus_seek_discards_whole_preroll_packets_without_reusing_pcm() {
+        let file = opus_file();
+        let mut source = Source::open(file.path(), PROBE_BUFFER_LEN).unwrap();
+        let reference = decode_remaining(&mut source);
+        assert_eq!(reference.len(), 96_000);
+        for target in [1.0, 0.0, 1.137] {
+            source.seek(target).unwrap();
+            let actual = decode_remaining(&mut source);
+            let offset = (target * 48_000.0).round() as usize;
+            assert_eq!(actual.len(), reference.len() - offset);
+            // Resetting Opus and decoding preroll does not reproduce every
+            // adaptive decoder state from uninterrupted playback. Compare
+            // temporal alignment, not a pinned waveform-error tolerance.
+            // Include the entire 80 ms preroll in the candidate range so that
+            // an early packet prefix cannot masquerade as the requested audio.
+            let window = &actual[..960];
+            let first = offset.saturating_sub(3840);
+            let last = (offset + 3840).min(reference.len() - window.len());
+            let best = (first..=last)
+                .map(|candidate| {
+                    let (dot, power) = window
+                        .iter()
+                        .zip(&reference[candidate..candidate + window.len()])
+                        .fold((0.0_f64, 0.0_f64), |(dot, power), (actual, expected)| {
+                            let expected = f64::from(expected[0]);
+                            (dot + f64::from(actual[0]) * expected, power + expected * expected)
+                        });
+                    // The actual window's norm is constant across candidates.
+                    (candidate, dot / power.sqrt())
+                })
+                .max_by(|(_, left), (_, right)| left.total_cmp(right))
+                .unwrap()
+                .0;
+            assert_eq!(best, offset, "Seek must start at the requested sample for {target}s");
+        }
+    }
+
+    #[test]
+    fn seek_to_duration_is_exhausted_and_can_seek_back() {
+        let file = opus_file();
+        let mut source = Source::open(file.path(), PROBE_BUFFER_LEN).unwrap();
+        let duration = source.info().duration.unwrap();
+        for target in [duration, duration + 1.0] {
+            source.seek(target).unwrap();
+            assert!(source.next_frames().unwrap().is_none());
+            assert!(source.next_frames().unwrap().is_none());
+            source.seek(0.0).unwrap();
+            assert_eq!(decode_remaining(&mut source).len(), 96_000);
+        }
+    }
 
     #[test]
     fn opus_headers_preserve_mono_stereo_preskip_and_container_timing() {
