@@ -1,10 +1,11 @@
 use super::{
-    components::{tree_row, TreeKey, TreeRow},
-    row_text, GuiApp, ListFocus, TRACK_HEIGHT,
+    GuiApp, ListFocus, TRACK_HEIGHT,
+    components::{TreeKey, TreeRow, tree_row},
+    row_text,
 };
 use crate::model::{Command, Track};
 use gpui::{
-    div, rgb, AnyElement, Context, Render, UniformListScrollHandle, Window, prelude::*, px,
+    AnyElement, Context, Render, UniformListScrollHandle, Window, div, prelude::*, px, rgb,
     uniform_list,
 };
 use std::{collections::BTreeMap, ffi::OsStr, path::Path, sync::Arc};
@@ -50,7 +51,10 @@ pub(super) fn library_rows(tracks: &[Track]) -> Vec<TreeRow<LibraryNode>> {
         let mut directory = &mut root;
         if let Some(parent) = track.path.parent() {
             for component in parent.components() {
-                directory = directory.directories.entry(component.as_os_str()).or_default();
+                directory = directory
+                    .directories
+                    .entry(component.as_os_str())
+                    .or_default();
             }
         }
         directory.tracks.push(track);
@@ -112,7 +116,8 @@ impl GuiApp {
     }
 
     pub(super) fn rebuild_library_tree(&mut self) {
-        self.library_tree.set_rows(library_rows(&self.state.library));
+        self.library_tree
+            .set_rows(library_rows(&self.state.library));
         self.library_tree_scroll = UniformListScrollHandle::new();
         if let Some(index) = self.library_tree.selected_index() {
             self.library_tree_scroll
@@ -131,6 +136,7 @@ impl GuiApp {
             Some(LibraryNode::Track(id)) => self.select_track(id, false, cx),
             _ => {
                 self.selected.clear();
+                self.library_selection.clear_selection();
                 self.metadata_track = None;
                 self.sync_waveform(cx);
                 cx.notify();
@@ -170,10 +176,9 @@ impl GuiApp {
                             .min_w_0()
                             .overflow_hidden()
                             .child(row_text(title, detail))
-                            .on_drag(
-                                LibraryDrag { node: id.clone() },
-                                |drag, _, _, cx| cx.new(|_| drag.clone()),
-                            )
+                            .on_drag(LibraryDrag { node: id.clone() }, |drag, _, _, cx| {
+                                cx.new(|_| drag.clone())
+                            })
                             .on_click(cx.listener(
                                 move |this, event: &gpui::ClickEvent, window, cx| {
                                     this.focus_workspace(window, cx);
@@ -188,7 +193,12 @@ impl GuiApp {
                                                 cx,
                                             );
                                             if event.click_count() == 2 {
-                                                this.send(Command::Play { track_id: *track_id }, cx);
+                                                this.send(
+                                                    Command::Play {
+                                                        track_id: *track_id,
+                                                    },
+                                                    cx,
+                                                );
                                             }
                                         }
                                         LibraryNode::Directory(_) => {
@@ -253,7 +263,10 @@ mod tests {
         tracks.reverse();
         assert_eq!(rows, library_rows(&tracks));
         assert_eq!(rows.len(), 6);
-        assert_eq!(rows[0].id, LibraryNode::Directory(Arc::from(Path::new("Music"))));
+        assert_eq!(
+            rows[0].id,
+            LibraryNode::Directory(Arc::from(Path::new("Music")))
+        );
         assert_eq!(rows[1].parent.as_ref(), Some(&rows[0].id));
         assert_eq!(rows[1].depth, 1);
         assert!(rows[1].has_children);
@@ -275,7 +288,10 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].id, LibraryNode::Track(1));
         assert_eq!(rows[1].id, LibraryNode::Track(2));
-        assert!(rows.iter().all(|row| row.parent.is_none() && row.depth == 0));
+        assert!(
+            rows.iter()
+                .all(|row| row.parent.is_none() && row.depth == 0)
+        );
         assert!(library_rows(&[]).is_empty());
     }
 }

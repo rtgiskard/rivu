@@ -347,14 +347,13 @@ impl Config {
         Ok(())
     }
 
-    /// Validate, serialize, and sync a private same-directory temporary file,
-    /// then atomically replace the destination. Failures before replacement
+    /// Validate, serialize, and atomically replace the destination using a
+    /// private same-directory temporary file. Failures before replacement
     /// leave the previous file untouched and clean up the temporary file.
     ///
-    /// On Unix, newly created directories are private and the containing
-    /// directory is synced after replacement for crash durability. An error
-    /// from that final sync explicitly reports that replacement already happened.
-    /// Existing directory permissions are never changed.
+    /// This deliberately does not fsync the file or directory: configuration
+    /// writes must not block on storage flushes. Existing directory
+    /// permissions are never changed.
     pub fn save(&self, path: &Path) -> Result<()> {
         self.validate()
             .with_context(|| format!("cannot save invalid configuration {}", path.display()))?;
@@ -379,9 +378,6 @@ impl Config {
         directories.create(parent).with_context(|| {
             format!("cannot create configuration directory {}", parent.display())
         })?;
-        #[cfg(unix)]
-        let directory = fs::File::open(parent)
-            .with_context(|| format!("cannot open configuration directory {}", parent.display()))?;
         // tempfile creates the file with owner-only permissions (0600 on Unix).
         let mut temporary = tempfile::Builder::new()
             .prefix(".rivu-config-")
@@ -399,9 +395,6 @@ impl Config {
                 path.display()
             )
         })?;
-        temporary.as_file().sync_all().with_context(|| {
-            format!("cannot sync temporary configuration for {}", path.display())
-        })?;
         // Discard PersistError's owned file here so cleanup is immediate, rather
         // than deferred until the caller drops the returned error.
         temporary
@@ -410,14 +403,6 @@ impl Config {
             .with_context(|| {
                 format!("cannot atomically replace configuration {}", path.display())
             })?;
-        #[cfg(unix)]
-        directory.sync_all().with_context(|| {
-            format!(
-                "configuration {} was replaced, but syncing directory {} failed",
-                path.display(),
-                parent.display()
-            )
-        })?;
         Ok(())
     }
 }
@@ -529,8 +514,10 @@ mod tests {
         let path = directory.path().join("config.toml");
         fs::write(&path, "").unwrap();
         assert!(Config::load(&path).unwrap().pipewire_auto_mix);
-        let mut config = Config::default();
-        config.pipewire_auto_mix = false;
+        let config = Config {
+            pipewire_auto_mix: false,
+            ..Config::default()
+        };
         config.save(&path).unwrap();
         assert!(!Config::load(&path).unwrap().pipewire_auto_mix);
     }

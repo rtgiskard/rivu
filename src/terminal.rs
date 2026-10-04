@@ -29,31 +29,48 @@ use std::{
 pub fn run(socket_path: &Path) -> Result<()> {
     enable_raw_mode().context("enable terminal raw mode")?;
     let mut stdout = io::stdout();
-    if let Err(e) = execute!(stdout, EnterAlternateScreen) {
-        let _ = disable_raw_mode();
-        return Err(e.into());
+    if let Err(error) = execute!(stdout, EnterAlternateScreen) {
+        restore_terminal_without_screen(&mut stdout);
+        return Err(error.into());
     }
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = match Terminal::new(backend) {
-        Ok(t) => t,
-        Err(e) => {
-            restore_terminal_without_screen();
-            return Err(e.into());
+        Ok(terminal) => terminal,
+        Err(error) => {
+            let mut stdout = io::stdout();
+            restore_terminal_without_screen(&mut stdout);
+            return Err(error.into());
         }
     };
     let result = run_loop(socket_path, &mut terminal);
     let cleanup = restore_terminal(&mut terminal);
-    result.and(cleanup)
+    match result {
+        Err(error) => Err(error),
+        Ok(()) => cleanup,
+    }
 }
 
-fn restore_terminal_without_screen() {
+fn restore_terminal_without_screen(stdout: &mut Stdout) {
     let _ = disable_raw_mode();
+    let _ = execute!(stdout, LeaveAlternateScreen, crossterm::cursor::Show);
 }
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
-    disable_raw_mode().context("restore terminal raw mode")?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen).context("leave alternate screen")?;
-    terminal.show_cursor().context("restore cursor")?;
-    Ok(())
+    let mut first = None;
+    if let Err(error) = disable_raw_mode().context("restore terminal raw mode") {
+        first = Some(error);
+    }
+    if let Err(error) =
+        execute!(terminal.backend_mut(), LeaveAlternateScreen).context("leave alternate screen")
+        && first.is_none()
+    {
+        first = Some(error);
+    }
+    if let Err(error) = terminal.show_cursor().context("restore cursor")
+        && first.is_none()
+    {
+        first = Some(error);
+    }
+    first.map_or(Ok(()), Err)
 }
 
 fn run_loop(socket_path: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
@@ -852,11 +869,13 @@ mod tests {
 
     #[test]
     fn revision_unchanged_local_selection_is_visible() {
-        let mut state = AppState::default();
-        state.queue = Arc::new(vec![
-            QueueEntry { id: 1, track_id: 1 },
-            QueueEntry { id: 2, track_id: 2 },
-        ]);
+        let state = AppState {
+            queue: Arc::new(vec![
+                QueueEntry { id: 1, track_id: 1 },
+                QueueEntry { id: 2, track_id: 2 },
+            ]),
+            ..AppState::default()
+        };
         let mut ui = UiState::default();
         ui.sync_queue(&state, &state);
         let revision = ui.local_revision;
@@ -909,21 +928,23 @@ mod tests {
 
     #[test]
     fn queue_cache_follows_order_and_metadata_changes() {
-        let mut state = AppState::default();
-        state.library = Arc::new(vec![
-            track(1, "Artist A", "Title A"),
-            track(2, "Artist B", "Title B"),
-        ]);
-        state.queue = Arc::new(vec![
-            QueueEntry {
-                id: 10,
-                track_id: 1,
-            },
-            QueueEntry {
-                id: 20,
-                track_id: 2,
-            },
-        ]);
+        let mut state = AppState {
+            library: Arc::new(vec![
+                track(1, "Artist A", "Title A"),
+                track(2, "Artist B", "Title B"),
+            ]),
+            queue: Arc::new(vec![
+                QueueEntry {
+                    id: 10,
+                    track_id: 1,
+                },
+                QueueEntry {
+                    id: 20,
+                    track_id: 2,
+                },
+            ]),
+            ..AppState::default()
+        };
         let mut cache = QueueViewCache::default();
         cache.sync(&state);
         assert_eq!(

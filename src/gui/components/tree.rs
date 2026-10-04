@@ -102,7 +102,9 @@ impl<T: Clone + Eq + Hash> TreeState<T> {
             .enumerate()
             .map(|(index, row)| (row.id.clone(), index))
             .collect::<HashMap<_, _>>();
-        self.parents = self.rows.iter()
+        self.parents = self
+            .rows
+            .iter()
             .map(|row| row.parent.as_ref().and_then(|id| ids.get(id).copied()))
             .collect();
         self.expanded.retain(|id| ids.contains_key(id));
@@ -145,8 +147,11 @@ impl<T: Clone + Eq + Hash> TreeState<T> {
                     }
                 }
             }
-            self.visible.extend(keep.into_iter().enumerate()
-                .filter_map(|(index, keep)| keep.then_some(index)));
+            self.visible.extend(
+                keep.into_iter()
+                    .enumerate()
+                    .filter_map(|(index, keep)| keep.then_some(index)),
+            );
             return;
         }
         for index in 0..self.rows.len() {

@@ -304,38 +304,20 @@ impl Input {
             .unwrap_or(self.content.len())
     }
 
-    fn offset_from_utf16(&self, offset: usize) -> usize {
-        let mut utf8_offset = 0;
-        let mut utf16_count = 0;
-        for ch in self.content.chars() {
-            if utf16_count >= offset {
-                break;
-            }
-            utf16_count += ch.len_utf16();
-            utf8_offset += ch.len_utf8();
-        }
-        utf8_offset
-    }
-
     fn offset_to_utf16(&self, offset: usize) -> usize {
-        let mut utf16_offset = 0;
-        let mut utf8_count = 0;
-        for ch in self.content.chars() {
-            if utf8_count >= offset {
-                break;
-            }
-            utf8_count += ch.len_utf8();
-            utf16_offset += ch.len_utf16();
-        }
-        utf16_offset
+        utf16_offset_from_utf8(&self.content, offset)
     }
 
     fn range_to_utf16(&self, range: &Range<usize>) -> Range<usize> {
-        self.offset_to_utf16(range.start)..self.offset_to_utf16(range.end)
+        utf16_range_from_utf8(&self.content, range)
     }
 
     fn range_from_utf16(&self, range: &Range<usize>) -> Range<usize> {
-        self.offset_from_utf16(range.start)..self.offset_from_utf16(range.end)
+        utf8_range_from_utf16(&self.content, range)
+    }
+
+    fn replace_range_from_utf16(&self, range: &Range<usize>) -> Range<usize> {
+        self.range_from_utf16(range)
     }
 
     fn replace_selection(
@@ -347,7 +329,7 @@ impl Input {
     ) {
         let range = range_utf16
             .as_ref()
-            .map(|range| self.range_from_utf16(range))
+            .map(|range| self.replace_range_from_utf16(range))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
         self.content =
@@ -358,6 +340,56 @@ impl Input {
         cx.emit(InputEvent::Changed);
         cx.notify();
     }
+}
+
+fn utf8_offset_from_utf16(text: &str, offset: usize) -> usize {
+    let mut utf8 = 0;
+    let mut utf16 = 0;
+    for ch in text.chars() {
+        let next = utf16 + ch.len_utf16();
+        if next > offset {
+            break;
+        }
+        utf16 = next;
+        utf8 += ch.len_utf8();
+    }
+    utf8
+}
+
+fn utf16_offset_from_utf8(text: &str, offset: usize) -> usize {
+    let mut utf8 = 0;
+    let mut utf16 = 0;
+    for ch in text.chars() {
+        let next = utf8 + ch.len_utf8();
+        if next > offset {
+            break;
+        }
+        utf8 = next;
+        utf16 += ch.len_utf16();
+    }
+    utf16
+}
+
+fn utf8_range_from_utf16(text: &str, range: &Range<usize>) -> Range<usize> {
+    let start = utf8_offset_from_utf16(text, range.start);
+    let end = utf8_offset_from_utf16(text, range.end);
+    start.min(end)..start.max(end)
+}
+
+fn utf16_range_from_utf8(text: &str, range: &Range<usize>) -> Range<usize> {
+    let start = utf16_offset_from_utf8(text, range.start);
+    let end = utf16_offset_from_utf8(text, range.end);
+    start.min(end)..start.max(end)
+}
+fn selected_range_after_replacement(
+    new_text: &str,
+    selected_range_utf16: Option<&Range<usize>>,
+    replacement_start: usize,
+) -> Range<usize> {
+    selected_range_utf16
+        .map(|selected| utf8_range_from_utf16(new_text, selected))
+        .map(|selected| replacement_start + selected.start..replacement_start + selected.end)
+        .unwrap_or_else(|| replacement_start + new_text.len()..replacement_start + new_text.len())
 }
 
 impl EntityInputHandler for Input {
@@ -422,11 +454,11 @@ impl EntityInputHandler for Input {
             (self.content[..range.start].to_owned() + new_text + &self.content[range.end..]).into();
         self.marked_range =
             (!new_text.is_empty()).then_some(range.start..range.start + new_text.len());
-        self.selected_range = new_selected_range_utf16
-            .as_ref()
-            .map(|new_range| self.range_from_utf16(new_range))
-            .map(|new_range| new_range.start + range.start..new_range.end + range.end)
-            .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
+        self.selected_range = selected_range_after_replacement(
+            new_text,
+            new_selected_range_utf16.as_ref(),
+            range.start,
+        );
         self.selection_reversed = false;
         cx.emit(InputEvent::Changed);
         cx.notify();
@@ -687,5 +719,24 @@ impl Render for Input {
 impl Focusable for Input {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ime_ranges_convert_at_unicode_boundaries() {
+        assert_eq!(utf8_range_from_utf16("😀中", &(2..3)), 4..7);
+        assert_eq!(utf8_range_from_utf16("😀中", &(1..3)), 0..7);
+        assert_eq!(utf16_range_from_utf8("😀中", &(4..7)), 2..3);
+    }
+
+    #[test]
+    fn ime_selected_range_is_relative_to_replacement_start() {
+        assert_eq!(
+            selected_range_after_replacement("😀a", Some(&(2..3)), 5),
+            9..10
+        );
     }
 }

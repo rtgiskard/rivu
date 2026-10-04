@@ -56,13 +56,15 @@ fn decode(bytes: &[u8]) -> Result<Cow<'_, str>> {
     if data.len() % 2 != 0 {
         bail!("Incomplete UTF-16 CUE character");
     }
-    let words: Vec<u16> = data
-        .chunks_exact(2)
+    let (pairs, remainder) = data.as_chunks::<2>();
+    debug_assert!(remainder.is_empty());
+    let words: Vec<u16> = pairs
+        .iter()
         .map(|pair| {
             if little_endian {
-                u16::from_le_bytes([pair[0], pair[1]])
+                u16::from_le_bytes(*pair)
             } else {
-                u16::from_be_bytes([pair[0], pair[1]])
+                u16::from_be_bytes(*pair)
             }
         })
         .collect();
@@ -212,10 +214,8 @@ fn parse(text: &str, parent: &Path) -> Result<CueSheet> {
                                 bail!("Duplicate INDEX 00");
                             }
                         }
-                        1 => {
-                            if track.start.replace(time).is_some() {
-                                bail!("Duplicate INDEX 01");
-                            }
+                        1 if track.start.replace(time).is_some() => {
+                            bail!("Duplicate INDEX 01");
                         }
                         _ => {}
                     }

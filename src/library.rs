@@ -644,7 +644,7 @@ mod tests {
         let sheet = directory.path().join("album.CUE");
         wav(&audio, 225)?;
         two_track_sheet(&sheet)?;
-        let result = scan_paths(&[sheet.clone()], &[], false)?;
+        let result = scan_paths(std::slice::from_ref(&sheet), &[], false)?;
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         assert_eq!(result.records.len(), 2);
         let first = &result.records[0];
@@ -719,10 +719,10 @@ mod tests {
         let sheet = directory.path().join("album.cue");
         wav(&audio, 225)?;
         two_track_sheet(&sheet)?;
-        let original = scan_paths(&[sheet.clone()], &[], false)?;
+        let original = scan_paths(std::slice::from_ref(&sheet), &[], false)?;
         assert!(original.errors.is_empty(), "{:?}", original.errors);
         let known = known_records(&original.records);
-        let full = scan_paths(&[audio.clone()], &known, false)?;
+        let full = scan_paths(std::slice::from_ref(&audio), &known, false)?;
         assert!(full.errors.is_empty(), "{:?}", full.errors);
         assert_eq!(full.records.len(), 1);
         assert_eq!(full.records[0].media.duration, Some(3.0));
@@ -732,7 +732,7 @@ mod tests {
             "TITLE \"Edited album\"\nFILE \"audio.wav\" WAVE\nTRACK 01 AUDIO\nTITLE \"Renamed\"\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nINDEX 01 00:02:00\n",
         )?;
         for cache in [&known, &known_records(&full.records)] {
-            let rescanned = scan_paths(&[sheet.clone()], cache, false)?;
+            let rescanned = scan_paths(std::slice::from_ref(&sheet), cache, false)?;
             assert!(rescanned.errors.is_empty(), "{:?}", rescanned.errors);
             assert_eq!(rescanned.records.len(), 2);
             assert_eq!(rescanned.records[0].media.title, "Renamed");
@@ -766,7 +766,7 @@ mod tests {
                 &sheet,
                 format!("FILE \"audio.wav\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n{invalid}"),
             )?;
-            let result = scan_paths(&[sheet.clone()], &[], false)?;
+            let result = scan_paths(std::slice::from_ref(&sheet), &[], false)?;
             assert!(result.records.is_empty());
             assert_eq!(result.errors.len(), 1);
             assert!(result.suppressed_sources.is_empty());
@@ -879,7 +879,7 @@ mod tests {
         wav(&directory.path().join("audio.wav"), 225)?;
         let sheet = directory.path().join("album.cue");
         two_track_sheet(&sheet)?;
-        let scan = scan_paths(&[sheet.clone()], &[], false)?;
+        let scan = scan_paths(std::slice::from_ref(&sheet), &[], false)?;
         let tracks: Vec<_> = scan
             .records
             .iter()

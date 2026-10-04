@@ -72,6 +72,35 @@ impl<T> SelectableListState<T> {
         self.selected = Some(self.selected.map_or(0, |index| index.saturating_sub(1)));
     }
 
+    pub(crate) fn toggle(&mut self, index: usize, extend: bool) {
+        if index >= self.items.len() {
+            return;
+        }
+        if self.mode == SelectionMode::Single || !extend {
+            self.select(index, false);
+            return;
+        }
+        if self.selected == Some(index) {
+            self.marked.remove(&index);
+            self.selected = self.marked.iter().next().copied();
+        } else {
+            if let Some(selected) = self.selected {
+                self.marked.insert(selected);
+            }
+            self.selected = Some(index);
+            self.marked.insert(index);
+        }
+    }
+
+    pub(crate) fn selected_indices(&self) -> impl Iterator<Item = usize> + '_ {
+        self.marked.iter().copied().chain(self.selected)
+    }
+
+    pub(crate) fn clear_selection(&mut self) {
+        self.selected = None;
+        self.marked.clear();
+    }
+
     pub(crate) fn select(&mut self, index: usize, extend: bool) {
         if index >= self.items.len() {
             return;

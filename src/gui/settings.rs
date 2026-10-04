@@ -548,9 +548,9 @@ impl GuiApp {
                             .map_or(0, |index| index + 1);
                         if this.device_popup_open {
                             let items = std::iter::once(DropdownItem::new(0, "System default"))
-                                .chain(this.state.devices.iter().enumerate().map(|(index, device)| {
-                                    DropdownItem::new(index + 1, device.clone())
-                                }));
+                                .chain(this.state.devices.iter().enumerate().map(
+                                    |(index, device)| DropdownItem::new(index + 1, device.clone()),
+                                ));
                             this.settings.device_dropdown.open(items);
                             this.settings.device_dropdown.select_index(selected);
                         } else {

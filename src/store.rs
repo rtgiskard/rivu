@@ -235,28 +235,34 @@ impl Store {
         .collect::<rusqlite::Result<Vec<_>>>()?)
     }
     pub fn playlists(&self) -> Result<Vec<Playlist>> {
-        let mut q = self
-            .conn
-            .prepare("SELECT id,name FROM playlists ORDER BY id")?;
-        let rows = q.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        let mut q = self.conn.prepare(
+            "SELECT p.id,p.name,e.id,e.track_id FROM playlists p
+             LEFT JOIN playlist_entries e ON e.playlist_id=p.id
+             ORDER BY p.id,e.position,e.id",
+        )?;
+        let mut rows = q.query([])?;
         let mut out = Vec::new();
-        for row in rows {
-            let (id, name) = row?;
-            let mut e = self.conn.prepare(
-                "SELECT id,track_id FROM playlist_entries WHERE playlist_id=? ORDER BY position,id",
-            )?;
-            out.push(Playlist {
-                id,
-                name,
-                entries: e
-                    .query_map([id], |r| {
-                        Ok(PlaylistEntry {
-                            id: r.get(0)?,
-                            track_id: r.get(1)?,
-                        })
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?,
-            });
+        while let Some(row) = rows.next()? {
+            let id: i64 = row.get(0)?;
+            if out
+                .last()
+                .is_none_or(|playlist: &Playlist| playlist.id != id)
+            {
+                out.push(Playlist {
+                    id,
+                    name: row.get(1)?,
+                    entries: Vec::new(),
+                });
+            }
+            if let Some(entry_id) = row.get::<_, Option<i64>>(2)? {
+                out.last_mut()
+                    .expect("playlist was just inserted")
+                    .entries
+                    .push(PlaylistEntry {
+                        id: entry_id,
+                        track_id: row.get(3)?,
+                    });
+            }
         }
         Ok(out)
     }

@@ -1,7 +1,6 @@
 use super::{
-    library::LibraryDrag,
-    ACCENT, BORDER, Dragging, Field, GuiApp, ListFocus, MUTED, Measured, QueueDrag,
-    button, column, format_time, icon_button, row, row_text,
+    ACCENT, BORDER, Dragging, Field, GuiApp, ListFocus, MUTED, Measured, QueueDrag, button, column,
+    format_time, icon_button, library::LibraryDrag, row, row_text,
 };
 pub(super) use super::{TRACK_HEIGHT, caption, list_row};
 use crate::model::{Command, PlaybackStatus, RepeatMode};
@@ -472,7 +471,9 @@ impl GuiApp {
         }
         if self.library_tree_active {
             return panel
-                .child(caption("↑/↓ navigate · ←/→ collapse/expand · Space toggles folders · Enter plays"))
+                .child(caption(
+                    "↑/↓ navigate · ←/→ collapse/expand · Space toggles folders · Enter plays",
+                ))
                 .child(self.library_tree_list(panel_id, cx))
                 .into_any_element();
         }
@@ -770,7 +771,7 @@ impl GuiApp {
                                             }
                                         },
                                     ))
-                                    .on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone()))
+                                    .on_drag(drag, |drag, _, _, cx| cx.new(|_| *drag))
                                     .on_drop(cx.listener(
                                         move |this, drag: &QueueDrag, window, cx| {
                                             window.prevent_default();
@@ -922,7 +923,13 @@ impl GuiApp {
                 };
                 let track_ids = this.library_drag_track_ids(&drag.node);
                 if !track_ids.is_empty() {
-                    this.send(Command::AddPlaylist { playlist_id, track_ids }, cx);
+                    this.send(
+                        Command::AddPlaylist {
+                            playlist_id,
+                            track_ids,
+                        },
+                        cx,
+                    );
                 }
             }))
             .drag_over::<LibraryDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
@@ -1104,18 +1111,16 @@ impl GuiApp {
                                                 .flex_shrink_0(),
                                         )
                                         .child(row_text(title, detail))
-                                        .on_click(
-                                            cx.listener(
-                                                move |this, event: &gpui::ClickEvent, window, cx| {
-                                                    this.focus_workspace(window, cx);
-                                                    this.selected_entry = Some(id);
-                                                    if event.click_count() == 2 {
-                                                        this.send(Command::Play { track_id }, cx);
-                                                    }
-                                                    cx.notify();
-                                                },
-                                            ),
-                                        ),
+                                        .on_click(cx.listener(
+                                            move |this, event: &gpui::ClickEvent, window, cx| {
+                                                this.focus_workspace(window, cx);
+                                                this.selected_entry = Some(id);
+                                                if event.click_count() == 2 {
+                                                    this.send(Command::Play { track_id }, cx);
+                                                }
+                                                cx.notify();
+                                            },
+                                        )),
                                     )
                                 })
                                 .collect::<Vec<_>>()
@@ -1133,7 +1138,9 @@ impl GuiApp {
                         .border_1()
                         .border_color(rgb(0xf7768e))
                         .rounded_sm()
-                        .child(caption("This playlist is not empty. Delete it and all entries?"))
+                        .child(caption(
+                            "This playlist is not empty. Delete it and all entries?",
+                        ))
                         .child(
                             row()
                                 .child(button(

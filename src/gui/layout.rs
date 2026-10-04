@@ -885,9 +885,8 @@ impl Layout {
         Ok(layout)
     }
 
-    /// Validate, write and fsync a unique sibling temporary file, then atomically
-    /// replace the destination and fsync its directory. A failed write never
-    /// replaces the previous workspace, and its temporary file is removed.
+    /// Validate, write a unique sibling temporary file, and atomically replace
+    /// the destination. A failed write never replaces the previous workspace.
     pub fn save(&self, path: &Path) -> Result<()> {
         self.validate().map_err(|error| anyhow!(error))?;
         let parent = path
@@ -924,13 +923,9 @@ impl Layout {
                 .context("encoding workspace")?;
             writer.write_all(b"\n")?;
             writer.flush().context("flushing workspace")?;
-            writer.get_ref().sync_all().context("syncing workspace")?;
             drop(writer);
             fs::rename(&temporary, path)
                 .with_context(|| format!("replacing workspace {}", path.display()))?;
-            File::open(parent)?
-                .sync_all()
-                .context("syncing workspace directory")?;
             Ok(())
         })();
         if result.is_err() {

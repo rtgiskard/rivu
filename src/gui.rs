@@ -14,17 +14,16 @@ use crate::{
 use anyhow::Result;
 use ashpd::desktop::file_chooser::SelectedFiles;
 use components::ButtonTooltip;
-use components::{TreeKey, TreeState};
-use library::LibraryNode;
 pub(super) use components::{
-    DropdownItem, DropdownState, TRACK_HEIGHT, caption, context_menu_container,
-    dropdown_container, list_row, row_text,
+    DropdownItem, DropdownState, SelectableListState, SelectionMode, TRACK_HEIGHT, caption,
+    context_menu_container, dropdown_container, list_row, row_text,
 };
+use components::{TreeKey, TreeState};
 use futures::{FutureExt, StreamExt, channel::mpsc};
-use url::Url;
 use gpui::{prelude::*, *};
 use input::{Input, InputEvent};
 use layout::{Axis, Edge, Layout, Node};
+use library::LibraryNode;
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
@@ -33,6 +32,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use url::Url;
 
 const BG: u32 = 0x1a1b26;
 const PANEL: u32 = 0x16161e;
@@ -298,7 +298,10 @@ fn icon_button(
 ) -> Stateful<Div> {
     let hint = hint.into();
     let mut icon = icon.into();
-    if !cx.try_global::<components::NerdSymbols>().is_none_or(|settings| settings.0) {
+    if !cx
+        .try_global::<components::NerdSymbols>()
+        .is_none_or(|settings| settings.0)
+    {
         let fallback = match icon.as_ref() {
             "󰒟" => Some("⤨"),
             "󰒮" => Some("|◀"),
@@ -479,6 +482,7 @@ struct GuiApp {
     layout_path: PathBuf,
     inputs: HashMap<Field, Entity<Input>>,
     selected: HashSet<i64>,
+    library_selection: SelectableListState<i64>,
     selected_queue: HashSet<u64>,
     queue_anchor: Option<u64>,
     list_focus: Option<ListFocus>,
@@ -489,14 +493,15 @@ struct GuiApp {
     metadata_track: Option<i64>,
     error: Option<String>,
     filtered_rows: Vec<usize>,
+    library_index: HashMap<i64, usize>,
     library_tree: TreeState<LibraryNode>,
     library_tree_scroll: UniformListScrollHandle,
     library_tree_active: bool,
     favorites_only: bool,
     missing_only: bool,
     force_scan: bool,
-    library_index: HashMap<i64, usize>,
     most_played: Vec<usize>,
+    library_search_cache: Vec<(String, String, String)>,
     settings: settings::Settings,
     visuals: visuals::Visuals,
     default_album: Entity<artwork::Artwork>,
@@ -602,10 +607,10 @@ impl GuiApp {
                     None if down => 0,
                     None => self.filtered_rows.len() - 1,
                 };
-                if let Some(&row) = self.filtered_rows.get(index) {
-                    if let Some(track) = self.state.library.get(row) {
-                        self.select_track(track.id, false, cx);
-                    }
+                if let Some(&row) = self.filtered_rows.get(index)
+                    && let Some(track) = self.state.library.get(row)
+                {
+                    self.select_track(track.id, false, cx);
                 }
             }
             ListFocus::Queue => {
@@ -640,8 +645,12 @@ impl GuiApp {
             ListFocus::Library => {
                 if self.library_tree_active {
                     match self.library_tree.selected().map(|row| row.id.clone()) {
-                        Some(LibraryNode::Track(track_id)) => self.send(Command::Play { track_id }, cx),
-                        Some(LibraryNode::Directory(_)) => self.navigate_library_tree(TreeKey::Toggle, cx),
+                        Some(LibraryNode::Track(track_id)) => {
+                            self.send(Command::Play { track_id }, cx)
+                        }
+                        Some(LibraryNode::Directory(_)) => {
+                            self.navigate_library_tree(TreeKey::Toggle, cx)
+                        }
                         None => {}
                     }
                     return;
@@ -785,6 +794,7 @@ impl GuiApp {
             layout_path,
             inputs,
             selected: HashSet::new(),
+            library_selection: SelectableListState::new([], SelectionMode::Multiple),
             selected_queue: HashSet::new(),
             queue_anchor: None,
             selected_playlist: None,
@@ -793,6 +803,7 @@ impl GuiApp {
             workspace_focus: cx.focus_handle(),
             metadata_track: None,
             error,
+            library_index: HashMap::new(),
             filtered_rows: Vec::new(),
             library_tree: TreeState::new([]),
             library_tree_scroll: UniformListScrollHandle::new(),
@@ -800,8 +811,8 @@ impl GuiApp {
             favorites_only: false,
             missing_only: false,
             force_scan: false,
-            library_index: HashMap::new(),
             most_played: Vec::new(),
+            library_search_cache: Vec::new(),
             visuals: visuals::Visuals::new(),
             default_album: cx.new(|_| artwork::Artwork::new()),
             catalog_open: false,
@@ -875,7 +886,9 @@ impl GuiApp {
                             this.send(Command::ExportPlaylist { playlist_id, path }, cx);
                         }
                     }
-                    Err(error) => this.error = Some(format!("Opening playlist destination: {error}")),
+                    Err(error) => {
+                        this.error = Some(format!("Opening playlist destination: {error}"))
+                    }
                 }
                 cx.notify();
             });
@@ -892,7 +905,18 @@ impl GuiApp {
         let value = value.into();
         self.inputs[&field].update(cx, |input, cx| input.set_text(value, cx));
     }
-    fn rebuild_library(&mut self, cx: &App) {
+    fn refresh_library_search_cache(&mut self) {
+        self.library_search_cache.clear();
+        self.library_search_cache
+            .extend(self.state.library.iter().map(|track| {
+                (
+                    track.title.to_lowercase(),
+                    track.artist.to_lowercase(),
+                    track.album.to_lowercase(),
+                )
+            }));
+    }
+    fn refresh_library_index(&mut self, structure_changed: bool) {
         self.library_index.clear();
         self.library_index.extend(
             self.state
@@ -901,9 +925,32 @@ impl GuiApp {
                 .enumerate()
                 .map(|(index, track)| (track.id, index)),
         );
+        if structure_changed {
+            let ids = self
+                .state
+                .library
+                .iter()
+                .map(|track| track.id)
+                .collect::<Vec<_>>();
+            self.library_selection.replace_items(ids);
+            self.library_selection.clear_selection();
+            for index in 0..self.library_selection.items().len() {
+                if self
+                    .selected
+                    .contains(&self.library_selection.items()[index])
+                {
+                    if self.library_selection.selected_index().is_none() {
+                        self.library_selection.select(index, false);
+                    } else {
+                        self.library_selection.toggle(index, true);
+                    }
+                }
+            }
+        }
         self.selected
             .retain(|id| self.library_index.contains_key(id));
-        self.rebuild_library_tree();
+    }
+    fn refresh_library_statistics(&mut self, cx: &App) {
         self.most_played.clear();
         self.most_played.extend(
             self.state
@@ -920,6 +967,12 @@ impl GuiApp {
         });
         self.refresh_filter(cx);
     }
+    fn rebuild_library(&mut self, cx: &App) {
+        self.refresh_library_search_cache();
+        self.refresh_library_index(true);
+        self.rebuild_library_tree();
+        self.refresh_library_statistics(cx);
+    }
     fn refresh_filter(&mut self, cx: &App) {
         let query = self.value(Field::Search, cx).to_lowercase();
         self.library_tree_active = query.is_empty() && !self.favorites_only && !self.missing_only;
@@ -931,47 +984,56 @@ impl GuiApp {
                     .iter()
                     .enumerate()
                     .filter_map(|(index, track)| {
+                        let (title, artist, album) = &self.library_search_cache[index];
                         ((!self.favorites_only || track.favorite)
                             && (!self.missing_only || track.missing)
                             && (query.is_empty()
-                                || track.title.to_lowercase().contains(&query)
-                                || track.artist.to_lowercase().contains(&query)
-                                || track.album.to_lowercase().contains(&query)))
+                                || title.contains(&query)
+                                || artist.contains(&query)
+                                || album.contains(&query)))
                         .then_some(index)
                     }),
             );
-        // Sort only view indices; the core's ID-sorted library remains unchanged.
-        self.filtered_rows.sort_unstable_by(|&left, &right| {
-            let left = &self.state.library[left];
-            let right = &self.state.library[right];
-            left.album
-                .cmp(&right.album)
-                .then_with(|| {
-                    if left.album.is_empty() {
-                        std::cmp::Ordering::Equal
-                    } else {
-                        (
-                            left.disc_number.unwrap_or(u32::MAX),
-                            left.track_number.unwrap_or(u32::MAX),
-                        )
-                            .cmp(&(
-                                right.disc_number.unwrap_or(u32::MAX),
-                                right.track_number.unwrap_or(u32::MAX),
-                            ))
-                    }
-                })
-                .then_with(|| left.title.cmp(&right.title))
-                .then_with(|| left.id.cmp(&right.id))
-        });
+        if !self.library_tree_active {
+            // Sort only view indices; the core's ID-sorted library remains unchanged.
+            self.filtered_rows.sort_unstable_by(|&left, &right| {
+                let left = &self.state.library[left];
+                let right = &self.state.library[right];
+                left.album
+                    .cmp(&right.album)
+                    .then_with(|| {
+                        if left.album.is_empty() {
+                            std::cmp::Ordering::Equal
+                        } else {
+                            (
+                                left.disc_number.unwrap_or(u32::MAX),
+                                left.track_number.unwrap_or(u32::MAX),
+                            )
+                                .cmp(&(
+                                    right.disc_number.unwrap_or(u32::MAX),
+                                    right.track_number.unwrap_or(u32::MAX),
+                                ))
+                        }
+                    })
+                    .then_with(|| left.title.cmp(&right.title))
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+        }
     }
     fn select_track(&mut self, id: i64, multi: bool, cx: &mut Context<Self>) {
-        if multi {
-            if !self.selected.insert(id) {
-                self.selected.remove(&id);
-            }
-        } else {
+        if let Some(index) = self
+            .library_selection
+            .items()
+            .iter()
+            .position(|item| *item == id)
+        {
+            self.library_selection.toggle(index, multi);
             self.selected.clear();
-            self.selected.insert(id);
+            self.selected.extend(
+                self.library_selection
+                    .selected_indices()
+                    .filter_map(|index| self.library_selection.items().get(index).copied()),
+            );
         }
         if let Some(&index) = self.library_index.get(&id) {
             let track = &self.state.library[index];
@@ -1031,7 +1093,9 @@ impl GuiApp {
         };
         let mut changed = state.is_some();
         if let Some(state) = state {
-            let library_changed = !Arc::ptr_eq(&self.state.library, &state.library);
+            let library_changed = self.state.library_revision != state.library_revision;
+            let library_structure_changed =
+                self.state.library_structure_revision != state.library_structure_revision;
             let queue_changed = !Arc::ptr_eq(&self.state.queue, &state.queue);
             if !matches!(self.dragging, Some(Dragging::Seek(_)))
                 && self.seek_queue_id != state.current_queue_id
@@ -1051,8 +1115,13 @@ impl GuiApp {
                 self.queue_anchor = self.queue_anchor.filter(|id| valid.contains(id));
             }
             self.visuals.configure(&self.state.config);
-            if library_changed {
-                self.rebuild_library(cx);
+            if library_changed || library_structure_changed {
+                self.refresh_library_index(library_structure_changed);
+                if library_structure_changed {
+                    self.refresh_library_search_cache();
+                    self.rebuild_library_tree();
+                }
+                self.refresh_library_statistics(cx);
             }
         }
         if self.state.shutting_down {
@@ -1114,7 +1183,35 @@ impl GuiApp {
             waveform.load_full(track, &self.state.config, cx);
         });
     }
+    fn prune_measured(&mut self) {
+        fn collect(node: &Node, keys: &mut HashSet<Measured>) {
+            match node {
+                Node::Split {
+                    id, first, second, ..
+                } => {
+                    keys.insert(Measured::Node(*id));
+                    collect(first, keys);
+                    collect(second, keys);
+                }
+                Node::Tabs { id, panels, .. } => {
+                    keys.insert(Measured::Node(*id));
+                    for panel in panels {
+                        keys.insert(Measured::Seek(panel.id));
+                        keys.insert(Measured::Volume(panel.id));
+                    }
+                }
+            }
+        }
+        let mut active = HashSet::from([Measured::Device]);
+        if let Some(root) = &self.layout.root {
+            collect(root, &mut active);
+        }
+        self.measured
+            .borrow_mut()
+            .retain(|key, _| active.contains(key));
+    }
     fn persist_layout(&mut self, cx: &mut Context<Self>) {
+        self.prune_measured();
         if let Err(error) = self.layout.save(&self.layout_path) {
             self.error = Some(format!("Saving workspace: {error:#}"));
         }
@@ -1634,6 +1731,7 @@ impl Render for GuiApp {
                     "escape" => {
                         this.focus_workspace(window, cx);
                         this.selected.clear();
+                        this.library_selection.clear_selection();
                         this.selected_queue.clear();
                         this.queue_anchor = None;
                         this.selected_playlist = None;
@@ -1847,11 +1945,12 @@ impl Render for GuiApp {
                 .queue
                 .iter()
                 .any(|entry| self.selected_queue.contains(&entry.id));
-            let mut menu = context_menu_container("panel-context-menu")
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+            let mut menu = context_menu_container("panel-context-menu").on_mouse_down_out(
+                cx.listener(|this, _, _, cx| {
                     this.panel_menu = None;
                     cx.notify();
-                }));
+                }),
+            );
             match state.page {
                 PanelMenuPage::Main => {
                     if is_waveform {
