@@ -405,7 +405,7 @@ impl Player {
 
     #[zbus(property)]
     fn can_pause(&self) -> bool {
-        !self.handle.mpris_snapshot().queue.entries.is_empty()
+        can_pause(&self.handle.mpris_snapshot())
     }
 
     #[zbus(property)]
@@ -446,6 +446,10 @@ fn loop_status(mode: RepeatMode) -> &'static str {
         RepeatMode::All => "Playlist",
         RepeatMode::One => "Track",
     }
+}
+
+fn can_pause(state: &MprisSnapshot) -> bool {
+    state.current_track().is_some()
 }
 
 fn can_seek(state: &MprisSnapshot) -> bool {
@@ -640,21 +644,23 @@ fn publish_changes(
             }
         }
     }
-    for (name, before, after) in [
-        (
-            "CanPlay",
-            !previous.queue.entries.is_empty(),
-            !current.queue.entries.is_empty(),
-        ),
-        (
-            "CanPause",
-            !previous.queue.entries.is_empty(),
-            !current.queue.entries.is_empty(),
-        ),
-        ("CanSeek", can_seek(previous), can_seek(current)),
-    ] {
-        if before != after {
-            changed.insert(name, after.into());
+    if previous.queue.current_id != current.queue.current_id
+        || previous.playback.status != current.playback.status
+        || !Arc::ptr_eq(&previous.tracks, &current.tracks)
+        || !Arc::ptr_eq(&previous.queue.entries, &current.queue.entries)
+    {
+        for (name, before, after) in [
+            (
+                "CanPlay",
+                !previous.queue.entries.is_empty(),
+                !current.queue.entries.is_empty(),
+            ),
+            ("CanPause", can_pause(previous), can_pause(current)),
+            ("CanSeek", can_seek(previous), can_seek(current)),
+        ] {
+            if before != after {
+                changed.insert(name, after.into());
+            }
         }
     }
     if !changed.is_empty() {
@@ -695,7 +701,56 @@ fn publish_changes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{PlaybackState, QueueEntry, QueueState, Track};
+    use std::path::PathBuf;
 
+    fn track(id: i64) -> Track {
+        Track {
+            id,
+            path: PathBuf::from(format!("/music/{id}.flac")),
+            fingerprint: None,
+            cue: None,
+            title: String::new(),
+            artist: String::new(),
+            album: String::new(),
+            duration: None,
+            codec: String::new(),
+            channels: 0,
+            sample_rate: 0,
+            bitrate_bps: None,
+            track_number: None,
+            disc_number: None,
+            bits_per_sample: None,
+            release_date: None,
+            favorite: false,
+            missing: false,
+            play_count: 0,
+            last_played: None,
+        }
+    }
+
+    #[test]
+    fn can_pause_requires_a_valid_current_track() {
+        let mut state = MprisSnapshot {
+            tracks: Arc::new(Vec::new()),
+            queue: QueueState {
+                entries: Arc::new(vec![QueueEntry { id: 1, track_id: 7 }]),
+                current_id: None,
+            },
+            playback: PlaybackState::default(),
+            shutting_down: false,
+        };
+        assert!(!can_pause(&state));
+
+        state.queue.current_id = Some(1);
+        assert!(!can_pause(&state));
+
+        state.tracks = Arc::new(vec![track(7)]);
+        assert!(can_pause(&state));
+
+        state.queue.current_id = Some(2);
+        assert!(!can_pause(&state));
+    }
     #[test]
     fn seek_boundaries_use_microseconds_and_distinguish_next() {
         assert_eq!(
