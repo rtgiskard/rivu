@@ -1067,6 +1067,22 @@ impl GuiApp {
             });
         }
     }
+    fn update_metadata_track(&mut self, id: i64, cx: &mut Context<Self>) {
+        let Some(&index) = self.library_index.get(&id) else {
+            return;
+        };
+        let track = &self.state.library.tracks[index];
+        let values = (
+            track.title.clone(),
+            track.artist.clone(),
+            track.album.clone(),
+        );
+        self.metadata_track = Some(id);
+        self.set_value(Field::Title, values.0, cx);
+        self.set_value(Field::Artist, values.1, cx);
+        self.set_value(Field::Album, values.2, cx);
+    }
+
     fn select_track(&mut self, id: i64, multi: bool, cx: &mut Context<Self>) {
         if let Some(index) = self
             .library_selection
@@ -1082,18 +1098,7 @@ impl GuiApp {
                     .filter_map(|index| self.library_selection.items().get(index).copied()),
             );
         }
-        if let Some(&index) = self.library_index.get(&id) {
-            let track = &self.state.library.tracks[index];
-            let values = (
-                track.title.clone(),
-                track.artist.clone(),
-                track.album.clone(),
-            );
-            self.metadata_track = Some(id);
-            self.set_value(Field::Title, values.0, cx);
-            self.set_value(Field::Artist, values.1, cx);
-            self.set_value(Field::Album, values.2, cx);
-        }
+        self.update_metadata_track(id, cx);
         self.sync_waveform(cx);
         cx.notify();
     }
@@ -1107,6 +1112,7 @@ impl GuiApp {
         else {
             return;
         };
+        let track_id = self.state.queue.entries[index].track_id;
         if shift {
             let anchor = self
                 .selected_queue
@@ -1153,6 +1159,8 @@ impl GuiApp {
             self.selected_queue.insert(id);
             self.selected_queue.set_anchor(id);
         }
+        self.update_metadata_track(track_id, cx);
+        self.sync_waveform(cx);
         cx.notify();
     }
     fn refresh(&mut self, cx: &mut Context<Self>) {

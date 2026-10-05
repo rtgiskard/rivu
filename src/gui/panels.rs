@@ -1,6 +1,6 @@
 use super::{
     ACCENT, BORDER, Dragging, ERROR, ERROR_BG, Field, GuiApp, HIGHLIGHT, ListFocus, MUTED,
-    Measured, QueueDrag, UI_INSET, button, column, empty_state, format_time, icon_button,
+    Measured, QueueDrag, TEXT, UI_INSET, button, column, empty_state, format_time, icon_button,
     library::LibraryDrag, panel_surface, panel_toolbar, row, row_text, track_row,
 };
 pub(super) use super::{TRACK_HEIGHT, caption, list_row};
@@ -1212,10 +1212,7 @@ impl GuiApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut panel = column()
-            .id(("metadata-panel", panel_id))
-            .size_full()
-            .overflow_y_scroll();
+        let mut panel = panel_surface(("metadata-panel", panel_id));
         if let Some(track) = self
             .metadata_track
             .and_then(|id| self.library_index.get(&id))
@@ -1223,7 +1220,69 @@ impl GuiApp {
         {
             let id = track.id;
             let favorite = track.favorite;
-            panel = panel
+            let title = track.title.clone();
+            let artist = track.artist.clone();
+            let album = track.album.clone();
+            let details = div()
+                .id(("metadata-details", panel_id))
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .p(px(UI_INSET))
+                .gap_3()
+                .child(
+                    row()
+                        .justify_between()
+                        .items_start()
+                        .gap_3()
+                        .child(
+                            column()
+                                .flex_1()
+                                .min_w_0()
+                                .gap_1()
+                                .child(
+                                    caption(if title.is_empty() {
+                                        "Untitled"
+                                    } else {
+                                        title.as_str()
+                                    })
+                                    .text_lg()
+                                    .text_color(rgb(TEXT)),
+                                )
+                                .child(caption(if artist.is_empty() {
+                                    "Unknown artist"
+                                } else {
+                                    artist.as_str()
+                                }))
+                                .child(caption(if album.is_empty() {
+                                    "Unknown album"
+                                } else {
+                                    album.as_str()
+                                })),
+                        )
+                        .child(icon_button(
+                            ("metadata-favorite", panel_id),
+                            if favorite { "♥" } else { "♡" },
+                            if favorite {
+                                "Remove favorite"
+                            } else {
+                                "Add favorite"
+                            },
+                            cx,
+                            move |this, _, cx| {
+                                this.send(
+                                    Command::SetFavorite {
+                                        track_ids: vec![id],
+                                        favorite: !favorite,
+                                    },
+                                    cx,
+                                );
+                            },
+                        )),
+                )
+                .child(div().h(px(1.)).w_full().flex_shrink_0().bg(rgb(BORDER)))
                 .child(caption(format!(
                     "Track #{id} · {}",
                     if track.missing {
@@ -1232,6 +1291,7 @@ impl GuiApp {
                         "File available"
                     }
                 )))
+                .child(caption("Technical details"))
                 .child(caption(format!(
                     "Codec: {} · Sample rate: {} · Channels: {}",
                     if track.codec.is_empty() {
@@ -1251,21 +1311,18 @@ impl GuiApp {
                     }
                 )))
                 .child(caption(format!(
-                    "Duration: {}",
-                    track.duration.map_or("—".into(), format_time)
-                )))
-                .child(caption(format!(
-                    "Bitrate: {} · Source bits/sample: {}",
+                    "Duration: {} · Bitrate: {}",
+                    track.duration.map_or("—".into(), format_time),
                     track.bitrate_bps.map_or("—".into(), |value| format!(
                         "{:.1} kbps",
                         value as f64 / 1000.0
-                    )),
-                    track
-                        .bits_per_sample
-                        .map_or("—".into(), |value| value.to_string())
+                    ))
                 )))
                 .child(caption(format!(
-                    "Disc: {} · Track: {} · Release date: {}",
+                    "Bits/sample: {} · Disc: {} · Track: {} · Release: {}",
+                    track
+                        .bits_per_sample
+                        .map_or("—".into(), |value| value.to_string()),
                     track
                         .disc_number
                         .map_or("—".into(), |value| value.to_string()),
@@ -1281,8 +1338,8 @@ impl GuiApp {
                         .last_played
                         .map_or("Last played —".into(), last_played_text)
                 )))
-                .when_some(track.cue.as_ref(), |panel, cue| {
-                    panel.child(caption(format!(
+                .when_some(track.cue.as_ref(), |details, cue| {
+                    details.child(caption(format!(
                         "CUE: {} · Track {} · {}–{}",
                         cue.sheet.display(),
                         cue.number,
@@ -1290,60 +1347,38 @@ impl GuiApp {
                         cue.end_seconds().map_or("—".into(), format_time)
                     )))
                 })
-                .child(button(
-                    ("metadata-favorite", panel_id),
-                    if favorite {
-                        "Favorite: on (clear)"
-                    } else {
-                        "Favorite: off (set)"
-                    },
-                    cx,
-                    move |this, _, cx| {
-                        this.send(
-                            Command::SetFavorite {
-                                track_ids: vec![id],
-                                favorite: !favorite,
-                            },
-                            cx,
-                        );
-                    },
-                ))
-                .child(caption(track.path.to_string_lossy().into_owned()).truncate())
+                .child(caption("Editable metadata"))
                 .child(self.panel_field(Field::Title, "Title"))
                 .child(self.panel_field(Field::Artist, "Artist"))
                 .child(self.panel_field(Field::Album, "Album"))
-                .child(row().flex_wrap().child(button(
-                    ("metadata-save", panel_id),
-                    "Save metadata",
-                    cx,
-                    move |this, _, cx| {
-                        this.send(
-                            Command::EditTrack {
-                                track_id: id,
-                                title: this.value(Field::Title, cx),
-                                artist: this.value(Field::Artist, cx),
-                                album: this.value(Field::Album, cx),
-                            },
+                .child(
+                    row()
+                        .flex_wrap()
+                        .gap_2()
+                        .child(icon_button(
+                            ("metadata-save", panel_id),
+                            "✓",
+                            "Save metadata",
                             cx,
-                        );
-                    },
-                )))
-                .child(caption(
-                    "Edits are stored in your library. Media files are never modified.",
-                ));
+                            move |this, _, cx| {
+                                this.send(
+                                    Command::EditTrack {
+                                        track_id: id,
+                                        title: this.value(Field::Title, cx),
+                                        artist: this.value(Field::Artist, cx),
+                                        album: this.value(Field::Album, cx),
+                                    },
+                                    cx,
+                                );
+                            },
+                        ))
+                        .child(caption("Media files are never modified.")),
+                )
+                .child(caption(track.path.to_string_lossy().into_owned()).truncate());
+            panel = panel.child(details);
         } else {
-            panel = panel.child(caption(
+            panel = panel.child(column().flex_1().p(px(UI_INSET)).gap_2().child(empty_state(
                 "Select a Library track to edit title, artist and album.",
-            ));
-        }
-        if let Some(id) = self.state.current_track().map(|track| track.id) {
-            panel = panel.child(row().child(button(
-                ("metadata-current", panel_id),
-                "Edit playing track",
-                cx,
-                move |this, _, cx| {
-                    this.select_track(id, false, cx);
-                },
             )));
         }
         panel.into_any_element()
