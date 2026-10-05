@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 use walkdir::WalkDir;
 
@@ -51,6 +52,49 @@ pub struct ScanRecord {
     pub fingerprint: Option<String>,
     pub media: MediaInfo,
     pub cue: Option<CueSegment>,
+}
+/// Core-owned mutable library catalog. The published `AppState` keeps immutable
+/// snapshots; small playback-stat changes never mutate an `Arc` shared with a
+/// frontend and therefore never trigger implicit copy-on-write.
+pub struct LibraryState {
+    tracks: Vec<Track>,
+    dirty: bool,
+}
+
+impl LibraryState {
+    pub fn new(tracks: Vec<Track>) -> Self {
+        Self {
+            tracks,
+            dirty: false,
+        }
+    }
+
+    pub fn tracks(&self) -> &[Track] {
+        &self.tracks
+    }
+
+    pub fn replace(&mut self, tracks: Vec<Track>) {
+        self.tracks = tracks;
+        self.dirty = true;
+    }
+
+    pub fn update(&mut self, track_id: i64, update: impl FnOnce(&mut Track)) -> Result<()> {
+        let index = self
+            .tracks
+            .binary_search_by_key(&track_id, |track| track.id)
+            .map_err(|_| anyhow!("Track not found: {track_id}"))?;
+        update(&mut self.tracks[index]);
+        self.dirty = true;
+        Ok(())
+    }
+
+    pub fn snapshot(&mut self) -> Option<Arc<Vec<Track>>> {
+        if !self.dirty {
+            return None;
+        }
+        self.dirty = false;
+        Some(Arc::new(self.tracks.clone()))
+    }
 }
 
 #[derive(Clone, Debug, Default)]
