@@ -1,46 +1,21 @@
 #[cfg(feature = "ffmpeg")]
 use std::collections::BTreeSet;
-use std::{env, path::PathBuf, process::Command};
+use std::env;
+#[cfg(feature = "ffmpeg")]
+use std::path::PathBuf;
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=LIBCLANG_PATH");
-
-    let git_dir = Command::new("git")
-        .args(["rev-parse", "--git-dir"])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|path| PathBuf::from(path.trim()))
-        .unwrap_or_else(|| PathBuf::from(".git"));
-    println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
-    println!(
-        "cargo:rerun-if-changed={}",
-        git_dir.join("packed-refs").display()
-    );
-    if let Ok(head) = std::fs::read_to_string(git_dir.join("HEAD"))
-        && let Some(reference) = head.strip_prefix("ref: ").map(str::trim)
-    {
-        println!(
-            "cargo:rerun-if-changed={}",
-            git_dir.join(reference).display()
-        );
-    }
     println!("cargo:rerun-if-env-changed=RIVU_GIT_VERSION");
-    let git_version = env::var("RIVU_GIT_VERSION").ok().or_else(|| {
-        Command::new("git")
-            .args(["describe", "--long", "--tags", "--dirty", "--always"])
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .map(|version| version.trim().to_owned())
-    });
-    println!(
-        "cargo:rustc-env=RIVU_GIT_VERSION={}",
-        git_version.as_deref().unwrap_or("unknown")
-    );
+
+    let version = env::var("RIVU_GIT_VERSION")
+        .ok()
+        .map(|version| version.trim().to_owned())
+        .filter(|version| !version.is_empty())
+        .unwrap_or_else(|| env::var("CARGO_PKG_VERSION").expect("Cargo sets CARGO_PKG_VERSION"));
+    println!("cargo:rustc-env=RIVU_GIT_VERSION={version}");
+
     #[cfg(feature = "ffmpeg")]
     if env::var_os("CARGO_FEATURE_FFMPEG").is_some() {
         generate_ffmpeg_bindings();

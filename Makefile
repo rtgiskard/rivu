@@ -1,10 +1,11 @@
 PREFIX ?= /usr/local
 DESTDIR ?=
+RIVU_GIT_VERSION ?= $(shell git describe --long --tags --always --dirty 2>/dev/null || printf unknown)
 
 .PHONY: build clean install
 
 build:
-	cargo build --release --features ffmpeg
+	RIVU_GIT_VERSION="$(RIVU_GIT_VERSION)" cargo build --release --features ffmpeg
 
 clean:
 	cargo clean
