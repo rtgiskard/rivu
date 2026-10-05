@@ -289,6 +289,10 @@ pub enum Command {
     CreatePlaylist {
         name: String,
     },
+    CreatePlaylistWithTracks {
+        name: String,
+        track_ids: Vec<i64>,
+    },
     RenamePlaylist {
         playlist_id: i64,
         name: String,
@@ -345,6 +349,12 @@ pub struct Response {
     pub ok: bool,
     pub error: Option<String>,
     pub state: AppState,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Ack {
+    pub ok: bool,
+    pub error: Option<String>,
+    pub revision: u64,
 }
 
 #[cfg(test)]

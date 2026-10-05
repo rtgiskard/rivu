@@ -476,8 +476,10 @@ fn run() -> Result<()> {
         }
         action => {
             let (command, wait_scan) = translate(action)?;
-            let response = ipc::request(&socket, &command)?;
-            checked(response.clone())?;
+            let ack = ipc::request_ack(&socket, &command)?;
+            if !ack.ok {
+                bail!("{}", ack.error.as_deref().unwrap_or("Command failed"));
+            }
             if wait_scan {
                 loop {
                     thread::sleep(Duration::from_millis(200));
@@ -490,27 +492,33 @@ fn run() -> Result<()> {
                     }
                 }
             }
-            show(&response, args.json)
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&ack)?);
+            } else {
+                println!("Command accepted at revision {}", ack.revision);
+            }
+            Ok(())
         }
     }
 }
 
 fn open_gui(data_dir: PathBuf, config_path: PathBuf, paths: Vec<PathBuf>) -> Result<()> {
     let socket = data_dir.join("rivu.sock");
-    match ipc::request(&socket, &Command::ShowWindow) {
-        Ok(response) => {
-            checked(response)?;
+    match ipc::request_ack(&socket, &Command::ShowWindow) {
+        Ok(ack) if ack.ok => {
             if !paths.is_empty() {
-                checked(ipc::request(
-                    &socket,
-                    &Command::Scan {
-                        paths: paths.into_iter().map(client_path).collect::<Result<_>>()?,
-                        force: false,
-                    },
-                )?)?;
+                let scan = Command::Scan {
+                    paths: paths.into_iter().map(client_path).collect::<Result<_>>()?,
+                    force: false,
+                };
+                let ack = ipc::request_ack(&socket, &scan)?;
+                if !ack.ok {
+                    bail!("{}", ack.error.as_deref().unwrap_or("Command failed"));
+                }
             }
             Ok(())
         }
+        Ok(ack) => bail!("{}", ack.error.as_deref().unwrap_or("Command failed")),
         Err(error) if ipc::is_no_instance(&error) => start(data_dir, config_path, paths, true),
         Err(error) => Err(error),
     }

@@ -2,7 +2,7 @@ use crate::{
     config::Config,
     core::AppHandle,
     model::{
-        AppState, Command, DatabaseOptimization, HistoryEntry, PlaybackStatus, Playlist,
+        Ack, AppState, Command, DatabaseOptimization, HistoryEntry, PlaybackStatus, Playlist,
         QueueEntry, RepeatMode, Response, Track,
     },
 };
@@ -48,6 +48,7 @@ struct RequestFrame {
 #[derive(Serialize, Deserialize)]
 enum RequestKind {
     Command(Command),
+    Ack(Command),
     Watch { revision: u16 },
 }
 
@@ -101,6 +102,7 @@ struct FullStatus {
 enum WireState {
     Overview(CompactOverview),
     Full(Box<FullStatus>),
+    Ack { revision: u64 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -236,6 +238,15 @@ impl WireResponse {
             state,
         }
     }
+    fn from_ack(ack: Ack) -> Self {
+        Self {
+            ok: ack.ok,
+            error: ack.error,
+            state: WireState::Ack {
+                revision: ack.revision,
+            },
+        }
+    }
 }
 
 impl From<WireResponse> for Response {
@@ -246,8 +257,22 @@ impl From<WireResponse> for Response {
             state: match response.state {
                 WireState::Overview(state) => state.into(),
                 WireState::Full(state) => (*state).into(),
+                WireState::Ack { .. } => AppState::default(),
             },
         }
+    }
+}
+
+fn unpack_ack(frame: ResponseFrame) -> Result<Ack> {
+    let ok = frame.response.ok;
+    let error = frame.response.error;
+    match frame.response.state {
+        WireState::Ack { revision } => Ok(Ack {
+            ok,
+            error,
+            revision,
+        }),
+        _ => bail!("IPC response was not an acknowledgement"),
     }
 }
 
@@ -513,6 +538,14 @@ fn response_frame(response: Response, instance_id: u16, compact: bool) -> Respon
     }
 }
 
+fn ack_frame(ack: Ack, instance_id: u16) -> ResponseFrame {
+    ResponseFrame {
+        instance_id,
+        revision: ack.revision as u16,
+        response: WireResponse::from_ack(ack),
+    }
+}
+
 fn unpack_response(frame: ResponseFrame) -> Response {
     frame.response.into()
 }
@@ -627,11 +660,22 @@ async fn serve_connection(
             RequestKind::Command(cmd) => {
                 let response = command(&handle, cmd).await;
                 if response.ok {
-                    (overview_response(response.state, &overview), false)
+                    (overview_response(response.state, &overview), true)
                 } else {
                     (response, false)
                 }
             }
+            RequestKind::Ack(cmd) => {
+                let response = command(&handle, cmd).await;
+                let ack = Ack {
+                    ok: response.ok,
+                    error: response.error,
+                    revision: response.state.revision,
+                };
+                write_frame(&mut stream, &ack_frame(ack, instance_id)).await?;
+                continue;
+            }
+
             RequestKind::Watch { revision } => {
                 let Some(response) = wait_for_revision(
                     &mut stream,
@@ -796,5 +840,28 @@ pub fn request(path: &Path, command: &Command) -> Result<Response> {
             .context("Reading IPC response timed out")??
         };
         Ok(unpack_response(decode_frame::<ResponseFrame>(&bytes)?))
+    })
+}
+pub fn request_ack(path: &Path, command: &Command) -> Result<Ack> {
+    let runtime = client_runtime()?;
+    runtime.block_on(async {
+        let mut stream = UnixStream::connect(path).await.with_context(|| {
+            format!(
+                "Cannot connect to Rivu at {}. Start `rivu` or `rivu serve` first.",
+                path.display()
+            )
+        })?;
+        let request = RequestFrame {
+            instance_id: CLIENT_INSTANCE_UNKNOWN,
+            request: RequestKind::Ack(command.clone()),
+        };
+        write_frame(&mut stream, &request).await?;
+        let bytes = timeout(
+            Duration::from_secs(15),
+            read_frame(&mut stream, MAX_RESPONSE, &mut Vec::new()),
+        )
+        .await
+        .context("Reading IPC acknowledgement timed out")??;
+        unpack_ack(decode_frame::<ResponseFrame>(&bytes)?)
     })
 }
