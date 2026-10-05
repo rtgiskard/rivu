@@ -1,6 +1,7 @@
 use super::{
-    ACCENT, BORDER, Dragging, Field, GuiApp, ListFocus, MUTED, Measured, QueueDrag, button, column,
-    format_time, icon_button, library::LibraryDrag, row, row_text,
+    ACCENT, BORDER, Dragging, ERROR, ERROR_BG, Field, GuiApp, HIGHLIGHT, ListFocus, MUTED,
+    Measured, QueueDrag, UI_INSET, button, column, format_time, icon_button, library::LibraryDrag,
+    row, row_text,
 };
 pub(super) use super::{TRACK_HEIGHT, caption, list_row};
 use crate::model::{Command, PlaybackStatus, RepeatMode};
@@ -128,7 +129,7 @@ impl GuiApp {
                 )
                 .size(gpui::rems(3.))
                 .text_2xl()
-                .bg(rgb(0x283457))
+                .bg(rgb(HIGHLIGHT))
                 .text_color(rgb(ACCENT)),
             )
             .child(
@@ -779,7 +780,7 @@ impl GuiApp {
                                         },
                                     ))
                                     .drag_over::<QueueDrag>(|style, _, _, _| {
-                                        style.bg(rgb(0x293d40))
+                                        style.bg(rgb(HIGHLIGHT))
                                     }),
                                 )
                             })
@@ -1133,10 +1134,10 @@ impl GuiApp {
             if self.playlist_delete_confirm == Some(playlist_id) {
                 panel = panel.child(
                     column()
-                        .p_2()
-                        .bg(rgb(0x2d2230))
+                        .p(gpui::px(UI_INSET))
+                        .bg(rgb(ERROR_BG))
                         .border_1()
-                        .border_color(rgb(0xf7768e))
+                        .border_color(rgb(ERROR))
                         .rounded_sm()
                         .child(caption(
                             "This playlist is not empty. Delete it and all entries?",
@@ -1340,13 +1341,14 @@ impl GuiApp {
                             .filter_map(|index| {
                                 let item = this.state.history.get(index)?;
                                 let track_id = item.track_id;
-                                let mut item_row =
-                                    list_row(("history-entry", track_id as u64), false).child(
-                                        row_text(
-                                            item.title.clone(),
-                                            last_played_text(item.played_at),
-                                        ),
-                                    );
+                                let mut item_row = list_row(
+                                    ("history-entry", track_id as u64),
+                                    this.selected.contains(&track_id),
+                                )
+                                .child(row_text(
+                                    item.title.clone(),
+                                    last_played_text(item.played_at),
+                                ));
                                 if this.library_index.contains_key(&track_id) {
                                     item_row = item_row.on_click(cx.listener(
                                         move |this, event: &gpui::ClickEvent, _, cx| {

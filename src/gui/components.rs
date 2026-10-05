@@ -3,7 +3,7 @@ mod list;
 mod menu;
 mod tree;
 
-use super::{ACCENT, BORDER, PANEL, TEXT};
+use super::{ACCENT, BORDER, HIGHLIGHT, PANEL, TEXT, UI_INSET};
 pub(crate) use dropdown::{DropdownItem, DropdownState};
 use gpui::{Context, Div, ElementId, Render, SharedString, Stateful, Window, div, prelude::*, rgb};
 #[allow(unused_imports)]
@@ -16,9 +16,9 @@ pub(crate) use tree::{TreeKey, TreeRow, TreeState};
 pub(super) fn visualization_status(message: impl Into<SharedString>) -> Div {
     div()
         .w_full()
-        .p_3()
+        .p(gpui::px(UI_INSET))
         .text_sm()
-        .text_color(rgb(0x8794a4))
+        .text_color(rgb(super::MUTED))
         .child(message.into())
 }
 
@@ -31,7 +31,7 @@ impl Render for ButtonTooltip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
             .max_w(gpui::px(360.))
-            .px_3()
+            .px(gpui::px(UI_INSET))
             .py_2()
             .bg(rgb(PANEL))
             .border_1()
@@ -49,7 +49,7 @@ pub(crate) fn button_style(
 ) -> Stateful<Div> {
     div()
         .id(id)
-        .px_3()
+        .px(gpui::px(UI_INSET))
         .py_1()
         .rounded_md()
         .text_sm()
@@ -57,7 +57,7 @@ pub(crate) fn button_style(
         .bg(rgb(PANEL))
         .border_1()
         .border_color(rgb(BORDER))
-        .hover(|style| style.bg(rgb(0x292e42)).border_color(rgb(ACCENT)))
+        .hover(|style| style.bg(rgb(HIGHLIGHT)).border_color(rgb(ACCENT)))
         .child(label.into())
 }
 
@@ -119,8 +119,8 @@ pub(crate) fn tree_row(
         .gap_1()
         .rounded_sm()
         .cursor_pointer()
-        .bg(rgb(if selected { 0x293d40 } else { PANEL }))
-        .hover(|style| style.bg(rgb(0x293039)))
+        .bg(rgb(if selected { HIGHLIGHT } else { PANEL }))
+        .hover(|style| style.bg(rgb(HIGHLIGHT)))
         .child(div().w(gpui::px(14.)).text_xs().child(disclosure))
         .child(label.into())
 }
@@ -146,8 +146,8 @@ pub(crate) fn list_row(id: impl Into<ElementId>, selected: bool) -> Stateful<Div
         .rounded_sm()
         .overflow_hidden()
         .cursor_pointer()
-        .bg(rgb(if selected { 0x293d40 } else { PANEL }))
-        .hover(|style| style.bg(rgb(0x293039)))
+        .bg(rgb(if selected { HIGHLIGHT } else { PANEL }))
+        .hover(|style| style.bg(rgb(HIGHLIGHT)))
 }
 
 struct TrackTooltip {
@@ -159,7 +159,7 @@ impl Render for TrackTooltip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         super::column()
             .max_w(gpui::px(560.))
-            .px_3()
+            .px(gpui::px(UI_INSET))
             .py_2()
             .bg(rgb(PANEL))
             .border_1()

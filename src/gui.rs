@@ -40,6 +40,11 @@ const BORDER: u32 = 0x3b4261;
 const TEXT: u32 = 0xc0caf5;
 const MUTED: u32 = 0x565f89;
 const ACCENT: u32 = 0x7aa2f7;
+const HIGHLIGHT: u32 = 0x292e42;
+const ERROR: u32 = 0xf7768e;
+const ERROR_BG: u32 = 0x3b2330;
+const UI_INSET: f32 = 10.0;
+const SPLIT_GUTTER: f32 = 4.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Field {
@@ -1314,10 +1319,10 @@ impl GuiApp {
                     .bg(rgb(BG))
                     .hover(|style| style.bg(rgb(ACCENT)))
                     .when(axis == Axis::Horizontal, |view| {
-                        view.w(px(8.)).h_full().cursor_col_resize()
+                        view.w(px(SPLIT_GUTTER)).h_full().cursor_col_resize()
                     })
                     .when(axis == Axis::Vertical, |view| {
-                        view.h(px(8.)).w_full().cursor_row_resize()
+                        view.h(px(SPLIT_GUTTER)).w_full().cursor_row_resize()
                     })
                     .when(self.layout.locked, |view| view.cursor_default())
                     .on_mouse_down(
@@ -1354,7 +1359,7 @@ impl GuiApp {
                 let mut tabs = row()
                     .h(px(36.))
                     .flex_shrink_0()
-                    .px_2()
+                    .px(gpui::px(UI_INSET))
                     .gap_1()
                     .border_b_1()
                     .border_color(rgb(BORDER));
@@ -1379,7 +1384,7 @@ impl GuiApp {
                             .rounded_sm()
                             .text_xs()
                             .when(!self.layout.locked, |view| view.cursor_move())
-                            .bg(rgb(if active == panel_id { 0x29343b } else { PANEL }))
+                            .bg(rgb(if active == panel_id { HIGHLIGHT } else { PANEL }))
                             .text_color(rgb(if active == panel_id { TEXT } else { MUTED }))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.layout.activate(panel_id);
@@ -1441,7 +1446,7 @@ impl GuiApp {
                             .map(|spec| (spec.render)(self, panel.id, window, cx))
                             .unwrap_or_else(|| {
                                 div()
-                                    .p_4()
+                                    .p(gpui::px(UI_INSET))
                                     .child(format!("Unknown panel: {}", panel.kind))
                                     .into_any_element()
                             })
@@ -1452,7 +1457,7 @@ impl GuiApp {
                     .flex_1()
                     .min_h_0()
                     .min_w_0()
-                    .p_3()
+                    .p(gpui::px(UI_INSET))
                     .overflow_hidden()
                     .child(content);
                 let mut panel = column()
@@ -1792,15 +1797,22 @@ impl Render for GuiApp {
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| this.finish_drag(cx)),
             )
-            .child(div().flex_1().min_h_0().min_w_0().p_3().child(workspace));
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .p(gpui::px(UI_INSET))
+                    .child(workspace),
+            );
 
         let error = self.error.clone().or_else(|| self.state.last_error.clone());
         let mut footer = row()
             .h(rems(3.0))
             .flex_shrink_0()
-            .px_3()
+            .px(gpui::px(UI_INSET))
             .pt_1()
-            .pb_3()
+            .pb(gpui::px(UI_INSET))
             .text_xs()
             .text_color(rgb(MUTED));
         if let Some(error) = error {
@@ -1809,7 +1821,7 @@ impl Render for GuiApp {
                     .flex_1()
                     .min_w_0()
                     .px_2()
-                    .bg(rgb(0x422b2a))
+                    .bg(rgb(ERROR_BG))
                     .text_color(rgb(TEXT))
                     .child(copyable_message("copy-error", error, cx))
                     .child(
@@ -1825,9 +1837,9 @@ impl Render for GuiApp {
                         )
                         .size(px(24.0))
                         .border_0()
-                        .bg(rgb(0x422b2a))
+                        .bg(rgb(ERROR_BG))
                         .text_color(rgb(MUTED))
-                        .hover(|style| style.bg(rgb(0x422b2a)).text_color(rgb(TEXT))),
+                        .hover(|style| style.bg(rgb(ERROR_BG)).text_color(rgb(TEXT))),
                     ),
             );
         } else if self.state.scanning {
@@ -1919,9 +1931,9 @@ impl Render for GuiApp {
                     }))
                     .absolute()
                     .bottom(rems(3.0))
-                    .right_3()
+                    .right(gpui::px(UI_INSET))
                     .max_w(px(560.))
-                    .p_3()
+                    .p(gpui::px(UI_INSET))
                     .gap_1()
                     .bg(rgb(PANEL))
                     .border_1()
@@ -2021,7 +2033,7 @@ impl Render for GuiApp {
                         .when(self.layout.locked, |view| {
                             view.child(
                                 div()
-                                    .px_3()
+                                    .px(gpui::px(UI_INSET))
                                     .py_1()
                                     .text_sm()
                                     .text_color(rgb(MUTED))
@@ -2053,11 +2065,15 @@ impl Render for GuiApp {
                 }
                 PanelMenuPage::ConfirmClearQueue => {
                     menu = menu
-                        .child(div().px_3().py_2().text_sm().child(format!(
+                        .child(div().px(gpui::px(UI_INSET)).py_2().text_sm().child(format!(
                             "Clear all {} queued entries?",
                             self.state.queue.len()
                         )))
-                        .child(panels::caption("This also stops playback.").px_3().pb_2())
+                        .child(
+                            panels::caption("This also stops playback.")
+                                .px(gpui::px(UI_INSET))
+                                .pb_2(),
+                        )
                         .child(
                             row()
                                 .child(
@@ -2081,14 +2097,14 @@ impl Render for GuiApp {
                                         },
                                     )
                                     .flex_1()
-                                    .text_color(rgb(0xf7768e)),
+                                    .text_color(rgb(ERROR)),
                                 ),
                         );
                 }
                 PanelMenuPage::Playlists => {
                     menu = menu.child(
                         div()
-                            .px_3()
+                            .px(gpui::px(UI_INSET))
                             .py_2()
                             .text_sm()
                             .child("Add selected tracks to playlist"),
@@ -2210,7 +2226,7 @@ impl Render for GuiApp {
                                 row()
                                     .h(rems(2.5))
                                     .flex_shrink_0()
-                                    .px_3()
+                                    .px(gpui::px(UI_INSET))
                                     .child(div().flex_1().text_lg().child("Settings")),
                             )
                             .child(settings),

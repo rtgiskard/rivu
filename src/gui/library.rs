@@ -22,7 +22,7 @@ impl Render for LibraryDrag {
             LibraryNode::Track(_) => "Track".to_owned(),
         };
         div()
-            .px_3()
+            .px(gpui::px(super::UI_INSET))
             .py_2()
             .bg(rgb(super::PANEL))
             .border_1()

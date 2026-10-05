@@ -7,13 +7,14 @@
 
 use std::ops::Range;
 
+use super::{ACCENT, BORDER, MUTED, PANEL, TEXT};
 use gpui::prelude::*;
 use gpui::{
     App, ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, IntoElement,
     KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
     Pixels, Point, ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle,
-    Window, actions, div, fill, hsla, point, px, relative, rgb, rgba, size,
+    Window, actions, div, fill, point, px, relative, rgb, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -550,7 +551,7 @@ impl Element for InputElement {
         let cursor_offset = input.cursor_offset();
         let style = window.text_style();
         let (display_text, text_color) = if content.is_empty() {
-            (input.placeholder.clone(), hsla(0.52, 0.12, 0.72, 0.62))
+            (input.placeholder.clone(), rgb(MUTED).alpha(0.7).into())
         } else {
             (content, style.color)
         };
@@ -601,7 +602,7 @@ impl Element for InputElement {
                         point(bounds.left() + cursor_pos, bounds.top()),
                         size(px(1.5), bounds.bottom() - bounds.top()),
                     ),
-                    rgb(0x5cc9bd),
+                    rgb(ACCENT),
                 )),
             )
         } else {
@@ -617,7 +618,7 @@ impl Element for InputElement {
                             bounds.bottom(),
                         ),
                     ),
-                    rgba(0x2d85807a),
+                    rgb(ACCENT).alpha(0.28),
                 )),
                 None,
             )
@@ -695,14 +696,10 @@ impl Render for Input {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .bg(rgb(0x171d21))
-            .text_color(rgb(0xd8e6e4))
+            .bg(rgb(PANEL))
+            .text_color(rgb(TEXT))
             .border_1()
-            .border_color(if focused {
-                rgb(0x3d7772)
-            } else {
-                rgb(0x2a3438)
-            })
+            .border_color(if focused { rgb(ACCENT) } else { rgb(BORDER) })
             .rounded(px(5.))
             .line_height(px(20.))
             .text_size(px(14.))
