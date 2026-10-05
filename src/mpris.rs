@@ -420,7 +420,7 @@ impl Player {
 }
 
 fn request(handle: &AppHandle, command: Command) -> fdo::Result<()> {
-    let response = handle.request(command);
+    let response = handle.request_ack(command);
     if response.ok {
         Ok(())
     } else {

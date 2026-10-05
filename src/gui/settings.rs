@@ -461,7 +461,7 @@ impl GuiApp {
         cx.spawn(async move |this, cx| {
             let response = cx
                 .background_executor()
-                .spawn(async move { handle.request(Command::Configure { config }) })
+                .spawn(async move { handle.request_ack(Command::Configure { config }) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.settings.session != session {
