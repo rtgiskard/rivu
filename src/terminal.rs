@@ -183,7 +183,17 @@ fn run_loop(socket_path: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>
                             ui.accept_response(response)
                         }
                         KeyAction::Command(command) => {
-                            ui.accept_response(ipc::request(socket_path, &command)?)
+                            let ack = ipc::request_ack(socket_path, &command)?;
+                            let response = if ack.ok {
+                                ipc::request(socket_path, &Command::Overview)?
+                            } else {
+                                StateResponse {
+                                    ok: false,
+                                    error: ack.error,
+                                    state: state.clone(),
+                                }
+                            };
+                            ui.accept_response(response)
                         }
                         KeyAction::Ignored => {
                             redraw |= ui.local_revision != local_revision;

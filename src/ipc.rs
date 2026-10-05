@@ -650,7 +650,7 @@ async fn serve_connection(
         };
         let (response, compact) = match request.request {
             RequestKind::Command(Command::Overview) => {
-                (overview_response(handle.snapshot(), &overview), false)
+                (overview_response(handle.snapshot(), &overview), true)
             }
             RequestKind::Command(Command::Status) => {
                 (command(&handle, Command::Status).await, false)
