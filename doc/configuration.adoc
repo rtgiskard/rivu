@@ -69,6 +69,54 @@ available while locked.
 Errors and scan progress appear in the footer. Click a message or its copy icon
 to copy the complete text.
 
+=== Visualization spaces
+
+Rivu provides four visualization spaces with different meanings rather than four
+versions of the same chart:
+
+[cols="1,2,3,3", options="header"]
+|===
+| Space | What it answers | Data and axes | Visual encoding
+
+| Waveform
+| Where are the loud and quiet parts of the selected track?
+| Decoded PCM over track time; left and right logical channels are placed above
+  and below the centerline.
+| RMS amplitude is the filled body, retained peak is the thin outer line, and
+  unknown timeline intervals remain blank.
+
+| Spectrum
+| Which frequencies are active right now?
+| The latest shared FFT frame, grouped around traditional 12-note-per-octave
+  musical bands.
+| Color represents normalized dB intensity using the fixed DeaDBeeF gradient.
+
+| Spectrogram
+| How does frequency energy change over recent audio time?
+| A rolling history of FFT frames; horizontal axis is audio time and vertical
+  axis is logarithmic frequency from 16 Hz to Nyquist.
+| Color represents dB intensity using the shared DeaDBeeF gradient. Missing
+  history stays blank; dense frames are max-pooled so transients survive.
+
+| Radial Spectrum
+| What is the current audio activity in a compact radial form?
+| The shared FFT is reduced to normalized configurable bands and rendered as
+  circular Bars, Rings, or both; there are no absolute frequency labels.
+| Sensitivity, rotation, bar width, glow layers, Bloom, ring opacity, and the
+  two endpoint colors control presentation rather than analysis semantics.
+|===
+
+Waveform is a time-domain view. Spectrum and Spectrogram are frequency-domain
+views of the same analyzer. Radial Spectrum is a presentation-oriented
+projection of that analyzer, not a replacement for Spectrum. All four share
+the configured background; only Spectrum and Spectrogram use the fixed
+DeaDBeeF palette. Waveform has its own palette, while Radial Spectrum has two
+endpoint colors.
+
+Use Waveform for track structure and channel balance, Spectrum for an immediate
+frequency snapshot, Spectrogram for frequency history, and Radial Spectrum for
+a compact at-a-glance activity indicator.
+
 The Waveform panel shows a whole-track timeline, including CUE boundaries. It
 builds a progressive preview from playback PCM, leaves unknown intervals blank,
 and stores at most 1600 peak bins. `Load full waveform now` starts an asynchronous
@@ -114,27 +162,31 @@ a non-playing selection preview does not issue a playback seek.
 
 Spectrum displays width-aware musical bands with configurable styles, peak hold,
 and smoothing. Spectrogram displays frequency over time with a separate history
-range. Both views follow the source Nyquist limit and configured frequency range.
+range. Both views use a logarithmic 16 Hz-to-Nyquist frequency axis and retain
+only analyzer bands available for the current sample rate.
 
-The three visualizations share `visual_background` and `visual_palette`. The
-default background is `#08090c`; palette `a` is TokyoNight and `b` is the
-DeaDBeeF-inspired gradient. `analysis_fps` accepts 5–60 updates per second.
-Changing visual settings redraws the views without decoding the track again.
+The Spectrum and Spectrogram palette is the seven-stop DeaDBeeF gradient from
+black through blue, cyan, green, yellow, and orange to red. `analysis_fps`
+accepts 5–60 updates per second. Changing visual settings redraws the views
+without decoding the track again.
+
+Bars and Outline use one plot-wide vertical gradient rather than a separately
+normalized gradient per bar. LED segments use the same bottom-to-top energy
+direction; Line and Solid use a single continuous path. The low-energy end has
+a short black floor before the original DeaDBeeF blue-to-red color sequence.
 
 Spectrum's independent settings are:
 
 * `spectrum_style`: `bars` (default), `outline`, `led`, `line`, or `solid`.
   These draw filled bars, outlined bars, segmented LED bars, a connected line,
   or a filled continuous spectrum. Style changes also redraw a paused frame.
-* `spectrum_min_hz` / `spectrum_max_hz`: frequency interval, default 20–20000 Hz.
 * `spectrum_db_range`: amplitude span, 1–160 dB, default 70.
 * `spectrum_fft_size`: 512, 1024, 2048, 4096, 8192 (default), 16384, or 32768.
 * `spectrum_window`: `hann`, `blackman_harris` (default), or `none`.
-* `spectrum_bands_per_octave`: 1–48, default 24.
 * `spectrum_bars`: `0` (automatic) or 1–512; narrow panels cap the count.
 * `spectrum_bar_width`: 1–20 pixels, default 3, controls automatic density.
 * `spectrum_gap`: 0–8 pixels, default 1, reduced to keep bars visible.
-* `spectrum_interpolate` and `spectrum_log_scale`: enabled by default.
+* `spectrum_interpolate`: interpolate between neighboring musical bands, enabled by default.
 * `spectrum_peaks`: peak markers, enabled by default.
 * `spectrum_peak_hold_ms`: 0–2000 ms; default 400.
 * `spectrum_bar_hold_ms`: 0–2000 ms; default 0.
@@ -143,8 +195,8 @@ Spectrum's independent settings are:
 * `spectrum_smoothing_ms`: 0–1000 ms, default 80, smooths release while retaining
   immediate attacks. Motion follows audio time and freezes while paused.
 * `spectrum_grid`: faint horizontal references, independent of labels.
-* `spectrum_labels`: axis labels, enabled by default; bottom frequencies show only
-  the two endpoints, never a midpoint.
+* `spectrum_labels`: axis labels, enabled by default; the two endpoints use
+  nearest musical note names.
 
 === Radial Spectrum control
 
