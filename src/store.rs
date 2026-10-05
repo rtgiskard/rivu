@@ -378,6 +378,40 @@ impl Store {
             byidentity.insert(key, record.id);
         }
         let mut seen = HashSet::new();
+        tx.execute_batch(
+            "CREATE TEMP TABLE scan_stage(
+                resolved_id INTEGER,
+                path TEXT NOT NULL,
+                fingerprint TEXT,
+                file_size INTEGER NOT NULL,
+                modified_ns INTEGER NOT NULL,
+                raw_title TEXT NOT NULL,
+                raw_artist TEXT NOT NULL,
+                raw_album TEXT NOT NULL,
+                duration REAL,
+                codec TEXT NOT NULL,
+                channels INTEGER NOT NULL,
+                sample_rate INTEGER NOT NULL,
+                cue_sheet TEXT,
+                cue_number INTEGER,
+                cue_start_frame INTEGER,
+                cue_end_frame INTEGER,
+                probe_version INTEGER NOT NULL,
+                bitrate_bps INTEGER,
+                track_number INTEGER,
+                disc_number INTEGER,
+                bits_per_sample INTEGER,
+                release_date TEXT
+            )",
+        )?;
+        let mut stage = tx.prepare(
+            "INSERT INTO temp.scan_stage(
+                resolved_id,path,fingerprint,file_size,modified_ns,raw_title,raw_artist,raw_album,
+                duration,codec,channels,sample_rate,cue_sheet,cue_number,cue_start_frame,
+                cue_end_frame,probe_version,bitrate_bps,track_number,disc_number,bits_per_sample,
+                release_date
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        )?;
         for r in &result.records {
             let key = identity(&r.path, r.cue.as_ref());
             let id = byidentity.get(&key).copied().or_else(|| {
@@ -414,16 +448,83 @@ impl Store {
                 .map(i64::try_from)
                 .transpose()
                 .context("Audio bitrate exceeds database range")?;
-            let id = if let Some(id) = id {
-                tx.execute("UPDATE tracks SET path=?,fingerprint=?,file_size=?,modified_ns=?,raw_title=?,raw_artist=?,raw_album=?,duration=?,codec=?,channels=?,sample_rate=?,cue_sheet=?,cue_number=?,cue_start_frame=?,cue_end_frame=?,missing=0,probe_version=?,bitrate_bps=?,track_number=?,disc_number=?,bits_per_sample=?,release_date=? WHERE id=?",params![r.path.to_str(),r.fingerprint.as_deref(),r.size as i64,r.modified_ns,m.title,m.artist,m.album,m.duration,m.codec,m.channels as i64,m.sample_rate as i64,sheet,number,start,end,PROBE_VERSION,bitrate,m.track_number,m.disc_number,m.bits_per_sample,m.release_date,id])?;
-                id
-            } else {
-                tx.execute("INSERT INTO tracks(path,fingerprint,file_size,modified_ns,raw_title,raw_artist,raw_album,duration,codec,channels,sample_rate,cue_sheet,cue_number,cue_start_frame,cue_end_frame,probe_version,bitrate_bps,track_number,disc_number,bits_per_sample,release_date) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",params![r.path.to_str(),r.fingerprint.as_deref(),r.size as i64,r.modified_ns,m.title,m.artist,m.album,m.duration,m.codec,m.channels as i64,m.sample_rate as i64,sheet,number,start,end,PROBE_VERSION,bitrate,m.track_number,m.disc_number,m.bits_per_sample,m.release_date])?;
-                tx.last_insert_rowid()
-            };
-            byidentity.insert(key, id);
-            seen.insert(id);
+            stage.execute(params![
+                id,
+                r.path.to_str(),
+                r.fingerprint.as_deref(),
+                r.size as i64,
+                r.modified_ns,
+                m.title,
+                m.artist,
+                m.album,
+                m.duration,
+                m.codec,
+                m.channels as i64,
+                m.sample_rate as i64,
+                sheet,
+                number,
+                start,
+                end,
+                PROBE_VERSION,
+                bitrate,
+                m.track_number,
+                m.disc_number,
+                m.bits_per_sample,
+                m.release_date,
+            ])?;
+            if let Some(id) = id {
+                seen.insert(id);
+            }
         }
+        drop(stage);
+        tx.execute(
+            "UPDATE tracks SET
+                path=s.path,fingerprint=s.fingerprint,file_size=s.file_size,modified_ns=s.modified_ns,
+                raw_title=s.raw_title,raw_artist=s.raw_artist,raw_album=s.raw_album,duration=s.duration,
+                codec=s.codec,channels=s.channels,sample_rate=s.sample_rate,cue_sheet=s.cue_sheet,
+                cue_number=s.cue_number,cue_start_frame=s.cue_start_frame,cue_end_frame=s.cue_end_frame,
+                missing=0,probe_version=s.probe_version,bitrate_bps=s.bitrate_bps,
+                track_number=s.track_number,disc_number=s.disc_number,bits_per_sample=s.bits_per_sample,
+                release_date=s.release_date
+             FROM temp.scan_stage AS s WHERE tracks.id=s.resolved_id",
+            [],
+        )?;
+        tx.execute(
+            "INSERT INTO tracks(
+                path,fingerprint,file_size,modified_ns,raw_title,raw_artist,raw_album,duration,codec,
+                channels,sample_rate,cue_sheet,cue_number,cue_start_frame,cue_end_frame,probe_version,
+                bitrate_bps,track_number,disc_number,bits_per_sample,release_date
+             ) SELECT path,fingerprint,file_size,modified_ns,raw_title,raw_artist,raw_album,duration,codec,
+                channels,sample_rate,cue_sheet,cue_number,cue_start_frame,cue_end_frame,probe_version,
+                bitrate_bps,track_number,disc_number,bits_per_sample,release_date
+             FROM temp.scan_stage WHERE resolved_id IS NULL",
+            [],
+        )?;
+        let mut current_stmt = tx.prepare(
+            "SELECT id,path,fingerprint,cue_sheet,cue_number,cue_start_frame,cue_end_frame FROM tracks",
+        )?;
+        let current: Vec<Existing> = current_stmt
+            .query_map([], |r| {
+                Ok(Existing {
+                    id: r.get(0)?,
+                    path: PathBuf::from(r.get::<_, String>(1)?),
+                    hash: r.get(2)?,
+                    cue: cue_from_row(r, 3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(current_stmt);
+        let mut current_by_identity = HashMap::new();
+        for record in &current {
+            current_by_identity.insert(identity(&record.path, record.cue.as_ref()), record.id);
+        }
+        for r in &result.records {
+            if let Some(id) = current_by_identity.get(&identity(&r.path, r.cue.as_ref())) {
+                seen.insert(*id);
+            }
+        }
+        tx.execute_batch("DROP TABLE temp.scan_stage")?;
+        let mut mark_missing = tx.prepare("UPDATE tracks SET missing=1 WHERE id=?1")?;
         for o in &old {
             let owner = o
                 .cue
@@ -436,9 +537,11 @@ impl Store {
                     .iter()
                     .any(|root| owner == root || owner.starts_with(root))
             {
-                tx.execute("UPDATE tracks SET missing=1 WHERE id=?", [o.id])?;
+                mark_missing.execute([o.id])?;
             }
         }
+        drop(mark_missing);
+        drop(current);
         tx.commit()?;
         Ok(())
     }
