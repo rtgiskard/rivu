@@ -789,14 +789,11 @@ impl GuiApp {
         let font = self.settings.draft.ui_font.clone();
         let font_dropdown = dropdown_button(
             "settings-font",
-            format!(
-                "{}",
-                if font.is_empty() {
-                    "system"
-                } else {
-                    font.as_str()
-                }
-            ),
+            if font.is_empty() {
+                "system".to_owned()
+            } else {
+                font
+            },
             cx,
             |this, _, _| {
                 let values = ["", "sans-serif", "serif", "monospace"];
@@ -969,7 +966,12 @@ impl GuiApp {
             .gap_3()
             .items_center()
             .text_center()
-            .child(div().size(px(128.)).child(cx.new(|_| Artwork::new())))
+            .child(
+                div()
+                    .mt(px(20.))
+                    .size(px(128.))
+                    .child(cx.new(|_| Artwork::new())),
+            )
             .child(caption("rivu, a local-first music player"))
             .child(caption(format!("Version {}", env!("CARGO_PKG_VERSION"))))
             .child(caption("GPL-3.0-or-later"))
