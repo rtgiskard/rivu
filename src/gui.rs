@@ -9,7 +9,8 @@ mod visuals;
 mod waveform;
 use crate::{
     core::AppHandle,
-    model::{Command, GuiSnapshot, PlaybackStatus, playback_key_command},
+    model::{Command, PlaybackStatus, playback_key_command},
+    projection::GuiSnapshot,
 };
 use anyhow::Result;
 use ashpd::desktop::file_chooser::SelectedFiles;
@@ -1817,7 +1818,7 @@ impl Render for GuiApp {
                         }
                     }
                     _ => {
-                        if let Some(command) = playback_key_command(key, &this.state) {
+                        if let Some(command) = playback_key_command(key, &this.state.playback) {
                             this.send(command, cx);
                         }
                     }

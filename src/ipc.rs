@@ -1,11 +1,12 @@
 use crate::{
     config::Config,
-    core::AppHandle,
+    core::{AppHandle, CoreState},
     model::{
-        Ack, AppState, Command, DatabaseOptimization, HistoryEntry, LibrarySnapshot, PlaybackState,
-        PlaybackStatus, Playlist, QueueEntry, QueueState, RepeatMode, StateResponse, SystemState,
-        Track,
+        Command, DatabaseOptimization, HistoryEntry, LibrarySnapshot, PlaybackState,
+        PlaybackStatus, Playlist, QueueEntry, QueueState, RepeatMode, SystemState, Track,
     },
+    projection::ClientSnapshot,
+    response::{Ack, StateResponse},
 };
 use anyhow::{Context, Error, Result, bail};
 use bincode::{
@@ -48,9 +49,27 @@ struct RequestFrame {
 
 #[derive(Serialize, Deserialize)]
 enum RequestKind {
+    Command(String),
+    Ack(String),
+    Watch { revision: u16 },
+}
+
+enum DecodedRequest {
     Command(Command),
     Ack(Command),
     Watch { revision: u16 },
+}
+
+fn decode_request(frame: RequestFrame) -> Result<DecodedRequest> {
+    Ok(match frame.request {
+        RequestKind::Command(command) => {
+            DecodedRequest::Command(serde_json::from_str(&command).context("Decoding command")?)
+        }
+        RequestKind::Ack(command) => {
+            DecodedRequest::Ack(serde_json::from_str(&command).context("Decoding command")?)
+        }
+        RequestKind::Watch { revision } => DecodedRequest::Watch { revision },
+    })
 }
 
 #[derive(Serialize, Deserialize)]
@@ -102,7 +121,7 @@ struct FullStatus {
     history: Vec<HistoryEntry>,
     devices: Vec<String>,
     selected_device: Option<String>,
-    config: Config,
+    config: String,
     database_optimization: Option<DatabaseOptimization>,
 }
 
@@ -120,7 +139,7 @@ struct WireResponse {
     state: WireState,
 }
 
-fn playback_snapshot(state: &AppState) -> PlaybackSnapshot {
+fn playback_snapshot(state: &ClientSnapshot) -> PlaybackSnapshot {
     PlaybackSnapshot {
         position_ms: (state.playback.position.max(0.0) * 1000.0).round() as u64,
         duration_ms: state
@@ -147,7 +166,7 @@ fn playback_snapshot(state: &AppState) -> PlaybackSnapshot {
     }
 }
 
-fn state_from_overview(state: CompactOverview) -> AppState {
+fn state_from_overview(state: CompactOverview) -> ClientSnapshot {
     let CompactOverview {
         library,
         library_revision,
@@ -158,7 +177,7 @@ fn state_from_overview(state: CompactOverview) -> AppState {
         last_error,
         playback,
     } = state;
-    AppState {
+    ClientSnapshot {
         library: LibrarySnapshot {
             tracks: Arc::new(library),
             revision: library_revision,
@@ -204,22 +223,24 @@ fn state_from_overview(state: CompactOverview) -> AppState {
     }
 }
 
-impl From<CompactOverview> for AppState {
+impl From<CompactOverview> for ClientSnapshot {
     fn from(state: CompactOverview) -> Self {
         state_from_overview(state)
     }
 }
 
-impl From<FullStatus> for AppState {
-    fn from(state: FullStatus) -> Self {
+impl TryFrom<FullStatus> for ClientSnapshot {
+    type Error = serde_json::Error;
+
+    fn try_from(state: FullStatus) -> Result<Self, Self::Error> {
         let mut app = state_from_overview(state.overview);
         app.library.playlists = Arc::new(state.playlists);
         app.library.history = Arc::new(state.history);
         app.system.devices = Arc::new(state.devices);
         app.system.selected_device = state.selected_device;
-        app.system.config = Arc::new(state.config);
+        app.system.config = Arc::new(serde_json::from_str(&state.config)?);
         app.system.database_optimization = state.database_optimization;
-        app
+        Ok(app)
     }
 }
 
@@ -245,7 +266,8 @@ impl WireResponse {
                 history: state.library.history.as_ref().clone(),
                 devices: state.system.devices.as_ref().clone(),
                 selected_device: state.system.selected_device,
-                config: state.system.config.as_ref().clone(),
+                config: serde_json::to_string(state.system.config.as_ref())
+                    .expect("Config serialization cannot fail"),
                 database_optimization: state.system.database_optimization,
             }))
         };
@@ -309,25 +331,25 @@ struct OverviewCache {
 }
 
 impl OverviewCache {
-    fn cached(&self, state: &AppState) -> Option<Arc<Vec<Track>>> {
+    fn cached(&self, state: &CoreState) -> Option<Arc<Vec<Track>>> {
         let unchanged = self.library.as_ptr() == Arc::as_ptr(&state.library.tracks)
             && self.queue.as_ptr() == Arc::as_ptr(&state.queue.entries)
             && self.current == state.queue.current_id;
         unchanged.then(|| self.tracks.clone())
     }
 
-    fn update(&mut self, state: &AppState, tracks: Arc<Vec<Track>>) {
+    fn update(&mut self, state: &CoreState, tracks: Arc<Vec<Track>>) {
         self.library = Arc::downgrade(&state.library.tracks);
         self.queue = Arc::downgrade(&state.queue.entries);
         self.current = state.queue.current_id;
         self.tracks = tracks;
     }
 
-    fn response(state: AppState, tracks: Arc<Vec<Track>>) -> StateResponse {
+    fn response(state: CoreState, tracks: Arc<Vec<Track>>) -> StateResponse {
         StateResponse {
             ok: true,
             error: None,
-            state: AppState {
+            state: ClientSnapshot {
                 library: LibrarySnapshot {
                     tracks,
                     revision: state.library.revision,
@@ -403,7 +425,11 @@ impl Server {
                         return;
                     }
                 };
-                let listener = match UnixListener::bind(&worker_path) {
+                let listener = {
+                    let _guard = runtime.enter();
+                    UnixListener::bind(&worker_path)
+                };
+                let listener = match listener {
                     Ok(listener) => listener,
                     Err(error) => {
                         let _ = ready_tx.send(Err(anyhow::Error::from(error)));
@@ -416,7 +442,7 @@ impl Server {
                     let _ = ready_tx.send(Err(anyhow::Error::from(error)));
                     return;
                 }
-                let (revision_tx, revision_rx) = watch::channel(handle.snapshot().system.revision);
+                let (revision_tx, revision_rx) = watch::channel(handle.core_state().system.revision);
                 let updates = handle.subscribe();
                 let bridge_handle = handle.clone();
                 let bridge = thread::Builder::new()
@@ -425,7 +451,7 @@ impl Server {
                         loop {
                             crossbeam_channel::select! {
                                 recv(updates) -> message => {
-                                    if message.is_ok() { let _ = revision_tx.send(bridge_handle.snapshot().system.revision); } else { break; }
+                                    if message.is_ok() { let _ = revision_tx.send(bridge_handle.core_state().system.revision); } else { break; }
                                 }
                                 recv(bridge_stop_rx) -> _ => break,
                             }
@@ -539,13 +565,13 @@ fn unpack_response(frame: ResponseFrame) -> Result<StateResponse> {
     let WireResponse { ok, error, state } = frame.response;
     let state = match state {
         WireState::Overview(state) => state.into(),
-        WireState::Full(state) => (*state).into(),
+        WireState::Full(state) => (*state).try_into()?,
         WireState::Ack { .. } => bail!("IPC acknowledgement used where state was required"),
     };
     Ok(StateResponse { ok, error, state })
 }
 
-fn overview_response(state: AppState, overview: &Mutex<OverviewCache>) -> StateResponse {
+fn overview_response(state: CoreState, overview: &Mutex<OverviewCache>) -> StateResponse {
     let cached = overview.lock().cached(&state);
     let tracks = cached.unwrap_or_else(|| {
         let mut ids: HashSet<i64> = state
@@ -573,7 +599,7 @@ fn overview_response(state: AppState, overview: &Mutex<OverviewCache>) -> StateR
 }
 
 async fn command(handle: &AppHandle, command: Command) -> StateResponse {
-    let fallback = handle.snapshot();
+    let fallback = ClientSnapshot::from_core(&handle.core_state());
     let duration = if matches!(command, Command::OptimizeDatabase) {
         Duration::from_secs(120)
     } else {
@@ -612,7 +638,7 @@ async fn wait_for_revision(
     shutdown: &mut watch::Receiver<bool>,
 ) -> Option<StateResponse> {
     loop {
-        let state = handle.snapshot();
+        let state = handle.core_state();
         if !revision_matches(state.system.revision, revision) || state.system.shutting_down {
             return Some(overview_response(state, overview));
         }
@@ -639,34 +665,34 @@ async fn serve_connection(
     let mut pending = Vec::new();
     loop {
         let bytes = tokio::select! { frame = read_frame(&mut stream, MAX_REQUEST, &mut pending) => frame?, changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() { return Ok(()); } continue; } };
-        let request = match decode_frame::<RequestFrame>(&bytes) {
+        let request = match decode_frame::<RequestFrame>(&bytes).and_then(decode_request) {
             Ok(request) => request,
             Err(error) => {
                 let response = StateResponse {
                     ok: false,
                     error: Some(format!("Invalid command: {error}")),
-                    state: handle.snapshot(),
+                    state: ClientSnapshot::from_core(&handle.core_state()),
                 };
                 write_frame(&mut stream, &response_frame(response, instance_id, false)).await?;
                 continue;
             }
         };
-        let (response, compact) = match request.request {
-            RequestKind::Command(Command::Overview) => {
-                (overview_response(handle.snapshot(), &overview), true)
+        let (response, compact) = match request {
+            DecodedRequest::Command(Command::Overview) => {
+                (overview_response(handle.core_state(), &overview), true)
             }
-            RequestKind::Command(Command::Status) => {
+            DecodedRequest::Command(Command::Status) => {
                 (command(&handle, Command::Status).await, false)
             }
-            RequestKind::Command(cmd) => {
+            DecodedRequest::Command(cmd) => {
                 let response = command(&handle, cmd).await;
                 if response.ok {
-                    (overview_response(response.state, &overview), true)
+                    (overview_response(handle.core_state(), &overview), true)
                 } else {
                     (response, false)
                 }
             }
-            RequestKind::Ack(cmd) => {
+            DecodedRequest::Ack(cmd) => {
                 let ack = tokio::task::spawn_blocking({
                     let handle = handle.clone();
                     move || handle.request_ack(cmd)
@@ -676,7 +702,7 @@ async fn serve_connection(
                 write_frame(&mut stream, &ack_frame(ack, instance_id)).await?;
                 continue;
             }
-            RequestKind::Watch { revision } => {
+            DecodedRequest::Watch { revision } => {
                 let Some(response) = wait_for_revision(
                     &mut stream,
                     &mut pending,
@@ -826,7 +852,7 @@ pub fn request(path: &Path, command: &Command) -> Result<StateResponse> {
         })?;
         let request = RequestFrame {
             instance_id: CLIENT_INSTANCE_UNKNOWN,
-            request: RequestKind::Command(command.clone()),
+            request: RequestKind::Command(serde_json::to_string(command)?),
         };
         write_frame(&mut stream, &request).await?;
         let bytes = if matches!(command, Command::OptimizeDatabase) {
@@ -853,7 +879,7 @@ pub fn request_ack(path: &Path, command: &Command) -> Result<Ack> {
         })?;
         let request = RequestFrame {
             instance_id: CLIENT_INSTANCE_UNKNOWN,
-            request: RequestKind::Ack(command.clone()),
+            request: RequestKind::Ack(serde_json::to_string(command)?),
         };
         write_frame(&mut stream, &request).await?;
         let bytes = timeout(

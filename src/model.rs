@@ -143,14 +143,6 @@ pub struct SystemState {
     pub shutting_down: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AppState {
-    pub library: LibrarySnapshot,
-    pub queue: QueueState,
-    pub playback: PlaybackState,
-    pub system: SystemState,
-}
-
 impl Default for LibrarySnapshot {
     fn default() -> Self {
         Self {
@@ -205,120 +197,39 @@ impl Default for SystemState {
     }
 }
 
-impl Default for AppState {
-    fn default() -> Self {
-        Self {
-            library: LibrarySnapshot::default(),
-            queue: QueueState::default(),
-            playback: PlaybackState::default(),
-            system: SystemState::default(),
-        }
-    }
-}
-
-impl AppState {
-    pub fn current_track(&self) -> Option<&Track> {
-        let queue_id = self.queue.current_id?;
-        let track_id = self
-            .queue
-            .entries
-            .iter()
-            .find(|entry| entry.id == queue_id)?
-            .track_id;
-        let index = self
-            .library
-            .tracks
-            .binary_search_by_key(&track_id, |track| track.id)
-            .ok()?;
-        self.library.tracks.get(index)
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct MprisSnapshot {
-    pub tracks: Arc<Vec<Track>>,
-    pub queue: QueueState,
-    pub playback: PlaybackState,
-    pub shutting_down: bool,
-}
-
-impl MprisSnapshot {
-    pub fn from_state(state: &AppState) -> Self {
-        Self {
-            tracks: Arc::clone(&state.library.tracks),
-            queue: state.queue.clone(),
-            playback: state.playback.clone(),
-            shutting_down: state.system.shutting_down,
-        }
-    }
-
-    pub fn current_track(&self) -> Option<&Track> {
-        let queue_id = self.queue.current_id?;
-        let track_id = self
-            .queue
-            .entries
-            .iter()
-            .find(|entry| entry.id == queue_id)?
-            .track_id;
-        let index = self
-            .tracks
-            .binary_search_by_key(&track_id, |track| track.id)
-            .ok()?;
-        self.tracks.get(index)
-    }
-}
-/// Translate a normalized playback key name into the corresponding command.
-
-#[derive(Clone, Debug)]
-pub struct GuiSnapshot(AppState);
-
-impl GuiSnapshot {
-    pub fn from_state(state: &AppState) -> Self {
-        Self(state.clone())
-    }
-}
-
-impl std::ops::Deref for GuiSnapshot {
-    type Target = AppState;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
 ///
 /// This is shared by the terminal and GUI frontends so playback controls keep
 /// identical semantics regardless of input surface.
-pub(crate) fn playback_key_command(key: &str, state: &AppState) -> Option<Command> {
+pub(crate) fn playback_key_command(key: &str, playback: &PlaybackState) -> Option<Command> {
     let seek = |seconds: f64| {
-        (state.playback.status != PlaybackStatus::Stopped).then_some(Command::Seek { seconds })
+        (playback.status != PlaybackStatus::Stopped).then_some(Command::Seek { seconds })
     };
     match key {
         "space" => Some(Command::Toggle),
         "n" => Some(Command::Next),
         "p" => Some(Command::Previous),
-        "left" => seek((state.playback.position - 5.0).max(0.0)),
-        "right" => seek((state.playback.position + 5.0).max(0.0)),
+        "left" => seek((playback.position - 5.0).max(0.0)),
+        "right" => seek((playback.position + 5.0).max(0.0)),
         "home" => seek(0.0),
-        "end" => state
-            .playback
+        "end" => playback
             .duration
             .filter(|duration| duration.is_finite())
             .and_then(seek),
         "r" => Some(Command::Repeat {
-            mode: match state.playback.repeat {
+            mode: match playback.repeat {
                 RepeatMode::Off => RepeatMode::All,
                 RepeatMode::All => RepeatMode::One,
                 RepeatMode::One => RepeatMode::Off,
             },
         }),
         "s" => Some(Command::Shuffle {
-            enabled: !state.playback.shuffle,
+            enabled: !playback.shuffle,
         }),
         "]" => Some(Command::Volume {
-            value: (state.playback.volume + 0.05).min(1.0),
+            value: (playback.volume + 0.05).min(1.0),
         }),
         "[" => Some(Command::Volume {
-            value: (state.playback.volume - 0.05).max(0.0),
+            value: (playback.volume - 0.05).max(0.0),
         }),
         _ => None,
     }
@@ -450,41 +361,27 @@ pub enum Command {
     Shutdown,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct StateResponse {
-    pub ok: bool,
-    pub error: Option<String>,
-    pub state: AppState,
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Ack {
-    pub ok: bool,
-    pub error: Option<String>,
-    pub revision: u64,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn playback_seek_respects_status_and_boundaries() {
-        let mut state = AppState::default();
-        state.playback.position = 2.0;
+        let mut state = PlaybackState::default();
+        state.position = 2.0;
         assert!(playback_key_command("left", &state).is_none());
-        state.playback.status = PlaybackStatus::Playing;
+        state.status = PlaybackStatus::Playing;
         assert!(matches!(
             playback_key_command("left", &state),
             Some(Command::Seek { seconds }) if seconds == 0.0
         ));
-        state.playback.position = 12.0;
+        state.position = 12.0;
         assert!(matches!(
             playback_key_command("right", &state),
             Some(Command::Seek { seconds }) if seconds == 17.0
         ));
-        state.playback.duration = Some(f64::INFINITY);
+        state.duration = Some(f64::INFINITY);
         assert!(playback_key_command("end", &state).is_none());
-        state.playback.duration = Some(42.0);
+        state.duration = Some(42.0);
         assert!(matches!(
             playback_key_command("end", &state),
             Some(Command::Seek { seconds }) if seconds == 42.0
@@ -494,13 +391,13 @@ mod tests {
 
     #[test]
     fn playback_volume_and_repeat_cycle_are_bounded() {
-        let mut state = AppState::default();
-        state.playback.volume = 1.0;
+        let mut state = PlaybackState::default();
+        state.volume = 1.0;
         assert!(matches!(
             playback_key_command("]", &state),
             Some(Command::Volume { value }) if value == 1.0
         ));
-        state.playback.volume = 0.0;
+        state.volume = 0.0;
         assert!(matches!(
             playback_key_command("[", &state),
             Some(Command::Volume { value }) if value == 0.0
@@ -511,14 +408,14 @@ mod tests {
                 mode: RepeatMode::All
             })
         ));
-        state.playback.repeat = RepeatMode::All;
+        state.repeat = RepeatMode::All;
         assert!(matches!(
             playback_key_command("r", &state),
             Some(Command::Repeat {
                 mode: RepeatMode::One
             })
         ));
-        state.playback.repeat = RepeatMode::One;
+        state.repeat = RepeatMode::One;
         assert!(matches!(
             playback_key_command("r", &state),
             Some(Command::Repeat {

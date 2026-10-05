@@ -8,17 +8,17 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[path = "core_impl/catalog.rs"]
+#[path = "catalog.rs"]
 mod catalog;
-#[path = "core_impl/command.rs"]
+#[path = "command.rs"]
 mod command;
-#[path = "core_impl/persistence.rs"]
+#[path = "persistence.rs"]
 mod persistence;
-#[path = "core_impl/playback.rs"]
+#[path = "playback.rs"]
 mod playback;
-#[path = "core_impl/playlists.rs"]
+#[path = "playlists.rs"]
 mod playlists;
-#[path = "core_impl/queue.rs"]
+#[path = "queue.rs"]
 mod queue;
-#[path = "core_impl/runtime.rs"]
+#[path = "runtime.rs"]
 mod runtime;

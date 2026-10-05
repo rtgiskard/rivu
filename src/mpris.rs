@@ -5,7 +5,8 @@
 use crate::{
     artwork::ArtworkManager,
     core::AppHandle,
-    model::{AppState, Command, MprisSnapshot, PlaybackStatus, RepeatMode},
+    model::{Command, PlaybackStatus, RepeatMode},
+    projection::MprisSnapshot,
 };
 use anyhow::{Context, Result};
 use crossbeam_channel::{Sender, bounded, select_biased};
@@ -191,8 +192,8 @@ impl Player {
     // interface cannot make this sequence atomic without changing core APIs.
     fn navigate(&self, command: Command) -> fdo::Result<()> {
         let status = self.handle.mpris_snapshot().playback.status;
-        let state = request(&self.handle, command)?;
-        if state.playback.status == PlaybackStatus::Playing {
+        request(&self.handle, command)?;
+        if self.handle.mpris_snapshot().playback.status == PlaybackStatus::Playing {
             match status {
                 PlaybackStatus::Paused => {
                     request(&self.handle, Command::Pause)?;
@@ -418,10 +419,10 @@ impl Player {
     }
 }
 
-fn request(handle: &AppHandle, command: Command) -> fdo::Result<AppState> {
+fn request(handle: &AppHandle, command: Command) -> fdo::Result<()> {
     let response = handle.request(command);
     if response.ok {
-        Ok(response.state)
+        Ok(())
     } else {
         Err(fdo::Error::Failed(
             response

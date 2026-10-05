@@ -23,7 +23,7 @@ impl Core {
                             CoreResponse::State(Box::new(StateResponse {
                                 ok: result.is_ok(),
                                 error: result.err().map(|e| format!("{e:#}")),
-                                state: self.state.clone(),
+                                state: ClientSnapshot::from_core(&self.state),
                             }))
                         };
                         let _ = reply.send(value);

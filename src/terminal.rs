@@ -1,8 +1,8 @@
 use crate::{
     ipc,
-    model::{
-        AppState, Command, PlaybackStatus, RepeatMode, StateResponse, Track, playback_key_command,
-    },
+    model::{Command, PlaybackStatus, RepeatMode, Track, playback_key_command},
+    projection::{ClientSnapshot, TuiSnapshot},
+    response::StateResponse,
 };
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, bounded};
@@ -11,6 +11,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use parking_lot::Mutex;
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -81,7 +82,8 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
 }
 
 struct Watcher {
-    receiver: Receiver<Result<StateResponse, String>>,
+    receiver: Receiver<()>,
+    latest: Arc<Mutex<Option<Result<StateResponse, String>>>>,
     stopping: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
@@ -98,11 +100,14 @@ impl Drop for Watcher {
 fn spawn_watcher(socket_path: &Path, revision: u64) -> Watcher {
     let socket_path = socket_path.to_owned();
     let (sender, receiver) = bounded(1);
+    let latest = Arc::new(Mutex::new(None));
+    let latest_worker = Arc::clone(&latest);
     let stopping = Arc::new(AtomicBool::new(false));
     let stop = stopping.clone();
     let worker = std::thread::spawn(move || {
         let Ok(mut session) = ipc::watch_session(&socket_path) else {
-            let _ = sender.try_send(Err("TUI state watcher could not connect".into()));
+            *latest_worker.lock() = Some(Err("TUI state watcher could not connect".into()));
+            let _ = sender.try_send(());
             return;
         };
         let mut revision = revision as u16;
@@ -111,13 +116,19 @@ fn spawn_watcher(socket_path: &Path, revision: u64) -> Watcher {
                 Ok(Some(response)) => {
                     revision = response.state.system.revision as u16;
                     let shutting_down = response.state.system.shutting_down;
-                    if sender.try_send(Ok(response)).is_err() || shutting_down {
+                    *latest_worker.lock() = Some(Ok(response));
+                    let disconnected = sender.try_send(()).is_err_and(|error| {
+                        matches!(error, crossbeam_channel::TrySendError::Disconnected(_))
+                    });
+                    if disconnected || shutting_down {
                         break;
                     }
                 }
                 Ok(None) => break,
                 Err(error) => {
-                    let _ = sender.try_send(Err(format!("TUI state watcher stopped: {error:#}")));
+                    *latest_worker.lock() =
+                        Some(Err(format!("TUI state watcher stopped: {error:#}")));
+                    let _ = sender.try_send(());
                     break;
                 }
             }
@@ -125,6 +136,7 @@ fn spawn_watcher(socket_path: &Path, revision: u64) -> Watcher {
     });
     Watcher {
         receiver,
+        latest,
         stopping,
         worker: Some(worker),
     }
@@ -136,23 +148,22 @@ fn run_loop(socket_path: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>
     let mut ui = UiState::default();
     ui.sync_queue(&state, &state);
     let mut redraw = true;
+    let mut pending_revision: Option<u16> = None;
     loop {
-        while let Ok(update) = updates.receiver.try_recv() {
+        while updates.receiver.try_recv().is_ok() {}
+        if let Some(update) = updates.latest.lock().take() {
             let response = update.map_err(anyhow::Error::msg)?;
-            if response.ok && response.state.system.revision != state.system.revision {
-                let mut next = response.state;
-                next.library.playlists = state.library.playlists.clone();
-                next.library.history = state.library.history.clone();
-                next.system.devices = state.system.devices.clone();
-                next.system.selected_device = state.system.selected_device.clone();
-                next.system.config = state.system.config.clone();
-                next.system.config_path = state.system.config_path.clone();
-                next.system.mpris_status = state.system.mpris_status.clone();
-                next.system.ffmpeg_status = state.system.ffmpeg_status.clone();
-                next.system.database_optimization = state.system.database_optimization.clone();
-                ui.sync_queue(&state, &next);
-                state = next;
-                redraw = true;
+            let response_revision = response.state.system.revision as u16;
+            if response.ok {
+                if pending_revision == Some(response_revision) {
+                    pending_revision = None;
+                }
+                if response.state.system.revision != state.system.revision {
+                    let next = TuiSnapshot::from_client(&response.state);
+                    ui.sync_queue(&state, &next);
+                    state = next;
+                    redraw = true;
+                }
             }
         }
         if redraw {
@@ -184,16 +195,23 @@ fn run_loop(socket_path: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>
                         }
                         KeyAction::Command(command) => {
                             let ack = ipc::request_ack(socket_path, &command)?;
-                            let response = if ack.ok {
-                                ipc::request(socket_path, &Command::Overview)?
+                            if ack.ok {
+                                let target = ack.revision as u16;
+                                if target != state.system.revision as u16 {
+                                    pending_revision = Some(target);
+                                }
+                                ui.accept_response(StateResponse {
+                                    ok: true,
+                                    error: None,
+                                    state: ClientSnapshot::from_tui(&state),
+                                })
                             } else {
-                                StateResponse {
+                                ui.accept_response(StateResponse {
                                     ok: false,
                                     error: ack.error,
-                                    state: state.clone(),
-                                }
-                            };
-                            ui.accept_response(response)
+                                    state: ClientSnapshot::from_tui(&state),
+                                })
+                            }
                         }
                         KeyAction::Ignored => {
                             redraw |= ui.local_revision != local_revision;
@@ -227,7 +245,7 @@ impl UiState {
         self.local_revision = self.local_revision.wrapping_add(1);
     }
 
-    fn sync_queue(&mut self, previous: &AppState, next: &AppState) {
+    fn sync_queue(&mut self, previous: &TuiSnapshot, next: &TuiSnapshot) {
         let selected = self.queue.selected().unwrap_or(0);
         let queue_id = previous.queue.entries.get(selected).map(|entry| entry.id);
         let index = next
@@ -241,7 +259,7 @@ impl UiState {
         );
     }
 
-    fn accept_response(&mut self, response: StateResponse) -> AppState {
+    fn accept_response(&mut self, response: StateResponse) -> TuiSnapshot {
         let message = if response.ok {
             None
         } else {
@@ -251,10 +269,10 @@ impl UiState {
             self.message = message;
             self.mark_local_change();
         }
-        response.state
+        TuiSnapshot::from_client(&response.state)
     }
 
-    fn key_action(&mut self, key: KeyEvent, state: &AppState) -> KeyAction {
+    fn key_action(&mut self, key: KeyEvent, state: &TuiSnapshot) -> KeyAction {
         if self.search.is_some() {
             let mut changed = false;
             let mut command = None;
@@ -565,7 +583,7 @@ enum KeyAction {
     Ignored,
 }
 
-fn key_action(key: KeyEvent, state: &AppState) -> KeyAction {
+fn key_action(key: KeyEvent, state: &TuiSnapshot) -> KeyAction {
     if key.code == KeyCode::Char('q') {
         return KeyAction::Quit;
     }
@@ -583,14 +601,16 @@ fn key_action(key: KeyEvent, state: &AppState) -> KeyAction {
         KeyCode::End => "end",
         _ => return KeyAction::Ignored,
     };
-    playback_key_command(key_name, state).map_or(KeyAction::Ignored, KeyAction::Command)
+    playback_key_command(key_name, &state.playback).map_or(KeyAction::Ignored, KeyAction::Command)
 }
 
-fn request_state(socket_path: &Path) -> Result<AppState> {
-    Ok(ipc::request(socket_path, &Command::Overview)?.state)
+fn request_state(socket_path: &Path) -> Result<TuiSnapshot> {
+    Ok(TuiSnapshot::from_client(
+        &ipc::request(socket_path, &Command::Overview)?.state,
+    ))
 }
 
-fn draw(frame: &mut ratatui::Frame<'_>, state: &AppState, ui: &mut UiState) {
+fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
     let area = frame.area();
     let outer = Layout::default()
         .direction(Direction::Vertical)
@@ -651,7 +671,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &AppState, ui: &mut UiState) {
     if let Some(search) = ui.search.as_mut() {
         draw_search(frame, left[1], search);
     } else if let Some(tree) = ui.tree.as_mut() {
-        draw_tree(frame, left[1], tree, state.system.config.nerd_symbols);
+        draw_tree(frame, left[1], tree, state.system.nerd_symbols);
     } else {
         draw_queue(frame, left[1], state, &mut ui.queue, &mut ui.queue_cache);
     }
@@ -666,7 +686,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &AppState, ui: &mut UiState) {
         .wrap(Wrap { trim: true })
         .block(Block::default().title("Keys").borders(Borders::ALL));
     frame.render_widget(help, columns[1]);
-    let status = if state.system.config.nerd_symbols {
+    let status = if state.system.nerd_symbols {
         format!(
             "󰕾 {:>3}% 󰒝 {} 󰑖 {} 󰘦 {}",
             (state.playback.volume * 100.0).round() as u8,
@@ -710,7 +730,7 @@ struct QueueTrackKey {
 }
 
 impl QueueViewCache {
-    fn matches(&self, state: &AppState) -> bool {
+    fn matches(&self, state: &TuiSnapshot) -> bool {
         self.queue.len() == state.queue.entries.len()
             && self
                 .queue
@@ -729,7 +749,7 @@ impl QueueViewCache {
                 })
     }
 
-    fn sync(&mut self, state: &AppState) {
+    fn sync(&mut self, state: &TuiSnapshot) {
         if self.matches(state) {
             return;
         }
@@ -771,7 +791,7 @@ impl QueueViewCache {
 fn draw_queue(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
-    state: &AppState,
+    state: &TuiSnapshot,
     selection: &mut ListState,
     cache: &mut QueueViewCache,
 ) {
@@ -918,7 +938,9 @@ fn fmt_time(seconds: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::PlaybackState;
     use crate::model::{LibrarySnapshot, QueueEntry, QueueState};
+    use crate::projection::{TuiLibrarySnapshot, TuiSystemSnapshot};
     use crossterm::event::KeyModifiers;
 
     fn track(id: i64, artist: &str, title: &str) -> Track {
@@ -946,18 +968,29 @@ mod tests {
         }
     }
 
+    fn tui_snapshot(library: LibrarySnapshot, queue: QueueState) -> TuiSnapshot {
+        TuiSnapshot {
+            library: TuiLibrarySnapshot {
+                tracks: library.tracks,
+            },
+            queue,
+            playback: PlaybackState::default(),
+            system: TuiSystemSnapshot::default(),
+        }
+    }
+
     #[test]
     fn revision_unchanged_local_selection_is_visible() {
-        let state = AppState {
-            queue: QueueState {
+        let state = tui_snapshot(
+            LibrarySnapshot::default(),
+            QueueState {
                 entries: Arc::new(vec![
                     QueueEntry { id: 1, track_id: 1 },
                     QueueEntry { id: 2, track_id: 2 },
                 ]),
                 current_id: None,
             },
-            ..AppState::default()
-        };
+        );
         let mut ui = UiState::default();
         ui.sync_queue(&state, &state);
         let revision = ui.local_revision;
@@ -972,8 +1005,9 @@ mod tests {
 
     #[test]
     fn enter_plays_selected_occurrence_after_queue_reorder() {
-        let previous = AppState {
-            queue: QueueState {
+        let previous = tui_snapshot(
+            LibrarySnapshot::default(),
+            QueueState {
                 entries: Arc::new(vec![
                     QueueEntry {
                         id: 11,
@@ -990,8 +1024,7 @@ mod tests {
                 ]),
                 current_id: Some(11),
             },
-            ..AppState::default()
-        };
+        );
         let mut ui = UiState::default();
         ui.sync_queue(&previous, &previous);
         ui.key_action(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &previous);
@@ -1002,7 +1035,7 @@ mod tests {
             ui.key_action(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &next),
             KeyAction::Command(Command::PlayQueue { queue_id: 22 })
         ));
-        let empty = AppState::default();
+        let empty = TuiSnapshot::default();
         ui.sync_queue(&next, &empty);
         assert!(matches!(
             ui.key_action(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &empty),
@@ -1012,15 +1045,15 @@ mod tests {
 
     #[test]
     fn queue_cache_follows_order_and_metadata_changes() {
-        let mut state = AppState {
-            library: LibrarySnapshot {
+        let mut state = tui_snapshot(
+            LibrarySnapshot {
                 tracks: Arc::new(vec![
                     track(1, "Artist A", "Title A"),
                     track(2, "Artist B", "Title B"),
                 ]),
                 ..LibrarySnapshot::default()
             },
-            queue: QueueState {
+            QueueState {
                 entries: Arc::new(vec![
                     QueueEntry {
                         id: 10,
@@ -1033,8 +1066,7 @@ mod tests {
                 ]),
                 current_id: None,
             },
-            ..AppState::default()
-        };
+        );
         let mut cache = QueueViewCache::default();
         cache.sync(&state);
         assert_eq!(

@@ -4,6 +4,8 @@ use crate::{
     config::Config,
     library::{self, M3uItem, ScanResult},
     model::*,
+    projection::{ClientSnapshot, GuiSnapshot, MprisSnapshot},
+    response::{Ack, StateResponse},
     store::Store,
 };
 use anyhow::{Context, Result};
@@ -33,9 +35,46 @@ struct Request {
     ack: bool,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct CoreState {
+    pub(crate) library: LibrarySnapshot,
+    pub(crate) queue: QueueState,
+    pub(crate) playback: PlaybackState,
+    pub(crate) system: SystemState,
+}
+
+impl Default for CoreState {
+    fn default() -> Self {
+        Self {
+            library: LibrarySnapshot::default(),
+            queue: QueueState::default(),
+            playback: PlaybackState::default(),
+            system: SystemState::default(),
+        }
+    }
+}
+
+impl CoreState {
+    pub(crate) fn current_track(&self) -> Option<&Track> {
+        let queue_id = self.queue.current_id?;
+        let track_id = self
+            .queue
+            .entries
+            .iter()
+            .find(|entry| entry.id == queue_id)?
+            .track_id;
+        let index = self
+            .library
+            .tracks
+            .binary_search_by_key(&track_id, |track| track.id)
+            .ok()?;
+        self.library.tracks.get(index)
+    }
+}
+
 #[derive(Clone)]
 pub struct AppHandle {
-    pub state: Arc<RwLock<AppState>>,
+    state: Arc<RwLock<CoreState>>,
     pub analysis: Arc<RwLock<AnalysisFrame>>,
     pub waveform: Arc<RwLock<audio::WaveformFrame>>,
     sender: Sender<Request>,
@@ -55,7 +94,7 @@ impl AppHandle {
             })
             .context("Rivu is busy or stopped")
     }
-    pub fn snapshot(&self) -> AppState {
+    pub(crate) fn core_state(&self) -> CoreState {
         self.state.read().clone()
     }
     pub fn is_shutting_down(&self) -> bool {
@@ -68,10 +107,10 @@ impl AppHandle {
         self.state.read().system.revision
     }
     pub fn mpris_snapshot(&self) -> MprisSnapshot {
-        MprisSnapshot::from_state(&self.state.read())
+        MprisSnapshot::from_core(&self.state.read())
     }
     pub fn gui_snapshot(&self) -> GuiSnapshot {
-        GuiSnapshot::from_state(&self.state.read())
+        GuiSnapshot::from_core(&self.state.read())
     }
     pub fn set_wakeup(&self, callback: impl Fn() + Send + Sync + 'static) {
         *self.wakeup.write() = Some(Arc::new(callback));
@@ -132,7 +171,7 @@ impl AppHandle {
             return StateResponse {
                 ok: false,
                 error: Some(format!("Core unavailable: {error}")),
-                state: self.snapshot(),
+                state: ClientSnapshot::from_core(&self.core_state()),
             };
         }
         let response = if maintenance {
@@ -145,7 +184,7 @@ impl AppHandle {
             CoreResponse::State(Box::new(StateResponse {
                 ok: false,
                 error: Some(format!("Core response unavailable: {error}")),
-                state: self.snapshot(),
+                state: ClientSnapshot::from_core(&self.core_state()),
             }))
         }) {
             CoreResponse::State(response) => *response,
@@ -166,7 +205,7 @@ impl AppHandle {
             return Ack {
                 ok: false,
                 error: Some(format!("Core unavailable: {error}")),
-                revision: self.snapshot().system.revision,
+                revision: self.core_state().system.revision,
             };
         }
         match rx.recv_timeout(Duration::from_secs(12)) {
@@ -174,12 +213,12 @@ impl AppHandle {
             Ok(CoreResponse::State(_)) => Ack {
                 ok: false,
                 error: Some("Core returned state for Ack request".into()),
-                revision: self.snapshot().system.revision,
+                revision: self.core_state().system.revision,
             },
             Err(error) => Ack {
                 ok: false,
                 error: Some(format!("Core response unavailable: {error}")),
-                revision: self.snapshot().system.revision,
+                revision: self.core_state().system.revision,
             },
         }
     }
@@ -197,7 +236,7 @@ impl Runtime {
         let store = Store::open(&data_dir.join("library.db"))?;
         let engine = AudioEngine::new(config.media_read_buffer_mb)?;
         let (sender, receiver) = bounded(64);
-        let shared = Arc::new(RwLock::new(AppState::default()));
+        let shared = Arc::new(RwLock::new(CoreState::default()));
         let wakeup = Arc::new(RwLock::new(None));
         let gui_opener = Arc::new(RwLock::new(None));
         let subscribers = Arc::new(RwLock::new(Vec::new()));
@@ -216,7 +255,7 @@ impl Runtime {
             subscribers: subscribers.clone(),
             raise_requested: Arc::new(AtomicBool::new(false)),
         };
-        let mut initial = AppState::default();
+        let mut initial = CoreState::default();
         initial.library = LibrarySnapshot {
             tracks: Arc::new(store.tracks()?),
             revision: 0,
@@ -359,9 +398,9 @@ struct ScanFinished {
 struct Core {
     store: Store,
     engine: AudioEngine,
-    state: AppState,
+    state: CoreState,
     library: library::LibraryState,
-    shared: Arc<RwLock<AppState>>,
+    shared: Arc<RwLock<CoreState>>,
     wakeup: Arc<RwLock<Option<Wakeup>>>,
     gui_opener: Arc<RwLock<Option<Wakeup>>>,
     subscribers: Arc<RwLock<Vec<Sender<()>>>>,
@@ -380,8 +419,8 @@ struct Core {
     config_dirty: bool,
     config_last_saved: Instant,
 }
-#[path = "core_impl.rs"]
-mod core_impl;
+#[path = "core/engine.rs"]
+mod engine;
 
 fn now() -> i64 {
     SystemTime::now()
@@ -434,7 +473,7 @@ mod tests {
                 errors: Vec::new(),
             })
             .unwrap();
-        let mut state = AppState::default();
+        let mut state = CoreState::default();
         state.library.tracks = Arc::new(store.tracks().unwrap());
         state.system.config_path = directory.path().join("config.toml");
         let (scan_tx, scan_rx) = bounded(1);

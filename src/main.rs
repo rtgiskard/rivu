@@ -5,8 +5,10 @@ use rivu::{
     audio, config,
     core::Runtime,
     gui, ipc,
-    model::{Command, PlaybackStatus, RepeatMode, StateResponse},
-    mpris, terminal,
+    model::{Command, PlaybackStatus, RepeatMode},
+    mpris,
+    response::StateResponse,
+    terminal,
 };
 use std::{path::PathBuf, thread, time::Duration};
 
@@ -554,7 +556,7 @@ fn start(
             let mut service = None;
             let mut enabled = false;
             loop {
-                let snapshot = media_handle.snapshot();
+                let snapshot = media_handle.gui_snapshot();
                 if snapshot.system.shutting_down {
                     break;
                 }
@@ -588,7 +590,7 @@ fn start(
     let paths = if paths.is_empty() {
         runtime
             .handle
-            .snapshot()
+            .gui_snapshot()
             .system
             .config
             .library_roots

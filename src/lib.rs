@@ -9,5 +9,7 @@ pub mod ipc;
 pub mod library;
 pub mod model;
 pub mod mpris;
+pub mod projection;
+pub mod response;
 pub mod store;
 pub mod terminal;

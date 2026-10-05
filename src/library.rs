@@ -53,9 +53,9 @@ pub struct ScanRecord {
     pub media: MediaInfo,
     pub cue: Option<CueSegment>,
 }
-/// Core-owned mutable library catalog. The published `AppState` keeps immutable
-/// snapshots; small playback-stat changes never mutate an `Arc` shared with a
-/// frontend and therefore never trigger implicit copy-on-write.
+/// The published CoreState keeps immutable library snapshots; small playback-stat
+/// changes never mutate an Arc shared with a frontend and therefore never trigger
+/// implicit copy-on-write.
 pub struct LibraryState {
     tracks: Vec<Track>,
     dirty: bool,
