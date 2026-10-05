@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 /// A candidate shown by a dropdown or autocomplete popup.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DropdownItem<T> {
@@ -53,14 +52,11 @@ impl<T> DropdownState<T> {
         self.open
     }
 
+    #[cfg(test)]
     pub(crate) fn set_query(&mut self, query: impl Into<String>) {
         self.query = query.into();
         self.selected = 0;
         self.normalize_selection();
-    }
-
-    pub(crate) fn query(&self) -> &str {
-        &self.query
     }
 
     pub(crate) fn filtered(&self) -> impl Iterator<Item = (usize, &DropdownItem<T>)> {
@@ -89,6 +85,7 @@ impl<T> DropdownState<T> {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn selected(&self) -> Option<&T> {
         self.filtered()
             .nth(self.selected)

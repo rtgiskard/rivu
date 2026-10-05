@@ -17,7 +17,8 @@ use components::ButtonTooltip;
 pub(super) use components::{
     DropdownItem, DropdownState, POPOVER_MAX_HEIGHT, SelectableListState, SelectionMode,
     SelectionModel, TRACK_HEIGHT, TreeKey, TreeState, caption, context_menu_container,
-    drag_preview, dropdown_container, dropdown_row, list_row, row_text, track_row,
+    drag_preview, dropdown_container, dropdown_row, empty_state, list_row, panel_toolbar, row_text,
+    track_row,
 };
 use futures::{FutureExt, StreamExt, channel::mpsc};
 use gpui::{prelude::*, *};
@@ -262,7 +263,7 @@ pub fn run(handle: AppHandle, layout_path: PathBuf) -> Result<()> {
     // Explicit platform quit also terminates the core. Do this after the GUI
     // loop, outside GPUI's short quit-observer deadline and without blocking UI.
     if !handle.state.read().shutting_down {
-        let response = handle.request(Command::Shutdown);
+        let response = handle.request_ack(Command::Shutdown);
         if !response.ok {
             anyhow::bail!(
                 "{}",

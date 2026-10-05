@@ -22,6 +22,16 @@ pub(super) fn visualization_status(message: impl Into<SharedString>) -> Div {
         .child(message.into())
 }
 
+/// Shared empty-state surface used by panels and virtualized lists.
+pub(crate) fn empty_state(message: impl Into<SharedString>) -> Div {
+    visualization_status(message)
+}
+
+/// Shared wrapping toolbar shell for panel actions.
+pub(crate) fn panel_toolbar() -> Div {
+    super::row().flex_wrap().flex_shrink_0()
+}
+
 /// Shared tooltip used by icon buttons.
 pub(crate) struct ButtonTooltip {
     pub(super) text: SharedString,

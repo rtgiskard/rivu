@@ -1,7 +1,7 @@
 use super::{
     ACCENT, BORDER, Dragging, ERROR, ERROR_BG, Field, GuiApp, HIGHLIGHT, ListFocus, MUTED,
-    Measured, QueueDrag, UI_INSET, button, column, format_time, icon_button, library::LibraryDrag,
-    row, row_text, track_row,
+    Measured, QueueDrag, UI_INSET, button, column, empty_state, format_time, icon_button,
+    library::LibraryDrag, panel_toolbar, row, row_text, track_row,
 };
 pub(super) use super::{TRACK_HEIGHT, caption, list_row};
 use crate::model::{Command, PlaybackStatus, RepeatMode};
@@ -330,7 +330,7 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let count = self.filtered_rows.len();
-        let mut tools = row().flex_wrap().flex_shrink_0();
+        let mut tools = panel_toolbar();
         tools = tools
             .child(button(
                 ("library-force-scan", panel_id),
@@ -443,7 +443,7 @@ impl GuiApp {
             panel = panel.child(caption(self.state.scan_message.clone()).truncate());
         }
         if count == 0 {
-            panel = panel.child(caption(
+            panel = panel.child(empty_state(
                 "No matching tracks. Scan a music file or folder to get started.",
             ));
         }
@@ -612,7 +612,7 @@ impl GuiApp {
         let selected_index =
             selected_id.and_then(|id| self.state.queue.iter().position(|entry| entry.id == id));
         let selection_count = self.selected_queue.len();
-        let mut tools = row().min_h(px(32.)).flex_wrap().flex_shrink_0();
+        let mut tools = panel_toolbar().min_h(px(32.));
         if selection_count > 0 {
             tools = tools
                 .child(icon_button(
@@ -693,7 +693,9 @@ impl GuiApp {
             )))
             .when(selection_count > 0, |panel| panel.child(tools))
             .when(self.state.queue.is_empty(), |panel| {
-                panel.child(caption("Your queue is empty. Enqueue tracks from Library."))
+                panel.child(empty_state(
+                    "Your queue is empty. Enqueue tracks from Library.",
+                ))
             })
             .child(
                 uniform_list(
@@ -838,7 +840,7 @@ impl GuiApp {
                 .position(|entry| Some(entry.id) == self.selected_entry)
         });
         let selected_name = selected.map(|playlist| playlist.name.clone());
-        let manage = row().flex_wrap().flex_shrink_0().child(icon_button(
+        let manage = panel_toolbar().child(icon_button(
             ("playlist-create", panel_id),
             "+",
             "Create playlist",
@@ -852,7 +854,7 @@ impl GuiApp {
                 this.send(Command::CreatePlaylist { name }, cx);
             },
         ));
-        let files = row().flex_wrap().flex_shrink_0().child(icon_button(
+        let files = panel_toolbar().child(icon_button(
             ("playlist-import", panel_id),
             "↓",
             "Choose M3U to import",
@@ -990,7 +992,7 @@ impl GuiApp {
                 .w_full(),
             );
         if let Some(playlist_id) = playlist_id {
-            let mut tools = row().flex_wrap().flex_shrink_0();
+            let mut tools = panel_toolbar();
             if entry_count > 0 {
                 tools = tools.child(icon_button(
                     ("playlist-play", panel_id),
@@ -1341,7 +1343,9 @@ impl GuiApp {
                 self.state.history.len()
             )))
             .when(self.state.history.is_empty(), |panel| {
-                panel.child(caption("Started tracks will appear here once per track."))
+                panel.child(empty_state(
+                    "Started tracks will appear here once per track.",
+                ))
             })
             .child(
                 uniform_list(

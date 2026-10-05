@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use std::collections::HashSet;
 use std::hash::Hash;
 
@@ -77,15 +76,6 @@ impl<T> SelectableListState<T> {
     pub(crate) fn selected_index(&self) -> Option<usize> {
         self.selected
     }
-    pub(crate) fn selected_item(&self) -> Option<&T> {
-        self.selected.and_then(|index| self.items.get(index))
-    }
-    pub(crate) fn is_marked(&self, index: usize) -> bool {
-        self.marked.contains(&index)
-    }
-    pub(crate) fn marked_indices(&self) -> impl Iterator<Item = usize> + '_ {
-        self.marked.iter().copied()
-    }
 
     pub(crate) fn replace_items(&mut self, items: impl IntoIterator<Item = T>) {
         self.items = items.into_iter().collect();
@@ -96,6 +86,7 @@ impl<T> SelectableListState<T> {
         self.marked.retain(|index| *index < self.items.len());
     }
 
+    #[cfg(test)]
     pub(crate) fn move_next(&mut self) {
         if self.items.is_empty() {
             self.selected = None;
@@ -105,14 +96,6 @@ impl<T> SelectableListState<T> {
             self.selected
                 .map_or(0, |index| (index + 1).min(self.items.len() - 1)),
         );
-    }
-
-    pub(crate) fn move_previous(&mut self) {
-        if self.items.is_empty() {
-            self.selected = None;
-            return;
-        }
-        self.selected = Some(self.selected.map_or(0, |index| index.saturating_sub(1)));
     }
 
     pub(crate) fn toggle(&mut self, index: usize, extend: bool) {
@@ -157,6 +140,7 @@ impl<T> SelectableListState<T> {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn toggle_marked(&mut self) {
         let Some(index) = self.selected else {
             return;
@@ -168,13 +152,10 @@ impl<T> SelectableListState<T> {
             self.marked.remove(&index);
         }
     }
-
-    pub(crate) fn clear_marks(&mut self) {
-        self.marked.clear();
-    }
 }
 
 impl<T: Eq + Hash> SelectableListState<T> {
+    #[cfg(test)]
     pub(crate) fn marked_items(&self) -> impl Iterator<Item = &T> {
         self.marked
             .iter()

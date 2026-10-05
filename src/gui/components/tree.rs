@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
@@ -89,9 +88,6 @@ impl<T: Clone + Eq + Hash> TreeState<T> {
             self.selected = Some(index);
         }
     }
-    pub(crate) fn query(&self) -> &str {
-        &self.query
-    }
 
     pub(crate) fn set_rows(&mut self, rows: impl IntoIterator<Item = TreeRow<T>>) {
         let selected = self.selected().map(|row| row.id.clone());
@@ -115,6 +111,7 @@ impl<T: Clone + Eq + Hash> TreeState<T> {
             .or_else(|| (!visible.is_empty()).then_some(0));
     }
 
+    #[cfg(test)]
     pub(crate) fn set_query(&mut self, query: impl Into<String>) {
         self.query = query.into();
         self.refresh_visible();
@@ -209,15 +206,6 @@ impl<T: Clone + Eq + Hash> TreeState<T> {
                     self.selected = Some(parent_index);
                 }
             }
-        }
-    }
-
-    pub(crate) fn toggle_selected(&mut self) {
-        if let Some(index) = self
-            .selected
-            .and_then(|selected| self.visible_indices().get(selected).copied())
-        {
-            self.toggle(index);
         }
     }
 
