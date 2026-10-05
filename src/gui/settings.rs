@@ -1,12 +1,13 @@
 use super::{
-    ACCENT, BORDER, ButtonTooltip, DropdownItem, DropdownState, GuiApp, Measured, PANEL, TEXT,
-    button, caption, column, copyable_message, dropdown_container, icon_button,
+    ACCENT, BORDER, ButtonTooltip, DropdownItem, DropdownState, ERROR, GuiApp, HIGHLIGHT, Measured,
+    PANEL, TEXT, UI_INSET, button, caption, column, copyable_message, dropdown_container,
+    icon_button,
     input::Input,
     panels::{TRACK_HEIGHT, list_row},
     row,
 };
 use crate::{
-    config::{Config, RgbColor, SpectrumStyle, SpectrumWindow},
+    config::{Config, RgbColor, SpectrumStyle, SpectrumWindow, VisualizationPalette},
     model::{Command, RepeatMode},
 };
 use anyhow::{Context as _, Result};
@@ -90,8 +91,24 @@ fn visual_switch(
     .size(rems(4.))
     .text_size(rems(1.75))
     .when(enabled, |view| {
-        view.bg(rgb(0x283457)).text_color(rgb(ACCENT))
+        view.bg(rgb(HIGHLIGHT)).text_color(rgb(ACCENT))
     })
+}
+
+fn visualization_palette_label(palette: VisualizationPalette) -> &'static str {
+    match palette {
+        VisualizationPalette::TokyoNight => "TokyoNight",
+        VisualizationPalette::Deadbeef => "DeaDBeeF",
+        VisualizationPalette::Nord => "Nord",
+    }
+}
+
+fn next_visualization_palette(palette: VisualizationPalette) -> VisualizationPalette {
+    match palette {
+        VisualizationPalette::TokyoNight => VisualizationPalette::Deadbeef,
+        VisualizationPalette::Deadbeef => VisualizationPalette::Nord,
+        VisualizationPalette::Nord => VisualizationPalette::TokyoNight,
+    }
 }
 
 fn spectrum_style_label(style: SpectrumStyle) -> &'static str {
@@ -408,7 +425,7 @@ impl Settings {
         })
         .flex_shrink_0()
         .when(active, |view| {
-            view.bg(rgb(0x283457))
+            view.bg(rgb(HIGHLIGHT))
                 .text_color(rgb(ACCENT))
                 .border_color(rgb(ACCENT))
         })
@@ -519,7 +536,7 @@ impl GuiApp {
                     .relative()
                     .w_full()
                     .h(rems(2.))
-                    .px_2()
+                    .px(gpui::px(UI_INSET))
                     .border_1()
                     .border_color(rgb(BORDER))
                     .rounded_sm()
@@ -585,7 +602,7 @@ impl GuiApp {
                 .size(rems(4.))
                 .text_size(rems(1.75))
                 .when(shuffle, |view| {
-                    view.bg(rgb(0x283457)).text_color(rgb(ACCENT))
+                    view.bg(rgb(HIGHLIGHT)).text_color(rgb(ACCENT))
                 }),
             )
             .child(
@@ -610,7 +627,7 @@ impl GuiApp {
                 .size(rems(4.))
                 .text_size(rems(1.75))
                 .when(repeat != RepeatMode::Off, |view| {
-                    view.bg(rgb(0x283457)).text_color(rgb(ACCENT))
+                    view.bg(rgb(HIGHLIGHT)).text_color(rgb(ACCENT))
                 }),
             )
             .child(
@@ -626,7 +643,9 @@ impl GuiApp {
                 )
                 .size(rems(4.))
                 .text_size(rems(1.75))
-                .when(mpris, |view| view.bg(rgb(0x283457)).text_color(rgb(ACCENT))),
+                .when(mpris, |view| {
+                    view.bg(rgb(HIGHLIGHT)).text_color(rgb(ACCENT))
+                }),
             )
             .child(
                 icon_button(
@@ -643,7 +662,7 @@ impl GuiApp {
                 .size(rems(4.))
                 .text_size(rems(1.75))
                 .when(ffmpeg, |view| {
-                    view.bg(rgb(0x283457)).text_color(rgb(ACCENT))
+                    view.bg(rgb(HIGHLIGHT)).text_color(rgb(ACCENT))
                 }),
             )
             .child(
@@ -661,7 +680,9 @@ impl GuiApp {
                 .font_family("Symbols Nerd Font")
                 .size(rems(4.))
                 .text_size(rems(1.75))
-                .when(remix, |view| view.bg(rgb(0x283457)).text_color(rgb(ACCENT))),
+                .when(remix, |view| {
+                    view.bg(rgb(HIGHLIGHT)).text_color(rgb(ACCENT))
+                }),
             );
         let nerd_symbols = self.settings.draft.nerd_symbols;
         let switches = switches.child(
@@ -678,7 +699,7 @@ impl GuiApp {
             .size(rems(4.))
             .text_size(rems(1.75))
             .when(nerd_symbols, |view| {
-                view.bg(rgb(0x283457)).text_color(rgb(ACCENT))
+                view.bg(rgb(HIGHLIGHT)).text_color(rgb(ACCENT))
             }),
         );
         column()
@@ -696,7 +717,7 @@ impl GuiApp {
             .flex_wrap()
             .flex_shrink_0()
             .gap_1()
-            .px_3()
+            .px(gpui::px(UI_INSET))
             .py_2()
             .child(self.settings.tab_button(
                 "visual-common",
@@ -732,7 +753,21 @@ impl GuiApp {
         let settings = &self.settings;
         let draft = &settings.draft;
         match settings.visual_page {
-            VisualPage::Common => column().gap_3()
+            VisualPage::Common => column()
+                .gap_3()
+                .child(button(
+                    "visual-palette",
+                    format!(
+                        "Visualization palette: {}  ›",
+                        visualization_palette_label(draft.visual_palette)
+                    ),
+                    cx,
+                    |this, _, cx| {
+                        this.settings.draft.visual_palette =
+                            next_visualization_palette(this.settings.draft.visual_palette);
+                        cx.notify();
+                    },
+                ))
                 .child(settings.pair(Field::Fps, Field::Background)),
             VisualPage::Spectrum => {
                 let style = spectrum_style_label(draft.spectrum_style);
@@ -813,8 +848,8 @@ impl GuiApp {
             .flex_wrap()
             .flex_shrink_0()
             .gap_1()
-            .px_3()
-            .py_2()
+            .px(gpui::px(UI_INSET))
+            .py(gpui::px(UI_INSET))
             .border_b_1()
             .border_color(rgb(BORDER))
             .child(self.settings.tab_button(
@@ -860,14 +895,14 @@ impl GuiApp {
                 .flex_1()
                 .min_h_0()
                 .overflow_y_scroll()
-                .child(content.flex_shrink_0().p_3()),
+                .child(content.flex_shrink_0().p(gpui::px(UI_INSET))),
         );
         let feedback = if self.settings.applying {
             caption("Applying settings…").into_any_element()
         } else {
             match &self.settings.feedback {
                 Some(Err(error)) => copyable_message("copy-settings-error", error.clone(), cx)
-                    .text_color(rgb(0xf7768e))
+                    .text_color(rgb(ERROR))
                     .into_any_element(),
                 Some(Ok(())) => caption("Last apply succeeded").into_any_element(),
                 None => div().into_any_element(),
@@ -876,8 +911,8 @@ impl GuiApp {
         panel = panel.child(
             row()
                 .flex_shrink_0()
-                .px_3()
-                .py_2()
+                .px(gpui::px(UI_INSET))
+                .py(gpui::px(UI_INSET))
                 .min_h(rems(3.))
                 .border_t_1()
                 .border_color(rgb(BORDER))

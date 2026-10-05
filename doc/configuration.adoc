@@ -81,8 +81,9 @@ Context menus use full-width, borderless rows with hover feedback, a single oute
 frame, and separators between track actions and workspace actions.
 
 Workspace top, left and right insets and the bottom-right buttons' bottom inset
-are consistently 12 pixels. Panel content has one 12-pixel inset rather than
-nested padding. Split gutters are 8 pixels wide.
+are consistently 10 pixels. Panel content has one 10-pixel inset rather than
+nested padding. Split gutters are 4 pixels wide. Standard controls use the
+shared TokyoNight button, input, list-row, menu, and dropdown styles.
 Errors and scan progress use the existing fixed-height footer, never an overlay
 over panels. Click a message or its copy glyph to copy the full text, even when
 the displayed line is truncated. A small, borderless inline cross dismisses an error.
@@ -131,11 +132,17 @@ outside the plot. Peak decay is based on elapsed time, not the configured fps.
 Waveform, Spectrum, and Spectrogram share `visual_background` (`#08090c` by default).
 Colors use `#RRGGBB` notation. `analysis_fps` accepts 5–60 updates per second.
 Empty and waiting states share the same small UI text style (14 pixels at default
-scale), muted color, and 12-pixel inset. Text scales with the UI and wraps in narrow
+scale), TokyoNight muted color, and 10-pixel inset. Text scales with the UI and wraps in narrow
 panels; axis labels retain their separate smaller drawing style.
-All three views share a fixed plugin-inspired gradient: deep blue, cyan, green,
-yellow, orange, red. Spectrogram maps intensity onto this gradient; silence stays
-dark. There are no Palette selectors.
+All three views use the selected visualization palette. `deadbeef` preserves the
+original plugin-inspired deep blue, cyan, green, yellow, orange, red gradient;
+`tokyo_night` uses TokyoNight blue, cyan, green, yellow, orange, red; `nord`
+uses the Nord blue, cyan, green, yellow, orange, red set. Spectrogram maps
+intensity onto the selected gradient; silence stays dark.
+`visual_palette` is available on the Visualizations → Common page and defaults
+to `deadbeef`. Changing it redraws Spectrum, Spectrogram, and Waveform without
+decoding the track again.
+
 
 Spectrum's independent settings are:
 

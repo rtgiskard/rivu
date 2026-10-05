@@ -12,22 +12,22 @@
 //! redraw Spectrum in place. Unchanged buckets reuse their GPU image.
 //! Spectrum max-pools transients and animates only on the advancing audio clock.
 
-use std::{cell::RefCell, ops::Range, rc::Rc, sync::Arc, time::Duration};
-
+use super::{ERROR, ERROR_BG};
 use gpui::{
     AnyElement, App, Bounds, PathBuilder, Pixels, Point, RenderImage, SharedString, TextAlign,
     Window, canvas, div, fill, linear_color_stop, linear_gradient, point, prelude::*, px, rgb,
     size,
 };
+use std::{cell::RefCell, ops::Range, rc::Rc, sync::Arc, time::Duration};
 
 use crate::{
     analysis::AnalysisFrame,
-    config::{Config, SpectrumStyle, SpectrumWindow},
+    config::{Config, SpectrumStyle, SpectrumWindow, VisualizationPalette},
 };
 
 const HISTORY_COLUMNS: usize = 180;
 const MAX_SPECTRUM_BARS: usize = 512;
-const SPECTRUM_STOPS: &[(f32, [u8; 3])] = &[
+const DEAD_BEE_F_STOPS: &[(f32, [u8; 3])] = &[
     (0.0, [32, 58, 138]),
     (0.25, [30, 190, 220]),
     (0.5, [75, 205, 120]),
@@ -35,6 +35,30 @@ const SPECTRUM_STOPS: &[(f32, [u8; 3])] = &[
     (0.87, [245, 140, 50]),
     (1.0, [235, 65, 65]),
 ];
+const TOKYO_NIGHT_STOPS: &[(f32, [u8; 3])] = &[
+    (0.0, [122, 162, 247]),
+    (0.25, [125, 207, 255]),
+    (0.5, [158, 206, 106]),
+    (0.72, [224, 175, 104]),
+    (0.87, [255, 158, 100]),
+    (1.0, [247, 118, 142]),
+];
+const NORD_STOPS: &[(f32, [u8; 3])] = &[
+    (0.0, [94, 129, 172]),
+    (0.25, [136, 192, 208]),
+    (0.5, [163, 190, 140]),
+    (0.72, [235, 203, 139]),
+    (0.87, [208, 135, 112]),
+    (1.0, [191, 97, 106]),
+];
+
+fn palette_stops(palette: VisualizationPalette) -> &'static [(f32, [u8; 3])] {
+    match palette {
+        VisualizationPalette::TokyoNight => TOKYO_NIGHT_STOPS,
+        VisualizationPalette::Deadbeef => DEAD_BEE_F_STOPS,
+        VisualizationPalette::Nord => NORD_STOPS,
+    }
+}
 
 #[derive(Default)]
 struct Column {
@@ -75,6 +99,7 @@ struct VisualData {
     last_update: Option<Duration>,
     top_db: f32,
     visual_background: u32,
+    visual_palette: VisualizationPalette,
     spectrum_min_hz: f32,
     spectrum_max_hz: f32,
     spectrum_db_range: f32,
@@ -138,6 +163,7 @@ impl Visuals {
                 last_update: None,
                 top_db: 0.0,
                 visual_background: 0x08090c,
+                visual_palette: VisualizationPalette::Deadbeef,
                 spectrum_min_hz: 20.0,
                 spectrum_max_hz: 20_000.0,
                 spectrum_db_range: 70.0,
@@ -176,9 +202,9 @@ impl Visuals {
     pub(super) fn configure(&mut self, config: &Config) {
         let mut data = self.data.borrow_mut();
         let changed = data.visual_background != config.visual_background.rgb()
+            || data.visual_palette != config.visual_palette
             || data.spectrum_min_hz != config.spectrum_min_hz
             || data.spectrum_max_hz != config.spectrum_max_hz
-            || data.spectrum_db_range != config.spectrum_db_range
             || data.spectrum_bars != config.spectrum_bars
             || data.spectrum_style != config.spectrum_style
             || data.spectrum_gap != config.spectrum_gap
@@ -211,11 +237,13 @@ impl Visuals {
             || data.spectrum_window != config.spectrum_window
             || data.spectrum_bands_per_octave != config.spectrum_bands_per_octave;
         let heat_changed = data.visual_background != config.visual_background.rgb()
+            || data.visual_palette != config.visual_palette
             || data.spectrogram_min_hz != config.spectrogram_min_hz
             || data.spectrogram_max_hz != config.spectrogram_max_hz
             || data.spectrogram_db_range != config.spectrogram_db_range
             || data.spectrogram_log_scale != config.spectrogram_log_scale;
         data.visual_background = config.visual_background.rgb();
+        data.visual_palette = config.visual_palette;
         data.spectrum_min_hz = config.spectrum_min_hz;
         data.spectrum_max_hz = config.spectrum_max_hz;
         data.spectrum_db_range = config.spectrum_db_range;
@@ -418,12 +446,12 @@ impl Visuals {
                         if let Some(error) = &data.error {
                             window.paint_quad(fill(
                                 Bounds::new(bounds.origin, size(bounds.size.width, px(22.0))),
-                                rgb(0x481b20),
+                                rgb(ERROR_BG),
                             ));
                             paint_label(
                                 format!("Visualization error: {error}").into(),
                                 point(bounds.left() + px(6.0), bounds.top() + px(3.0)),
-                                0xffb5b5,
+                                ERROR,
                                 window,
                                 cx,
                             );
@@ -700,7 +728,10 @@ impl VisualData {
                         * db_height(level, self.top_db, self.spectrum_db_range))
                     .clamp(px(0.0), plot.size.height);
                     any_visible |= bar_height > px(0.0);
-                    let color = rgb(palette_color((left_t + right_t) * 0.5));
+                    let color = rgb(palette_color_with(
+                        self.visual_palette,
+                        (left_t + right_t) * 0.5,
+                    ));
                     let (x, width) = match style {
                         SpectrumStyle::Line | SpectrumStyle::Solid => {
                             (plot.left() + plot.size.width * left_t, slot_width)
@@ -802,6 +833,7 @@ impl VisualData {
                         &self.spectrum_points,
                         plot,
                         style,
+                        self.visual_palette,
                         self.spectrum_interpolate,
                         window,
                     )?;
@@ -882,7 +914,7 @@ impl VisualData {
                         / self.spectrogram_db_range)
                         .clamp(0.0, 1.0);
                     let [red, green, blue] = if intensity > 0.0 {
-                        gradient(intensity, SPECTRUM_STOPS)
+                        gradient(intensity, palette_stops(self.visual_palette))
                     } else {
                         [
                             (self.visual_background >> 16) as u8,
@@ -1028,13 +1060,14 @@ fn paint_spectrum_shape(
     points: &[Point<Pixels>],
     plot: Bounds<Pixels>,
     style: SpectrumStyle,
+    palette: VisualizationPalette,
     interpolate: bool,
     window: &mut Window,
 ) -> Result<(), String> {
     if points.is_empty() {
         return Ok(());
     }
-    for stops in SPECTRUM_STOPS.windows(2) {
+    for stops in palette_stops(palette).windows(2) {
         let left = plot.left() + plot.size.width * stops[0].0;
         let right = plot.left() + plot.size.width * stops[1].0;
         let solid = style == SpectrumStyle::Solid;
@@ -1077,8 +1110,8 @@ fn paint_spectrum_shape(
         let to = (right - path.bounds.left()) / width;
         let color = linear_gradient(
             90.0,
-            linear_color_stop(rgb(palette_color(stops[0].0)), from),
-            linear_color_stop(rgb(palette_color(stops[1].0)), to),
+            linear_color_stop(rgb(palette_color_with(palette, stops[0].0)), from),
+            linear_color_stop(rgb(palette_color_with(palette, stops[1].0)), to),
         );
         window.with_content_mask(
             Some(gpui::ContentMask {
@@ -1184,9 +1217,34 @@ fn gradient(value: f32, stops: &[(f32, [u8; 3])]) -> [u8; 3] {
     }
     stops[stops.len() - 1].1
 }
+#[cfg(test)]
 pub(super) fn palette_color(fraction: f32) -> u32 {
-    let color = gradient(fraction, SPECTRUM_STOPS);
+    palette_color_with(VisualizationPalette::Deadbeef, fraction)
+}
+
+pub(super) fn palette_function(palette: VisualizationPalette) -> fn(f32) -> u32 {
+    match palette {
+        VisualizationPalette::TokyoNight => tokyonight_palette_color,
+        VisualizationPalette::Deadbeef => deadbeef_palette_color,
+        VisualizationPalette::Nord => nord_palette_color,
+    }
+}
+
+fn palette_color_with(palette: VisualizationPalette, fraction: f32) -> u32 {
+    let color = gradient(fraction, palette_stops(palette));
     (u32::from(color[0]) << 16) | (u32::from(color[1]) << 8) | u32::from(color[2])
+}
+
+fn tokyonight_palette_color(fraction: f32) -> u32 {
+    palette_color_with(VisualizationPalette::TokyoNight, fraction)
+}
+
+fn deadbeef_palette_color(fraction: f32) -> u32 {
+    palette_color_with(VisualizationPalette::Deadbeef, fraction)
+}
+
+fn nord_palette_color(fraction: f32) -> u32 {
+    palette_color_with(VisualizationPalette::Nord, fraction)
 }
 
 fn paint_label(
@@ -1229,6 +1287,25 @@ fn paint_aligned_label(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn palettes_have_distinct_named_endpoints() {
+        assert_eq!(
+            palette_color_with(VisualizationPalette::Deadbeef, 0.0),
+            0x203a8a
+        );
+        assert_eq!(
+            palette_color_with(VisualizationPalette::TokyoNight, 0.0),
+            0x7aa2f7
+        );
+        assert_eq!(
+            palette_color_with(VisualizationPalette::Nord, 0.0),
+            0x5e81ac
+        );
+        assert_eq!(
+            palette_color_with(VisualizationPalette::TokyoNight, 1.0),
+            0xf7768e
+        );
+    }
     fn frame(time: f64, level: f32) -> AnalysisFrame {
         AnalysisFrame {
             sample_rate: 48_000,

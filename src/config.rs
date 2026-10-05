@@ -18,6 +18,14 @@ use std::{
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum VisualizationPalette {
+    TokyoNight,
+    Deadbeef,
+    Nord,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SpectrumStyle {
     Bars,
     Outline,
@@ -115,6 +123,7 @@ pub struct Config {
     pub ui_scale: f32,
     pub analysis_fps: u32,
     pub visual_background: RgbColor,
+    pub visual_palette: VisualizationPalette,
     pub spectrum_style: SpectrumStyle,
     pub spectrum_min_hz: f32,
     pub spectrum_max_hz: f32,
@@ -165,6 +174,7 @@ impl Default for Config {
             ui_scale: 1.0,
             analysis_fps: 20,
             visual_background: RgbColor(0x08090c),
+            visual_palette: VisualizationPalette::Deadbeef,
             spectrum_style: SpectrumStyle::Bars,
             spectrum_min_hz: 20.0,
             spectrum_max_hz: 20_000.0,
@@ -216,9 +226,11 @@ impl Config {
         };
         let mut document: toml::Table = toml::from_str(&contents)
             .with_context(|| format!("cannot parse TOML configuration {}", path.display()))?;
+        if document.get("visual_palette").and_then(toml::Value::as_str) == Some("legacy") {
+            document.remove("visual_palette");
+        }
         // Removed visual controls are discarded so older configurations remain loadable.
         for key in [
-            "visual_palette",
             "spectrogram_palette",
             "waveform_palette",
             "waveform_played_opacity",
@@ -466,6 +478,7 @@ mod tests {
             pipewire_auto_mix: false,
             spectrum_style: SpectrumStyle::Solid,
             visual_background: "#101820".parse().unwrap(),
+            visual_palette: VisualizationPalette::TokyoNight,
             spectrum_min_hz: 60.0,
             spectrum_max_hz: 16_000.0,
             spectrum_fft_size: 16384,
@@ -726,7 +739,7 @@ mod tests {
         let path = directory.path().join("config.toml");
         fs::write(
             &path,
-            "shuffle = true\nspectrum_style = 'led'\nvisual_palette = 'legacy'\nspectrogram_palette = 'legacy'\nwaveform_palette = 'legacy'\nwaveform_played_opacity = 0.5\n",
+            "shuffle = true\nspectrum_style = 'led'\nspectrogram_palette = 'legacy'\nwaveform_palette = 'legacy'\nwaveform_played_opacity = 0.5\n",
         )
         .unwrap();
         let config = Config::load(&path).unwrap();
@@ -743,7 +756,6 @@ mod tests {
             Some("led")
         );
         for key in [
-            "visual_palette",
             "spectrogram_palette",
             "waveform_palette",
             "waveform_played_opacity",
@@ -751,6 +763,21 @@ mod tests {
             assert!(!saved.contains_key(key), "obsolete key was saved: {key}");
         }
         assert_eq!(Config::load(&path).unwrap(), config);
+    }
+
+    #[test]
+    fn visualization_palette_round_trips() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let config = Config {
+            visual_palette: VisualizationPalette::TokyoNight,
+            ..Config::default()
+        };
+        config.save(&path).unwrap();
+        assert_eq!(
+            Config::load(&path).unwrap().visual_palette,
+            VisualizationPalette::TokyoNight
+        );
     }
 
     #[test]

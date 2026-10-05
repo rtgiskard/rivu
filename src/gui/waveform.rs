@@ -20,7 +20,6 @@ use gpui::{
 };
 use parking_lot::RwLock;
 
-use super::visuals::palette_color;
 use crate::{
     audio::{PlaybackRange, WaveformFrame},
     config::Config,
@@ -331,6 +330,7 @@ impl Waveform {
         let source = Rc::clone(self.source.as_ref().expect("preview source is present"));
         let shared = Arc::clone(&self.shared);
         let waveform = Rc::clone(&self.plot);
+        let palette = super::visuals::palette_function(config.visual_palette);
         let water = rgb(config.waveform_cursor_color.rgb());
         let background = rgb(config.visual_background.rgb());
         let glow = config.waveform_glow;
@@ -366,7 +366,7 @@ impl Waveform {
                                 panel_id,
                                 (plot.size.width / px(1.0)) as usize,
                                 &frame,
-                                palette_color,
+                                palette,
                             );
                             progress(position, timeline(&frame, duration))
                         };
@@ -493,6 +493,7 @@ impl Drop for Waveform {
 
 #[cfg(test)]
 mod tests {
+    use super::super::visuals::palette_color;
     use super::*;
 
     fn frame(peaks: Vec<Option<f32>>) -> WaveformFrame {
