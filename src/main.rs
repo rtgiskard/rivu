@@ -523,16 +523,15 @@ fn start(
     desktop: bool,
 ) -> Result<()> {
     let socket = data_dir.join("rivu.sock");
-    let listener = ipc::bind(&socket)?;
+    ipc::bind(&socket)?;
     let mut runtime = match Runtime::start(&data_dir, &config_path) {
         Ok(runtime) => runtime,
         Err(error) => {
-            drop(listener);
             let _ = std::fs::remove_file(&socket);
             return Err(error);
         }
     };
-    let server = ipc::Server::start(socket, listener, runtime.handle.clone())?;
+    let server = ipc::Server::start(socket, runtime.handle.clone())?;
     let media_handle = runtime.handle.clone();
     let media_changes = media_handle.subscribe();
     let (media_stop, media_stop_receiver) = bounded(1);
