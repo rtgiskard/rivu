@@ -366,8 +366,10 @@ mod tests {
     use super::*;
     #[test]
     fn playback_seek_respects_status_and_boundaries() {
-        let mut state = PlaybackState::default();
-        state.position = 2.0;
+        let mut state = PlaybackState {
+            position: 2.0,
+            ..PlaybackState::default()
+        };
         assert!(playback_key_command("left", &state).is_none());
         state.status = PlaybackStatus::Playing;
         assert!(matches!(
@@ -391,8 +393,10 @@ mod tests {
 
     #[test]
     fn playback_volume_and_repeat_cycle_are_bounded() {
-        let mut state = PlaybackState::default();
-        state.volume = 1.0;
+        let mut state = PlaybackState {
+            volume: 1.0,
+            ..PlaybackState::default()
+        };
         assert!(matches!(
             playback_key_command("]", &state),
             Some(Command::Volume { value }) if value == 1.0

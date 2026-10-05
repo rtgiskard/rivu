@@ -573,7 +573,12 @@ impl DbusMenu {
     }
 
     fn about_to_show(&self, id: i32) -> fdo::Result<bool> {
-        if id == 0 || (1..=6).contains(&id) {
+        if id == 0 {
+            // Hosts commonly call AboutToShow before their first GetLayout.
+            // Force the static root layout to be loaded instead of leaving an
+            // empty host-side cache.
+            Ok(true)
+        } else if (1..=6).contains(&id) {
             Ok(false)
         } else {
             Err(fdo::Error::InvalidArgs("Unknown menu item".into()))

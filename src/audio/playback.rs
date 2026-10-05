@@ -84,12 +84,17 @@ impl Playback {
             analyzer,
         )?;
         let converter = Converter::new(source.info().sample_rate, output.rate(), channels)?;
-        waveform.write().select(
-            &path,
-            range,
-            source.info().duration,
-            source.info().sample_rate,
-        );
+        {
+            let mut waveform = waveform.write();
+            waveform.select(
+                &path,
+                range,
+                source.info().duration,
+                source.info().sample_rate,
+            );
+            let weights = super::output::analysis_weights(source.layout());
+            waveform.set_channel_weights(&weights);
+        }
         Ok(Self {
             source,
             output,

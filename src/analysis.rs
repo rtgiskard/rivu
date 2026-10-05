@@ -28,7 +28,6 @@ pub struct AnalysisSettings {
     pub fps: u32,
     pub fft_size: u32,
     pub window: SpectrumWindow,
-    pub bands_per_octave: u32,
 }
 
 impl From<&Config> for AnalysisSettings {
@@ -37,7 +36,6 @@ impl From<&Config> for AnalysisSettings {
             fps: config.analysis_fps,
             fft_size: config.spectrum_fft_size,
             window: config.spectrum_window,
-            bands_per_octave: config.spectrum_bands_per_octave,
         }
     }
 }
@@ -49,7 +47,6 @@ impl AnalysisSettings {
                 self.fft_size,
                 512 | 1024 | 2048 | 4096 | 8192 | 16384 | 32768
             )
-            && (1..=48).contains(&self.bands_per_octave)
     }
 }
 
@@ -135,16 +132,15 @@ impl Drop for AnalysisWorker {
     }
 }
 
-fn musical_frequencies(sample_rate: u32, bands_per_octave: u32) -> Vec<f32> {
+fn musical_frequencies(sample_rate: u32) -> Vec<f32> {
     let nyquist = sample_rate as f32 * 0.5;
-    let mut frequencies = Vec::with_capacity(bands_per_octave as usize * 16);
+    let mut frequencies = Vec::with_capacity(12 * 16);
     if nyquist <= 0.0 {
         return frequencies;
     }
-    // Keep A440 exactly on a center for every density, starting near MIDI 0.
-    let first = (-69.0 * bands_per_octave as f32 / 12.0).ceil() as i32;
-    for band in first.. {
-        let center = 440.0 * 2.0_f32.powf(band as f32 / bands_per_octave as f32);
+    const FIRST_NOTE: i32 = -69;
+    for note in FIRST_NOTE.. {
+        let center = 440.0 * 2.0_f32.powf(note as f32 / 12.0);
         if center >= nyquist {
             break;
         }
@@ -191,8 +187,8 @@ impl SpectrumAnalyzer {
             .collect();
         // Coherent gain keeps bin-centered sine amplitudes calibrated across windows.
         let normalization = 2.0 / window.iter().sum::<f32>();
-        let frequencies = musical_frequencies(sample_rate, settings.bands_per_octave);
-        let half_band = 2.0_f32.powf(0.5 / settings.bands_per_octave as f32);
+        let frequencies = musical_frequencies(sample_rate);
+        let half_band = 2.0_f32.powf(0.5 / 12.0);
         let bin_scale = n as f32 / sample_rate.max(1) as f32;
         let bands = frequencies
             .iter()
@@ -324,7 +320,6 @@ fn analyze(
         if sample_rate != analyzer.sample_rate
             || settings.fft_size != analyzer.settings.fft_size
             || settings.window != analyzer.settings.window
-            || settings.bands_per_octave != analyzer.settings.bands_per_octave
         {
             analyzer = SpectrumAnalyzer::new(settings, sample_rate);
         }
@@ -386,21 +381,17 @@ mod tests {
     }
 
     #[test]
-    fn musical_bands_follow_nyquist_and_density() {
-        for density in [1, 12, 24, 48] {
-            for rate in [48_000, 8_000, 192_000, 44_100] {
-                let frequencies = musical_frequencies(rate, density);
-                assert_eq!(frequencies.last().copied(), Some(rate as f32 * 0.5));
-                assert!(frequencies.windows(2).all(|pair| pair[0] < pair[1]));
-                assert!(frequencies.contains(&440.0));
-                assert!(
-                    frequencies
-                        .iter()
-                        .all(|hz| *hz > 0.0 && *hz <= rate as f32 * 0.5)
-                );
-                let a = frequencies.iter().position(|hz| *hz == 440.0).unwrap();
-                assert!((frequencies[a + density as usize] - 880.0).abs() < 0.001);
-            }
+    fn musical_bands_follow_nyquist() {
+        for rate in [48_000, 8_000, 192_000, 44_100] {
+            let frequencies = musical_frequencies(rate);
+            assert_eq!(frequencies.last().copied(), Some(rate as f32 * 0.5));
+            assert!(frequencies.windows(2).all(|pair| pair[0] < pair[1]));
+            assert!(frequencies.contains(&440.0));
+            assert!(
+                frequencies
+                    .iter()
+                    .all(|hz| *hz > 0.0 && *hz <= rate as f32 * 0.5)
+            );
         }
     }
 
@@ -412,44 +403,40 @@ mod tests {
                 SpectrumWindow::BlackmanHarris,
                 SpectrumWindow::None,
             ] {
-                for bands_per_octave in [1, 24, 48] {
-                    let settings = AnalysisSettings {
-                        fps: 20,
-                        fft_size,
-                        window,
-                        bands_per_octave,
-                    };
-                    // A1760 is both a musical center and FFT-bin aligned at every size.
-                    let rate = 56_320;
-                    let mut analyzer = SpectrumAnalyzer::new(settings, rate);
-                    for i in 0..fft_size {
-                        let sample = 0.5 * (std::f32::consts::TAU * i as f32 / 32.0).sin();
-                        analyzer.push([sample, -sample]);
-                    }
-                    let rms = analyzer.transform();
-                    let tone = analyzer
-                        .frequencies
-                        .iter()
-                        .position(|hz| *hz == 1760.0)
-                        .unwrap();
-                    let expected_db = 20.0 * 0.5_f32.log10();
-                    assert!(
-                        (analyzer.levels[tone] - expected_db).abs() < 0.02,
-                        "size={fft_size} window={window:?} density={bands_per_octave}"
-                    );
-                    assert!((rms[0] - 0.5 / 2.0_f32.sqrt()).abs() < 0.001);
-                    assert_eq!(rms[0], rms[1]);
-                    let strongest = analyzer
-                        .levels
-                        .iter()
-                        .enumerate()
-                        .max_by(|a, b| a.1.total_cmp(b.1))
-                        .unwrap()
-                        .0;
-                    let tolerance = (rate as f32 / fft_size as f32)
-                        .max(1760.0 * (2.0_f32.powf(0.5 / bands_per_octave as f32) - 1.0));
-                    assert!((analyzer.frequencies[strongest] - 1760.0).abs() <= tolerance + 1.0);
+                let settings = AnalysisSettings {
+                    fps: 20,
+                    fft_size,
+                    window,
+                };
+                // A1760 is both a musical center and FFT-bin aligned at every size.
+                let rate = 56_320;
+                let mut analyzer = SpectrumAnalyzer::new(settings, rate);
+                for i in 0..fft_size {
+                    let sample = 0.5 * (std::f32::consts::TAU * i as f32 / 32.0).sin();
+                    analyzer.push([sample, -sample]);
                 }
+                let rms = analyzer.transform();
+                let tone = analyzer
+                    .frequencies
+                    .iter()
+                    .position(|hz| *hz == 1760.0)
+                    .unwrap();
+                let expected_db = 20.0 * 0.5_f32.log10();
+                assert!(
+                    (analyzer.levels[tone] - expected_db).abs() < 0.02,
+                    "size={fft_size} window={window:?}"
+                );
+                assert!((rms[0] - 0.5 / 2.0_f32.sqrt()).abs() < 0.001);
+                assert_eq!(rms[0], rms[1]);
+                let strongest = analyzer
+                    .levels
+                    .iter()
+                    .enumerate()
+                    .max_by(|a, b| a.1.total_cmp(b.1))
+                    .unwrap()
+                    .0;
+                let tolerance = rate as f32 / fft_size as f32;
+                assert!((analyzer.frequencies[strongest] - 1760.0).abs() <= tolerance + 1.0);
             }
         }
     }
@@ -471,13 +458,7 @@ mod tests {
         assert!(analyzer.levels.iter().all(|db| *db == -140.0));
         let mut frame = AnalysisFrame::default();
         analyzer.publish(&mut frame, rms, Duration::from_secs(1));
-        let mut changed = SpectrumAnalyzer::new(
-            AnalysisSettings {
-                bands_per_octave: 48,
-                ..settings
-            },
-            8_000,
-        );
+        let mut changed = SpectrumAnalyzer::new(settings, 8_000);
         let rms = changed.transform();
         changed.publish(&mut frame, rms, Duration::from_secs(2));
         assert_eq!(frame.sequence, 2);
@@ -494,7 +475,6 @@ mod tests {
             fps: 5,
             fft_size: 32768,
             window: SpectrumWindow::None,
-            bands_per_octave: 48,
         };
         worker.configure(settings);
         worker.reset(192_000);
@@ -509,14 +489,6 @@ mod tests {
             },
             AnalysisSettings {
                 fft_size: 1000,
-                ..settings
-            },
-            AnalysisSettings {
-                bands_per_octave: 0,
-                ..settings
-            },
-            AnalysisSettings {
-                bands_per_octave: 49,
                 ..settings
             },
         ] {

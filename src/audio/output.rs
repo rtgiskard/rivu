@@ -583,9 +583,9 @@ fn report_stream_error(
     }
 }
 
-// Only the visualization tap is downmixed. Real output uses the permutation
-// above, with independent LFE and surrounds and zero-filled unused speakers.
-fn analysis_weights(layout: &[Channel]) -> Vec<[f32; 2]> {
+// Visualization paths fold decoded channels into two logical sides. Real
+// output still uses the original permutation with independent speakers.
+pub(super) fn analysis_weights(layout: &[Channel]) -> Vec<[f32; 2]> {
     use Channel::*;
     let mut weights: Vec<_> = layout
         .iter()

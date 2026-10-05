@@ -4,6 +4,7 @@ mod input;
 mod layout;
 mod library;
 mod panels;
+mod radial_spectrum;
 mod settings;
 mod visuals;
 mod waveform;
@@ -100,6 +101,11 @@ const PANELS: &[PanelSpec] = &[
         render: GuiApp::spectrum_panel,
     },
     PanelSpec {
+        kind: "radial_spectrum",
+        title: "Radial Spectrum",
+        render: GuiApp::radial_spectrum_panel,
+    },
+    PanelSpec {
         kind: "waveform",
         title: "Waveform",
         render: GuiApp::waveform_panel,
@@ -128,6 +134,7 @@ impl GuiHost {
         if self.quitting {
             return;
         }
+        cx.activate(true);
         if self.handle.is_shutting_down() {
             self.quit(cx);
             return;
@@ -424,7 +431,6 @@ enum Measured {
     Volume(u64),
     Device,
     SettingsFont,
-    SettingsPalette,
     SettingsStyle,
     SettingsFft,
     SettingsWindow,
@@ -501,6 +507,7 @@ struct GuiApp {
     library_search_cache: Vec<(String, String, String)>,
     settings: settings::Settings,
     visuals: visuals::Visuals,
+    radial_spectrum: radial_spectrum::RadialSpectrum,
     default_album: Entity<artwork::Artwork>,
     catalog_open: bool,
     settings_open: bool,
@@ -755,6 +762,12 @@ impl GuiApp {
         let mut subscriptions = Vec::new();
         let waveform = cx.new(|_| waveform::Waveform::new(Arc::clone(&handle.waveform)));
         subscriptions.push(cx.observe(&waveform, |_, _, cx| cx.notify()));
+        subscriptions.push(cx.subscribe(&waveform, |this, _, event, cx| {
+            let waveform::WaveformEvent::Seek(seconds) = event;
+            if this.state.current_track().is_some() {
+                this.send(Command::Seek { seconds: *seconds }, cx);
+            }
+        }));
         subscriptions.push(cx.subscribe(&inputs[&Field::Search], |this, _, event, cx| {
             if matches!(event, InputEvent::Changed) {
                 this.refresh_filter(cx);
@@ -815,6 +828,7 @@ impl GuiApp {
             most_played: Vec::new(),
             library_search_cache: Vec::new(),
             visuals: visuals::Visuals::new(),
+            radial_spectrum: radial_spectrum::RadialSpectrum::new(),
             default_album: cx.new(|_| artwork::Artwork::new()),
             catalog_open: false,
             settings_open: false,
@@ -835,6 +849,7 @@ impl GuiApp {
         };
         app.rebuild_library(cx);
         app.visuals.configure(&app.state.system.config);
+        app.radial_spectrum.configure(&app.state.system.config);
         app.sync_analysis(cx);
         app.workspace_focus.focus(window, cx);
         app
@@ -1168,6 +1183,7 @@ impl GuiApp {
                 self.selected_queue.clear_anchor();
             }
             self.visuals.configure(&self.state.system.config);
+            self.radial_spectrum.configure(&self.state.system.config);
             if library_changed || library_structure_changed {
                 self.refresh_library_index(library_structure_changed);
                 if library_structure_changed {
@@ -1188,6 +1204,7 @@ impl GuiApp {
             if frame.sequence != self.analysis_sequence {
                 self.analysis_sequence = frame.sequence;
                 self.visuals.update(&frame);
+                self.radial_spectrum.update(&frame);
                 changed = true;
             }
         }
@@ -1197,11 +1214,12 @@ impl GuiApp {
     }
     fn sync_analysis(&mut self, cx: &mut Context<Self>) {
         let analysis_visible = self.window_visible
-            && self
-                .layout
-                .active_panels()
-                .iter()
-                .any(|panel| matches!(panel.kind.as_str(), "spectrum" | "spectrogram"));
+            && self.layout.active_panels().iter().any(|panel| {
+                matches!(
+                    panel.kind.as_str(),
+                    "spectrum" | "spectrogram" | "radial_spectrum"
+                )
+            });
         if analysis_visible != self.analysis_worker_enabled {
             self.analysis_worker_enabled = analysis_visible;
             self.send(
@@ -1274,6 +1292,15 @@ impl GuiApp {
     fn spectrum_panel(&mut self, id: u64, _: &mut Window, _: &mut Context<Self>) -> AnyElement {
         self.visuals.spectrum(id)
     }
+    fn radial_spectrum_panel(
+        &mut self,
+        id: u64,
+        _: &mut Window,
+        _: &mut Context<GuiApp>,
+    ) -> AnyElement {
+        self.radial_spectrum
+            .view(id, self.state.playback.status == PlaybackStatus::Playing)
+    }
     fn spectrogram_panel(&mut self, id: u64, _: &mut Window, _: &mut Context<Self>) -> AnyElement {
         self.visuals.spectrogram(id)
     }
@@ -1295,9 +1322,10 @@ impl GuiApp {
             None
         }
         .or_else(|| track.and_then(|track| track.duration));
-        self.waveform
-            .read(cx)
-            .view(id, position, duration, &self.state.system.config)
+        let config = self.state.system.config.clone();
+        self.waveform.update(cx, |waveform, cx| {
+            waveform.view(id, position, duration, &config, cx)
+        })
     }
     fn measurement(&self, key: Measured) -> AnyElement {
         let measured = self.measured.clone();

@@ -607,6 +607,8 @@ impl Source {
         let sample_rate = self.info.sample_rate;
         let channels = self.layout.len();
         frame.select(path, range, self.info.duration, sample_rate);
+        let weights = super::output::analysis_weights(&self.layout);
+        frame.set_channel_weights(&weights);
         let mut end_seconds = 0.0_f64;
         loop {
             check_cancelled()?;

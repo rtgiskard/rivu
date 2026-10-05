@@ -40,9 +40,9 @@ TUI are different clients of that core.
   spectrum styles, and analysis rates
 * Embedded album artwork with local caching and a generated fallback cover
 * Multiple audio visualizations: progressive whole-track waveform, live Spectrum,
-  and Spectrogram views
-* Dedicated Audio visualizer control with Noctalia-compatible bars and ring
-  modes
+  Spectrogram, and Radial Spectrum views
+* Dedicated Radial Spectrum control, based on the Noctalia Shell v5 Fancy Audio
+  Visualizer's Bars/Rings presentation model
 
 Rivu is local-first: it reads audio and artwork from local files and does not
 fetch media or cover images from the network.

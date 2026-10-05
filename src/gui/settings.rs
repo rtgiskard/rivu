@@ -5,7 +5,7 @@ use super::{
     panels::TRACK_HEIGHT, row,
 };
 use crate::{
-    config::{Config, RgbColor, SpectrumStyle, SpectrumWindow, VisualizationPalette},
+    config::{Config, RadialSpectrumStyle, RgbColor, SpectrumStyle, SpectrumWindow},
     model::{Command, RepeatMode},
 };
 use anyhow::{Context as _, Result};
@@ -16,9 +16,9 @@ use std::{collections::HashMap, path::PathBuf, str::FromStr};
 enum SettingChoice {
     Device(usize),
     Font(&'static str),
-    Palette(VisualizationPalette),
     SpectrumStyle(SpectrumStyle),
     Fft(u32),
+    RadialSpectrumStyle(RadialSpectrumStyle),
     Window(SpectrumWindow),
 }
 
@@ -27,8 +27,8 @@ impl SettingChoice {
         match self {
             Self::Device(_) => String::new(),
             Self::Font(value) => value.to_owned(),
-            Self::Palette(value) => visualization_palette_label(value).to_owned(),
             Self::SpectrumStyle(value) => spectrum_style_label(value).to_owned(),
+            Self::RadialSpectrumStyle(value) => radial_spectrum_style_label(value).to_owned(),
             Self::Fft(value) => value.to_string(),
             Self::Window(SpectrumWindow::Hann) => "Hann".to_owned(),
             Self::Window(SpectrumWindow::BlackmanHarris) => "Blackman–Harris".to_owned(),
@@ -46,10 +46,17 @@ enum Field {
     Scale,
     Fps,
     Background,
-    SpectrumMinHz,
-    SpectrumMaxHz,
+    RadialSpectrumSensitivity,
+    RadialSpectrumRotationSpeed,
+    RadialSpectrumBarWidth,
+    RadialSpectrumBarGlowLayers,
+    RadialSpectrumRingOpacity,
+    RadialSpectrumBloomIntensity,
+    RadialSpectrumWaveThickness,
+    RadialSpectrumInnerDiameter,
+    RadialSpectrumPrimaryColor,
+    RadialSpectrumSecondaryColor,
     SpectrumDb,
-    SpectrumBandsPerOctave,
     SpectrumBarWidth,
     SpectrumBars,
     SpectrumGap,
@@ -58,8 +65,6 @@ enum Field {
     SpectrumBarHold,
     SpectrumBarGravity,
     SpectrumSmoothing,
-    SpectrogramMinHz,
-    SpectrogramMaxHz,
     SpectrogramDb,
     SpectrogramHistory,
     CursorColor,
@@ -76,10 +81,19 @@ impl Field {
             Self::Scale => "Interface scale (0.75–2)",
             Self::Fps => "Analysis refresh rate (5–60 fps)",
             Self::Background => "Background (#RRGGBB)",
-            Self::SpectrumMinHz | Self::SpectrogramMinHz => "Minimum frequency (Hz)",
-            Self::SpectrumMaxHz | Self::SpectrogramMaxHz => "Maximum frequency (Hz)",
-            Self::SpectrumDb | Self::SpectrogramDb => "Dynamic range (1–160 dB)",
-            Self::SpectrumBandsPerOctave => "Bands per octave (1–48)",
+            Self::RadialSpectrumSensitivity => "Sensitivity (0–5)",
+            Self::RadialSpectrumRotationSpeed => "Rotation speed (0–10)",
+            Self::RadialSpectrumBarWidth => "Bar width (0–2)",
+            Self::RadialSpectrumBarGlowLayers => "Bar glow layers (0–4)",
+            Self::RadialSpectrumRingOpacity => "Ring opacity (0–1)",
+            Self::RadialSpectrumBloomIntensity => "Bloom intensity (0–2)",
+            Self::RadialSpectrumWaveThickness => "Wave thickness (0–2; reserved)",
+            Self::RadialSpectrumInnerDiameter => "Inner diameter (0–2)",
+            Self::RadialSpectrumPrimaryColor | Self::RadialSpectrumSecondaryColor => {
+                "Radial Spectrum color (#RRGGBB)"
+            }
+            Self::SpectrumDb => "Dynamic range (1–160 dB)",
+            Self::SpectrogramDb => "Dynamic range (1–160 dB)",
             Self::SpectrumBarWidth => "Auto bar width (1–20 px)",
             Self::SpectrumBars => "Bar count (0 = auto; 1–512)",
             Self::SpectrumGap => "Bar gap (0–8 px)",
@@ -130,13 +144,6 @@ fn visual_switch(
     })
 }
 
-fn visualization_palette_label(palette: VisualizationPalette) -> &'static str {
-    match palette {
-        VisualizationPalette::A => "A",
-        VisualizationPalette::B => "B",
-    }
-}
-
 fn spectrum_style_label(style: SpectrumStyle) -> &'static str {
     match style {
         SpectrumStyle::Bars => "Bars",
@@ -144,6 +151,13 @@ fn spectrum_style_label(style: SpectrumStyle) -> &'static str {
         SpectrumStyle::Led => "LED",
         SpectrumStyle::Line => "Line",
         SpectrumStyle::Solid => "Solid",
+    }
+}
+fn radial_spectrum_style_label(style: RadialSpectrumStyle) -> &'static str {
+    match style {
+        RadialSpectrumStyle::Bars => "Bars",
+        RadialSpectrumStyle::Rings => "Rings",
+        RadialSpectrumStyle::BarsRings => "Bars + Rings",
     }
 }
 
@@ -181,6 +195,7 @@ enum VisualPage {
     Common,
     Spectrum,
     Spectrogram,
+    RadialSpectrum,
     Waveform,
 }
 
@@ -208,10 +223,17 @@ impl Settings {
             Field::Scale,
             Field::Fps,
             Field::Background,
-            Field::SpectrumMinHz,
-            Field::SpectrumMaxHz,
+            Field::RadialSpectrumSensitivity,
+            Field::RadialSpectrumRotationSpeed,
+            Field::RadialSpectrumBarWidth,
+            Field::RadialSpectrumBarGlowLayers,
+            Field::RadialSpectrumRingOpacity,
+            Field::RadialSpectrumBloomIntensity,
+            Field::RadialSpectrumWaveThickness,
+            Field::RadialSpectrumInnerDiameter,
+            Field::RadialSpectrumPrimaryColor,
+            Field::RadialSpectrumSecondaryColor,
             Field::SpectrumDb,
-            Field::SpectrumBandsPerOctave,
             Field::SpectrumBarWidth,
             Field::SpectrumBars,
             Field::SpectrumGap,
@@ -220,8 +242,6 @@ impl Settings {
             Field::SpectrumBarHold,
             Field::SpectrumBarGravity,
             Field::SpectrumSmoothing,
-            Field::SpectrogramMinHz,
-            Field::SpectrogramMaxHz,
             Field::SpectrogramDb,
             Field::SpectrogramHistory,
             Field::CursorColor,
@@ -314,13 +334,53 @@ impl Settings {
             cx,
         );
         self.set_value(
-            Field::SpectrumMinHz,
-            self.draft.spectrum_min_hz.to_string(),
+            Field::RadialSpectrumSensitivity,
+            self.draft.radial_spectrum_sensitivity.to_string(),
             cx,
         );
         self.set_value(
-            Field::SpectrumMaxHz,
-            self.draft.spectrum_max_hz.to_string(),
+            Field::RadialSpectrumRotationSpeed,
+            self.draft.radial_spectrum_rotation_speed.to_string(),
+            cx,
+        );
+        self.set_value(
+            Field::RadialSpectrumBarWidth,
+            self.draft.radial_spectrum_bar_width.to_string(),
+            cx,
+        );
+        self.set_value(
+            Field::RadialSpectrumBarGlowLayers,
+            self.draft.radial_spectrum_bar_glow_layers.to_string(),
+            cx,
+        );
+        self.set_value(
+            Field::RadialSpectrumRingOpacity,
+            self.draft.radial_spectrum_ring_opacity.to_string(),
+            cx,
+        );
+        self.set_value(
+            Field::RadialSpectrumBloomIntensity,
+            self.draft.radial_spectrum_bloom_intensity.to_string(),
+            cx,
+        );
+        self.set_value(
+            Field::RadialSpectrumWaveThickness,
+            self.draft.radial_spectrum_wave_thickness.to_string(),
+            cx,
+        );
+        self.set_value(
+            Field::RadialSpectrumInnerDiameter,
+            self.draft.radial_spectrum_inner_diameter.to_string(),
+            cx,
+        );
+        self.set_value(
+            Field::RadialSpectrumPrimaryColor,
+            self.draft.radial_spectrum_primary_color.to_string(),
+            cx,
+        );
+        self.set_value(
+            Field::RadialSpectrumSecondaryColor,
+            self.draft.radial_spectrum_secondary_color.to_string(),
             cx,
         );
         self.set_value(
@@ -355,11 +415,6 @@ impl Settings {
             cx,
         );
         self.set_value(
-            Field::SpectrumBandsPerOctave,
-            self.draft.spectrum_bands_per_octave.to_string(),
-            cx,
-        );
-        self.set_value(
             Field::SpectrumBarWidth,
             self.draft.spectrum_bar_width.to_string(),
             cx,
@@ -367,16 +422,6 @@ impl Settings {
         self.set_value(
             Field::SpectrumBars,
             self.draft.spectrum_bars.to_string(),
-            cx,
-        );
-        self.set_value(
-            Field::SpectrogramMinHz,
-            self.draft.spectrogram_min_hz.to_string(),
-            cx,
-        );
-        self.set_value(
-            Field::SpectrogramMaxHz,
-            self.draft.spectrogram_max_hz.to_string(),
             cx,
         );
         self.set_value(
@@ -416,8 +461,29 @@ impl Settings {
             .trim()
             .parse::<RgbColor>()
             .context("Visualization background")?;
-        config.spectrum_min_hz = self.number(Field::SpectrumMinHz, cx)?;
-        config.spectrum_max_hz = self.number(Field::SpectrumMaxHz, cx)?;
+        config.radial_spectrum_sensitivity = self.number(Field::RadialSpectrumSensitivity, cx)?;
+        config.radial_spectrum_rotation_speed =
+            self.number(Field::RadialSpectrumRotationSpeed, cx)?;
+        config.radial_spectrum_bar_width = self.number(Field::RadialSpectrumBarWidth, cx)?;
+        config.radial_spectrum_bar_glow_layers =
+            self.number(Field::RadialSpectrumBarGlowLayers, cx)?;
+        config.radial_spectrum_ring_opacity = self.number(Field::RadialSpectrumRingOpacity, cx)?;
+        config.radial_spectrum_bloom_intensity =
+            self.number(Field::RadialSpectrumBloomIntensity, cx)?;
+        config.radial_spectrum_wave_thickness =
+            self.number(Field::RadialSpectrumWaveThickness, cx)?;
+        config.radial_spectrum_inner_diameter =
+            self.number(Field::RadialSpectrumInnerDiameter, cx)?;
+        config.radial_spectrum_primary_color = self
+            .value(Field::RadialSpectrumPrimaryColor, cx)
+            .trim()
+            .parse::<RgbColor>()
+            .context("Radial Spectrum primary color")?;
+        config.radial_spectrum_secondary_color = self
+            .value(Field::RadialSpectrumSecondaryColor, cx)
+            .trim()
+            .parse::<RgbColor>()
+            .context("Radial Spectrum secondary color")?;
         config.spectrum_db_range = self.number(Field::SpectrumDb, cx)?;
         config.spectrum_gap = self.number(Field::SpectrumGap, cx)?;
         config.spectrum_peak_hold_ms = self.number(Field::SpectrumHold, cx)?;
@@ -425,11 +491,8 @@ impl Settings {
         config.spectrum_bar_hold_ms = self.number(Field::SpectrumBarHold, cx)?;
         config.spectrum_bar_gravity = self.number(Field::SpectrumBarGravity, cx)?;
         config.spectrum_smoothing_ms = self.number(Field::SpectrumSmoothing, cx)?;
-        config.spectrum_bands_per_octave = self.number(Field::SpectrumBandsPerOctave, cx)?;
         config.spectrum_bar_width = self.number(Field::SpectrumBarWidth, cx)?;
         config.spectrum_bars = self.number(Field::SpectrumBars, cx)?;
-        config.spectrogram_min_hz = self.number(Field::SpectrogramMinHz, cx)?;
-        config.spectrogram_max_hz = self.number(Field::SpectrogramMaxHz, cx)?;
         config.spectrogram_db_range = self.number(Field::SpectrogramDb, cx)?;
         config.spectrogram_history_seconds = self.number(Field::SpectrogramHistory, cx)?;
         config.waveform_cursor_color = self
@@ -532,8 +595,10 @@ impl GuiApp {
                     input.set_text(value, cx);
                 });
             }
-            SettingChoice::Palette(value) => self.settings.draft.visual_palette = value,
             SettingChoice::SpectrumStyle(value) => self.settings.draft.spectrum_style = value,
+            SettingChoice::RadialSpectrumStyle(value) => {
+                self.settings.draft.radial_spectrum_style = value
+            }
             SettingChoice::Fft(value) => self.settings.draft.spectrum_fft_size = value,
             SettingChoice::Window(value) => self.settings.draft.spectrum_window = value,
         }
@@ -546,10 +611,10 @@ impl GuiApp {
         if let Some(item) = items.first() {
             self.settings.dropdown_anchor = match item.value {
                 SettingChoice::Font(_) => Measured::SettingsFont,
-                SettingChoice::Palette(_) => Measured::SettingsPalette,
                 SettingChoice::SpectrumStyle(_) => Measured::SettingsStyle,
                 SettingChoice::Fft(_) => Measured::SettingsFft,
                 SettingChoice::Window(_) => Measured::SettingsWindow,
+                SettingChoice::RadialSpectrumStyle(_) => Measured::SettingsStyle,
                 SettingChoice::Device(_) => Measured::Device,
             };
         }
@@ -851,6 +916,13 @@ impl GuiApp {
                 |settings| settings.visual_page = VisualPage::Common,
             ))
             .child(self.settings.tab_button(
+                "visual-spectrogram",
+                "Spectrogram",
+                selected == VisualPage::Spectrogram,
+                cx,
+                |settings| settings.visual_page = VisualPage::Spectrogram,
+            ))
+            .child(self.settings.tab_button(
                 "visual-spectrum",
                 "Spectrum",
                 selected == VisualPage::Spectrum,
@@ -858,11 +930,11 @@ impl GuiApp {
                 |settings| settings.visual_page = VisualPage::Spectrum,
             ))
             .child(self.settings.tab_button(
-                "visual-spectrogram",
-                "Spectrogram",
-                selected == VisualPage::Spectrogram,
+                "visual-radial-spectrum",
+                "Radial Spectrum",
+                selected == VisualPage::RadialSpectrum,
                 cx,
-                |settings| settings.visual_page = VisualPage::Spectrogram,
+                |settings| settings.visual_page = VisualPage::RadialSpectrum,
             ))
             .child(self.settings.tab_button(
                 "visual-waveform",
@@ -879,25 +951,6 @@ impl GuiApp {
         match settings.visual_page {
             VisualPage::Common => column()
                 .gap_3()
-                .child(caption("Visualization palette"))
-                .child(dropdown_button(
-                    "visual-palette",
-                    visualization_palette_label(draft.visual_palette),
-                    cx,
-                    |this, _, _| {
-                        let selected = match this.settings.draft.visual_palette {
-                            VisualizationPalette::A => 0,
-                            VisualizationPalette::B => 1,
-                        };
-                        this.open_setting_dropdown(
-                            vec![
-                                DropdownItem::new(SettingChoice::Palette(VisualizationPalette::A), "A"),
-                                DropdownItem::new(SettingChoice::Palette(VisualizationPalette::B), "B"),
-                            ],
-                            selected,
-                        );
-                    },
-                ).relative().child(self.measurement(Measured::SettingsPalette)))
                 .child(settings.pair(Field::Fps, Field::Background)),
             VisualPage::Spectrum => {
                 let style = spectrum_style_label(draft.spectrum_style);
@@ -921,17 +974,14 @@ impl GuiApp {
                         let selected = values.iter().position(|value| *value == this.settings.draft.spectrum_window).unwrap_or(0);
                         this.open_setting_dropdown(values.into_iter().map(|value| DropdownItem::new(SettingChoice::Window(value), SettingChoice::Window(value).label())).collect(), selected);
                     }).relative().child(self.measurement(Measured::SettingsWindow)))
-                    .child(settings.pair(Field::SpectrumMinHz, Field::SpectrumMaxHz))
-                    .child(settings.pair(Field::SpectrumDb, Field::SpectrumBandsPerOctave))
-                    .child(settings.pair(Field::SpectrumBarWidth, Field::SpectrumGap))
-                    .child(settings.pair(Field::SpectrumBars, Field::SpectrumSmoothing))
+                    .child(settings.pair(Field::SpectrumDb, Field::SpectrumBarWidth))
+                    .child(settings.pair(Field::SpectrumBars, Field::SpectrumGap))
+                    .child(settings.field(Field::SpectrumSmoothing))
                     .child(settings.pair(Field::SpectrumBarHold, Field::SpectrumBarGravity))
                     .child(settings.pair(Field::SpectrumHold, Field::SpectrumGravity))
                     .child(row().flex_wrap()
                         .child(visual_switch("spectrum-interpolate", "≈", "Interpolation", draft.spectrum_interpolate, cx,
                             |draft| draft.spectrum_interpolate = !draft.spectrum_interpolate))
-                        .child(visual_switch("spectrum-scale", "ln", "Logarithmic frequency axis", draft.spectrum_log_scale, cx,
-                            |draft| draft.spectrum_log_scale = !draft.spectrum_log_scale))
                         .child(visual_switch("spectrum-peaks", "∧", "Peaks", draft.spectrum_peaks, cx,
                             |draft| draft.spectrum_peaks = !draft.spectrum_peaks))
                         .child(visual_switch("spectrum-grid", "#", "Faint grid", draft.spectrum_grid, cx,
@@ -941,16 +991,58 @@ impl GuiApp {
                     .child(caption("Auto uses bar width plus gap, up to 512 bars. Gravity accelerates falling levels; 0 snaps to the signal after hold, bypassing smoothing. Attacks stay immediate. Labels show four dB levels and the first/last frequencies."))
             }
             VisualPage::Spectrogram => column().gap_3()
-                .child(settings.pair(Field::SpectrogramMinHz, Field::SpectrogramMaxHz))
                 .child(settings.pair(Field::SpectrogramDb, Field::SpectrogramHistory))
                 .child(row().flex_wrap()
-                    .child(visual_switch("spectrogram-interpolate", "≈", "Interpolation", draft.spectrogram_interpolate, cx,
-                        |draft| draft.spectrogram_interpolate = !draft.spectrogram_interpolate))
-                    .child(visual_switch("spectrogram-scale", "ln", "Logarithmic frequency axis", draft.spectrogram_log_scale, cx,
-                        |draft| draft.spectrogram_log_scale = !draft.spectrogram_log_scale))
                     .child(visual_switch("spectrogram-labels", "T", "Labels", draft.spectrogram_labels, cx,
                         |draft| draft.spectrogram_labels = !draft.spectrogram_labels)))
-                .child(caption("History is measured in audio seconds, independent of refresh rate and panel width.")),
+                .child(caption("The frequency axis is logarithmic from 16 Hz to Nyquist; history is measured in audio seconds.")), 
+            VisualPage::RadialSpectrum => {
+                column()
+                    .gap_3()
+                    .child(caption("Style"))
+                    .child(dropdown_button(
+                        "radial-spectrum-style",
+                        radial_spectrum_style_label(draft.radial_spectrum_style),
+                        cx,
+                        |this, _, _| {
+                            let values = [
+                                RadialSpectrumStyle::Bars,
+                                RadialSpectrumStyle::Rings,
+                                RadialSpectrumStyle::BarsRings,
+                            ];
+                            let selected = values
+                                .iter()
+                                .position(|value| *value == this.settings.draft.radial_spectrum_style)
+                                .unwrap_or(0);
+                            this.open_setting_dropdown(
+                                values
+                                    .into_iter()
+                                    .map(|value| {
+                                        DropdownItem::new(
+                                            SettingChoice::RadialSpectrumStyle(value),
+                                            radial_spectrum_style_label(value),
+                                        )
+                                    })
+                                    .collect(),
+                                selected,
+                            );
+                        },
+                    ))
+                    .child(settings.pair(Field::RadialSpectrumSensitivity, Field::RadialSpectrumRotationSpeed))
+                    .child(settings.pair(Field::RadialSpectrumBarWidth, Field::RadialSpectrumBarGlowLayers))
+                    .child(settings.pair(Field::RadialSpectrumRingOpacity, Field::RadialSpectrumBloomIntensity))
+                    .child(settings.pair(Field::RadialSpectrumInnerDiameter, Field::RadialSpectrumWaveThickness))
+                    .child(settings.pair(Field::RadialSpectrumPrimaryColor, Field::RadialSpectrumSecondaryColor))
+                    .child(visual_switch(
+                        "radial-spectrum-fade-idle",
+                        "◌",
+                        "Fade when idle",
+                        draft.radial_spectrum_fade_when_idle,
+                        cx,
+                        |draft| draft.radial_spectrum_fade_when_idle = !draft.radial_spectrum_fade_when_idle,
+                    ))
+                    .child(caption("Radial Spectrum follows the Noctalia v5 Fancy Audio Visualizer's Bars/Rings control. Rivu uses the shared FFT and GPUI-native rendering; wave thickness remains a compatibility parameter, but no wave mode is implemented."))
+            }
             VisualPage::Waveform => column().gap_3()
                 .child(settings.field(Field::CursorColor))
                 .child(settings.field(Field::Glow))
@@ -1026,6 +1118,7 @@ impl GuiApp {
             (_, VisualPage::Common) => "settings-common-scroll",
             (_, VisualPage::Spectrum) => "settings-spectrum-scroll",
             (_, VisualPage::Spectrogram) => "settings-spectrogram-scroll",
+            (_, VisualPage::RadialSpectrum) => "settings-radial-spectrum-scroll",
             (_, VisualPage::Waveform) => "settings-waveform-scroll",
         };
         let content = match self.settings.page {

@@ -17,10 +17,19 @@ use std::{
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum VisualizationPalette {
-    A,
-    B,
+    #[serde(rename = "tokyo_night")]
+    TokyoNight,
+    #[serde(rename = "deadbeef")]
+    Deadbeef,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RadialSpectrumStyle {
+    Bars,
+    Rings,
+    BarsRings,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,11 +136,8 @@ pub struct Config {
     pub visual_background: RgbColor,
     pub visual_palette: VisualizationPalette,
     pub spectrum_style: SpectrumStyle,
-    pub spectrum_min_hz: f32,
-    pub spectrum_max_hz: f32,
     pub spectrum_fft_size: u32,
     pub spectrum_window: SpectrumWindow,
-    pub spectrum_bands_per_octave: u32,
     pub spectrum_interpolate: bool,
     pub spectrum_bar_width: f32,
     pub spectrum_bars: u32,
@@ -144,17 +150,25 @@ pub struct Config {
     /// Falling acceleration in dB/s²; zero snaps to the current level after hold.
     pub spectrum_bar_gravity: f32,
     pub spectrum_smoothing_ms: u32,
-    pub spectrum_log_scale: bool,
     pub spectrum_grid: bool,
     pub spectrum_labels: bool,
-    pub spectrogram_interpolate: bool,
+    pub radial_spectrum_style: RadialSpectrumStyle,
+    pub radial_spectrum_sensitivity: f32,
+    pub radial_spectrum_rotation_speed: f32,
+    pub radial_spectrum_bar_width: f32,
+    pub radial_spectrum_bar_glow_layers: u32,
+    pub radial_spectrum_ring_opacity: f32,
+    pub radial_spectrum_bloom_intensity: f32,
+    pub radial_spectrum_wave_thickness: f32,
+    pub radial_spectrum_inner_diameter: f32,
+    pub radial_spectrum_fade_when_idle: bool,
+    pub radial_spectrum_primary_color: RgbColor,
+    pub radial_spectrum_secondary_color: RgbColor,
+
     pub spectrogram_labels: bool,
     pub waveform_labels: bool,
-    pub spectrogram_min_hz: f32,
-    pub spectrogram_max_hz: f32,
     pub spectrum_db_range: f32,
     pub spectrogram_db_range: f32,
-    pub spectrogram_log_scale: bool,
     pub spectrogram_history_seconds: u32,
     pub waveform_cursor_color: RgbColor,
     pub waveform_glow: f32,
@@ -179,13 +193,10 @@ impl Default for Config {
             ui_scale: 1.0,
             analysis_fps: 20,
             visual_background: RgbColor(0x08090c),
-            visual_palette: VisualizationPalette::B,
+            visual_palette: VisualizationPalette::Deadbeef,
             spectrum_style: SpectrumStyle::Bars,
-            spectrum_min_hz: 20.0,
-            spectrum_max_hz: 20_000.0,
             spectrum_fft_size: 8192,
             spectrum_window: SpectrumWindow::BlackmanHarris,
-            spectrum_bands_per_octave: 24,
             spectrum_interpolate: true,
             spectrum_bar_width: 3.0,
             spectrum_bars: 0,
@@ -196,17 +207,25 @@ impl Default for Config {
             spectrum_bar_hold_ms: 0,
             spectrum_bar_gravity: 50.0,
             spectrum_smoothing_ms: 80,
-            spectrum_log_scale: true,
             spectrum_grid: true,
             spectrum_labels: true,
-            spectrogram_interpolate: true,
+            radial_spectrum_style: RadialSpectrumStyle::BarsRings,
+            radial_spectrum_sensitivity: 1.5,
+            radial_spectrum_rotation_speed: 0.5,
+            radial_spectrum_bar_width: 0.6,
+            radial_spectrum_bar_glow_layers: 2,
+            radial_spectrum_ring_opacity: 0.8,
+            radial_spectrum_bloom_intensity: 0.5,
+            radial_spectrum_wave_thickness: 1.0,
+            radial_spectrum_inner_diameter: 0.7,
+            radial_spectrum_fade_when_idle: false,
+            radial_spectrum_primary_color: RgbColor(0x7aa2f7),
+            radial_spectrum_secondary_color: RgbColor(0xbb9af7),
+
             spectrogram_labels: true,
             waveform_labels: true,
-            spectrogram_min_hz: 20.0,
-            spectrogram_max_hz: 20_000.0,
             spectrum_db_range: 70.0,
             spectrogram_db_range: 70.0,
-            spectrogram_log_scale: true,
             spectrogram_history_seconds: 10,
             waveform_cursor_color: RgbColor(0x73daca),
             waveform_glow: 1.0,
@@ -232,27 +251,19 @@ impl Config {
         };
         let mut document: toml::Table = toml::from_str(&contents)
             .with_context(|| format!("cannot parse TOML configuration {}", path.display()))?;
-        if document.get("visual_palette").and_then(toml::Value::as_str) == Some("legacy") {
-            document.remove("visual_palette");
-        }
-        if let Some(palette) = document.get("visual_palette").and_then(toml::Value::as_str) {
-            let migrated = match palette {
-                "tokyo_night" | "nord" => Some("a"),
-                "deadbeef" => Some("b"),
-                _ => None,
-            };
-            if let Some(value) = migrated {
-                document.insert(
-                    "visual_palette".to_owned(),
-                    toml::Value::String(value.to_owned()),
-                );
-            }
-        }
         // Removed visual controls are discarded so older configurations remain loadable.
         for key in [
             "spectrogram_palette",
             "waveform_palette",
             "waveform_played_opacity",
+            "spectrum_min_hz",
+            "spectrum_max_hz",
+            "spectrogram_min_hz",
+            "spectrogram_max_hz",
+            "spectrum_bands_per_octave",
+            "spectrum_log_scale",
+            "spectrogram_log_scale",
+            "spectrogram_interpolate",
         ] {
             document.remove(key);
         }
@@ -307,19 +318,6 @@ impl Config {
             "analysis_fps must be between 5 and 60 (inclusive); got {}",
             self.analysis_fps
         );
-        for (name, min, max) in [
-            ("spectrum", self.spectrum_min_hz, self.spectrum_max_hz),
-            (
-                "spectrogram",
-                self.spectrogram_min_hz,
-                self.spectrogram_max_hz,
-            ),
-        ] {
-            ensure!(
-                min.is_finite() && max.is_finite() && min > 0.0 && min < max && max <= 384_000.0,
-                "{name} Hz range must be finite with 0 < min < max <= 384000; got {min}..{max}"
-            );
-        }
         for (name, range) in [
             ("spectrum_db_range", self.spectrum_db_range),
             ("spectrogram_db_range", self.spectrogram_db_range),
@@ -337,10 +335,6 @@ impl Config {
             "spectrum_fft_size must be a power of two from 512 to 32768"
         );
         ensure!(
-            (1..=48).contains(&self.spectrum_bands_per_octave),
-            "spectrum_bands_per_octave must be between 1 and 48"
-        );
-        ensure!(
             self.spectrum_bar_width.is_finite() && (1.0..=20.0).contains(&self.spectrum_bar_width),
             "spectrum_bar_width must be between 1 and 20 pixels"
         );
@@ -352,6 +346,52 @@ impl Config {
             self.spectrum_gap.is_finite() && (0.0..=8.0).contains(&self.spectrum_gap),
             "spectrum_gap must be between 0 and 8 pixels"
         );
+        ensure!(
+            self.radial_spectrum_bar_glow_layers <= 4,
+            "radial_spectrum_bar_glow_layers must be between 0 and 4"
+        );
+        for (name, value, range) in [
+            (
+                "radial_spectrum_sensitivity",
+                self.radial_spectrum_sensitivity,
+                0.0..=5.0,
+            ),
+            (
+                "radial_spectrum_rotation_speed",
+                self.radial_spectrum_rotation_speed,
+                0.0..=10.0,
+            ),
+            (
+                "radial_spectrum_bar_width",
+                self.radial_spectrum_bar_width,
+                0.0..=2.0,
+            ),
+            (
+                "radial_spectrum_ring_opacity",
+                self.radial_spectrum_ring_opacity,
+                0.0..=1.0,
+            ),
+            (
+                "radial_spectrum_bloom_intensity",
+                self.radial_spectrum_bloom_intensity,
+                0.0..=2.0,
+            ),
+            (
+                "radial_spectrum_wave_thickness",
+                self.radial_spectrum_wave_thickness,
+                0.0..=2.0,
+            ),
+            (
+                "radial_spectrum_inner_diameter",
+                self.radial_spectrum_inner_diameter,
+                0.0..=2.0,
+            ),
+        ] {
+            ensure!(
+                value.is_finite() && range.contains(&value),
+                "{name} is outside its supported range; got {value}"
+            );
+        }
         for (name, hold) in [
             ("spectrum_peak_hold_ms", self.spectrum_peak_hold_ms),
             ("spectrum_bar_hold_ms", self.spectrum_bar_hold_ms),
@@ -494,22 +534,16 @@ mod tests {
             ui_font: "sans-serif".to_owned(),
             ui_scale: 1.5,
             analysis_fps: 30,
-            spectrogram_min_hz: 30.0,
-            spectrogram_interpolate: false,
-            spectrogram_max_hz: 18_000.0,
             spectrum_db_range: 80.0,
             media_read_buffer_mb: 8,
             nerd_symbols: true,
             ffmpeg_enabled: true,
             pipewire_auto_mix: false,
             spectrum_style: SpectrumStyle::Solid,
+            visual_palette: VisualizationPalette::Deadbeef,
             visual_background: "#101820".parse().unwrap(),
-            visual_palette: VisualizationPalette::A,
-            spectrum_min_hz: 60.0,
-            spectrum_max_hz: 16_000.0,
             spectrum_fft_size: 16384,
             spectrum_window: SpectrumWindow::Hann,
-            spectrum_bands_per_octave: 36,
             spectrum_interpolate: false,
             spectrum_bar_width: 4.0,
             spectrum_bars: 48,
@@ -520,13 +554,23 @@ mod tests {
             spectrum_bar_hold_ms: 100,
             spectrum_bar_gravity: 25.0,
             spectrum_smoothing_ms: 120,
-            spectrum_log_scale: false,
             spectrum_grid: false,
             spectrum_labels: false,
+            radial_spectrum_style: RadialSpectrumStyle::BarsRings,
+            radial_spectrum_sensitivity: 2.0,
+            radial_spectrum_rotation_speed: 1.0,
+            radial_spectrum_bar_width: 0.8,
+            radial_spectrum_bar_glow_layers: 3,
+            radial_spectrum_ring_opacity: 0.7,
+            radial_spectrum_bloom_intensity: 1.0,
+            radial_spectrum_wave_thickness: 1.2,
+            radial_spectrum_inner_diameter: 0.8,
+            radial_spectrum_fade_when_idle: true,
+            radial_spectrum_primary_color: "#7aa2f7".parse().unwrap(),
+            radial_spectrum_secondary_color: "#bb9af7".parse().unwrap(),
             spectrogram_labels: false,
             waveform_labels: false,
             spectrogram_db_range: 100.0,
-            spectrogram_log_scale: false,
             spectrogram_history_seconds: 30,
             waveform_cursor_color: "#eeaa66".parse().unwrap(),
             waveform_glow: 0.0,
@@ -604,13 +648,6 @@ mod tests {
             "analysis_fps = 61",
             "analysis_fps = -1",
             "analysis_fps = 5.5",
-            "spectrum_min_hz = 0",
-            "spectrum_max_hz = 384001",
-            "spectrum_min_hz = nan",
-            "spectrum_min_hz = 300\nspectrum_max_hz = 200",
-            "spectrogram_min_hz = 0",
-            "spectrogram_min_hz = nan",
-            "spectrogram_max_hz = 10\nspectrogram_min_hz = 20",
             "spectrum_db_range = 0",
             "spectrum_db_range = 161",
             "spectrogram_db_range = inf",
@@ -620,8 +657,6 @@ mod tests {
             "spectrum_fft_size = 65536",
             "spectrum_fft_size = 1000",
             "spectrum_window = 'hamming'",
-            "spectrum_bands_per_octave = 0",
-            "spectrum_bands_per_octave = 49",
             "spectrum_bar_width = 0.9",
             "spectrum_bar_width = 21",
             "spectrum_bar_width = nan",
@@ -629,6 +664,10 @@ mod tests {
             "spectrum_gap = -1",
             "spectrum_gap = 9",
             "spectrum_gap = nan",
+            "radial_spectrum_sensitivity = -1",
+            "radial_spectrum_sensitivity = 6",
+            "radial_spectrum_bar_glow_layers = 5",
+            "radial_spectrum_ring_opacity = 2",
             "spectrum_peak_hold_ms = 2001",
             "spectrum_peak_gravity = -1",
             "spectrum_peak_gravity = 501",
@@ -792,34 +831,16 @@ mod tests {
     }
 
     #[test]
-    fn visualization_palette_round_trips() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("config.toml");
-        let config = Config {
-            visual_palette: VisualizationPalette::A,
-            ..Config::default()
-        };
-        config.save(&path).unwrap();
-        assert_eq!(
-            Config::load(&path).unwrap().visual_palette,
-            VisualizationPalette::A
-        );
-    }
-
-    #[test]
     fn visual_parameter_boundaries_round_trip() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
         for high in [false, true] {
             let config = Config {
-                spectrum_min_hz: 1.0,
-                spectrum_max_hz: 384_000.0,
                 spectrum_db_range: if high { 160.0 } else { 1.0 },
                 spectrogram_db_range: if high { 1.0 } else { 160.0 },
                 spectrum_gap: if high { 8.0 } else { 0.0 },
                 spectrum_peak_hold_ms: if high { 2000 } else { 0 },
                 spectrum_fft_size: if high { 32768 } else { 512 },
-                spectrum_bands_per_octave: if high { 48 } else { 1 },
                 spectrum_bar_width: if high { 20.0 } else { 1.0 },
                 spectrum_bars: if high { 512 } else { 1 },
                 spectrum_peak_gravity: if high { 500.0 } else { 0.0 },
@@ -890,8 +911,6 @@ mod tests {
         ] {
             let config = Config {
                 spectrum_style,
-                spectrogram_min_hz: 31.0,
-                spectrogram_max_hz: 19_000.0,
                 spectrum_db_range: 55.0,
                 ..Config::default()
             };

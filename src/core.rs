@@ -35,23 +35,12 @@ struct Request {
     ack: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct CoreState {
     pub(crate) library: LibrarySnapshot,
     pub(crate) queue: QueueState,
     pub(crate) playback: PlaybackState,
     pub(crate) system: SystemState,
-}
-
-impl Default for CoreState {
-    fn default() -> Self {
-        Self {
-            library: LibrarySnapshot::default(),
-            queue: QueueState::default(),
-            playback: PlaybackState::default(),
-            system: SystemState::default(),
-        }
-    }
 }
 
 impl CoreState {
@@ -258,13 +247,15 @@ impl Runtime {
             subscribers: subscribers.clone(),
             raise_requested: Arc::new(AtomicBool::new(false)),
         };
-        let mut initial = CoreState::default();
-        initial.library = LibrarySnapshot {
-            tracks: Arc::new(store.tracks()?),
-            revision: 0,
-            structure_revision: 0,
-            playlists: Arc::new(store.playlists()?),
-            history: Arc::new(store.history(200)?),
+        let mut initial = CoreState {
+            library: LibrarySnapshot {
+                tracks: Arc::new(store.tracks()?),
+                revision: 0,
+                structure_revision: 0,
+                playlists: Arc::new(store.playlists()?),
+                history: Arc::new(store.history(200)?),
+            },
+            ..CoreState::default()
         };
         initial.system.devices = Arc::new(audio::devices().unwrap_or_default());
         initial.playback.volume = config.volume;

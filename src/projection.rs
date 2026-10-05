@@ -44,36 +44,6 @@ impl ClientSnapshot {
     }
 }
 
-impl ClientSnapshot {
-    pub(crate) fn from_tui(state: &TuiSnapshot) -> Self {
-        Self {
-            library: crate::model::LibrarySnapshot {
-                tracks: Arc::clone(&state.library.tracks),
-                revision: 0,
-                structure_revision: 0,
-                playlists: Arc::new(Vec::new()),
-                history: Arc::new(Vec::new()),
-            },
-            queue: state.queue.clone(),
-            playback: state.playback.clone(),
-            system: crate::model::SystemState {
-                scanning: false,
-                scan_message: state.system.scan_message.clone(),
-                last_error: state.system.last_error.clone(),
-                devices: Arc::new(Vec::new()),
-                selected_device: None,
-                revision: state.system.revision,
-                config: Arc::new(Config::default()),
-                config_path: std::path::PathBuf::new(),
-                mpris_status: String::new(),
-                ffmpeg_status: String::new(),
-                database_optimization: None,
-                shutting_down: state.system.shutting_down,
-            },
-        }
-    }
-}
-
 #[derive(Clone, Debug, Default)]
 pub struct GuiSnapshot {
     pub library: GuiLibrarySnapshot,
@@ -163,6 +133,7 @@ pub struct TuiSnapshot {
 pub struct TuiLibrarySnapshot {
     pub revision: u64,
     pub tracks: Arc<Vec<Track>>,
+    pub playlists: Arc<Vec<Playlist>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -180,6 +151,7 @@ impl TuiSnapshot {
             library: TuiLibrarySnapshot {
                 revision: state.library.revision,
                 tracks: Arc::clone(&state.library.tracks),
+                playlists: Arc::clone(&state.library.playlists),
             },
             queue: state.queue.clone(),
             playback: state.playback.clone(),
