@@ -3,7 +3,7 @@ use crate::{
     core::AppHandle,
     model::{
         Ack, AppState, Command, DatabaseOptimization, HistoryEntry, PlaybackStatus, Playlist,
-        QueueEntry, RepeatMode, Response, Track,
+        QueueEntry, RepeatMode, StateResponse, Track,
     },
 };
 use anyhow::{Context, Error, Result, bail};
@@ -214,7 +214,7 @@ impl From<FullStatus> for AppState {
 }
 
 impl WireResponse {
-    fn from_response(response: Response, compact: bool) -> Self {
+    fn from_response(response: StateResponse, compact: bool) -> Self {
         let state = response.state;
         let overview = CompactOverview {
             library: state.library.as_ref().clone(),
@@ -313,8 +313,8 @@ impl OverviewCache {
         self.tracks = tracks;
     }
 
-    fn response(state: AppState, tracks: Arc<Vec<Track>>) -> Response {
-        Response {
+    fn response(state: AppState, tracks: Arc<Vec<Track>>) -> StateResponse {
+        StateResponse {
             ok: true,
             error: None,
             state: AppState {
@@ -523,7 +523,7 @@ async fn write_frame<S: AsyncWrite + Unpin>(stream: &mut S, value: &impl Seriali
     Ok(())
 }
 
-fn response_frame(response: Response, instance_id: u16, compact: bool) -> ResponseFrame {
+fn response_frame(response: StateResponse, instance_id: u16, compact: bool) -> ResponseFrame {
     ResponseFrame {
         instance_id,
         revision: response.state.revision as u16,
@@ -538,17 +538,17 @@ fn ack_frame(ack: Ack, instance_id: u16) -> ResponseFrame {
         response: WireResponse::from_ack(ack),
     }
 }
-fn unpack_response(frame: ResponseFrame) -> Result<Response> {
+fn unpack_response(frame: ResponseFrame) -> Result<StateResponse> {
     let WireResponse { ok, error, state } = frame.response;
     let state = match state {
         WireState::Overview(state) => state.into(),
         WireState::Full(state) => (*state).into(),
         WireState::Ack { .. } => bail!("IPC acknowledgement used where state was required"),
     };
-    Ok(Response { ok, error, state })
+    Ok(StateResponse { ok, error, state })
 }
 
-fn overview_response(state: AppState, overview: &Mutex<OverviewCache>) -> Response {
+fn overview_response(state: AppState, overview: &Mutex<OverviewCache>) -> StateResponse {
     let cached = overview.lock().cached(&state);
     let tracks = cached.unwrap_or_else(|| {
         let mut ids: HashSet<i64> = state.queue.iter().map(|entry| entry.track_id).collect();
@@ -569,7 +569,7 @@ fn overview_response(state: AppState, overview: &Mutex<OverviewCache>) -> Respon
     OverviewCache::response(state, tracks)
 }
 
-async fn command(handle: &AppHandle, command: Command) -> Response {
+async fn command(handle: &AppHandle, command: Command) -> StateResponse {
     let fallback = handle.snapshot();
     let duration = if matches!(command, Command::OptimizeDatabase) {
         Duration::from_secs(120)
@@ -586,12 +586,12 @@ async fn command(handle: &AppHandle, command: Command) -> Response {
     .await
     {
         Ok(Ok(response)) => response,
-        Ok(Err(error)) => Response {
+        Ok(Err(error)) => StateResponse {
             ok: false,
             error: Some(format!("Core command task failed: {error}")),
             state: fallback,
         },
-        Err(_) => Response {
+        Err(_) => StateResponse {
             ok: false,
             error: Some("Core command timed out".into()),
             state: fallback,
@@ -607,7 +607,7 @@ async fn wait_for_revision(
     overview: &Mutex<OverviewCache>,
     updates: &mut watch::Receiver<u64>,
     shutdown: &mut watch::Receiver<bool>,
-) -> Option<Response> {
+) -> Option<StateResponse> {
     loop {
         let state = handle.snapshot();
         if !revision_matches(state.revision, revision) || state.shutting_down {
@@ -639,7 +639,7 @@ async fn serve_connection(
         let request = match decode_frame::<RequestFrame>(&bytes) {
             Ok(request) => request,
             Err(error) => {
-                let response = Response {
+                let response = StateResponse {
                     ok: false,
                     error: Some(format!("Invalid command: {error}")),
                     state: handle.snapshot(),
@@ -783,7 +783,7 @@ impl WatcherSession {
         self.cancelled.store(true, Ordering::Release);
         self.cancel_notify.notify_waiters();
     }
-    pub fn watch(&mut self, revision: u16) -> Result<Response> {
+    pub fn watch(&mut self, revision: u16) -> Result<StateResponse> {
         self.watch_until(revision, || false)
             .and_then(|response| response.ok_or_else(|| anyhow::anyhow!("Watcher cancelled")))
     }
@@ -791,7 +791,7 @@ impl WatcherSession {
         &mut self,
         revision: u16,
         cancelled: impl Fn() -> bool,
-    ) -> Result<Option<Response>> {
+    ) -> Result<Option<StateResponse>> {
         if cancelled() || self.cancelled.load(Ordering::Acquire) {
             return Ok(None);
         }
@@ -809,10 +809,10 @@ impl WatcherSession {
         }
     }
 }
-pub fn watch(path: &Path, revision: u16) -> Result<Response> {
+pub fn watch(path: &Path, revision: u16) -> Result<StateResponse> {
     watch_session(path)?.watch(revision)
 }
-pub fn request(path: &Path, command: &Command) -> Result<Response> {
+pub fn request(path: &Path, command: &Command) -> Result<StateResponse> {
     let runtime = client_runtime()?;
     runtime.block_on(async {
         let mut stream = UnixStream::connect(path).await.with_context(|| {

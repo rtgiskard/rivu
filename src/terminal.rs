@@ -1,6 +1,8 @@
 use crate::{
     ipc,
-    model::{AppState, Command, PlaybackStatus, RepeatMode, Response, Track, playback_key_command},
+    model::{
+        AppState, Command, PlaybackStatus, RepeatMode, StateResponse, Track, playback_key_command,
+    },
 };
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, bounded};
@@ -79,7 +81,7 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
 }
 
 struct Watcher {
-    receiver: Receiver<Result<Response, String>>,
+    receiver: Receiver<Result<StateResponse, String>>,
     stopping: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
@@ -227,7 +229,7 @@ impl UiState {
         );
     }
 
-    fn accept_response(&mut self, response: Response) -> AppState {
+    fn accept_response(&mut self, response: StateResponse) -> AppState {
         let message = if response.ok {
             None
         } else {

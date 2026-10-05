@@ -5,7 +5,7 @@ use rivu::{
     audio, config,
     core::Runtime,
     gui, ipc,
-    model::{Command, PlaybackStatus, RepeatMode, Response},
+    model::{Command, PlaybackStatus, RepeatMode, StateResponse},
     mpris, terminal,
 };
 use std::{path::PathBuf, thread, time::Duration};
@@ -610,13 +610,13 @@ fn start(
     drop(server);
     Ok(())
 }
-fn checked(response: Response) -> Result<Response> {
+fn checked(response: StateResponse) -> Result<StateResponse> {
     if !response.ok {
         bail!("{}", response.error.as_deref().unwrap_or("Command failed"));
     }
     Ok(response)
 }
-fn show(response: &Response, json: bool) -> Result<()> {
+fn show(response: &StateResponse, json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(response)?);
     } else {

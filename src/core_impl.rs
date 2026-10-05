@@ -18,7 +18,7 @@ impl Core {
                                 revision: self.state.revision,
                             })
                         } else {
-                            CoreResponse::State(Box::new(Response {
+                            CoreResponse::State(Box::new(StateResponse {
                                 ok: result.is_ok(),
                                 error: result.err().map(|e| format!("{e:#}")),
                                 state: self.state.clone(),

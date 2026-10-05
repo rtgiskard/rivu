@@ -345,7 +345,7 @@ pub enum Command {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Response {
+pub struct StateResponse {
     pub ok: bool,
     pub error: Option<String>,
     pub state: AppState,

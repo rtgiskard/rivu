@@ -24,7 +24,7 @@ use std::{
 
 type Wakeup = Arc<dyn Fn() + Send + Sync>;
 enum CoreResponse {
-    State(Box<Response>),
+    State(Box<StateResponse>),
     Ack(Ack),
 }
 struct Request {
@@ -102,7 +102,7 @@ impl AppHandle {
     pub fn take_raise_request(&self) -> bool {
         self.raise_requested.swap(false, Ordering::AcqRel)
     }
-    pub fn request(&self, command: Command) -> Response {
+    pub fn request(&self, command: Command) -> StateResponse {
         let (tx, rx) = bounded(1);
         let maintenance = matches!(command, Command::OptimizeDatabase);
         let result = self.sender.send_timeout(
@@ -114,7 +114,7 @@ impl AppHandle {
             Duration::from_secs(2),
         );
         if let Err(error) = result {
-            return Response {
+            return StateResponse {
                 ok: false,
                 error: Some(format!("Core unavailable: {error}")),
                 state: self.snapshot(),
@@ -127,7 +127,7 @@ impl AppHandle {
                 .map_err(|error| error.to_string())
         };
         match response.unwrap_or_else(|error| {
-            CoreResponse::State(Box::new(Response {
+            CoreResponse::State(Box::new(StateResponse {
                 ok: false,
                 error: Some(format!("Core response unavailable: {error}")),
                 state: self.snapshot(),
