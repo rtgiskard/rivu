@@ -41,16 +41,17 @@ impl GuiApp {
             .map(|track| track.title.clone())
             .unwrap_or_else(|| "Choose something to listen to".into());
         let artist = track.map(|track| track.artist.clone()).unwrap_or_default();
-        let status = match self.state.status {
+        let status = match self.state.playback.status {
             PlaybackStatus::Playing => "Playing",
             PlaybackStatus::Paused => "Paused",
             PlaybackStatus::Stopped => "Stopped",
         };
         let duration = self
             .state
+            .playback
             .duration
             .or_else(|| track.and_then(|track| track.duration));
-        let preview_position = self.seek_preview.unwrap_or(self.state.position);
+        let preview_position = self.seek_preview.unwrap_or(self.state.playback.position);
         let progress = duration
             .filter(|duration| *duration > 0.)
             .map_or(0., |duration| (preview_position / duration) as f32);
@@ -63,7 +64,7 @@ impl GuiApp {
         );
         let volume = self.slider(
             ("volume", panel_id),
-            self.state.volume,
+            self.state.playback.volume,
             Dragging::Volume(panel_id),
             Measured::Volume(panel_id),
             cx,
@@ -76,7 +77,7 @@ impl GuiApp {
                 icon_button(
                     ("shuffle", panel_id),
                     "󰒟",
-                    if self.state.shuffle {
+                    if self.state.playback.shuffle {
                         "Shuffle: on (s)"
                     } else {
                         "Shuffle: off (s)"
@@ -85,7 +86,7 @@ impl GuiApp {
                     |this, _, cx| {
                         this.send(
                             Command::Shuffle {
-                                enabled: !this.state.shuffle,
+                                enabled: !this.state.playback.shuffle,
                             },
                             cx,
                         )
@@ -93,7 +94,7 @@ impl GuiApp {
                 )
                 .size(gpui::rems(3.))
                 .text_2xl()
-                .when(self.state.shuffle, |view| {
+                .when(self.state.playback.shuffle, |view| {
                     view.text_color(rgb(ACCENT)).border_color(rgb(ACCENT))
                 }),
             )
@@ -111,12 +112,12 @@ impl GuiApp {
             .child(
                 icon_button(
                     ("toggle", panel_id),
-                    if self.state.status == PlaybackStatus::Playing {
+                    if self.state.playback.status == PlaybackStatus::Playing {
                         "󰏤"
                     } else {
                         "󰐊"
                     },
-                    if self.state.status == PlaybackStatus::Playing {
+                    if self.state.playback.status == PlaybackStatus::Playing {
                         "Pause (space)"
                     } else {
                         "Play (space)"
@@ -143,19 +144,19 @@ impl GuiApp {
             .child(
                 icon_button(
                     ("repeat", panel_id),
-                    if self.state.repeat == RepeatMode::One {
+                    if self.state.playback.repeat == RepeatMode::One {
                         "󰑘"
                     } else {
                         "󰑖"
                     },
-                    match self.state.repeat {
+                    match self.state.playback.repeat {
                         RepeatMode::Off => "Repeat: off (r)",
                         RepeatMode::All => "Repeat: all (r)",
                         RepeatMode::One => "Repeat: one (r)",
                     },
                     cx,
                     |this, _, cx| {
-                        let mode = match this.state.repeat {
+                        let mode = match this.state.playback.repeat {
                             RepeatMode::Off => RepeatMode::All,
                             RepeatMode::All => RepeatMode::One,
                             RepeatMode::One => RepeatMode::Off,
@@ -165,7 +166,7 @@ impl GuiApp {
                 )
                 .size(gpui::rems(3.))
                 .text_2xl()
-                .when(self.state.repeat != RepeatMode::Off, |view| {
+                .when(self.state.playback.repeat != RepeatMode::Off, |view| {
                     view.text_color(rgb(ACCENT)).border_color(rgb(ACCENT))
                 }),
             );
@@ -179,7 +180,7 @@ impl GuiApp {
                     .flex_shrink_0()
                     .text_lg()
                     .text_color(rgb(MUTED))
-                    .child(if self.state.config.nerd_symbols {
+                    .child(if self.state.system.config.nerd_symbols {
                         "󰕾"
                     } else {
                         "♪"
@@ -193,7 +194,7 @@ impl GuiApp {
             )
             .child(div().flex_1().min_w_0().child(volume))
             .child(
-                caption(format!("{:.0}%", self.state.volume * 100.))
+                caption(format!("{:.0}%", self.state.playback.volume * 100.))
                     .w(px(34.))
                     .flex_shrink_0(),
             );
@@ -233,7 +234,7 @@ impl GuiApp {
                                             .flex_shrink_0()
                                             .text_lg()
                                             .text_color(rgb(MUTED))
-                                            .child(if self.state.config.nerd_symbols {
+                                            .child(if self.state.system.config.nerd_symbols {
                                                 "󰅐"
                                             } else {
                                                 "◷"
@@ -279,6 +280,7 @@ impl GuiApp {
     fn panel_selected_tracks(&self) -> Vec<i64> {
         self.state
             .library
+            .tracks
             .iter()
             .filter(|track| self.selected.contains(&track.id))
             .map(|track| track.id)
@@ -289,7 +291,7 @@ impl GuiApp {
         match self
             .library_index
             .get(&track_id)
-            .and_then(|index| self.state.library.get(*index))
+            .and_then(|index| self.state.library.tracks.get(*index))
         {
             Some(track) => {
                 let detail = format!(
@@ -439,8 +441,8 @@ impl GuiApp {
                 "{count} tracks · {} selected · Ctrl-click to select multiple",
                 self.selected.len()
             )));
-        if self.state.scanning {
-            panel = panel.child(caption(self.state.scan_message.clone()).truncate());
+        if self.state.system.scanning {
+            panel = panel.child(caption(self.state.system.scan_message.clone()).truncate());
         }
         if count == 0 {
             panel = panel.child(empty_state(
@@ -463,8 +465,11 @@ impl GuiApp {
                     cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                         range
                             .filter_map(|index| {
-                                let track =
-                                    this.state.library.get(*this.filtered_rows.get(index)?)?;
+                                let track = this
+                                    .state
+                                    .library
+                                    .tracks
+                                    .get(*this.filtered_rows.get(index)?)?;
                                 let id = track.id;
                                 let (title, detail) = this.panel_track_text(id);
                                 Some(
@@ -505,6 +510,7 @@ impl GuiApp {
     fn selected_queue_ids_in_order(&self) -> Vec<u64> {
         self.state
             .queue
+            .entries
             .iter()
             .filter(|entry| self.selected_queue.contains(&entry.id))
             .map(|entry| entry.id)
@@ -517,6 +523,7 @@ impl GuiApp {
         }
         self.state
             .queue
+            .entries
             .iter()
             .find(|entry| self.selected_queue.contains(&entry.id))
             .map(|entry| entry.id)
@@ -529,6 +536,7 @@ impl GuiApp {
         let Some(index) = self
             .state
             .queue
+            .entries
             .iter()
             .position(|entry| entry.id == queue_id)
         else {
@@ -539,7 +547,7 @@ impl GuiApp {
         } else {
             index.saturating_sub(1)
         };
-        if target != index && target < self.state.queue.len() {
+        if target != index && target < self.state.queue.entries.len() {
             self.send(
                 Command::MoveQueue {
                     queue_id,
@@ -554,6 +562,7 @@ impl GuiApp {
         let Some(source_index) = self
             .state
             .queue
+            .entries
             .iter()
             .position(|entry| entry.id == source_id)
         else {
@@ -562,6 +571,7 @@ impl GuiApp {
         let Some(target_index) = self
             .state
             .queue
+            .entries
             .iter()
             .position(|entry| entry.id == target_id)
         else {
@@ -582,13 +592,14 @@ impl GuiApp {
         if self.selected_queue.contains(&target_id) {
             return;
         }
-        let target_after_removal = self.state.queue[..target_index]
+        let target_after_removal = self.state.queue.entries[..target_index]
             .iter()
             .filter(|entry| !self.selected_queue.contains(&entry.id))
             .count();
         let first_index = self
             .state
             .queue
+            .entries
             .iter()
             .position(|entry| self.selected_queue.contains(&entry.id))
             .unwrap_or(source_index);
@@ -609,8 +620,13 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let selected_id = self.selected_queue_single();
-        let selected_index =
-            selected_id.and_then(|id| self.state.queue.iter().position(|entry| entry.id == id));
+        let selected_index = selected_id.and_then(|id| {
+            self.state
+                .queue
+                .entries
+                .iter()
+                .position(|entry| entry.id == id)
+        });
         let selection_count = self.selected_queue.len();
         let mut tools = panel_toolbar().min_h(px(32.));
         if selection_count > 0 {
@@ -629,6 +645,7 @@ impl GuiApp {
                             .or_else(|| {
                                 this.state
                                     .queue
+                                    .entries
                                     .iter()
                                     .find(|entry| this.selected_queue.contains(&entry.id))
                                     .map(|entry| entry.id)
@@ -663,7 +680,7 @@ impl GuiApp {
                         |this, _, cx| this.move_selected_queue(false, cx),
                     ));
                 }
-                if index + 1 < self.state.queue.len() {
+                if index + 1 < self.state.queue.entries.len() {
                     tools = tools.child(icon_button(
                         ("queue-down", panel_id),
                         "↓",
@@ -688,11 +705,11 @@ impl GuiApp {
             .drag_over::<LibraryDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
             .child(caption(format!(
                 "{} queued · {} selected · drag an entry onto its new position",
-                self.state.queue.len(),
+                self.state.queue.entries.len(),
                 selection_count,
             )))
             .when(selection_count > 0, |panel| panel.child(tools))
-            .when(self.state.queue.is_empty(), |panel| {
+            .when(self.state.queue.entries.is_empty(), |panel| {
                 panel.child(empty_state(
                     "Your queue is empty. Enqueue tracks from Library.",
                 ))
@@ -700,14 +717,14 @@ impl GuiApp {
             .child(
                 uniform_list(
                     ("queue-rows", panel_id),
-                    self.state.queue.len(),
+                    self.state.queue.entries.len(),
                     cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                         range
                             .filter_map(|index| {
-                                let entry = this.state.queue.get(index)?;
+                                let entry = this.state.queue.entries.get(index)?;
                                 let id = entry.id;
                                 let (title, detail) = this.panel_track_text(entry.track_id);
-                                let playing = this.state.current_queue_id == Some(id);
+                                let playing = this.state.queue.current_id == Some(id);
                                 let drag = QueueDrag { queue_id: id };
                                 Some(
                                     list_row(
@@ -790,6 +807,7 @@ impl GuiApp {
         };
         let Some(playlist) = self
             .state
+            .library
             .playlists
             .iter()
             .find(|playlist| Some(playlist.id) == self.selected_playlist)
@@ -827,6 +845,7 @@ impl GuiApp {
     ) -> AnyElement {
         let selected = self.selected_playlist.and_then(|id| {
             self.state
+                .library
                 .playlists
                 .iter()
                 .find(|playlist| playlist.id == id)
@@ -861,7 +880,8 @@ impl GuiApp {
             cx,
             |this, _, cx| this.choose_playlist_import(cx),
         ));
-        let catalog_height = (self.state.playlists.len().max(1) as f32 * TRACK_HEIGHT).min(126.0);
+        let catalog_height =
+            (self.state.library.playlists.len().max(1) as f32 * TRACK_HEIGHT).min(126.0);
         let mut panel = column()
             .id(("playlists-panel", panel_id))
             .size_full()
@@ -888,11 +908,11 @@ impl GuiApp {
             .child(
                 uniform_list(
                     ("playlist-catalog", panel_id),
-                    self.state.playlists.len(),
+                    self.state.library.playlists.len(),
                     cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                         range
                             .filter_map(|index| {
-                                let playlist = this.state.playlists.get(index)?;
+                                let playlist = this.state.library.playlists.get(index)?;
                                 let id = playlist.id;
                                 let entry_count = playlist.entries.len();
                                 let actions = row()
@@ -972,6 +992,7 @@ impl GuiApp {
                                             this.selected_entry = None;
                                             if let Some(name) = this
                                                 .state
+                                                .library
                                                 .playlists
                                                 .iter()
                                                 .find(|playlist| playlist.id == id)
@@ -1031,6 +1052,7 @@ impl GuiApp {
                         |this, _, cx| {
                             let track_id = this
                                 .state
+                                .library
                                 .playlists
                                 .iter()
                                 .find(|playlist| Some(playlist.id) == this.selected_playlist)
@@ -1098,6 +1120,7 @@ impl GuiApp {
                         cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                             let Some(playlist) = this
                                 .state
+                                .library
                                 .playlists
                                 .iter()
                                 .find(|playlist| playlist.id == playlist_id)
@@ -1199,7 +1222,7 @@ impl GuiApp {
         if let Some(track) = self
             .metadata_track
             .and_then(|id| self.library_index.get(&id))
-            .and_then(|index| self.state.library.get(*index))
+            .and_then(|index| self.state.library.tracks.get(*index))
         {
             let id = track.id;
             let favorite = track.favorite;
@@ -1340,9 +1363,9 @@ impl GuiApp {
             .size_full()
             .child(caption(format!(
                 "Recent tracks · {} tracks · newest first",
-                self.state.history.len()
+                self.state.library.history.len()
             )))
-            .when(self.state.history.is_empty(), |panel| {
+            .when(self.state.library.history.is_empty(), |panel| {
                 panel.child(empty_state(
                     "Started tracks will appear here once per track.",
                 ))
@@ -1350,11 +1373,11 @@ impl GuiApp {
             .child(
                 uniform_list(
                     ("history-rows", panel_id),
-                    self.state.history.len(),
+                    self.state.library.history.len(),
                     cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                         range
                             .filter_map(|index| {
-                                let item = this.state.history.get(index)?;
+                                let item = this.state.library.history.get(index)?;
                                 let track_id = item.track_id;
                                 let mut item_row = track_row(
                                     ("history-entry", track_id as u64),
@@ -1391,8 +1414,11 @@ impl GuiApp {
                     cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                         range
                             .filter_map(|index| {
-                                let track =
-                                    this.state.library.get(*this.most_played.get(index)?)?;
+                                let track = this
+                                    .state
+                                    .library
+                                    .tracks
+                                    .get(*this.most_played.get(index)?)?;
                                 let id = track.id;
                                 Some(
                                     list_row(

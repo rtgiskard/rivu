@@ -70,13 +70,6 @@ impl<T> DropdownState<T> {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn selected(&self) -> Option<&T> {
-        self.filtered()
-            .nth(self.selected)
-            .map(|(_, item)| &item.value)
-    }
-
     pub(crate) fn selected_index(&self) -> Option<usize> {
         self.filtered().nth(self.selected).map(|(index, _)| index)
     }

@@ -2,8 +2,9 @@ use crate::{
     config::Config,
     core::AppHandle,
     model::{
-        Ack, AppState, Command, DatabaseOptimization, HistoryEntry, PlaybackStatus, Playlist,
-        QueueEntry, RepeatMode, StateResponse, Track,
+        Ack, AppState, Command, DatabaseOptimization, HistoryEntry, LibrarySnapshot, PlaybackState,
+        PlaybackStatus, Playlist, QueueEntry, QueueState, RepeatMode, StateResponse, SystemState,
+        Track,
     },
 };
 use anyhow::{Context, Error, Result, bail};
@@ -121,27 +122,28 @@ struct WireResponse {
 
 fn playback_snapshot(state: &AppState) -> PlaybackSnapshot {
     PlaybackSnapshot {
-        position_ms: (state.position.max(0.0) * 1000.0).round() as u64,
+        position_ms: (state.playback.position.max(0.0) * 1000.0).round() as u64,
         duration_ms: state
+            .playback
             .duration
             .filter(|value| value.is_finite() && *value >= 0.0)
             .map(|value| (value * 1000.0).round() as u64),
-        volume: (state.volume.clamp(0.0, 1.0) * u16::MAX as f32).round() as u16,
-        status: match state.status {
+        volume: (state.playback.volume.clamp(0.0, 1.0) * u16::MAX as f32).round() as u16,
+        status: match state.playback.status {
             PlaybackStatus::Stopped => 0,
             PlaybackStatus::Playing => 1,
             PlaybackStatus::Paused => 2,
         },
-        repeat: match state.repeat {
+        repeat: match state.playback.repeat {
             RepeatMode::Off => 0,
             RepeatMode::All => 1,
             RepeatMode::One => 2,
         },
-        flags: (state.shuffle as u16 * FLAG_SHUFFLE)
-            | (state.scanning as u16 * FLAG_SCANNING)
-            | (state.shutting_down as u16 * FLAG_SHUTTING_DOWN),
-        revision: state.revision as u16,
-        seek_revision: state.seek_revision as u16,
+        flags: (state.playback.shuffle as u16 * FLAG_SHUFFLE)
+            | (state.system.scanning as u16 * FLAG_SCANNING)
+            | (state.system.shutting_down as u16 * FLAG_SHUTTING_DOWN),
+        revision: state.system.revision as u16,
+        seek_revision: state.playback.seek_revision as u16,
     }
 }
 
@@ -157,40 +159,48 @@ fn state_from_overview(state: CompactOverview) -> AppState {
         playback,
     } = state;
     AppState {
-        library: Arc::new(library),
-        library_revision,
-        library_structure_revision,
-        playlists: Arc::new(Vec::new()),
-        queue: Arc::new(queue),
-        history: Arc::new(Vec::new()),
-        current_queue_id,
-        status: match playback.status {
-            1 => PlaybackStatus::Playing,
-            2 => PlaybackStatus::Paused,
-            _ => PlaybackStatus::Stopped,
+        library: LibrarySnapshot {
+            tracks: Arc::new(library),
+            revision: library_revision,
+            structure_revision: library_structure_revision,
+            playlists: Arc::new(Vec::new()),
+            history: Arc::new(Vec::new()),
         },
-        position: playback.position_ms as f64 / 1000.0,
-        duration: playback.duration_ms.map(|value| value as f64 / 1000.0),
-        volume: playback.volume as f32 / u16::MAX as f32,
-        shuffle: playback.flags & FLAG_SHUFFLE != 0,
-        repeat: match playback.repeat {
-            1 => RepeatMode::All,
-            2 => RepeatMode::One,
-            _ => RepeatMode::Off,
+        queue: QueueState {
+            entries: Arc::new(queue),
+            current_id: current_queue_id,
         },
-        scanning: playback.flags & FLAG_SCANNING != 0,
-        scan_message,
-        last_error,
-        devices: Arc::new(Vec::new()),
-        selected_device: None,
-        revision: playback.revision as u64,
-        seek_revision: playback.seek_revision as u64,
-        config: Arc::new(Config::default()),
-        config_path: PathBuf::new(),
-        mpris_status: String::new(),
-        ffmpeg_status: String::new(),
-        database_optimization: None,
-        shutting_down: playback.flags & FLAG_SHUTTING_DOWN != 0,
+        playback: PlaybackState {
+            status: match playback.status {
+                1 => PlaybackStatus::Playing,
+                2 => PlaybackStatus::Paused,
+                _ => PlaybackStatus::Stopped,
+            },
+            position: playback.position_ms as f64 / 1000.0,
+            duration: playback.duration_ms.map(|value| value as f64 / 1000.0),
+            volume: playback.volume as f32 / u16::MAX as f32,
+            shuffle: playback.flags & FLAG_SHUFFLE != 0,
+            repeat: match playback.repeat {
+                1 => RepeatMode::All,
+                2 => RepeatMode::One,
+                _ => RepeatMode::Off,
+            },
+            seek_revision: playback.seek_revision as u64,
+        },
+        system: SystemState {
+            scanning: playback.flags & FLAG_SCANNING != 0,
+            scan_message,
+            last_error,
+            devices: Arc::new(Vec::new()),
+            selected_device: None,
+            revision: playback.revision as u64,
+            config: Arc::new(Config::default()),
+            config_path: PathBuf::new(),
+            mpris_status: String::new(),
+            ffmpeg_status: String::new(),
+            database_optimization: None,
+            shutting_down: playback.flags & FLAG_SHUTTING_DOWN != 0,
+        },
     }
 }
 
@@ -203,12 +213,12 @@ impl From<CompactOverview> for AppState {
 impl From<FullStatus> for AppState {
     fn from(state: FullStatus) -> Self {
         let mut app = state_from_overview(state.overview);
-        app.playlists = Arc::new(state.playlists);
-        app.history = Arc::new(state.history);
-        app.devices = Arc::new(state.devices);
-        app.selected_device = state.selected_device;
-        app.config = Arc::new(state.config);
-        app.database_optimization = state.database_optimization;
+        app.library.playlists = Arc::new(state.playlists);
+        app.library.history = Arc::new(state.history);
+        app.system.devices = Arc::new(state.devices);
+        app.system.selected_device = state.selected_device;
+        app.system.config = Arc::new(state.config);
+        app.system.database_optimization = state.database_optimization;
         app
     }
 }
@@ -217,13 +227,13 @@ impl WireResponse {
     fn from_response(response: StateResponse, compact: bool) -> Self {
         let state = response.state;
         let overview = CompactOverview {
-            library: state.library.as_ref().clone(),
-            library_revision: state.library_revision,
-            library_structure_revision: state.library_structure_revision,
-            queue: state.queue.as_ref().clone(),
-            current_queue_id: state.current_queue_id,
-            scan_message: state.scan_message.clone(),
-            last_error: state.last_error.clone(),
+            library: state.library.tracks.as_ref().clone(),
+            library_revision: state.library.revision,
+            library_structure_revision: state.library.structure_revision,
+            queue: state.queue.entries.as_ref().clone(),
+            current_queue_id: state.queue.current_id,
+            scan_message: state.system.scan_message.clone(),
+            last_error: state.system.last_error.clone(),
             playback: playback_snapshot(&state),
         };
         let state = if compact {
@@ -231,12 +241,12 @@ impl WireResponse {
         } else {
             WireState::Full(Box::new(FullStatus {
                 overview,
-                playlists: state.playlists.as_ref().clone(),
-                history: state.history.as_ref().clone(),
-                devices: state.devices.as_ref().clone(),
-                selected_device: state.selected_device,
-                config: state.config.as_ref().clone(),
-                database_optimization: state.database_optimization,
+                playlists: state.library.playlists.as_ref().clone(),
+                history: state.library.history.as_ref().clone(),
+                devices: state.system.devices.as_ref().clone(),
+                selected_device: state.system.selected_device,
+                config: state.system.config.as_ref().clone(),
+                database_optimization: state.system.database_optimization,
             }))
         };
         Self {
@@ -300,16 +310,16 @@ struct OverviewCache {
 
 impl OverviewCache {
     fn cached(&self, state: &AppState) -> Option<Arc<Vec<Track>>> {
-        let unchanged = self.library.as_ptr() == Arc::as_ptr(&state.library)
-            && self.queue.as_ptr() == Arc::as_ptr(&state.queue)
-            && self.current == state.current_queue_id;
+        let unchanged = self.library.as_ptr() == Arc::as_ptr(&state.library.tracks)
+            && self.queue.as_ptr() == Arc::as_ptr(&state.queue.entries)
+            && self.current == state.queue.current_id;
         unchanged.then(|| self.tracks.clone())
     }
 
     fn update(&mut self, state: &AppState, tracks: Arc<Vec<Track>>) {
-        self.library = Arc::downgrade(&state.library);
-        self.queue = Arc::downgrade(&state.queue);
-        self.current = state.current_queue_id;
+        self.library = Arc::downgrade(&state.library.tracks);
+        self.queue = Arc::downgrade(&state.queue.entries);
+        self.current = state.queue.current_id;
         self.tracks = tracks;
     }
 
@@ -318,32 +328,19 @@ impl OverviewCache {
             ok: true,
             error: None,
             state: AppState {
-                library: tracks,
-                library_revision: state.library_revision,
-                library_structure_revision: state.library_structure_revision,
-                playlists: Arc::new(Vec::new()),
-                queue: state.queue.clone(),
-                history: Arc::new(Vec::new()),
-                current_queue_id: state.current_queue_id,
-                status: state.status,
-                position: state.position,
-                duration: state.duration,
-                volume: state.volume,
-                shuffle: state.shuffle,
-                repeat: state.repeat,
-                scanning: state.scanning,
-                scan_message: state.scan_message.clone(),
-                last_error: state.last_error.clone(),
-                devices: state.devices.clone(),
-                selected_device: state.selected_device.clone(),
-                revision: state.revision,
-                seek_revision: state.seek_revision,
-                config: state.config.clone(),
-                config_path: state.config_path.clone(),
-                mpris_status: state.mpris_status.clone(),
-                ffmpeg_status: state.ffmpeg_status.clone(),
-                database_optimization: state.database_optimization.clone(),
-                shutting_down: state.shutting_down,
+                library: LibrarySnapshot {
+                    tracks,
+                    revision: state.library.revision,
+                    structure_revision: state.library.structure_revision,
+                    playlists: Arc::new(Vec::new()),
+                    history: Arc::new(Vec::new()),
+                },
+                queue: QueueState {
+                    entries: state.queue.entries.clone(),
+                    current_id: state.queue.current_id,
+                },
+                playback: state.playback,
+                system: state.system,
             },
         }
     }
@@ -419,7 +416,7 @@ impl Server {
                     let _ = ready_tx.send(Err(anyhow::Error::from(error)));
                     return;
                 }
-                let (revision_tx, revision_rx) = watch::channel(handle.snapshot().revision);
+                let (revision_tx, revision_rx) = watch::channel(handle.snapshot().system.revision);
                 let updates = handle.subscribe();
                 let bridge_handle = handle.clone();
                 let bridge = thread::Builder::new()
@@ -428,7 +425,7 @@ impl Server {
                         loop {
                             crossbeam_channel::select! {
                                 recv(updates) -> message => {
-                                    if message.is_ok() { let _ = revision_tx.send(bridge_handle.snapshot().revision); } else { break; }
+                                    if message.is_ok() { let _ = revision_tx.send(bridge_handle.snapshot().system.revision); } else { break; }
                                 }
                                 recv(bridge_stop_rx) -> _ => break,
                             }
@@ -526,7 +523,7 @@ async fn write_frame<S: AsyncWrite + Unpin>(stream: &mut S, value: &impl Seriali
 fn response_frame(response: StateResponse, instance_id: u16, compact: bool) -> ResponseFrame {
     ResponseFrame {
         instance_id,
-        revision: response.state.revision as u16,
+        revision: response.state.system.revision as u16,
         response: WireResponse::from_response(response, compact),
     }
 }
@@ -551,13 +548,19 @@ fn unpack_response(frame: ResponseFrame) -> Result<StateResponse> {
 fn overview_response(state: AppState, overview: &Mutex<OverviewCache>) -> StateResponse {
     let cached = overview.lock().cached(&state);
     let tracks = cached.unwrap_or_else(|| {
-        let mut ids: HashSet<i64> = state.queue.iter().map(|entry| entry.track_id).collect();
+        let mut ids: HashSet<i64> = state
+            .queue
+            .entries
+            .iter()
+            .map(|entry| entry.track_id)
+            .collect();
         if let Some(track) = state.current_track() {
             ids.insert(track.id);
         }
         let tracks: Arc<Vec<Track>> = Arc::new(
             state
                 .library
+                .tracks
                 .iter()
                 .filter(|track| ids.contains(&track.id))
                 .cloned()
@@ -610,7 +613,7 @@ async fn wait_for_revision(
 ) -> Option<StateResponse> {
     loop {
         let state = handle.snapshot();
-        if !revision_matches(state.revision, revision) || state.shutting_down {
+        if !revision_matches(state.system.revision, revision) || state.system.shutting_down {
             return Some(overview_response(state, overview));
         }
         tokio::select! {

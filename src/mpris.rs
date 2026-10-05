@@ -96,7 +96,7 @@ impl Mpris {
                                 eprintln!("MPRIS publisher stopped: {error}");
                                 break;
                             }
-                            if current.shutting_down { break; }
+                            if current.system.shutting_down { break; }
                             previous = current;
                             previous_can_raise = current_can_raise;
                         }
@@ -190,9 +190,9 @@ impl Player {
     // Next/Previous and restoring play state are separate core commands; the
     // interface cannot make this sequence atomic without changing core APIs.
     fn navigate(&self, command: Command) -> fdo::Result<()> {
-        let status = self.handle.snapshot().status;
+        let status = self.handle.snapshot().playback.status;
         let state = request(&self.handle, command)?;
-        if state.status == PlaybackStatus::Playing {
+        if state.playback.status == PlaybackStatus::Playing {
             match status {
                 PlaybackStatus::Paused => {
                     request(&self.handle, Command::Pause)?;
@@ -237,7 +237,7 @@ impl Player {
 
     fn play(&self) -> fdo::Result<()> {
         let state = self.handle.snapshot();
-        if state.queue.is_empty() || state.status == PlaybackStatus::Playing {
+        if state.queue.entries.is_empty() || state.playback.status == PlaybackStatus::Playing {
             return Ok(());
         }
         request(&self.handle, Command::Resume).map(|_| ())
@@ -248,13 +248,14 @@ impl Player {
         if !can_seek(&state) {
             return Ok(());
         }
-        match relative_seek(state.position, offset, state.duration) {
+        match relative_seek(state.playback.position, offset, state.playback.duration) {
             SeekTarget::Next => self.next(),
             SeekTarget::Position(seconds) => request(
                 &self.handle,
                 Command::SeekQueue {
                     queue_id: state
-                        .current_queue_id
+                        .queue
+                        .current_id
                         .expect("seekable track has a queue entry"),
                     seconds,
                 },
@@ -268,13 +269,13 @@ impl Player {
         if !can_seek(&state) {
             return Ok(());
         }
-        let Some(queue_id) = state.current_queue_id else {
+        let Some(queue_id) = state.queue.current_id else {
             return Ok(());
         };
         if track_id.as_str() != track_path(queue_id) {
             return Ok(());
         }
-        let Some(seconds) = absolute_seek(position, state.duration) else {
+        let Some(seconds) = absolute_seek(position, state.playback.duration) else {
             return Ok(());
         };
         request(&self.handle, Command::SeekQueue { queue_id, seconds }).map(|_| ())
@@ -292,7 +293,7 @@ impl Player {
 
     #[zbus(property)]
     fn playback_status(&self) -> &'static str {
-        playback_status(self.handle.snapshot().status)
+        playback_status(self.handle.snapshot().playback.status)
     }
 
     // The core publisher owns change emission, including changes originating
@@ -300,7 +301,7 @@ impl Player {
     // notifications for assignments that leave the actual value unchanged.
     #[zbus(property(emits_changed_signal = "false"))]
     fn loop_status(&self) -> &'static str {
-        loop_status(self.handle.snapshot().repeat)
+        loop_status(self.handle.snapshot().playback.repeat)
     }
 
     #[zbus(property)]
@@ -335,7 +336,7 @@ impl Player {
 
     #[zbus(property(emits_changed_signal = "false"))]
     fn shuffle(&self) -> bool {
-        self.handle.snapshot().shuffle
+        self.handle.snapshot().playback.shuffle
     }
 
     #[zbus(property)]
@@ -350,7 +351,7 @@ impl Player {
 
     #[zbus(property(emits_changed_signal = "false"))]
     fn volume(&self) -> f64 {
-        f64::from(self.handle.snapshot().volume)
+        f64::from(self.handle.snapshot().playback.volume)
     }
 
     #[zbus(property)]
@@ -371,7 +372,7 @@ impl Player {
 
     #[zbus(property(emits_changed_signal = "false"))]
     fn position(&self) -> i64 {
-        microseconds(self.handle.snapshot().position)
+        microseconds(self.handle.snapshot().playback.position)
     }
 
     #[zbus(property(emits_changed_signal = "const"))]
@@ -396,12 +397,12 @@ impl Player {
 
     #[zbus(property)]
     fn can_play(&self) -> bool {
-        !self.handle.snapshot().queue.is_empty()
+        !self.handle.snapshot().queue.entries.is_empty()
     }
 
     #[zbus(property)]
     fn can_pause(&self) -> bool {
-        !self.handle.snapshot().queue.is_empty()
+        !self.handle.snapshot().queue.entries.is_empty()
     }
 
     #[zbus(property)]
@@ -445,35 +446,37 @@ fn loop_status(mode: RepeatMode) -> &'static str {
 }
 
 fn can_seek(state: &AppState) -> bool {
-    state.status != PlaybackStatus::Stopped && state.current_queue_id.is_some()
+    state.playback.status != PlaybackStatus::Stopped && state.queue.current_id.is_some()
 }
 
 fn can_go_next(state: &AppState) -> bool {
-    if state.queue.is_empty() {
+    if state.queue.entries.is_empty() {
         return false;
     }
-    if state.shuffle || state.repeat == RepeatMode::All {
+    if state.playback.shuffle || state.playback.repeat == RepeatMode::All {
         return true;
     }
     state
-        .current_queue_id
-        .and_then(|id| state.queue.iter().position(|entry| entry.id == id))
-        .is_none_or(|index| index + 1 < state.queue.len())
+        .queue
+        .current_id
+        .and_then(|id| state.queue.entries.iter().position(|entry| entry.id == id))
+        .is_none_or(|index| index + 1 < state.queue.entries.len())
 }
 
 fn can_go_previous(state: &AppState) -> bool {
-    if state.queue.is_empty() {
+    if state.queue.entries.is_empty() {
         return false;
     }
     // A loaded track can restart; with stopped playback the first queue
     // occurrence cannot seek and has no predecessor. Shuffle history belongs
     // to the core, so unknown navigation availability is true per MPRIS.
-    if can_seek(state) || state.shuffle {
+    if can_seek(state) || state.playback.shuffle {
         return true;
     }
     state
-        .current_queue_id
-        .and_then(|id| state.queue.iter().position(|entry| entry.id == id))
+        .queue
+        .current_id
+        .and_then(|id| state.queue.entries.iter().position(|entry| entry.id == id))
         .is_none_or(|index| index > 0)
 }
 
@@ -528,7 +531,7 @@ struct TrackMetadata {
 
 impl TrackMetadata {
     fn from_state(state: &AppState, artwork: &ArtworkManager) -> Option<Self> {
-        let queue_id = state.current_queue_id?;
+        let queue_id = state.queue.current_id?;
         let track = state.current_track()?;
         Some(Self {
             queue_id,
@@ -538,6 +541,7 @@ impl TrackMetadata {
             url: url::Url::from_file_path(&track.path).ok()?.into(),
             art_url: artwork.uri_for(track),
             length: state
+                .playback
                 .duration
                 .or(track.duration)
                 .filter(|duration| duration.is_finite() && *duration >= 0.0)
@@ -585,23 +589,26 @@ fn publish_changes(
     current_can_raise: bool,
 ) -> zbus::Result<()> {
     let mut changed: HashMap<&str, Value<'_>> = HashMap::new();
-    if previous.status != current.status {
-        changed.insert("PlaybackStatus", playback_status(current.status).into());
+    if previous.playback.status != current.playback.status {
+        changed.insert(
+            "PlaybackStatus",
+            playback_status(current.playback.status).into(),
+        );
     }
-    if previous.repeat != current.repeat {
-        changed.insert("LoopStatus", loop_status(current.repeat).into());
+    if previous.playback.repeat != current.playback.repeat {
+        changed.insert("LoopStatus", loop_status(current.playback.repeat).into());
     }
-    if previous.shuffle != current.shuffle {
-        changed.insert("Shuffle", current.shuffle.into());
+    if previous.playback.shuffle != current.playback.shuffle {
+        changed.insert("Shuffle", current.playback.shuffle.into());
     }
-    if previous.volume != current.volume {
-        changed.insert("Volume", f64::from(current.volume).into());
+    if previous.playback.volume != current.playback.volume {
+        changed.insert("Volume", f64::from(current.playback.volume).into());
     }
     // Arc comparisons avoid rebuilding metadata on ordinary audio clock ticks.
-    if previous.current_queue_id != current.current_queue_id
-        || previous.duration != current.duration
-        || !Arc::ptr_eq(&previous.library, &current.library)
-        || !Arc::ptr_eq(&previous.queue, &current.queue)
+    if previous.queue.current_id != current.queue.current_id
+        || previous.playback.duration != current.playback.duration
+        || !Arc::ptr_eq(&previous.library.tracks, &current.library.tracks)
+        || !Arc::ptr_eq(&previous.queue.entries, &current.queue.entries)
     {
         let next = TrackMetadata::from_state(current, artwork);
         if *metadata != next {
@@ -611,11 +618,11 @@ fn publish_changes(
     }
     // Queue navigation depends on ordering, selection and repeat/shuffle,
     // not the audio clock; do not walk the queue on each position update.
-    if previous.current_queue_id != current.current_queue_id
-        || previous.status != current.status
-        || previous.shuffle != current.shuffle
-        || previous.repeat != current.repeat
-        || !Arc::ptr_eq(&previous.queue, &current.queue)
+    if previous.queue.current_id != current.queue.current_id
+        || previous.playback.status != current.playback.status
+        || previous.playback.shuffle != current.playback.shuffle
+        || previous.playback.repeat != current.playback.repeat
+        || !Arc::ptr_eq(&previous.queue.entries, &current.queue.entries)
     {
         for (name, before, after) in [
             ("CanGoNext", can_go_next(previous), can_go_next(current)),
@@ -633,13 +640,13 @@ fn publish_changes(
     for (name, before, after) in [
         (
             "CanPlay",
-            !previous.queue.is_empty(),
-            !current.queue.is_empty(),
+            !previous.queue.entries.is_empty(),
+            !current.queue.entries.is_empty(),
         ),
         (
             "CanPause",
-            !previous.queue.is_empty(),
-            !current.queue.is_empty(),
+            !previous.queue.entries.is_empty(),
+            !current.queue.entries.is_empty(),
         ),
         ("CanSeek", can_seek(previous), can_seek(current)),
     ] {
@@ -670,13 +677,13 @@ fn publish_changes(
     // Position itself never sends PropertiesChanged. Core explicitly marks
     // discontinuities, including seeks from non-D-Bus clients, so small seeks
     // are not lost to a clock-drift threshold and regular progress stays quiet.
-    if previous.seek_revision != current.seek_revision {
+    if previous.playback.seek_revision != current.playback.seek_revision {
         connection.emit_signal(
             None::<&str>,
             OBJECT_PATH,
             PLAYER_INTERFACE,
             "Seeked",
-            &(microseconds(current.position),),
+            &(microseconds(current.playback.position),),
         )?;
     }
     Ok(())

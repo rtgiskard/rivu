@@ -109,8 +109,8 @@ fn spawn_watcher(socket_path: &Path, revision: u64) -> Watcher {
         while !stop.load(Ordering::Acquire) {
             match session.watch_until(revision, || stop.load(Ordering::Acquire)) {
                 Ok(Some(response)) => {
-                    revision = response.state.revision as u16;
-                    let shutting_down = response.state.shutting_down;
+                    revision = response.state.system.revision as u16;
+                    let shutting_down = response.state.system.shutting_down;
                     if sender.try_send(Ok(response)).is_err() || shutting_down {
                         break;
                     }
@@ -132,24 +132,24 @@ fn spawn_watcher(socket_path: &Path, revision: u64) -> Watcher {
 
 fn run_loop(socket_path: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
     let mut state = request_state(socket_path)?;
-    let updates = spawn_watcher(socket_path, state.revision);
+    let updates = spawn_watcher(socket_path, state.system.revision);
     let mut ui = UiState::default();
     ui.sync_queue(&state, &state);
     let mut redraw = true;
     loop {
         while let Ok(update) = updates.receiver.try_recv() {
             let response = update.map_err(anyhow::Error::msg)?;
-            if response.ok && response.state.revision != state.revision {
+            if response.ok && response.state.system.revision != state.system.revision {
                 let mut next = response.state;
-                next.playlists = state.playlists.clone();
-                next.history = state.history.clone();
-                next.devices = state.devices.clone();
-                next.selected_device = state.selected_device.clone();
-                next.config = state.config.clone();
-                next.config_path = state.config_path.clone();
-                next.mpris_status = state.mpris_status.clone();
-                next.ffmpeg_status = state.ffmpeg_status.clone();
-                next.database_optimization = state.database_optimization.clone();
+                next.library.playlists = state.library.playlists.clone();
+                next.library.history = state.library.history.clone();
+                next.system.devices = state.system.devices.clone();
+                next.system.selected_device = state.system.selected_device.clone();
+                next.system.config = state.system.config.clone();
+                next.system.config_path = state.system.config_path.clone();
+                next.system.mpris_status = state.system.mpris_status.clone();
+                next.system.ffmpeg_status = state.system.ffmpeg_status.clone();
+                next.system.database_optimization = state.system.database_optimization.clone();
                 ui.sync_queue(&state, &next);
                 state = next;
                 redraw = true;
@@ -170,7 +170,7 @@ fn run_loop(socket_path: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>
                         action @ (KeyAction::Search | KeyAction::Tree) => {
                             let response = ipc::request(socket_path, &Command::Status)?;
                             if response.ok {
-                                let library = Arc::clone(&response.state.library);
+                                let library = Arc::clone(&response.state.library.tracks);
                                 if matches!(action, KeyAction::Tree) {
                                     ui.tree = Some(LibraryTree::new(library));
                                     ui.search = None;
@@ -200,8 +200,8 @@ fn run_loop(socket_path: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>
                             continue;
                         }
                     };
-                    redraw |=
-                        ui.local_revision != local_revision || next.revision != state.revision;
+                    redraw |= ui.local_revision != local_revision
+                        || next.system.revision != state.system.revision;
                     ui.sync_queue(&state, &next);
                     state = next;
                 }
@@ -229,13 +229,15 @@ impl UiState {
 
     fn sync_queue(&mut self, previous: &AppState, next: &AppState) {
         let selected = self.queue.selected().unwrap_or(0);
-        let queue_id = previous.queue.get(selected).map(|entry| entry.id);
+        let queue_id = previous.queue.entries.get(selected).map(|entry| entry.id);
         let index = next
             .queue
+            .entries
             .iter()
             .position(|entry| Some(entry.id) == queue_id);
         self.queue.select(
-            (!next.queue.is_empty()).then(|| index.unwrap_or(selected.min(next.queue.len() - 1))),
+            (!next.queue.entries.is_empty())
+                .then(|| index.unwrap_or(selected.min(next.queue.entries.len() - 1))),
         );
     }
 
@@ -342,13 +344,13 @@ impl UiState {
         let changed = match key.code {
             KeyCode::Char('/') => return KeyAction::Search,
             KeyCode::Char('t') => return KeyAction::Tree,
-            KeyCode::Up => move_selection(&mut self.queue, state.queue.len(), false),
-            KeyCode::Down => move_selection(&mut self.queue, state.queue.len(), true),
+            KeyCode::Up => move_selection(&mut self.queue, state.queue.entries.len(), false),
+            KeyCode::Down => move_selection(&mut self.queue, state.queue.entries.len(), true),
             KeyCode::Enter => {
                 return self
                     .queue
                     .selected()
-                    .and_then(|index| state.queue.get(index))
+                    .and_then(|index| state.queue.entries.get(index))
                     .map_or(KeyAction::Ignored, |entry| {
                         KeyAction::Command(Command::PlayQueue { queue_id: entry.id })
                     });
@@ -357,7 +359,7 @@ impl UiState {
                 if let Some(entry) = self
                     .queue
                     .selected()
-                    .and_then(|index| state.queue.get(index))
+                    .and_then(|index| state.queue.entries.get(index))
                 {
                     return KeyAction::Command(Command::RemoveQueue { queue_id: entry.id });
                 }
@@ -602,7 +604,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &AppState, ui: &mut UiState) {
         .current_track()
         .map(|t| format!("{} — {}", t.artist, t.title))
         .unwrap_or_else(|| "Nothing playing".into());
-    let status = match state.status {
+    let status = match state.playback.status {
         PlaybackStatus::Playing => "Playing",
         PlaybackStatus::Paused => "Paused",
         PlaybackStatus::Stopped => "Stopped",
@@ -624,8 +626,8 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &AppState, ui: &mut UiState) {
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
         .split(outer[1]);
-    let position = state.position.max(0.0);
-    let duration = state.duration.unwrap_or(0.0).max(position + 0.001);
+    let position = state.playback.position.max(0.0);
+    let duration = state.playback.duration.unwrap_or(0.0).max(position + 0.001);
     let ratio = (position / duration).clamp(0.0, 1.0);
     let left = Layout::default()
         .direction(Direction::Vertical)
@@ -638,7 +640,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &AppState, ui: &mut UiState) {
                     .title(format!(
                         " {} / {} ",
                         fmt_time(position),
-                        fmt_time(state.duration.unwrap_or(0.0))
+                        fmt_time(state.playback.duration.unwrap_or(0.0))
                     ))
                     .borders(Borders::ALL),
             )
@@ -649,7 +651,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &AppState, ui: &mut UiState) {
     if let Some(search) = ui.search.as_mut() {
         draw_search(frame, left[1], search);
     } else if let Some(tree) = ui.tree.as_mut() {
-        draw_tree(frame, left[1], tree, state.config.nerd_symbols);
+        draw_tree(frame, left[1], tree, state.system.config.nerd_symbols);
     } else {
         draw_queue(frame, left[1], state, &mut ui.queue, &mut ui.queue_cache);
     }
@@ -664,21 +666,21 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &AppState, ui: &mut UiState) {
         .wrap(Wrap { trim: true })
         .block(Block::default().title("Keys").borders(Borders::ALL));
     frame.render_widget(help, columns[1]);
-    let status = if state.config.nerd_symbols {
+    let status = if state.system.config.nerd_symbols {
         format!(
             "󰕾 {:>3}% 󰒝 {} 󰑖 {} 󰘦 {}",
-            (state.volume * 100.0).round() as u8,
-            if state.shuffle { "on" } else { "off" },
-            repeat_label(state.repeat),
-            state.queue.len()
+            (state.playback.volume * 100.0).round() as u8,
+            if state.playback.shuffle { "on" } else { "off" },
+            repeat_label(state.playback.repeat),
+            state.queue.entries.len()
         )
     } else {
         format!(
             "vol {:>3}%  shuffle {}  repeat {}  queue {}",
-            (state.volume * 100.0).round() as u8,
-            if state.shuffle { "on" } else { "off" },
-            repeat_label(state.repeat),
-            state.queue.len()
+            (state.playback.volume * 100.0).round() as u8,
+            if state.playback.shuffle { "on" } else { "off" },
+            repeat_label(state.playback.repeat),
+            state.queue.entries.len()
         )
     };
     frame.render_widget(
@@ -709,17 +711,17 @@ struct QueueTrackKey {
 
 impl QueueViewCache {
     fn matches(&self, state: &AppState) -> bool {
-        self.queue.len() == state.queue.len()
+        self.queue.len() == state.queue.entries.len()
             && self
                 .queue
                 .iter()
-                .zip(state.queue.iter())
+                .zip(state.queue.entries.iter())
                 .all(|(&(id, track_id), entry)| id == entry.id && track_id == entry.track_id)
-            && self.tracks.len() == state.library.len()
+            && self.tracks.len() == state.library.tracks.len()
             && self
                 .tracks
                 .iter()
-                .zip(state.library.iter())
+                .zip(state.library.tracks.iter())
                 .all(|(cached, track)| {
                     cached.id == track.id
                         && cached.title == track.title
@@ -733,11 +735,13 @@ impl QueueViewCache {
         }
         self.queue = state
             .queue
+            .entries
             .iter()
             .map(|entry| (entry.id, entry.track_id))
             .collect();
         self.tracks = state
             .library
+            .tracks
             .iter()
             .map(|track| QueueTrackKey {
                 id: track.id,
@@ -745,17 +749,18 @@ impl QueueViewCache {
                 artist: track.artist.clone(),
             })
             .collect();
-        let mut track_index = HashMap::with_capacity(state.library.len());
-        for (index, track) in state.library.iter().enumerate() {
+        let mut track_index = HashMap::with_capacity(state.library.tracks.len());
+        for (index, track) in state.library.tracks.iter().enumerate() {
             track_index.insert(track.id, index);
         }
         self.rows = state
             .queue
+            .entries
             .iter()
             .map(|entry| {
                 track_index
                     .get(&entry.track_id)
-                    .and_then(|&index| state.library.get(index))
+                    .and_then(|&index| state.library.tracks.get(index))
                     .map(|track| format!("{} — {}", track.artist, track.title))
                     .unwrap_or_else(|| "Missing track".into())
             })
@@ -772,14 +777,14 @@ fn draw_queue(
 ) {
     cache.sync(state);
     let items = cache.rows.iter().enumerate().map(|(index, title)| {
-        let marker = if state.current_queue_id == Some(state.queue[index].id) {
+        let marker = if state.queue.current_id == Some(state.queue.entries[index].id) {
             "▶ "
         } else {
             "  "
         };
         ListItem::new(format!("{marker}{title}"))
     });
-    let title = if state.queue.is_empty() {
+    let title = if state.queue.entries.is_empty() {
         "Queue — empty; / to search, t to browse"
     } else {
         "Queue"
@@ -913,7 +918,7 @@ fn fmt_time(seconds: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::QueueEntry;
+    use crate::model::{LibrarySnapshot, QueueEntry, QueueState};
     use crossterm::event::KeyModifiers;
 
     fn track(id: i64, artist: &str, title: &str) -> Track {
@@ -944,10 +949,13 @@ mod tests {
     #[test]
     fn revision_unchanged_local_selection_is_visible() {
         let state = AppState {
-            queue: Arc::new(vec![
-                QueueEntry { id: 1, track_id: 1 },
-                QueueEntry { id: 2, track_id: 2 },
-            ]),
+            queue: QueueState {
+                entries: Arc::new(vec![
+                    QueueEntry { id: 1, track_id: 1 },
+                    QueueEntry { id: 2, track_id: 2 },
+                ]),
+                current_id: None,
+            },
             ..AppState::default()
         };
         let mut ui = UiState::default();
@@ -965,28 +973,30 @@ mod tests {
     #[test]
     fn enter_plays_selected_occurrence_after_queue_reorder() {
         let previous = AppState {
-            queue: Arc::new(vec![
-                QueueEntry {
-                    id: 11,
-                    track_id: 1,
-                },
-                QueueEntry {
-                    id: 22,
-                    track_id: 1,
-                },
-                QueueEntry {
-                    id: 33,
-                    track_id: 2,
-                },
-            ]),
-            current_queue_id: Some(11),
+            queue: QueueState {
+                entries: Arc::new(vec![
+                    QueueEntry {
+                        id: 11,
+                        track_id: 1,
+                    },
+                    QueueEntry {
+                        id: 22,
+                        track_id: 1,
+                    },
+                    QueueEntry {
+                        id: 33,
+                        track_id: 2,
+                    },
+                ]),
+                current_id: Some(11),
+            },
             ..AppState::default()
         };
         let mut ui = UiState::default();
         ui.sync_queue(&previous, &previous);
         ui.key_action(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &previous);
         let mut next = previous.clone();
-        Arc::make_mut(&mut next.queue).rotate_right(1);
+        Arc::make_mut(&mut next.queue.entries).rotate_right(1);
         ui.sync_queue(&previous, &next);
         assert!(matches!(
             ui.key_action(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &next),
@@ -1003,20 +1013,26 @@ mod tests {
     #[test]
     fn queue_cache_follows_order_and_metadata_changes() {
         let mut state = AppState {
-            library: Arc::new(vec![
-                track(1, "Artist A", "Title A"),
-                track(2, "Artist B", "Title B"),
-            ]),
-            queue: Arc::new(vec![
-                QueueEntry {
-                    id: 10,
-                    track_id: 1,
-                },
-                QueueEntry {
-                    id: 20,
-                    track_id: 2,
-                },
-            ]),
+            library: LibrarySnapshot {
+                tracks: Arc::new(vec![
+                    track(1, "Artist A", "Title A"),
+                    track(2, "Artist B", "Title B"),
+                ]),
+                ..LibrarySnapshot::default()
+            },
+            queue: QueueState {
+                entries: Arc::new(vec![
+                    QueueEntry {
+                        id: 10,
+                        track_id: 1,
+                    },
+                    QueueEntry {
+                        id: 20,
+                        track_id: 2,
+                    },
+                ]),
+                current_id: None,
+            },
             ..AppState::default()
         };
         let mut cache = QueueViewCache::default();
@@ -1029,7 +1045,7 @@ mod tests {
             ]
         );
 
-        state.queue = Arc::new(vec![
+        state.queue.entries = Arc::new(vec![
             QueueEntry {
                 id: 20,
                 track_id: 2,
@@ -1050,7 +1066,7 @@ mod tests {
 
         let mut changed = track(1, "Artist A", "Title A (remastered)");
         changed.album = "new album".into();
-        state.library = Arc::new(vec![changed, track(2, "Artist B", "Title B")]);
+        state.library.tracks = Arc::new(vec![changed, track(2, "Artist B", "Title B")]);
         cache.sync(&state);
         assert_eq!(cache.rows[1], "Artist A — Title A (remastered)");
     }

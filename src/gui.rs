@@ -125,7 +125,7 @@ impl GuiHost {
         if self.quitting {
             return;
         }
-        if self.handle.state.read().shutting_down {
+        if self.handle.state.read().system.shutting_down {
             self.quit(cx);
             return;
         }
@@ -171,7 +171,7 @@ impl GuiHost {
         if self.quitting {
             return;
         }
-        if self.handle.state.read().shutting_down {
+        if self.handle.state.read().system.shutting_down {
             self.quit(cx);
         } else if self.handle.take_raise_request() {
             self.show_window(cx);
@@ -262,7 +262,7 @@ pub fn run(handle: AppHandle, layout_path: PathBuf) -> Result<()> {
     }
     // Explicit platform quit also terminates the core. Do this after the GUI
     // loop, outside GPUI's short quit-observer deadline and without blocking UI.
-    if !handle.state.read().shutting_down {
+    if !handle.state.read().system.shutting_down {
         let response = handle.request_ack(Command::Shutdown);
         if !response.ok {
             anyhow::bail!(
@@ -577,10 +577,10 @@ impl GuiApp {
                 if self.filtered_rows.is_empty() {
                     return;
                 }
-                let current = self
-                    .filtered_rows
-                    .iter()
-                    .position(|index| self.selected.contains(&self.state.library[*index].id));
+                let current = self.filtered_rows.iter().position(|index| {
+                    self.selected
+                        .contains(&self.state.library.tracks[*index].id)
+                });
                 let index = match current {
                     Some(index) if down => (index + 1).min(self.filtered_rows.len() - 1),
                     Some(index) => index.saturating_sub(1),
@@ -588,13 +588,13 @@ impl GuiApp {
                     None => self.filtered_rows.len() - 1,
                 };
                 if let Some(&row) = self.filtered_rows.get(index)
-                    && let Some(track) = self.state.library.get(row)
+                    && let Some(track) = self.state.library.tracks.get(row)
                 {
                     self.select_track(track.id, false, cx);
                 }
             }
             ListFocus::Queue => {
-                if self.state.queue.is_empty() {
+                if self.state.queue.entries.is_empty() {
                     return;
                 }
                 let current = self
@@ -602,20 +602,27 @@ impl GuiApp {
                     .anchor()
                     .copied()
                     .filter(|id| self.selected_queue.contains(id))
-                    .and_then(|id| self.state.queue.iter().position(|entry| entry.id == id))
+                    .and_then(|id| {
+                        self.state
+                            .queue
+                            .entries
+                            .iter()
+                            .position(|entry| entry.id == id)
+                    })
                     .or_else(|| {
                         self.state
                             .queue
+                            .entries
                             .iter()
                             .position(|entry| self.selected_queue.contains(&entry.id))
                     });
                 let index = match current {
-                    Some(index) if down => (index + 1).min(self.state.queue.len() - 1),
+                    Some(index) if down => (index + 1).min(self.state.queue.entries.len() - 1),
                     Some(index) => index.saturating_sub(1),
                     None if down => 0,
-                    None => self.state.queue.len() - 1,
+                    None => self.state.queue.entries.len() - 1,
                 };
-                if let Some(entry) = self.state.queue.get(index) {
+                if let Some(entry) = self.state.queue.entries.get(index) {
                     self.select_queue_entry(entry.id, false, false, cx);
                 }
             }
@@ -640,7 +647,7 @@ impl GuiApp {
                 let track_id = self
                     .filtered_rows
                     .iter()
-                    .map(|&index| self.state.library[index].id)
+                    .map(|&index| self.state.library.tracks[index].id)
                     .find(|id| self.selected.contains(id));
                 if let Some(track_id) = track_id {
                     self.send(Command::Play { track_id }, cx);
@@ -655,6 +662,7 @@ impl GuiApp {
                     .or_else(|| {
                         self.state
                             .queue
+                            .entries
                             .iter()
                             .find(|entry| self.selected_queue.contains(&entry.id))
                             .map(|entry| entry.id)
@@ -673,6 +681,7 @@ impl GuiApp {
         let queue_ids = self
             .state
             .queue
+            .entries
             .iter()
             .filter(|entry| self.selected_queue.contains(&entry.id))
             .map(|entry| entry.id)
@@ -712,10 +721,10 @@ impl GuiApp {
         for id in settings_panels {
             layout.remove(id);
         }
-        let ui_font = if state.config.ui_font.trim().is_empty() {
+        let ui_font = if state.system.config.ui_font.trim().is_empty() {
             ".SystemUIFont".into()
         } else {
-            state.config.ui_font.trim().to_owned().into()
+            state.system.config.ui_font.trim().to_owned().into()
         };
         let mut inputs = HashMap::new();
         for (field, placeholder) in [
@@ -751,8 +760,8 @@ impl GuiApp {
         cx.spawn(async move |this, cx| {
             loop {
                 let Ok(interval) = this.update(cx, |this, _| {
-                    (this.window_visible && this.analysis_worker_enabled && this.state.status == PlaybackStatus::Playing)
-                        .then(|| Duration::from_secs_f64(1. / this.state.config.analysis_fps as f64))
+                    (this.window_visible && this.analysis_worker_enabled && this.state.playback.status == PlaybackStatus::Playing)
+                        .then(|| Duration::from_secs_f64(1. / this.state.system.config.analysis_fps as f64))
                 }) else { break; };
                 if let Some(interval) = interval {
                     let timer = cx.background_executor().timer(interval).fuse();
@@ -764,7 +773,7 @@ impl GuiApp {
             }
         }).detach();
         let mut app = Self {
-            settings: settings::Settings::new(&state.config, cx),
+            settings: settings::Settings::new(&state.system.config, cx),
             handle,
             state,
             layout,
@@ -809,7 +818,7 @@ impl GuiApp {
             ui_font,
         };
         app.rebuild_library(cx);
-        app.visuals.configure(&app.state.config);
+        app.visuals.configure(&app.state.system.config);
         app.sync_analysis(cx);
         app.workspace_focus.focus(window, cx);
         app
@@ -884,7 +893,8 @@ impl GuiApp {
                 match result {
                     Ok(files) => {
                         if let Some(path) = chooser_path(&files) {
-                            let mut config = this.handle.state.read().config.as_ref().clone();
+                            let mut config =
+                                this.handle.state.read().system.config.as_ref().clone();
                             if !config.library_roots.iter().any(|root| root == &path) {
                                 config.library_roots.push(path);
                                 this.send(Command::Configure { config }, cx);
@@ -911,7 +921,7 @@ impl GuiApp {
     fn refresh_library_search_cache(&mut self) {
         self.library_search_cache.clear();
         self.library_search_cache
-            .extend(self.state.library.iter().map(|track| {
+            .extend(self.state.library.tracks.iter().map(|track| {
                 (
                     track.title.to_lowercase(),
                     track.artist.to_lowercase(),
@@ -924,6 +934,7 @@ impl GuiApp {
         self.library_index.extend(
             self.state
                 .library
+                .tracks
                 .iter()
                 .enumerate()
                 .map(|(index, track)| (track.id, index)),
@@ -932,6 +943,7 @@ impl GuiApp {
             let ids = self
                 .state
                 .library
+                .tracks
                 .iter()
                 .map(|track| track.id)
                 .collect::<Vec<_>>();
@@ -958,14 +970,15 @@ impl GuiApp {
         self.most_played.extend(
             self.state
                 .library
+                .tracks
                 .iter()
                 .enumerate()
                 .filter_map(|(index, track)| (track.play_count > 0).then_some(index)),
         );
         self.most_played.sort_unstable_by_key(|&index| {
             (
-                std::cmp::Reverse(self.state.library[index].play_count),
-                self.state.library[index].id,
+                std::cmp::Reverse(self.state.library.tracks[index].play_count),
+                self.state.library.tracks[index].id,
             )
         });
         self.refresh_filter(cx);
@@ -984,6 +997,7 @@ impl GuiApp {
             .extend(
                 self.state
                     .library
+                    .tracks
                     .iter()
                     .enumerate()
                     .filter_map(|(index, track)| {
@@ -1000,8 +1014,8 @@ impl GuiApp {
         if !self.library_tree_active {
             // Sort only view indices; the core's ID-sorted library remains unchanged.
             self.filtered_rows.sort_unstable_by(|&left, &right| {
-                let left = &self.state.library[left];
-                let right = &self.state.library[right];
+                let left = &self.state.library.tracks[left];
+                let right = &self.state.library.tracks[right];
                 left.album
                     .cmp(&right.album)
                     .then_with(|| {
@@ -1039,7 +1053,7 @@ impl GuiApp {
             );
         }
         if let Some(&index) = self.library_index.get(&id) {
-            let track = &self.state.library[index];
+            let track = &self.state.library.tracks[index];
             let values = (
                 track.title.clone(),
                 track.artist.clone(),
@@ -1054,7 +1068,13 @@ impl GuiApp {
         cx.notify();
     }
     fn select_queue_entry(&mut self, id: u64, shift: bool, multi: bool, cx: &mut Context<Self>) {
-        let Some(index) = self.state.queue.iter().position(|entry| entry.id == id) else {
+        let Some(index) = self
+            .state
+            .queue
+            .entries
+            .iter()
+            .position(|entry| entry.id == id)
+        else {
             return;
         };
         if shift {
@@ -1062,9 +1082,20 @@ impl GuiApp {
                 .selected_queue
                 .anchor()
                 .copied()
-                .filter(|anchor| self.state.queue.iter().any(|entry| entry.id == *anchor))
+                .filter(|anchor| {
+                    self.state
+                        .queue
+                        .entries
+                        .iter()
+                        .any(|entry| entry.id == *anchor)
+                })
                 .unwrap_or(id);
-            let Some(anchor_index) = self.state.queue.iter().position(|entry| entry.id == anchor)
+            let Some(anchor_index) = self
+                .state
+                .queue
+                .entries
+                .iter()
+                .position(|entry| entry.id == anchor)
             else {
                 return;
             };
@@ -1076,8 +1107,11 @@ impl GuiApp {
             if !multi {
                 self.selected_queue.clear();
             }
-            self.selected_queue
-                .extend(self.state.queue[start..=end].iter().map(|entry| entry.id));
+            self.selected_queue.extend(
+                self.state.queue.entries[start..=end]
+                    .iter()
+                    .map(|entry| entry.id),
+            );
             self.selected_queue.set_anchor(anchor);
         } else if multi {
             if !self.selected_queue.insert(id) {
@@ -1094,16 +1128,16 @@ impl GuiApp {
     fn refresh(&mut self, cx: &mut Context<Self>) {
         let state = {
             let shared = self.handle.state.read();
-            (shared.revision != self.state.revision).then(|| shared.clone())
+            (shared.system.revision != self.state.system.revision).then(|| shared.clone())
         };
         let mut changed = state.is_some();
         if let Some(state) = state {
-            let library_changed = self.state.library_revision != state.library_revision;
+            let library_changed = self.state.library.revision != state.library.revision;
             let library_structure_changed =
-                self.state.library_structure_revision != state.library_structure_revision;
-            let queue_changed = !Arc::ptr_eq(&self.state.queue, &state.queue);
+                self.state.library.structure_revision != state.library.structure_revision;
+            let queue_changed = !Arc::ptr_eq(&self.state.queue.entries, &state.queue.entries);
             if !matches!(self.dragging, Some(Dragging::Seek(_)))
-                && self.seek_queue_id != state.current_queue_id
+                && self.seek_queue_id != state.queue.current_id
             {
                 self.seek_preview = None;
                 self.seek_queue_id = None;
@@ -1113,13 +1147,14 @@ impl GuiApp {
                 let valid = self
                     .state
                     .queue
+                    .entries
                     .iter()
                     .map(|entry| entry.id)
                     .collect::<HashSet<_>>();
                 self.selected_queue.retain(|id| valid.contains(id));
                 self.selected_queue.clear_anchor();
             }
-            self.visuals.configure(&self.state.config);
+            self.visuals.configure(&self.state.system.config);
             if library_changed || library_structure_changed {
                 self.refresh_library_index(library_structure_changed);
                 if library_structure_changed {
@@ -1129,7 +1164,7 @@ impl GuiApp {
                 self.refresh_library_statistics(cx);
             }
         }
-        if self.state.shutting_down {
+        if self.state.system.shutting_down {
             return;
         }
         if changed {
@@ -1171,7 +1206,7 @@ impl GuiApp {
         let track = self.state.current_track().or_else(|| {
             self.metadata_track
                 .and_then(|id| self.library_index.get(&id))
-                .and_then(|&index| self.state.library.get(index))
+                .and_then(|&index| self.state.library.tracks.get(index))
         });
         self.waveform.update(cx, |waveform, cx| {
             waveform.retain_panels(&panels);
@@ -1182,10 +1217,10 @@ impl GuiApp {
         let track = self.state.current_track().or_else(|| {
             self.metadata_track
                 .and_then(|id| self.library_index.get(&id))
-                .and_then(|&index| self.state.library.get(index))
+                .and_then(|&index| self.state.library.tracks.get(index))
         });
         self.waveform.update(cx, |waveform, cx| {
-            waveform.load_full(track, &self.state.config, cx);
+            waveform.load_full(track, &self.state.system.config, cx);
         });
     }
     fn prune_measured(&mut self) {
@@ -1234,22 +1269,22 @@ impl GuiApp {
         let track = current.or_else(|| {
             self.metadata_track
                 .and_then(|id| self.library_index.get(&id))
-                .and_then(|&index| self.state.library.get(index))
+                .and_then(|&index| self.state.library.tracks.get(index))
         });
         let position = if current.is_some() {
-            self.state.position
+            self.state.playback.position
         } else {
             0.0
         };
         let duration = if current.is_some() {
-            self.state.duration
+            self.state.playback.duration
         } else {
             None
         }
         .or_else(|| track.and_then(|track| track.duration));
         self.waveform
             .read(cx)
-            .view(id, position, duration, &self.state.config)
+            .view(id, position, duration, &self.state.system.config)
     }
     fn measurement(&self, key: Measured) -> AnyElement {
         let measured = self.measured.clone();
@@ -1567,7 +1602,7 @@ impl GuiApp {
                 }
             }
             Dragging::Seek(_) => {
-                if let Some(duration) = self.state.duration {
+                if let Some(duration) = self.state.playback.duration {
                     let fraction =
                         ((position.x - bounds.origin.x) / bounds.size.width).clamp(0., 1.);
                     self.seek_preview = Some(duration * fraction as f64);
@@ -1633,7 +1668,7 @@ impl GuiApp {
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                     this.dragging = Some(dragging);
                     if matches!(dragging, Dragging::Seek(_)) {
-                        this.seek_queue_id = this.state.current_queue_id;
+                        this.seek_queue_id = this.state.queue.current_id;
                     }
                     this.drag_position(event.position, cx);
                 }),
@@ -1643,8 +1678,10 @@ impl GuiApp {
 }
 impl Render for GuiApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        cx.set_global(components::NerdSymbols(self.state.config.nerd_symbols));
-        window.set_rem_size(px(16. * self.state.config.ui_scale));
+        cx.set_global(components::NerdSymbols(
+            self.state.system.config.nerd_symbols,
+        ));
+        window.set_rem_size(px(16. * self.state.system.config.ui_scale));
         let root = self.layout.root.take();
         let workspace = root
             .as_ref()
@@ -1667,11 +1704,11 @@ impl Render for GuiApp {
             .gap_0()
             .bg(rgb(BG))
             .text_color(rgb(TEXT))
-            .text_size(px(14. * self.state.config.ui_scale))
-            .font_family(if self.state.config.ui_font.trim().is_empty() {
+            .text_size(px(14. * self.state.system.config.ui_scale))
+            .font_family(if self.state.system.config.ui_font.trim().is_empty() {
                 self.ui_font.clone()
             } else {
-                self.state.config.ui_font.clone().into()
+                self.state.system.config.ui_font.clone().into()
             })
             .track_focus(&self.workspace_focus)
             .capture_key_down(cx.listener(|_, event: &KeyDownEvent, window, cx| {
@@ -1810,7 +1847,10 @@ impl Render for GuiApp {
                     .child(workspace),
             );
 
-        let error = self.error.clone().or_else(|| self.state.last_error.clone());
+        let error = self
+            .error
+            .clone()
+            .or_else(|| self.state.system.last_error.clone());
         let mut footer = row()
             .h(rems(3.0))
             .flex_shrink_0()
@@ -1846,10 +1886,14 @@ impl Render for GuiApp {
                         .hover(|style| style.bg(rgb(ERROR_BG)).text_color(rgb(TEXT))),
                     ),
             );
-        } else if self.state.scanning {
+        } else if self.state.system.scanning {
             footer = footer.child(
-                copyable_message("copy-scan-message", self.state.scan_message.clone(), cx)
-                    .text_color(rgb(TEXT)),
+                copyable_message(
+                    "copy-scan-message",
+                    self.state.system.scan_message.clone(),
+                    cx,
+                )
+                .text_color(rgb(TEXT)),
             );
         } else {
             footer = footer.child(div().flex_1());
@@ -1959,6 +2003,7 @@ impl Render for GuiApp {
             let has_selected_queue = self
                 .state
                 .queue
+                .entries
                 .iter()
                 .any(|entry| self.selected_queue.contains(&entry.id));
             let mut menu = context_menu_container("panel-context-menu").on_mouse_down_out(
@@ -2071,7 +2116,7 @@ impl Render for GuiApp {
                     menu = menu
                         .child(div().px(gpui::px(UI_INSET)).py_2().text_sm().child(format!(
                             "Clear all {} queued entries?",
-                            self.state.queue.len()
+                            self.state.queue.entries.len()
                         )))
                         .child(
                             panels::caption("This also stops playback.")
@@ -2121,7 +2166,7 @@ impl Render for GuiApp {
                                     return;
                                 }
                                 let mut track_ids = Vec::new();
-                                for entry in this.state.queue.iter() {
+                                for entry in this.state.queue.entries.iter() {
                                     if this.selected_queue.contains(&entry.id)
                                         && !track_ids.contains(&entry.track_id)
                                     {
@@ -2141,24 +2186,25 @@ impl Render for GuiApp {
                         .w_full(),
                     );
                     if has_selected_queue {
-                        if self.state.playlists.is_empty() {
+                        if self.state.library.playlists.is_empty() {
                             menu = menu.child(panels::caption(
                                 "No playlists yet. Create one in Playlists.",
                             ));
                         } else {
-                            let height = (self.state.playlists.len() as f32 * panels::TRACK_HEIGHT)
+                            let height = (self.state.library.playlists.len() as f32
+                                * panels::TRACK_HEIGHT)
                                 .min(240.)
                                 .min(f32::from(window.viewport_size().height) * 0.5);
                             menu = menu.child(
                                 uniform_list(
                                     "queue-playlist-targets",
-                                    self.state.playlists.len(),
+                                    self.state.library.playlists.len(),
                                     cx.processor(
                                         move |this, range: std::ops::Range<usize>, _, cx| {
                                             range
                                                 .filter_map(|index| {
                                                     let playlist =
-                                                        this.state.playlists.get(index)?;
+                                                        this.state.library.playlists.get(index)?;
                                                     let playlist_id = playlist.id;
                                                     Some(
                                                         menu_item(
@@ -2169,6 +2215,7 @@ impl Render for GuiApp {
                                                                 let track_ids = this
                                                                     .state
                                                                     .queue
+                                                                    .entries
                                                                     .iter()
                                                                     .filter(|entry| {
                                                                         this.selected_queue

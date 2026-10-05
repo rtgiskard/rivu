@@ -318,7 +318,7 @@ fn run() -> Result<()> {
         }) => {
             let mut response = checked(ipc::request(&socket, &Command::Status)?)?;
             let query = query.unwrap_or_default().to_lowercase();
-            let tracks = response.state.library.iter().filter(|track| {
+            let tracks = response.state.library.tracks.iter().filter(|track| {
                 (!favorites || track.favorite)
                     && (!missing || track.missing)
                     && (query.is_empty()
@@ -334,7 +334,7 @@ fn run() -> Result<()> {
             });
             if args.json {
                 let library = tracks.cloned().collect();
-                response.state.library = std::sync::Arc::new(library);
+                response.state.library.tracks = std::sync::Arc::new(library);
                 return show(&response, true);
             }
             for track in tracks {
@@ -362,10 +362,11 @@ fn run() -> Result<()> {
             }
             println!(
                 "Tracks: {}\nPlays: {}",
-                response.state.library.len(),
+                response.state.library.tracks.len(),
                 response
                     .state
                     .library
+                    .tracks
                     .iter()
                     .map(|t| t.play_count)
                     .sum::<u64>()
@@ -377,7 +378,7 @@ fn run() -> Result<()> {
             if args.json {
                 return show(&response, true);
             }
-            for entry in response.state.history.iter().take(limit) {
+            for entry in response.state.library.history.iter().take(limit) {
                 println!("{}\t{}\t{}", entry.played_at, entry.track_id, entry.title);
             }
             Ok(())
@@ -387,10 +388,11 @@ fn run() -> Result<()> {
             if args.json {
                 return show(&response, true);
             }
-            for (index, entry) in response.state.queue.iter().enumerate() {
+            for (index, entry) in response.state.queue.entries.iter().enumerate() {
                 let title = response
                     .state
                     .library
+                    .tracks
                     .iter()
                     .find(|t| t.id == entry.track_id)
                     .map_or("Missing track", |t| t.title.as_str());
@@ -400,7 +402,7 @@ fn run() -> Result<()> {
                     entry.id,
                     entry.track_id,
                     title,
-                    if response.state.current_queue_id == Some(entry.id) {
+                    if response.state.queue.current_id == Some(entry.id) {
                         " *"
                     } else {
                         ""
@@ -414,7 +416,7 @@ fn run() -> Result<()> {
             if args.json {
                 return show(&response, true);
             }
-            for playlist in response.state.playlists.iter() {
+            for playlist in response.state.library.playlists.iter() {
                 println!(
                     "{}\t{}\t{} entries",
                     playlist.id,
@@ -437,6 +439,7 @@ fn run() -> Result<()> {
             let track = response
                 .state
                 .library
+                .tracks
                 .iter()
                 .find(|track| track.id == track_id)
                 .context("Track not found")?;
@@ -455,8 +458,8 @@ fn run() -> Result<()> {
             }
             let report = response
                 .state
+                .system
                 .database_optimization
-                .as_ref()
                 .context("Database optimization returned no size report")?;
             let before = report
                 .database_bytes_before
@@ -484,8 +487,8 @@ fn run() -> Result<()> {
                 loop {
                     thread::sleep(Duration::from_millis(200));
                     let response = checked(ipc::request(&socket, &Command::Overview)?)?;
-                    if !response.state.scanning {
-                        if let Some(error) = &response.state.last_error {
+                    if !response.state.system.scanning {
+                        if let Some(error) = &response.state.system.last_error {
                             bail!("{error}");
                         }
                         return show(&response, args.json);
@@ -552,11 +555,11 @@ fn start(
             let mut enabled = false;
             loop {
                 let snapshot = media_handle.snapshot();
-                if snapshot.shutting_down {
+                if snapshot.system.shutting_down {
                     break;
                 }
-                if snapshot.config.mpris_enabled != enabled {
-                    enabled = snapshot.config.mpris_enabled;
+                if snapshot.system.config.mpris_enabled != enabled {
+                    enabled = snapshot.system.config.mpris_enabled;
                     let status = if enabled {
                         match mpris::Mpris::start(media_handle.clone(), desktop, &media_data_dir) {
                             Ok(started) => {
@@ -583,7 +586,13 @@ fn start(
             drop(service);
         })?;
     let paths = if paths.is_empty() {
-        runtime.handle.snapshot().config.library_roots.clone()
+        runtime
+            .handle
+            .snapshot()
+            .system
+            .config
+            .library_roots
+            .clone()
     } else {
         paths
     };
@@ -621,7 +630,7 @@ fn show(response: &StateResponse, json: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(response)?);
     } else {
         let state = &response.state;
-        let status = match state.status {
+        let status = match state.playback.status {
             PlaybackStatus::Stopped => "stopped",
             PlaybackStatus::Playing => "playing",
             PlaybackStatus::Paused => "paused",
@@ -631,24 +640,28 @@ fn show(response: &StateResponse, json: bool) -> Result<()> {
                 "{status}: {} — {}  {:.1}/{} s  volume {:.0}%",
                 track.artist,
                 track.title,
-                state.position,
+                state.playback.position,
                 state
+                    .playback
                     .duration
                     .map_or("?".into(), |value| format!("{value:.1}")),
-                state.volume * 100.0
+                state.playback.volume * 100.0
             );
         } else {
             println!(
                 "{status} · {} tracks · {} queued",
-                state.library.len(),
-                state.queue.len()
+                state.library.tracks.len(),
+                state.queue.entries.len()
             );
         }
-        if !state.scan_message.is_empty() {
-            println!("{}", state.scan_message);
+        if !state.system.scan_message.is_empty() {
+            println!("{}", state.system.scan_message);
         }
-        println!("FFmpeg extension audio decoding: {}", state.ffmpeg_status);
-        if let Some(error) = &state.last_error {
+        println!(
+            "FFmpeg extension audio decoding: {}",
+            state.system.ffmpeg_status
+        );
+        if let Some(error) = &state.system.last_error {
             eprintln!("{error}");
         }
     }

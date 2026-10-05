@@ -98,31 +98,43 @@ pub struct DatabaseOptimization {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AppState {
-    pub library: Arc<Vec<Track>>,
+pub struct LibrarySnapshot {
+    pub tracks: Arc<Vec<Track>>,
     /// Changes whenever any persisted track data changes.
     #[serde(default)]
-    pub library_revision: u64,
+    pub revision: u64,
     /// Changes only when the library tree or visible row ordering may change.
     #[serde(default)]
-    pub library_structure_revision: u64,
+    pub structure_revision: u64,
     pub playlists: Arc<Vec<Playlist>>,
-    pub queue: Arc<Vec<QueueEntry>>,
     pub history: Arc<Vec<HistoryEntry>>,
-    pub current_queue_id: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct QueueState {
+    pub entries: Arc<Vec<QueueEntry>>,
+    pub current_id: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PlaybackState {
     pub status: PlaybackStatus,
     pub position: f64,
     pub duration: Option<f64>,
     pub volume: f32,
     pub shuffle: bool,
     pub repeat: RepeatMode,
+    pub seek_revision: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SystemState {
     pub scanning: bool,
     pub scan_message: String,
     pub last_error: Option<String>,
     pub devices: Arc<Vec<String>>,
     pub selected_device: Option<String>,
     pub revision: u64,
-    pub seek_revision: u64,
     pub config: Arc<crate::config::Config>,
     pub config_path: PathBuf,
     pub mpris_status: String,
@@ -131,29 +143,58 @@ pub struct AppState {
     pub shutting_down: bool,
 }
 
-impl Default for AppState {
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AppState {
+    pub library: LibrarySnapshot,
+    pub queue: QueueState,
+    pub playback: PlaybackState,
+    pub system: SystemState,
+}
+
+impl Default for LibrarySnapshot {
     fn default() -> Self {
         Self {
-            library: Arc::new(Vec::new()),
-            library_revision: 0,
-            library_structure_revision: 0,
+            tracks: Arc::new(Vec::new()),
+            revision: 0,
+            structure_revision: 0,
             playlists: Arc::new(Vec::new()),
-            queue: Arc::new(Vec::new()),
             history: Arc::new(Vec::new()),
-            current_queue_id: None,
+        }
+    }
+}
+
+impl Default for QueueState {
+    fn default() -> Self {
+        Self {
+            entries: Arc::new(Vec::new()),
+            current_id: None,
+        }
+    }
+}
+
+impl Default for PlaybackState {
+    fn default() -> Self {
+        Self {
             status: PlaybackStatus::Stopped,
             position: 0.0,
             duration: None,
             volume: 0.7,
             shuffle: false,
             repeat: RepeatMode::Off,
+            seek_revision: 0,
+        }
+    }
+}
+
+impl Default for SystemState {
+    fn default() -> Self {
+        Self {
             scanning: false,
             scan_message: String::new(),
             last_error: None,
             devices: Arc::new(Vec::new()),
             selected_device: None,
             revision: 0,
-            seek_revision: 0,
             config: Arc::new(crate::config::Config::default()),
             config_path: PathBuf::new(),
             mpris_status: String::new(),
@@ -164,19 +205,32 @@ impl Default for AppState {
     }
 }
 
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            library: LibrarySnapshot::default(),
+            queue: QueueState::default(),
+            playback: PlaybackState::default(),
+            system: SystemState::default(),
+        }
+    }
+}
+
 impl AppState {
     pub fn current_track(&self) -> Option<&Track> {
-        let queue_id = self.current_queue_id?;
+        let queue_id = self.queue.current_id?;
         let track_id = self
             .queue
+            .entries
             .iter()
             .find(|entry| entry.id == queue_id)?
             .track_id;
         let index = self
             .library
+            .tracks
             .binary_search_by_key(&track_id, |track| track.id)
             .ok()?;
-        self.library.get(index)
+        self.library.tracks.get(index)
     }
 }
 /// Translate a normalized playback key name into the corresponding command.
@@ -185,34 +239,35 @@ impl AppState {
 /// identical semantics regardless of input surface.
 pub(crate) fn playback_key_command(key: &str, state: &AppState) -> Option<Command> {
     let seek = |seconds: f64| {
-        (state.status != PlaybackStatus::Stopped).then_some(Command::Seek { seconds })
+        (state.playback.status != PlaybackStatus::Stopped).then_some(Command::Seek { seconds })
     };
     match key {
         "space" => Some(Command::Toggle),
         "n" => Some(Command::Next),
         "p" => Some(Command::Previous),
-        "left" => seek((state.position - 5.0).max(0.0)),
-        "right" => seek((state.position + 5.0).max(0.0)),
+        "left" => seek((state.playback.position - 5.0).max(0.0)),
+        "right" => seek((state.playback.position + 5.0).max(0.0)),
         "home" => seek(0.0),
         "end" => state
+            .playback
             .duration
             .filter(|duration| duration.is_finite())
             .and_then(seek),
         "r" => Some(Command::Repeat {
-            mode: match state.repeat {
+            mode: match state.playback.repeat {
                 RepeatMode::Off => RepeatMode::All,
                 RepeatMode::All => RepeatMode::One,
                 RepeatMode::One => RepeatMode::Off,
             },
         }),
         "s" => Some(Command::Shuffle {
-            enabled: !state.shuffle,
+            enabled: !state.playback.shuffle,
         }),
         "]" => Some(Command::Volume {
-            value: (state.volume + 0.05).min(1.0),
+            value: (state.playback.volume + 0.05).min(1.0),
         }),
         "[" => Some(Command::Volume {
-            value: (state.volume - 0.05).max(0.0),
+            value: (state.playback.volume - 0.05).max(0.0),
         }),
         _ => None,
     }
@@ -363,24 +418,22 @@ mod tests {
 
     #[test]
     fn playback_seek_respects_status_and_boundaries() {
-        let mut state = AppState {
-            position: 2.0,
-            ..AppState::default()
-        };
+        let mut state = AppState::default();
+        state.playback.position = 2.0;
         assert!(playback_key_command("left", &state).is_none());
-        state.status = PlaybackStatus::Playing;
+        state.playback.status = PlaybackStatus::Playing;
         assert!(matches!(
             playback_key_command("left", &state),
             Some(Command::Seek { seconds }) if seconds == 0.0
         ));
-        state.position = 12.0;
+        state.playback.position = 12.0;
         assert!(matches!(
             playback_key_command("right", &state),
             Some(Command::Seek { seconds }) if seconds == 17.0
         ));
-        state.duration = Some(f64::INFINITY);
+        state.playback.duration = Some(f64::INFINITY);
         assert!(playback_key_command("end", &state).is_none());
-        state.duration = Some(42.0);
+        state.playback.duration = Some(42.0);
         assert!(matches!(
             playback_key_command("end", &state),
             Some(Command::Seek { seconds }) if seconds == 42.0
@@ -390,15 +443,13 @@ mod tests {
 
     #[test]
     fn playback_volume_and_repeat_cycle_are_bounded() {
-        let mut state = AppState {
-            volume: 1.0,
-            ..AppState::default()
-        };
+        let mut state = AppState::default();
+        state.playback.volume = 1.0;
         assert!(matches!(
             playback_key_command("]", &state),
             Some(Command::Volume { value }) if value == 1.0
         ));
-        state.volume = 0.0;
+        state.playback.volume = 0.0;
         assert!(matches!(
             playback_key_command("[", &state),
             Some(Command::Volume { value }) if value == 0.0
@@ -409,14 +460,14 @@ mod tests {
                 mode: RepeatMode::All
             })
         ));
-        state.repeat = RepeatMode::All;
+        state.playback.repeat = RepeatMode::All;
         assert!(matches!(
             playback_key_command("r", &state),
             Some(Command::Repeat {
                 mode: RepeatMode::One
             })
         ));
-        state.repeat = RepeatMode::One;
+        state.playback.repeat = RepeatMode::One;
         assert!(matches!(
             playback_key_command("r", &state),
             Some(Command::Repeat {

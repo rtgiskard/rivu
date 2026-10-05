@@ -6,14 +6,14 @@ use crate::{
     model::*,
     store::Store,
 };
-use anyhow::{Context, Result, bail};
-use crossbeam_channel::{Receiver, Sender, bounded, select};
+use anyhow::{Context, Result};
+use crossbeam_channel::{Receiver, Sender, bounded};
 use parking_lot::RwLock;
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
-    path::{Path, PathBuf},
+    path::Path,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -151,7 +151,7 @@ impl AppHandle {
             return Ack {
                 ok: false,
                 error: Some(format!("Core unavailable: {error}")),
-                revision: self.snapshot().revision,
+                revision: self.snapshot().system.revision,
             };
         }
         match rx.recv_timeout(Duration::from_secs(12)) {
@@ -159,12 +159,12 @@ impl AppHandle {
             Ok(CoreResponse::State(_)) => Ack {
                 ok: false,
                 error: Some("Core returned state for Ack request".into()),
-                revision: self.snapshot().revision,
+                revision: self.snapshot().system.revision,
             },
             Err(error) => Ack {
                 ok: false,
                 error: Some(format!("Core response unavailable: {error}")),
-                revision: self.snapshot().revision,
+                revision: self.snapshot().system.revision,
             },
         }
     }
@@ -201,38 +201,41 @@ impl Runtime {
             subscribers: subscribers.clone(),
             raise_requested: Arc::new(AtomicBool::new(false)),
         };
-        let mut initial = AppState {
-            library: Arc::new(store.tracks()?),
+        let mut initial = AppState::default();
+        initial.library = LibrarySnapshot {
+            tracks: Arc::new(store.tracks()?),
+            revision: 0,
+            structure_revision: 0,
             playlists: Arc::new(store.playlists()?),
             history: Arc::new(store.history(200)?),
-            devices: Arc::new(audio::devices().unwrap_or_default()),
-            volume: config.volume,
-            shuffle: config.shuffle,
-            repeat: config.repeat,
-            selected_device: config.output_device.clone(),
-            config: Arc::new(config),
-            config_path: config_path.to_path_buf(),
-            ffmpeg_status,
-            ..AppState::default()
         };
+        initial.system.devices = Arc::new(audio::devices().unwrap_or_default());
+        initial.playback.volume = config.volume;
+        initial.playback.shuffle = config.shuffle;
+        initial.playback.repeat = config.repeat;
+        initial.system.selected_device = config.output_device.clone();
+        initial.system.config = Arc::new(config);
+        initial.system.config_path = config_path.to_path_buf();
+        initial.system.ffmpeg_status = ffmpeg_status;
         if let Some(json) = store.get_setting("playback")? {
             let saved: Saved =
                 serde_json::from_str(&json).context("Reading saved playback settings")?;
-            initial.queue = Arc::new(
+            initial.queue.entries = Arc::new(
                 saved
                     .queue
                     .into_iter()
                     .filter(|entry| {
                         initial
                             .library
+                            .tracks
                             .binary_search_by_key(&entry.track_id, |track| track.id)
                             .is_ok()
                     })
                     .collect(),
             );
-            initial.current_queue_id = saved
+            initial.queue.current_id = saved
                 .current
-                .filter(|id| initial.queue.iter().any(|entry| entry.id == *id));
+                .filter(|id| initial.queue.entries.iter().any(|entry| entry.id == *id));
         }
         *shared.write() = initial.clone();
         let raise_requested = handle.raise_requested.clone();
@@ -240,9 +243,16 @@ impl Runtime {
             .name("rivu-core".into())
             .spawn(move || {
                 let (scan_tx, scan_rx) = bounded(1);
-                let next_queue_id = initial.queue.iter().map(|q| q.id).max().unwrap_or(0) + 1;
+                let next_queue_id = initial
+                    .queue
+                    .entries
+                    .iter()
+                    .map(|q| q.id)
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
                 let mut core = Core {
-                    library: library::LibraryState::new(initial.library.as_ref().clone()),
+                    library: library::LibraryState::new(initial.library.tracks.as_ref().clone()),
                     store,
                     engine,
                     state: initial,
@@ -267,16 +277,16 @@ impl Runtime {
                 let _ = core
                     .engine
                     .commands
-                    .send(AudioCommand::Volume(core.state.volume));
+                    .send(AudioCommand::Volume(core.state.playback.volume));
                 let _ = core.engine.commands.send(AudioCommand::FfmpegEnabled(
-                    core.state.config.ffmpeg_enabled,
+                    core.state.system.config.ffmpeg_enabled,
                 ));
                 let _ = core.engine.commands.send(AudioCommand::OutputSettings {
-                    device: core.state.selected_device.clone(),
-                    auto_mix: core.state.config.pipewire_auto_mix,
+                    device: core.state.system.selected_device.clone(),
+                    auto_mix: core.state.system.config.pipewire_auto_mix,
                 });
                 let _ = core.engine.commands.send(AudioCommand::AnalysisSettings(
-                    core.state.config.as_ref().into(),
+                    core.state.system.config.as_ref().into(),
                 ));
                 core.run(receiver);
             })?;
@@ -409,14 +419,12 @@ mod tests {
                 errors: Vec::new(),
             })
             .unwrap();
-        let state = AppState {
-            library: Arc::new(store.tracks().unwrap()),
-            config_path: directory.path().join("config.toml"),
-            ..AppState::default()
-        };
+        let mut state = AppState::default();
+        state.library.tracks = Arc::new(store.tracks().unwrap());
+        state.system.config_path = directory.path().join("config.toml");
         let (scan_tx, scan_rx) = bounded(1);
         let mut core = Core {
-            library: library::LibraryState::new(state.library.as_ref().clone()),
+            library: library::LibraryState::new(state.library.tracks.as_ref().clone()),
             store,
             engine: AudioEngine::new(1).unwrap(),
             shared: Arc::new(RwLock::new(state.clone())),
@@ -443,13 +451,13 @@ mod tests {
     }
 
     fn pending(core: &mut Core, queue_id: u64) {
-        core.state.current_queue_id = Some(queue_id);
-        core.state.status = PlaybackStatus::Playing;
+        core.state.queue.current_id = Some(queue_id);
+        core.state.playback.status = PlaybackStatus::Playing;
         let (track_id, duration) = {
             let track = core.state.current_track().unwrap();
             (track.id, track.duration)
         };
-        core.state.duration = duration;
+        core.state.playback.duration = duration;
         core.playback = Some(PlaybackStats {
             track_id,
             heard: 0.0,
@@ -539,7 +547,7 @@ mod tests {
     fn configured_threshold_controls_counting_including_zero_percent() {
         for percent in [0.0, 50.0, 99.0] {
             let (_directory, mut core) = fixture();
-            Arc::make_mut(&mut core.state.config).play_count_threshold_percent = percent;
+            Arc::make_mut(&mut core.state.system.config).play_count_threshold_percent = percent;
             playing(&mut core, 1);
             let boundary = 10.0 * percent / 100.0;
             progress(&mut core, 10.0, boundary);
@@ -607,8 +615,11 @@ mod tests {
             message: "Decoder failed".into(),
         })
         .unwrap();
-        assert_eq!(core.state.status, PlaybackStatus::Stopped);
-        assert_eq!(core.state.last_error.as_deref(), Some("Decoder failed"));
+        assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+        assert_eq!(
+            core.state.system.last_error.as_deref(),
+            Some("Decoder failed")
+        );
         assert_ne!(core.generation, generation);
         core.audio_event(AudioEvent::Progress {
             generation,
@@ -616,7 +627,7 @@ mod tests {
             listened_seconds: 10.0,
         })
         .unwrap();
-        assert_eq!(core.state.position, 0.0);
+        assert_eq!(core.state.playback.position, 0.0);
         assert_eq!(play_count(&core, 1), 0);
         assert!(core.store.history(200).unwrap().is_empty());
     }
@@ -632,7 +643,7 @@ mod tests {
             core.finish_playback(Ok(Some((snapshot_generation, heard))), false)
                 .unwrap();
             assert_eq!(play_count(&core, 1), expected);
-            assert_eq!(core.state.status, PlaybackStatus::Stopped);
+            assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
             assert_ne!(core.generation, generation);
             assert!(core.playback.is_none());
             core.audio_event(AudioEvent::Progress {
@@ -684,10 +695,10 @@ mod tests {
             assert_eq!(play_count(&core, 1), expected);
             assert_eq!(core.store.history(200).unwrap().len(), 1);
             assert_eq!(core.store.history(200).unwrap()[0].track_id, 1);
-            assert_eq!(core.state.status, PlaybackStatus::Stopped);
-            assert_eq!(core.state.current_queue_id, Some(1));
-            assert_eq!(core.state.position, 0.0);
-            assert!(core.state.last_error.is_none());
+            assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+            assert_eq!(core.state.queue.current_id, Some(1));
+            assert_eq!(core.state.playback.position, 0.0);
+            assert!(core.state.system.last_error.is_none());
             assert_eq!(core.generation, generation.wrapping_add(1));
             assert!(core.playback.is_none());
         }
@@ -715,7 +726,7 @@ mod tests {
                 .is_err()
         );
         assert_eq!(core.generation, generation.wrapping_add(1));
-        assert_eq!(core.state.status, PlaybackStatus::Stopped);
+        assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
         assert!(core.playback.is_none());
         while let Ok(event) = core.engine.events.try_recv() {
             core.audio_event(event).unwrap();
@@ -728,24 +739,24 @@ mod tests {
     fn database_optimization_requires_stopped_playback_and_no_scan() {
         let (_directory, mut core) = fixture();
         playing(&mut core, 1);
-        core.state.database_optimization = Some(DatabaseOptimization {
+        core.state.system.database_optimization = Some(DatabaseOptimization {
             database_bytes_before: 1,
             database_bytes_after: 1,
             wal_bytes_before: 1,
             wal_bytes_after: 0,
         });
         assert!(core.command(Command::OptimizeDatabase).is_err());
-        assert!(core.state.database_optimization.is_none());
+        assert!(core.state.system.database_optimization.is_none());
         core.command(Command::Pause).unwrap();
         assert!(core.command(Command::OptimizeDatabase).is_err());
         core.stop().unwrap();
-        core.state.scanning = true;
+        core.state.system.scanning = true;
         assert!(core.command(Command::OptimizeDatabase).is_err());
-        core.state.scanning = false;
+        core.state.system.scanning = false;
         let saved = core.store.get_setting("playback").unwrap();
         core.enqueue(&[4]).unwrap();
         core.command(Command::OptimizeDatabase).unwrap();
-        assert!(core.state.database_optimization.is_some());
+        assert!(core.state.system.database_optimization.is_some());
         assert_eq!(core.store.get_setting("playback").unwrap(), saved);
         assert_eq!(core.store.history(200).unwrap()[0].track_id, 1);
         assert_eq!(play_count(&core, 1), 0);
@@ -774,7 +785,7 @@ mod tests {
         assert!(core.track(2).unwrap().favorite);
         assert_eq!(play_count(&core, 1), 1);
         assert_eq!(core.store.history(200).unwrap()[0].played_at, played_at);
-        assert_eq!(core.state.status, PlaybackStatus::Playing);
+        assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
     }
 
     #[test]
@@ -798,6 +809,7 @@ mod tests {
         assert_eq!(
             core.state
                 .library
+                .tracks
                 .iter()
                 .map(|track| track.id)
                 .collect::<Vec<_>>(),
@@ -806,13 +818,14 @@ mod tests {
         assert_eq!(
             core.state
                 .queue
+                .entries
                 .iter()
                 .map(|entry| entry.id)
                 .collect::<Vec<_>>(),
             [1, 4, 5]
         );
         assert_eq!(
-            core.state.playlists[0]
+            core.state.library.playlists[0]
                 .entries
                 .iter()
                 .map(|entry| entry.track_id)
@@ -821,9 +834,9 @@ mod tests {
         );
         assert_eq!(core.played, [1]);
         assert_eq!(core.played_cursor, 1);
-        assert_eq!(core.state.current_queue_id, None);
-        assert_eq!(core.state.status, PlaybackStatus::Stopped);
-        assert!(core.state.history.is_empty());
+        assert_eq!(core.state.queue.current_id, None);
+        assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+        assert!(core.state.library.history.is_empty());
         assert_eq!(std::fs::read(&kept_path).unwrap(), b"Do not delete");
     }
 
@@ -860,7 +873,7 @@ mod tests {
             .unwrap();
             let finished = core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap();
             core.finish_scan(finished).unwrap();
-            core.state.scanning = false;
+            core.state.system.scanning = false;
             assert_eq!(core.track(1).unwrap().title, expected);
         }
     }
@@ -884,9 +897,9 @@ mod tests {
             message: "Old failure".into(),
         })
         .unwrap();
-        assert_eq!(core.state.status, PlaybackStatus::Playing);
-        assert_eq!(core.state.position, 0.0);
-        assert!(core.state.last_error.is_none());
+        assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
+        assert_eq!(core.state.playback.position, 0.0);
+        assert!(core.state.system.last_error.is_none());
         assert_eq!(play_count(&core, 1), 0);
         assert_eq!(play_count(&core, 2), 0);
         progress(&mut core, 3.0, 3.0);
@@ -906,7 +919,7 @@ mod tests {
             pending(&mut core, 1);
             started(&mut core, duration).unwrap();
             let expected_duration = if duration == Some(5.0) { 5.0 } else { 10.0 };
-            assert_eq!(core.state.duration, Some(expected_duration));
+            assert_eq!(core.state.playback.duration, Some(expected_duration));
             let boundary = expected_duration * 20.0 / 100.0;
             progress(&mut core, expected_duration, boundary);
             assert_eq!(play_count(&core, 1), 0);
@@ -922,7 +935,7 @@ mod tests {
         let generation = core.generation;
         core.store.remove_tracks(&[1]).unwrap();
         assert!(started(&mut core, Some(10.0)).is_err());
-        assert_eq!(core.state.status, PlaybackStatus::Stopped);
+        assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
         assert_ne!(core.generation, generation);
         assert!(core.playback.is_none());
         assert!(core.store.history(200).unwrap().is_empty());
@@ -940,8 +953,8 @@ mod tests {
             let generation = core.generation;
             assert!(core.audio_event(AudioEvent::Ended { generation }).is_err());
             assert_eq!(play_count(&core, 1), expected);
-            assert_eq!(core.state.duration, Some(10.0));
-            assert_eq!(core.state.status, PlaybackStatus::Stopped);
+            assert_eq!(core.state.playback.duration, Some(10.0));
+            assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
         }
     }
 
@@ -955,7 +968,7 @@ mod tests {
         let generation = core.generation;
         assert!(core.audio_event(AudioEvent::Ended { generation }).is_err());
         assert_eq!(play_count(&core, 1), 0);
-        assert_eq!(core.state.duration, None);
+        assert_eq!(core.state.playback.duration, None);
 
         pending(&mut core, 1);
         started(&mut core, None).unwrap();
@@ -979,8 +992,8 @@ mod tests {
             listened_seconds: 10.0,
         })
         .unwrap();
-        assert_eq!(core.state.status, PlaybackStatus::Stopped);
-        assert_eq!(core.state.position, 0.0);
+        assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+        assert_eq!(core.state.playback.position, 0.0);
         assert!(core.playback.is_none());
         assert_eq!(play_count(&core, 1), 1);
     }
@@ -1002,7 +1015,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(
-            core.state.playlists[0]
+            core.state.library.playlists[0]
                 .entries
                 .iter()
                 .map(|entry| entry.track_id)
@@ -1016,6 +1029,7 @@ mod tests {
         assert_eq!(
             core.state
                 .queue
+                .entries
                 .iter()
                 .skip(5)
                 .map(|entry| entry.track_id)
@@ -1070,7 +1084,7 @@ mod tests {
             )),
         })
         .unwrap();
-        let playlist = &core.state.playlists[0];
+        let playlist = &core.state.library.playlists[0];
         let tracks: Vec<_> = playlist
             .entries
             .iter()
@@ -1091,14 +1105,14 @@ mod tests {
     fn ended_missing_next_stops_and_resume_attempts_a_load() {
         let (_directory, mut core) = fixture();
         playing(&mut core, 1);
-        core.state.position = 10.0;
+        core.state.playback.position = 10.0;
         let generation = core.generation;
         let error = core
             .audio_event(AudioEvent::Ended { generation })
             .unwrap_err();
         assert!(error.to_string().contains("2.wav"));
-        assert_eq!(core.state.status, PlaybackStatus::Stopped);
-        assert_eq!(core.state.position, 0.0);
+        assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+        assert_eq!(core.state.playback.position, 0.0);
         assert!(core.playback.is_none());
         assert_eq!(core.store.history(1).unwrap()[0].track_id, 1);
         assert_ne!(core.generation, generation);
@@ -1108,24 +1122,24 @@ mod tests {
             listened_seconds: 10.0,
         })
         .unwrap();
-        assert_eq!(core.state.position, 0.0);
+        assert_eq!(core.state.playback.position, 0.0);
         // Resume must try to reopen the selected track, not send Pause(false)
         // to an empty worker and falsely report playing.
         missing(&mut core, Command::Resume, 1);
-        assert_eq!(core.state.status, PlaybackStatus::Stopped);
+        assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
     }
 
     #[test]
     fn missing_manual_next_preserves_current_playback() {
         let (_directory, mut core) = fixture();
         playing(&mut core, 1);
-        core.state.position = 4.0;
+        core.state.playback.position = 4.0;
         let generation = core.generation;
         let played_at = core.store.history(1).unwrap()[0].played_at;
         missing(&mut core, Command::Next, 2);
-        assert_eq!(core.state.status, PlaybackStatus::Playing);
-        assert_eq!(core.state.current_queue_id, Some(1));
-        assert_eq!(core.state.position, 4.0);
+        assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
+        assert_eq!(core.state.queue.current_id, Some(1));
+        assert_eq!(core.state.playback.position, 4.0);
         assert_eq!(core.generation, generation);
         assert_eq!(core.playback.as_ref().unwrap().track_id, 1);
         assert_eq!(core.store.history(1).unwrap()[0].played_at, played_at);
@@ -1148,7 +1162,7 @@ mod tests {
         let message = format!("{error:#}");
         assert!(message.contains("Decoder failed"));
         assert!(message.contains("does not exist"));
-        assert_eq!(core.state.status, PlaybackStatus::Stopped);
+        assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
         assert_ne!(core.generation, generation);
     }
 
@@ -1164,9 +1178,9 @@ mod tests {
             serde_json::from_str(&core.store.get_setting("playback").unwrap().unwrap()).unwrap();
         assert_eq!(
             queue_entries(&saved.queue),
-            queue_entries(&core.state.queue)
+            queue_entries(&core.state.queue.entries)
         );
-        assert_eq!(saved.current, core.state.current_queue_id);
+        assert_eq!(saved.current, core.state.queue.current_id);
     }
 
     #[test]
@@ -1180,20 +1194,20 @@ mod tests {
         .unwrap();
         playing(&mut core, 3);
         progress(&mut core, 1.5, 1.5);
-        core.state.shuffle = true;
+        core.state.playback.shuffle = true;
         core.played = vec![1, 2, 4, 3, 2, 5];
         core.played_cursor = 4;
         core.shuffle_bag = vec![5, 2, 4];
         let generation = core.generation;
-        let seek_revision = core.state.seek_revision;
+        let seek_revision = core.state.playback.seek_revision;
         let next_queue_id = core.next_queue_id;
         let history = core.store.history(200).unwrap();
-        let old_queue = Arc::clone(&core.state.queue);
+        let old_queue = Arc::clone(&core.state.queue.entries);
 
         core.command(Command::DeduplicateQueue).unwrap();
 
         assert_eq!(
-            queue_entries(&core.state.queue),
+            queue_entries(&core.state.queue.entries),
             [(1, 1), (3, 2), (4, 3), (5, 4)]
         );
         assert_eq!(
@@ -1203,12 +1217,12 @@ mod tests {
         assert_eq!(core.played, [1, 4, 3, 5]);
         assert_eq!(core.played_cursor, 3);
         assert_eq!(core.shuffle_bag, [5, 4]);
-        assert!(core.state.shuffle);
-        assert_eq!(core.state.current_queue_id, Some(3));
-        assert_eq!(core.state.status, PlaybackStatus::Playing);
-        assert_eq!(core.state.position, 1.5);
-        assert_eq!(core.state.duration, Some(10.0));
-        assert_eq!(core.state.seek_revision, seek_revision);
+        assert!(core.state.playback.shuffle);
+        assert_eq!(core.state.queue.current_id, Some(3));
+        assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
+        assert_eq!(core.state.playback.position, 1.5);
+        assert_eq!(core.state.playback.duration, Some(10.0));
+        assert_eq!(core.state.playback.seek_revision, seek_revision);
         assert_eq!(core.generation, generation);
         assert_eq!(core.next_queue_id, next_queue_id);
         let playback = core.playback.as_ref().unwrap();
@@ -1232,23 +1246,23 @@ mod tests {
     fn deduplicate_queue_preserves_first_entries_when_current_is_not_a_later_duplicate() {
         for current in [None, Some(2), Some(4)] {
             let (_directory, mut core) = fixture();
-            core.state.current_queue_id = current;
+            core.state.queue.current_id = current;
             core.played = vec![1, 2, 3, 4, 5];
             core.played_cursor = 2;
             core.shuffle_bag = vec![5, 4, 3, 2];
             core.command(Command::DeduplicateQueue).unwrap();
             assert_eq!(
-                queue_entries(&core.state.queue),
+                queue_entries(&core.state.queue.entries),
                 [(1, 1), (2, 2), (4, 3), (5, 4)]
             );
-            assert_eq!(core.state.current_queue_id, current);
+            assert_eq!(core.state.queue.current_id, current);
             assert_eq!(core.played, [1, 2, 4, 5]);
             assert_eq!(core.played_cursor, 2);
             assert_eq!(core.shuffle_bag, [5, 4, 2]);
             assert_queue_saved(&core);
             core.command(Command::DeduplicateQueue).unwrap();
             assert_eq!(
-                queue_entries(&core.state.queue),
+                queue_entries(&core.state.queue.entries),
                 [(1, 1), (2, 2), (4, 3), (5, 4)]
             );
             assert_eq!(core.played_cursor, 2);
@@ -1267,32 +1281,32 @@ mod tests {
         core.played_cursor = 3;
         core.shuffle_bag = vec![5, 4];
         let generation = core.generation;
-        let seek_revision = core.state.seek_revision;
+        let seek_revision = core.state.playback.seek_revision;
         let next_queue_id = core.next_queue_id;
-        let original = Arc::clone(&core.state.queue);
+        let original = Arc::clone(&core.state.queue.entries);
         let mut expected = queue_entries(&original);
 
         core.randomize_queue(&mut rand::rngs::StdRng::seed_from_u64(42));
-        assert_ne!(queue_entries(&core.state.queue), expected);
-        let mut reordered = queue_entries(&core.state.queue);
+        assert_ne!(queue_entries(&core.state.queue.entries), expected);
+        let mut reordered = queue_entries(&core.state.queue.entries);
         reordered.sort_unstable();
         expected.sort_unstable();
         assert_eq!(reordered, expected);
 
         for shuffle in [false, true] {
-            core.state.shuffle = shuffle;
+            core.state.playback.shuffle = shuffle;
             core.command(Command::RandomizeQueue).unwrap();
-            let mut reordered = queue_entries(&core.state.queue);
+            let mut reordered = queue_entries(&core.state.queue.entries);
             reordered.sort_unstable();
             assert_eq!(reordered, expected);
-            assert_eq!(core.state.shuffle, shuffle);
+            assert_eq!(core.state.playback.shuffle, shuffle);
             assert_eq!(core.played, [1, 2, 3, 4]);
             assert_eq!(core.played_cursor, 3);
             assert_eq!(core.shuffle_bag, [5, 4]);
-            assert_eq!(core.state.current_queue_id, Some(3));
-            assert_eq!(core.state.status, PlaybackStatus::Playing);
-            assert_eq!(core.state.position, 1.5);
-            assert_eq!(core.state.seek_revision, seek_revision);
+            assert_eq!(core.state.queue.current_id, Some(3));
+            assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
+            assert_eq!(core.state.playback.position, 1.5);
+            assert_eq!(core.state.playback.seek_revision, seek_revision);
             assert_eq!(core.generation, generation);
             assert_eq!(core.next_queue_id, next_queue_id);
             assert_eq!(core.playback.as_ref().unwrap().track_id, 2);
@@ -1313,13 +1327,13 @@ mod tests {
             assert_eq!(serde_json::to_value(&command).unwrap(), json);
             let (_directory, mut core) = fixture();
             for queue in [vec![], vec![QueueEntry { id: 7, track_id: 2 }]] {
-                core.state.queue = Arc::new(queue);
-                let expected = queue_entries(&core.state.queue);
+                core.state.queue.entries = Arc::new(queue);
+                let expected = queue_entries(&core.state.queue.entries);
                 core.command(serde_json::from_value(json.clone()).unwrap())
                     .unwrap();
-                assert_eq!(queue_entries(&core.state.queue), expected);
+                assert_eq!(queue_entries(&core.state.queue.entries), expected);
                 assert_eq!(core.generation, 1);
-                assert_eq!(core.state.status, PlaybackStatus::Stopped);
+                assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
                 assert_queue_saved(&core);
             }
         }
@@ -1329,7 +1343,7 @@ mod tests {
     fn removing_tracks_prunes_unplayed_shuffle_entries_and_duplicates() {
         let (_directory, mut core) = fixture();
         playing(&mut core, 1);
-        core.state.shuffle = true;
+        core.state.playback.shuffle = true;
         core.played = vec![1];
         core.played_cursor = 1;
         core.shuffle_bag = vec![5, 4, 3, 2];
@@ -1337,20 +1351,25 @@ mod tests {
             .unwrap();
         assert_eq!(core.shuffle_bag, [5, 4]);
         assert_eq!(
-            core.state.queue.iter().map(|q| q.id).collect::<Vec<_>>(),
+            core.state
+                .queue
+                .entries
+                .iter()
+                .map(|q| q.id)
+                .collect::<Vec<_>>(),
             [1, 4, 5]
         );
         missing(&mut core, Command::Next, 3);
         assert_eq!(core.shuffle_bag, [5, 4]);
-        assert_eq!(core.state.current_queue_id, Some(1));
-        assert_eq!(core.state.status, PlaybackStatus::Playing);
+        assert_eq!(core.state.queue.current_id, Some(1));
+        assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
     }
 
     #[test]
     fn removing_history_rebases_cursor_without_consuming_failed_navigation() {
         let (_directory, mut core) = fixture();
         playing(&mut core, 4);
-        core.state.shuffle = true;
+        core.state.playback.shuffle = true;
         core.played = vec![1, 2, 3, 4, 5];
         core.played_cursor = 4;
         core.command(Command::RemoveTracks { track_ids: vec![2] })
@@ -1363,24 +1382,25 @@ mod tests {
         assert_eq!(core.played_cursor, 2);
         core.command(Command::RemoveQueue { queue_id: 5 }).unwrap();
         core.command(Command::Next).unwrap();
-        assert_eq!(core.state.status, PlaybackStatus::Stopped);
+        assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
     }
 
     #[test]
     fn removing_current_queue_entry_keeps_other_copy_and_history_gap() {
         let (_directory, mut core) = fixture();
         playing(&mut core, 2);
-        core.state.shuffle = true;
+        core.state.playback.shuffle = true;
         core.played = vec![1, 2, 3];
         core.played_cursor = 2;
         core.command(Command::RemoveQueue { queue_id: 2 }).unwrap();
         assert_eq!(core.played, [1, 3]);
         assert_eq!(core.played_cursor, 1);
-        assert_eq!(core.state.current_queue_id, None);
-        assert_eq!(core.state.status, PlaybackStatus::Stopped);
+        assert_eq!(core.state.queue.current_id, None);
+        assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
         assert!(
             core.state
                 .queue
+                .entries
                 .iter()
                 .any(|q| q.id == 3 && q.track_id == 2)
         );
@@ -1391,7 +1411,7 @@ mod tests {
         assert_eq!(core.played_cursor, 0);
         assert!(core.shuffle_bag.is_empty());
         core.command(Command::Next).unwrap();
-        assert_eq!(core.state.status, PlaybackStatus::Stopped);
+        assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
     }
 
     #[test]
@@ -1412,16 +1432,16 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            queue_entries(&core.state.queue),
+            queue_entries(&core.state.queue.entries),
             [(2, 2), (1, 1), (3, 2), (5, 4), (4, 3)]
         );
-        assert_eq!(core.state.current_queue_id, Some(3));
-        assert_eq!(core.state.status, PlaybackStatus::Playing);
+        assert_eq!(core.state.queue.current_id, Some(3));
+        assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
         assert_eq!(core.generation, generation);
         assert_eq!(core.played, [1, 3, 5]);
         assert_eq!(core.played_cursor, 2);
         assert_eq!(core.shuffle_bag, [5, 4]);
-        assert_eq!(core.state.position, 1.5);
+        assert_eq!(core.state.playback.position, 1.5);
         assert_eq!(core.playback.as_ref().unwrap().track_id, 2);
         let current_history = core.store.history(200).unwrap();
         assert_eq!(current_history.len(), history.len());
@@ -1435,7 +1455,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(
-            queue_entries(&core.state.queue),
+            queue_entries(&core.state.queue.entries),
             [(2, 2), (4, 3), (1, 1), (3, 2), (5, 4)]
         );
         assert_queue_saved(&core);
@@ -1445,10 +1465,10 @@ mod tests {
     fn bulk_queue_invalid_ids_are_atomic_and_do_not_stop_current_playback() {
         let (_directory, mut core) = fixture();
         playing(&mut core, 3);
-        let queue = Arc::clone(&core.state.queue);
+        let queue = Arc::clone(&core.state.queue.entries);
         let generation = core.generation;
-        let status = core.state.status;
-        let current = core.state.current_queue_id;
+        let status = core.state.playback.status;
+        let current = core.state.queue.current_id;
         let error = core
             .command(Command::MoveQueueEntries {
                 queue_ids: vec![3, 99, 3],
@@ -1456,9 +1476,9 @@ mod tests {
             })
             .unwrap_err();
         assert!(error.to_string().contains("99"));
-        assert!(Arc::ptr_eq(&core.state.queue, &queue));
-        assert_eq!(core.state.current_queue_id, current);
-        assert_eq!(core.state.status, status);
+        assert!(Arc::ptr_eq(&core.state.queue.entries, &queue));
+        assert_eq!(core.state.queue.current_id, current);
+        assert_eq!(core.state.playback.status, status);
         assert_eq!(core.generation, generation);
 
         let error = core
@@ -1467,9 +1487,9 @@ mod tests {
             })
             .unwrap_err();
         assert!(error.to_string().contains("99"));
-        assert!(Arc::ptr_eq(&core.state.queue, &queue));
-        assert_eq!(core.state.current_queue_id, current);
-        assert_eq!(core.state.status, status);
+        assert!(Arc::ptr_eq(&core.state.queue.entries, &queue));
+        assert_eq!(core.state.queue.current_id, current);
+        assert_eq!(core.state.playback.status, status);
         assert_eq!(core.generation, generation);
     }
 
@@ -1485,11 +1505,11 @@ mod tests {
         })
         .unwrap();
         assert_eq!(
-            queue_entries(&core.state.queue),
+            queue_entries(&core.state.queue.entries),
             [(2, 2), (3, 2), (4, 3), (5, 4)]
         );
-        assert_eq!(core.state.current_queue_id, Some(3));
-        assert_eq!(core.state.status, PlaybackStatus::Playing);
+        assert_eq!(core.state.queue.current_id, Some(3));
+        assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
         assert_eq!(core.generation, generation);
         assert_eq!(core.played, [3, 5]);
         assert_eq!(core.played_cursor, 1);
@@ -1499,9 +1519,9 @@ mod tests {
             queue_ids: vec![3, 3],
         })
         .unwrap();
-        assert!(!core.state.queue.iter().any(|entry| entry.id == 3));
-        assert_eq!(core.state.current_queue_id, None);
-        assert_eq!(core.state.status, PlaybackStatus::Stopped);
+        assert!(!core.state.queue.entries.iter().any(|entry| entry.id == 3));
+        assert_eq!(core.state.queue.current_id, None);
+        assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
         assert_ne!(core.generation, generation);
         assert!(core.playback.is_none());
         assert_eq!(core.played, [5]);
@@ -1533,10 +1553,10 @@ mod tests {
         ] {
             assert_eq!(serde_json::to_value(&command).unwrap(), expected);
             let (_directory, mut core) = fixture();
-            let queue = Arc::clone(&core.state.queue);
+            let queue = Arc::clone(&core.state.queue.entries);
             let generation = core.generation;
             core.command(command).unwrap();
-            assert!(Arc::ptr_eq(&core.state.queue, &queue));
+            assert!(Arc::ptr_eq(&core.state.queue.entries, &queue));
             assert_eq!(core.generation, generation);
             assert_queue_saved(&core);
         }
@@ -1546,20 +1566,20 @@ mod tests {
     fn repeat_one_only_repeats_natural_end_and_repeat_all_revisits_singleton() {
         let (_directory, mut core) = fixture();
         playing(&mut core, 1);
-        core.state.repeat = RepeatMode::One;
+        core.state.playback.repeat = RepeatMode::One;
         missing(&mut core, Command::Next, 2);
         let generation = core.generation;
         let error = core
             .audio_event(AudioEvent::Ended { generation })
             .unwrap_err();
         assert!(error.to_string().contains("1.wav"));
-        assert_eq!(core.state.status, PlaybackStatus::Stopped);
+        assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
         core.command(Command::RemoveTracks {
             track_ids: vec![2, 3, 4],
         })
         .unwrap();
-        core.state.shuffle = true;
-        core.state.repeat = RepeatMode::All;
+        core.state.playback.shuffle = true;
+        core.state.playback.repeat = RepeatMode::All;
         core.played = vec![1];
         core.played_cursor = 1;
         missing(&mut core, Command::Next, 1);
@@ -1579,8 +1599,14 @@ mod tests {
         let history = core.store.history(200).unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].track_id, 2);
-        assert_eq!(core.state.queue[1].track_id, core.state.queue[2].track_id);
-        assert_ne!(core.state.queue[1].id, core.state.queue[2].id);
+        assert_eq!(
+            core.state.queue.entries[1].track_id,
+            core.state.queue.entries[2].track_id
+        );
+        assert_ne!(
+            core.state.queue.entries[1].id,
+            core.state.queue.entries[2].id
+        );
     }
 
     #[test]
@@ -1594,28 +1620,30 @@ mod tests {
             .command(Command::PlayPlaylist { playlist_id })
             .unwrap_err();
         assert!(error.to_string().contains("2.wav"));
-        assert_eq!(core.state.status, PlaybackStatus::Stopped);
-        assert_eq!(core.state.current_queue_id, None);
+        assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+        assert_eq!(core.state.queue.current_id, None);
         missing(&mut core, Command::Resume, 2);
     }
     #[test]
     fn show_window_rejects_without_host_and_preserves_playback_state() {
         let (_directory, mut core) = fixture();
-        core.state.status = PlaybackStatus::Playing;
-        core.state.position = 12.5;
+        core.state.playback.status = PlaybackStatus::Playing;
+        core.state.playback.position = 12.5;
         let queue = core
             .state
             .queue
+            .entries
             .iter()
             .map(|entry| (entry.id, entry.track_id))
             .collect::<Vec<_>>();
         let error = core.command(Command::ShowWindow).unwrap_err();
         assert!(error.to_string().contains("graphical host"));
-        assert_eq!(core.state.status, PlaybackStatus::Playing);
-        assert_eq!(core.state.position, 12.5);
+        assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
+        assert_eq!(core.state.playback.position, 12.5);
         assert_eq!(
             core.state
                 .queue
+                .entries
                 .iter()
                 .map(|entry| (entry.id, entry.track_id))
                 .collect::<Vec<_>>(),
@@ -1626,11 +1654,12 @@ mod tests {
     #[test]
     fn show_window_notifies_registered_host_without_changing_playback() {
         let (_directory, mut core) = fixture();
-        core.state.status = PlaybackStatus::Paused;
-        core.state.position = 7.25;
+        core.state.playback.status = PlaybackStatus::Paused;
+        core.state.playback.position = 7.25;
         let queue = core
             .state
             .queue
+            .entries
             .iter()
             .map(|entry| (entry.id, entry.track_id))
             .collect::<Vec<_>>();
@@ -1642,11 +1671,12 @@ mod tests {
         core.command(Command::ShowWindow).unwrap();
         assert!(called.load(Ordering::Acquire));
         assert!(core.raise_requested.swap(false, Ordering::AcqRel));
-        assert_eq!(core.state.status, PlaybackStatus::Paused);
-        assert_eq!(core.state.position, 7.25);
+        assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
+        assert_eq!(core.state.playback.position, 7.25);
         assert_eq!(
             core.state
                 .queue
+                .entries
                 .iter()
                 .map(|entry| (entry.id, entry.track_id))
                 .collect::<Vec<_>>(),
@@ -1662,7 +1692,7 @@ mod tests {
         let signal = observed.clone();
         *core.gui_opener.write() = Some(Arc::new(move || {
             let state = shared.read();
-            if state.shutting_down && state.status == PlaybackStatus::Stopped {
+            if state.system.shutting_down && state.playback.status == PlaybackStatus::Stopped {
                 signal.store(true, Ordering::Release);
             }
         }));

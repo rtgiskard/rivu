@@ -135,10 +135,12 @@ impl GuiApp {
     pub(super) fn library_drag_track_ids(&self, node: &LibraryNode) -> Vec<i64> {
         self.state
             .library
+            .tracks
             .iter()
             .filter_map(|track| match node {
                 LibraryNode::Directory(path) if path.as_os_str().is_empty() => (!self
                     .state
+                    .system
                     .config
                     .library_roots
                     .iter()
@@ -154,8 +156,8 @@ impl GuiApp {
 
     pub(super) fn rebuild_library_tree(&mut self) {
         self.library_tree.set_rows(library_rows(
-            &self.state.library,
-            &self.state.config.library_roots,
+            &self.state.library.tracks,
+            &self.state.system.config.library_roots,
         ));
         self.library_tree_scroll = UniformListScrollHandle::new();
         if let Some(index) = self.library_tree.selected_index() {
@@ -207,7 +209,7 @@ impl GuiApp {
                             LibraryNode::Track(track_id) => this
                                 .library_index
                                 .get(track_id)
-                                .and_then(|index| this.state.library.get(*index))
+                                .and_then(|index| this.state.library.tracks.get(*index))
                                 .map(|track| track.path.clone()),
                         };
                         let scan = scan_path.map(|path| {

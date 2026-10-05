@@ -437,7 +437,7 @@ impl Settings {
 impl GuiApp {
     pub(super) fn load_settings(&mut self, cx: &mut Context<Self>) {
         self.settings.device_dropdown.close();
-        let config = self.handle.state.read().config.as_ref().clone();
+        let config = self.handle.state.read().system.config.as_ref().clone();
         self.settings.reset(&config, cx);
         cx.notify();
     }
@@ -485,7 +485,7 @@ impl GuiApp {
     fn choose_device(&mut self, index: usize, cx: &mut Context<Self>) {
         if index == 0 {
             self.settings.draft.output_device = None;
-        } else if let Some(name) = self.state.devices.get(index - 1) {
+        } else if let Some(name) = self.state.system.devices.get(index - 1) {
             self.settings.draft.output_device = Some(name.clone());
         } else {
             return;
@@ -570,11 +570,15 @@ impl GuiApp {
                                 .output_device
                                 .as_ref()
                                 .and_then(|name| {
-                                    this.state.devices.iter().position(|device| device == name)
+                                    this.state
+                                        .system
+                                        .devices
+                                        .iter()
+                                        .position(|device| device == name)
                                 })
                                 .map_or(0, |index| index + 1);
                             let items = std::iter::once(DropdownItem::new(0, "System default"))
-                                .chain(this.state.devices.iter().enumerate().map(
+                                .chain(this.state.system.devices.iter().enumerate().map(
                                     |(index, device)| DropdownItem::new(index + 1, device.clone()),
                                 ));
                             this.settings.device_dropdown.open(items);
@@ -641,7 +645,7 @@ impl GuiApp {
                 icon_button(
                     "settings-mpris",
                     "󰐹",
-                    format!("Media controls (MPRIS)\n{}", self.state.mpris_status),
+                    format!("Media controls (MPRIS)\n{}", self.state.system.mpris_status),
                     cx,
                     |this, _, cx| {
                         this.settings.draft.mpris_enabled = !this.settings.draft.mpris_enabled;
@@ -658,7 +662,7 @@ impl GuiApp {
                 icon_button(
                     "settings-ffmpeg",
                     "\u{f384}",
-                    ffmpeg_hint(&self.state.ffmpeg_status),
+                    ffmpeg_hint(&self.state.system.ffmpeg_status),
                     cx,
                     |this, _, cx| {
                         this.settings.draft.ffmpeg_enabled = !this.settings.draft.ffmpeg_enabled;

@@ -1,14 +1,10 @@
 #[test]
 fn wire_revision_wraps_by_equality_domain() {
-    let state = AppState {
-        revision: u16::MAX as u64,
-        ..AppState::default()
-    };
+    let mut state = AppState::default();
+    state.system.revision = u16::MAX as u64;
     assert_eq!(playback_snapshot(&state).revision, u16::MAX);
-    let state = AppState {
-        revision: u16::MAX as u64 + 1,
-        ..AppState::default()
-    };
+    let mut state = AppState::default();
+    state.system.revision = u16::MAX as u64 + 1;
     assert_eq!(playback_snapshot(&state).revision, 0);
 }
 
