@@ -21,7 +21,11 @@ use std::{
     collections::{BTreeMap, HashMap},
     io::{self, Stdout},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread::JoinHandle,
     time::Duration,
 };
 
@@ -74,27 +78,54 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
     first.map_or(Ok(()), Err)
 }
 
-fn spawn_watcher(socket_path: &Path, revision: u64) -> Receiver<Result<Response, String>> {
+struct Watcher {
+    receiver: Receiver<Result<Response, String>>,
+    stopping: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl Drop for Watcher {
+    fn drop(&mut self) {
+        self.stopping.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn spawn_watcher(socket_path: &Path, revision: u64) -> Watcher {
     let socket_path = socket_path.to_owned();
     let (sender, receiver) = bounded(1);
-    std::thread::spawn(move || {
+    let stopping = Arc::new(AtomicBool::new(false));
+    let stop = stopping.clone();
+    let worker = std::thread::spawn(move || {
+        let Ok(mut session) = ipc::watch_session(&socket_path) else {
+            let _ = sender.try_send(Err("TUI state watcher could not connect".into()));
+            return;
+        };
         let mut revision = revision as u16;
-        loop {
-            match ipc::watch(&socket_path, revision) {
-                Ok(response) => {
+        while !stop.load(Ordering::Acquire) {
+            match session.watch_until(revision, || stop.load(Ordering::Acquire)) {
+                Ok(Some(response)) => {
                     revision = response.state.revision as u16;
-                    if sender.send(Ok(response)).is_err() {
+                    let shutting_down = response.state.shutting_down;
+                    if sender.try_send(Ok(response)).is_err() || shutting_down {
                         break;
                     }
                 }
+                Ok(None) => break,
                 Err(error) => {
-                    let _ = sender.send(Err(format!("TUI state watcher stopped: {error:#}")));
+                    let _ = sender.try_send(Err(format!("TUI state watcher stopped: {error:#}")));
                     break;
                 }
             }
         }
     });
-    receiver
+    Watcher {
+        receiver,
+        stopping,
+        worker: Some(worker),
+    }
 }
 
 fn run_loop(socket_path: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
@@ -104,11 +135,21 @@ fn run_loop(socket_path: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>
     ui.sync_queue(&state, &state);
     let mut redraw = true;
     loop {
-        while let Ok(update) = updates.try_recv() {
+        while let Ok(update) = updates.receiver.try_recv() {
             let response = update.map_err(anyhow::Error::msg)?;
             if response.ok && response.state.revision != state.revision {
-                ui.sync_queue(&state, &response.state);
-                state = response.state;
+                let mut next = response.state;
+                next.playlists = state.playlists.clone();
+                next.history = state.history.clone();
+                next.devices = state.devices.clone();
+                next.selected_device = state.selected_device.clone();
+                next.config = state.config.clone();
+                next.config_path = state.config_path.clone();
+                next.mpris_status = state.mpris_status.clone();
+                next.ffmpeg_status = state.ffmpeg_status.clone();
+                next.database_optimization = state.database_optimization.clone();
+                ui.sync_queue(&state, &next);
+                state = next;
                 redraw = true;
             }
         }
