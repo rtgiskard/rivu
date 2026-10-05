@@ -6,182 +6,86 @@ playback controls, separate from the unapplied draft in the settings dialog.
 Previous restarts the current track when its position exceeds three seconds;
 press it again near the start to select the previous queue entry.
 
-All five buttons are 1.5 times the standard icon-button size. The 128-pixel left
-artwork approximately matches the information and controls beside it. The seek
-row has a progress icon on the left and `elapsed / total` on the right. Volume
-uses a speaker icon with a tooltip, a separate slider, and its percentage.
-Controls wrap in narrow panels, which can scroll vertically when needed.
+The Playback panel shows artwork, elapsed/total time, seek, and volume controls.
+Controls wrap in narrow panels. Seeking to the end follows normal queue completion;
+if paused, playback remains paused until resumed. Previous restarts a track after
+three seconds, otherwise it selects the previous queue entry.
 
-Seeking to the end of a track follows normal queue completion rather than
-reporting a decoder error. If paused, playback stays paused at the end until
-resumed. Opus seeking accounts for decoder preroll without replaying earlier PCM.
+Pause uses software gating and play counts use heard time confirmed by the output
+backend. Recoverable output underruns do not start a new playback. Analysis pauses
+while playback is paused; silent backend callbacks may still consume some CPU.
+The audio worker waits for commands and backend events instead of polling unchanged
+playback positions.
 
-Pause uses software gating, including on devices without hardware pause support.
-At EOF, Rivu waits for the output backend's playback clock to pass the final
-samples before closing the stream. Play counting uses actual heard time confirmed
-by the output backend, not the seek position or frames merely queued to the
-device; confirmation is conservative across underruns. Recoverable ALSA underruns
-do not start a new playback.
+The TUI updates state while idle and redraws on state changes, local input, or
+terminal resize. Up/Down and Enter operate on the selected queue occurrence;
+Space toggles playback, `n`/`p` selects next/previous, and `q` exits only the TUI.
 
-Backend playback-time predictions can decrease when device latency shrinks.
-Rivu accounts for queued samples in submission order rather than treating this
-as a clock failure; a backwards callback clock still reports an error.
+The GUI supports Space, `n`/`p`, Left/Right seeking, Home/End, `r` repeat,
+`s` shuffle, and `[`/`]` volume. Up/Down and Enter operate on the focused Library
+or Queue list; `d`/Delete removes selected queue occurrences. `q` closes the GUI
+window without stopping the core. Text fields and popups take precedence.
 
-While paused, the audio worker waits for commands, backend errors, or the last
-audible device-buffer tail to settle. It does not poll or repeatedly broadcast an
-unchanged position to the GUI. Analysis is parked as well. Software-paused output
-backends may still invoke silent audio callbacks, so total process CPU is not
-guaranteed to reach zero on every device/backend.
+Playlists support creation, renaming, deletion, import/export, playback, adding,
+removing, and moving entries. If the next track cannot be opened after EOF,
+playback stops and reports the error. Switching manually to a missing file does
+not interrupt the current track. Removing tracks also removes their queue and
+shuffle-history references.
 
-The TUI checks external state every 250 ms while idle, but redraws only after a
-state change, local interaction, or terminal resize. Queue labels are cached by
-content, avoiding repeated library searches and label rebuilding on progress updates.
-In the queue, Up/Down selects an occurrence and Enter plays that occurrence,
-including when the same track appears more than once. Search and directory views
-keep their separate Enter actions (enqueue a result or open a directory).
-Space toggles playback; `n`/`p` chooses next/previous. `q` exits only the TUI;
-the core continues playing.
+== Native multichannel output
 
-The GUI shares playback keys with the TUI: Space, `n`/`p`, Left/Right (5 seconds),
-Home/End, `r` (repeat), `s` (shuffle), and `[`/`]` (5% volume). Up/Down and Enter
-operate on the last focused Library or Queue list; `d`/Delete removes selected
-queue occurrences. `/` focuses Library search and `t` activates Library. A missing
-Library panel is added only when the workspace is unlocked. `q` closes the GUI
-window without shutting down the core. Text fields and modal/popup input take
-precedence; Escape dismisses the topmost popup or leaves text-field focus.
-Otherwise Escape clears Library, Queue, and Playlists selections, including the
-queue range anchor, without removing entries or changing playback.
+Speaker identities are preserved through decoding and resampling. On Linux, an
+unset output device uses the default PipeWire sink; an explicit `PipeWire:
+<node.name>` selects a named sink. Other explicit devices may use CPAL.
 
-Playlists use the same compact icon buttons and tooltips as Queue for creation,
-renaming, deletion, import/export, playback, adding tracks, removing entries and
-moving entries up/down.
+`pipewire_auto_mix` is enabled by default and lets PipeWire remix channels for
+different sink layouts. Disable it to require a compatible speaker layout and
+reject routes that would lose or remix channels. Unsupported layouts report an
+error instead of silently downmixing.
 
-If the next track cannot be opened after EOF, playback stops and reports the
-error. A manual switch to a missing file does not interrupt the current track.
-Removing tracks also removes their queue and shuffle-history references.
+== Extension audio decoding
 
-=== Native multichannel output
+Enable `ffmpeg_enabled` to play additional audio containers and codecs, including
+audio tracks in MKV and MP4 files. Detection uses file contents, not only file
+extensions. Corrupt streams and invalid layouts report errors.
 
-Speaker identities are preserved through decoding and resampling. Select an
-explicit `PipeWire: <node.name>` device to address a PipeWire sink. Multichannel
-playback through the default PipeWire ALSA device also uses the native route.
-With `pipewire_auto_mix = false`, the sink must expose every source speaker,
-including LFE and rear center where present; missing or incompatible routes
-produce an error rather than a silent downmix. Stereo visualization is a separate
-analysis branch and does not itself change the device signal.
-Unspecified mono/stereo layouts use conventional mono or left/right identities;
-unspecified multichannel layouts are rejected rather than guessed from their size.
-On Linux, leaving the output device unset now selects the default PipeWire sink
-through the native PipeWire backend. Selecting another device explicitly may use
-CPAL unless it is named `PipeWire: <node.name>`.
+The setting requires a binary built with Cargo's `ffmpeg` feature
+(`cargo build --features ffmpeg`). In a default build, enabling it is rejected
+as unavailable; native playback remains available. The extension supports
+seeking and bounded decoder preroll.
 
-PipeWire automatic channel remix is enabled by default. This allows a multichannel
-track to play through a stereo or differently arranged sink using PipeWire's
-channelmix policy. Disable `pipewire_auto_mix` in settings for strict speaker
-preservation; incompatible layouts then fail instead of being remixed.
-When changing the output device and remix mode together, Apply installs the final
-pair before reopening output once. Reapplying an unchanged pair does not reopen
-playback.
+Missing or incompatible FFmpeg libraries are reported in settings. FFmpeg is
+not loaded when the extension is disabled.
 
-=== Extension audio decoding
-
-Enable `ffmpeg_enabled` in preferences or the configuration file to allow
-unsupported native containers/codecs to use the FFmpeg audio backend. Format
-detection uses file contents, not just the extension. Corrupt native streams and
-invalid layouts are errors, not reasons to retry through another decoder.
-
-DTS carried inside a PCM-labelled WAV is detected before native playback. With
-the extension disabled it can be listed as DTS, with unknown channel metadata,
-but cannot be played as PCM noise. Enabling the decoder and rescanning enriches
-the cached metadata, including the decoded DTS-ES layout. Old probe-cache entries
-are invalidated without changing track identity or user metadata.
-
-The DTS guard validates consecutive frames in bounded, incremental data windows;
-it stops when identified rather than reading the entire probe budget first.
-Decoding reuses PCM buffers and dispatches sample conversion once per frame.
-Seeking uses the container's seek operation with bounded decoder preroll, not an
-unconditional decode from the beginning of an album.
-
-The settings status reports missing libraries or incompatible versions. A saved
-enabled setting with an unavailable runtime does not prevent native playback or
-application startup. Disabling the extension stops an active FFmpeg-decoded track,
-but leaves native playback running. Successful library loads are shared; no
-
-FFmpeg library is loaded merely to probe native media while the option is off.
-
-The footer exit button, `rivu quit`, and MPRIS `Quit` stop the core explicitly;
-closing the GUI window alone leaves playback and MPRIS running.
+`rivu quit`, the footer exit button, tray `Quit Rivu`, and MPRIS `Quit` stop the
+core when their respective integration is enabled. Closing the GUI window leaves
+the core and playback running; the tray is independent of MPRIS.
 
 == Desktop queue
 
-Click selects one queue occurrence. Ctrl/Cmd-click toggles occurrences;
-Shift-click selects an inclusive range from the selection anchor, and
-Ctrl/Cmd+Shift-click adds that range. Repeated tracks remain independently
-selectable by queue occurrence. Double-click plays the clicked occurrence.
-Right-clicking a selected row preserves the selection; right-clicking another
-row selects only that occurrence before opening the menu.
+Queue rows represent occurrences, so repeated tracks can be selected and moved
+independently. Click selects one row; Ctrl/Cmd toggles, Shift selects a range,
+and double-click plays the selected occurrence. Right-clicking a selected row
+keeps the selection.
 
-The toolbar removes all selected occurrences. Dragging a selected row moves the
-whole selection in queue order; dropping on a selected row leaves it unchanged.
-Single-row up/down controls remain available for a single selection.
-
-Queue actions remain available while the workspace layout is locked:
-
-* Randomize queue changes queue order without changing the playing occurrence.
-* Remove duplicates keeps one occurrence per library track, preserving the
-  current playing occurrence when its track is duplicated.
-* Add to playlist lets you choose a target and adds selected tracks in queue order,
-  respecting the playlist's existing track deduplication.
-* Clear queue is the penultimate context-menu item, above the final workspace
-  action/status. It remains available only in the menu and requires confirmation.
-  Cancel leaves the queue and playback unchanged; confirming also stops playback.
-
-Removing a selection that excludes the current occurrence leaves playback alone.
-Removing the current occurrence stops it. Queue transformations preserve remaining
-occurrence identities and remove obsolete selection and navigation references.
+The queue toolbar and menu support removal, moving, randomizing, deduplicating,
+adding to playlists, and clearing the queue. Removing the current occurrence
+stops playback; other removals leave playback running. Queue actions remain
+available while the workspace is locked.
 
 == Desktop album artwork
 
-MPRIS metadata includes `mpris:artUrl` for the current track. Rivu reads embedded
-pictures exposed by Symphonia's container/track metadata, preferring front-cover
-images. Pictures are not fetched from the network or searched for beside audio
-files. Containers supported only through FFmpeg, external picture links, and
-pictures not exposed by Symphonia use the bundled Rivu icon instead.
+Rivu uses embedded front-cover artwork exposed by supported native media and does
+not fetch images from the network. Unsupported or unavailable artwork falls back
+to the bundled Rivu icon.
 
-Artwork lives below the selected data directory: `artwork/default.png` contains
-the existing bundled `assets/rivu.png` image, and extracted images are stored at
-`artwork/cache/<blake3>.<ext>`. The hash covers the original image bytes, allowing
-identical covers to share one file. Images are not transcoded; recognized PNG,
-JPEG, GIF, WebP, BMP, TIFF, and ICO pictures retain their original format.
-
-The in-memory lookup key is exactly the library track ID and its stored source
-fingerprint. A rescan that changes the fingerprint refreshes the lookup; changing
-the queue occurrence or editing title/artist tags does not re-extract artwork.
-The disposable cache uses complete-file renames without `fsync` and requires no
-SQLite artwork table. Unreadable media, unsupported artwork, or cache-write errors
-fall back to the default image; if that cannot be written either, the art URL is
-omitted. None of these failures prevents playback. Artwork changes are included
-in MPRIS `Metadata` property-change notifications.
+Artwork is cached below the selected data directory in `artwork/`; cache failures
+do not prevent playback. MPRIS exposes the current artwork through `mpris:artUrl`.
 
 == Runtime decoder dependencies
 
-Clean builds require FFmpeg development headers and pkg-config files, plus
-libclang. `build.rs` generates Rust ABI declarations into Cargo's `OUT_DIR`;
-generated bindings are not stored in the source tree or tracked by Git.
-Generation selects the decoder's required ABI types and constants, recursively
-retaining complete layouts for accessed structures. Pointer-only handles are
-opaque, and unused C function declarations are not generated.
-Cargo reuses the generated file while the build script, included headers and
-tracked build environment remain unchanged. Cleaning the build cache requires
-generation again. A build-script rerun also requires the development environment.
-
-The currently validated build target is little-endian x86-64 Linux with FFmpeg 9
-headers (libavutil 61, libavcodec 63, libavformat 63). Other header ABI families
-are explicitly rejected until adapted and validated. Runtime library names and
-the required ABI majors come from the generated header constants; minor and
-patch versions need not match. Changing ABI major requires rebuilding with an
-adapted backend, or retaining compatible runtime libraries.
-
-The executable still loads FFmpeg dynamically: the build script does not emit
-FFmpeg linker directives. Runtime FFmpeg libraries are optional when extension
-decoding is disabled; enabling it checks library versions and required symbols.
+Native source builds do not require FFmpeg. The optional extension requires
+FFmpeg 9 development headers (`libavutil` 61, `libavcodec` 63,
+`libavformat` 63) and `libclang` on little-endian x86-64 or aarch64 Linux.
+Other FFmpeg ABI major versions are rejected by `build.rs`. Runtime FFmpeg
+libraries are loaded dynamically only when extension decoding is enabled.

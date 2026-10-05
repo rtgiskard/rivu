@@ -1,36 +1,23 @@
 = Library
 
-CLI scan and playlist import/export paths are relative to the CLI's working
-directory, not the running core's directory. Playlists deduplicate by track ID,
-retaining the first occurrence in its original order on add, import, and M3U8
-export. The playback queue may still repeat tracks. Exported paths are relative
-to the actual destination directory, including when it contains directory
-symlinks or `..`.
+CLI scan and playlist import/export paths are relative to the invoking client's
+working directory. Playlists deduplicate track IDs while queues may repeat tracks.
+Exported playlist paths are relative to the destination directory.
 
 == Library metadata and favorites
 
-`library probe PATH` reads real audio metadata without starting a core. The CLI
-and Track details show codec, sample rate, channels, and available encoded audio
-bitrate in decimal kbps (`bitrate_bps` in JSON). Bitrate is not bit depth: source
-bits/sample is reported separately only from PCM/lossless source metadata, never
-from the decoder's floating-point output format. Unknown values appear as `—`
-or JSON `null`, not zero. Bitrate is taken from audio-stream metadata, or the
-encoded PCM sample width × sample rate × channels; Rivu never estimates it from
-whole-container size and duration. Native compressed streams without a reported
-bitrate remain unknown. CUE subtracks inherit their source's bitrate and precision.
+`library probe PATH` reads audio metadata without starting a core. Library rows and
+Track details show codec, sample rate, channels, bitrate, track/disc numbers,
+release date, path, missing status, CUE boundaries, play count, and favorite state.
+Unknown metadata is reported as `—` or JSON `null`.
 
-Track and disc numbers come from available tags (CUE track numbers from the
-sheet). Release dates retain the source precision: `2024`, `2024-03`, and
-`2024-03-15` stay distinct; no month or day is invented. GUI library rows group by
-album and use disc/track numbers when present, then title; directory ordering is
-unchanged. The library's internal track IDs and identity rules are unchanged.
-Title/artist/album editing and favorites are library-only: media tags and audio
-files are never rewritten. Track details also shows path, missing status, CUE
-boundaries, play count, last-played timestamp, and a favorite toggle.
+Editing titles, artists, albums, and favorites changes only Rivu's library data;
+media tags and audio files are never rewritten. Track identity uses the stored
+path and fingerprint. Rescans preserve identity, overrides, counts, and history.
 
 [source,sh]
 ----
-# Reprobe unchanged files while retaining IDs, overrides, favorites and counts
+# Force metadata reprobe while retaining library identity and user data
 ./target/release/rivu library scan ~/Music --force --wait
 
 # Filter by favorites or missing status (both flags select their intersection)
@@ -43,19 +30,12 @@ boundaries, play count, last-played timestamp, and a favorite toggle.
 ./target/release/rivu library clean-missing
 ----
 
-The GUI library offers favorite/missing filters, batch favorite/unfavorite actions
-for selected tracks, and a force-rescan toggle. Track rows have no inline favorite
-button; this does not change stored favorites.
-
-In the desktop GUI, an unfiltered Library is displayed as a directory-first tree.
-Use Up/Down to move, Left/Right to collapse or expand, Space to toggle a folder,
-and Enter to play a track. Search, Favorites, and Missing filters keep the flat
-filtered list view. Dragging a tree file or directory onto Queue appends all
-matching library tracks; dragging onto a selected Playlist adds them using the
-same track-ID deduplication rules as the existing add action.
-Normal scans reuse valid cached probes; `--force` rereads metadata even when file
-size and modification time are unchanged. Forced scans do not replace track IDs
-or clear user metadata overrides, favorites, play counts, or recent timestamps.
+The GUI Library supports favorite/missing filters, batch favorite actions, and
+force-rescan. The unfiltered view is a directory-first tree; filtered views are
+flat lists. Use Up/Down, Left/Right, Space, and Enter to navigate and play.
+Dragging files or directories to Queue or a Playlist adds their matching tracks.
+Normal scans reuse cached probes; `--force` rereads metadata while preserving
+track identity and user data.
 
 == Play counts and recent tracks
 
@@ -73,34 +53,22 @@ stores only aggregate play counts and last-played timestamps, not per-play recor
 or per-play/cumulative heard durations; heard time exists only in memory for
 playback and count decisions.
 
-Existing path and fingerprint identity rules are unchanged. Rescanning or updating
-tags preserves track identity, user metadata overrides, counts, and last-played
-timestamps under those rules.
+Track identity uses path and fingerprint. Rescanning or updating tags preserves
+that identity, user metadata overrides, counts, and last-played timestamps.
 
 == Database initialization and maintenance
 
-Rivu creates the current database structure directly. Older database formats are
-not migrated or backed up automatically. Stop the instance before removing an
-old `library.db` and its `-wal`/`-shm` sidecars, then rescan the music files.
-This resets playlists, queue, favorites, metadata overrides, and playback statistics;
-source audio files, `config.toml`, and `workspace.json` are independent and retained.
+Rivu creates the database structure directly. Stop the instance before removing
+`library.db` and its `-wal`/`-shm` sidecars, then rescan the music files. This
+resets playlists, queue, favorites, metadata overrides, and playback statistics;
+source audio files, `config.toml`, and `workspace.json` are independent.
 
-Failed manual maintenance retains a pending marker and is retried on the next
-open. No playback history table or per-play duration data is stored.
-
-To run maintenance explicitly, connect to the running GUI/headless core, stop
-playback, and wait for scans to finish:
+To optimize the database, stop playback, wait for scans to finish, and run:
 
 [source,sh]
 ----
-./target/release/rivu playback stop
 ./target/release/rivu library optimize
 ----
 
-Optimization is rejected while playback or scanning is active. It performs
-`VACUUM`, `PRAGMA optimize`, and a truncating WAL checkpoint through the core;
-do not operate directly on an open database from another process. `VACUUM` needs
-temporary disk space, so free space may be required before it can reclaim space.
-On success the CLI reports database and WAL bytes before/after plus total bytes
-reclaimed; JSON exposes the report in `state.database_optimization`. Failures are
-reported as errors, not successful maintenance.
+Optimization is rejected while playback or scanning is active. It reclaims
+database/WAL space and refreshes query statistics; failures are reported as errors.
