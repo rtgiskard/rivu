@@ -159,7 +159,6 @@ pub struct Config {
     pub radial_spectrum_bar_glow_layers: u32,
     pub radial_spectrum_ring_opacity: f32,
     pub radial_spectrum_bloom_intensity: f32,
-    pub radial_spectrum_wave_thickness: f32,
     pub radial_spectrum_inner_diameter: f32,
     pub radial_spectrum_fade_when_idle: bool,
     pub radial_spectrum_primary_color: RgbColor,
@@ -220,7 +219,6 @@ impl Default for Config {
             radial_spectrum_bar_glow_layers: 2,
             radial_spectrum_ring_opacity: 0.8,
             radial_spectrum_bloom_intensity: 0.5,
-            radial_spectrum_wave_thickness: 1.0,
             radial_spectrum_inner_diameter: 0.7,
             radial_spectrum_fade_when_idle: false,
             radial_spectrum_primary_color: RgbColor(0x7aa2f7),
@@ -269,7 +267,7 @@ impl Config {
             "spectrum_bands_per_octave",
             "spectrum_log_scale",
             "spectrogram_log_scale",
-            "spectrogram_interpolate",
+            "radial_spectrum_wave_thickness",
         ] {
             document.remove(key);
         }
@@ -380,11 +378,6 @@ impl Config {
             (
                 "radial_spectrum_bloom_intensity",
                 self.radial_spectrum_bloom_intensity,
-                0.0..=2.0,
-            ),
-            (
-                "radial_spectrum_wave_thickness",
-                self.radial_spectrum_wave_thickness,
                 0.0..=2.0,
             ),
             (
@@ -573,7 +566,6 @@ mod tests {
             radial_spectrum_bar_glow_layers: 3,
             radial_spectrum_ring_opacity: 0.7,
             radial_spectrum_bloom_intensity: 1.0,
-            radial_spectrum_wave_thickness: 1.2,
             radial_spectrum_inner_diameter: 0.8,
             radial_spectrum_fade_when_idle: true,
             radial_spectrum_primary_color: "#7aa2f7".parse().unwrap(),

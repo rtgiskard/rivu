@@ -52,7 +52,6 @@ enum Field {
     RadialSpectrumBarGlowLayers,
     RadialSpectrumRingOpacity,
     RadialSpectrumBloomIntensity,
-    RadialSpectrumWaveThickness,
     RadialSpectrumInnerDiameter,
     RadialSpectrumPrimaryColor,
     RadialSpectrumSecondaryColor,
@@ -88,7 +87,6 @@ impl Field {
             Self::RadialSpectrumBarGlowLayers => "Bar glow layers (0–4)",
             Self::RadialSpectrumRingOpacity => "Ring opacity (0–1)",
             Self::RadialSpectrumBloomIntensity => "Bloom intensity (0–2)",
-            Self::RadialSpectrumWaveThickness => "Wave thickness (0–2; reserved)",
             Self::RadialSpectrumInnerDiameter => "Inner diameter (0–2)",
             Self::RadialSpectrumPrimaryColor | Self::RadialSpectrumSecondaryColor => {
                 "Radial Spectrum color (#RRGGBB)"
@@ -231,7 +229,6 @@ impl Settings {
             Field::RadialSpectrumBarGlowLayers,
             Field::RadialSpectrumRingOpacity,
             Field::RadialSpectrumBloomIntensity,
-            Field::RadialSpectrumWaveThickness,
             Field::RadialSpectrumInnerDiameter,
             Field::RadialSpectrumPrimaryColor,
             Field::RadialSpectrumSecondaryColor,
@@ -367,11 +364,6 @@ impl Settings {
             cx,
         );
         self.set_value(
-            Field::RadialSpectrumWaveThickness,
-            self.draft.radial_spectrum_wave_thickness.to_string(),
-            cx,
-        );
-        self.set_value(
             Field::RadialSpectrumInnerDiameter,
             self.draft.radial_spectrum_inner_diameter.to_string(),
             cx,
@@ -478,8 +470,6 @@ impl Settings {
         config.radial_spectrum_ring_opacity = self.number(Field::RadialSpectrumRingOpacity, cx)?;
         config.radial_spectrum_bloom_intensity =
             self.number(Field::RadialSpectrumBloomIntensity, cx)?;
-        config.radial_spectrum_wave_thickness =
-            self.number(Field::RadialSpectrumWaveThickness, cx)?;
         config.radial_spectrum_inner_diameter =
             self.number(Field::RadialSpectrumInnerDiameter, cx)?;
         config.radial_spectrum_primary_color = self
@@ -1061,7 +1051,6 @@ impl GuiApp {
                     ))
                     .child(settings.pair(Field::RadialSpectrumSensitivity, Field::RadialSpectrumRotationSpeed))
                     .child(settings.pair(Field::RadialSpectrumBarWidth, Field::RadialSpectrumBarGlowLayers))
-                    .child(settings.pair(Field::RadialSpectrumInnerDiameter, Field::RadialSpectrumWaveThickness))
                     .child(settings.pair(Field::RadialSpectrumRingOpacity, Field::RadialSpectrumBloomIntensity))
                     .child(settings.pair(Field::RadialSpectrumPrimaryColor, Field::RadialSpectrumSecondaryColor))
                     .child(visual_switch(
@@ -1072,7 +1061,7 @@ impl GuiApp {
                         cx,
                         |draft| draft.radial_spectrum_fade_when_idle = !draft.radial_spectrum_fade_when_idle,
                     ))
-                    .child(caption("Radial Spectrum follows the Noctalia v5 Fancy Audio Visualizer's Bars/Rings control. Rivu uses the shared FFT and GPUI-native rendering; wave thickness remains a compatibility parameter, but no wave mode is implemented."))
+                    .child(caption("Radial Spectrum follows the Noctalia v5 Fancy Audio Visualizer's Bars/Rings control. Rivu uses the shared FFT and GPUI-native rendering. Fade when idle uses a 2-second opacity fade."))
             }
             VisualPage::Waveform => column().gap_3()
                 .child(settings.field(Field::CursorColor))

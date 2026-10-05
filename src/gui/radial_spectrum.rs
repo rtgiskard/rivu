@@ -10,11 +10,17 @@ use crate::{
 use gpui::{
     AnyElement, Bounds, PathBuilder, Rgba, Window, canvas, div, point, prelude::*, px, rgb,
 };
-use std::{cell::RefCell, f32::consts::PI, rc::Rc, time::Duration};
+use std::{
+    cell::RefCell,
+    f32::consts::PI,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 const FANCY_BANDS: usize = 32;
 const SMOOTHING_MS: f32 = 60.0;
 const TWO_PI: f32 = PI * 2.0;
+const IDLE_FADE_DURATION: Duration = Duration::from_secs(2);
 const BAR_GLOW_PASSES: [(f32, f32, f32); 4] = [
     (0.05, 3.5, 0.18),
     (0.025, 2.0, 0.32),
@@ -44,8 +50,8 @@ struct VisualizerData {
     displayed: Vec<f32>,
     last_sample_time: Option<Duration>,
     time: f32,
+    fade_started: Option<Instant>,
 }
-
 impl RadialSpectrum {
     pub(super) fn new() -> Self {
         Self {
@@ -67,6 +73,7 @@ impl RadialSpectrum {
                 displayed: Vec::with_capacity(FANCY_BANDS),
                 last_sample_time: None,
                 time: 0.0,
+                fade_started: None,
             })),
         }
     }
@@ -175,11 +182,25 @@ impl RadialSpectrum {
                 canvas(
                     |_, _, _| (),
                     move |bounds, _, window, _| {
-                        let data = data.borrow();
+                        let mut data = data.borrow_mut();
                         window.paint_quad(gpui::fill(bounds, rgb(data.background)));
-                        if (!playing && data.fade_when_idle) || data.displayed.is_empty() {
+                        if data.displayed.is_empty() {
                             return;
                         }
+                        let fade_alpha = if playing || !data.fade_when_idle {
+                            data.fade_started = None;
+                            1.0
+                        } else {
+                            let started = *data.fade_started.get_or_insert_with(Instant::now);
+                            let elapsed = started.elapsed();
+                            let alpha = 1.0
+                                - (elapsed.as_secs_f32() / IDLE_FADE_DURATION.as_secs_f32())
+                                    .clamp(0.0, 1.0);
+                            if alpha > 0.0 {
+                                window.request_animation_frame();
+                            }
+                            alpha
+                        };
                         match data.style {
                             RadialSpectrumStyle::Bars => paint_bars(bounds, &data, window),
                             RadialSpectrumStyle::Rings => paint_rings(bounds, &data, window),
@@ -187,6 +208,12 @@ impl RadialSpectrum {
                                 paint_rings(bounds, &data, window);
                                 paint_bars(bounds, &data, window);
                             }
+                        }
+                        if fade_alpha < 1.0 {
+                            window.paint_quad(gpui::fill(
+                                bounds,
+                                rgb(data.background).alpha(1.0 - fade_alpha),
+                            ));
                         }
                     },
                 )

@@ -116,29 +116,44 @@ Spectrum's independent settings are:
 * `spectrum_labels`: axis labels, enabled by default; bottom frequencies show only
   the two endpoints, never a midpoint.
 
-=== Audio visualizer control
+=== Radial Spectrum control
 
-The workspace catalog contains a separate `Audio visualizer` control. It reuses
-the shared live FFT and supports the Noctalia widget parameters for both
-`bars` and `ring` modes:
+The workspace catalog contains a separate `Radial Spectrum` control. Its mode
+and presentation parameters are explicitly based on Noctalia Shell v5's Fancy
+Audio Visualizer control, especially the mirrored spectrum and ring settings:
 
-* `audio_visualizer_mode`: `bars` (default) or `ring`.
-* `audio_visualizer_width`: 1–512 pixels, default 56. For bars this caps the
-  level height; for rings it is the radial level length.
-* `audio_visualizer_bands`: 1–128, default 16.
-* `audio_visualizer_mirrored`: duplicate the bands in reverse order, default
-  false.
-* `audio_visualizer_centered`: grow around the center line/ring, default true.
-* `audio_visualizer_show_when_idle`: retain the last frame while paused, default
-  false.
-* `audio_visualizer_color_1` / `audio_visualizer_color_2`: `#RRGGBB` endpoints
-  of the per-band gradient, both default `#7aa2f7`.
+* https://github.com/noctalia-dev/noctalia-shell/blob/e56a9db5/Widgets/AudioSpectrum/NMirroredSpectrum.qml[`NMirroredSpectrum.qml`]
+* https://github.com/noctalia-dev/noctalia-shell/blob/e56a9db5/src/shell/bar/widgets/audio_visualizer_widget.cpp[`audio_visualizer_widget.cpp`]
 
-The parameter names and defaults match Noctalia's bar widget. Rivu's `ring`
-mode is the additional circular presentation; its bands use the same normalized
-FFT values and color parameters.
+Rivu reuses the shared live FFT and implements the `bars`, `rings`, and combined
+`bars_rings` modes with GPUI-native paths. The parameter model is based on the
+Noctalia v5 control; geometry, compositing, and glow rendering are adapted to
+Rivu's renderer and are not a pixel-identical QML port.
 
-Spectrogram has separate frequency and display settings:
+The control settings are:
+
+* `radial_spectrum_style`: `bars`, `rings`, or `bars_rings` (default
+  `bars_rings`).
+* `radial_spectrum_sensitivity`: 0–5, default 1.5; gain applied to normalized
+  FFT levels before drawing.
+* `radial_spectrum_rotation_speed`: 0–10, default 0.5; animation phase speed.
+* `radial_spectrum_bar_width`: 0–2, default 0.6; angular bar width in Bars
+  mode.
+* `radial_spectrum_bar_glow_layers`: 0–4, default 2; number of translucent
+  halo passes around each active Bar. Zero disables Bar halos without disabling
+  Ring Bloom.
+* `radial_spectrum_ring_opacity`: 0–1, default 0.8.
+* `radial_spectrum_bloom_intensity`: 0–2, default 0.5; controls Ring halos and
+  Bar halo opacity.
+* `radial_spectrum_primary_color` / `radial_spectrum_secondary_color`:
+  `#RRGGBB` endpoints, default `#7aa2f7` and `#bb9af7`.
+
+Bars mirror normalized FFT bands around a circular baseline. Rings use the same
+values for segmented, rotating circular accents and amplitude-driven inner and
+outer rings. `bars_rings` draws both presentations. Spectrum settings such as
+`spectrum_db_range` still provide the shared amplitude range; changing these
+settings redraws the control without decoding the track again.
+
 Spectrogram display settings are:
 
 * `spectrogram_db_range`: independent color span, 1–160 dB, default 70.
