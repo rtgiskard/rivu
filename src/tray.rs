@@ -132,7 +132,11 @@ fn run_bus(
         }
     };
 
-    if let Err(error) = register_with_watcher(&connection, &service_name) {
+    let item_address = connection
+        .unique_name()
+        .map(|name| format!("{}{SNI_PATH}", name.as_str()))
+        .unwrap_or_else(|| service_name.clone());
+    if let Err(error) = register_with_watcher(&connection, &item_address) {
         eprintln!("Rivu tray watcher unavailable; waiting for it to appear: {error}");
     }
 
@@ -160,10 +164,13 @@ fn run_bus(
     };
 
     let watcher_connection = connection.clone();
-    let watcher_service_name = service_name.clone();
+    let watcher_item_address = connection
+        .unique_name()
+        .map(|name| format!("{}{SNI_PATH}", name.as_str()))
+        .unwrap_or(service_name);
     let watcher = match thread::Builder::new()
         .name("rivu-tray-watcher".into())
-        .spawn(move || watch_watcher(watcher_connection, watcher_service_name))
+        .spawn(move || watch_watcher(watcher_connection, watcher_item_address))
     {
         Ok(watcher) => Some(watcher),
         Err(error) => {
