@@ -22,7 +22,6 @@
 ## Commits
 
 - Keep each commit atomic and limited to one coherent responsibility
-- Use a concise Conventional Commit subject
-- Write one concrete change per body line
-- Separate subject and body with one blank line
+- Use a concise Conventional Commit subject, one concrete change per body line
 - Use real newlines, no terminal punctuation, and no blank lines between items
+- Prefix every commit body item, match repository history
