@@ -24,7 +24,7 @@ use std::{
 
 type Wakeup = Arc<dyn Fn() + Send + Sync>;
 enum CoreResponse {
-    State(Response),
+    State(Box<Response>),
     Ack(Ack),
 }
 struct Request {
@@ -127,13 +127,13 @@ impl AppHandle {
                 .map_err(|error| error.to_string())
         };
         match response.unwrap_or_else(|error| {
-            CoreResponse::State(Response {
+            CoreResponse::State(Box::new(Response {
                 ok: false,
                 error: Some(format!("Core response unavailable: {error}")),
                 state: self.snapshot(),
-            })
+            }))
         }) {
-            CoreResponse::State(response) => response,
+            CoreResponse::State(response) => *response,
             CoreResponse::Ack(_) => unreachable!("state request returned Ack"),
         }
     }

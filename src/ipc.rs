@@ -836,7 +836,7 @@ pub fn request(path: &Path, command: &Command) -> Result<Response> {
             .await
             .context("Reading IPC response timed out")??
         };
-        Ok(unpack_response(decode_frame::<ResponseFrame>(&bytes)?)?)
+        unpack_response(decode_frame::<ResponseFrame>(&bytes)?)
     })
 }
 pub fn request_ack(path: &Path, command: &Command) -> Result<Ack> {

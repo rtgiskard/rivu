@@ -18,11 +18,11 @@ impl Core {
                                 revision: self.state.revision,
                             })
                         } else {
-                            CoreResponse::State(Response {
+                            CoreResponse::State(Box::new(Response {
                                 ok: result.is_ok(),
                                 error: result.err().map(|e| format!("{e:#}")),
                                 state: self.state.clone(),
-                            })
+                            }))
                         };
                         let _ = reply.send(value);
                     }
