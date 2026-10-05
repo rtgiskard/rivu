@@ -74,11 +74,41 @@ builds a progressive preview from playback PCM, leaves unknown intervals blank,
 and stores at most 1600 peak bins. `Load full waveform now` starts an asynchronous
 whole-file scan. Source changes cancel obsolete work; hiding a panel does not.
 
-Waveform, Spectrum, Spectrogram, and Audio visualizer share the configured
-background. Spectrum, Spectrogram, and the Audio visualizer also use the
-configured palette or widget colors. Waveform appearance changes reuse decoded
-data. GUI refreshes reuse unchanged state and drawing caches; analysis pauses when
-playback is paused or the window is closed.
+`visual_palette` controls the Waveform palette and accepts `tokyo_night` or
+`deadbeef`; the default is `deadbeef`.
+
+The Waveform panel uses the conventional stereo layout: playback time advances
+from left to right, the logical left channel is drawn above the centerline, and
+the logical right channel below it. The filled body is RMS amplitude; the thin
+outer line is the retained peak. Gradients grow from the centerline toward the
+outer edge, so the center-to-edge color progression represents amplitude rather
+than time. The RMS underlay uses a reduced palette scale; each retained peak is
+submitted as its own 1 px shape and receives an independent amplitude color.
+The high end is gently compressed so red remains an accent for loud peaks
+instead of dominating ordinary loud passages. The palette is shared by both
+channels; channel identity comes from its position, not from a red/blue color
+convention.
+
+Decoded channels are folded into two logical channels using their speaker
+layout. Left-positioned speakers contribute to left, right-positioned speakers
+to right, and center/LFE channels contribute to both. Mono audio is calculated
+once and mirrored. A shared peak scale preserves the left/right balance.
+Unknown timeline intervals remain blank; decoded silence remains visible as a
+zero-amplitude region.
+
+The Waveform view has no numeric vertical-axis tick labels. Its vertical scale is
+normalized to the shared retained peak: the centerline is zero amplitude and the
+outer edge is `1.0` (the loudest decoded logical-channel peak for the track).
+`L` and `R` are conveyed by the upper/lower channel placement rather than by a
+separate color or numeric axis.
+
+The playback cursor is a water-drop marker centered on the stereo midline. Its
+small vertical motion follows a slow, eased periodic curve with deliberate
+rhythm rather than a fast jitter. A thin waterline runs above and below the
+marker, leaving the drop unobstructed; its x-position remains aligned to the
+selected time. Click or drag across the actual waveform plot to seek the current
+track; positions outside the plot are clamped to the track endpoints. Dragging
+a non-playing selection preview does not issue a playback seek.
 
 === Spectrum and Spectrogram
 

@@ -53,6 +53,17 @@ pub struct WaveformFrame {
     pub max_peak: f32,
     /// `None` is not yet decoded; `Some(0.0)` is decoded silence.
     pub peaks: Vec<Option<f32>>,
+    /// Per-bin RMS energy, accumulated from the same PCM pass as `peaks`.
+    pub(crate) rms: Vec<Option<f32>>,
+    pub(crate) rms_counts: Vec<u64>,
+    pub(crate) left_peaks: Vec<Option<f32>>,
+    pub(crate) right_peaks: Vec<Option<f32>>,
+    pub(crate) left_rms: Vec<Option<f32>>,
+    pub(crate) right_rms: Vec<Option<f32>>,
+    pub(crate) left_rms_counts: Vec<u64>,
+    pub(crate) right_rms_counts: Vec<u64>,
+    pub(crate) channel_weights: Vec<[f32; 2]>,
+    pub(crate) last_push_start: Option<f64>,
 }
 
 impl Default for WaveformFrame {
@@ -66,13 +77,82 @@ impl Default for WaveformFrame {
             span_seconds: 0.0,
             max_peak: 1.0,
             peaks: Vec::new(),
+            rms: Vec::new(),
+            rms_counts: Vec::new(),
+            left_peaks: Vec::new(),
+            right_peaks: Vec::new(),
+            left_rms: Vec::new(),
+            right_rms: Vec::new(),
+            left_rms_counts: Vec::new(),
+            right_rms_counts: Vec::new(),
+            channel_weights: Vec::new(),
+            last_push_start: None,
         }
     }
+}
+
+fn merge_bin(peaks: &mut [Option<f32>], rms: &mut [Option<f32>], counts: &mut [u64], index: usize) {
+    peaks[index] = match (peaks[index * 2], peaks[index * 2 + 1]) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (left, right) => left.or(right),
+    };
+    let left = index * 2;
+    let right = left + 1;
+    let count = counts[left].saturating_add(counts[right]);
+    rms[index] = if count == 0 {
+        None
+    } else {
+        let left_energy = rms[left].map_or(0.0, |value| {
+            f64::from(value) * f64::from(value) * counts[left] as f64
+        });
+        let right_energy = rms[right].map_or(0.0, |value| {
+            f64::from(value) * f64::from(value) * counts[right] as f64
+        });
+        Some(((left_energy + right_energy) / count as f64).sqrt() as f32)
+    };
+    counts[index] = count;
+}
+
+fn update_bin(
+    peaks: &mut [Option<f32>],
+    rms: &mut [Option<f32>],
+    counts: &mut [u64],
+    index: usize,
+    peak: f32,
+    energy: f64,
+    sample_count: u64,
+) -> bool {
+    if sample_count == 0 {
+        return false;
+    }
+    let mut changed = false;
+    let previous = peaks[index];
+    let next = Some(previous.unwrap_or(0.0).max(peak));
+    if previous != next {
+        peaks[index] = next;
+        changed = true;
+    }
+    let old_count = counts[index];
+    let old_energy = rms[index].map_or(0.0, |value| {
+        f64::from(value) * f64::from(value) * old_count as f64
+    });
+    let count = old_count.saturating_add(sample_count);
+    let next_rms = ((old_energy + energy) / count as f64).sqrt() as f32;
+    if rms[index] != Some(next_rms) {
+        rms[index] = Some(next_rms);
+        changed = true;
+    }
+    counts[index] = count;
+    changed
 }
 
 impl WaveformFrame {
     pub fn matches(&self, path: &Path, range: Option<PlaybackRange>) -> bool {
         self.path.as_deref() == Some(path) && self.range == range
+    }
+    pub(super) fn set_channel_weights(&mut self, weights: &[[f32; 2]]) {
+        self.channel_weights.clear();
+        self.channel_weights.extend_from_slice(weights);
     }
 
     /// The caller validates source identity and request generation before
@@ -105,7 +185,25 @@ impl WaveformFrame {
         self.complete = false;
         self.peaks.clear();
         self.peaks.resize(bins, None);
+        self.rms.clear();
+        self.rms.resize(bins, None);
+        self.rms_counts.clear();
+        self.rms_counts.resize(bins, 0);
+        self.left_peaks.clear();
+        self.left_peaks.resize(bins, None);
+        self.right_peaks.clear();
+        self.right_peaks.resize(bins, None);
+        self.left_rms.clear();
+        self.left_rms.resize(bins, None);
+        self.right_rms.clear();
+        self.right_rms.resize(bins, None);
+        self.left_rms_counts.clear();
+        self.left_rms_counts.resize(bins, 0);
+        self.right_rms_counts.clear();
+        self.right_rms_counts.resize(bins, 0);
+        self.channel_weights.clear();
         self.max_peak = 1.0;
+        self.last_push_start = None;
         self.revision = self.revision.wrapping_add(1);
     }
 
@@ -119,6 +217,14 @@ impl WaveformFrame {
                 let bins = last + 1;
                 self.span_seconds *= bins as f64 / self.peaks.len() as f64;
                 self.peaks.truncate(bins);
+                self.rms.truncate(bins);
+                self.rms_counts.truncate(bins);
+                self.left_peaks.truncate(bins);
+                self.right_peaks.truncate(bins);
+                self.left_rms.truncate(bins);
+                self.right_rms.truncate(bins);
+                self.left_rms_counts.truncate(bins);
+                self.right_rms_counts.truncate(bins);
             }
         }
         self.complete = true;
@@ -151,18 +257,39 @@ impl WaveformFrame {
         if !end_seconds.is_finite() || end_seconds <= 0.0 {
             return;
         }
+        if self.last_push_start == Some(start_seconds) {
+            return;
+        }
+        self.last_push_start = Some(start_seconds);
         let mut changed = false;
         if self.duration.is_none() {
             // Doubling merges adjacent bins exactly, unlike arbitrary rescaling
             // which would misplace or lose old peaks. Empty bins stay unknown.
             while end_seconds > self.span_seconds {
                 for index in 0..MAX_BINS / 2 {
-                    self.peaks[index] = match (self.peaks[index * 2], self.peaks[index * 2 + 1]) {
-                        (Some(left), Some(right)) => Some(left.max(right)),
-                        (left, right) => left.or(right),
-                    };
+                    merge_bin(&mut self.peaks, &mut self.rms, &mut self.rms_counts, index);
+                    merge_bin(
+                        &mut self.left_peaks,
+                        &mut self.left_rms,
+                        &mut self.left_rms_counts,
+                        index,
+                    );
+                    merge_bin(
+                        &mut self.right_peaks,
+                        &mut self.right_rms,
+                        &mut self.right_rms_counts,
+                        index,
+                    );
                 }
                 self.peaks[MAX_BINS / 2..].fill(None);
+                self.rms[MAX_BINS / 2..].fill(None);
+                self.rms_counts[MAX_BINS / 2..].fill(0);
+                self.left_peaks[MAX_BINS / 2..].fill(None);
+                self.right_peaks[MAX_BINS / 2..].fill(None);
+                self.left_rms[MAX_BINS / 2..].fill(None);
+                self.right_rms[MAX_BINS / 2..].fill(None);
+                self.left_rms_counts[MAX_BINS / 2..].fill(0);
+                self.right_rms_counts[MAX_BINS / 2..].fill(0);
                 self.span_seconds *= 2.0;
                 changed = true;
             }
@@ -186,17 +313,99 @@ impl WaveformFrame {
             let bin = (u128::from(frame) * bins / u128::from(total_frames)) as usize;
             let boundary = ((bin as u128 + 1) * u128::from(total_frames)).div_ceil(bins) as u64;
             let take = (boundary - frame).min((count - offset) as u64) as usize;
-            let peak = samples[offset * channels..(offset + take) * channels]
-                .iter()
-                .filter(|sample| sample.is_finite())
-                .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
-            let previous = self.peaks[bin];
-            let next = Some(previous.unwrap_or(0.0).max(peak));
-            if previous != next {
-                self.peaks[bin] = next;
-                changed = true;
+            let mut combined_peak = 0.0_f32;
+            let mut combined_energy = 0.0_f64;
+            let mut combined_count = 0_u64;
+            let mut side_peaks = [0.0_f32; 2];
+            let mut side_energy = [0.0_f64; 2];
+            let mut side_counts = [0_u64; 2];
+            for frame_offset in 0..take {
+                let base = (offset + frame_offset) * channels;
+                let mut mixed = [0.0_f32; 2];
+                let mut finite = false;
+                for channel in 0..channels {
+                    let sample = samples[base + channel];
+                    if !sample.is_finite() {
+                        continue;
+                    }
+                    finite = true;
+                    let magnitude = sample.abs();
+                    combined_peak = combined_peak.max(magnitude);
+                    combined_energy += f64::from(sample) * f64::from(sample);
+                    combined_count += 1;
+                    let fallback = if channels == 1 {
+                        [1.0, 0.0]
+                    } else if channels == 2 {
+                        [
+                            if channel == 0 { 1.0 } else { 0.0 },
+                            if channel == 1 { 1.0 } else { 0.0 },
+                        ]
+                    } else {
+                        [0.5, 0.5]
+                    };
+                    let weight = self
+                        .channel_weights
+                        .get(channel)
+                        .copied()
+                        .unwrap_or(fallback);
+                    mixed[0] += sample * weight[0];
+                    if channels != 1 {
+                        mixed[1] += sample * weight[1];
+                    }
+                }
+                if finite {
+                    side_peaks[0] = side_peaks[0].max(mixed[0].abs());
+                    side_energy[0] += f64::from(mixed[0]) * f64::from(mixed[0]);
+                    side_counts[0] += 1;
+                    if channels != 1 {
+                        side_peaks[1] = side_peaks[1].max(mixed[1].abs());
+                        side_energy[1] += f64::from(mixed[1]) * f64::from(mixed[1]);
+                        side_counts[1] += 1;
+                    }
+                } else {
+                    side_counts[0] += 1;
+                    if channels != 1 {
+                        side_counts[1] += 1;
+                    }
+                }
+                if channels == 1 {
+                    side_peaks[1] = side_peaks[0];
+                    side_energy[1] = side_energy[0];
+                    side_counts[1] = side_counts[0];
+                }
             }
-            self.max_peak = self.max_peak.max(peak);
+            changed |= update_bin(
+                &mut self.peaks,
+                &mut self.rms,
+                &mut self.rms_counts,
+                bin,
+                combined_peak,
+                combined_energy,
+                combined_count.max(1),
+            );
+            changed |= update_bin(
+                &mut self.left_peaks,
+                &mut self.left_rms,
+                &mut self.left_rms_counts,
+                bin,
+                side_peaks[0],
+                side_energy[0],
+                side_counts[0],
+            );
+            changed |= update_bin(
+                &mut self.right_peaks,
+                &mut self.right_rms,
+                &mut self.right_rms_counts,
+                bin,
+                side_peaks[1],
+                side_energy[1],
+                side_counts[1],
+            );
+            self.max_peak = self
+                .max_peak
+                .max(combined_peak)
+                .max(side_peaks[0])
+                .max(side_peaks[1]);
             offset += take;
         }
         if changed {
@@ -336,6 +545,26 @@ mod tests {
             ]
         );
         assert_eq!(frame.max_peak, 1.0);
+    }
+
+    #[test]
+    fn multichannel_samples_fold_into_layout_aware_left_and_right() {
+        let mut frame = frame(Some(1.0), 1);
+        frame.set_channel_weights(&[[0.5, 0.0], [0.0, 0.5], [0.5, 0.5]]);
+        frame.push(0.0, &[1.0, 2.0, 3.0], 1, 3);
+        assert_eq!(frame.left_peaks, [Some(2.0)]);
+        assert_eq!(frame.right_peaks, [Some(2.5)]);
+        assert_eq!(frame.left_rms, [Some(2.0)]);
+        assert_eq!(frame.right_rms, [Some(2.5)]);
+    }
+
+    #[test]
+    fn mono_samples_are_calculated_once_and_mirrored() {
+        let mut frame = frame(Some(1.0), 1);
+        frame.push(0.0, &[-0.5], 1, 1);
+        assert_eq!(frame.left_peaks, frame.right_peaks);
+        assert_eq!(frame.left_rms, frame.right_rms);
+        assert_eq!(frame.left_peaks, [Some(0.5)]);
     }
 
     #[test]

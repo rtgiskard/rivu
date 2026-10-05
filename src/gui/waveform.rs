@@ -16,7 +16,9 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, Bounds, Context, SharedString, canvas, div, fill, point, prelude::*, px, rgb, size,
+    AnyElement, Bounds, Context, EventEmitter, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Path, PathBuilder, Pixels, Point, SharedString, Window, canvas, div, fill,
+    linear_color_stop, linear_gradient, point, prelude::*, px, rgb, size,
 };
 use parking_lot::RwLock;
 
@@ -61,13 +63,47 @@ fn track_range(track: &Track) -> Option<PlaybackRange> {
 struct Columns {
     revision: u64,
     width: usize,
-    palette: fn(f32) -> u32,
-    values: Vec<(Option<f32>, u32)>,
+    values: Vec<(Option<f32>, Option<f32>, Option<f32>, Option<f32>)>,
 }
 
 #[derive(Default)]
 struct WaveformPlot {
     columns: HashMap<u64, Columns>,
+}
+
+fn waveform_level(value: f32) -> f32 {
+    value.clamp(0.0, 1.0).powf(0.7)
+}
+fn waveform_color_level(value: f32) -> f32 {
+    // Peak colors retain more palette range without making ordinary peaks red.
+    0.82 * value.clamp(0.0, 1.0).powf(1.35)
+}
+fn waveform_rms_color_level(value: f32) -> f32 {
+    // Keep the RMS underlay one palette tier below the retained Peak overlay.
+    0.68 * value.clamp(0.0, 1.0).powf(1.15)
+}
+
+fn pooled_side(
+    peaks: &[Option<f32>],
+    rms: &[Option<f32>],
+    first: usize,
+    end: usize,
+    scale: f32,
+) -> (Option<f32>, Option<f32>) {
+    let peak = peaks[first..end]
+        .iter()
+        .flatten()
+        .copied()
+        .reduce(f32::max)
+        .map(|value| (value * scale).clamp(0.0, 1.0));
+    let mut energy = 0.0_f32;
+    let mut known = 0_u32;
+    for value in rms[first..end].iter().flatten().copied() {
+        energy += value * value;
+        known += 1;
+    }
+    let rms = (known != 0).then(|| waveform_level((energy / known as f32).sqrt() * scale));
+    (rms, peak)
 }
 
 impl WaveformPlot {
@@ -76,44 +112,130 @@ impl WaveformPlot {
         panel_id: u64,
         width: usize,
         frame: &WaveformFrame,
-        palette: fn(f32) -> u32,
-    ) -> &[(Option<f32>, u32)] {
+    ) -> &[(Option<f32>, Option<f32>, Option<f32>, Option<f32>)] {
         let columns = self.columns.entry(panel_id).or_insert_with(|| Columns {
             revision: frame.revision,
             width,
-            palette,
             values: Vec::new(),
         });
-        let count = width.max(1).min(frame.peaks.len());
+        let left_peaks = if frame.left_peaks.is_empty() {
+            &frame.peaks
+        } else {
+            &frame.left_peaks
+        };
+        let left_rms = if frame.left_rms.is_empty() {
+            &frame.rms
+        } else {
+            &frame.left_rms
+        };
+        let right_peaks = if frame.right_peaks.is_empty() {
+            &frame.peaks
+        } else {
+            &frame.right_peaks
+        };
+        let right_rms = if frame.right_rms.is_empty() {
+            &frame.rms
+        } else {
+            &frame.right_rms
+        };
+        let count = width.max(1).min(left_peaks.len());
         if columns.revision != frame.revision
             || columns.width != width
             || columns.values.len() != count
-            || !std::ptr::fn_addr_eq(columns.palette, palette)
         {
             columns.values.clear();
         }
         if columns.values.len() != count {
-            // Pool at most 1600 bins while reading the shared frame, never PCM.
-            // Preserve track-wide peak ratios without amplifying quiet tracks.
             let scale = frame.max_peak.max(1.0).recip();
             for column in 0..count {
-                let first = column * frame.peaks.len() / count;
-                let end = (column + 1) * frame.peaks.len() / count;
-                let amplitude = frame.peaks[first..end]
-                    .iter()
-                    .flatten()
-                    .copied()
-                    .reduce(f32::max)
-                    .map(|peak| peak * scale);
-                let fraction = column as f32 / count.saturating_sub(1).max(1) as f32;
-                columns.values.push((amplitude, palette(fraction)));
+                let first = column * left_peaks.len() / count;
+                let end = (column + 1) * left_peaks.len() / count;
+                let (left_rms, left_peak) = pooled_side(left_peaks, left_rms, first, end, scale);
+                let (right_rms, right_peak) =
+                    pooled_side(right_peaks, right_rms, first, end, scale);
+                columns
+                    .values
+                    .push((left_rms, left_peak, right_rms, right_peak));
             }
         }
         columns.revision = frame.revision;
         columns.width = width;
-        columns.palette = palette;
         &columns.values
     }
+}
+
+const WAVEFORM_PALETTE_SEGMENTS: usize = 8;
+
+fn append_rect(path: &mut PathBuilder, bounds: Bounds<Pixels>) {
+    path.move_to(bounds.origin);
+    path.line_to(point(bounds.right(), bounds.top()));
+    path.line_to(point(bounds.right(), bounds.bottom()));
+    path.line_to(point(bounds.left(), bounds.bottom()));
+    path.close();
+}
+
+fn paint_waveform_gradient(
+    mut path: Path<Pixels>,
+    plot: Bounds<Pixels>,
+    upper: bool,
+    palette: fn(f32) -> u32,
+    color_level: fn(f32) -> f32,
+    window: &mut Window,
+) {
+    path.bounds = plot;
+    let mut path = Some(path);
+    for segment in 0..WAVEFORM_PALETTE_SEGMENTS {
+        let low = segment as f32 / WAVEFORM_PALETTE_SEGMENTS as f32;
+        let high = (segment + 1) as f32 / WAVEFORM_PALETTE_SEGMENTS as f32;
+        let (start, end, start_level, end_level) = if upper {
+            (0.5 * (1.0 - high), 0.5 * (1.0 - low), low, high)
+        } else {
+            (0.5 * (1.0 + low), 0.5 * (1.0 + high), high, low)
+        };
+        let mask = Bounds::new(
+            point(plot.left(), plot.top() + plot.size.height * start),
+            size(
+                plot.size.width,
+                (plot.size.height * (end - start)).max(px(1.0)),
+            ),
+        );
+        let background = linear_gradient(
+            0.0,
+            linear_color_stop(rgb(palette(color_level(start_level))), 0.0),
+            linear_color_stop(rgb(palette(color_level(end_level))), 1.0),
+        );
+        let segment_path = if segment + 1 == WAVEFORM_PALETTE_SEGMENTS {
+            path.take()
+                .expect("last waveform gradient segment owns the path")
+        } else {
+            path.as_ref()
+                .expect("waveform gradient path is retained")
+                .clone()
+        };
+        window.with_content_mask(Some(gpui::ContentMask { bounds: mask }), |window| {
+            window.paint_path(segment_path, background);
+        });
+    }
+}
+
+fn smooth_ping_pong(position: f64, period: f64) -> f64 {
+    let phase = position.rem_euclid(period) / period;
+    let ramp = if phase <= 0.5 {
+        phase * 2.0
+    } else {
+        (1.0 - phase) * 2.0
+    };
+    let eased = ramp * ramp * (3.0 - 2.0 * ramp);
+    eased * 2.0 - 1.0
+}
+
+/// A slow, periodic spline-like motion. Both ends have zero velocity, so the
+/// playhead changes direction rhythmically instead of vibrating at high speed.
+fn cursor_wobble(position: f64) -> f32 {
+    if !position.is_finite() {
+        return 0.0;
+    }
+    (0.68 * smooth_ping_pong(position, 5.0) + 0.32 * smooth_ping_pong(position + 1.4, 8.0)) as f32
 }
 
 fn preview_message(source: Option<&Source>, frame: &WaveformFrame) -> Option<&'static str> {
@@ -139,6 +261,22 @@ fn progress(position: f64, duration: Option<f64>) -> Option<f32> {
         .filter(|value| value.is_finite() && *value > 0.0 && position.is_finite())
         .map(|duration| (position / duration).clamp(0.0, 1.0) as f32)
 }
+fn seek_seconds(position: Pixels, left: Pixels, width: Pixels, duration: f64) -> f64 {
+    let fraction = ((position - left) / width.max(px(1.0))).clamp(0.0, 1.0);
+    f64::from(fraction) * duration
+}
+
+#[derive(Default)]
+struct WaveformInteraction {
+    panels: HashMap<u64, (Bounds<Pixels>, Option<f64>)>,
+    active_panel: Option<u64>,
+}
+
+pub(super) enum WaveformEvent {
+    Preview(f64),
+    Seek(f64),
+}
+impl EventEmitter<WaveformEvent> for Waveform {}
 
 pub(super) struct Waveform {
     shared: Arc<RwLock<WaveformFrame>>,
@@ -148,6 +286,8 @@ pub(super) struct Waveform {
     generation: u64,
     manual: Option<ManualRequest>,
     manual_error: Option<SharedString>,
+    interaction: Rc<RefCell<WaveformInteraction>>,
+    dragging: bool,
 }
 
 impl Waveform {
@@ -160,6 +300,8 @@ impl Waveform {
             generation: 0,
             manual: None,
             manual_error: None,
+            interaction: Rc::new(RefCell::new(WaveformInteraction::default())),
+            dragging: false,
         }
     }
 
@@ -168,8 +310,11 @@ impl Waveform {
             .borrow_mut()
             .columns
             .retain(|id, _| panels.iter().any(|panel| panel.id == *id));
+        self.interaction
+            .borrow_mut()
+            .panels
+            .retain(|id, _| panels.iter().any(|panel| panel.id == *id));
     }
-
     /// The caller chooses the playing track, or the selected track before play.
     /// Metadata, display settings and visibility do not change source identity.
     pub(super) fn sync(&mut self, track: Option<&Track>, cx: &mut Context<Self>) {
@@ -300,15 +445,72 @@ impl Waveform {
         }
     }
 
+    fn seek_from_position(
+        &mut self,
+        position: Point<Pixels>,
+        panel_id: Option<u64>,
+        preview: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let interaction = self.interaction.borrow();
+        let panel_id = panel_id.or(interaction.active_panel);
+        let Some((bounds, Some(duration))) = panel_id.and_then(|id| interaction.panels.get(&id))
+        else {
+            return;
+        };
+        let seconds = seek_seconds(
+            position.x,
+            bounds.left(),
+            bounds.size.width.max(px(1.0)),
+            *duration,
+        );
+        cx.emit(if preview {
+            WaveformEvent::Preview(seconds)
+        } else {
+            WaveformEvent::Seek(seconds)
+        });
+    }
+
+    fn mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let panel_id = self
+            .interaction
+            .borrow()
+            .panels
+            .iter()
+            .find(|(_, (bounds, _))| bounds.contains(&event.position))
+            .map(|(panel_id, _)| *panel_id);
+        let Some(panel_id) = panel_id else {
+            return;
+        };
+        self.dragging = true;
+        self.interaction.borrow_mut().active_panel = Some(panel_id);
+        self.seek_from_position(event.position, Some(panel_id), true, cx);
+    }
+
+    fn mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.dragging {
+            self.seek_from_position(event.position, None, true, cx);
+        }
+    }
+
+    fn mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.dragging {
+            self.seek_from_position(event.position, None, false, cx);
+        }
+        self.dragging = false;
+        self.interaction.borrow_mut().active_panel = None;
+    }
+
     /// Position and duration are relative to the selected track/CUE segment.
     /// Pass position zero for a selection preview rather than another track's
     /// playback position. The caller observes this entity for data changes.
     pub(super) fn view(
-        &self,
+        &mut self,
         panel_id: u64,
         position: f64,
         duration: Option<f64>,
         config: &Config,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         let panel = div()
             .id(("waveform", panel_id))
@@ -330,135 +532,269 @@ impl Waveform {
         let source = Rc::clone(self.source.as_ref().expect("preview source is present"));
         let shared = Arc::clone(&self.shared);
         let waveform = Rc::clone(&self.plot);
-        let palette = super::visuals::palette_function(config.visual_palette);
+        let palette = super::visuals::palette_function_without_floor(config.visual_palette);
         let water = rgb(config.waveform_cursor_color.rgb());
         let background = rgb(config.visual_background.rgb());
         let glow = config.waveform_glow;
         let labels = config.waveform_labels;
         let label_duration = timeline(&self.shared.read(), duration);
+        let interaction = Rc::clone(&self.interaction);
+        interaction
+            .borrow_mut()
+            .panels
+            .insert(panel_id, (Bounds::default(), label_duration));
+        let prepaint_interaction = Rc::clone(&interaction);
         panel
             .child(
-                canvas(
-                    |_, _, _| (),
-                    move |bounds, _, window, _| {
-                        window.paint_quad(fill(bounds, background));
-                        if bounds.size.width <= px(16.0)
-                            || bounds.size.height <= px(if labels { 32.0 } else { 16.0 })
-                        {
-                            return;
-                        }
-                        let plot = Bounds::new(
-                            bounds.origin + point(px(8.0), px(8.0)),
-                            size(
-                                bounds.size.width - px(16.0),
-                                bounds.size.height - px(if labels { 32.0 } else { 16.0 }),
-                            ),
-                        );
-                        let center = plot.center().y;
-                        let mut waveform = waveform.borrow_mut();
-                        let progress = {
-                            let frame = shared.read();
-                            // Playback may replace its source between layout and paint.
-                            if !frame.matches(&source.path, source.range) {
-                                return;
-                            }
-                            waveform.columns(
-                                panel_id,
-                                (plot.size.width / px(1.0)) as usize,
-                                &frame,
-                                palette,
-                            );
-                            progress(position, timeline(&frame, duration))
-                        };
-                        // No shared read lock is held while submitting draw commands.
-                        let columns = &waveform.columns[&panel_id].values;
-                        if columns.is_empty() {
-                            return;
-                        }
-                        // Max-pooling preserves narrow transients. Unknown columns
-                        // have neither a bar nor a silence baseline.
-                        let width = plot.size.width / columns.len() as f32;
-                        for (column, &(amplitude, color)) in columns.iter().enumerate() {
-                            let Some(amplitude) = amplitude else {
-                                continue;
-                            };
-                            let height = (plot.size.height * amplitude).max(px(1.0));
-                            window.paint_quad(fill(
-                                Bounds::new(
-                                    point(
-                                        plot.left() + width * column as f32,
-                                        center - height * 0.5,
-                                    ),
-                                    size(width, height),
-                                ),
-                                rgb(color),
-                            ));
-                        }
-                        if let Some(fraction) = progress {
-                            // The plot inset leaves room for the droplet at both endpoints.
-                            let x = plot.left() + plot.size.width * fraction;
-                            if glow > 0.0 {
-                                for (width, opacity) in [(12.0, 0.035), (6.0, 0.08), (2.0, 0.28)] {
-                                    window.paint_quad(fill(
-                                        Bounds::new(
-                                            point(x - px(width * 0.5), plot.top()),
-                                            size(px(width), plot.size.height),
+                div()
+                    .size_full()
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
+                    .on_mouse_move(cx.listener(Self::mouse_move))
+                    .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
+                    .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
+                    .child(
+                        canvas(
+                            move |bounds, _, _| {
+                                let plot = (bounds.size.width > px(16.0)
+                                    && bounds.size.height > px(if labels { 32.0 } else { 16.0 }))
+                                .then(|| {
+                                    Bounds::new(
+                                        bounds.origin + point(px(8.0), px(8.0)),
+                                        size(
+                                            bounds.size.width - px(16.0),
+                                            bounds.size.height
+                                                - px(if labels { 32.0 } else { 16.0 }),
                                         ),
-                                        water.alpha(opacity * glow),
-                                    ));
+                                    )
+                                });
+                                if let Some(entry) =
+                                    prepaint_interaction.borrow_mut().panels.get_mut(&panel_id)
+                                {
+                                    entry.0 = plot.unwrap_or_default();
                                 }
-                            }
-                            window.paint_quad(fill(
-                                Bounds::new(
-                                    point(x - px(0.5), plot.top()),
-                                    size(px(1.0), plot.size.height),
-                                ),
-                                water.alpha(0.9),
-                            ));
-                            if plot.size.height >= px(24.0) {
-                                if glow > 0.0 {
-                                    let mut halo = fill(
-                                        Bounds::new(
-                                            point(x - px(7.0), plot.top()),
-                                            size(px(14.0), px(14.0)),
-                                        ),
-                                        water.alpha(0.12 * glow),
+                            },
+                            move |bounds, _, window, _| {
+                                window.paint_quad(fill(bounds, background));
+                                if bounds.size.width <= px(16.0)
+                                    || bounds.size.height <= px(if labels { 32.0 } else { 16.0 })
+                                {
+                                    return;
+                                }
+                                let plot = Bounds::new(
+                                    bounds.origin + point(px(8.0), px(8.0)),
+                                    size(
+                                        bounds.size.width - px(16.0),
+                                        bounds.size.height - px(if labels { 32.0 } else { 16.0 }),
+                                    ),
+                                );
+                                let center = plot.center().y;
+                                let mut waveform = waveform.borrow_mut();
+                                let progress = {
+                                    let frame = shared.read();
+                                    // Playback may replace its source between layout and paint.
+                                    if !frame.matches(&source.path, source.range) {
+                                        return;
+                                    }
+                                    waveform.columns(
+                                        panel_id,
+                                        (plot.size.width / px(1.0)) as usize,
+                                        &frame,
                                     );
-                                    halo.corner_radii = px(7.0).into();
-                                    window.paint_quad(halo);
+                                    progress(position, timeline(&frame, duration))
+                                };
+                                // No shared read lock is held while submitting draw commands.
+                                let columns = &waveform.columns[&panel_id].values;
+                                if columns.is_empty() {
+                                    return;
                                 }
-                                for (width, y) in [(6.0, 10.0), (4.0, 12.0), (2.0, 14.0)] {
-                                    window.paint_quad(fill(
-                                        Bounds::new(
-                                            point(x - px(width * 0.5), plot.top() + px(y)),
-                                            size(px(width), px(2.0)),
-                                        ),
-                                        water,
-                                    ));
+                                // RMS and Peak each submit shared geometry. Peak color is
+                                // resolved from the stroke's vertical position by the bounded
+                                // center-to-edge gradient, as in Spectrum's solid shape path.
+                                let width = plot.size.width / columns.len() as f32;
+                                let half_height = plot.size.height * 0.5;
+                                let mut left_path = PathBuilder::fill();
+                                let mut right_path = PathBuilder::fill();
+                                let mut peak_path = PathBuilder::stroke(px(1.0));
+                                let mut has_left = false;
+                                let mut has_right = false;
+                                let mut has_peak = false;
+                                for (column, &(left_rms, left_peak, right_rms, right_peak)) in
+                                    columns.iter().enumerate()
+                                {
+                                    let x = plot.left() + width * column as f32;
+                                    if let Some(level) = left_rms {
+                                        let height = (half_height * level).max(px(1.0));
+                                        append_rect(
+                                            &mut left_path,
+                                            Bounds::new(
+                                                point(x, center - height),
+                                                size(width, height),
+                                            ),
+                                        );
+                                        has_left = true;
+                                    }
+                                    if let Some(level) = right_rms {
+                                        let height = (half_height * level).max(px(1.0));
+                                        append_rect(
+                                            &mut right_path,
+                                            Bounds::new(point(x, center), size(width, height)),
+                                        );
+                                        has_right = true;
+                                    }
+                                    if let Some(level) = left_peak {
+                                        let y = center - half_height * level;
+                                        peak_path.move_to(point(x, y));
+                                        peak_path.line_to(point(x + width, y));
+                                        has_peak = true;
+                                    }
+                                    if let Some(level) = right_peak {
+                                        let y = center + half_height * level;
+                                        peak_path.move_to(point(x, y));
+                                        peak_path.line_to(point(x + width, y));
+                                        has_peak = true;
+                                    }
                                 }
-                                let mut droplet = fill(
-                                    Bounds::new(
-                                        point(x - px(4.5), plot.top() + px(2.0)),
-                                        size(px(9.0), px(10.0)),
-                                    ),
-                                    water,
-                                );
-                                droplet.corner_radii = px(4.5).into();
-                                window.paint_quad(droplet);
-                                let mut glint = fill(
-                                    Bounds::new(
-                                        point(x - px(2.5), plot.top() + px(4.0)),
-                                        size(px(2.5), px(3.0)),
-                                    ),
-                                    rgb(0xc4f5ee).alpha(0.8),
-                                );
-                                glint.corner_radii = px(1.25).into();
-                                window.paint_quad(glint);
-                            }
-                        }
-                    },
-                )
-                .size_full(),
+                                if has_left {
+                                    if let Ok(path) = left_path.build() {
+                                        paint_waveform_gradient(
+                                            path,
+                                            plot,
+                                            true,
+                                            palette,
+                                            waveform_rms_color_level,
+                                            window,
+                                        );
+                                    }
+                                }
+                                if has_right {
+                                    if let Ok(path) = right_path.build() {
+                                        paint_waveform_gradient(
+                                            path,
+                                            plot,
+                                            false,
+                                            palette,
+                                            waveform_rms_color_level,
+                                            window,
+                                        );
+                                    }
+                                }
+                                if has_peak {
+                                    if let Ok(path) = peak_path.build() {
+                                        let lower_path = path.clone();
+                                        paint_waveform_gradient(
+                                            path,
+                                            plot,
+                                            true,
+                                            palette,
+                                            waveform_color_level,
+                                            window,
+                                        );
+                                        paint_waveform_gradient(
+                                            lower_path,
+                                            plot,
+                                            false,
+                                            palette,
+                                            waveform_color_level,
+                                            window,
+                                        );
+                                    }
+                                }
+                                if let Some(fraction) = progress {
+                                    // Slow periodic easing gives the droplet a deliberate rhythm;
+                                    // it never snaps at a cycle boundary.
+                                    let jitter = cursor_wobble(position) * 0.8;
+                                    let cursor_center = plot.center().y + px(jitter);
+                                    let x = plot.left() + plot.size.width * fraction;
+                                    if glow > 0.0 {
+                                        for (width, opacity) in
+                                            [(10.0, 0.025), (5.0, 0.05), (2.0, 0.14)]
+                                        {
+                                            window.paint_quad(fill(
+                                                Bounds::new(
+                                                    point(x - px(width * 0.5), plot.top()),
+                                                    size(px(width), plot.size.height),
+                                                ),
+                                                water.alpha(opacity * glow),
+                                            ));
+                                        }
+                                    }
+                                    // Leave the droplet readable: the playhead is continuous
+                                    // above and below it, but does not cut through its body.
+                                    let line_gap = if plot.size.height >= px(24.0) {
+                                        px(10.0)
+                                    } else {
+                                        px(0.0)
+                                    };
+                                    let upper_height = cursor_center - line_gap - plot.top();
+                                    if upper_height > px(0.0) {
+                                        window.paint_quad(fill(
+                                            Bounds::new(
+                                                point(x - px(0.5), plot.top()),
+                                                size(px(1.0), upper_height),
+                                            ),
+                                            water.alpha(0.62),
+                                        ));
+                                    }
+                                    let lower_top = cursor_center + line_gap;
+                                    if lower_top < plot.bottom() {
+                                        window.paint_quad(fill(
+                                            Bounds::new(
+                                                point(x - px(0.5), lower_top),
+                                                size(px(1.0), plot.bottom() - lower_top),
+                                            ),
+                                            water.alpha(0.62),
+                                        ));
+                                    }
+                                    if plot.size.height >= px(24.0) {
+                                        if glow > 0.0 {
+                                            let mut halo = fill(
+                                                Bounds::new(
+                                                    point(x - px(7.0), cursor_center - px(7.0)),
+                                                    size(px(14.0), px(14.0)),
+                                                ),
+                                                water.alpha(0.12 * glow),
+                                            );
+                                            halo.corner_radii = px(7.0).into();
+                                            window.paint_quad(halo);
+                                        }
+                                        for (width, offset) in
+                                            [(6.0, -4.0), (4.0, -2.0), (2.0, 0.0)]
+                                        {
+                                            window.paint_quad(fill(
+                                                Bounds::new(
+                                                    point(
+                                                        x - px(width * 0.5),
+                                                        cursor_center + px(offset),
+                                                    ),
+                                                    size(px(width), px(2.0)),
+                                                ),
+                                                water,
+                                            ));
+                                        }
+                                        let mut droplet = fill(
+                                            Bounds::new(
+                                                point(x - px(4.5), cursor_center - px(5.0)),
+                                                size(px(9.0), px(10.0)),
+                                            ),
+                                            water,
+                                        );
+                                        droplet.corner_radii = px(4.5).into();
+                                        window.paint_quad(droplet);
+                                        let mut glint = fill(
+                                            Bounds::new(
+                                                point(x - px(2.5), cursor_center - px(3.0)),
+                                                size(px(2.5), px(3.0)),
+                                            ),
+                                            rgb(0xc4f5ee).alpha(0.8),
+                                        );
+                                        glint.corner_radii = px(1.25).into();
+                                        window.paint_quad(glint);
+                                    }
+                                }
+                            },
+                        )
+                        .size_full(),
+                    ),
             )
             .when(labels, |panel| {
                 panel.child(
@@ -493,8 +829,23 @@ impl Drop for Waveform {
 
 #[cfg(test)]
 mod tests {
-    use super::super::visuals::palette_color;
     use super::*;
+    #[test]
+    fn seek_seconds_clamps_drag_to_timeline_bounds() {
+        assert_eq!(seek_seconds(px(8.0), px(8.0), px(100.0), 10.0), 0.0);
+        assert_eq!(seek_seconds(px(58.0), px(8.0), px(100.0), 10.0), 5.0);
+        assert_eq!(seek_seconds(px(108.0), px(8.0), px(100.0), 10.0), 10.0);
+        assert_eq!(seek_seconds(px(200.0), px(8.0), px(100.0), 10.0), 10.0);
+        assert_eq!(seek_seconds(px(-20.0), px(8.0), px(100.0), 10.0), 0.0);
+    }
+
+    #[test]
+    fn cursor_wobble_is_slow_periodic_and_finite() {
+        assert_eq!(cursor_wobble(f64::NAN), 0.0);
+        assert!((cursor_wobble(0.0) - cursor_wobble(40.0)).abs() < 0.001);
+        assert!((cursor_wobble(2.0) - cursor_wobble(0.0)).abs() > 0.01);
+        assert!(cursor_wobble(4.0).is_finite());
+    }
 
     fn frame(peaks: Vec<Option<f32>>) -> WaveformFrame {
         let max_peak = peaks.iter().flatten().copied().fold(1.0, f32::max);
@@ -505,13 +856,34 @@ mod tests {
             duration: Some(10.0),
             span_seconds: 10.0,
             max_peak,
+            peaks: peaks.clone(),
+            rms: peaks.clone(),
+            rms_counts: peaks
+                .iter()
+                .map(|value| u64::from(value.is_some()))
+                .collect(),
+            left_peaks: peaks.clone(),
+            right_peaks: peaks.clone(),
+            left_rms: peaks.clone(),
+            right_rms: peaks.clone(),
+            left_rms_counts: peaks
+                .iter()
+                .map(|value| u64::from(value.is_some()))
+                .collect(),
+            right_rms_counts: peaks
+                .iter()
+                .map(|value| u64::from(value.is_some()))
+                .collect(),
+            channel_weights: Vec::new(),
+            last_push_start: None,
             complete: false,
-            peaks,
         }
     }
 
-    fn amplitudes(columns: &[(Option<f32>, u32)]) -> Vec<Option<f32>> {
-        columns.iter().map(|column| column.0).collect()
+    fn amplitudes(
+        columns: &[(Option<f32>, Option<f32>, Option<f32>, Option<f32>)],
+    ) -> Vec<Option<f32>> {
+        columns.iter().map(|column| column.1).collect()
     }
 
     #[test]
@@ -519,16 +891,16 @@ mod tests {
         let frame = frame(vec![Some(0.0), Some(0.5), Some(2.0), Some(0.25), Some(0.0)]);
         let mut plot = WaveformPlot::default();
         assert_eq!(
-            amplitudes(plot.columns(1, 2, &frame, palette_color)),
+            amplitudes(plot.columns(1, 2, &frame)),
             vec![Some(0.25), Some(1.0)]
         );
         assert_eq!(
-            amplitudes(plot.columns(2, 5, &frame, palette_color)),
+            amplitudes(plot.columns(2, 5, &frame)),
             vec![Some(0.0), Some(0.25), Some(1.0), Some(0.125), Some(0.0)]
         );
-        assert_eq!(plot.columns(1, 1, &frame, palette_color)[0].0, Some(1.0));
+        assert_eq!(plot.columns(1, 1, &frame)[0].1, Some(1.0));
         assert_eq!(
-            amplitudes(plot.columns(2, 5, &frame, palette_color)),
+            amplitudes(plot.columns(2, 5, &frame)),
             vec![Some(0.0), Some(0.25), Some(1.0), Some(0.125), Some(0.0)]
         );
     }
@@ -538,14 +910,11 @@ mod tests {
         let frame = frame(vec![None, None, Some(0.0), None, Some(0.25), None]);
         let mut plot = WaveformPlot::default();
         assert_eq!(
-            amplitudes(plot.columns(1, 3, &frame, palette_color)),
+            amplitudes(plot.columns(1, 3, &frame)),
             vec![None, Some(0.0), Some(0.25)]
         );
-        assert_eq!(
-            amplitudes(plot.columns(1, 6, &frame, palette_color)),
-            frame.peaks
-        );
-        assert_eq!(plot.columns(2, 1, &frame, palette_color)[0].0, Some(0.25));
+        assert_eq!(amplitudes(plot.columns(1, 6, &frame)), frame.peaks);
+        assert_eq!(plot.columns(2, 1, &frame)[0].1, Some(0.25));
     }
 
     #[test]
@@ -553,55 +922,40 @@ mod tests {
         let mut frame = frame(vec![Some(0.25), None]);
         let mut plot = WaveformPlot::default();
         assert_eq!(
-            amplitudes(plot.columns(1, 2, &frame, palette_color)),
+            amplitudes(plot.columns(1, 2, &frame)),
             vec![Some(0.25), None]
         );
         frame.peaks[1] = Some(2.0);
+        frame.left_peaks[1] = Some(2.0);
+        frame.right_peaks[1] = Some(2.0);
         frame.max_peak = 2.0;
         frame.revision += 1;
         assert_eq!(
-            amplitudes(plot.columns(1, 2, &frame, palette_color)),
+            amplitudes(plot.columns(1, 2, &frame)),
             vec![Some(0.125), Some(1.0)]
         );
     }
 
-    fn grayscale(fraction: f32) -> u32 {
-        let level = (fraction * 255.0).round() as u32;
-        level * 0x010101
-    }
-
     #[test]
-    fn columns_follow_palette_endpoints_and_palette_changes() {
-        let frame = frame(vec![Some(0.25), Some(0.5), Some(0.75)]);
-        let mut plot = WaveformPlot::default();
-        let columns = plot.columns(1, 3, &frame, palette_color);
-        assert_eq!(columns[0].1, palette_color(0.0));
-        assert_eq!(columns[1].1, palette_color(0.5));
-        assert_eq!(columns[2].1, palette_color(1.0));
-        let columns = plot.columns(1, 3, &frame, grayscale);
-        assert_eq!(columns[0].1, 0x000000);
-        assert_eq!(columns[1].1, 0x808080);
-        assert_eq!(columns[2].1, 0xffffff);
-        assert_eq!(columns[1].0, Some(0.5));
-        assert_eq!(
-            plot.columns(1, 1, &frame, palette_color)[0].1,
-            palette_color(0.0)
-        );
+    fn peak_and_rms_use_separate_color_scales() {
+        assert_eq!(waveform_color_level(0.0), 0.0);
+        assert_eq!(waveform_rms_color_level(0.0), 0.0);
+        assert!(waveform_color_level(0.5) < 0.5);
+        assert_eq!(waveform_color_level(1.0), 0.82);
+        assert_eq!(waveform_rms_color_level(1.0), 0.68);
+        assert!(waveform_rms_color_level(1.0) < waveform_color_level(1.0));
     }
 
     #[test]
     fn zero_and_extreme_widths_are_bounded_and_empty_data_has_no_columns() {
         let data = frame(vec![Some(0.0), None, Some(0.5)]);
         let mut plot = WaveformPlot::default();
-        assert_eq!(plot.columns(1, 0, &data, palette_color).len(), 1);
-        assert_eq!(plot.columns(1, 0, &data, palette_color)[0].0, Some(0.5));
-        assert_eq!(plot.columns(1, usize::MAX, &data, palette_color).len(), 3);
+        assert_eq!(plot.columns(1, 0, &data).len(), 1);
+        assert_eq!(plot.columns(1, 0, &data)[0].1, Some(0.5));
+        assert_eq!(plot.columns(1, usize::MAX, &data).len(), 3);
         let empty = frame(Vec::new());
-        assert!(plot.columns(1, 0, &empty, palette_color).is_empty());
-        assert!(
-            plot.columns(1, usize::MAX, &empty, palette_color)
-                .is_empty()
-        );
+        assert!(plot.columns(1, 0, &empty).is_empty());
+        assert!(plot.columns(1, usize::MAX, &empty).is_empty());
     }
 
     #[test]
