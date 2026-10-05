@@ -73,9 +73,10 @@ impl LibraryState {
         &self.tracks
     }
 
-    pub fn replace(&mut self, tracks: Vec<Track>) {
+    pub fn replace(&mut self, tracks: Vec<Track>) -> Arc<Vec<Track>> {
         self.tracks = tracks;
-        self.dirty = true;
+        self.dirty = false;
+        Arc::new(self.tracks.clone())
     }
 
     pub fn update(&mut self, track_id: i64, update: impl FnOnce(&mut Track)) -> Result<()> {

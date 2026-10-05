@@ -128,9 +128,7 @@ impl Core {
     }
     fn reload_library(&mut self, structure_changed: bool) -> Result<()> {
         let tracks = self.store.tracks()?;
-        self.library.replace(tracks.clone());
-        let _ = self.library.snapshot();
-        self.state.library = Arc::new(tracks);
+        self.state.library = self.library.replace(tracks);
         self.state.library_revision = self.state.library_revision.wrapping_add(1);
         if structure_changed {
             self.state.library_structure_revision =
