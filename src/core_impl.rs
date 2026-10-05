@@ -12,8 +12,12 @@ use std::{
 mod catalog;
 #[path = "core_impl/command.rs"]
 mod command;
+#[path = "core_impl/persistence.rs"]
+mod persistence;
 #[path = "core_impl/playback.rs"]
 mod playback;
+#[path = "core_impl/playlists.rs"]
+mod playlists;
 #[path = "core_impl/queue.rs"]
 mod queue;
 #[path = "core_impl/runtime.rs"]

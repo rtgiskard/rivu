@@ -154,37 +154,21 @@ impl Core {
                 }
             }
             Command::Repeat { mode } => self.state.playback.repeat = mode,
-            Command::CreatePlaylist { name } => {
-                self.store.create_playlist(&name)?;
-                self.state.library.playlists = Arc::new(self.store.playlists()?);
-            }
+            Command::CreatePlaylist { name } => self.create_playlist(name)?,
             Command::CreatePlaylistWithTracks { name, track_ids } => {
-                let playlist_id = self.store.create_playlist(&name)?;
-                self.store.add_playlist(playlist_id, &track_ids)?;
-                self.state.library.playlists = Arc::new(self.store.playlists()?);
+                self.create_playlist_with_tracks(name, track_ids)?;
             }
             Command::RenamePlaylist { playlist_id, name } => {
-                self.store.rename_playlist(playlist_id, &name)?;
-                self.state.library.playlists = Arc::new(self.store.playlists()?);
+                self.rename_playlist(playlist_id, name)?;
             }
-            Command::DeletePlaylist { playlist_id } => {
-                self.store.delete_playlist(playlist_id)?;
-                self.state.library.playlists = Arc::new(self.store.playlists()?);
-            }
+            Command::DeletePlaylist { playlist_id } => self.delete_playlist(playlist_id)?,
             Command::AddPlaylist {
                 playlist_id,
                 track_ids,
-            } => {
-                self.store.add_playlist(playlist_id, &track_ids)?;
-                self.state.library.playlists = Arc::new(self.store.playlists()?);
-            }
-            Command::RemovePlaylistEntry { entry_id } => {
-                self.store.remove_playlist_entry(entry_id)?;
-                self.state.library.playlists = Arc::new(self.store.playlists()?);
-            }
+            } => self.add_playlist(playlist_id, track_ids)?,
+            Command::RemovePlaylistEntry { entry_id } => self.remove_playlist_entry(entry_id)?,
             Command::MovePlaylistEntry { entry_id, index } => {
-                self.store.move_playlist_entry(entry_id, index)?;
-                self.state.library.playlists = Arc::new(self.store.playlists()?);
+                self.move_playlist_entry(entry_id, index)?;
             }
             Command::ImportPlaylist { path, name } => {
                 if self.state.system.scanning {
@@ -204,14 +188,7 @@ impl Core {
                 self.scan(paths, Some((name, items)), false)?;
             }
             Command::ExportPlaylist { playlist_id, path } => {
-                let playlist = self
-                    .state
-                    .library
-                    .playlists
-                    .iter()
-                    .find(|p| p.id == playlist_id)
-                    .context("Playlist not found")?;
-                library::export_m3u(&path, playlist, &self.state.library.tracks)?;
+                self.export_playlist(playlist_id, &path)?;
             }
             Command::EditTrack {
                 track_id,
