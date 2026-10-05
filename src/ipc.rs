@@ -67,8 +67,8 @@ struct PlaybackSnapshot {
     status: u8,
     repeat: u8,
     flags: u16,
-    revision: u64,
-    seek_revision: u64,
+    revision: u16,
+    seek_revision: u16,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -97,7 +97,7 @@ struct FullStatus {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum WireState {
     Overview(CompactOverview),
-    Full(FullStatus),
+    Full(Box<FullStatus>),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -128,21 +128,22 @@ fn playback_snapshot(state: &AppState) -> PlaybackSnapshot {
         flags: (state.shuffle as u16 * FLAG_SHUFFLE)
             | (state.scanning as u16 * FLAG_SCANNING)
             | (state.shutting_down as u16 * FLAG_SHUTTING_DOWN),
-        revision: state.revision,
-        seek_revision: state.seek_revision,
+        revision: state.revision as u16,
+        seek_revision: state.seek_revision as u16,
     }
 }
 
-fn state_from_playback(
-    playback: PlaybackSnapshot,
-    current_queue_id: Option<u64>,
-    library: Vec<Track>,
-    library_revision: u64,
-    library_structure_revision: u64,
-    queue: Vec<QueueEntry>,
-    scan_message: String,
-    last_error: Option<String>,
-) -> AppState {
+fn state_from_overview(state: CompactOverview) -> AppState {
+    let CompactOverview {
+        library,
+        library_revision,
+        library_structure_revision,
+        queue,
+        current_queue_id,
+        scan_message,
+        last_error,
+        playback,
+    } = state;
     AppState {
         library: Arc::new(library),
         library_revision,
@@ -170,8 +171,8 @@ fn state_from_playback(
         last_error,
         devices: Arc::new(Vec::new()),
         selected_device: None,
-        revision: playback.revision,
-        seek_revision: playback.seek_revision,
+        revision: playback.revision as u64,
+        seek_revision: playback.seek_revision as u64,
         config: Arc::new(Config::default()),
         config_path: PathBuf::new(),
         mpris_status: String::new(),
@@ -183,22 +184,13 @@ fn state_from_playback(
 
 impl From<CompactOverview> for AppState {
     fn from(state: CompactOverview) -> Self {
-        state_from_playback(
-            state.playback,
-            state.current_queue_id,
-            state.library,
-            state.library_revision,
-            state.library_structure_revision,
-            state.queue,
-            state.scan_message,
-            state.last_error,
-        )
+        state_from_overview(state)
     }
 }
 
 impl From<FullStatus> for AppState {
     fn from(state: FullStatus) -> Self {
-        let mut app = AppState::from(state.overview);
+        let mut app = state_from_overview(state.overview);
         app.playlists = Arc::new(state.playlists);
         app.history = Arc::new(state.history);
         app.devices = Arc::new(state.devices);
@@ -225,7 +217,7 @@ impl WireResponse {
         let state = if compact {
             WireState::Overview(overview)
         } else {
-            WireState::Full(FullStatus {
+            WireState::Full(Box::new(FullStatus {
                 overview,
                 playlists: state.playlists.as_ref().clone(),
                 history: state.history.as_ref().clone(),
@@ -233,7 +225,7 @@ impl WireResponse {
                 selected_device: state.selected_device,
                 config: state.config.as_ref().clone(),
                 database_optimization: state.database_optimization,
-            })
+            }))
         };
         Self {
             ok: response.ok,
@@ -250,7 +242,7 @@ impl From<WireResponse> for Response {
             error: response.error,
             state: match response.state {
                 WireState::Overview(state) => state.into(),
-                WireState::Full(state) => state.into(),
+                WireState::Full(state) => (*state).into(),
             },
         }
     }
