@@ -120,6 +120,8 @@ pub struct Config {
     pub repeat: RepeatMode,
     pub play_count_threshold_percent: f64,
     pub mpris_enabled: bool,
+    /// UI font family; empty selects the platform UI font.
+    pub ui_font: String,
     pub ui_scale: f32,
     pub analysis_fps: u32,
     pub visual_background: RgbColor,
@@ -171,6 +173,7 @@ impl Default for Config {
             repeat: RepeatMode::Off,
             play_count_threshold_percent: 20.0,
             mpris_enabled: true,
+            ui_font: String::new(),
             ui_scale: 1.0,
             analysis_fps: 20,
             visual_background: RgbColor(0x08090c),
@@ -268,6 +271,10 @@ impl Config {
                 && (0.0..100.0).contains(&self.play_count_threshold_percent),
             "play_count_threshold_percent must be finite and at least 0.0 but less than 100.0; got {}",
             self.play_count_threshold_percent
+        );
+        ensure!(
+            self.ui_font.len() <= 128 && !self.ui_font.chars().any(char::is_control),
+            "ui_font must be at most 128 characters without control characters"
         );
         ensure!(
             self.ui_scale.is_finite() && (0.75..=2.0).contains(&self.ui_scale),
@@ -467,6 +474,7 @@ mod tests {
             repeat: RepeatMode::All,
             play_count_threshold_percent: 35.5,
             mpris_enabled: false,
+            ui_font: "sans-serif".to_owned(),
             ui_scale: 1.5,
             analysis_fps: 30,
             spectrogram_min_hz: 30.0,

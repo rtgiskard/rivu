@@ -711,17 +711,11 @@ impl GuiApp {
         for id in settings_panels {
             layout.remove(id);
         }
-        let fonts = cx.text_system().all_font_names();
-        let ui_font = [
-            "Noto Sans CJK SC",
-            "Source Han Sans SC",
-            "WenQuanYi Micro Hei",
-            "LXGW Neo XiHei",
-        ]
-        .into_iter()
-        .find(|name| fonts.iter().any(|font| font == name))
-        .unwrap_or(".SystemUIFont")
-        .into();
+        let ui_font = if state.config.ui_font.trim().is_empty() {
+            ".SystemUIFont".into()
+        } else {
+            state.config.ui_font.trim().to_owned().into()
+        };
         let mut inputs = HashMap::new();
         for (field, placeholder) in [
             (Field::Search, "Search title, artist or album"),
@@ -1673,7 +1667,11 @@ impl Render for GuiApp {
             .bg(rgb(BG))
             .text_color(rgb(TEXT))
             .text_size(px(14. * self.state.config.ui_scale))
-            .font_family(self.ui_font.clone())
+            .font_family(if self.state.config.ui_font.trim().is_empty() {
+                self.ui_font.clone()
+            } else {
+                self.state.config.ui_font.clone().into()
+            })
             .track_focus(&self.workspace_focus)
             .capture_key_down(cx.listener(|_, event: &KeyDownEvent, window, cx| {
                 let modifiers = event.keystroke.modifiers;

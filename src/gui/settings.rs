@@ -16,6 +16,7 @@ enum Field {
     Roots,
     Volume,
     PlayCountThreshold,
+    Font,
     Scale,
     Fps,
     Background,
@@ -45,6 +46,7 @@ impl Field {
             Self::Roots => "Library roots (separate paths with semicolons)",
             Self::Volume => "Volume (0–100%)",
             Self::PlayCountThreshold => "Play count threshold (%)",
+            Self::Font => "Interface font family (sans-serif, serif, monospace, or installed name)",
             Self::Scale => "Interface scale (0.75–2)",
             Self::Fps => "Analysis refresh rate (5–60 fps)",
             Self::Background => "Background (#RRGGBB)",
@@ -173,6 +175,7 @@ impl Settings {
             Field::Roots,
             Field::Volume,
             Field::PlayCountThreshold,
+            Field::Font,
             Field::Scale,
             Field::Fps,
             Field::Background,
@@ -272,6 +275,7 @@ impl Settings {
             self.draft.play_count_threshold_percent.to_string(),
             cx,
         );
+        self.set_value(Field::Font, self.draft.ui_font.clone(), cx);
         self.set_value(Field::Scale, self.draft.ui_scale.to_string(), cx);
         self.set_value(Field::Fps, self.draft.analysis_fps.to_string(), cx);
         self.set_value(
@@ -374,6 +378,7 @@ impl Settings {
             .collect();
         config.volume = self.number::<f32>(Field::Volume, cx)? / 100.;
         config.play_count_threshold_percent = self.number(Field::PlayCountThreshold, cx)?;
+        config.ui_font = self.value(Field::Font, cx).trim().to_owned();
         config.ui_scale = self.number(Field::Scale, cx)?;
         config.analysis_fps = self.number(Field::Fps, cx)?;
         config.visual_background = self
@@ -709,6 +714,7 @@ impl GuiApp {
             .child(self.settings.field(Field::Roots))
             .child(device)
             .child(self.settings.pair(Field::Volume, Field::PlayCountThreshold))
+            .child(self.settings.field(Field::Font))
             .child(self.settings.field(Field::Scale))
             .child(switches)
     }
