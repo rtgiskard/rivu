@@ -3,12 +3,16 @@ use crate::{
     model::{AppState, Command, QueueEntry, Response, Track},
 };
 use anyhow::{Context, Error, Result, bail};
+use bincode::{
+    config,
+    serde::{decode_from_slice, encode_to_vec},
+};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     fs,
-    io::{BufRead, BufReader, Write},
+    io::{Read, Write},
     os::unix::{
         fs::{FileTypeExt, PermissionsExt},
         net::{UnixListener, UnixStream},
@@ -19,22 +23,53 @@ use std::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-const MAX_REQUEST: u64 = 64 * 1024;
-const MAX_RESPONSE: u64 = 64 * 1024 * 1024;
-#[derive(Deserialize)]
-#[serde(tag = "request", rename_all = "snake_case")]
-enum WireRequest {
-    Command { command: Command },
-    Watch { revision: u64 },
+const MAX_REQUEST: usize = 64 * 1024;
+const MAX_RESPONSE: usize = 64 * 1024 * 1024;
+// Clients do not know the server instance before the first response.
+const CLIENT_INSTANCE_UNKNOWN: u16 = 0;
+
+/// Length-prefixed bincode request envelope.
+#[derive(Serialize, Deserialize)]
+struct RequestFrame {
+    instance_id: u16,
+    request: RequestKind,
 }
-#[derive(Serialize)]
-#[serde(tag = "request", rename_all = "snake_case")]
-enum WireCommand<'a> {
-    Command { command: &'a Command },
-    Watch { revision: u64 },
+
+#[derive(Serialize, Deserialize)]
+enum RequestKind {
+    Command(Command),
+    Watch { revision: u16 },
+}
+
+#[derive(Serialize, Deserialize)]
+struct ResponseFrame {
+    instance_id: u16,
+    revision: u16,
+    response: Response,
+}
+
+fn encode_frame<T: Serialize>(value: &T) -> Result<Vec<u8>> {
+    let payload = encode_to_vec(value, config::standard()).context("Encoding IPC frame")?;
+    if payload.len() > MAX_RESPONSE {
+        bail!("IPC frame exceeds maximum size");
+    }
+    let len = u32::try_from(payload.len()).context("IPC frame is too large")?;
+    let mut frame = Vec::with_capacity(4 + payload.len());
+    frame.extend_from_slice(&len.to_le_bytes());
+    frame.extend_from_slice(&payload);
+    Ok(frame)
+}
+
+fn decode_frame<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T> {
+    let (value, consumed) =
+        decode_from_slice(bytes, config::standard()).context("Decoding IPC frame")?;
+    if consumed != bytes.len() {
+        bail!("Trailing bytes in IPC frame");
+    }
+    Ok(value)
 }
 
 #[derive(Default)]
@@ -141,10 +176,16 @@ pub fn bind(path: &Path) -> Result<UnixListener> {
 
 impl Server {
     pub fn start(path: PathBuf, listener: UnixListener, handle: AppHandle) -> Result<Self> {
+        let instance_id = (SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos() as u16)
+            .wrapping_add(std::process::id() as u16);
         let stopping = Arc::new(AtomicBool::new(false));
         let stop = stopping.clone();
         let active = Arc::new(AtomicUsize::new(0));
         let overview = Arc::new(Mutex::new(OverviewCache::default()));
+        let server_instance_id = instance_id;
         let worker = thread::Builder::new()
             .name("rivu-ipc".into())
             .spawn(move || {
@@ -167,7 +208,12 @@ impl Server {
                         thread::Builder::new()
                             .name("rivu-client".into())
                             .spawn(move || {
-                                let _ = serve_connection(stream, &client_handle, &client_overview);
+                                let _ = serve_connection(
+                                    stream,
+                                    &client_handle,
+                                    &client_overview,
+                                    server_instance_id,
+                                );
                                 count.fetch_sub(1, Ordering::AcqRel);
                             });
                     match spawn {
@@ -203,17 +249,33 @@ impl Drop for Server {
     }
 }
 
-fn read_message(stream: &mut UnixStream, limit: u64) -> Result<Vec<u8>> {
-    use std::io::Read;
-    let mut bytes = Vec::new();
-    let read = BufReader::new(stream.take(limit + 1)).read_until(b'\n', &mut bytes)?;
-    if read == 0 {
-        bail!("Connection closed without a message");
+fn read_frame(stream: &mut UnixStream, limit: usize) -> Result<Vec<u8>> {
+    let mut header = [0u8; 4];
+    stream
+        .read_exact(&mut header)
+        .context("Reading IPC frame length")?;
+    let length = u32::from_le_bytes(header) as usize;
+    if length > limit {
+        bail!("IPC frame exceeds maximum size");
     }
-    if read as u64 > limit || bytes.last() != Some(&b'\n') {
-        bail!("Message too large or incomplete");
-    }
+    let mut bytes = vec![0u8; length];
+    stream
+        .read_exact(&mut bytes)
+        .context("Reading IPC frame payload")?;
     Ok(bytes)
+}
+
+fn response_frame(response: Response, instance_id: u16) -> ResponseFrame {
+    let revision = response.state.revision as u16;
+    ResponseFrame {
+        instance_id,
+        revision,
+        response,
+    }
+}
+
+fn unpack_response(frame: ResponseFrame) -> Response {
+    frame.response
 }
 
 fn overview_response(state: AppState, overview: &Mutex<OverviewCache>) -> Response {
@@ -239,13 +301,13 @@ fn overview_response(state: AppState, overview: &Mutex<OverviewCache>) -> Respon
 
 fn wait_for_revision(
     handle: &AppHandle,
-    revision: u64,
+    revision: u16,
     overview: &Mutex<OverviewCache>,
 ) -> Response {
     let updates = handle.subscribe();
     loop {
         let state = handle.snapshot();
-        if state.revision != revision || state.shutting_down {
+        if (state.revision as u16) != revision || state.shutting_down {
             return overview_response(state, overview);
         }
         if updates.recv().is_err() {
@@ -258,18 +320,24 @@ fn serve_connection(
     mut stream: UnixStream,
     handle: &AppHandle,
     overview: &Mutex<OverviewCache>,
+    instance_id: u16,
 ) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(3)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-    let bytes = read_message(&mut stream, MAX_REQUEST)?;
-    let response = match serde_json::from_slice::<WireRequest>(&bytes) {
-        Ok(WireRequest::Command {
-            command: Command::Overview,
+    let bytes = read_frame(&mut stream, MAX_REQUEST)?;
+    let response = match decode_frame::<RequestFrame>(&bytes) {
+        Ok(RequestFrame {
+            request: RequestKind::Command(Command::Overview),
+            ..
         }) => overview_response(handle.snapshot(), overview),
-        Ok(WireRequest::Command {
-            command: Command::Status,
+        Ok(RequestFrame {
+            request: RequestKind::Command(Command::Status),
+            ..
         }) => handle.request(Command::Status),
-        Ok(WireRequest::Command { command }) => {
+        Ok(RequestFrame {
+            request: RequestKind::Command(command),
+            ..
+        }) => {
             let response = handle.request(command);
             if response.ok {
                 overview_response(response.state, overview)
@@ -277,15 +345,17 @@ fn serve_connection(
                 response
             }
         }
-        Ok(WireRequest::Watch { revision }) => wait_for_revision(handle, revision, overview),
+        Ok(RequestFrame {
+            request: RequestKind::Watch { revision },
+            ..
+        }) => wait_for_revision(handle, revision, overview),
         Err(error) => Response {
             ok: false,
             error: Some(format!("Invalid command: {error}")),
             state: handle.snapshot(),
         },
     };
-    serde_json::to_writer(&mut stream, &response)?;
-    stream.write_all(b"\n")?;
+    stream.write_all(&encode_frame(&response_frame(response, instance_id))?)?;
     Ok(())
 }
 
@@ -299,18 +369,24 @@ pub fn is_no_instance(error: &Error) -> bool {
         })
     })
 }
-pub fn watch(path: &Path, revision: u64) -> Result<Response> {
+pub fn watch(path: &Path, revision: u16) -> Result<Response> {
     let mut stream = UnixStream::connect(path).with_context(|| {
         format!(
             "Cannot connect to Rivu at {}. Start `rivu` or `rivu serve` first.",
             path.display()
         )
     })?;
+    stream.set_read_timeout(Some(Duration::from_secs(15)))?;
     stream.set_write_timeout(Some(Duration::from_secs(3)))?;
-    serde_json::to_writer(&mut stream, &WireCommand::Watch { revision })?;
-    stream.write_all(b"\n")?;
-    let response: Response = serde_json::from_slice(&read_message(&mut stream, MAX_RESPONSE)?)?;
-    Ok(response)
+    let request = RequestFrame {
+        instance_id: CLIENT_INSTANCE_UNKNOWN,
+        request: RequestKind::Watch { revision },
+    };
+    stream.write_all(&encode_frame(&request)?)?;
+    Ok(unpack_response(decode_frame(&read_frame(
+        &mut stream,
+        MAX_RESPONSE,
+    )?)?))
 }
 
 pub fn request(path: &Path, command: &Command) -> Result<Response> {
@@ -326,8 +402,13 @@ pub fn request(path: &Path, command: &Command) -> Result<Response> {
         Some(Duration::from_secs(15))
     })?;
     stream.set_write_timeout(Some(Duration::from_secs(3)))?;
-    serde_json::to_writer(&mut stream, &WireCommand::Command { command })?;
-    stream.write_all(b"\n")?;
-    let response: Response = serde_json::from_slice(&read_message(&mut stream, MAX_RESPONSE)?)?;
-    Ok(response)
+    let request = RequestFrame {
+        instance_id: CLIENT_INSTANCE_UNKNOWN,
+        request: RequestKind::Command(command.clone()),
+    };
+    stream.write_all(&encode_frame(&request)?)?;
+    Ok(unpack_response(decode_frame(&read_frame(
+        &mut stream,
+        MAX_RESPONSE,
+    )?)?))
 }

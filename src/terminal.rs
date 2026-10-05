@@ -78,11 +78,11 @@ fn spawn_watcher(socket_path: &Path, revision: u64) -> Receiver<Result<Response,
     let socket_path = socket_path.to_owned();
     let (sender, receiver) = bounded(1);
     std::thread::spawn(move || {
-        let mut revision = revision;
+        let mut revision = revision as u16;
         loop {
             match ipc::watch(&socket_path, revision) {
                 Ok(response) => {
-                    revision = response.state.revision;
+                    revision = response.state.revision as u16;
                     if sender.send(Ok(response)).is_err() {
                         break;
                     }
