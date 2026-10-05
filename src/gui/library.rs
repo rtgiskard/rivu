@@ -245,7 +245,7 @@ impl GuiApp {
                                     this.library_tree.expanded().contains(&id),
                                     node.has_children,
                                 )
-                                .h(px(TRACK_HEIGHT))
+                                .h(px(TRACK_HEIGHT * this.state.system.config.ui_scale))
                                 .min_w_0()
                                 .overflow_hidden()
                                 .child(content)

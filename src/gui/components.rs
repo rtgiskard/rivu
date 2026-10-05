@@ -5,7 +5,6 @@ mod tree;
 use super::{ACCENT, BORDER, HIGHLIGHT, PANEL, TEXT, UI_INSET};
 
 use gpui::{Context, Div, ElementId, Render, SharedString, Stateful, Window, div, prelude::*, rgb};
-pub(crate) const CONTROL_HEIGHT: f32 = 32.0;
 pub(crate) const ROW_HEIGHT: f32 = 42.0;
 pub(crate) const MENU_WIDTH: f32 = 260.0;
 pub(crate) const POPOVER_MAX_HEIGHT: f32 = 240.0;
@@ -72,7 +71,7 @@ pub(crate) fn button_style(
         .px(gpui::px(UI_INSET))
         .py_1()
         .rounded_md()
-        .min_h(gpui::px(CONTROL_HEIGHT))
+        .min_h(gpui::rems(2.0))
         .text_sm()
         .cursor_pointer()
         .bg(rgb(PANEL))
@@ -80,6 +79,30 @@ pub(crate) fn button_style(
         .border_color(rgb(BORDER))
         .hover(|style| style.bg(rgb(HIGHLIGHT)).border_color(rgb(ACCENT)))
         .child(label.into())
+}
+
+/// Shared trigger for settings and other anchored dropdowns.
+pub(crate) fn dropdown_trigger(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .w_full()
+        .px(gpui::px(UI_INSET))
+        .py_1()
+        .rounded_md()
+        .min_h(gpui::rems(2.0))
+        .text_sm()
+        .cursor_pointer()
+        .bg(rgb(PANEL))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .hover(|style| style.bg(rgb(HIGHLIGHT)).border_color(rgb(ACCENT)))
+        .child(div().flex_1().truncate().child(label.into()))
+        .child("⌄")
 }
 
 pub(super) struct NerdSymbols(pub bool);
@@ -108,7 +131,7 @@ pub(crate) fn menu_item_style(
     div()
         .id(id)
         .w_full()
-        .min_h(gpui::px(CONTROL_HEIGHT))
+        .min_h(gpui::rems(2.0))
         .px(gpui::px(UI_INSET))
         .py_0()
         .flex()
@@ -164,7 +187,7 @@ pub(crate) fn tree_row(
     div()
         .id(id)
         .w_full()
-        .h(gpui::px(ROW_HEIGHT))
+        .h(gpui::rems(1.75))
         .px_2()
         .pl(gpui::px(depth as f32 * 16.))
         .flex()
@@ -184,7 +207,7 @@ pub(crate) fn dropdown_row(
     label: impl Into<SharedString>,
 ) -> Stateful<Div> {
     list_row(id, selected)
-        .h(gpui::px(CONTROL_HEIGHT))
+        .h(gpui::rems(2.0))
         .child(div().flex_1().min_w_0().truncate().child(label.into()))
 }
 
@@ -202,7 +225,7 @@ pub(crate) fn list_row(id: impl Into<ElementId>, selected: bool) -> Stateful<Div
     div()
         .id(id)
         .w_full()
-        .h(gpui::px(ROW_HEIGHT))
+        .h(gpui::rems(2.625))
         .flex_shrink_0()
         .min_w_0()
         .px_2()

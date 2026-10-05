@@ -1,7 +1,8 @@
 use super::{
     ACCENT, BORDER, ButtonTooltip, DropdownItem, DropdownState, ERROR, GuiApp, HIGHLIGHT, Measured,
-    PANEL, POPOVER_MAX_HEIGHT, UI_INSET, button, caption, column, copyable_message,
-    dropdown_container, dropdown_row, icon_button, input::Input, panels::TRACK_HEIGHT, row,
+    POPOVER_MAX_HEIGHT, UI_INSET, artwork::Artwork, button, caption, column, copyable_message,
+    dropdown_container, dropdown_row, dropdown_trigger, icon_button, input::Input,
+    panels::TRACK_HEIGHT, row,
 };
 use crate::{
     config::{Config, RgbColor, SpectrumStyle, SpectrumWindow, VisualizationPalette},
@@ -10,6 +11,31 @@ use crate::{
 use anyhow::{Context as _, Result};
 use gpui::{prelude::*, *};
 use std::{collections::HashMap, path::PathBuf, str::FromStr};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingChoice {
+    Device(usize),
+    Font(&'static str),
+    Palette(VisualizationPalette),
+    SpectrumStyle(SpectrumStyle),
+    Fft(u32),
+    Window(SpectrumWindow),
+}
+
+impl SettingChoice {
+    fn label(self) -> String {
+        match self {
+            Self::Device(_) => String::new(),
+            Self::Font(value) => value.to_owned(),
+            Self::Palette(value) => visualization_palette_label(value).to_owned(),
+            Self::SpectrumStyle(value) => spectrum_style_label(value).to_owned(),
+            Self::Fft(value) => value.to_string(),
+            Self::Window(SpectrumWindow::Hann) => "Hann".to_owned(),
+            Self::Window(SpectrumWindow::BlackmanHarris) => "Blackman–Harris".to_owned(),
+            Self::Window(SpectrumWindow::None) => "None".to_owned(),
+        }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Field {
@@ -69,6 +95,16 @@ impl Field {
     }
 }
 
+fn dropdown_button(
+    id: &'static str,
+    label: impl Into<SharedString>,
+    cx: &mut Context<GuiApp>,
+    action: impl Fn(&mut GuiApp, &mut Window, &mut Context<GuiApp>) + 'static,
+) -> Stateful<Div> {
+    dropdown_trigger(id, label)
+        .on_click(cx.listener(move |this, _, window, cx| action(this, window, cx)))
+}
+
 fn visual_switch(
     id: &'static str,
     icon: &'static str,
@@ -96,17 +132,8 @@ fn visual_switch(
 
 fn visualization_palette_label(palette: VisualizationPalette) -> &'static str {
     match palette {
-        VisualizationPalette::TokyoNight => "TokyoNight",
-        VisualizationPalette::Deadbeef => "DeaDBeeF",
-        VisualizationPalette::Nord => "Nord",
-    }
-}
-
-fn next_visualization_palette(palette: VisualizationPalette) -> VisualizationPalette {
-    match palette {
-        VisualizationPalette::TokyoNight => VisualizationPalette::Deadbeef,
-        VisualizationPalette::Deadbeef => VisualizationPalette::Nord,
-        VisualizationPalette::Nord => VisualizationPalette::TokyoNight,
+        VisualizationPalette::A => "A",
+        VisualizationPalette::B => "B",
     }
 }
 
@@ -147,6 +174,7 @@ fn ffmpeg_hint(status: &str) -> String {
 enum SettingsPage {
     General,
     Visualizations,
+    About,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum VisualPage {
@@ -160,8 +188,9 @@ enum VisualPage {
 pub(super) struct Settings {
     draft: Config,
     inputs: HashMap<Field, Entity<Input>>,
-    device_dropdown: DropdownState<usize>,
+    dropdown: DropdownState<SettingChoice>,
     device_scroll: UniformListScrollHandle,
+    dropdown_anchor: Measured,
     applying: bool,
     session: u64,
     feedback: Option<std::result::Result<(), String>>,
@@ -204,8 +233,9 @@ impl Settings {
         let mut settings = Self {
             draft: config.clone(),
             inputs,
-            device_dropdown: DropdownState::default(),
+            dropdown: DropdownState::default(),
             device_scroll: UniformListScrollHandle::new(),
+            dropdown_anchor: Measured::Device,
             applying: false,
             session: 0,
             feedback: None,
@@ -421,7 +451,7 @@ impl Settings {
         select: impl Fn(&mut Settings) + 'static,
     ) -> Stateful<Div> {
         button(id, label, cx, move |this, _, cx| {
-            this.settings.device_dropdown.close();
+            this.settings.dropdown.close();
             select(&mut this.settings);
             cx.notify();
         })
@@ -436,7 +466,7 @@ impl Settings {
 
 impl GuiApp {
     pub(super) fn load_settings(&mut self, cx: &mut Context<Self>) {
-        self.settings.device_dropdown.close();
+        self.settings.dropdown.close();
         let config = self.handle.config_snapshot();
         self.settings.reset(&config, cx);
         cx.notify();
@@ -483,32 +513,64 @@ impl GuiApp {
     }
 
     fn choose_device(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index == 0 {
-            self.settings.draft.output_device = None;
-        } else if let Some(name) = self.state.system.devices.get(index - 1) {
-            self.settings.draft.output_device = Some(name.clone());
-        } else {
+        let Some((_, item)) = self.settings.dropdown.filtered_item(index) else {
             return;
+        };
+        match item.value {
+            SettingChoice::Device(device_index) => {
+                if device_index == 0 {
+                    self.settings.draft.output_device = None;
+                } else if let Some(name) = self.state.system.devices.get(device_index - 1) {
+                    self.settings.draft.output_device = Some(name.clone());
+                } else {
+                    return;
+                }
+            }
+            SettingChoice::Font(value) => {
+                self.settings.draft.ui_font = value.to_owned();
+                self.settings.inputs[&Field::Font].update(cx, |input, cx| {
+                    input.set_text(value, cx);
+                });
+            }
+            SettingChoice::Palette(value) => self.settings.draft.visual_palette = value,
+            SettingChoice::SpectrumStyle(value) => self.settings.draft.spectrum_style = value,
+            SettingChoice::Fft(value) => self.settings.draft.spectrum_fft_size = value,
+            SettingChoice::Window(value) => self.settings.draft.spectrum_window = value,
         }
-        self.settings.device_dropdown.select_index(index);
-        self.settings.device_dropdown.close();
+        self.settings.dropdown.select_index(index);
+        self.settings.dropdown.close();
         cx.notify();
     }
 
+    fn open_setting_dropdown(&mut self, items: Vec<DropdownItem<SettingChoice>>, selected: usize) {
+        if let Some(item) = items.first() {
+            self.settings.dropdown_anchor = match item.value {
+                SettingChoice::Font(_) => Measured::SettingsFont,
+                SettingChoice::Palette(_) => Measured::SettingsPalette,
+                SettingChoice::SpectrumStyle(_) => Measured::SettingsStyle,
+                SettingChoice::Fft(_) => Measured::SettingsFft,
+                SettingChoice::Window(_) => Measured::SettingsWindow,
+                SettingChoice::Device(_) => Measured::Device,
+            };
+        }
+        self.settings.dropdown.open(items);
+        self.settings.dropdown.select_index(selected);
+    }
+
     pub(super) fn device_dropdown_is_open(&self) -> bool {
-        self.settings.device_dropdown.is_open()
+        self.settings.dropdown.is_open()
     }
 
     pub(super) fn close_device_dropdown(&mut self) {
-        self.settings.device_dropdown.close();
+        self.settings.dropdown.close();
     }
 
     pub(super) fn device_key(&mut self, key: &str, cx: &mut Context<Self>) {
         match key {
-            "up" => self.settings.device_dropdown.move_previous(),
-            "down" => self.settings.device_dropdown.move_next(),
+            "up" => self.settings.dropdown.move_previous(),
+            "down" => self.settings.dropdown.move_next(),
             "enter" | "space" => {
-                if let Some(index) = self.settings.device_dropdown.selected_index() {
+                if let Some(index) = self.settings.dropdown.selected_index() {
                     self.choose_device(index, cx);
                 }
                 cx.stop_propagation();
@@ -516,7 +578,7 @@ impl GuiApp {
             }
             _ => return,
         }
-        if let Some(index) = self.settings.device_dropdown.selected_index() {
+        if let Some(index) = self.settings.dropdown.selected_index() {
             self.settings
                 .device_scroll
                 .scroll_to_item(index, ScrollStrategy::Nearest);
@@ -538,31 +600,22 @@ impl GuiApp {
             .gap_1()
             .child(caption("Output device"))
             .child(
-                row()
-                    .id("output-device-selector")
+                dropdown_trigger("output-device-selector", chosen_device.clone())
                     .relative()
-                    .w_full()
-                    .h(rems(2.))
-                    .px(gpui::px(UI_INSET))
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .rounded_sm()
-                    .bg(rgb(PANEL))
-                    .cursor_pointer()
-                    .hover(|style| style.border_color(rgb(ACCENT)))
-                    .child(div().flex_1().truncate().child(chosen_device.clone()))
-                    .child("⌄")
-                    .tooltip(move |_, cx| {
-                        cx.new(|_| ButtonTooltip {
-                            text: chosen_device.clone(),
-                        })
-                        .into()
+                    .tooltip({
+                        let chosen_device = chosen_device.clone();
+                        move |_, cx| {
+                            cx.new(|_| ButtonTooltip {
+                                text: chosen_device.clone(),
+                            })
+                            .into()
+                        }
                     })
                     .child(self.measurement(Measured::Device))
                     .on_click(cx.listener(|this, _, window, cx| {
-                        let open = this.settings.device_dropdown.is_open();
+                        let open = this.settings.dropdown.is_open();
                         if open {
-                            this.settings.device_dropdown.close();
+                            this.settings.dropdown.close();
                         } else {
                             let selected = this
                                 .settings
@@ -577,14 +630,24 @@ impl GuiApp {
                                         .position(|device| device == name)
                                 })
                                 .map_or(0, |index| index + 1);
-                            let items = std::iter::once(DropdownItem::new(0, "System default"))
-                                .chain(this.state.system.devices.iter().enumerate().map(
-                                    |(index, device)| DropdownItem::new(index + 1, device.clone()),
-                                ));
-                            this.settings.device_dropdown.open(items);
-                            this.settings.device_dropdown.select_index(selected);
+                            let items = std::iter::once(DropdownItem::new(
+                                SettingChoice::Device(0),
+                                "System default",
+                            ))
+                            .chain(
+                                this.state.system.devices.iter().enumerate().map(
+                                    |(index, device)| {
+                                        DropdownItem::new(
+                                            SettingChoice::Device(index + 1),
+                                            device.clone(),
+                                        )
+                                    },
+                                ),
+                            );
+                            this.settings.dropdown.open(items);
+                            this.settings.dropdown.select_index(selected);
                         }
-                        if let Some(index) = this.settings.device_dropdown.selected_index() {
+                        if let Some(index) = this.settings.dropdown.selected_index() {
                             this.settings
                                 .device_scroll
                                 .scroll_to_item(index, ScrollStrategy::Nearest);
@@ -594,10 +657,11 @@ impl GuiApp {
                     })),
             );
         let draft = &self.settings.draft;
-        let (shuffle, repeat, mpris, ffmpeg, remix) = (
+        let (shuffle, repeat, mpris, tray, ffmpeg, remix) = (
             draft.shuffle,
             draft.repeat,
             draft.mpris_enabled,
+            draft.tray_enabled,
             draft.ffmpeg_enabled,
             draft.pipewire_auto_mix,
         );
@@ -659,6 +723,15 @@ impl GuiApp {
                 }),
             )
             .child(
+                icon_button("settings-tray", "▣", "System tray", cx, |this, _, cx| {
+                    this.settings.draft.tray_enabled = !this.settings.draft.tray_enabled;
+                    cx.notify();
+                })
+                .size(rems(4.))
+                .text_size(rems(1.75))
+                .when(tray, |view| view.bg(rgb(HIGHLIGHT)).text_color(rgb(ACCENT))),
+            )
+            .child(
                 icon_button(
                     "settings-ffmpeg",
                     "\u{f384}",
@@ -713,12 +786,54 @@ impl GuiApp {
                 view.bg(rgb(HIGHLIGHT)).text_color(rgb(ACCENT))
             }),
         );
+        let font = self.settings.draft.ui_font.clone();
+        let font_dropdown = dropdown_button(
+            "settings-font",
+            format!(
+                "{}",
+                if font.is_empty() {
+                    "system"
+                } else {
+                    font.as_str()
+                }
+            ),
+            cx,
+            |this, _, _| {
+                let values = ["", "sans-serif", "serif", "monospace"];
+                let selected = values
+                    .iter()
+                    .position(|value| *value == this.settings.draft.ui_font)
+                    .unwrap_or(0);
+                this.open_setting_dropdown(
+                    values
+                        .into_iter()
+                        .map(|value| {
+                            DropdownItem::new(
+                                SettingChoice::Font(value),
+                                if value.is_empty() {
+                                    "system".to_owned()
+                                } else {
+                                    value.to_owned()
+                                },
+                            )
+                        })
+                        .collect(),
+                    selected,
+                );
+            },
+        );
+
         column()
             .gap_3()
             .child(self.settings.field(Field::Roots))
             .child(device)
             .child(self.settings.pair(Field::Volume, Field::PlayCountThreshold))
-            .child(self.settings.field(Field::Font))
+            .child(caption("Interface font"))
+            .child(
+                font_dropdown
+                    .relative()
+                    .child(self.measurement(Measured::SettingsFont)),
+            )
             .child(self.settings.field(Field::Scale))
             .child(switches)
     }
@@ -767,52 +882,48 @@ impl GuiApp {
         match settings.visual_page {
             VisualPage::Common => column()
                 .gap_3()
-                .child(button(
+                .child(caption("Visualization palette"))
+                .child(dropdown_button(
                     "visual-palette",
-                    format!(
-                        "Visualization palette: {}  ›",
-                        visualization_palette_label(draft.visual_palette)
-                    ),
+                    visualization_palette_label(draft.visual_palette),
                     cx,
-                    |this, _, cx| {
-                        this.settings.draft.visual_palette =
-                            next_visualization_palette(this.settings.draft.visual_palette);
-                        cx.notify();
+                    |this, _, _| {
+                        let selected = match this.settings.draft.visual_palette {
+                            VisualizationPalette::A => 0,
+                            VisualizationPalette::B => 1,
+                        };
+                        this.open_setting_dropdown(
+                            vec![
+                                DropdownItem::new(SettingChoice::Palette(VisualizationPalette::A), "A"),
+                                DropdownItem::new(SettingChoice::Palette(VisualizationPalette::B), "B"),
+                            ],
+                            selected,
+                        );
                     },
-                ))
+                ).relative().child(self.measurement(Measured::SettingsPalette)))
                 .child(settings.pair(Field::Fps, Field::Background)),
             VisualPage::Spectrum => {
                 let style = spectrum_style_label(draft.spectrum_style);
-                column().gap_3()
-                    .child(button("spectrum-style", format!("Style: {style}  ›"), cx, |this, _, cx| {
-                        this.settings.draft.spectrum_style = match this.settings.draft.spectrum_style {
-                            SpectrumStyle::Bars => SpectrumStyle::Outline,
-                            SpectrumStyle::Outline => SpectrumStyle::Led,
-                            SpectrumStyle::Led => SpectrumStyle::Line,
-                            SpectrumStyle::Line => SpectrumStyle::Solid,
-                            SpectrumStyle::Solid => SpectrumStyle::Bars,
-                        };
-                        cx.notify();
-                    }))
-                    .child(button("spectrum-fft", format!("FFT size: {}  ›", draft.spectrum_fft_size), cx, |this, _, cx| {
-                        this.settings.draft.spectrum_fft_size = match this.settings.draft.spectrum_fft_size {
-                            512 => 1024, 1024 => 2048, 2048 => 4096, 4096 => 8192,
-                            8192 => 16384, 16384 => 32768, _ => 512,
-                        };
-                        cx.notify();
-                    }))
-                    .child(button("spectrum-window", format!("Window: {}  ›", match draft.spectrum_window {
-                        SpectrumWindow::Hann => "Hann",
-                        SpectrumWindow::BlackmanHarris => "Blackman–Harris",
-                        SpectrumWindow::None => "None",
-                    }), cx, |this, _, cx| {
-                        this.settings.draft.spectrum_window = match this.settings.draft.spectrum_window {
-                            SpectrumWindow::Hann => SpectrumWindow::BlackmanHarris,
-                            SpectrumWindow::BlackmanHarris => SpectrumWindow::None,
-                            SpectrumWindow::None => SpectrumWindow::Hann,
-                        };
-                        cx.notify();
-                    }))
+                column()
+                    .gap_3()
+                    .child(caption("Style"))
+                    .child(dropdown_button("spectrum-style", style, cx, |this, _, _| {
+                        let values = [SpectrumStyle::Bars, SpectrumStyle::Outline, SpectrumStyle::Led, SpectrumStyle::Line, SpectrumStyle::Solid];
+                        let selected = values.iter().position(|value| *value == this.settings.draft.spectrum_style).unwrap_or(0);
+                        this.open_setting_dropdown(values.into_iter().map(|value| DropdownItem::new(SettingChoice::SpectrumStyle(value), spectrum_style_label(value))).collect(), selected);
+                    }).relative().child(self.measurement(Measured::SettingsStyle)))
+                    .child(caption("FFT size"))
+                    .child(dropdown_button("spectrum-fft", draft.spectrum_fft_size.to_string(), cx, |this, _, _| {
+                        let values = [512, 1024, 2048, 4096, 8192, 16384, 32768];
+                        let selected = values.iter().position(|value| *value == this.settings.draft.spectrum_fft_size).unwrap_or(0);
+                        this.open_setting_dropdown(values.into_iter().map(|value| DropdownItem::new(SettingChoice::Fft(value), value.to_string())).collect(), selected);
+                    }).relative().child(self.measurement(Measured::SettingsFft)))
+                    .child(caption("Window"))
+                    .child(dropdown_button("spectrum-window", SettingChoice::Window(draft.spectrum_window).label(), cx, |this, _, _| {
+                        let values = [SpectrumWindow::Hann, SpectrumWindow::BlackmanHarris, SpectrumWindow::None];
+                        let selected = values.iter().position(|value| *value == this.settings.draft.spectrum_window).unwrap_or(0);
+                        this.open_setting_dropdown(values.into_iter().map(|value| DropdownItem::new(SettingChoice::Window(value), SettingChoice::Window(value).label())).collect(), selected);
+                    }).relative().child(self.measurement(Measured::SettingsWindow)))
                     .child(settings.pair(Field::SpectrumMinHz, Field::SpectrumMaxHz))
                     .child(settings.pair(Field::SpectrumDb, Field::SpectrumBandsPerOctave))
                     .child(settings.pair(Field::SpectrumBarWidth, Field::SpectrumGap))
@@ -836,6 +947,8 @@ impl GuiApp {
                 .child(settings.pair(Field::SpectrogramMinHz, Field::SpectrogramMaxHz))
                 .child(settings.pair(Field::SpectrogramDb, Field::SpectrogramHistory))
                 .child(row().flex_wrap()
+                    .child(visual_switch("spectrogram-interpolate", "≈", "Interpolation", draft.spectrogram_interpolate, cx,
+                        |draft| draft.spectrogram_interpolate = !draft.spectrogram_interpolate))
                     .child(visual_switch("spectrogram-scale", "ln", "Logarithmic frequency axis", draft.spectrogram_log_scale, cx,
                         |draft| draft.spectrogram_log_scale = !draft.spectrogram_log_scale))
                     .child(visual_switch("spectrogram-labels", "T", "Labels", draft.spectrogram_labels, cx,
@@ -848,6 +961,18 @@ impl GuiApp {
                     |draft| draft.waveform_labels = !draft.waveform_labels))
                 .child(caption("Appearance only: changing colors does not decode the track again. The waterline stays still while paused.")),
         }
+    }
+
+    fn about_settings(&self, cx: &mut Context<GuiApp>) -> Div {
+        column()
+            .w_full()
+            .gap_3()
+            .items_center()
+            .text_center()
+            .child(div().size(px(128.)).child(cx.new(|_| Artwork::new())))
+            .child(caption("rivu, a local-first music player"))
+            .child(caption(format!("Version {}", env!("CARGO_PKG_VERSION"))))
+            .child(caption("GPL-3.0-or-later"))
     }
 
     pub(super) fn settings_panel(
@@ -877,6 +1002,13 @@ impl GuiApp {
                 self.settings.page == SettingsPage::Visualizations,
                 cx,
                 |settings| settings.page = SettingsPage::Visualizations,
+            ))
+            .child(self.settings.tab_button(
+                "settings-about",
+                "About",
+                self.settings.page == SettingsPage::About,
+                cx,
+                |settings| settings.page = SettingsPage::About,
             ));
         let mut panel = column()
             .id(("settings-panel", panel_id))
@@ -888,16 +1020,19 @@ impl GuiApp {
             .child(category);
         let page_id = match (self.settings.page, self.settings.visual_page) {
             (SettingsPage::General, _) => "settings-general-scroll",
+            (SettingsPage::About, _) => "settings-about-scroll",
             (_, VisualPage::Common) => "settings-common-scroll",
             (_, VisualPage::Spectrum) => "settings-spectrum-scroll",
             (_, VisualPage::Spectrogram) => "settings-spectrogram-scroll",
             (_, VisualPage::Waveform) => "settings-waveform-scroll",
         };
-        let content = if self.settings.page == SettingsPage::General {
-            self.general_settings(cx)
-        } else {
-            panel = panel.child(self.visual_settings_tabs(cx));
-            self.visual_settings(cx)
+        let content = match self.settings.page {
+            SettingsPage::General => self.general_settings(cx),
+            SettingsPage::Visualizations => {
+                panel = panel.child(self.visual_settings_tabs(cx));
+                self.visual_settings(cx)
+            }
+            SettingsPage::About => self.about_settings(cx),
         };
         panel = panel.child(
             div()
@@ -951,27 +1086,31 @@ impl GuiApp {
                     },
                 )),
         );
-        if self.settings.device_dropdown.is_open() {
-            let bounds = self.measured.borrow().get(&Measured::Device).copied();
+        if self.settings.dropdown.is_open() {
+            let bounds = self
+                .measured
+                .borrow()
+                .get(&self.settings.dropdown_anchor)
+                .copied();
             if let Some(bounds) = bounds {
-                let selected = self.settings.device_dropdown.selected_index().unwrap_or(0);
-                let item_count = self.settings.device_dropdown.filtered().count();
-                let height = (item_count as f32 * TRACK_HEIGHT)
-                    .min(POPOVER_MAX_HEIGHT)
+                let selected = self.settings.dropdown.selected_index().unwrap_or(0);
+                let item_count = self.settings.dropdown.filtered().count();
+                let height = (item_count as f32 * TRACK_HEIGHT * self.state.system.config.ui_scale)
+                    .min(POPOVER_MAX_HEIGHT * self.state.system.config.ui_scale)
                     .min(f32::from(window.viewport_size().height) * 0.45);
-                let devices = uniform_list(
-                    "settings-devices",
+                let choices = uniform_list(
+                    "settings-dropdown",
                     item_count,
                     cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                         range
                             .filter_map(|index| {
                                 let (item_index, item) =
-                                    this.settings.device_dropdown.filtered_item(index)?;
+                                    this.settings.dropdown.filtered_item(index)?;
                                 let label = item.label.clone();
                                 let hint: SharedString = label.clone().into();
                                 Some(
                                     dropdown_row(
-                                        ("output-device", item_index),
+                                        ("settings-choice", item_index),
                                         item_index == selected,
                                         label,
                                     )
@@ -995,12 +1134,12 @@ impl GuiApp {
                             .position(bounds.bottom_left())
                             .snap_to_window()
                             .child(
-                                dropdown_container("device-dropdown", bounds.size.width)
+                                dropdown_container("settings-dropdown", bounds.size.width)
                                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                                        this.settings.device_dropdown.close();
+                                        this.settings.dropdown.close();
                                         cx.notify();
                                     }))
-                                    .child(devices),
+                                    .child(choices),
                             ),
                     )
                     .with_priority(2),

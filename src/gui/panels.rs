@@ -875,8 +875,10 @@ impl GuiApp {
             cx,
             |this, _, cx| this.choose_playlist_import(cx),
         ));
-        let catalog_height =
-            (self.state.library.playlists.len().max(1) as f32 * TRACK_HEIGHT).min(126.0);
+        let catalog_height = (self.state.library.playlists.len().max(1) as f32
+            * TRACK_HEIGHT
+            * self.state.system.config.ui_scale)
+            .min(126. * self.state.system.config.ui_scale);
         let mut panel = panel_surface(("playlists-panel", panel_id))
             .on_drop(cx.listener(|this, drag: &LibraryDrag, window, cx| {
                 window.prevent_default();
@@ -907,8 +909,22 @@ impl GuiApp {
                                 let playlist = this.state.library.playlists.get(index)?;
                                 let id = playlist.id;
                                 let entry_count = playlist.entries.len();
-                                let actions = row()
-                                    .flex_shrink_0()
+                                let mut actions = row().flex_shrink_0();
+                                if this.selected_playlist == Some(id) {
+                                    actions = actions.child(icon_button(
+                                        ("playlist-play-item", id as u64),
+                                        "▷",
+                                        "Play playlist",
+                                        cx,
+                                        move |this, _, cx| {
+                                            this.send(
+                                                Command::PlayPlaylist { playlist_id: id },
+                                                cx,
+                                            );
+                                        },
+                                    ));
+                                }
+                                actions = actions
                                     .child(icon_button(
                                         ("playlist-export", id as u64),
                                         "↑",
@@ -1006,17 +1022,6 @@ impl GuiApp {
             );
         if let Some(playlist_id) = playlist_id {
             let mut tools = panel_toolbar();
-            if entry_count > 0 {
-                tools = tools.child(icon_button(
-                    ("playlist-play", panel_id),
-                    "▷",
-                    "Play playlist",
-                    cx,
-                    move |this, _, cx| {
-                        this.send(Command::PlayPlaylist { playlist_id }, cx);
-                    },
-                ));
-            }
             if !self.selected.is_empty() {
                 tools = tools.child(icon_button(
                     ("playlist-add", panel_id),
