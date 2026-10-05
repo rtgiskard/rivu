@@ -37,17 +37,36 @@ impl<T> SelectionModel<T> {
     }
 }
 
-impl<T> std::ops::Deref for SelectionModel<T> {
-    type Target = HashSet<T>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.selected
+impl<T> SelectionModel<T>
+where
+    T: Eq + std::hash::Hash,
+{
+    pub(crate) fn contains(&self, id: &T) -> bool {
+        self.selected.contains(id)
     }
-}
 
-impl<T> std::ops::DerefMut for SelectionModel<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.selected
+    pub(crate) fn len(&self) -> usize {
+        self.selected.len()
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.selected.clear();
+    }
+
+    pub(crate) fn insert(&mut self, id: T) -> bool {
+        self.selected.insert(id)
+    }
+
+    pub(crate) fn remove(&mut self, id: &T) -> bool {
+        self.selected.remove(id)
+    }
+
+    pub(crate) fn extend<I: IntoIterator<Item = T>>(&mut self, ids: I) {
+        self.selected.extend(ids);
+    }
+
+    pub(crate) fn retain(&mut self, keep: impl FnMut(&T) -> bool) {
+        self.selected.retain(keep);
     }
 }
 

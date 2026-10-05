@@ -45,7 +45,6 @@ pub(crate) struct TreeState<T> {
     visible: Vec<usize>,
     expanded: HashSet<T>,
     selected: Option<usize>,
-    query: String,
 }
 
 impl<T: Clone + Eq + Hash> TreeState<T> {
@@ -56,7 +55,6 @@ impl<T: Clone + Eq + Hash> TreeState<T> {
             parents: Vec::new(),
             visible: Vec::new(),
             expanded: HashSet::new(),
-            query: String::new(),
         };
         tree.set_rows(rows);
         tree
@@ -111,46 +109,12 @@ impl<T: Clone + Eq + Hash> TreeState<T> {
             .or_else(|| (!visible.is_empty()).then_some(0));
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_query(&mut self, query: impl Into<String>) {
-        self.query = query.into();
-        self.refresh_visible();
-        self.selected = self
-            .selected
-            .filter(|index| *index < self.visible_indices().len());
-        if self.selected.is_none() && !self.visible_indices().is_empty() {
-            self.selected = Some(0);
-        }
-    }
-
     pub(crate) fn visible_indices(&self) -> &[usize] {
         &self.visible
     }
 
     fn refresh_visible(&mut self) {
         self.visible.clear();
-        if !self.query.is_empty() {
-            let query = self.query.to_lowercase();
-            let mut keep = vec![false; self.rows.len()];
-            for (index, row) in self.rows.iter().enumerate() {
-                if row.label.to_lowercase().contains(&query) {
-                    let mut ancestor = Some(index);
-                    while let Some(index) = ancestor {
-                        if keep[index] {
-                            break;
-                        }
-                        keep[index] = true;
-                        ancestor = self.parents[index];
-                    }
-                }
-            }
-            self.visible.extend(
-                keep.into_iter()
-                    .enumerate()
-                    .filter_map(|(index, keep)| keep.then_some(index)),
-            );
-            return;
-        }
         for index in 0..self.rows.len() {
             let mut parent = self.parents[index];
             let mut visible = true;
@@ -242,13 +206,6 @@ mod tests {
         assert_eq!(tree.visible_indices(), vec![0, 1, 2]);
         tree.handle_key(TreeKey::Left);
         assert_eq!(tree.selected().map(|row| row.id), Some("album"));
-    }
-
-    #[test]
-    fn search_keeps_matching_ancestors_visible() {
-        let mut tree = tree();
-        tree.set_query("track");
-        assert_eq!(tree.visible_indices(), vec![0, 1, 2]);
     }
 
     #[test]

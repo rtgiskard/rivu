@@ -17,7 +17,6 @@ impl<T> DropdownItem<T> {
 #[derive(Clone, Debug)]
 pub(crate) struct DropdownState<T> {
     items: Vec<DropdownItem<T>>,
-    query: String,
     selected: usize,
     open: bool,
 }
@@ -26,7 +25,6 @@ impl<T> Default for DropdownState<T> {
     fn default() -> Self {
         Self {
             items: Vec::new(),
-            query: String::new(),
             selected: 0,
             open: false,
         }
@@ -36,7 +34,6 @@ impl<T> Default for DropdownState<T> {
 impl<T> DropdownState<T> {
     pub(crate) fn open(&mut self, items: impl IntoIterator<Item = DropdownItem<T>>) {
         self.items = items.into_iter().collect();
-        self.query.clear();
         self.selected = 0;
         self.open = true;
         self.normalize_selection();
@@ -44,7 +41,6 @@ impl<T> DropdownState<T> {
 
     pub(crate) fn close(&mut self) {
         self.open = false;
-        self.query.clear();
         self.selected = 0;
     }
 
@@ -52,19 +48,8 @@ impl<T> DropdownState<T> {
         self.open
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_query(&mut self, query: impl Into<String>) {
-        self.query = query.into();
-        self.selected = 0;
-        self.normalize_selection();
-    }
-
     pub(crate) fn filtered(&self) -> impl Iterator<Item = (usize, &DropdownItem<T>)> {
-        let query = self.query.to_lowercase();
-        self.items
-            .iter()
-            .enumerate()
-            .filter(move |(_, item)| query.is_empty() || item.label.to_lowercase().contains(&query))
+        self.items.iter().enumerate()
     }
 
     pub(crate) fn filtered_item(&self, index: usize) -> Option<(usize, &DropdownItem<T>)> {
@@ -113,32 +98,5 @@ impl<T> DropdownState<T> {
         } else {
             self.selected = self.selected.min(count - 1);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn dropdown_filters_and_selects_candidates() {
-        let mut dropdown = DropdownState::default();
-        dropdown.open([DropdownItem::new(1, "Rock"), DropdownItem::new(2, "Jazz")]);
-        dropdown.set_query("ja");
-        assert_eq!(dropdown.selected(), Some(&2));
-    }
-
-    #[test]
-    fn selecting_original_index_respects_filtering() {
-        let mut dropdown = DropdownState::default();
-        dropdown.open([
-            DropdownItem::new(1, "Rock"),
-            DropdownItem::new(2, "Jazz"),
-            DropdownItem::new(3, "Folk"),
-        ]);
-        dropdown.set_query("ja");
-        dropdown.select_index(1);
-        assert_eq!(dropdown.selected(), Some(&2));
-        assert_eq!(dropdown.selected_index(), Some(1));
     }
 }
