@@ -29,6 +29,7 @@ const SNI_INTERFACE: &str = "org.freedesktop.StatusNotifierItem";
 const MENU_PATH: &str = "/Menu";
 const MENU_INTERFACE: &str = "com.canonical.dbusmenu";
 static INSTANCE_COUNTER: AtomicUsize = AtomicUsize::new(1);
+type IconPixmap = (i32, i32, Vec<u8>);
 
 fn sni_status() -> &'static str {
     "Active"
@@ -194,28 +195,27 @@ fn watch_watcher(connection: Connection, service_name: String) {
             return;
         }
     };
-    let mut owner_changes =
-        match proxy.receive_name_owner_changed_with_args(&[(0, WATCHER_SERVICE)]) {
-            Ok(changes) => changes,
-            Err(error) => {
-                eprintln!("Rivu tray watcher monitor unavailable: {error}");
-                return;
-            }
-        };
+    let owner_changes = match proxy.receive_name_owner_changed_with_args(&[(0, WATCHER_SERVICE)]) {
+        Ok(changes) => changes,
+        Err(error) => {
+            eprintln!("Rivu tray watcher monitor unavailable: {error}");
+            return;
+        }
+    };
 
     // The watcher may have appeared between the initial registration attempt and
     // signal subscription. Retry once before waiting for future owner changes.
     if let Err(error) = register_with_watcher(&connection, &service_name) {
         eprintln!("Rivu tray watcher not registered yet: {error}");
     }
-    while let Some(signal) = owner_changes.next() {
+    for signal in owner_changes {
         let Ok(args) = signal.args() else {
             continue;
         };
-        if args.new_owner().is_some() {
-            if let Err(error) = register_with_watcher(&connection, &service_name) {
-                eprintln!("Rivu tray watcher re-registration failed: {error}");
-            }
+        if args.new_owner().is_some()
+            && let Err(error) = register_with_watcher(&connection, &service_name)
+        {
+            eprintln!("Rivu tray watcher re-registration failed: {error}");
         }
     }
 }
@@ -391,7 +391,7 @@ impl StatusNotifierItem {
     }
 
     #[zbus(property(emits_changed_signal = "false"))]
-    fn tool_tip(&self) -> (String, Vec<(i32, i32, Vec<u8>)>, String, String) {
+    fn tool_tip(&self) -> (String, Vec<IconPixmap>, String, String) {
         let snapshot = self.data.read().snapshot.clone();
         let description = match snapshot.current_track() {
             Some(track) if track.artist.is_empty() => track.title.clone(),
