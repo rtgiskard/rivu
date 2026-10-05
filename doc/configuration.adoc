@@ -11,11 +11,13 @@ tray_enabled = true
 mpris_enabled = true
 ui_font = ""
 play_count_threshold_percent = 20.0
-spectrogram_min_hz = 20.0
-spectrogram_max_hz = 20000.0
 spectrogram_db_range = 70.0
 spectrum_db_range = 70.0
+spectrogram_interpolation_points = 1024
+spectrogram_history_seconds = 30
 ----
+
+Spectrogram interpolation generates logarithmic frequency rows up to the configured point count (64–4096); the default is 1024. The row count is also limited by the panel's rendered height. Spectrogram history grows with continuous audio up to `spectrogram_history_seconds` (1–120 seconds; default 30).
 
 Accepted media read buffer sizes are `1`, `2`, `4`, `8`, and `16` MiB.
 
@@ -137,17 +139,22 @@ mode is the additional circular presentation; its bands use the same normalized
 FFT values and color parameters.
 
 Spectrogram has separate frequency and display settings:
+Spectrogram display settings are:
 
-* `spectrogram_min_hz` / `spectrogram_max_hz`: frequency interval, default 20–20000 Hz.
-* `spectrogram_log_scale`: logarithmic when true (default), linear otherwise.
 * `spectrogram_db_range`: independent color span, 1–160 dB, default 70.
-* `spectrogram_history_seconds`: 5–120 audio seconds, default 10, independent of
-  refresh rate and panel width. Unavailable history remains blank.
+* `spectrogram_history_seconds`: maximum continuous audio history, 1–120 seconds,
+  default 30. The visible window grows with available uninterrupted audio and
+  remains blank where no history exists.
 * `spectrogram_labels`: show endpoint frequency labels, default true.
+* `spectrogram_interpolate`: interpolate dB values at logarithmic frequency positions
+  before color mapping, default true. Disable it to use nearest source frequency points.
+* `spectrogram_interpolation_points`: maximum frequency rows per cached column,
+  64–4096, default 1024. The source row count follows the tallest active
+  Spectrogram panel and is capped by this setting; smaller panels scale it down.
 
-Both frequency intervals require finite `0 < min < max <= 384000`. Rendering
-clips each interval to available analyzer bands and the source Nyquist limit;
-empty intersections report an error instead of relabeling unrelated data.
+The frequency axis is always logarithmic from 16 Hz to the source Nyquist limit.
+Rendering clips the fixed range to available analyzer bands; empty intersections
+report an error instead of relabeling unrelated data.
 Spectrum permits headroom above 0 dB; Spectrogram colors span its negative dB
 range through 0 dB. The heatmap has no reference lines and labels only its endpoints.
 

@@ -1261,8 +1261,16 @@ impl GuiApp {
         }
     }
     fn sync_analysis(&mut self, cx: &mut Context<Self>) {
+        let active_panels = self.layout.active_panels();
+        let spectrogram_panel_ids = active_panels
+            .iter()
+            .filter(|panel| panel.kind == "spectrogram")
+            .map(|panel| panel.id)
+            .collect::<Vec<_>>();
+        self.visuals
+            .retain_spectrogram_panels(&spectrogram_panel_ids);
         let analysis_visible = self.window_visible
-            && self.layout.active_panels().iter().any(|panel| {
+            && active_panels.iter().any(|panel| {
                 matches!(
                     panel.kind.as_str(),
                     "spectrum" | "spectrogram" | "radial_spectrum"

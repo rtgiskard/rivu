@@ -10,7 +10,8 @@
 //! spectrograms retain reusable CPU buckets but create no new GPU images.
 //! Range and axis changes remap cached levels even while paused; style changes
 //! redraw Spectrum in place. Unchanged buckets reuse their GPU image.
-//! Spectrum max-pools transients and animates only on the advancing audio clock.
+//! Spectrogram columns use the tallest active panel's row count, capped by
+//! configuration; smaller panels scale the shared source image.
 
 use super::{ERROR, ERROR_BG};
 use gpui::{
@@ -18,7 +19,7 @@ use gpui::{
     TextAlign, Window, canvas, div, fill, linear_color_stop, linear_gradient, point, prelude::*,
     px, rgb, size,
 };
-use std::{cell::RefCell, ops::Range, rc::Rc, sync::Arc, time::Duration};
+use std::{cell::RefCell, collections::HashMap, ops::Range, rc::Rc, sync::Arc, time::Duration};
 
 use crate::{
     analysis::AnalysisFrame,
@@ -26,6 +27,7 @@ use crate::{
 };
 
 const MAX_HISTORY_COLUMNS: usize = 512;
+const HISTORY_GAP_RESET: Duration = Duration::from_secs(1);
 const MAX_SPECTRUM_BARS: usize = 2000;
 const TOKYO_NIGHT_STOPS: &[(f32, [u8; 3])] = &[
     (0.0, [65, 72, 110]),
@@ -60,9 +62,20 @@ struct Column {
     bucket_start: Option<Duration>,
     interval_start: Duration,
     image: Option<Arc<RenderImage>>,
+    generation: u64,
+}
+
+#[derive(Clone, Copy)]
+struct HeatSample {
+    left: usize,
+    right: usize,
+    fraction: f32,
 }
 
 fn history_fraction(time: Duration, latest: Duration, history: Duration) -> f32 {
+    if history.is_zero() {
+        return 1.0;
+    }
     (1.0 - latest.saturating_sub(time).as_secs_f32() / history.as_secs_f32()).clamp(0.0, 1.0)
 }
 
@@ -72,6 +85,11 @@ fn history_column_count(history_seconds: u32, analysis_fps: u32) -> usize {
         .saturating_mul(analysis_fps as usize)
         .clamp(2, MAX_HISTORY_COLUMNS)
 }
+fn spectrogram_source_height(panel_height: usize, max_rows: u32) -> usize {
+    panel_height
+        .max(1)
+        .min(usize::try_from(max_rows.max(1)).unwrap_or(usize::MAX))
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum VisualMode {
@@ -80,13 +98,16 @@ enum VisualMode {
 }
 
 struct VisualData {
+    spectrogram_panel_heights: HashMap<u64, usize>,
     frequencies: Vec<f32>,
     sample_rate: u32,
     frequency_labels: [SharedString; 2],
     spectrum_labels: [SharedString; 2],
     db_labels: [SharedString; 4],
     spectrum_bins: Vec<Range<usize>>,
-    heat_rows: Vec<Range<usize>>,
+    heat_samples: Vec<HeatSample>,
+    heat_sample_generation: u64,
+    spectrogram_image_height: usize,
     columns: Vec<Column>,
     latest_levels: Vec<f32>,
     peaks: Vec<f32>,
@@ -116,9 +137,12 @@ struct VisualData {
     spectrum_grid: bool,
     spectrogram_db_range: f32,
     spectrogram_show_labels: bool,
+    spectrogram_interpolate: bool,
+    spectrogram_interpolation_points: u32,
     spectrogram_history_seconds: u32,
     analysis_fps: u32,
     history_columns: usize,
+    stream_generation: u64,
     head: usize,
     len: usize,
     latest: Option<usize>,
@@ -143,7 +167,9 @@ impl Visuals {
                 spectrum_labels: ["20 Hz".into(), "20 kHz".into()],
                 db_labels: std::array::from_fn(|step| db_label(-70.0 * step as f32 / 3.0)),
                 spectrum_bins: Vec::new(),
-                heat_rows: Vec::new(),
+                heat_samples: Vec::new(),
+                spectrogram_panel_heights: HashMap::new(),
+                spectrogram_image_height: 0,
                 columns: (0..MAX_HISTORY_COLUMNS)
                     .map(|_| Column::default())
                     .collect(),
@@ -175,9 +201,13 @@ impl Visuals {
                 spectrum_grid: true,
                 spectrogram_db_range: 70.0,
                 spectrogram_show_labels: true,
+                spectrogram_interpolate: true,
+                spectrogram_interpolation_points: 1024,
                 analysis_fps: 20,
-                history_columns: 200,
-                spectrogram_history_seconds: 10,
+                history_columns: MAX_HISTORY_COLUMNS,
+                heat_sample_generation: 0,
+                stream_generation: 0,
+                spectrogram_history_seconds: 30,
                 head: 0,
                 len: 0,
                 latest: None,
@@ -192,6 +222,8 @@ impl Visuals {
         let history_columns =
             history_column_count(config.spectrogram_history_seconds, config.analysis_fps);
         let changed = data.visual_background != config.visual_background.rgb()
+            || data.spectrum_db_range != config.spectrum_db_range
+            || data.spectrum_grid != config.spectrum_grid
             || data.spectrum_bars != config.spectrum_bars
             || data.spectrum_style != config.spectrum_style
             || data.spectrum_gap != config.spectrum_gap
@@ -206,9 +238,10 @@ impl Visuals {
             || data.spectrum_show_labels != config.spectrum_labels
             || data.spectrum_fft_size != config.spectrum_fft_size
             || data.spectrum_window != config.spectrum_window
-            || data.spectrum_grid != config.spectrum_grid
             || data.spectrogram_db_range != config.spectrogram_db_range
             || data.spectrogram_show_labels != config.spectrogram_labels
+            || data.spectrogram_interpolate != config.spectrogram_interpolate
+            || data.spectrogram_interpolation_points != config.spectrogram_interpolation_points
             || data.spectrogram_history_seconds != config.spectrogram_history_seconds
             || data.analysis_fps != config.analysis_fps
             || data.history_columns != history_columns;
@@ -222,7 +255,9 @@ impl Visuals {
         let analysis_changed = data.spectrum_fft_size != config.spectrum_fft_size
             || data.spectrum_window != config.spectrum_window;
         let heat_changed = data.visual_background != config.visual_background.rgb()
-            || data.spectrogram_db_range != config.spectrogram_db_range;
+            || data.spectrogram_db_range != config.spectrogram_db_range
+            || data.spectrogram_interpolate != config.spectrogram_interpolate
+            || data.spectrogram_interpolation_points != config.spectrogram_interpolation_points;
         data.spectrum_db_range = config.spectrum_db_range;
         data.spectrum_bars = config.spectrum_bars;
         data.spectrum_style = config.spectrum_style;
@@ -237,6 +272,8 @@ impl Visuals {
         data.spectrum_interpolate = config.spectrum_interpolate;
         data.spectrum_show_labels = config.spectrum_labels;
         data.spectrogram_show_labels = config.spectrogram_labels;
+        data.spectrogram_interpolate = config.spectrogram_interpolate;
+        data.spectrogram_interpolation_points = config.spectrogram_interpolation_points;
         data.spectrum_fft_size = config.spectrum_fft_size;
         data.spectrum_window = config.spectrum_window;
         data.spectrum_grid = config.spectrum_grid;
@@ -272,7 +309,7 @@ impl Visuals {
         let sample_rate_changed = data.sample_rate != frame.sample_rate;
         data.sample_rate = frame.sample_rate;
         if sample_rate_changed || data.frequencies != frame.frequencies_hz {
-            data.clear_history();
+            data.stream_generation = data.stream_generation.wrapping_add(1);
             data.latest_levels.clear();
             data.frequencies.clone_from(&frame.frequencies_hz);
             data.top_db = 0.0;
@@ -282,12 +319,6 @@ impl Visuals {
         }
         if frame.spectrum_db.is_empty() {
             return;
-        }
-        if let Some(previous) = data.latest_sample_time
-            && frame.sample_time.saturating_sub(previous)
-                > Duration::from_secs(data.spectrogram_history_seconds as u64)
-        {
-            data.clear_history();
         }
         let now = frame.sample_time;
         if data.last_update.is_some_and(|last| now < last) {
@@ -357,6 +388,12 @@ impl Visuals {
     pub(super) fn spectrogram(&self, panel_id: u64) -> AnyElement {
         self.view(panel_id, VisualMode::Spectrogram)
     }
+    pub(super) fn retain_spectrogram_panels(&mut self, panel_ids: &[u64]) {
+        self.data
+            .borrow_mut()
+            .spectrogram_panel_heights
+            .retain(|panel_id, _| panel_ids.contains(panel_id));
+    }
 
     fn view(&self, panel_id: u64, mode: VisualMode) -> AnyElement {
         let data = Rc::clone(&self.data);
@@ -371,7 +408,7 @@ impl Visuals {
                     VisualMode::Spectrum if data.spectrum_range().is_none() => {
                         Some("No audible spectrum data".into())
                     }
-                    VisualMode::Spectrogram if data.heat_rows.is_empty() => {
+                    VisualMode::Spectrogram if data.visible_range().is_none() => {
                         Some("No spectrogram data in 16 Hz–Nyquist".into())
                     }
                     _ => None,
@@ -379,6 +416,7 @@ impl Visuals {
             }
         };
         let showing_status = message.is_some();
+        let prepaint_data = Rc::clone(&data);
         let kind = match mode {
             VisualMode::Spectrum => "spectrum",
             VisualMode::Spectrogram => "spectrogram",
@@ -393,7 +431,16 @@ impl Visuals {
             .bg(rgb(self.data.borrow().visual_background))
             .child(
                 canvas(
-                    |_, _, _| (),
+                    move |bounds, _, _| {
+                        if mode == VisualMode::Spectrogram {
+                            let height = ((bounds.size.height - px(12.0)).max(px(1.0)) / px(1.0))
+                                .ceil() as usize;
+                            prepaint_data
+                                .borrow_mut()
+                                .spectrogram_panel_heights
+                                .insert(panel_id, height.max(1));
+                        }
+                    },
                     move |bounds, _, window, cx| {
                         let mut data = data.borrow_mut();
                         data.release_retired(window);
@@ -481,15 +528,21 @@ impl VisualData {
     }
 
     fn push_history(&mut self, time: Duration, levels: &[f32]) {
-        // One extra slot covers the partial bucket at the left edge.
+        let discontinuity = self
+            .latest
+            .is_some_and(|index| self.columns[index].generation != self.stream_generation)
+            || self
+                .latest_sample_time
+                .is_some_and(|previous| time.saturating_sub(previous) > HISTORY_GAP_RESET);
         let width = Duration::from_secs_f64(
             self.spectrogram_history_seconds as f64 / (self.history_columns - 1) as f64,
         );
         let bucket =
             Duration::from_nanos(((time.as_nanos() / width.as_nanos()) * width.as_nanos()) as u64);
-        let merge = self
-            .latest
-            .filter(|&index| self.columns[index].bucket_start == Some(bucket));
+        let merge = self.latest.filter(|&index| {
+            self.columns[index].generation == self.stream_generation
+                && self.columns[index].bucket_start == Some(bucket)
+        });
         let index = merge.unwrap_or(self.head);
         let mut changed = merge.is_none();
         if merge.is_some() {
@@ -502,13 +555,17 @@ impl VisualData {
             self.columns[index].levels.clear();
             self.columns[index].levels.extend_from_slice(levels);
             self.columns[index].bucket_start = Some(bucket);
-            self.columns[index].interval_start = self
-                .latest_sample_time
-                .unwrap_or(time)
-                .max(time.saturating_sub(Duration::from_millis(250)));
+            self.columns[index].interval_start = if discontinuity {
+                time
+            } else {
+                self.latest_sample_time
+                    .map(|previous| previous.max(time.saturating_sub(Duration::from_millis(250))))
+                    .unwrap_or_else(|| time.saturating_sub(Duration::from_millis(250)))
+            };
             self.head = (index + 1) % self.history_columns;
             self.len = (self.len + 1).min(self.history_columns);
         }
+        self.columns[index].generation = self.stream_generation;
         self.columns[index].sample_time = Some(time);
         if changed && let Some(image) = self.columns[index].image.take() {
             self.retired.push(image);
@@ -518,6 +575,16 @@ impl VisualData {
     fn invalidate_images(&mut self) {
         for column in &mut self.columns {
             if let Some(image) = column.image.take() {
+                self.retired.push(image);
+            }
+        }
+    }
+
+    fn invalidate_current_images(&mut self) {
+        for column in &mut self.columns {
+            if column.generation == self.stream_generation
+                && let Some(image) = column.image.take()
+            {
                 self.retired.push(image);
             }
         }
@@ -533,6 +600,23 @@ impl VisualData {
         self.len = 0;
         self.latest = None;
         self.latest_sample_time = None;
+        self.spectrogram_image_height = 0;
+        self.heat_samples.clear();
+        self.heat_sample_generation = 0;
+    }
+
+    fn history_window(&self, latest: Duration) -> Duration {
+        let limit = Duration::from_secs(self.spectrogram_history_seconds as u64);
+        let available = self
+            .columns
+            .iter()
+            .filter_map(|column| column.sample_time)
+            .min()
+            .map(|oldest| latest.saturating_sub(oldest));
+        available
+            .filter(|duration| !duration.is_zero())
+            .unwrap_or(limit)
+            .min(limit)
     }
 
     fn visible_range(&self) -> Option<(usize, usize, f32, f32)> {
@@ -560,10 +644,8 @@ impl VisualData {
     }
 
     fn refresh_frequency_labels(&mut self) {
-        self.heat_rows.clear();
         self.spectrum_bins.clear();
         if let Some((_, _, low, high)) = self.visible_range() {
-            group_heat_rows(&self.frequencies, low, high, &mut self.heat_rows);
             self.frequency_labels = [frequency_label(low), frequency_label(high)];
         }
         if let Some((_, _, low, high)) = self.spectrum_range() {
@@ -857,19 +939,36 @@ impl VisualData {
                 bounds.size.height - px(12.0),
             ),
         );
-        if self.heat_rows.is_empty() {
-            return Ok(());
-        }
         if plot.size.width <= px(2.0) || plot.size.height <= px(2.0) {
             return Ok(());
         }
         let Some(latest_time) = self.latest_sample_time else {
             return Ok(());
         };
-        let history = Duration::from_secs(self.spectrogram_history_seconds as u64);
+        let Some((_, _, low, high)) = self.visible_range() else {
+            return Ok(());
+        };
+        let history = self.history_window(latest_time);
         let start_time = latest_time.saturating_sub(history);
-        let height = u32::try_from(self.heat_rows.len())
+        let fallback_height = (plot.size.height / px(1.0)).ceil() as usize;
+        let max_panel_height = self
+            .spectrogram_panel_heights
+            .values()
+            .copied()
+            .max()
+            .unwrap_or(fallback_height);
+        let height =
+            spectrogram_source_height(max_panel_height, self.spectrogram_interpolation_points);
+        let height_u32 = u32::try_from(height)
             .map_err(|_| "Spectrogram image height exceeds GPU image dimensions".to_string())?;
+        if self.spectrogram_image_height != height
+            || self.heat_sample_generation != self.stream_generation
+        {
+            self.invalidate_current_images();
+            self.spectrogram_image_height = height;
+            self.heat_samples = build_heat_samples(&self.frequencies, low, high, height);
+            self.heat_sample_generation = self.stream_generation;
+        }
         for index in 0..self.history_columns {
             let Some(sample_time) = self.columns[index].sample_time else {
                 continue;
@@ -877,14 +976,16 @@ impl VisualData {
             if sample_time < start_time || sample_time > latest_time {
                 continue;
             }
+            if self.columns[index].generation != self.stream_generation
+                && self.columns[index].image.is_none()
+            {
+                continue;
+            }
             if self.columns[index].image.is_none() {
                 let levels = &self.columns[index].levels;
-                let mut pixels = image::RgbaImage::new(1, height);
-                for row in 0..height {
-                    let mut level = f32::NEG_INFINITY;
-                    for source in self.heat_rows[height as usize - 1 - row as usize].clone() {
-                        level = level.max(finite_level(levels[source]));
-                    }
+                let mut pixels = image::RgbaImage::new(1, height_u32);
+                for (row, sample) in self.heat_samples.iter().enumerate() {
+                    let level = sample_heat_level_at(levels, *sample, self.spectrogram_interpolate);
                     let intensity = ((level + self.spectrogram_db_range)
                         / self.spectrogram_db_range)
                         .clamp(0.0, 1.0);
@@ -893,7 +994,7 @@ impl VisualData {
                     } else {
                         [0, 0, 0]
                     };
-                    pixels.put_pixel(0, row, image::Rgba([blue, green, red, 255]));
+                    pixels.put_pixel(0, row as u32, image::Rgba([blue, green, red, 255]));
                 }
                 self.columns[index].image =
                     Some(Arc::new(RenderImage::new([image::Frame::new(pixels)])));
@@ -1135,11 +1236,81 @@ fn paint_spectrum_path(mut path: Path<Pixels>, plot: Bounds<Pixels>, window: &mu
 fn stop_color([red, green, blue]: [u8; 3]) -> u32 {
     (u32::from(red) << 16) | (u32::from(green) << 8) | u32::from(blue)
 }
-fn group_heat_rows(frequencies: &[f32], low: f32, high: f32, rows: &mut Vec<Range<usize>>) {
-    rows.clear();
-    let first = frequencies.partition_point(|hz| *hz < low);
-    let end = frequencies.partition_point(|hz| *hz <= high);
-    rows.extend((first..end).map(|index| index..index + 1));
+fn build_heat_samples(frequencies: &[f32], low: f32, high: f32, height: usize) -> Vec<HeatSample> {
+    (0..height)
+        .filter_map(|row| {
+            let fraction = if height == 1 {
+                0.0
+            } else {
+                row as f32 / (height - 1) as f32
+            };
+            let hz = (high.ln() + (low.ln() - high.ln()) * fraction).exp();
+            heat_sample(frequencies, hz, low, high)
+        })
+        .collect()
+}
+
+fn heat_sample(frequencies: &[f32], hz: f32, low: f32, high: f32) -> Option<HeatSample> {
+    let first = frequencies.partition_point(|value| *value < low);
+    let end = frequencies.partition_point(|value| *value <= high);
+    if first >= end {
+        return None;
+    }
+    let right = frequencies
+        .partition_point(|value| *value < hz)
+        .clamp(first, end - 1);
+    let left = right.saturating_sub(1).max(first);
+    let fraction = if left == right {
+        0.0
+    } else {
+        ((hz.ln() - frequencies[left].ln()) / (frequencies[right].ln() - frequencies[left].ln()))
+            .clamp(0.0, 1.0)
+    };
+    Some(HeatSample {
+        left,
+        right,
+        fraction,
+    })
+}
+
+#[cfg(test)]
+fn sample_heat_level(
+    frequencies: &[f32],
+    levels: &[f32],
+    hz: f32,
+    low: f32,
+    high: f32,
+    interpolate: bool,
+) -> f32 {
+    let Some(sample) = heat_sample(frequencies, hz, low, high) else {
+        return f32::NEG_INFINITY;
+    };
+    sample_heat_level_at(levels, sample, interpolate)
+}
+
+fn sample_heat_level_at(levels: &[f32], sample: HeatSample, interpolate: bool) -> f32 {
+    if levels.len() <= sample.right {
+        return f32::NEG_INFINITY;
+    }
+    let left_level = finite_level(levels[sample.left]);
+    let right_level = finite_level(levels[sample.right]);
+    if sample.left == sample.right || !interpolate {
+        if !interpolate && sample.left != sample.right {
+            return if sample.fraction <= 0.5 {
+                left_level
+            } else {
+                right_level
+            };
+        }
+        return right_level;
+    }
+    if !left_level.is_finite() {
+        return right_level;
+    }
+    if !right_level.is_finite() {
+        return left_level;
+    }
+    left_level + (right_level - left_level) * sample.fraction
 }
 
 fn group_bands(
@@ -1248,19 +1419,21 @@ fn note_label(frequency: f32) -> SharedString {
     format!("{}{octave}", NAMES[midi.rem_euclid(12) as usize]).into()
 }
 
-pub(super) fn palette_color(fraction: f32) -> u32 {
-    palette_color_with(VisualizationPalette::Deadbeef, fraction)
-}
-
-pub(super) fn palette_function(palette: VisualizationPalette) -> fn(f32) -> u32 {
+pub(super) fn palette_function_without_floor(palette: VisualizationPalette) -> fn(f32) -> u32 {
     match palette {
         VisualizationPalette::TokyoNight => palette_tokyo_night_color,
-        VisualizationPalette::Deadbeef => palette_color,
+        VisualizationPalette::Deadbeef => palette_deadbeef_without_floor,
     }
 }
 
 fn palette_tokyo_night_color(fraction: f32) -> u32 {
     palette_color_with(VisualizationPalette::TokyoNight, fraction)
+}
+fn palette_deadbeef_without_floor(fraction: f32) -> u32 {
+    palette_color_with(
+        VisualizationPalette::Deadbeef,
+        0.06 + fraction.clamp(0.0, 1.0) * 0.94,
+    )
 }
 
 fn palette_color_with(palette: VisualizationPalette, fraction: f32) -> u32 {
@@ -1310,8 +1483,14 @@ mod tests {
     use super::*;
     #[test]
     fn deadbeef_palettes_have_expected_endpoints() {
-        assert_eq!(palette_color(0.0), 0x000000);
-        assert_eq!(palette_color(1.0), 0xff0000);
+        assert_eq!(
+            palette_color_with(VisualizationPalette::Deadbeef, 0.0),
+            0x000000
+        );
+        assert_eq!(
+            palette_color_with(VisualizationPalette::Deadbeef, 1.0),
+            0xff0000
+        );
         assert_eq!(gradient(0.0, DEADBEEF_STOPS), [0, 0, 0]);
         assert_eq!(gradient(1.0, DEADBEEF_STOPS), [255, 0, 0]);
     }
@@ -1356,6 +1535,30 @@ mod tests {
     }
 
     #[test]
+    fn history_window_grows_with_continuous_audio_until_limit() {
+        let mut visuals = Visuals::new();
+        visuals.update(&frame(1.0, -30.0));
+        visuals.update(&frame(1.5, -30.0));
+        assert_eq!(
+            visuals
+                .data
+                .borrow()
+                .history_window(Duration::from_secs_f64(1.5)),
+            Duration::from_millis(500)
+        );
+        for step in 4..=62 {
+            visuals.update(&frame(step as f64 * 0.5, -30.0));
+        }
+        assert_eq!(
+            visuals
+                .data
+                .borrow()
+                .history_window(Duration::from_secs(31)),
+            Duration::from_secs(30)
+        );
+    }
+
+    #[test]
     fn buckets_preserve_transients_without_contaminating_latest_spectrum() {
         let mut visuals = Visuals::new();
         visuals.configure(&Config {
@@ -1387,19 +1590,25 @@ mod tests {
     }
 
     #[test]
-    fn history_does_not_fill_long_gaps_or_mix_sample_rates() {
+    fn history_preserves_gaps_and_stream_changes() {
         let mut visuals = Visuals::new();
         visuals.update(&frame(1.0, -20.0));
         visuals.update(&frame(6.0, -30.0));
         {
             let data = visuals.data.borrow();
+            assert_eq!(data.len, 2);
             let last = &data.columns[data.latest.unwrap()];
-            assert_eq!(last.interval_start, Duration::from_millis(5750));
+            assert_eq!(last.interval_start, Duration::from_secs(6));
+            assert!(
+                data.columns
+                    .iter()
+                    .any(|column| column.sample_time == Some(Duration::from_secs(1)))
+            );
         }
         let mut changed_rate = frame(6.5, -40.0);
         changed_rate.sample_rate = 44_100;
         visuals.update(&changed_rate);
-        assert_eq!(visuals.data.borrow().len, 1);
+        assert_eq!(visuals.data.borrow().len, 3);
     }
 
     #[test]
@@ -1426,6 +1635,28 @@ mod tests {
         assert!(data.columns[0].image.is_none());
         assert_eq!(data.columns[0].levels, vec![-30.0; 4]);
         assert_eq!(data.len, 1);
+    }
+
+    #[test]
+    fn spectrum_range_and_grid_update_without_other_changes() {
+        let mut visuals = Visuals::new();
+        let initial = Config::default();
+        visuals.configure(&initial);
+
+        let mut range = initial.clone();
+        range.spectrum_db_range = 40.0;
+        visuals.configure(&range);
+        {
+            let data = visuals.data.borrow();
+            assert_eq!(data.spectrum_db_range, 40.0);
+            assert!(data.spectrum_grid);
+        }
+
+        let mut grid = range;
+        grid.spectrum_grid = false;
+        visuals.configure(&grid);
+        let data = visuals.data.borrow();
+        assert!(!data.spectrum_grid);
     }
 
     #[test]
@@ -1460,12 +1691,24 @@ mod tests {
     }
 
     #[test]
-    fn heat_rows_never_create_empty_frequency_lines() {
-        let frequencies = [20.0, 25.0, 31.5, 40.0, 50.0, 63.0, 80.0, 100.0];
-        let mut rows = Vec::new();
-        group_heat_rows(&frequencies, 25.0, 80.0, &mut rows);
-        assert_eq!(rows, vec![1..2, 2..3, 3..4, 4..5, 5..6, 6..7]);
-        assert!(rows.iter().all(|row| row.start + 1 == row.end));
+    fn spectrogram_source_uses_tallest_panel_and_configured_cap() {
+        assert_eq!(spectrogram_source_height(320, 1024), 320);
+        assert_eq!(spectrogram_source_height(700, 1024), 700);
+        assert_eq!(spectrogram_source_height(1400, 1024), 1024);
+        assert_eq!(spectrogram_source_height(1400, 512), 512);
+    }
+
+    #[test]
+    fn spectrogram_interpolation_is_linear_in_log_frequency_and_db() {
+        let frequencies = [100.0, 200.0, 400.0];
+        let levels = [-40.0, -20.0, 0.0];
+        let midpoint = (100.0_f32 * 200.0).sqrt();
+        let level = sample_heat_level(&frequencies, &levels, midpoint, 100.0, 400.0, true);
+        assert!((level - (-30.0)).abs() < 0.0001);
+        assert_eq!(
+            sample_heat_level(&frequencies, &levels, 120.0, 100.0, 400.0, false),
+            -40.0
+        );
     }
 
     #[test]
@@ -1563,7 +1806,7 @@ mod tests {
     }
 
     #[test]
-    fn analysis_resolution_changes_reset_motion_and_history_safely() {
+    fn analysis_resolution_changes_preserve_old_images_safely() {
         let mut visuals = Visuals::new();
         visuals.update(&frame(1.0, -10.0));
         let mut changed = frame(2.0, -50.0);
@@ -1571,7 +1814,13 @@ mod tests {
         changed.spectrum_db = vec![-50.0; 6];
         visuals.update(&changed);
         let data = visuals.data.borrow();
-        assert_eq!(data.len, 1);
+        assert_eq!(data.len, 2);
+        assert!(data.columns.iter().any(|column| column.generation == 0));
+        assert!(
+            data.columns
+                .iter()
+                .any(|column| column.generation == data.stream_generation)
+        );
         assert_eq!(data.peaks, changed.spectrum_db);
         assert_eq!(data.bar_levels.len(), 6);
         assert_eq!(data.bar_deadlines.len(), 6);

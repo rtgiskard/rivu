@@ -67,6 +67,7 @@ enum Field {
     SpectrumSmoothing,
     SpectrogramDb,
     SpectrogramHistory,
+    SpectrogramInterpolationPoints,
     CursorColor,
     Glow,
 }
@@ -102,7 +103,8 @@ impl Field {
             Self::SpectrumBarHold => "Bar hold (0–2000 ms)",
             Self::SpectrumBarGravity => "Bar gravity (0–500 dB/s²)",
             Self::SpectrumSmoothing => "Release smoothing (0–1000 ms)",
-            Self::SpectrogramHistory => "History (5–120 seconds)",
+            Self::SpectrogramHistory => "History limit (1–120 seconds)",
+            Self::SpectrogramInterpolationPoints => "Interpolated frequency points (64–4096)",
             Self::CursorColor => "Waterline color (#RRGGBB)",
             Self::Glow => "Glow strength (0–2; 0 = off)",
         }
@@ -244,6 +246,7 @@ impl Settings {
             Field::SpectrumSmoothing,
             Field::SpectrogramDb,
             Field::SpectrogramHistory,
+            Field::SpectrogramInterpolationPoints,
             Field::CursorColor,
             Field::Glow,
         ]
@@ -435,6 +438,11 @@ impl Settings {
             cx,
         );
         self.set_value(
+            Field::SpectrogramInterpolationPoints,
+            self.draft.spectrogram_interpolation_points.to_string(),
+            cx,
+        );
+        self.set_value(
             Field::CursorColor,
             self.draft.waveform_cursor_color.to_string(),
             cx,
@@ -495,6 +503,8 @@ impl Settings {
         config.spectrum_bars = self.number(Field::SpectrumBars, cx)?;
         config.spectrogram_db_range = self.number(Field::SpectrogramDb, cx)?;
         config.spectrogram_history_seconds = self.number(Field::SpectrogramHistory, cx)?;
+        config.spectrogram_interpolation_points =
+            self.number(Field::SpectrogramInterpolationPoints, cx)?;
         config.waveform_cursor_color = self
             .value(Field::CursorColor, cx)
             .trim()
@@ -990,12 +1000,33 @@ impl GuiApp {
                             |draft| draft.spectrum_labels = !draft.spectrum_labels)))
                     .child(caption("Auto uses bar width plus gap, up to 512 bars. Gravity accelerates falling levels; 0 snaps to the signal after hold, bypassing smoothing. Attacks stay immediate. Labels show four dB levels and the first/last frequencies."))
             }
-            VisualPage::Spectrogram => column().gap_3()
+            VisualPage::Spectrogram => column()
+                .gap_3()
                 .child(settings.pair(Field::SpectrogramDb, Field::SpectrogramHistory))
-                .child(row().flex_wrap()
-                    .child(visual_switch("spectrogram-labels", "T", "Labels", draft.spectrogram_labels, cx,
-                        |draft| draft.spectrogram_labels = !draft.spectrogram_labels)))
-                .child(caption("The frequency axis is logarithmic from 16 Hz to Nyquist; history is measured in audio seconds.")), 
+                .child(settings.field(Field::SpectrogramInterpolationPoints))
+                .child(
+                    row()
+                        .flex_wrap()
+                        .child(visual_switch(
+                            "spectrogram-interpolate",
+                            "≈",
+                            "Interpolation",
+                            draft.spectrogram_interpolate,
+                            cx,
+                            |draft| draft.spectrogram_interpolate = !draft.spectrogram_interpolate,
+                        ))
+                        .child(visual_switch(
+                            "spectrogram-labels",
+                            "T",
+                            "Labels",
+                            draft.spectrogram_labels,
+                            cx,
+                            |draft| draft.spectrogram_labels = !draft.spectrogram_labels,
+                        )),
+                )
+                .child(caption(
+                    "The frequency axis is logarithmic from 16 Hz to Nyquist; the tallest active Spectrogram panel sets the shared source resolution, capped by the configured interpolation points, and smaller panels scale it down.",
+                )),
             VisualPage::RadialSpectrum => {
                 column()
                     .gap_3()
@@ -1030,8 +1061,8 @@ impl GuiApp {
                     ))
                     .child(settings.pair(Field::RadialSpectrumSensitivity, Field::RadialSpectrumRotationSpeed))
                     .child(settings.pair(Field::RadialSpectrumBarWidth, Field::RadialSpectrumBarGlowLayers))
-                    .child(settings.pair(Field::RadialSpectrumRingOpacity, Field::RadialSpectrumBloomIntensity))
                     .child(settings.pair(Field::RadialSpectrumInnerDiameter, Field::RadialSpectrumWaveThickness))
+                    .child(settings.pair(Field::RadialSpectrumRingOpacity, Field::RadialSpectrumBloomIntensity))
                     .child(settings.pair(Field::RadialSpectrumPrimaryColor, Field::RadialSpectrumSecondaryColor))
                     .child(visual_switch(
                         "radial-spectrum-fade-idle",

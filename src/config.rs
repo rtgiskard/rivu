@@ -166,9 +166,13 @@ pub struct Config {
     pub radial_spectrum_secondary_color: RgbColor,
 
     pub spectrogram_labels: bool,
+    pub spectrogram_interpolate: bool,
+    /// Maximum logarithmic frequency rows generated for each cached column.
+    pub spectrogram_interpolation_points: u32,
     pub waveform_labels: bool,
     pub spectrum_db_range: f32,
     pub spectrogram_db_range: f32,
+    /// Maximum continuous audio history shown by Spectrogram.
     pub spectrogram_history_seconds: u32,
     pub waveform_cursor_color: RgbColor,
     pub waveform_glow: f32,
@@ -223,10 +227,12 @@ impl Default for Config {
             radial_spectrum_secondary_color: RgbColor(0xbb9af7),
 
             spectrogram_labels: true,
+            spectrogram_interpolate: true,
+            spectrogram_interpolation_points: 1024,
             waveform_labels: true,
             spectrum_db_range: 70.0,
             spectrogram_db_range: 70.0,
-            spectrogram_history_seconds: 10,
+            spectrogram_history_seconds: 30,
             waveform_cursor_color: RgbColor(0x73daca),
             waveform_glow: 1.0,
             media_read_buffer_mb: 2,
@@ -412,8 +418,12 @@ impl Config {
             "spectrum_smoothing_ms must be between 0 and 1000 ms"
         );
         ensure!(
-            (5..=120).contains(&self.spectrogram_history_seconds),
-            "spectrogram_history_seconds must be between 5 and 120 seconds"
+            (1..=120).contains(&self.spectrogram_history_seconds),
+            "spectrogram_history_seconds must be between 1 and 120 seconds"
+        );
+        ensure!(
+            (64..=4096).contains(&self.spectrogram_interpolation_points),
+            "spectrogram_interpolation_points must be between 64 and 4096"
         );
         ensure!(
             self.waveform_glow.is_finite() && (0.0..=2.0).contains(&self.waveform_glow),
@@ -569,6 +579,8 @@ mod tests {
             radial_spectrum_primary_color: "#7aa2f7".parse().unwrap(),
             radial_spectrum_secondary_color: "#bb9af7".parse().unwrap(),
             spectrogram_labels: false,
+            spectrogram_interpolate: false,
+            spectrogram_interpolation_points: 1024,
             waveform_labels: false,
             spectrogram_db_range: 100.0,
             spectrogram_history_seconds: 30,
@@ -677,8 +689,7 @@ mod tests {
             "spectrum_bar_gravity = 501",
             "spectrum_bar_gravity = nan",
             "spectrum_smoothing_ms = 1001",
-            "spectrogram_history_seconds = 4",
-            "spectrogram_history_seconds = 121",
+            "spectrogram_history_seconds = 0",
             "waveform_glow = -1",
             "waveform_glow = 3",
             "visual_background = '#12345'",
@@ -847,7 +858,8 @@ mod tests {
                 spectrum_bar_hold_ms: if high { 2000 } else { 0 },
                 spectrum_bar_gravity: if high { 500.0 } else { 0.0 },
                 spectrum_smoothing_ms: if high { 1000 } else { 0 },
-                spectrogram_history_seconds: if high { 120 } else { 5 },
+                spectrogram_history_seconds: if high { 120 } else { 1 },
+                spectrogram_interpolation_points: if high { 4096 } else { 64 },
                 waveform_glow: if high { 2.0 } else { 0.0 },
                 visual_background: if high {
                     RgbColor(0xffffff)
