@@ -1,11 +1,11 @@
 use crate::{
     ipc,
     model::{Command, PlaybackStatus, RepeatMode, Track, playback_key_command},
-    projection::{ClientSnapshot, TuiSnapshot},
-    response::StateResponse,
+    projection::TuiSnapshot,
+    response::{Ack, StateResponse},
 };
 use anyhow::{Context, Result};
-use crossbeam_channel::{Receiver, bounded};
+use crossbeam_channel::{Receiver, Sender, bounded};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
     execute,
@@ -15,7 +15,7 @@ use parking_lot::Mutex;
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph, Wrap},
@@ -141,12 +141,54 @@ fn spawn_watcher(socket_path: &Path, revision: u64) -> Watcher {
         worker: Some(worker),
     }
 }
+struct CommandWorker {
+    sender: Option<Sender<Command>>,
+    stopping: Option<Sender<()>>,
+    results: Receiver<Result<Ack, String>>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl Drop for CommandWorker {
+    fn drop(&mut self) {
+        self.sender.take();
+        if let Some(stopping) = self.stopping.take() {
+            let _ = stopping.send(());
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn spawn_command_worker(socket_path: &Path) -> CommandWorker {
+    let socket_path = socket_path.to_owned();
+    let (sender, receiver) = bounded::<Command>(8);
+    let (stopping, stop_receiver) = bounded::<()>(1);
+    let (result_sender, results) = bounded::<Result<Ack, String>>(8);
+    let worker = std::thread::spawn(move || {
+        while let Ok(command) = receiver.recv() {
+            let result =
+                ipc::request_ack(&socket_path, &command).map_err(|error| format!("{error:#}"));
+            crossbeam_channel::select! {
+                send(result_sender, result) -> _ => {}
+                recv(stop_receiver) -> _ => break,
+            }
+        }
+    });
+    CommandWorker {
+        sender: Some(sender),
+        stopping: Some(stopping),
+        results,
+        worker: Some(worker),
+    }
+}
 
 fn run_loop(socket_path: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
     let snapshot = request_state(socket_path)?;
     let updates = spawn_watcher(socket_path, snapshot.system.revision);
+    let commands = spawn_command_worker(socket_path);
     let mut tui = TuiState::new(snapshot);
-    tui.ui.sync_queue(&tui.snapshot, &tui.snapshot);
+    tui.ui.sync_playlists(&tui.snapshot, &tui.snapshot);
     let mut redraw = true;
     let mut immediate_redraw = true;
     let mut last_draw = Instant::now() - Duration::from_millis(100);
@@ -154,16 +196,26 @@ fn run_loop(socket_path: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>
         while updates.receiver.try_recv().is_ok() {}
         if let Some(update) = updates.latest.lock().take() {
             let response = update.map_err(anyhow::Error::msg)?;
-            let response_revision = response.state.system.revision as u16;
-            if response.ok {
-                if tui.pending_revision == Some(response_revision) {
-                    tui.pending_revision = None;
-                }
-                if response.state.system.revision != tui.snapshot.system.revision {
-                    tui.apply_snapshot(TuiSnapshot::from_client(&response.state));
-                    redraw = true;
-                }
+            if response.ok && response.state.system.revision != tui.snapshot.system.revision {
+                tui.apply_snapshot(TuiSnapshot::from_client(&response.state));
+                redraw = true;
             }
+        }
+        while let Ok(result) = commands.results.try_recv() {
+            match result {
+                Ok(ack) if !ack.ok => {
+                    tui.ui
+                        .set_message(Some(ack.error.unwrap_or_else(|| "Command rejected".into())));
+                }
+                Ok(_) => {}
+                Err(error) => tui.ui.set_message(Some(error)),
+            }
+            redraw = true;
+            immediate_redraw = true;
+        }
+        if tui.ui.expire_message() {
+            redraw = true;
+            immediate_redraw = true;
         }
         if redraw && (immediate_redraw || last_draw.elapsed() >= Duration::from_millis(100)) {
             terminal.draw(|frame| draw(frame, &tui.snapshot, &mut tui.ui))?;
@@ -184,39 +236,26 @@ fn run_loop(socket_path: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>
                     let next = match tui.ui.key_action(key, &tui.snapshot) {
                         KeyAction::Quit => break,
                         action @ (KeyAction::Search | KeyAction::Tree) => {
-                            let response = ipc::request(socket_path, &Command::Status)?;
-                            if response.ok {
-                                let library = Arc::clone(&response.state.library.tracks);
-                                if matches!(action, KeyAction::Tree) {
-                                    tui.ui.tree = Some(LibraryTree::new(library));
-                                    tui.ui.search = None;
-                                } else {
-                                    tui.ui.search = Some(LibrarySearch::new(library));
-                                    tui.ui.tree = None;
-                                }
-                                tui.ui.mark_local_change();
+                            let library = Arc::clone(&tui.snapshot.library.tracks);
+                            if matches!(action, KeyAction::Tree) {
+                                tui.ui.view = View::Tree(LibraryTree::new(library));
+                            } else {
+                                tui.ui.view = View::Search(LibrarySearch::new(library));
                             }
-                            tui.ui.accept_response(response)
+                            tui.ui.mark_local_change();
+                            tui.snapshot.clone()
                         }
                         KeyAction::Command(command) => {
-                            let ack = ipc::request_ack(socket_path, &command)?;
-                            if ack.ok {
-                                let target = ack.revision as u16;
-                                if target != tui.snapshot.system.revision as u16 {
-                                    tui.pending_revision = Some(target);
-                                }
-                                tui.ui.accept_response(StateResponse {
-                                    ok: true,
-                                    error: None,
-                                    state: ClientSnapshot::from_tui(&tui.snapshot),
-                                })
-                            } else {
-                                tui.ui.accept_response(StateResponse {
-                                    ok: false,
-                                    error: ack.error,
-                                    state: ClientSnapshot::from_tui(&tui.snapshot),
-                                })
+                            let queued = commands
+                                .sender
+                                .as_ref()
+                                .is_some_and(|sender| sender.try_send(command).is_ok());
+                            if !queued {
+                                tui.ui.set_message(Some("Command queue busy".into()));
+                                redraw = true;
+                                immediate_redraw = true;
                             }
+                            continue;
                         }
                         KeyAction::Ignored => {
                             if tui.ui.local_revision != local_revision {
@@ -241,7 +280,6 @@ fn run_loop(socket_path: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>
 struct TuiState {
     snapshot: TuiSnapshot,
     ui: UiState,
-    pending_revision: Option<u16>,
 }
 
 impl TuiState {
@@ -249,7 +287,6 @@ impl TuiState {
         Self {
             snapshot,
             ui: UiState::default(),
-            pending_revision: None,
         }
     }
 
@@ -258,23 +295,93 @@ impl TuiState {
             next.library.tracks = Arc::clone(&self.snapshot.library.tracks);
         }
         self.ui.sync_queue(&self.snapshot, &next);
+        self.ui.sync_playlists(&self.snapshot, &next);
+        if let Some(message) = snapshot_message(&self.snapshot, &next) {
+            self.ui.set_message(Some(message));
+        }
         self.snapshot = next;
+    }
+}
+
+fn snapshot_message(previous: &TuiSnapshot, next: &TuiSnapshot) -> Option<String> {
+    if previous.playback.status != next.playback.status {
+        return Some(match next.playback.status {
+            PlaybackStatus::Playing => "Playing".into(),
+            PlaybackStatus::Paused => "Paused".into(),
+            PlaybackStatus::Stopped => "Stopped".into(),
+        });
+    }
+    if previous.queue.current_id != next.queue.current_id {
+        return next
+            .current_track()
+            .map(|track| format!("Now playing: {} — {}", track.artist, track.title));
+    }
+    match next.queue.entries.len().cmp(&previous.queue.entries.len()) {
+        std::cmp::Ordering::Greater => Some("Added to queue".into()),
+        std::cmp::Ordering::Less => Some("Removed from queue".into()),
+        std::cmp::Ordering::Equal => None,
+    }
+}
+
+struct Notice {
+    text: String,
+    expires_at: Instant,
+}
+
+enum View {
+    Queue,
+    Search(LibrarySearch),
+    Tree(LibraryTree),
+    Playlists(ListState),
+    PlaylistDetail {
+        playlists: ListState,
+        detail: PlaylistDetail,
+    },
+}
+
+impl Default for View {
+    fn default() -> Self {
+        Self::Queue
     }
 }
 
 #[derive(Default)]
 struct UiState {
+    view: View,
     queue: ListState,
-    search: Option<LibrarySearch>,
-    tree: Option<LibraryTree>,
-    message: Option<String>,
+    show_help: bool,
+    message: Option<Notice>,
     queue_cache: QueueViewCache,
+    playlist_cache: PlaylistDetailCache,
     local_revision: u64,
+    page_size: usize,
 }
-
 impl UiState {
     fn mark_local_change(&mut self) {
         self.local_revision = self.local_revision.wrapping_add(1);
+    }
+
+    fn set_message(&mut self, message: Option<String>) {
+        let current = self.message.as_ref().map(|notice| notice.text.as_str());
+        if current != message.as_deref() {
+            self.message = message.map(|text| Notice {
+                text,
+                expires_at: Instant::now() + Duration::from_secs(10),
+            });
+            self.mark_local_change();
+        }
+    }
+
+    fn expire_message(&mut self) -> bool {
+        if self
+            .message
+            .as_ref()
+            .is_some_and(|notice| Instant::now() >= notice.expires_at)
+        {
+            self.message = None;
+            return true;
+        }
+        false
     }
 
     fn sync_queue(&mut self, previous: &TuiSnapshot, next: &TuiSnapshot) {
@@ -291,144 +398,364 @@ impl UiState {
         );
     }
 
-    fn accept_response(&mut self, response: StateResponse) -> TuiSnapshot {
-        let message = if response.ok {
-            None
-        } else {
-            Some(response.error.unwrap_or_else(|| "Command rejected".into()))
-        };
-        if self.message != message {
-            self.message = message;
-            self.mark_local_change();
+    fn sync_playlists(&mut self, previous: &TuiSnapshot, next: &TuiSnapshot) {
+        match &mut self.view {
+            View::Playlists(selection) => {
+                Self::sync_playlist_selection(selection, previous, next);
+            }
+            View::PlaylistDetail { playlists, detail } => {
+                Self::sync_playlist_selection(playlists, previous, next);
+                let Some(playlist) = next
+                    .library
+                    .playlists
+                    .iter()
+                    .find(|playlist| playlist.id == detail.playlist_id)
+                else {
+                    let playlists = std::mem::take(playlists);
+                    self.view = View::Playlists(playlists);
+                    return;
+                };
+                let selected = detail.selection.selected().unwrap_or(0);
+                detail.selection.select(
+                    (!playlist.entries.is_empty())
+                        .then(|| selected.min(playlist.entries.len() - 1)),
+                );
+            }
+            _ => {}
         }
-        TuiSnapshot::from_client(&response.state)
+    }
+    fn sync_playlist_selection(
+        selection: &mut ListState,
+        previous: &TuiSnapshot,
+        next: &TuiSnapshot,
+    ) {
+        let selected = selection.selected().unwrap_or(0);
+        let playlist_id = previous
+            .library
+            .playlists
+            .get(selected)
+            .map(|playlist| playlist.id);
+        let index = next
+            .library
+            .playlists
+            .iter()
+            .position(|playlist| Some(playlist.id) == playlist_id);
+        selection.select(
+            (!next.library.playlists.is_empty())
+                .then(|| index.unwrap_or(selected.min(next.library.playlists.len() - 1))),
+        );
     }
 
     fn key_action(&mut self, key: KeyEvent, state: &TuiSnapshot) -> KeyAction {
-        if self.search.is_some() {
-            let mut changed = false;
-            let mut command = None;
-            let mut close = false;
-            {
-                let search = self.search.as_mut().expect("search checked above");
-                match key.code {
-                    KeyCode::Esc => close = true,
-                    KeyCode::Up => {
-                        changed =
-                            move_selection(&mut search.selection, search.matches.len(), false);
-                    }
-                    KeyCode::Down => {
-                        changed = move_selection(&mut search.selection, search.matches.len(), true);
-                    }
-                    KeyCode::Enter => {
-                        if let Some(index) = search.selection.selected()
-                            && let Some(&track_index) = search.matches.get(index)
-                        {
-                            command = Some(Command::Enqueue {
-                                track_ids: vec![search.library[track_index].id],
-                            });
+        if key.code == KeyCode::Char('?') {
+            self.show_help = !self.show_help;
+            self.mark_local_change();
+            return KeyAction::Ignored;
+        }
+        let page_size = self.page_size;
+        let view = std::mem::take(&mut self.view);
+        match view {
+            View::Search(mut search) => {
+                let mut changed = false;
+                let mut command = None;
+                let close = key.code == KeyCode::Esc;
+                if !close {
+                    match key.code {
+                        KeyCode::Tab => {
+                            search.focus = match search.focus {
+                                SearchFocus::Query => SearchFocus::Results,
+                                SearchFocus::Results => SearchFocus::Query,
+                            };
+                            changed = true;
                         }
-                    }
-                    KeyCode::Backspace => {
-                        if search.query.pop().is_some() {
+                        KeyCode::Up | KeyCode::Down if search.focus == SearchFocus::Results => {
+                            changed = move_selection(
+                                &mut search.selection,
+                                search.matches.len(),
+                                key.code == KeyCode::Down,
+                            );
+                        }
+                        KeyCode::PageUp | KeyCode::PageDown
+                            if search.focus == SearchFocus::Results =>
+                        {
+                            changed = move_selection_page(
+                                &mut search.selection,
+                                search.matches.len(),
+                                page_size,
+                                key.code == KeyCode::PageDown,
+                            );
+                        }
+                        KeyCode::Enter if search.focus == SearchFocus::Results => {
+                            if let Some(index) = search.selection.selected()
+                                && let Some(&track_index) = search.matches.get(index)
+                            {
+                                command = Some(Command::Enqueue {
+                                    track_ids: vec![search.library[track_index].id],
+                                });
+                            }
+                        }
+                        KeyCode::Enter => {
+                            search.focus = SearchFocus::Results;
+                            changed = true;
+                        }
+                        KeyCode::Backspace if search.focus == SearchFocus::Query => {
+                            if search.query.pop().is_some() {
+                                search.filter();
+                                changed = true;
+                            }
+                        }
+                        KeyCode::Char(character) if search.focus == SearchFocus::Query => {
+                            search.query.push(character);
                             search.filter();
                             changed = true;
                         }
+                        _ => {}
                     }
-                    KeyCode::Char(character) => {
-                        search.query.push(character);
-                        search.filter();
-                        changed = true;
-                    }
-                    _ => {}
                 }
-            }
-            if close {
-                self.search = None;
-                changed = true;
-            }
-            if changed {
-                self.mark_local_change();
-            }
-            return command.map_or(KeyAction::Ignored, KeyAction::Command);
-        }
-        if self.tree.is_some() {
-            let mut changed = false;
-            let mut command = None;
-            let mut close = false;
-            let mut delegate = false;
-            {
-                let tree = self.tree.as_mut().expect("tree checked above");
-                match key.code {
-                    KeyCode::Esc => close = true,
-                    KeyCode::Up | KeyCode::Down => {
-                        let len = tree.entries().len();
-                        changed =
-                            move_selection(&mut tree.selection, len, key.code == KeyCode::Down);
-                    }
-                    KeyCode::Enter => {
-                        command = tree.activate();
-                        changed = command.is_none();
-                    }
-                    KeyCode::Backspace | KeyCode::Left => changed = tree.parent(),
-                    KeyCode::Char('/') => delegate = true,
-                    _ => delegate = true,
-                }
-            }
-            if close {
-                self.tree = None;
-                changed = true;
-            }
-            if changed {
-                self.mark_local_change();
-            }
-            if delegate {
-                return if key.code == KeyCode::Char('/') {
-                    KeyAction::Search
+                self.view = if close {
+                    View::Queue
                 } else {
-                    key_action(key, state)
+                    View::Search(search)
                 };
-            }
-            return command.map_or(KeyAction::Ignored, KeyAction::Command);
-        }
-        let changed = match key.code {
-            KeyCode::Char('/') => return KeyAction::Search,
-            KeyCode::Char('t') => return KeyAction::Tree,
-            KeyCode::Up => move_selection(&mut self.queue, state.queue.entries.len(), false),
-            KeyCode::Down => move_selection(&mut self.queue, state.queue.entries.len(), true),
-            KeyCode::Enter => {
-                return self
-                    .queue
-                    .selected()
-                    .and_then(|index| state.queue.entries.get(index))
-                    .map_or(KeyAction::Ignored, |entry| {
-                        KeyAction::Command(Command::PlayQueue { queue_id: entry.id })
-                    });
-            }
-            KeyCode::Char('d') | KeyCode::Delete => {
-                if let Some(entry) = self
-                    .queue
-                    .selected()
-                    .and_then(|index| state.queue.entries.get(index))
-                {
-                    return KeyAction::Command(Command::RemoveQueue { queue_id: entry.id });
+                if changed || close {
+                    self.mark_local_change();
                 }
-                false
+                command.map_or(KeyAction::Ignored, KeyAction::Command)
             }
-            _ => return key_action(key, state),
-        };
-        if changed {
-            self.mark_local_change();
+            View::Tree(mut tree) => {
+                let mut changed = false;
+                let mut command = None;
+                let close = key.code == KeyCode::Esc;
+                if !close {
+                    match key.code {
+                        KeyCode::Up | KeyCode::Down => {
+                            let len = tree.entries().len();
+                            changed =
+                                move_selection(&mut tree.selection, len, key.code == KeyCode::Down);
+                        }
+                        KeyCode::PageUp | KeyCode::PageDown => {
+                            let len = tree.entries().len();
+                            changed = move_selection_page(
+                                &mut tree.selection,
+                                len,
+                                page_size,
+                                key.code == KeyCode::PageDown,
+                            );
+                        }
+                        KeyCode::Enter => {
+                            command = tree.activate();
+                            changed = command.is_none();
+                        }
+                        KeyCode::Backspace | KeyCode::Left => changed = tree.parent(),
+                        _ => {
+                            self.view = View::Tree(tree);
+                            return key_action(key, state);
+                        }
+                    }
+                }
+                self.view = if close { View::Queue } else { View::Tree(tree) };
+                if changed || close {
+                    self.mark_local_change();
+                }
+                command.map_or(KeyAction::Ignored, KeyAction::Command)
+            }
+            View::PlaylistDetail {
+                playlists,
+                mut detail,
+            } => {
+                let Some(playlist) = state
+                    .library
+                    .playlists
+                    .iter()
+                    .find(|playlist| playlist.id == detail.playlist_id)
+                else {
+                    self.view = View::Playlists(playlists);
+                    return KeyAction::Ignored;
+                };
+                let mut changed = false;
+                let mut command = None;
+                let close = matches!(key.code, KeyCode::Esc | KeyCode::Left);
+                if !close {
+                    match key.code {
+                        KeyCode::Up | KeyCode::Down => {
+                            changed = move_selection(
+                                &mut detail.selection,
+                                playlist.entries.len(),
+                                key.code == KeyCode::Down,
+                            );
+                        }
+                        KeyCode::PageUp | KeyCode::PageDown => {
+                            changed = move_selection_page(
+                                &mut detail.selection,
+                                playlist.entries.len(),
+                                page_size,
+                                key.code == KeyCode::PageDown,
+                            );
+                        }
+                        KeyCode::Enter => {
+                            if let Some(index) = detail.selection.selected()
+                                && let Some(entry) = playlist.entries.get(index)
+                            {
+                                command = Some(Command::Play {
+                                    track_id: entry.track_id,
+                                });
+                            }
+                        }
+                        KeyCode::Char('a') => {
+                            if let Some(index) = detail.selection.selected()
+                                && let Some(entry) = playlist.entries.get(index)
+                            {
+                                command = Some(Command::Enqueue {
+                                    track_ids: vec![entry.track_id],
+                                });
+                            }
+                        }
+                        _ => {
+                            self.view = View::PlaylistDetail { playlists, detail };
+                            return key_action(key, state);
+                        }
+                    }
+                }
+                self.view = if close {
+                    View::Playlists(playlists)
+                } else {
+                    View::PlaylistDetail { playlists, detail }
+                };
+                if changed || close {
+                    self.mark_local_change();
+                }
+                command.map_or(KeyAction::Ignored, KeyAction::Command)
+            }
+            View::Playlists(mut selection) => {
+                let mut changed = false;
+                let mut command = None;
+                let close = key.code == KeyCode::Esc;
+                if !close {
+                    match key.code {
+                        KeyCode::Up | KeyCode::Down => {
+                            changed = move_selection(
+                                &mut selection,
+                                state.library.playlists.len(),
+                                key.code == KeyCode::Down,
+                            );
+                        }
+                        KeyCode::PageUp | KeyCode::PageDown => {
+                            changed = move_selection_page(
+                                &mut selection,
+                                state.library.playlists.len(),
+                                page_size,
+                                key.code == KeyCode::PageDown,
+                            );
+                        }
+                        KeyCode::Right => {
+                            if let Some(index) = selection.selected()
+                                && let Some(playlist) = state.library.playlists.get(index)
+                            {
+                                self.view = View::PlaylistDetail {
+                                    playlists: selection,
+                                    detail: PlaylistDetail {
+                                        playlist_id: playlist.id,
+                                        selection: ListState::default().with_selected(
+                                            (!playlist.entries.is_empty()).then_some(0),
+                                        ),
+                                    },
+                                };
+                                self.mark_local_change();
+                                return KeyAction::Ignored;
+                            }
+                        }
+                        KeyCode::Enter => {
+                            if let Some(index) = selection.selected()
+                                && let Some(playlist) = state.library.playlists.get(index)
+                            {
+                                command = Some(Command::PlayPlaylist {
+                                    playlist_id: playlist.id,
+                                });
+                            }
+                        }
+                        _ => {
+                            self.view = View::Playlists(selection);
+                            return key_action(key, state);
+                        }
+                    }
+                }
+                self.view = if close {
+                    View::Queue
+                } else {
+                    View::Playlists(selection)
+                };
+                if changed || close {
+                    self.mark_local_change();
+                }
+                command.map_or(KeyAction::Ignored, KeyAction::Command)
+            }
+            View::Queue => {
+                let changed = match key.code {
+                    KeyCode::Char('/') => return KeyAction::Search,
+                    KeyCode::Char('t') => return KeyAction::Tree,
+                    KeyCode::Char('P') => {
+                        self.view = View::Playlists(ListState::default());
+                        self.mark_local_change();
+                        return KeyAction::Ignored;
+                    }
+                    KeyCode::Up | KeyCode::Down => move_selection(
+                        &mut self.queue,
+                        state.queue.entries.len(),
+                        key.code == KeyCode::Down,
+                    ),
+                    KeyCode::PageUp | KeyCode::PageDown => move_selection_page(
+                        &mut self.queue,
+                        state.queue.entries.len(),
+                        page_size,
+                        key.code == KeyCode::PageDown,
+                    ),
+                    KeyCode::Enter => {
+                        return self
+                            .queue
+                            .selected()
+                            .and_then(|index| state.queue.entries.get(index))
+                            .map_or(KeyAction::Ignored, |entry| {
+                                KeyAction::Command(Command::PlayQueue { queue_id: entry.id })
+                            });
+                    }
+                    KeyCode::Char('d') | KeyCode::Delete => {
+                        return self
+                            .queue
+                            .selected()
+                            .and_then(|index| state.queue.entries.get(index))
+                            .map_or(KeyAction::Ignored, |entry| {
+                                KeyAction::Command(Command::RemoveQueue { queue_id: entry.id })
+                            });
+                    }
+                    _ => return key_action(key, state),
+                };
+                if changed {
+                    self.mark_local_change();
+                }
+                KeyAction::Ignored
+            }
         }
-        KeyAction::Ignored
     }
 }
+struct PlaylistDetail {
+    playlist_id: i64,
+    selection: ListState,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum SearchFocus {
+    #[default]
+    Query,
+    Results,
+}
+
 struct LibrarySearch {
     library: Arc<Vec<Track>>,
     searchable: Vec<String>,
     query: String,
     matches: Vec<usize>,
     selection: ListState,
+    focus: SearchFocus,
 }
 
 impl LibrarySearch {
@@ -454,6 +781,7 @@ impl LibrarySearch {
             query: String::new(),
             matches,
             selection,
+            focus: SearchFocus::default(),
         }
     }
 
@@ -606,6 +934,33 @@ fn move_selection(selection: &mut ListState, len: usize, down: bool) -> bool {
         true
     }
 }
+fn move_selection_page(
+    selection: &mut ListState,
+    len: usize,
+    page_size: usize,
+    down: bool,
+) -> bool {
+    let page_size = page_size.max(1);
+    if len == 0 {
+        if selection.selected().is_some() {
+            selection.select(None);
+            return true;
+        }
+        return false;
+    }
+    let index = selection.selected().unwrap_or(0);
+    let next = if down {
+        index.saturating_add(page_size).min(len - 1)
+    } else {
+        index.saturating_sub(page_size)
+    };
+    if selection.selected() == Some(next) {
+        false
+    } else {
+        selection.select(Some(next));
+        true
+    }
+}
 
 enum KeyAction {
     Quit,
@@ -649,6 +1004,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(5),
+            Constraint::Length(3),
             Constraint::Length(2),
         ])
         .split(area);
@@ -656,10 +1012,31 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
         .current_track()
         .map(|t| format!("{} — {}", t.artist, t.title))
         .unwrap_or_else(|| "Nothing playing".into());
-    let status = match state.playback.status {
-        PlaybackStatus::Playing => "Playing",
-        PlaybackStatus::Paused => "Paused",
-        PlaybackStatus::Stopped => "Stopped",
+    let (status, status_icon) = match state.playback.status {
+        PlaybackStatus::Playing => (
+            "Playing",
+            if state.system.nerd_symbols {
+                "󰐊"
+            } else {
+                ">"
+            },
+        ),
+        PlaybackStatus::Paused => (
+            "Paused",
+            if state.system.nerd_symbols {
+                "󰏤"
+            } else {
+                "||"
+            },
+        ),
+        PlaybackStatus::Stopped => (
+            "Stopped",
+            if state.system.nerd_symbols {
+                "󰓛"
+            } else {
+                "[]"
+            },
+        ),
     };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -669,22 +1046,50 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
                     .fg(Color::Rgb(122, 162, 247))
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(format!("{status}  {now}")),
+            Span::raw(format!("{status_icon} {status}  {now}")),
         ]))
         .block(Block::default().borders(Borders::BOTTOM)),
         outer[0],
     );
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
-        .split(outer[1]);
+    let columns = if ui.show_help {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+            .split(outer[1])
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(100)])
+            .split(outer[1])
+    };
+    if matches!(&ui.view, View::Search(_)) {
+        ui.page_size = columns[0].height.saturating_sub(5).max(1) as usize;
+    } else {
+        ui.page_size = columns[0].height.saturating_sub(2).max(1) as usize;
+    }
+    match &mut ui.view {
+        View::Search(search) => draw_search(frame, columns[0], search),
+        View::Tree(tree) => draw_tree(frame, columns[0], tree, state.system.nerd_symbols),
+        View::PlaylistDetail { detail, .. } => draw_playlist_detail(
+            frame,
+            columns[0],
+            state,
+            detail,
+            &mut ui.playlist_cache,
+            state.system.nerd_symbols,
+        ),
+        View::Playlists(selection) => draw_playlists(
+            frame,
+            columns[0],
+            state,
+            selection,
+            state.system.nerd_symbols,
+        ),
+        View::Queue => draw_queue(frame, columns[0], state, &mut ui.queue, &mut ui.queue_cache),
+    }
     let position = state.playback.position.max(0.0);
     let duration = state.playback.duration.unwrap_or(0.0).max(position + 0.001);
     let ratio = (position / duration).clamp(0.0, 1.0);
-    let left = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(2)])
-        .split(columns[0]);
     frame.render_widget(
         Gauge::default()
             .block(
@@ -698,26 +1103,31 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
             )
             .gauge_style(Style::default().fg(Color::Rgb(122, 162, 247)))
             .ratio(ratio),
-        left[0],
+        outer[2],
     );
-    if let Some(search) = ui.search.as_mut() {
-        draw_search(frame, left[1], search);
-    } else if let Some(tree) = ui.tree.as_mut() {
-        draw_tree(frame, left[1], tree, state.system.nerd_symbols);
-    } else {
-        draw_queue(frame, left[1], state, &mut ui.queue, &mut ui.queue_cache);
-    }
-    let keys = if ui.search.is_some() {
-        "Type    search library\nBackspace edit query\n↑/↓     select result\nEnter   add to queue\nEsc     return to queue\n\nSearch matches title, artist, album and path."
-    } else if ui.tree.is_some() {
-        "↑/↓     select entry\nEnter   open directory/add track\nBackspace/← parent directory\nEsc     return to queue\n/       search library\nSpace   play/pause\nn/p     next/previous\n→       seek forward 5 sec\nHome/End seek start/end\nr       repeat mode\ns       shuffle\n[/]     volume\nq       quit"
-    } else {
-        "↑/↓     select queue\nEnter   play selected\nd/Del   remove selected\n/       search library\nt       browse library tree\nSpace   play/pause\nn/p     next/previous\n←/→     seek 5 sec\nHome/End seek start/end\nr       repeat mode\ns       shuffle\n[/]     volume\nq       quit"
+    let keys = match &ui.view {
+        View::Search(_) => {
+            "Type    search library\nTab     query/results focus\n↑/↓     select result\nPgUp/Dn page result\nBackspace edit query\nEnter   focus results\nEsc     return to queue\n\nSearch matches title, artist, album and path."
+        }
+        View::Tree(_) => {
+            "↑/↓     select entry\nPgUp/Dn page entries\nEnter   open directory/add track\nBackspace/← parent directory\nEsc     return to queue\n/       search library\nP       playlists\nSpace   play/pause\nn/p       next/previous\n→       seek forward 5 sec\nHome/End seek start/end\nr       repeat mode\ns       shuffle\n[/]     volume\nq       quit"
+        }
+        View::PlaylistDetail { .. } => {
+            "↑/↓     select track\nPgUp/Dn page tracks\nEnter   play track\na       add track to queue\n←/Esc   back to playlists\nSpace   play/pause\nn/p       next/previous\nHome/End seek start/end\nr       repeat mode\ns       shuffle\n[/]     volume\nq       quit"
+        }
+        View::Playlists(_) => {
+            "↑/↓     select playlist\nPgUp/Dn page playlists\n→       open playlist\nEnter   play playlist\nEsc     return to queue\nP       playlists\n/       search library\nt       browse library tree\nSpace   play/pause\nn/p       next/previous\nHome/End seek start/end\nr       repeat mode\ns       shuffle\n[/]     volume\nq       quit"
+        }
+        View::Queue => {
+            "↑/↓     select queue\nPgUp/Dn page queue\nEnter   play selected\nd/Del   remove selected\n/       search library\nt       browse library tree\nP       playlists\nSpace   play/pause\n←/→     seek 5 sec\nHome/End seek start/end\nr       repeat mode\ns       shuffle\n[/]     volume\nq       quit"
+        }
     };
-    let help = Paragraph::new(keys)
-        .wrap(Wrap { trim: true })
-        .block(Block::default().title("Keys").borders(Borders::ALL));
-    frame.render_widget(help, columns[1]);
+    if ui.show_help {
+        let help = Paragraph::new(keys)
+            .wrap(Wrap { trim: true })
+            .block(Block::default().title("Keys").borders(Borders::ALL));
+        frame.render_widget(help, columns[1]);
+    }
     let status = if state.system.nerd_symbols {
         format!(
             "󰕾 {:>3}% 󰒝 {} 󰑖 {} 󰘦 {}",
@@ -735,16 +1145,27 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
             state.queue.entries.len()
         )
     };
+    let status_columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+        .split(outer[3]);
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::raw(status),
-            Line::styled(
-                ui.message.as_deref().unwrap_or(""),
-                Style::default().fg(Color::Yellow),
-            ),
-        ])
-        .style(Style::default().fg(Color::Rgb(86, 95, 137))),
-        outer[2],
+        Paragraph::new(status).style(Style::default().fg(Color::Rgb(86, 95, 137))),
+        status_columns[0],
+    );
+    let prompt = ui.message.as_ref().map_or(
+        if ui.show_help {
+            "?  close help"
+        } else {
+            "?  help"
+        },
+        |notice| notice.text.as_str(),
+    );
+    frame.render_widget(
+        Paragraph::new(prompt)
+            .alignment(Alignment::Right)
+            .style(Style::default().fg(Color::Yellow)),
+        status_columns[1],
     );
 }
 
@@ -759,6 +1180,57 @@ struct QueueTrackKey {
     id: i64,
     title: String,
     artist: String,
+}
+#[derive(Default)]
+struct PlaylistDetailCache {
+    playlist_id: Option<i64>,
+    library_revision: u64,
+    entry_track_ids: Vec<i64>,
+    nerd_symbols: bool,
+    rows: Vec<String>,
+}
+
+impl PlaylistDetailCache {
+    fn sync(&mut self, state: &TuiSnapshot, playlist: &crate::model::Playlist, nerd_symbols: bool) {
+        let entry_track_ids = playlist.entries.iter().map(|entry| entry.track_id);
+        if self.playlist_id == Some(playlist.id)
+            && self.library_revision == state.library.revision
+            && self.nerd_symbols == nerd_symbols
+            && self.entry_track_ids.len() == playlist.entries.len()
+            && self
+                .entry_track_ids
+                .iter()
+                .copied()
+                .eq(entry_track_ids.clone())
+        {
+            return;
+        }
+        let marker = if nerd_symbols { "󰎆 " } else { "♪ " };
+        let tracks = state
+            .library
+            .tracks
+            .iter()
+            .map(|track| (track.id, track))
+            .collect::<HashMap<_, _>>();
+        self.rows = playlist
+            .entries
+            .iter()
+            .map(|entry| {
+                tracks
+                    .get(&entry.track_id)
+                    .map(|track| format!("{marker}{} — {}", track.artist, track.title))
+                    .unwrap_or_else(|| format!("{marker}Missing track"))
+            })
+            .collect();
+        self.playlist_id = Some(playlist.id);
+        self.library_revision = state.library.revision;
+        self.entry_track_ids = playlist
+            .entries
+            .iter()
+            .map(|entry| entry.track_id)
+            .collect();
+        self.nerd_symbols = nerd_symbols;
+    }
 }
 
 impl QueueViewCache {
@@ -854,6 +1326,85 @@ fn draw_queue(
         selection,
     );
 }
+fn draw_playlist_detail(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    state: &TuiSnapshot,
+    detail: &mut PlaylistDetail,
+    cache: &mut PlaylistDetailCache,
+    nerd_symbols: bool,
+) {
+    let Some(playlist) = state
+        .library
+        .playlists
+        .iter()
+        .find(|playlist| playlist.id == detail.playlist_id)
+    else {
+        frame.render_widget(
+            Block::default()
+                .title("Playlist not found")
+                .borders(Borders::ALL),
+            area,
+        );
+        return;
+    };
+    cache.sync(state, playlist, nerd_symbols);
+    let items = cache.rows.iter().map(|row| ListItem::new(row.as_str()));
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(
+                Block::default()
+                    .title(format!(
+                        "Playlist — {} ({} tracks)",
+                        playlist.name,
+                        playlist.entries.len()
+                    ))
+                    .borders(Borders::ALL),
+            )
+            .highlight_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("> "),
+        area,
+        &mut detail.selection,
+    );
+}
+
+fn draw_playlists(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    state: &TuiSnapshot,
+    selection: &mut ListState,
+    nerd_symbols: bool,
+) {
+    let items = state.library.playlists.iter().map(|playlist| {
+        let marker = if nerd_symbols { "󰲋 " } else { "[P] " };
+        ListItem::new(format!(
+            "{marker}{}  ({} tracks)",
+            playlist.name,
+            playlist.entries.len()
+        ))
+    });
+    let title = if state.library.playlists.is_empty() {
+        "Playlists — empty"
+    } else {
+        "Playlists"
+    };
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(Block::default().title(title).borders(Borders::ALL))
+            .highlight_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("> "),
+        area,
+        selection,
+    );
+}
 
 fn draw_search(frame: &mut ratatui::Frame<'_>, area: Rect, search: &mut LibrarySearch) {
     let rows = Layout::default()
@@ -863,7 +1414,11 @@ fn draw_search(frame: &mut ratatui::Frame<'_>, area: Rect, search: &mut LibraryS
     frame.render_widget(
         Paragraph::new(search.query.as_str()).block(
             Block::default()
-                .title("Library search — type to filter")
+                .title(if search.focus == SearchFocus::Query {
+                    "Search query — Tab to results"
+                } else {
+                    "Search query"
+                })
                 .borders(Borders::ALL),
         ),
         rows[0],
@@ -885,7 +1440,15 @@ fn draw_search(frame: &mut ratatui::Frame<'_>, area: Rect, search: &mut LibraryS
     };
     frame.render_stateful_widget(
         List::new(items)
-            .block(Block::default().title(title).borders(Borders::ALL))
+            .block(
+                Block::default()
+                    .title(if search.focus == SearchFocus::Results {
+                        title
+                    } else {
+                        format!("{title} — Tab to focus")
+                    })
+                    .borders(Borders::ALL),
+            )
             .highlight_style(
                 Style::default()
                     .bg(Color::DarkGray)
@@ -971,7 +1534,7 @@ fn fmt_time(seconds: f64) -> String {
 mod tests {
     use super::*;
     use crate::model::PlaybackState;
-    use crate::model::{LibrarySnapshot, QueueEntry, QueueState};
+    use crate::model::{LibrarySnapshot, Playlist, PlaylistEntry, QueueEntry, QueueState};
     use crate::projection::{TuiLibrarySnapshot, TuiSystemSnapshot};
     use crossterm::event::KeyModifiers;
 
@@ -1005,6 +1568,7 @@ mod tests {
             library: TuiLibrarySnapshot {
                 revision: library.revision,
                 tracks: library.tracks,
+                playlists: library.playlists,
             },
             queue,
             playback: PlaybackState::default(),
@@ -1135,6 +1699,49 @@ mod tests {
         cache.sync(&state);
         assert_eq!(cache.rows[1], "Artist A — Title A (remastered)");
     }
+    #[test]
+    fn playlist_detail_plays_or_enqueues_selected_track() {
+        let library = LibrarySnapshot {
+            tracks: Arc::new(vec![track(1, "Artist", "Title")]),
+            playlists: Arc::new(vec![Playlist {
+                id: 7,
+                name: "Mix".into(),
+                entries: vec![PlaylistEntry { id: 9, track_id: 1 }],
+            }]),
+            ..LibrarySnapshot::default()
+        };
+        let state = tui_snapshot(library, QueueState::default());
+        let mut ui = UiState::default();
+        ui.view = View::Playlists(ListState::default().with_selected(Some(0)));
+        assert!(matches!(
+            ui.key_action(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), &state),
+            KeyAction::Ignored
+        ));
+        assert!(matches!(&ui.view, View::PlaylistDetail { .. }));
+        assert!(matches!(
+            ui.key_action(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &state),
+            KeyAction::Command(Command::Play { track_id: 1 })
+        ));
+        assert!(matches!(
+            ui.key_action(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE), &state),
+            KeyAction::Command(Command::Enqueue { track_ids }) if track_ids == vec![1]
+        ));
+        assert!(matches!(
+            ui.key_action(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &state),
+            KeyAction::Ignored
+        ));
+        assert!(matches!(&ui.view, View::Playlists(_)));
+    }
+
+    #[test]
+    fn notice_expires_without_a_timer_thread() {
+        let mut ui = UiState::default();
+        ui.set_message(Some("Paused".into()));
+        ui.message.as_mut().unwrap().expires_at = Instant::now() - Duration::from_secs(1);
+        assert!(ui.expire_message());
+        assert!(ui.message.is_none());
+    }
+
     #[test]
     fn tui_state_reuses_tracks_when_library_revision_is_unchanged() {
         let mut first = tui_snapshot(LibrarySnapshot::default(), QueueState::default());
