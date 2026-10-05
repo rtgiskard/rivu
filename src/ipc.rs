@@ -59,10 +59,17 @@ struct ResponseFrame {
     response: WireResponse,
 }
 
+// Wire revisions are equality tokens, not ordered counters. Truncation to u16
+// permits wraparound; watchers only need to know whether the current token
+// equals the token supplied by the client. Missing a full 16-bit cycle is
+// outside the protocol's bounded-observation guarantee.
 const FLAG_SHUFFLE: u16 = 1;
 const FLAG_SCANNING: u16 = 1 << 1;
 const FLAG_SHUTTING_DOWN: u16 = 1 << 2;
 
+fn revision_matches(current: u64, expected: u16) -> bool {
+    current as u16 == expected
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct PlaybackSnapshot {
     position_ms: u64,
@@ -612,7 +619,7 @@ async fn wait_for_revision(
 ) -> Option<Response> {
     loop {
         let state = handle.snapshot();
-        if (state.revision as u16) != revision || state.shutting_down {
+        if !revision_matches(state.revision, revision) || state.shutting_down {
             return Some(overview_response(state, overview));
         }
         tokio::select! {
@@ -864,4 +871,9 @@ pub fn request_ack(path: &Path, command: &Command) -> Result<Ack> {
         .context("Reading IPC acknowledgement timed out")??;
         unpack_ack(decode_frame::<ResponseFrame>(&bytes)?)
     })
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    include!("ipc_tests.rs");
 }
