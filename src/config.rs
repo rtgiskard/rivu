@@ -19,9 +19,8 @@ use std::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VisualizationPalette {
-    TokyoNight,
-    Deadbeef,
-    Nord,
+    A,
+    B,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,6 +118,7 @@ pub struct Config {
     pub shuffle: bool,
     pub repeat: RepeatMode,
     pub play_count_threshold_percent: f64,
+    pub tray_enabled: bool,
     pub mpris_enabled: bool,
     /// UI font family; empty selects the platform UI font.
     pub ui_font: String,
@@ -147,6 +147,7 @@ pub struct Config {
     pub spectrum_log_scale: bool,
     pub spectrum_grid: bool,
     pub spectrum_labels: bool,
+    pub spectrogram_interpolate: bool,
     pub spectrogram_labels: bool,
     pub waveform_labels: bool,
     pub spectrogram_min_hz: f32,
@@ -172,12 +173,13 @@ impl Default for Config {
             shuffle: false,
             repeat: RepeatMode::Off,
             play_count_threshold_percent: 20.0,
+            tray_enabled: true,
             mpris_enabled: true,
             ui_font: String::new(),
             ui_scale: 1.0,
             analysis_fps: 20,
             visual_background: RgbColor(0x08090c),
-            visual_palette: VisualizationPalette::Deadbeef,
+            visual_palette: VisualizationPalette::B,
             spectrum_style: SpectrumStyle::Bars,
             spectrum_min_hz: 20.0,
             spectrum_max_hz: 20_000.0,
@@ -197,6 +199,7 @@ impl Default for Config {
             spectrum_log_scale: true,
             spectrum_grid: true,
             spectrum_labels: true,
+            spectrogram_interpolate: true,
             spectrogram_labels: true,
             waveform_labels: true,
             spectrogram_min_hz: 20.0,
@@ -231,6 +234,19 @@ impl Config {
             .with_context(|| format!("cannot parse TOML configuration {}", path.display()))?;
         if document.get("visual_palette").and_then(toml::Value::as_str) == Some("legacy") {
             document.remove("visual_palette");
+        }
+        if let Some(palette) = document.get("visual_palette").and_then(toml::Value::as_str) {
+            let migrated = match palette {
+                "tokyo_night" | "nord" => Some("a"),
+                "deadbeef" => Some("b"),
+                _ => None,
+            };
+            if let Some(value) = migrated {
+                document.insert(
+                    "visual_palette".to_owned(),
+                    toml::Value::String(value.to_owned()),
+                );
+            }
         }
         // Removed visual controls are discarded so older configurations remain loadable.
         for key in [
@@ -473,11 +489,13 @@ mod tests {
             shuffle: true,
             repeat: RepeatMode::All,
             play_count_threshold_percent: 35.5,
+            tray_enabled: false,
             mpris_enabled: false,
             ui_font: "sans-serif".to_owned(),
             ui_scale: 1.5,
             analysis_fps: 30,
             spectrogram_min_hz: 30.0,
+            spectrogram_interpolate: false,
             spectrogram_max_hz: 18_000.0,
             spectrum_db_range: 80.0,
             media_read_buffer_mb: 8,
@@ -486,7 +504,7 @@ mod tests {
             pipewire_auto_mix: false,
             spectrum_style: SpectrumStyle::Solid,
             visual_background: "#101820".parse().unwrap(),
-            visual_palette: VisualizationPalette::TokyoNight,
+            visual_palette: VisualizationPalette::A,
             spectrum_min_hz: 60.0,
             spectrum_max_hz: 16_000.0,
             spectrum_fft_size: 16384,
@@ -778,13 +796,13 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
         let config = Config {
-            visual_palette: VisualizationPalette::TokyoNight,
+            visual_palette: VisualizationPalette::A,
             ..Config::default()
         };
         config.save(&path).unwrap();
         assert_eq!(
             Config::load(&path).unwrap().visual_palette,
-            VisualizationPalette::TokyoNight
+            VisualizationPalette::A
         );
     }
 
@@ -922,6 +940,3 @@ mod tests {
         directory.close().unwrap();
     }
 }
-    pub tray_enabled: bool,
-            tray_enabled: true,
-            tray_enabled: false,

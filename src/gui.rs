@@ -19,8 +19,8 @@ use components::ButtonTooltip;
 pub(super) use components::{
     DropdownItem, DropdownState, POPOVER_MAX_HEIGHT, SelectableListState, SelectionMode,
     SelectionModel, TRACK_HEIGHT, TreeKey, TreeState, caption, context_menu_container,
-    drag_preview, dropdown_container, dropdown_row, empty_state, list_row, list_viewport,
-    panel_surface, panel_toolbar, row_text, track_row,
+    drag_preview, dropdown_container, dropdown_row, dropdown_trigger, empty_state, list_row,
+    list_viewport, panel_surface, panel_toolbar, row_text, track_row,
 };
 use futures::{FutureExt, StreamExt, channel::mpsc};
 use gpui::{prelude::*, *};
@@ -416,12 +416,18 @@ impl Render for QueueDrag {
         drag_preview("Move queue entry")
     }
 }
+
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 enum Measured {
     Node(u64),
     Seek(u64),
     Volume(u64),
     Device,
+    SettingsFont,
+    SettingsPalette,
+    SettingsStyle,
+    SettingsFft,
+    SettingsWindow,
 }
 #[derive(Clone, Copy)]
 enum Dragging {
