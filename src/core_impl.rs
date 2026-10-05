@@ -8,10 +8,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "core_impl/catalog.rs"]
+mod catalog;
 #[path = "core_impl/command.rs"]
 mod command;
-#[path = "core_impl/library_scan.rs"]
-mod library_scan;
 #[path = "core_impl/playback.rs"]
 mod playback;
 #[path = "core_impl/queue.rs"]
