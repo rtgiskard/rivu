@@ -16,18 +16,21 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     fs,
-    io::{Read, Write},
-    os::unix::{
-        fs::{FileTypeExt, PermissionsExt},
-        net::{UnixListener, UnixStream},
-    },
+    os::unix::fs::{FileTypeExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::{
         Arc, Weak,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
     time::{Duration, SystemTime, UNIX_EPOCH},
+};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    net::{UnixListener, UnixStream},
+    runtime::Builder,
+    sync::watch,
+    time::timeout,
 };
 
 const MAX_REQUEST: usize = 64 * 1024;
@@ -331,116 +334,121 @@ impl OverviewCache {
 pub struct Server {
     path: PathBuf,
     stopping: Arc<AtomicBool>,
+    shutdown: watch::Sender<bool>,
+    bridge_stop: crossbeam_channel::Sender<()>,
     worker: Option<JoinHandle<()>>,
 }
 
-pub fn bind(path: &Path) -> Result<UnixListener> {
+pub fn bind(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    match UnixListener::bind(path) {
-        Ok(listener) => {
-            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-            Ok(listener)
+    if !path.exists() {
+        return Ok(());
+    }
+    if !fs::symlink_metadata(path)?.file_type().is_socket() {
+        bail!("Refusing to replace non-socket {}", path.display());
+    }
+    match std::os::unix::net::UnixStream::connect(path) {
+        Ok(_) => bail!(
+            "Rivu is already running at {}. Use its CLI or TUI.",
+            path.display()
+        ),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+            ) =>
+        {
+            fs::remove_file(path)?;
+            Ok(())
         }
-        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
-            match UnixStream::connect(path) {
-                Ok(_) => bail!(
-                    "Rivu is already running at {}. Use its CLI or TUI.",
-                    path.display()
-                ),
-                Err(connect)
-                    if matches!(
-                        connect.kind(),
-                        std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
-                    ) =>
-                {
-                    if fs::symlink_metadata(path)?.file_type().is_socket() {
-                        fs::remove_file(path)?;
-                        let listener = UnixListener::bind(path)?;
-                        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-                        Ok(listener)
-                    } else {
-                        bail!("Refusing to replace non-socket {}", path.display());
-                    }
-                }
-                Err(connect) => Err(connect).context("Checking existing Rivu socket"),
-            }
-        }
-        Err(error) => Err(error).context("Binding local Rivu socket"),
+        Err(error) => Err(error).context("Checking existing Rivu socket"),
     }
 }
 
 impl Server {
-    pub fn start(path: PathBuf, listener: UnixListener, handle: AppHandle) -> Result<Self> {
-        let instance_id = (SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_nanos() as u16)
-            .wrapping_add(std::process::id() as u16);
+    pub fn start(path: PathBuf, handle: AppHandle) -> Result<Self> {
         let stopping = Arc::new(AtomicBool::new(false));
-        let stop = stopping.clone();
-        let active = Arc::new(AtomicUsize::new(0));
-        let overview = Arc::new(Mutex::new(OverviewCache::default()));
-        let server_instance_id = instance_id;
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        let (bridge_stop, bridge_stop_rx) = crossbeam_channel::bounded(1);
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+        let worker_path = path.clone();
         let worker = thread::Builder::new()
             .name("rivu-ipc".into())
             .spawn(move || {
-                let mut clients: Vec<JoinHandle<()>> = Vec::new();
-                for connection in listener.incoming() {
-                    if stop.load(Ordering::Acquire) {
-                        break;
+                let runtime = match Builder::new_current_thread()
+                    .enable_io()
+                    .enable_time()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        let _ = ready_tx.send(Err(anyhow::Error::from(error)));
+                        return;
                     }
-                    let Ok(stream) = connection else {
-                        continue;
-                    };
-                    if active.fetch_add(1, Ordering::AcqRel) >= 16 {
-                        active.fetch_sub(1, Ordering::AcqRel);
-                        continue;
+                };
+                let listener = match UnixListener::bind(&worker_path) {
+                    Ok(listener) => listener,
+                    Err(error) => {
+                        let _ = ready_tx.send(Err(anyhow::Error::from(error)));
+                        return;
                     }
-                    let count = active.clone();
-                    let client_handle = handle.clone();
-                    let client_overview = overview.clone();
-                    let client_stop = stop.clone();
-                    let spawn =
-                        thread::Builder::new()
-                            .name("rivu-client".into())
-                            .spawn(move || {
-                                let _ = serve_connection(
-                                    stream,
-                                    &client_handle,
-                                    &client_overview,
-                                    server_instance_id,
-                                    &client_stop,
-                                );
-                                count.fetch_sub(1, Ordering::AcqRel);
-                            });
-                    match spawn {
-                        Ok(worker) => {
-                            clients.retain(|worker| !worker.is_finished());
-                            clients.push(worker);
-                        }
-                        Err(_) => {
-                            active.fetch_sub(1, Ordering::AcqRel);
-                        }
-                    }
+                };
+                if let Err(error) =
+                    fs::set_permissions(&worker_path, fs::Permissions::from_mode(0o600))
+                {
+                    let _ = ready_tx.send(Err(anyhow::Error::from(error)));
+                    return;
                 }
-                for client in clients {
-                    let _ = client.join();
-                }
+                let (revision_tx, revision_rx) = watch::channel(handle.snapshot().revision);
+                let updates = handle.subscribe();
+                let bridge_handle = handle.clone();
+                let bridge = thread::Builder::new()
+                    .name("rivu-ipc-revisions".into())
+                    .spawn(move || {
+                        loop {
+                            crossbeam_channel::select! {
+                                recv(updates) -> message => {
+                                    if message.is_ok() { let _ = revision_tx.send(bridge_handle.snapshot().revision); } else { break; }
+                                }
+                                recv(bridge_stop_rx) -> _ => break,
+                            }
+                        }
+                    });
+                let Ok(bridge) = bridge else {
+                    let _ = ready_tx.send(Err(anyhow::anyhow!("starting IPC revision bridge")));
+                    return;
+                };
+                let _ = ready_tx.send(Ok(()));
+                runtime.block_on(run_server(listener, handle, revision_rx, shutdown_rx));
+                let _ = bridge.join();
             })?;
-        Ok(Self {
-            path,
-            stopping,
-            worker: Some(worker),
-        })
+        match ready_rx.recv() {
+            Ok(Ok(())) => Ok(Self {
+                path,
+                stopping,
+                shutdown,
+                bridge_stop,
+                worker: Some(worker),
+            }),
+            Ok(Err(error)) => {
+                let _ = worker.join();
+                Err(error)
+            }
+            Err(error) => {
+                let _ = worker.join();
+                Err(anyhow::Error::from(error))
+            }
+        }
     }
 }
 
 impl Drop for Server {
     fn drop(&mut self) {
         self.stopping.store(true, Ordering::Release);
-        let _ = UnixStream::connect(&self.path);
+        let _ = self.shutdown.send(true);
+        let _ = self.bridge_stop.send(());
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -448,27 +456,23 @@ impl Drop for Server {
     }
 }
 
-fn read_frame(stream: &mut UnixStream, limit: usize) -> Result<Vec<u8>> {
-    let mut pending = Vec::new();
-    read_frame_with_prefix(stream, limit, &mut pending)
-}
-
-fn read_frame_with_prefix(
-    stream: &mut UnixStream,
+async fn read_frame<S: AsyncRead + Unpin>(
+    stream: &mut S,
     limit: usize,
     pending: &mut Vec<u8>,
 ) -> Result<Vec<u8>> {
     let mut header = [0u8; 4];
     let mut offset = 0;
-    while offset < header.len() {
-        if !pending.is_empty() {
-            header[offset] = pending.remove(0);
-            offset += 1;
-        } else {
+    while offset < 4 {
+        if pending.is_empty() {
             stream
                 .read_exact(&mut header[offset..])
+                .await
                 .context("Reading IPC frame length")?;
-            offset = header.len();
+            offset = 4;
+        } else {
+            header[offset] = pending.remove(0);
+            offset += 1;
         }
     }
     let length = u32::from_le_bytes(header) as usize;
@@ -477,77 +481,34 @@ fn read_frame_with_prefix(
     }
     let mut bytes = vec![0u8; length];
     let mut offset = 0;
-    while offset < bytes.len() {
-        if !pending.is_empty() {
-            bytes[offset] = pending.remove(0);
-            offset += 1;
-        } else {
+    while offset < length {
+        if pending.is_empty() {
             stream
                 .read_exact(&mut bytes[offset..])
+                .await
                 .context("Reading IPC frame payload")?;
-            offset = bytes.len();
+            offset = length;
+        } else {
+            bytes[offset] = pending.remove(0);
+            offset += 1;
         }
     }
     Ok(bytes)
 }
 
-fn read_frame_interruptible<F: Fn() -> bool>(
-    stream: &mut UnixStream,
-    limit: usize,
-    cancelled: F,
-) -> Result<Option<Vec<u8>>> {
-    let mut header = [0u8; 4];
-    let mut offset = 0;
-    while offset < header.len() {
-        if cancelled() {
-            return Ok(None);
-        }
-        match stream.read(&mut header[offset..]) {
-            Ok(0) => bail!("IPC peer closed while reading frame length"),
-            Ok(count) => offset += count,
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) =>
-            {
-                continue;
-            }
-            Err(error) => return Err(error).context("Reading IPC frame length"),
-        }
-    }
-    let length = u32::from_le_bytes(header) as usize;
-    if length > limit {
-        bail!("IPC frame exceeds maximum size");
-    }
-    let mut bytes = vec![0u8; length];
-    let mut offset = 0;
-    while offset < bytes.len() {
-        if cancelled() {
-            return Ok(None);
-        }
-        match stream.read(&mut bytes[offset..]) {
-            Ok(0) => bail!("IPC peer closed while reading frame payload"),
-            Ok(count) => offset += count,
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) =>
-            {
-                continue;
-            }
-            Err(error) => return Err(error).context("Reading IPC frame payload"),
-        }
-    }
-    Ok(Some(bytes))
+async fn write_frame<S: AsyncWrite + Unpin>(stream: &mut S, value: &impl Serialize) -> Result<()> {
+    stream
+        .write_all(&encode_frame(value)?)
+        .await
+        .context("Writing IPC frame")?;
+    stream.flush().await.context("Flushing IPC frame")?;
+    Ok(())
 }
 
 fn response_frame(response: Response, instance_id: u16, compact: bool) -> ResponseFrame {
-    let revision = response.state.revision as u16;
     ResponseFrame {
         instance_id,
-        revision,
+        revision: response.state.revision as u16,
         response: WireResponse::from_response(response, compact),
     }
 }
@@ -577,57 +538,73 @@ fn overview_response(state: AppState, overview: &Mutex<OverviewCache>) -> Respon
     OverviewCache::response(state, tracks)
 }
 
-fn wait_for_revision(
+async fn command(handle: &AppHandle, command: Command) -> Response {
+    let fallback = handle.snapshot();
+    let duration = if matches!(command, Command::OptimizeDatabase) {
+        Duration::from_secs(120)
+    } else {
+        Duration::from_secs(15)
+    };
+    match timeout(
+        duration,
+        tokio::task::spawn_blocking({
+            let handle = handle.clone();
+            move || handle.request(command)
+        }),
+    )
+    .await
+    {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => Response {
+            ok: false,
+            error: Some(format!("Core command task failed: {error}")),
+            state: fallback,
+        },
+        Err(_) => Response {
+            ok: false,
+            error: Some("Core command timed out".into()),
+            state: fallback,
+        },
+    }
+}
+
+async fn wait_for_revision(
     stream: &mut UnixStream,
     pending: &mut Vec<u8>,
     handle: &AppHandle,
     revision: u16,
     overview: &Mutex<OverviewCache>,
-    stopping: &AtomicBool,
+    updates: &mut watch::Receiver<u64>,
+    shutdown: &mut watch::Receiver<bool>,
 ) -> Option<Response> {
-    if stream.set_nonblocking(true).is_err() {
-        return None;
-    }
-    let updates = handle.subscribe();
-    let mut probe = [0u8; 1];
     loop {
-        if stopping.load(Ordering::Acquire) {
-            let _ = stream.set_nonblocking(false);
-            return None;
-        }
         let state = handle.snapshot();
         if (state.revision as u16) != revision || state.shutting_down {
-            let _ = stream.set_nonblocking(false);
             return Some(overview_response(state, overview));
         }
-        match stream.read(&mut probe) {
-            Ok(0) => {
-                let _ = stream.set_nonblocking(false);
-                return None;
-            }
-            Ok(count) => pending.extend_from_slice(&probe[..count]),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(_) => {
-                let _ = stream.set_nonblocking(false);
-                return None;
+        tokio::select! {
+            changed = updates.changed() => { if changed.is_err() { return None; } }
+            changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() { return None; } }
+            ready = stream.readable() => {
+                if ready.is_err() { return None; }
+                let mut probe = [0u8; 1];
+                match stream.try_read(&mut probe) { Ok(0) => return None, Ok(count) => pending.extend_from_slice(&probe[..count]), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}, Err(_) => return None }
             }
         }
-        let _ = updates.recv_timeout(Duration::from_millis(100));
     }
 }
 
-fn serve_connection(
+async fn serve_connection(
     mut stream: UnixStream,
-    handle: &AppHandle,
-    overview: &Mutex<OverviewCache>,
+    handle: AppHandle,
+    overview: Arc<Mutex<OverviewCache>>,
     instance_id: u16,
-    stopping: &AtomicBool,
+    mut updates: watch::Receiver<u64>,
+    mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
-    stream.set_read_timeout(Some(Duration::from_secs(3)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     let mut pending = Vec::new();
     loop {
-        let bytes = read_frame_with_prefix(&mut stream, MAX_REQUEST, &mut pending)?;
+        let bytes = tokio::select! { frame = read_frame(&mut stream, MAX_REQUEST, &mut pending) => frame?, changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() { return Ok(()); } continue; } };
         let request = match decode_frame::<RequestFrame>(&bytes) {
             Ok(request) => request,
             Err(error) => {
@@ -636,23 +613,21 @@ fn serve_connection(
                     error: Some(format!("Invalid command: {error}")),
                     state: handle.snapshot(),
                 };
-                stream.write_all(&encode_frame(&response_frame(
-                    response,
-                    instance_id,
-                    false,
-                ))?)?;
+                write_frame(&mut stream, &response_frame(response, instance_id, false)).await?;
                 continue;
             }
         };
         let (response, compact) = match request.request {
             RequestKind::Command(Command::Overview) => {
-                (overview_response(handle.snapshot(), overview), false)
+                (overview_response(handle.snapshot(), &overview), false)
             }
-            RequestKind::Command(Command::Status) => (handle.request(Command::Status), false),
-            RequestKind::Command(command) => {
-                let response = handle.request(command);
+            RequestKind::Command(Command::Status) => {
+                (command(&handle, Command::Status).await, false)
+            }
+            RequestKind::Command(cmd) => {
+                let response = command(&handle, cmd).await;
                 if response.ok {
-                    (overview_response(response.state, overview), false)
+                    (overview_response(response.state, &overview), false)
                 } else {
                     (response, false)
                 }
@@ -661,21 +636,47 @@ fn serve_connection(
                 let Some(response) = wait_for_revision(
                     &mut stream,
                     &mut pending,
-                    handle,
+                    &handle,
                     revision,
-                    overview,
-                    stopping,
-                ) else {
+                    &overview,
+                    &mut updates,
+                    &mut shutdown,
+                )
+                .await
+                else {
                     return Ok(());
                 };
                 (response, true)
             }
         };
-        stream.write_all(&encode_frame(&response_frame(
-            response,
-            instance_id,
-            compact,
-        ))?)?;
+        write_frame(&mut stream, &response_frame(response, instance_id, compact)).await?;
+    }
+}
+
+async fn run_server(
+    listener: UnixListener,
+    handle: AppHandle,
+    updates: watch::Receiver<u64>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let instance_id = (SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos() as u16)
+        .wrapping_add(std::process::id() as u16);
+    let overview = Arc::new(Mutex::new(OverviewCache::default()));
+    let mut clients: Vec<tokio::task::JoinHandle<Result<()>>> = Vec::new();
+    let mut revisions = updates.clone();
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => { let Ok((stream, _)) = accepted else { continue; }; clients.retain(|task| !task.is_finished()); if clients.len() < 16 { clients.push(tokio::spawn(serve_connection(stream, handle.clone(), overview.clone(), instance_id, updates.clone(), shutdown.clone()))); } }
+            changed = revisions.changed() => { if changed.is_err() { break; } }
+            changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() { break; } }
+        }
+    }
+    for task in clients {
+        task.abort();
+        let _ = task.await;
     }
 }
 
@@ -689,69 +690,111 @@ pub fn is_no_instance(error: &Error) -> bool {
         })
     })
 }
+
 pub struct WatcherSession {
+    runtime: tokio::runtime::Runtime,
     stream: UnixStream,
+    cancelled: Arc<AtomicBool>,
+    cancel_notify: Arc<tokio::sync::Notify>,
+}
+fn client_runtime() -> Result<tokio::runtime::Runtime> {
+    Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .context("creating IPC runtime")
 }
 
 pub fn watch_session(path: &Path) -> Result<WatcherSession> {
-    let stream = UnixStream::connect(path).with_context(|| {
-        format!(
-            "Cannot connect to Rivu at {}. Start `rivu` or `rivu serve` first.",
-            path.display()
-        )
-    })?;
-    stream.set_read_timeout(Some(Duration::from_millis(250)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(3)))?;
-    Ok(WatcherSession { stream })
+    watch_session_with_cancel(
+        path,
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(tokio::sync::Notify::new()),
+    )
 }
 
+pub fn watch_session_with_cancel(
+    path: &Path,
+    cancelled: Arc<AtomicBool>,
+    cancel_notify: Arc<tokio::sync::Notify>,
+) -> Result<WatcherSession> {
+    let runtime = client_runtime()?;
+    let stream = runtime
+        .block_on(UnixStream::connect(path))
+        .with_context(|| {
+            format!(
+                "Cannot connect to Rivu at {}. Start `rivu` or `rivu serve` first.",
+                path.display()
+            )
+        })?;
+    Ok(WatcherSession {
+        runtime,
+        stream,
+        cancelled,
+        cancel_notify,
+    })
+}
 impl WatcherSession {
+    pub fn cancellation(&self) -> (Arc<AtomicBool>, Arc<tokio::sync::Notify>) {
+        (self.cancelled.clone(), self.cancel_notify.clone())
+    }
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.cancel_notify.notify_waiters();
+    }
     pub fn watch(&mut self, revision: u16) -> Result<Response> {
         self.watch_until(revision, || false)
             .and_then(|response| response.ok_or_else(|| anyhow::anyhow!("Watcher cancelled")))
     }
-
     pub(crate) fn watch_until(
         &mut self,
         revision: u16,
         cancelled: impl Fn() -> bool,
     ) -> Result<Option<Response>> {
+        if cancelled() || self.cancelled.load(Ordering::Acquire) {
+            return Ok(None);
+        }
         let request = RequestFrame {
             instance_id: CLIENT_INSTANCE_UNKNOWN,
             request: RequestKind::Watch { revision },
         };
-        self.stream.write_all(&encode_frame(&request)?)?;
-        let bytes = read_frame_interruptible(&mut self.stream, MAX_RESPONSE, cancelled)?;
-        bytes
-            .map(|bytes| decode_frame::<ResponseFrame>(&bytes).map(unpack_response))
-            .transpose()
+        let cancelled_flag = self.cancelled.clone();
+        let notify = self.cancel_notify.clone();
+        let result = self.runtime.block_on(async { let mut pending = Vec::new(); write_frame(&mut self.stream, &request).await?; tokio::select! { bytes = read_frame(&mut self.stream, MAX_RESPONSE, &mut pending) => { let bytes = bytes?; Ok(Some(unpack_response(decode_frame::<ResponseFrame>(&bytes)?))) }, _ = notify.notified() => Ok(None) } });
+        if cancelled_flag.load(Ordering::Acquire) {
+            Ok(None)
+        } else {
+            result
+        }
     }
 }
-
 pub fn watch(path: &Path, revision: u16) -> Result<Response> {
     watch_session(path)?.watch(revision)
 }
-
 pub fn request(path: &Path, command: &Command) -> Result<Response> {
-    let mut stream = UnixStream::connect(path).with_context(|| {
-        format!(
-            "Cannot connect to Rivu at {}. Start `rivu` or `rivu serve` first.",
-            path.display()
-        )
-    })?;
-    stream.set_read_timeout(if matches!(command, Command::OptimizeDatabase) {
-        None
-    } else {
-        Some(Duration::from_secs(15))
-    })?;
-    stream.set_write_timeout(Some(Duration::from_secs(3)))?;
-    let request = RequestFrame {
-        instance_id: CLIENT_INSTANCE_UNKNOWN,
-        request: RequestKind::Command(command.clone()),
-    };
-    stream.write_all(&encode_frame(&request)?)?;
-    Ok(unpack_response(decode_frame(&read_frame(
-        &mut stream,
-        MAX_RESPONSE,
-    )?)?))
+    let runtime = client_runtime()?;
+    runtime.block_on(async {
+        let mut stream = UnixStream::connect(path).await.with_context(|| {
+            format!(
+                "Cannot connect to Rivu at {}. Start `rivu` or `rivu serve` first.",
+                path.display()
+            )
+        })?;
+        let request = RequestFrame {
+            instance_id: CLIENT_INSTANCE_UNKNOWN,
+            request: RequestKind::Command(command.clone()),
+        };
+        write_frame(&mut stream, &request).await?;
+        let bytes = if matches!(command, Command::OptimizeDatabase) {
+            read_frame(&mut stream, MAX_RESPONSE, &mut Vec::new()).await?
+        } else {
+            timeout(
+                Duration::from_secs(15),
+                read_frame(&mut stream, MAX_RESPONSE, &mut Vec::new()),
+            )
+            .await
+            .context("Reading IPC response timed out")??
+        };
+        Ok(unpack_response(decode_frame::<ResponseFrame>(&bytes)?))
+    })
 }
