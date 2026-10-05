@@ -1,8 +1,25 @@
-use std::{collections::BTreeSet, env, path::PathBuf};
+use std::{collections::BTreeSet, env, path::PathBuf, process::Command};
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=LIBCLANG_PATH");
+
+    println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=.git/refs/tags");
+    println!("cargo:rerun-if-env-changed=RIVU_GIT_VERSION");
+    let git_version = env::var("RIVU_GIT_VERSION").ok().or_else(|| {
+        Command::new("git")
+            .args(["describe", "--long", "--tags", "--dirty", "--always"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|version| version.trim().to_owned())
+    });
+    println!(
+        "cargo:rustc-env=RIVU_GIT_VERSION={}",
+        git_version.as_deref().unwrap_or("unknown")
+    );
     let target = env::var("TARGET").expect("Cargo TARGET");
     assert!(
         target.starts_with("x86_64-") && target.contains("linux"),

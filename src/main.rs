@@ -15,7 +15,7 @@ use std::{path::PathBuf, thread, time::Duration};
 #[derive(Parser)]
 #[command(
     name = "rivu",
-    version,
+    version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("RIVU_GIT_VERSION"), ")"),
     about = "A quiet, local-first music player",
     long_about = "Rivu plays local audio with a shared Rust core. Run without a subcommand for the desktop UI; CLI and TUI control that same instance. Optional FFmpeg extension audio decoding is loaded only when enabled."
 )]
