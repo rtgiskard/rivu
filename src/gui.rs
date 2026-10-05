@@ -18,8 +18,8 @@ use components::ButtonTooltip;
 pub(super) use components::{
     DropdownItem, DropdownState, POPOVER_MAX_HEIGHT, SelectableListState, SelectionMode,
     SelectionModel, TRACK_HEIGHT, TreeKey, TreeState, caption, context_menu_container,
-    drag_preview, dropdown_container, dropdown_row, empty_state, list_row, panel_surface,
-    panel_toolbar, row_text, track_row,
+    drag_preview, dropdown_container, dropdown_row, empty_state, list_row, list_viewport,
+    panel_surface, panel_toolbar, row_text, track_row,
 };
 use futures::{FutureExt, StreamExt, channel::mpsc};
 use gpui::{prelude::*, *};

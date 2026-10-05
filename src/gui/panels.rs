@@ -1,7 +1,7 @@
 use super::{
     ACCENT, BORDER, Dragging, ERROR, ERROR_BG, Field, GuiApp, HIGHLIGHT, ListFocus, MUTED,
     Measured, QueueDrag, UI_INSET, button, column, empty_state, format_time, icon_button,
-    library::LibraryDrag, panel_toolbar, row, row_text, track_row,
+    library::LibraryDrag, panel_surface, panel_toolbar, row, row_text, track_row,
 };
 pub(super) use super::{TRACK_HEIGHT, caption, list_row};
 use crate::model::{Command, PlaybackStatus, RepeatMode};
@@ -432,9 +432,7 @@ impl GuiApp {
                     },
                 ));
         }
-        let mut panel = column()
-            .id(("library-panel", panel_id))
-            .size_full()
+        let mut panel = panel_surface(("library-panel", panel_id))
             .child(self.panel_field(Field::Search, "Search title, artist or album"))
             .child(tools)
             .child(caption(format!(
@@ -691,10 +689,7 @@ impl GuiApp {
                 }
             }
         }
-        column()
-            .id(("queue-panel", panel_id))
-            .size_full()
-            .min_h_0()
+        panel_surface(("queue-panel", panel_id))
             .on_drop(cx.listener(|this, drag: &LibraryDrag, window, cx| {
                 window.prevent_default();
                 let track_ids = this.library_drag_track_ids(&drag.node);
@@ -882,10 +877,7 @@ impl GuiApp {
         ));
         let catalog_height =
             (self.state.library.playlists.len().max(1) as f32 * TRACK_HEIGHT).min(126.0);
-        let mut panel = column()
-            .id(("playlists-panel", panel_id))
-            .size_full()
-            .min_h_0()
+        let mut panel = panel_surface(("playlists-panel", panel_id))
             .on_drop(cx.listener(|this, drag: &LibraryDrag, window, cx| {
                 window.prevent_default();
                 let Some(playlist_id) = this.selected_playlist else {
@@ -1358,9 +1350,7 @@ impl GuiApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        column()
-            .id(("history-panel", panel_id))
-            .size_full()
+        panel_surface(("history-panel", panel_id))
             .child(caption(format!(
                 "Recent tracks · {} tracks · newest first",
                 self.state.library.history.len()

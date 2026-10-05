@@ -32,6 +32,16 @@ pub(crate) fn panel_toolbar() -> Div {
     super::row().flex_wrap().flex_shrink_0()
 }
 
+/// Shared root surface for docked panels.
+pub(crate) fn panel_surface(id: impl Into<ElementId>) -> Stateful<Div> {
+    div().id(id).size_full().min_h_0()
+}
+
+/// Shared viewport shell for virtualized lists.
+pub(crate) fn list_viewport(child: impl IntoElement) -> Div {
+    div().flex_1().min_h_0().w_full().child(child)
+}
+
 /// Shared tooltip used by icon buttons.
 pub(crate) struct ButtonTooltip {
     pub(super) text: SharedString,

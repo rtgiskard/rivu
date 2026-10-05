@@ -1,7 +1,7 @@
 use super::{
     GuiApp, ListFocus, TRACK_HEIGHT,
     components::{TreeKey, TreeRow, tree_row},
-    icon_button, row, row_text,
+    icon_button, list_viewport, row, row_text,
 };
 use crate::model::{Command, Track};
 use gpui::{
@@ -186,110 +186,109 @@ impl GuiApp {
     }
 
     pub(super) fn library_tree_list(&self, panel_id: u64, cx: &mut Context<Self>) -> AnyElement {
-        uniform_list(
-            ("library-tree", panel_id),
-            self.library_tree.visible_indices().len(),
-            cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
-                let focused = this.library_tree.selected().map(|row| row.id.clone());
-                range
-                    .filter_map(|index| {
-                        let source_index = *this.library_tree.visible_indices().get(index)?;
-                        let node = this.library_tree.rows().get(source_index)?;
-                        let id = node.id.clone();
-                        let selected = match &id {
-                            LibraryNode::Track(id) => this.selected.contains(id),
-                            _ => focused.as_ref() == Some(&id),
-                        };
-                        let (title, detail) = match &id {
-                            LibraryNode::Track(id) => this.panel_track_text(*id),
-                            _ => (node.label.clone(), String::new()),
-                        };
-                        let scan_path = match &id {
-                            LibraryNode::Directory(path) => Some(path.to_path_buf()),
-                            LibraryNode::Track(track_id) => this
-                                .library_index
-                                .get(track_id)
-                                .and_then(|index| this.state.library.tracks.get(*index))
-                                .map(|track| track.path.clone()),
-                        };
-                        let scan = scan_path.map(|path| {
-                            icon_button(
-                                ("library-scan", source_index),
-                                "↻",
-                                "Scan this path",
-                                cx,
-                                move |this, _, cx| {
-                                    this.send(
-                                        Command::Scan {
-                                            paths: vec![path.clone()],
-                                            force: this.force_scan,
-                                        },
-                                        cx,
-                                    );
-                                },
-                            )
-                            .opacity(0.35)
-                            .hover(|style| style.opacity(1.0))
-                        });
-                        let content = row()
-                            .flex_1()
-                            .min_w_0()
-                            .child(row_text(("library-node-text", source_index), title, detail))
-                            .when_some(scan, |view, scan| view.child(scan));
-                        Some(
-                            tree_row(
-                                ("library-node", source_index),
-                                node.depth,
-                                selected,
-                                this.library_tree.expanded().contains(&id),
-                                node.has_children,
-                            )
-                            .h(px(TRACK_HEIGHT))
-                            .min_w_0()
-                            .overflow_hidden()
-                            .child(content)
-                            .on_drag(LibraryDrag { node: id.clone() }, |drag, _, _, cx| {
-                                cx.new(|_| drag.clone())
-                            })
-                            .on_click(cx.listener(
-                                move |this, event: &gpui::ClickEvent, window, cx| {
-                                    this.focus_workspace(window, cx);
-                                    this.list_focus = Some(ListFocus::Library);
-                                    this.library_tree.select(&id);
-                                    match &id {
-                                        LibraryNode::Track(track_id) => {
-                                            let modifiers = event.modifiers();
-                                            this.select_track(
-                                                *track_id,
-                                                modifiers.control || modifiers.platform,
-                                                cx,
-                                            );
-                                            if event.click_count() == 2 {
-                                                this.send(
-                                                    Command::Play {
-                                                        track_id: *track_id,
-                                                    },
+        list_viewport(
+            uniform_list(
+                ("library-tree", panel_id),
+                self.library_tree.visible_indices().len(),
+                cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                    let focused = this.library_tree.selected().map(|row| row.id.clone());
+                    range
+                        .filter_map(|index| {
+                            let source_index = *this.library_tree.visible_indices().get(index)?;
+                            let node = this.library_tree.rows().get(source_index)?;
+                            let id = node.id.clone();
+                            let selected = match &id {
+                                LibraryNode::Track(id) => this.selected.contains(id),
+                                _ => focused.as_ref() == Some(&id),
+                            };
+                            let (title, detail) = match &id {
+                                LibraryNode::Track(id) => this.panel_track_text(*id),
+                                _ => (node.label.clone(), String::new()),
+                            };
+                            let scan_path = match &id {
+                                LibraryNode::Directory(path) => Some(path.to_path_buf()),
+                                LibraryNode::Track(track_id) => this
+                                    .library_index
+                                    .get(track_id)
+                                    .and_then(|index| this.state.library.tracks.get(*index))
+                                    .map(|track| track.path.clone()),
+                            };
+                            let scan = scan_path.map(|path| {
+                                icon_button(
+                                    ("library-scan", source_index),
+                                    "↻",
+                                    "Scan this path",
+                                    cx,
+                                    move |this, _, cx| {
+                                        this.send(
+                                            Command::Scan {
+                                                paths: vec![path.clone()],
+                                                force: this.force_scan,
+                                            },
+                                            cx,
+                                        );
+                                    },
+                                )
+                                .opacity(0.35)
+                                .hover(|style| style.opacity(1.0))
+                            });
+                            let content = row()
+                                .flex_1()
+                                .min_w_0()
+                                .child(row_text(("library-node-text", source_index), title, detail))
+                                .when_some(scan, |view, scan| view.child(scan));
+                            Some(
+                                tree_row(
+                                    ("library-node", source_index),
+                                    node.depth,
+                                    selected,
+                                    this.library_tree.expanded().contains(&id),
+                                    node.has_children,
+                                )
+                                .h(px(TRACK_HEIGHT))
+                                .min_w_0()
+                                .overflow_hidden()
+                                .child(content)
+                                .on_drag(LibraryDrag { node: id.clone() }, |drag, _, _, cx| {
+                                    cx.new(|_| drag.clone())
+                                })
+                                .on_click(cx.listener(
+                                    move |this, event: &gpui::ClickEvent, window, cx| {
+                                        this.focus_workspace(window, cx);
+                                        this.list_focus = Some(ListFocus::Library);
+                                        this.library_tree.select(&id);
+                                        match &id {
+                                            LibraryNode::Track(track_id) => {
+                                                let modifiers = event.modifiers();
+                                                this.select_track(
+                                                    *track_id,
+                                                    modifiers.control || modifiers.platform,
                                                     cx,
                                                 );
+                                                if event.click_count() == 2 {
+                                                    this.send(
+                                                        Command::Play {
+                                                            track_id: *track_id,
+                                                        },
+                                                        cx,
+                                                    );
+                                                }
+                                            }
+                                            LibraryNode::Directory(_) => {
+                                                if event.click_count() == 1 {
+                                                    this.navigate_library_tree(TreeKey::Toggle, cx);
+                                                }
                                             }
                                         }
-                                        LibraryNode::Directory(_) => {
-                                            if event.click_count() == 1 {
-                                                this.navigate_library_tree(TreeKey::Toggle, cx);
-                                            }
-                                        }
-                                    }
-                                },
-                            )),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            }),
+                                    },
+                                )),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                }),
+            )
+            .track_scroll(&self.library_tree_scroll),
         )
-        .track_scroll(&self.library_tree_scroll)
-        .flex_1()
-        .min_h_0()
-        .w_full()
         .into_any_element()
     }
 }
