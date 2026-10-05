@@ -11,7 +11,20 @@ impl Core {
                     if let Err(error) = &result { self.state.last_error = Some(format!("{error:#}")); }
                     if changed || result.is_err() { self.publish(); }
                     if let Some(reply) = request.reply {
-                        let _ = reply.send(Response { ok: result.is_ok(), error: result.err().map(|e| format!("{e:#}")), state: self.state.clone() });
+                        let value = if request.ack {
+                            CoreResponse::Ack(Ack {
+                                ok: result.is_ok(),
+                                error: result.as_ref().err().map(|e| format!("{e:#}")),
+                                revision: self.state.revision,
+                            })
+                        } else {
+                            CoreResponse::State(Response {
+                                ok: result.is_ok(),
+                                error: result.err().map(|e| format!("{e:#}")),
+                                state: self.state.clone(),
+                            })
+                        };
+                        let _ = reply.send(value);
                     }
                     if shutdown { break; }
                 }

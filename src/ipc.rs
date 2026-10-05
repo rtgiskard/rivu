@@ -664,16 +664,15 @@ async fn serve_connection(
                 }
             }
             RequestKind::Ack(cmd) => {
-                let response = command(&handle, cmd).await;
-                let ack = Ack {
-                    ok: response.ok,
-                    error: response.error,
-                    revision: response.state.revision,
-                };
+                let ack = tokio::task::spawn_blocking({
+                    let handle = handle.clone();
+                    move || handle.request_ack(cmd)
+                })
+                .await
+                .map_err(|error| anyhow::anyhow!("Core command task failed: {error}"))?;
                 write_frame(&mut stream, &ack_frame(ack, instance_id)).await?;
                 continue;
             }
-
             RequestKind::Watch { revision } => {
                 let Some(response) = wait_for_revision(
                     &mut stream,

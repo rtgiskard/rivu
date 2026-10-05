@@ -23,9 +23,14 @@ use std::{
 };
 
 type Wakeup = Arc<dyn Fn() + Send + Sync>;
+enum CoreResponse {
+    State(Response),
+    Ack(Ack),
+}
 struct Request {
     command: Command,
-    reply: Option<Sender<Response>>,
+    reply: Option<Sender<CoreResponse>>,
+    ack: bool,
 }
 
 #[derive(Clone)]
@@ -46,6 +51,7 @@ impl AppHandle {
             .try_send(Request {
                 command,
                 reply: None,
+                ack: false,
             })
             .context("Rivu is busy or stopped")
     }
@@ -103,6 +109,7 @@ impl AppHandle {
             Request {
                 command,
                 reply: Some(tx),
+                ack: false,
             },
             Duration::from_secs(2),
         );
@@ -119,11 +126,47 @@ impl AppHandle {
             rx.recv_timeout(Duration::from_secs(12))
                 .map_err(|error| error.to_string())
         };
-        response.unwrap_or_else(|error| Response {
-            ok: false,
-            error: Some(format!("Core response unavailable: {error}")),
-            state: self.snapshot(),
-        })
+        match response.unwrap_or_else(|error| {
+            CoreResponse::State(Response {
+                ok: false,
+                error: Some(format!("Core response unavailable: {error}")),
+                state: self.snapshot(),
+            })
+        }) {
+            CoreResponse::State(response) => response,
+            CoreResponse::Ack(_) => unreachable!("state request returned Ack"),
+        }
+    }
+
+    pub fn request_ack(&self, command: Command) -> Ack {
+        let (tx, rx) = bounded(1);
+        if let Err(error) = self.sender.send_timeout(
+            Request {
+                command,
+                reply: Some(tx),
+                ack: true,
+            },
+            Duration::from_secs(2),
+        ) {
+            return Ack {
+                ok: false,
+                error: Some(format!("Core unavailable: {error}")),
+                revision: self.snapshot().revision,
+            };
+        }
+        match rx.recv_timeout(Duration::from_secs(12)) {
+            Ok(CoreResponse::Ack(ack)) => ack,
+            Ok(CoreResponse::State(_)) => Ack {
+                ok: false,
+                error: Some("Core returned state for Ack request".into()),
+                revision: self.snapshot().revision,
+            },
+            Err(error) => Ack {
+                ok: false,
+                error: Some(format!("Core response unavailable: {error}")),
+                revision: self.snapshot().revision,
+            },
+        }
     }
 }
 
@@ -265,6 +308,7 @@ impl Drop for Runtime {
             let _ = self.handle.sender.send(Request {
                 command: Command::Shutdown,
                 reply: None,
+                ack: false,
             });
         }
         let _ = self.join();
@@ -1626,6 +1670,7 @@ mod tests {
             .send(Request {
                 command: Command::Shutdown,
                 reply: None,
+                ack: false,
             })
             .unwrap();
         core.run(receiver);
