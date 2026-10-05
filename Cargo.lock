@@ -5170,6 +5170,7 @@ dependencies = [
  "bincode",
  "bindgen",
  "blake3",
+ "bytes",
  "clap",
  "cpal",
  "crossbeam-channel",

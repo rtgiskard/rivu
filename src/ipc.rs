@@ -13,6 +13,7 @@ use bincode::{
     config,
     serde::{decode_from_slice, encode_to_vec},
 };
+use bytes::{Buf, Bytes, BytesMut};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -500,41 +501,28 @@ impl Drop for Server {
 async fn read_frame<S: AsyncRead + Unpin>(
     stream: &mut S,
     limit: usize,
-    pending: &mut Vec<u8>,
-) -> Result<Vec<u8>> {
-    let mut header = [0u8; 4];
-    let mut offset = 0;
-    while offset < 4 {
-        if pending.is_empty() {
-            stream
-                .read_exact(&mut header[offset..])
-                .await
-                .context("Reading IPC frame length")?;
-            offset = 4;
-        } else {
-            header[offset] = pending.remove(0);
-            offset += 1;
+    pending: &mut BytesMut,
+) -> Result<Bytes> {
+    loop {
+        if pending.len() >= 4 {
+            let length = u32::from_le_bytes(pending[..4].try_into().unwrap()) as usize;
+            if length > limit {
+                bail!("IPC frame exceeds maximum size");
+            }
+            if pending.len() >= 4 + length {
+                pending.advance(4);
+                return Ok(pending.split_to(length).freeze());
+            }
+        }
+        let before = pending.len();
+        stream
+            .read_buf(pending)
+            .await
+            .context("Reading IPC frame")?;
+        if pending.len() == before {
+            bail!("IPC connection closed while reading frame");
         }
     }
-    let length = u32::from_le_bytes(header) as usize;
-    if length > limit {
-        bail!("IPC frame exceeds maximum size");
-    }
-    let mut bytes = vec![0u8; length];
-    let mut offset = 0;
-    while offset < length {
-        if pending.is_empty() {
-            stream
-                .read_exact(&mut bytes[offset..])
-                .await
-                .context("Reading IPC frame payload")?;
-            offset = length;
-        } else {
-            bytes[offset] = pending.remove(0);
-            offset += 1;
-        }
-    }
-    Ok(bytes)
 }
 
 async fn write_frame<S: AsyncWrite + Unpin>(stream: &mut S, value: &impl Serialize) -> Result<()> {
@@ -630,7 +618,7 @@ async fn command(handle: &AppHandle, command: Command) -> StateResponse {
 
 async fn wait_for_revision(
     stream: &mut UnixStream,
-    pending: &mut Vec<u8>,
+    pending: &mut BytesMut,
     handle: &AppHandle,
     revision: u16,
     overview: &Mutex<OverviewCache>,
@@ -647,8 +635,20 @@ async fn wait_for_revision(
             changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() { return None; } }
             ready = stream.readable() => {
                 if ready.is_err() { return None; }
-                let mut probe = [0u8; 1];
-                match stream.try_read(&mut probe) { Ok(0) => return None, Ok(count) => pending.extend_from_slice(&probe[..count]), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}, Err(_) => return None }
+                match stream.try_read_buf(pending) {
+                    Ok(0) => return None,
+                    Ok(_) => {
+                        if pending.len() >= 4 {
+                            let length =
+                                u32::from_le_bytes(pending[..4].try_into().unwrap()) as usize;
+                            if length > MAX_REQUEST {
+                                return None;
+                            }
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(_) => return None,
+                }
             }
         }
     }
@@ -662,7 +662,7 @@ async fn serve_connection(
     mut updates: watch::Receiver<u64>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
-    let mut pending = Vec::new();
+    let mut pending = BytesMut::new();
     loop {
         let bytes = tokio::select! { frame = read_frame(&mut stream, MAX_REQUEST, &mut pending) => frame?, changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() { return Ok(()); } continue; } };
         let request = match decode_frame::<RequestFrame>(&bytes).and_then(decode_request) {
@@ -830,7 +830,7 @@ impl WatcherSession {
         };
         let cancelled_flag = self.cancelled.clone();
         let notify = self.cancel_notify.clone();
-        let result = self.runtime.block_on(async { let mut pending = Vec::new(); write_frame(&mut self.stream, &request).await?; tokio::select! { bytes = read_frame(&mut self.stream, MAX_RESPONSE, &mut pending) => { let bytes = bytes?; Ok(Some(unpack_response(decode_frame::<ResponseFrame>(&bytes)?)?)) }, _ = notify.notified() => Ok(None) } });
+        let result = self.runtime.block_on(async { let mut pending = BytesMut::new(); write_frame(&mut self.stream, &request).await?; tokio::select! { bytes = read_frame(&mut self.stream, MAX_RESPONSE, &mut pending) => { let bytes = bytes?; Ok(Some(unpack_response(decode_frame::<ResponseFrame>(&bytes)?)?)) }, _ = notify.notified() => Ok(None) } });
         if cancelled_flag.load(Ordering::Acquire) {
             Ok(None)
         } else {
@@ -856,11 +856,11 @@ pub fn request(path: &Path, command: &Command) -> Result<StateResponse> {
         };
         write_frame(&mut stream, &request).await?;
         let bytes = if matches!(command, Command::OptimizeDatabase) {
-            read_frame(&mut stream, MAX_RESPONSE, &mut Vec::new()).await?
+            read_frame(&mut stream, MAX_RESPONSE, &mut BytesMut::new()).await?
         } else {
             timeout(
                 Duration::from_secs(15),
-                read_frame(&mut stream, MAX_RESPONSE, &mut Vec::new()),
+                read_frame(&mut stream, MAX_RESPONSE, &mut BytesMut::new()),
             )
             .await
             .context("Reading IPC response timed out")??
@@ -884,7 +884,7 @@ pub fn request_ack(path: &Path, command: &Command) -> Result<Ack> {
         write_frame(&mut stream, &request).await?;
         let bytes = timeout(
             Duration::from_secs(15),
-            read_frame(&mut stream, MAX_RESPONSE, &mut Vec::new()),
+            read_frame(&mut stream, MAX_RESPONSE, &mut BytesMut::new()),
         )
         .await
         .context("Reading IPC acknowledgement timed out")??;
