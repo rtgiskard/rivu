@@ -19,7 +19,7 @@ use symphonia::{
     default::get_probe,
 };
 
-const DEFAULT_IMAGE: &[u8] = include_bytes!("../assets/rivu.png");
+pub(crate) static DEFAULT_IMAGE: &[u8] = include_bytes!("../assets/rivu.png");
 
 struct CachedArtwork {
     fingerprint: Option<String>,

@@ -1,4 +1,5 @@
 use crate::{
+    artwork::DEFAULT_IMAGE,
     core::AppHandle,
     model::{Command, PlaybackStatus},
     projection::TraySnapshot,
@@ -37,7 +38,7 @@ fn sni_status() -> &'static str {
 
 fn icon_pixmap() -> &'static Vec<IconPixmap> {
     static ICON: std::sync::LazyLock<Vec<IconPixmap>> = std::sync::LazyLock::new(|| {
-        let image = image::load_from_memory(include_bytes!("../assets/rivu.png"))
+        let image = image::load_from_memory(DEFAULT_IMAGE)
             .expect("embedded Rivu tray icon")
             .to_rgba8();
         let (width, height) = image.dimensions();
