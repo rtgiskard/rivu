@@ -922,3 +922,6 @@ mod tests {
         directory.close().unwrap();
     }
 }
+    pub tray_enabled: bool,
+            tray_enabled: true,
+            tray_enabled: false,

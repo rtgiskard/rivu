@@ -1,7 +1,10 @@
 use crate::{
     config::Config,
     core::CoreState,
-    model::{DatabaseOptimization, HistoryEntry, PlaybackState, Playlist, QueueState, Track},
+    model::{
+        DatabaseOptimization, HistoryEntry, PlaybackState, PlaybackStatus, Playlist, QueueState,
+        Track,
+    },
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -243,6 +246,48 @@ impl MprisSnapshot {
     }
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct TraySnapshot {
+    pub(crate) tracks: Arc<Vec<Track>>,
+    pub(crate) current_track_id: Option<i64>,
+    pub(crate) status: PlaybackStatus,
+    pub(crate) shutting_down: bool,
+}
+
+impl TraySnapshot {
+    pub(crate) fn from_core(state: &CoreState) -> Self {
+        let current_track_id = state.queue.current_id.and_then(|queue_id| {
+            state
+                .queue
+                .entries
+                .iter()
+                .find(|entry| entry.id == queue_id)
+                .map(|entry| entry.track_id)
+        });
+        Self {
+            tracks: Arc::clone(&state.library.tracks),
+            current_track_id,
+            status: state.playback.status,
+            shutting_down: state.system.shutting_down,
+        }
+    }
+
+    pub(crate) fn current_track(&self) -> Option<&Track> {
+        let track_id = self.current_track_id?;
+        self.tracks.iter().find(|track| track.id == track_id)
+    }
+
+    pub(crate) fn changed_from(&self, previous: &Self) -> bool {
+        self.status != previous.status
+            || self.current_track_id != previous.current_track_id
+            || self.shutting_down != previous.shutting_down
+            || !Arc::ptr_eq(&self.tracks, &previous.tracks)
+    }
+    pub(crate) fn menu_changed_from(&self, previous: &Self) -> bool {
+        self.status != previous.status
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,5 +322,33 @@ mod tests {
         assert_eq!(gui.library.revision, 3);
         assert_eq!(gui.library.structure_revision, 5);
         assert!(Arc::ptr_eq(&gui.library.tracks, &tracks));
+    }
+
+    #[test]
+    fn tray_projection_ignores_playback_position_but_tracks_status_changes() {
+        let mut core = CoreState::default();
+        let previous = TraySnapshot::from_core(&core);
+        core.playback.position = 12.0;
+        let position_only = TraySnapshot::from_core(&core);
+        assert!(!position_only.changed_from(&previous));
+
+        core.playback.status = PlaybackStatus::Playing;
+        let playing = TraySnapshot::from_core(&core);
+        assert!(playing.changed_from(&position_only));
+    }
+
+    #[test]
+    fn tray_menu_changes_only_when_playback_label_changes() {
+        let mut core = CoreState::default();
+        let previous = TraySnapshot::from_core(&core);
+
+        core.library.tracks = Arc::new(Vec::new());
+        let metadata_changed = TraySnapshot::from_core(&core);
+        assert!(metadata_changed.changed_from(&previous));
+        assert!(!metadata_changed.menu_changed_from(&previous));
+
+        core.playback.status = PlaybackStatus::Playing;
+        let playing = TraySnapshot::from_core(&core);
+        assert!(playing.menu_changed_from(&metadata_changed));
     }
 }

@@ -13,3 +13,4 @@ pub mod projection;
 pub mod response;
 pub mod store;
 pub mod terminal;
+pub(crate) mod tray;

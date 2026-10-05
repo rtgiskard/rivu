@@ -4,7 +4,7 @@ use crate::{
     config::Config,
     library::{self, M3uItem, ScanResult},
     model::*,
-    projection::{ClientSnapshot, GuiSnapshot, MprisSnapshot},
+    projection::{ClientSnapshot, GuiSnapshot, MprisSnapshot, TraySnapshot},
     response::{Ack, StateResponse},
     store::Store,
 };
@@ -111,6 +111,9 @@ impl AppHandle {
     }
     pub fn gui_snapshot(&self) -> GuiSnapshot {
         GuiSnapshot::from_core(&self.state.read())
+    }
+    pub(crate) fn tray_snapshot(&self) -> TraySnapshot {
+        TraySnapshot::from_core(&self.state.read())
     }
     pub fn set_wakeup(&self, callback: impl Fn() + Send + Sync + 'static) {
         *self.wakeup.write() = Some(Arc::new(callback));

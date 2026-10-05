@@ -11,6 +11,7 @@ use crate::{
     core::AppHandle,
     model::{Command, PlaybackStatus, playback_key_command},
     projection::GuiSnapshot,
+    tray::TrayController,
 };
 use anyhow::Result;
 use ashpd::desktop::file_chooser::SelectedFiles;
@@ -117,6 +118,7 @@ struct GuiHost {
     handle: AppHandle,
     layout_path: PathBuf,
     window: Option<WindowHandle<GuiApp>>,
+    tray: Option<TrayController>,
     error: Option<anyhow::Error>,
     quitting: bool,
 }
@@ -200,6 +202,7 @@ impl GuiHost {
         if self.window.take().is_some() {
             self.clear_window_state();
         }
+        self.tray.take();
     }
 
     fn quit(&mut self, cx: &mut App) {
@@ -215,10 +218,16 @@ impl Drop for GuiHost {
 }
 
 pub fn run(handle: AppHandle, layout_path: PathBuf) -> Result<()> {
+    let tray = if handle.config_snapshot().tray_enabled {
+        TrayController::start(handle.clone())?
+    } else {
+        None
+    };
     let host = Rc::new(RefCell::new(GuiHost {
         handle: handle.clone(),
         layout_path,
         window: None,
+        tray,
         error: None,
         quitting: false,
     }));
