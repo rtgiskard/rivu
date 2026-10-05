@@ -1,7 +1,7 @@
 use super::{
     ACCENT, BORDER, Dragging, ERROR, ERROR_BG, Field, GuiApp, HIGHLIGHT, ListFocus, MUTED,
     Measured, QueueDrag, TEXT, UI_INSET, button, column, empty_state, format_time, icon_button,
-    library::LibraryDrag, panel_surface, panel_toolbar, row, row_text, track_row,
+    library::LibraryDrag, list_viewport, panel_surface, panel_toolbar, row, row_text, track_row,
 };
 pub(super) use super::{TRACK_HEIGHT, caption, list_row};
 use crate::model::{Command, PlaybackStatus, RepeatMode};
@@ -456,7 +456,7 @@ impl GuiApp {
                 .into_any_element();
         }
         panel
-            .child(
+            .child(list_viewport(
                 uniform_list(
                     ("library-rows", panel_id),
                     count,
@@ -501,7 +501,7 @@ impl GuiApp {
                 .flex_1()
                 .min_h_0()
                 .w_full(),
-            )
+            ))
             .into_any_element()
     }
 
@@ -709,7 +709,7 @@ impl GuiApp {
                     "Your queue is empty. Enqueue tracks from Library.",
                 ))
             })
-            .child(
+            .child(list_viewport(
                 uniform_list(
                     ("queue-rows", panel_id),
                     self.state.queue.entries.len(),
@@ -791,8 +791,11 @@ impl GuiApp {
                         this.send(Command::Enqueue { track_ids }, cx);
                     }
                 }))
-                .drag_over::<LibraryDrag>(|style, _, _, _| style.border_color(rgb(ACCENT))),
-            )
+                .drag_over::<LibraryDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
+                .flex_1()
+                .min_h_0()
+                .w_full(),
+            ))
             .into_any_element()
     }
 
@@ -1110,7 +1113,7 @@ impl GuiApp {
                         "Select tracks in Library, then choose Add selected.",
                     ))
                 })
-                .child(
+                .child(list_viewport(
                     uniform_list(
                         ("playlist-entries", panel_id),
                         entry_count,
@@ -1163,7 +1166,7 @@ impl GuiApp {
                     .flex_1()
                     .min_h_0()
                     .w_full(),
-                );
+                ));
             if self.playlist_delete_confirm == Some(playlist_id) {
                 panel = panel.child(
                     column()
@@ -1400,7 +1403,7 @@ impl GuiApp {
                     "Started tracks will appear here once per track.",
                 ))
             })
-            .child(
+            .child(list_viewport(
                 uniform_list(
                     ("history-rows", panel_id),
                     self.state.library.history.len(),
@@ -1434,10 +1437,9 @@ impl GuiApp {
                 .flex_1()
                 .min_h_0()
                 .w_full(),
-            )
-            .child(div().h(px(1.0)).flex_shrink_0().bg(rgb(BORDER)))
+            ))
             .child(caption("Most played · ranked by play count"))
-            .child(
+            .child(list_viewport(
                 uniform_list(
                     ("most-played-rows", panel_id),
                     self.most_played.len(),
@@ -1481,7 +1483,7 @@ impl GuiApp {
                 .flex_1()
                 .min_h_0()
                 .w_full(),
-            )
+            ))
             .into_any_element()
     }
 }

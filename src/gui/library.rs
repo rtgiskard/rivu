@@ -287,6 +287,9 @@ impl GuiApp {
                         .collect::<Vec<_>>()
                 }),
             )
+            .flex_1()
+            .min_h_0()
+            .w_full()
             .track_scroll(&self.library_tree_scroll),
         )
         .into_any_element()

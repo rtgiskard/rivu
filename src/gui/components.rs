@@ -33,12 +33,25 @@ pub(crate) fn panel_toolbar() -> Div {
 
 /// Shared root surface for docked panels.
 pub(crate) fn panel_surface(id: impl Into<ElementId>) -> Stateful<Div> {
-    div().id(id).size_full().min_h_0()
+    div()
+        .id(id)
+        .size_full()
+        .flex()
+        .flex_col()
+        .min_w_0()
+        .min_h_0()
+        .overflow_hidden()
 }
 
 /// Shared viewport shell for virtualized lists.
 pub(crate) fn list_viewport(child: impl IntoElement) -> Div {
-    div().flex_1().min_h_0().w_full().child(child)
+    div()
+        .flex_1()
+        .min_w_0()
+        .min_h_0()
+        .w_full()
+        .overflow_hidden()
+        .child(child)
 }
 
 /// Shared tooltip used by icon buttons.

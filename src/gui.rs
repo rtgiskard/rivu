@@ -307,8 +307,10 @@ fn button(
     cx: &mut Context<GuiApp>,
     action: impl Fn(&mut GuiApp, &mut Window, &mut Context<GuiApp>) + 'static,
 ) -> Stateful<Div> {
-    components::button_style(id, label)
-        .on_click(cx.listener(move |this, _, window, cx| action(this, window, cx)))
+    components::button_style(id, label).on_click(cx.listener(move |this, _, window, cx| {
+        action(this, window, cx);
+        cx.stop_propagation();
+    }))
 }
 
 fn icon_button(
@@ -518,6 +520,7 @@ struct GuiApp {
     target_group: Option<u64>,
     dragging: Option<Dragging>,
     seek_preview: Option<f64>,
+    waveform_preview_active: bool,
     seek_queue_id: Option<u64>,
     analysis_worker_enabled: bool,
     measured: Rc<RefCell<HashMap<Measured, Bounds<Pixels>>>>,
@@ -762,10 +765,18 @@ impl GuiApp {
         let mut subscriptions = Vec::new();
         let waveform = cx.new(|_| waveform::Waveform::new(Arc::clone(&handle.waveform)));
         subscriptions.push(cx.observe(&waveform, |_, _, cx| cx.notify()));
-        subscriptions.push(cx.subscribe(&waveform, |this, _, event, cx| {
-            let waveform::WaveformEvent::Seek(seconds) = event;
-            if this.state.current_track().is_some() {
-                this.send(Command::Seek { seconds: *seconds }, cx);
+        subscriptions.push(cx.subscribe(&waveform, |this, _, event, cx| match event {
+            waveform::WaveformEvent::Preview(seconds) => {
+                this.waveform_preview_active = true;
+                this.seek_preview = Some(*seconds);
+                cx.notify();
+            }
+            waveform::WaveformEvent::Seek(seconds) => {
+                this.waveform_preview_active = false;
+                this.seek_preview = None;
+                if this.state.current_track().is_some() {
+                    this.send(Command::Seek { seconds: *seconds }, cx);
+                }
             }
         }));
         subscriptions.push(cx.subscribe(&inputs[&Field::Search], |this, _, event, cx| {
@@ -843,6 +854,7 @@ impl GuiApp {
             analysis_sequence: 0,
             window_visible: true,
             seek_preview: None,
+            waveform_preview_active: false,
             seek_queue_id: None,
             _subscriptions: subscriptions,
             ui_font,
@@ -1163,6 +1175,32 @@ impl GuiApp {
         self.sync_waveform(cx);
         cx.notify();
     }
+    fn reconcile_playlist_selection(&mut self) {
+        let Some(playlist_id) = self.selected_playlist else {
+            self.selected_entry = None;
+            self.playlist_delete_confirm = None;
+            return;
+        };
+        let Some(playlist) = self
+            .state
+            .library
+            .playlists
+            .iter()
+            .find(|playlist| playlist.id == playlist_id)
+        else {
+            self.selected_playlist = None;
+            self.selected_entry = None;
+            self.playlist_delete_confirm = None;
+            return;
+        };
+        if self
+            .selected_entry
+            .is_some_and(|entry_id| !playlist.entries.iter().any(|entry| entry.id == entry_id))
+        {
+            self.selected_entry = None;
+        }
+    }
+
     fn refresh(&mut self, cx: &mut Context<Self>) {
         let state = (self.handle.revision() != self.state.system.revision)
             .then(|| self.handle.gui_snapshot());
@@ -1173,12 +1211,14 @@ impl GuiApp {
                 self.state.library.structure_revision != state.library.structure_revision;
             let queue_changed = !Arc::ptr_eq(&self.state.queue.entries, &state.queue.entries);
             if !matches!(self.dragging, Some(Dragging::Seek(_)))
+                && !self.waveform_preview_active
                 && self.seek_queue_id != state.queue.current_id
             {
                 self.seek_preview = None;
                 self.seek_queue_id = None;
             }
             self.state = state;
+            self.reconcile_playlist_selection();
             if queue_changed {
                 let valid = self
                     .state
@@ -1320,7 +1360,7 @@ impl GuiApp {
                 .and_then(|&index| self.state.library.tracks.get(index))
         });
         let position = if current.is_some() {
-            self.state.playback.position
+            self.seek_preview.unwrap_or(self.state.playback.position)
         } else {
             0.0
         };
