@@ -1,4 +1,6 @@
-use std::{collections::BTreeSet, env, path::PathBuf, process::Command};
+#[cfg(feature = "ffmpeg")]
+use std::collections::BTreeSet;
+use std::{env, path::PathBuf, process::Command};
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -13,11 +15,17 @@ fn main() {
         .map(|path| PathBuf::from(path.trim()))
         .unwrap_or_else(|| PathBuf::from(".git"));
     println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
-    println!("cargo:rerun-if-changed={}", git_dir.join("packed-refs").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        git_dir.join("packed-refs").display()
+    );
     if let Ok(head) = std::fs::read_to_string(git_dir.join("HEAD"))
         && let Some(reference) = head.strip_prefix("ref: ").map(str::trim)
     {
-        println!("cargo:rerun-if-changed={}", git_dir.join(reference).display());
+        println!(
+            "cargo:rerun-if-changed={}",
+            git_dir.join(reference).display()
+        );
     }
     println!("cargo:rerun-if-env-changed=RIVU_GIT_VERSION");
     let git_version = env::var("RIVU_GIT_VERSION").ok().or_else(|| {
@@ -33,15 +41,24 @@ fn main() {
         "cargo:rustc-env=RIVU_GIT_VERSION={}",
         git_version.as_deref().unwrap_or("unknown")
     );
+    #[cfg(feature = "ffmpeg")]
+    if env::var_os("CARGO_FEATURE_FFMPEG").is_some() {
+        generate_ffmpeg_bindings();
+    }
+}
+
+#[cfg(feature = "ffmpeg")]
+fn generate_ffmpeg_bindings() {
     let target = env::var("TARGET").expect("Cargo TARGET");
+    let supported = (target.starts_with("x86_64-") || target.starts_with("aarch64-"))
+        && target.contains("-linux");
     assert!(
-        target.starts_with("x86_64-") && target.contains("linux"),
-        "FFmpeg ABI support is currently validated only for x86_64 Linux"
+        supported,
+        "FFmpeg extension is validated only for little-endian x86_64/aarch64 Linux"
     );
 
     let mut includes = BTreeSet::new();
     for (name, major) in [("libavutil", 61), ("libavcodec", 63), ("libavformat", 63)] {
-        // Locate development headers only; do not emit linker instructions.
         let package = pkg_config::Config::new()
             .cargo_metadata(false)
             .range_version(format!("{major}").as_str()..format!("{}", major + 1).as_str())
@@ -62,8 +79,6 @@ fn main() {
 #error Unsupported FFmpeg header ABI: expected 61/63/63\n\
 #endif\n")
         .clang_arg(format!("--target={target}"))
-        // Recursively retain complete layouts for structures we actually read.
-        // Pointer-only handles do not need generated field accessors.
         .allowlist_type("AV(FormatContext|InputFormat|Dictionary|DictionaryEntry|Packet|Codec|CodecID|CodecContext|CodecParameters|Frame|Rational|ChannelLayout|Channel|ChannelOrder|MediaType|Discard|SampleFormat)")
         .allowlist_type("AVStreamGroup")
         .opaque_type("AVCodecContext|AVInputFormat|AVStreamGroup")

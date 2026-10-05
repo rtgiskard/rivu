@@ -1,15 +1,15 @@
 PREFIX ?= /usr/local
 DESTDIR ?=
 
-.PHONY: all clean install
+.PHONY: build clean install
 
-all:
-	cargo build --release
+build:
+	cargo build --release --features ffmpeg
 
 clean:
 	cargo clean
 
-install: all
+install: build
 	install -Dm755 target/release/rivu "$(DESTDIR)$(PREFIX)/bin/rivu"
 	install -Dm644 assets/rivu.desktop "$(DESTDIR)$(PREFIX)/share/applications/rivu.desktop"
 	install -Dm644 assets/rivu.svg "$(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/rivu.svg"

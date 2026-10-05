@@ -15,7 +15,42 @@
 //! Shutdown cancels blocked event delivery without involving the output callback.
 
 mod detector;
+#[cfg(feature = "ffmpeg")]
 mod ffmpeg;
+#[cfg(not(feature = "ffmpeg"))]
+mod ffmpeg {
+    use super::{Channel, MediaInfo};
+    use anyhow::{Result, bail};
+    use std::path::Path;
+
+    pub(super) fn availability() -> Result<String> {
+        bail!("FFmpeg extension is not compiled; rebuild with --features ffmpeg")
+    }
+
+    pub(super) struct Decoder;
+
+    impl Decoder {
+        pub(super) fn open(_: &Path) -> Result<Self> {
+            bail!("FFmpeg extension is not compiled; rebuild with --features ffmpeg")
+        }
+
+        pub(super) fn info(&self) -> &MediaInfo {
+            unreachable!("FFmpeg decoder cannot be opened without the ffmpeg feature")
+        }
+
+        pub(super) fn layout(&self) -> &[Channel] {
+            unreachable!("FFmpeg decoder cannot be opened without the ffmpeg feature")
+        }
+
+        pub(super) fn next_frames(&mut self) -> Result<Option<(&[f32], f64)>> {
+            bail!("FFmpeg extension is not compiled; rebuild with --features ffmpeg")
+        }
+
+        pub(super) fn seek(&mut self, _: f64) -> Result<()> {
+            bail!("FFmpeg extension is not compiled; rebuild with --features ffmpeg")
+        }
+    }
+}
 mod format;
 mod output;
 mod playback;

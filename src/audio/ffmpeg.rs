@@ -13,8 +13,12 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
-#[cfg(not(all(target_arch = "x86_64", target_endian = "little")))]
-compile_error!("runtime FFmpeg ABI bindings are only validated for little-endian x86_64");
+#[cfg(not(all(
+    target_os = "linux",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+)))]
+compile_error!("the FFmpeg extension supports little-endian x86_64/aarch64 Linux");
 #[allow(
     non_camel_case_types,
     non_upper_case_globals,

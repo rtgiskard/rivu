@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "A lightweight, local-first Linux music player"
 
+[features]
+default = []
+ffmpeg = ["dep:bindgen", "dep:pkg-config"]
+
 [dependencies]
 anyhow = "1"
 blake3 = "1"
@@ -44,8 +48,8 @@ alsa = "0.11"
 pipewire = { version = "0.9", features = ["v0_3_65"] }
 
 [build-dependencies]
-bindgen = "=0.72.1"
-pkg-config = "0.3"
+bindgen = { version = "=0.72.1", optional = true }
+pkg-config = { version = "0.3", optional = true }
 
 [profile.release]
 lto = "thin"
