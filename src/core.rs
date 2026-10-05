@@ -58,6 +58,21 @@ impl AppHandle {
     pub fn snapshot(&self) -> AppState {
         self.state.read().clone()
     }
+    pub fn is_shutting_down(&self) -> bool {
+        self.state.read().system.shutting_down
+    }
+    pub fn config_snapshot(&self) -> Arc<Config> {
+        Arc::clone(&self.state.read().system.config)
+    }
+    pub fn revision(&self) -> u64 {
+        self.state.read().system.revision
+    }
+    pub fn mpris_snapshot(&self) -> MprisSnapshot {
+        MprisSnapshot::from_state(&self.state.read())
+    }
+    pub fn gui_snapshot(&self) -> GuiSnapshot {
+        GuiSnapshot::from_state(&self.state.read())
+    }
     pub fn set_wakeup(&self, callback: impl Fn() + Send + Sync + 'static) {
         *self.wakeup.write() = Some(Arc::new(callback));
         self.notify_subscribers();

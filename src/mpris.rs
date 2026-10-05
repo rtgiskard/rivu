@@ -5,7 +5,7 @@
 use crate::{
     artwork::ArtworkManager,
     core::AppHandle,
-    model::{AppState, Command, PlaybackStatus, RepeatMode},
+    model::{AppState, Command, MprisSnapshot, PlaybackStatus, RepeatMode},
 };
 use anyhow::{Context, Result};
 use crossbeam_channel::{Sender, bounded, select_biased};
@@ -40,7 +40,7 @@ impl Mpris {
     pub fn start(handle: AppHandle, can_raise: bool, data_dir: &Path) -> Result<Self> {
         let artwork = Arc::new(ArtworkManager::new(data_dir));
         let updates = handle.subscribe();
-        let initial = handle.snapshot();
+        let initial = handle.mpris_snapshot();
         let initial_can_raise = can_raise && handle.can_raise();
         // Builder uses DoNotQueue: another Rivu must fail, not silently wait for
         // the name or replace the running player's controls.
@@ -73,13 +73,13 @@ impl Mpris {
             .spawn(move || {
                 let mut previous = initial;
                 let mut previous_can_raise = initial_can_raise;
-                let mut metadata = TrackMetadata::from_state(&previous, &artwork);
+                let mut metadata = TrackMetadata::from_snapshot(&previous, &artwork);
                 loop {
                     select_biased! {
                         recv(stopped) -> _ => break,
                         recv(updates) -> update => {
                             if update.is_err() { break; }
-                            let current = handle.snapshot();
+                            let current = handle.mpris_snapshot();
                             let current_can_raise = can_raise && handle.can_raise();
                             if let Err(error) = publish_changes(
                                 &bus,
@@ -96,7 +96,7 @@ impl Mpris {
                                 eprintln!("MPRIS publisher stopped: {error}");
                                 break;
                             }
-                            if current.system.shutting_down { break; }
+                            if current.shutting_down { break; }
                             previous = current;
                             previous_can_raise = current_can_raise;
                         }
@@ -190,7 +190,7 @@ impl Player {
     // Next/Previous and restoring play state are separate core commands; the
     // interface cannot make this sequence atomic without changing core APIs.
     fn navigate(&self, command: Command) -> fdo::Result<()> {
-        let status = self.handle.snapshot().playback.status;
+        let status = self.handle.mpris_snapshot().playback.status;
         let state = request(&self.handle, command)?;
         if state.playback.status == PlaybackStatus::Playing {
             match status {
@@ -210,14 +210,14 @@ impl Player {
 #[zbus::interface(name = "org.mpris.MediaPlayer2.Player")]
 impl Player {
     fn next(&self) -> fdo::Result<()> {
-        if !can_go_next(&self.handle.snapshot()) {
+        if !can_go_next(&self.handle.mpris_snapshot()) {
             return Ok(());
         }
         self.navigate(Command::Next)
     }
 
     fn previous(&self) -> fdo::Result<()> {
-        if !can_go_previous(&self.handle.snapshot()) {
+        if !can_go_previous(&self.handle.mpris_snapshot()) {
             return Ok(());
         }
         self.navigate(Command::Previous)
@@ -236,7 +236,7 @@ impl Player {
     }
 
     fn play(&self) -> fdo::Result<()> {
-        let state = self.handle.snapshot();
+        let state = self.handle.mpris_snapshot();
         if state.queue.entries.is_empty() || state.playback.status == PlaybackStatus::Playing {
             return Ok(());
         }
@@ -244,7 +244,7 @@ impl Player {
     }
 
     fn seek(&self, offset: i64) -> fdo::Result<()> {
-        let state = self.handle.snapshot();
+        let state = self.handle.mpris_snapshot();
         if !can_seek(&state) {
             return Ok(());
         }
@@ -265,7 +265,7 @@ impl Player {
     }
 
     fn set_position(&self, track_id: ObjectPath<'_>, position: i64) -> fdo::Result<()> {
-        let state = self.handle.snapshot();
+        let state = self.handle.mpris_snapshot();
         if !can_seek(&state) {
             return Ok(());
         }
@@ -293,7 +293,7 @@ impl Player {
 
     #[zbus(property)]
     fn playback_status(&self) -> &'static str {
-        playback_status(self.handle.snapshot().playback.status)
+        playback_status(self.handle.mpris_snapshot().playback.status)
     }
 
     // The core publisher owns change emission, including changes originating
@@ -301,7 +301,7 @@ impl Player {
     // notifications for assignments that leave the actual value unchanged.
     #[zbus(property(emits_changed_signal = "false"))]
     fn loop_status(&self) -> &'static str {
-        loop_status(self.handle.snapshot().playback.repeat)
+        loop_status(self.handle.mpris_snapshot().playback.repeat)
     }
 
     #[zbus(property)]
@@ -336,7 +336,7 @@ impl Player {
 
     #[zbus(property(emits_changed_signal = "false"))]
     fn shuffle(&self) -> bool {
-        self.handle.snapshot().playback.shuffle
+        self.handle.mpris_snapshot().playback.shuffle
     }
 
     #[zbus(property)]
@@ -346,12 +346,14 @@ impl Player {
 
     #[zbus(property)]
     fn metadata(&self) -> Metadata {
-        metadata_map(TrackMetadata::from_state(&self.handle.snapshot(), &self.artwork).as_ref())
+        metadata_map(
+            TrackMetadata::from_snapshot(&self.handle.mpris_snapshot(), &self.artwork).as_ref(),
+        )
     }
 
     #[zbus(property(emits_changed_signal = "false"))]
     fn volume(&self) -> f64 {
-        f64::from(self.handle.snapshot().playback.volume)
+        f64::from(self.handle.mpris_snapshot().playback.volume)
     }
 
     #[zbus(property)]
@@ -372,7 +374,7 @@ impl Player {
 
     #[zbus(property(emits_changed_signal = "false"))]
     fn position(&self) -> i64 {
-        microseconds(self.handle.snapshot().playback.position)
+        microseconds(self.handle.mpris_snapshot().playback.position)
     }
 
     #[zbus(property(emits_changed_signal = "const"))]
@@ -387,27 +389,27 @@ impl Player {
 
     #[zbus(property)]
     fn can_go_next(&self) -> bool {
-        can_go_next(&self.handle.snapshot())
+        can_go_next(&self.handle.mpris_snapshot())
     }
 
     #[zbus(property)]
     fn can_go_previous(&self) -> bool {
-        can_go_previous(&self.handle.snapshot())
+        can_go_previous(&self.handle.mpris_snapshot())
     }
 
     #[zbus(property)]
     fn can_play(&self) -> bool {
-        !self.handle.snapshot().queue.entries.is_empty()
+        !self.handle.mpris_snapshot().queue.entries.is_empty()
     }
 
     #[zbus(property)]
     fn can_pause(&self) -> bool {
-        !self.handle.snapshot().queue.entries.is_empty()
+        !self.handle.mpris_snapshot().queue.entries.is_empty()
     }
 
     #[zbus(property)]
     fn can_seek(&self) -> bool {
-        can_seek(&self.handle.snapshot())
+        can_seek(&self.handle.mpris_snapshot())
     }
 
     #[zbus(property(emits_changed_signal = "const"))]
@@ -445,11 +447,11 @@ fn loop_status(mode: RepeatMode) -> &'static str {
     }
 }
 
-fn can_seek(state: &AppState) -> bool {
+fn can_seek(state: &MprisSnapshot) -> bool {
     state.playback.status != PlaybackStatus::Stopped && state.queue.current_id.is_some()
 }
 
-fn can_go_next(state: &AppState) -> bool {
+fn can_go_next(state: &MprisSnapshot) -> bool {
     if state.queue.entries.is_empty() {
         return false;
     }
@@ -463,7 +465,7 @@ fn can_go_next(state: &AppState) -> bool {
         .is_none_or(|index| index + 1 < state.queue.entries.len())
 }
 
-fn can_go_previous(state: &AppState) -> bool {
+fn can_go_previous(state: &MprisSnapshot) -> bool {
     if state.queue.entries.is_empty() {
         return false;
     }
@@ -530,7 +532,7 @@ struct TrackMetadata {
 }
 
 impl TrackMetadata {
-    fn from_state(state: &AppState, artwork: &ArtworkManager) -> Option<Self> {
+    fn from_snapshot(state: &MprisSnapshot, artwork: &ArtworkManager) -> Option<Self> {
         let queue_id = state.queue.current_id?;
         let track = state.current_track()?;
         Some(Self {
@@ -581,8 +583,8 @@ fn metadata_map(track: Option<&TrackMetadata>) -> Metadata {
 
 fn publish_changes(
     connection: &Connection,
-    previous: &AppState,
-    current: &AppState,
+    previous: &MprisSnapshot,
+    current: &MprisSnapshot,
     metadata: &mut Option<TrackMetadata>,
     artwork: &ArtworkManager,
     previous_can_raise: bool,
@@ -607,10 +609,10 @@ fn publish_changes(
     // Arc comparisons avoid rebuilding metadata on ordinary audio clock ticks.
     if previous.queue.current_id != current.queue.current_id
         || previous.playback.duration != current.playback.duration
-        || !Arc::ptr_eq(&previous.library.tracks, &current.library.tracks)
+        || !Arc::ptr_eq(&previous.tracks, &current.tracks)
         || !Arc::ptr_eq(&previous.queue.entries, &current.queue.entries)
     {
-        let next = TrackMetadata::from_state(current, artwork);
+        let next = TrackMetadata::from_snapshot(current, artwork);
         if *metadata != next {
             changed.insert("Metadata", Value::from(metadata_map(next.as_ref())));
             *metadata = next;

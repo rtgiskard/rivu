@@ -437,7 +437,7 @@ impl Settings {
 impl GuiApp {
     pub(super) fn load_settings(&mut self, cx: &mut Context<Self>) {
         self.settings.device_dropdown.close();
-        let config = self.handle.state.read().system.config.as_ref().clone();
+        let config = self.handle.config_snapshot();
         self.settings.reset(&config, cx);
         cx.notify();
     }

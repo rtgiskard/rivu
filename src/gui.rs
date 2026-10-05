@@ -9,7 +9,7 @@ mod visuals;
 mod waveform;
 use crate::{
     core::AppHandle,
-    model::{AppState, Command, PlaybackStatus, playback_key_command},
+    model::{Command, GuiSnapshot, PlaybackStatus, playback_key_command},
 };
 use anyhow::Result;
 use ashpd::desktop::file_chooser::SelectedFiles;
@@ -17,8 +17,8 @@ use components::ButtonTooltip;
 pub(super) use components::{
     DropdownItem, DropdownState, POPOVER_MAX_HEIGHT, SelectableListState, SelectionMode,
     SelectionModel, TRACK_HEIGHT, TreeKey, TreeState, caption, context_menu_container,
-    drag_preview, dropdown_container, dropdown_row, empty_state, list_row, panel_toolbar, row_text,
-    track_row,
+    drag_preview, dropdown_container, dropdown_row, empty_state, list_row, panel_surface,
+    panel_toolbar, row_text, track_row,
 };
 use futures::{FutureExt, StreamExt, channel::mpsc};
 use gpui::{prelude::*, *};
@@ -125,7 +125,7 @@ impl GuiHost {
         if self.quitting {
             return;
         }
-        if self.handle.state.read().system.shutting_down {
+        if self.handle.is_shutting_down() {
             self.quit(cx);
             return;
         }
@@ -171,7 +171,7 @@ impl GuiHost {
         if self.quitting {
             return;
         }
-        if self.handle.state.read().system.shutting_down {
+        if self.handle.is_shutting_down() {
             self.quit(cx);
         } else if self.handle.take_raise_request() {
             self.show_window(cx);
@@ -262,7 +262,7 @@ pub fn run(handle: AppHandle, layout_path: PathBuf) -> Result<()> {
     }
     // Explicit platform quit also terminates the core. Do this after the GUI
     // loop, outside GPUI's short quit-observer deadline and without blocking UI.
-    if !handle.state.read().system.shutting_down {
+    if !handle.is_shutting_down() {
         let response = handle.request_ack(Command::Shutdown);
         if !response.ok {
             anyhow::bail!(
@@ -459,7 +459,7 @@ enum ListFocus {
 
 struct GuiApp {
     handle: AppHandle,
-    state: AppState,
+    state: GuiSnapshot,
     layout: Layout,
     layout_path: PathBuf,
     inputs: HashMap<Field, Entity<Input>>,
@@ -699,7 +699,7 @@ impl GuiApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let state = handle.snapshot();
+        let state = handle.gui_snapshot();
         let (layout, error) = if layout_path.exists() {
             match Layout::load(&layout_path) {
                 Ok(layout) => (layout, None),
@@ -893,8 +893,7 @@ impl GuiApp {
                 match result {
                     Ok(files) => {
                         if let Some(path) = chooser_path(&files) {
-                            let mut config =
-                                this.handle.state.read().system.config.as_ref().clone();
+                            let mut config = this.handle.config_snapshot().as_ref().clone();
                             if !config.library_roots.iter().any(|root| root == &path) {
                                 config.library_roots.push(path);
                                 this.send(Command::Configure { config }, cx);
@@ -1126,10 +1125,8 @@ impl GuiApp {
         cx.notify();
     }
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        let state = {
-            let shared = self.handle.state.read();
-            (shared.system.revision != self.state.system.revision).then(|| shared.clone())
-        };
+        let state = (self.handle.revision() != self.state.system.revision)
+            .then(|| self.handle.gui_snapshot());
         let mut changed = state.is_some();
         if let Some(state) = state {
             let library_changed = self.state.library.revision != state.library.revision;

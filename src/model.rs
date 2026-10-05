@@ -233,7 +233,58 @@ impl AppState {
         self.library.tracks.get(index)
     }
 }
+
+#[derive(Clone, Debug)]
+pub struct MprisSnapshot {
+    pub tracks: Arc<Vec<Track>>,
+    pub queue: QueueState,
+    pub playback: PlaybackState,
+    pub shutting_down: bool,
+}
+
+impl MprisSnapshot {
+    pub fn from_state(state: &AppState) -> Self {
+        Self {
+            tracks: Arc::clone(&state.library.tracks),
+            queue: state.queue.clone(),
+            playback: state.playback.clone(),
+            shutting_down: state.system.shutting_down,
+        }
+    }
+
+    pub fn current_track(&self) -> Option<&Track> {
+        let queue_id = self.queue.current_id?;
+        let track_id = self
+            .queue
+            .entries
+            .iter()
+            .find(|entry| entry.id == queue_id)?
+            .track_id;
+        let index = self
+            .tracks
+            .binary_search_by_key(&track_id, |track| track.id)
+            .ok()?;
+        self.tracks.get(index)
+    }
+}
 /// Translate a normalized playback key name into the corresponding command.
+
+#[derive(Clone, Debug)]
+pub struct GuiSnapshot(AppState);
+
+impl GuiSnapshot {
+    pub fn from_state(state: &AppState) -> Self {
+        Self(state.clone())
+    }
+}
+
+impl std::ops::Deref for GuiSnapshot {
+    type Target = AppState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 ///
 /// This is shared by the terminal and GUI frontends so playback controls keep
 /// identical semantics regardless of input surface.

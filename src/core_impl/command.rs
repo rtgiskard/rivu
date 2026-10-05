@@ -1,0 +1,358 @@
+use super::*;
+
+impl Core {
+    pub(in crate::core) fn command(&mut self, command: Command) -> Result<()> {
+        let persist_queue = matches!(
+            &command,
+            Command::Enqueue { .. }
+                | Command::RemoveQueue { .. }
+                | Command::RemoveQueueEntries { .. }
+                | Command::MoveQueue { .. }
+                | Command::MoveQueueEntries { .. }
+                | Command::ClearQueue
+                | Command::RandomizeQueue
+                | Command::DeduplicateQueue
+                | Command::RemoveTracks { .. }
+                | Command::RemoveMissingTracks
+        );
+        let persist_config = matches!(
+            &command,
+            Command::Volume { .. }
+                | Command::Shuffle { .. }
+                | Command::Repeat { .. }
+                | Command::Device { .. }
+                | Command::Configure { .. }
+        );
+        match command {
+            Command::Status | Command::Overview => return Ok(()),
+            Command::Scan { paths, force } => self.scan(paths, None, force)?,
+            Command::Play { track_id } => {
+                self.track(track_id)?;
+                let existing = self
+                    .state
+                    .queue
+                    .entries
+                    .iter()
+                    .find(|q| q.track_id == track_id)
+                    .map(|q| q.id);
+                let id = if let Some(id) = existing {
+                    id
+                } else {
+                    self.enqueue(&[track_id])?;
+                    self.state.queue.entries.last().unwrap().id
+                };
+                self.start(id, true)?;
+            }
+            Command::PlayQueue { queue_id } => self.start(queue_id, true)?,
+            Command::PlayPlaylist { playlist_id } => {
+                let ids = self
+                    .state
+                    .library
+                    .playlists
+                    .iter()
+                    .find(|p| p.id == playlist_id)
+                    .context("Playlist not found")?
+                    .entries
+                    .iter()
+                    .map(|e| e.track_id)
+                    .collect::<Vec<_>>();
+                if ids.is_empty() {
+                    bail!("Playlist is empty");
+                }
+                self.stop()?;
+                self.state.queue.entries = Arc::new(Vec::new());
+                self.state.queue.current_id = None;
+                self.played.clear();
+                self.played_cursor = 0;
+                self.enqueue(&ids)?;
+                self.start(self.state.queue.entries[0].id, true)?;
+            }
+            Command::Resume => {
+                if self.state.playback.status == PlaybackStatus::Stopped {
+                    let id = self
+                        .state
+                        .queue
+                        .current_id
+                        .or_else(|| self.state.queue.entries.first().map(|q| q.id))
+                        .context("Queue is empty")?;
+                    self.start(id, true)?;
+                } else {
+                    self.audio(AudioCommand::Pause(false))?;
+                    self.state.playback.status = PlaybackStatus::Playing;
+                }
+            }
+            Command::Pause => {
+                if self.state.playback.status == PlaybackStatus::Playing {
+                    self.audio(AudioCommand::Pause(true))?;
+                    self.state.playback.status = PlaybackStatus::Paused;
+                }
+            }
+            Command::Toggle => {
+                return self.command(if self.state.playback.status == PlaybackStatus::Playing {
+                    Command::Pause
+                } else {
+                    Command::Resume
+                });
+            }
+            Command::Stop => self.stop()?,
+            Command::Next => self.advance(false)?,
+            Command::Previous => self.previous()?,
+            Command::Seek { seconds } => self.seek(seconds)?,
+            Command::Volume { value } => {
+                if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+                    bail!("Volume must be between 0 and 1");
+                }
+                self.audio(AudioCommand::Volume(value))?;
+                self.state.playback.volume = value;
+            }
+            Command::Enqueue { track_ids } => self.enqueue(&track_ids)?,
+            Command::RemoveQueue { queue_id } => {
+                if !self.state.queue.entries.iter().any(|q| q.id == queue_id) {
+                    bail!("Queue entry not found");
+                }
+                if self.state.queue.current_id == Some(queue_id) {
+                    self.stop()?;
+                    self.state.queue.current_id = None;
+                }
+                Arc::make_mut(&mut self.state.queue.entries).retain(|q| q.id != queue_id);
+                self.prune_queue_history();
+            }
+            Command::RemoveQueueEntries { queue_ids } => self.remove_queue_entries(&queue_ids)?,
+            Command::MoveQueue { queue_id, index } => {
+                let queue = Arc::make_mut(&mut self.state.queue.entries);
+                let old = queue
+                    .iter()
+                    .position(|q| q.id == queue_id)
+                    .context("Queue entry not found")?;
+                if index >= queue.len() {
+                    bail!("Queue target position out of range");
+                }
+                let entry = queue.remove(old);
+                queue.insert(index, entry);
+            }
+            Command::MoveQueueEntries { queue_ids, index } => {
+                self.move_queue_entries(&queue_ids, index)?;
+            }
+            Command::ClearQueue => {
+                self.stop()?;
+                self.state.queue.entries = Arc::new(Vec::new());
+                self.state.queue.current_id = None;
+                self.played.clear();
+                self.played_cursor = 0;
+                self.shuffle_bag.clear();
+            }
+            Command::RandomizeQueue => self.randomize_queue(&mut rand::rng()),
+            Command::DeduplicateQueue => self.deduplicate_queue(),
+            Command::Shuffle { enabled } => {
+                self.state.playback.shuffle = enabled;
+                self.shuffle_bag.clear();
+                self.played.clear();
+                self.played_cursor = 0;
+                if let Some(id) = self.state.queue.current_id {
+                    self.played.push(id);
+                    self.played_cursor = 1;
+                }
+            }
+            Command::Repeat { mode } => self.state.playback.repeat = mode,
+            Command::CreatePlaylist { name } => {
+                self.store.create_playlist(&name)?;
+                self.state.library.playlists = Arc::new(self.store.playlists()?);
+            }
+            Command::CreatePlaylistWithTracks { name, track_ids } => {
+                let playlist_id = self.store.create_playlist(&name)?;
+                self.store.add_playlist(playlist_id, &track_ids)?;
+                self.state.library.playlists = Arc::new(self.store.playlists()?);
+            }
+            Command::RenamePlaylist { playlist_id, name } => {
+                self.store.rename_playlist(playlist_id, &name)?;
+                self.state.library.playlists = Arc::new(self.store.playlists()?);
+            }
+            Command::DeletePlaylist { playlist_id } => {
+                self.store.delete_playlist(playlist_id)?;
+                self.state.library.playlists = Arc::new(self.store.playlists()?);
+            }
+            Command::AddPlaylist {
+                playlist_id,
+                track_ids,
+            } => {
+                self.store.add_playlist(playlist_id, &track_ids)?;
+                self.state.library.playlists = Arc::new(self.store.playlists()?);
+            }
+            Command::RemovePlaylistEntry { entry_id } => {
+                self.store.remove_playlist_entry(entry_id)?;
+                self.state.library.playlists = Arc::new(self.store.playlists()?);
+            }
+            Command::MovePlaylistEntry { entry_id, index } => {
+                self.store.move_playlist_entry(entry_id, index)?;
+                self.state.library.playlists = Arc::new(self.store.playlists()?);
+            }
+            Command::ImportPlaylist { path, name } => {
+                if self.state.system.scanning {
+                    bail!("A library scan is already running");
+                }
+                let items = library::import_playlist(&path)?;
+                let paths = items
+                    .iter()
+                    .map(|item| item.path.clone())
+                    .collect::<Vec<_>>();
+                let name = name.unwrap_or_else(|| {
+                    path.file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned()
+                });
+                self.scan(paths, Some((name, items)), false)?;
+            }
+            Command::ExportPlaylist { playlist_id, path } => {
+                let playlist = self
+                    .state
+                    .library
+                    .playlists
+                    .iter()
+                    .find(|p| p.id == playlist_id)
+                    .context("Playlist not found")?;
+                library::export_m3u(&path, playlist, &self.state.library.tracks)?;
+            }
+            Command::EditTrack {
+                track_id,
+                title,
+                artist,
+                album,
+            } => {
+                self.store.edit_track(track_id, &title, &artist, &album)?;
+                self.library.update(track_id, |track| {
+                    track.title = title;
+                    track.artist = artist;
+                    track.album = album;
+                })?;
+            }
+            Command::RemoveTracks { track_ids } => {
+                for id in &track_ids {
+                    self.track(*id)?;
+                }
+                if self
+                    .state
+                    .current_track()
+                    .is_some_and(|track| track_ids.contains(&track.id))
+                {
+                    self.stop()?;
+                    self.state.queue.current_id = None;
+                }
+                self.store.remove_tracks(&track_ids)?;
+                Arc::make_mut(&mut self.state.queue.entries)
+                    .retain(|q| !track_ids.contains(&q.track_id));
+                self.prune_queue_history();
+                self.reload(true)?;
+            }
+            Command::SetFavorite {
+                track_ids,
+                favorite,
+            } => {
+                self.store.set_favorite(&track_ids, favorite)?;
+                for track_id in track_ids {
+                    self.library
+                        .update(track_id, |track| track.favorite = favorite)?;
+                }
+            }
+            Command::RemoveMissingTracks => {
+                let track_ids = self
+                    .state
+                    .library
+                    .tracks
+                    .iter()
+                    .filter(|track| track.missing)
+                    .map(|track| track.id)
+                    .collect();
+                return self.command(Command::RemoveTracks { track_ids });
+            }
+            Command::Device { name } => {
+                if let Some(name) = &name
+                    && !self.state.system.devices.contains(name)
+                {
+                    bail!("Output device not found: {name}");
+                }
+                self.audio(AudioCommand::OutputSettings {
+                    device: name.clone(),
+                    auto_mix: self.state.system.config.pipewire_auto_mix,
+                })?;
+                self.state.system.selected_device = name;
+            }
+            Command::Analysis { enabled } => {
+                self.audio(AudioCommand::Analysis(enabled))?;
+                return Ok(());
+            }
+            Command::DismissError => {
+                self.state.system.last_error = None;
+                return Ok(());
+            }
+            Command::Configure { config } => {
+                config.validate()?;
+                if let Some(device) = &config.output_device
+                    && !self.state.system.devices.contains(device)
+                {
+                    bail!("Output device not found: {device}");
+                }
+                let enabling_ffmpeg =
+                    config.ffmpeg_enabled && !self.state.system.config.ffmpeg_enabled;
+                let ffmpeg_status = if !config.ffmpeg_enabled {
+                    "disabled".to_owned()
+                } else if enabling_ffmpeg {
+                    audio::ffmpeg_status()
+                        .context("FFmpeg extension audio decoding is unavailable")?
+                } else {
+                    self.state.system.ffmpeg_status.clone()
+                };
+                config.save(&self.state.system.config_path)?;
+                self.audio(AudioCommand::MediaReadBuffer(config.media_read_buffer_mb))?;
+                self.audio(AudioCommand::Volume(config.volume))?;
+                self.audio(AudioCommand::AnalysisSettings((&config).into()))?;
+                self.audio(AudioCommand::FfmpegEnabled(config.ffmpeg_enabled))?;
+                self.audio(AudioCommand::OutputSettings {
+                    device: config.output_device.clone(),
+                    auto_mix: config.pipewire_auto_mix,
+                })?;
+                self.state.system.selected_device = config.output_device.clone();
+                self.state.playback.volume = config.volume;
+                if self.state.playback.shuffle != config.shuffle {
+                    self.shuffle_bag.clear();
+                    self.played.clear();
+                    self.played_cursor = 0;
+                }
+                self.state.playback.shuffle = config.shuffle;
+                self.state.playback.repeat = config.repeat;
+                self.state.system.ffmpeg_status = ffmpeg_status;
+                self.state.system.config = Arc::new(config);
+            }
+            Command::ShowWindow => return self.request_raise(),
+            Command::MprisStatus { status } => {
+                self.state.system.mpris_status = status;
+                return Ok(());
+            }
+            Command::SeekQueue { queue_id, seconds } => {
+                if self.state.queue.current_id == Some(queue_id) {
+                    self.seek(seconds)?;
+                }
+                return Ok(());
+            }
+            Command::OptimizeDatabase => {
+                self.state.system.database_optimization = None;
+                if self.state.playback.status != PlaybackStatus::Stopped
+                    || self.state.system.scanning
+                {
+                    bail!("Database optimization requires stopped playback and no active scan");
+                }
+                self.state.system.database_optimization = Some(self.store.optimize()?);
+                // Saving playback here would immediately create new WAL pages
+                // after maintenance has truncated them.
+                return Ok(());
+            }
+            Command::Shutdown => {
+                self.state.system.shutting_down = true;
+                self.stop()?;
+            }
+        }
+        self.queue_dirty |= persist_queue;
+        self.config_dirty |= persist_config;
+        self.save(false)
+    }
+}
