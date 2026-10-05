@@ -911,72 +911,72 @@ impl GuiApp {
                                 let entry_count = playlist.entries.len();
                                 let mut actions = row().flex_shrink_0();
                                 if this.selected_playlist == Some(id) {
-                                    actions = actions.child(icon_button(
-                                        ("playlist-play-item", id as u64),
-                                        "▷",
-                                        "Play playlist",
-                                        cx,
-                                        move |this, _, cx| {
-                                            this.send(
-                                                Command::PlayPlaylist { playlist_id: id },
-                                                cx,
-                                            );
-                                        },
-                                    ));
-                                }
-                                actions = actions
-                                    .child(icon_button(
-                                        ("playlist-export", id as u64),
-                                        "↑",
-                                        "Choose destination for M3U export",
-                                        cx,
-                                        move |this, _, cx| this.choose_playlist_export(id, cx),
-                                    ))
-                                    .child(icon_button(
-                                        ("playlist-rename", id as u64),
-                                        "✎",
-                                        "Rename playlist",
-                                        cx,
-                                        move |this, _, cx| {
-                                            let name = this
-                                                .value(Field::PlaylistName, cx)
-                                                .trim()
-                                                .to_owned();
-                                            if name.is_empty() {
-                                                this.panel_error(
-                                                    "Enter a playlist name first.",
-                                                    cx,
-                                                );
-                                                return;
-                                            }
-                                            this.send(
-                                                Command::RenamePlaylist {
-                                                    playlist_id: id,
-                                                    name,
-                                                },
-                                                cx,
-                                            );
-                                        },
-                                    ))
-                                    .child(icon_button(
-                                        ("playlist-delete", id as u64),
-                                        "×",
-                                        "Delete playlist",
-                                        cx,
-                                        move |this, _, cx| {
-                                            if entry_count > 0 {
-                                                this.playlist_delete_confirm = Some(id);
-                                            } else {
-                                                this.selected_playlist = None;
-                                                this.selected_entry = None;
+                                    actions = actions
+                                        .child(icon_button(
+                                            ("playlist-play-item", id as u64),
+                                            "▷",
+                                            "Play playlist",
+                                            cx,
+                                            move |this, _, cx| {
                                                 this.send(
-                                                    Command::DeletePlaylist { playlist_id: id },
+                                                    Command::PlayPlaylist { playlist_id: id },
                                                     cx,
                                                 );
-                                            }
-                                            cx.notify();
-                                        },
-                                    ));
+                                            },
+                                        ))
+                                        .child(icon_button(
+                                            ("playlist-export", id as u64),
+                                            "↑",
+                                            "Choose destination for M3U export",
+                                            cx,
+                                            move |this, _, cx| this.choose_playlist_export(id, cx),
+                                        ))
+                                        .child(icon_button(
+                                            ("playlist-rename", id as u64),
+                                            "✎",
+                                            "Rename playlist",
+                                            cx,
+                                            move |this, _, cx| {
+                                                let name = this
+                                                    .value(Field::PlaylistName, cx)
+                                                    .trim()
+                                                    .to_owned();
+                                                if name.is_empty() {
+                                                    this.panel_error(
+                                                        "Enter a playlist name first.",
+                                                        cx,
+                                                    );
+                                                    return;
+                                                }
+                                                this.send(
+                                                    Command::RenamePlaylist {
+                                                        playlist_id: id,
+                                                        name,
+                                                    },
+                                                    cx,
+                                                );
+                                            },
+                                        ))
+                                        .child(icon_button(
+                                            ("playlist-delete", id as u64),
+                                            "×",
+                                            "Delete playlist",
+                                            cx,
+                                            move |this, _, cx| {
+                                                if entry_count > 0 {
+                                                    this.playlist_delete_confirm = Some(id);
+                                                } else {
+                                                    this.selected_playlist = None;
+                                                    this.selected_entry = None;
+                                                    this.send(
+                                                        Command::DeletePlaylist { playlist_id: id },
+                                                        cx,
+                                                    );
+                                                }
+                                                cx.notify();
+                                            },
+                                        ));
+                                }
                                 let content = row()
                                     .flex_1()
                                     .min_w_0()
