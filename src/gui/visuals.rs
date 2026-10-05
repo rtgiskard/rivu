@@ -14,9 +14,9 @@
 
 use super::{ERROR, ERROR_BG};
 use gpui::{
-    AnyElement, App, Bounds, PathBuilder, Pixels, Point, RenderImage, SharedString, TextAlign,
-    Window, canvas, div, fill, linear_color_stop, linear_gradient, point, prelude::*, px, rgb,
-    size,
+    AnyElement, App, Background, Bounds, PathBuilder, Pixels, Point, RenderImage, SharedString,
+    TextAlign, Window, canvas, div, fill, linear_color_stop, linear_gradient, point, prelude::*,
+    px, rgb, size,
 };
 use std::{cell::RefCell, ops::Range, rc::Rc, sync::Arc, time::Duration};
 
@@ -43,20 +43,11 @@ const TOKYO_NIGHT_STOPS: &[(f32, [u8; 3])] = &[
     (0.82, [224, 175, 104]),
     (1.0, [247, 118, 142]),
 ];
-const NORD_STOPS: &[(f32, [u8; 3])] = &[
-    (0.0, [46, 52, 64]),
-    (0.2, [94, 129, 172]),
-    (0.42, [136, 192, 208]),
-    (0.62, [163, 190, 140]),
-    (0.82, [235, 203, 139]),
-    (1.0, [191, 97, 106]),
-];
 
 fn palette_stops(palette: VisualizationPalette) -> &'static [(f32, [u8; 3])] {
     match palette {
-        VisualizationPalette::TokyoNight => TOKYO_NIGHT_STOPS,
-        VisualizationPalette::Deadbeef => DEAD_BEE_F_STOPS,
-        VisualizationPalette::Nord => NORD_STOPS,
+        VisualizationPalette::A => TOKYO_NIGHT_STOPS,
+        VisualizationPalette::B => DEAD_BEE_F_STOPS,
     }
 }
 
@@ -94,7 +85,7 @@ struct VisualData {
     bar_levels: Vec<f32>,
     bar_deadlines: Vec<Duration>,
     smoothed_levels: Vec<f32>,
-    peak_markers: Vec<Bounds<Pixels>>,
+    peak_markers: Vec<(Bounds<Pixels>, u32)>,
     spectrum_points: Vec<Point<Pixels>>,
     last_update: Option<Duration>,
     top_db: f32,
@@ -124,6 +115,7 @@ struct VisualData {
     spectrogram_max_hz: f32,
     spectrogram_db_range: f32,
     spectrogram_log_scale: bool,
+    spectrogram_interpolate: bool,
     spectrogram_show_labels: bool,
     spectrogram_history_seconds: u32,
     head: usize,
@@ -163,7 +155,7 @@ impl Visuals {
                 last_update: None,
                 top_db: 0.0,
                 visual_background: 0x08090c,
-                visual_palette: VisualizationPalette::Deadbeef,
+                visual_palette: VisualizationPalette::B,
                 spectrum_min_hz: 20.0,
                 spectrum_max_hz: 20_000.0,
                 spectrum_db_range: 70.0,
@@ -189,6 +181,7 @@ impl Visuals {
                 spectrogram_db_range: 70.0,
                 spectrogram_log_scale: true,
                 spectrogram_show_labels: true,
+                spectrogram_interpolate: true,
                 spectrogram_history_seconds: 10,
                 head: 0,
                 len: 0,
@@ -218,7 +211,7 @@ impl Visuals {
             || data.spectrum_interpolate != config.spectrum_interpolate
             || data.spectrum_log_scale != config.spectrum_log_scale
             || data.spectrum_show_labels != config.spectrum_labels
-            || data.spectrogram_show_labels != config.spectrogram_labels
+            || data.spectrogram_interpolate != config.spectrogram_interpolate
             || data.spectrum_fft_size != config.spectrum_fft_size
             || data.spectrum_window != config.spectrum_window
             || data.spectrum_bands_per_octave != config.spectrum_bands_per_octave
@@ -270,6 +263,7 @@ impl Visuals {
         data.spectrogram_db_range = config.spectrogram_db_range;
         data.spectrogram_log_scale = config.spectrogram_log_scale;
         data.spectrogram_history_seconds = config.spectrogram_history_seconds;
+        data.spectrogram_interpolate = config.spectrogram_interpolate;
         if history_changed || analysis_changed {
             data.clear_history();
         } else if heat_changed {
@@ -637,7 +631,7 @@ impl VisualData {
         window: &mut Window,
         cx: &mut App,
     ) -> Result<(), String> {
-        let left_margin = if self.spectrum_show_labels { 42.0 } else { 8.0 };
+        let left_margin = axis_label_margin(self.spectrum_show_labels, &self.spectrum_labels);
         let bottom_margin = if self.spectrum_show_labels { 22.0 } else { 8.0 };
         let plot = Bounds::new(
             point(bounds.left() + px(left_margin), bounds.top() + px(8.0)),
@@ -724,14 +718,10 @@ impl VisualData {
                         peak = peak.max(self.interpolate_level(center_hz, low, high, true));
                     }
                     let slot_width = plot.size.width * (right_t - left_t);
-                    let bar_height = (plot.size.height
-                        * db_height(level, self.top_db, self.spectrum_db_range))
-                    .clamp(px(0.0), plot.size.height);
+                    let level_fraction = db_height(level, self.top_db, self.spectrum_db_range);
+                    let bar_height =
+                        (plot.size.height * level_fraction).clamp(px(0.0), plot.size.height);
                     any_visible |= bar_height > px(0.0);
-                    let color = rgb(palette_color_with(
-                        self.visual_palette,
-                        (left_t + right_t) * 0.5,
-                    ));
                     let (x, width) = match style {
                         SpectrumStyle::Line | SpectrumStyle::Solid => {
                             (plot.left() + plot.size.width * left_t, slot_width)
@@ -752,7 +742,11 @@ impl VisualData {
                                 let height = bar_height.max(px(1.0)).min(plot.size.height);
                                 window.paint_quad(fill(
                                     Bounds::new(point(x, bottom - height), size(width, height)),
-                                    color,
+                                    spectrum_height_gradient(
+                                        self.visual_palette,
+                                        0.0,
+                                        level_fraction,
+                                    ),
                                 ));
                             }
                             SpectrumStyle::Outline => {
@@ -760,12 +754,20 @@ impl VisualData {
                                 let edge = px(1.0).min(width * 0.5).min(height * 0.5);
                                 window.paint_quad(fill(
                                     Bounds::new(point(x, bottom - height), size(width, edge)),
-                                    color,
+                                    spectrum_height_gradient(
+                                        self.visual_palette,
+                                        0.0,
+                                        level_fraction,
+                                    ),
                                 ));
                                 if height > edge {
                                     window.paint_quad(fill(
                                         Bounds::new(point(x, bottom - edge), size(width, edge)),
-                                        color,
+                                        spectrum_height_gradient(
+                                            self.visual_palette,
+                                            0.0,
+                                            edge / plot.size.height,
+                                        ),
                                     ));
                                 }
                                 if height > edge * 2.0 {
@@ -774,14 +776,22 @@ impl VisualData {
                                             point(x, bottom - height + edge),
                                             size(edge, height - edge * 2.0),
                                         ),
-                                        color,
+                                        spectrum_height_gradient(
+                                            self.visual_palette,
+                                            0.0,
+                                            level_fraction,
+                                        ),
                                     ));
                                     window.paint_quad(fill(
                                         Bounds::new(
                                             point(x + width - edge, bottom - height + edge),
                                             size(edge, height - edge * 2.0),
                                         ),
-                                        color,
+                                        spectrum_height_gradient(
+                                            self.visual_palette,
+                                            0.0,
+                                            level_fraction,
+                                        ),
                                     ));
                                 }
                             }
@@ -797,7 +807,11 @@ impl VisualData {
                                             point(x, segment_top),
                                             size(width, segment_bottom - segment_top),
                                         ),
-                                        color,
+                                        rgb(spectrum_height_color(
+                                            self.visual_palette,
+                                            ((segment_top + segment_bottom) * 0.5 - top)
+                                                / plot.size.height,
+                                        )),
                                     ));
                                     segment_bottom = segment_top - segment_gap;
                                 }
@@ -810,9 +824,9 @@ impl VisualData {
                         }
                     }
                     if self.spectrum_peaks && peak > self.top_db - self.spectrum_db_range {
-                        let peak_height = (plot.size.height
-                            * db_height(peak, self.top_db, self.spectrum_db_range))
-                        .clamp(px(0.0), plot.size.height);
+                        let peak_fraction = db_height(peak, self.top_db, self.spectrum_db_range);
+                        let peak_height =
+                            (plot.size.height * peak_fraction).clamp(px(0.0), plot.size.height);
                         let peak_y = (bottom - peak_height).clamp(top, bottom - px(1.0));
                         let peak_width =
                             if matches!(style, SpectrumStyle::Line | SpectrumStyle::Solid) {
@@ -822,9 +836,9 @@ impl VisualData {
                             };
                         let peak_x = (x + (width - peak_width) * 0.5)
                             .clamp(plot.left(), (plot.right() - peak_width).max(plot.left()));
-                        self.peak_markers.push(Bounds::new(
-                            point(peak_x, peak_y),
-                            size(peak_width, px(1.0)),
+                        self.peak_markers.push((
+                            Bounds::new(point(peak_x, peak_y), size(peak_width, px(1.0))),
+                            spectrum_height_color(self.visual_palette, peak_fraction),
                         ));
                     }
                 }
@@ -834,12 +848,12 @@ impl VisualData {
                         plot,
                         style,
                         self.visual_palette,
-                        self.spectrum_interpolate,
+                        self.spectrum_interpolate || style == SpectrumStyle::Solid,
                         window,
                     )?;
                 }
-                for &bounds in &self.peak_markers {
-                    window.paint_quad(fill(bounds, rgb(0xd7def0)));
+                for &(bounds, color) in &self.peak_markers {
+                    window.paint_quad(fill(bounds, rgb(color)));
                 }
                 Ok(())
             },
@@ -870,11 +884,7 @@ impl VisualData {
         window: &mut Window,
         cx: &mut App,
     ) -> Result<(), String> {
-        let left_margin = if self.spectrogram_show_labels {
-            42.0
-        } else {
-            8.0
-        };
+        let left_margin = axis_label_margin(self.spectrogram_show_labels, &self.frequency_labels);
         let plot = Bounds::new(
             point(bounds.left() + px(left_margin), bounds.top() + px(6.0)),
             size(
@@ -945,7 +955,7 @@ impl VisualData {
                         px(0.0).into(),
                         Arc::clone(image),
                         0,
-                        false,
+                        !self.spectrogram_interpolate,
                     )
                     .map_err(|error| format!("Cannot upload/paint spectrogram image: {error}"))?;
             }
@@ -1054,6 +1064,14 @@ fn shape_y(points: &[Point<Pixels>], x: Pixels, interpolate: bool) -> Pixels {
     a.y + (b.y - a.y) * t
 }
 
+fn axis_label_margin(show_labels: bool, labels: &[SharedString]) -> f32 {
+    if !show_labels {
+        return 8.0;
+    }
+    let max_chars = labels.iter().map(|label| label.len()).max().unwrap_or(0) as f32;
+    (max_chars * 7.0 + 8.0).max(32.0)
+}
+
 /// GPUI supports two gradient stops per path. Build one bounded path per
 /// palette interval, not one allocation per band or a copied full mesh.
 fn paint_spectrum_shape(
@@ -1067,62 +1085,55 @@ fn paint_spectrum_shape(
     if points.is_empty() {
         return Ok(());
     }
-    for stops in palette_stops(palette).windows(2) {
-        let left = plot.left() + plot.size.width * stops[0].0;
-        let right = plot.left() + plot.size.width * stops[1].0;
-        let solid = style == SpectrumStyle::Solid;
-        let mut builder = if solid {
-            PathBuilder::fill()
-        } else {
-            PathBuilder::stroke(px(2.0))
-        };
-        if solid {
-            builder.move_to(point(left, plot.bottom()));
-            builder.line_to(point(left, shape_y(points, left, interpolate)));
-        } else {
-            builder.move_to(point(left, shape_y(points, left, interpolate)));
-        }
-        if interpolate {
-            for &vertex in points {
-                if vertex.x > left && vertex.x < right {
-                    builder.line_to(vertex);
-                }
-            }
-        } else {
-            for pair in points.windows(2) {
-                let x = (pair[0].x + pair[1].x) * 0.5;
-                if x > left && x < right {
-                    builder.line_to(point(x, pair[0].y));
-                    builder.line_to(point(x, pair[1].y));
-                }
-            }
-        }
-        builder.line_to(point(right, shape_y(points, right, interpolate)));
-        if solid {
-            builder.line_to(point(right, plot.bottom()));
-            builder.close();
-        }
-        let path = builder
-            .build()
-            .map_err(|error| format!("Cannot tessellate spectrum shape: {error}"))?;
-        let width = path.bounds.size.width.max(px(1.0));
-        let from = (left - path.bounds.left()) / width;
-        let to = (right - path.bounds.left()) / width;
-        let color = linear_gradient(
-            90.0,
-            linear_color_stop(rgb(palette_color_with(palette, stops[0].0)), from),
-            linear_color_stop(rgb(palette_color_with(palette, stops[1].0)), to),
-        );
-        window.with_content_mask(
-            Some(gpui::ContentMask {
-                bounds: Bounds::new(
-                    point(left, plot.top()),
-                    size(right - left, plot.size.height),
-                ),
-            }),
-            |window| window.paint_path(path, color),
-        );
+    let solid = style == SpectrumStyle::Solid;
+    let mut builder = if solid {
+        PathBuilder::fill()
+    } else {
+        PathBuilder::stroke(px(2.0))
+    };
+    if solid {
+        builder.move_to(point(plot.left(), plot.bottom()));
+        builder.line_to(point(
+            plot.left(),
+            shape_y(points, plot.left(), interpolate),
+        ));
+    } else {
+        builder.move_to(point(
+            plot.left(),
+            shape_y(points, plot.left(), interpolate),
+        ));
     }
+    if interpolate {
+        for &vertex in points {
+            if vertex.x > plot.left() && vertex.x < plot.right() {
+                builder.line_to(vertex);
+            }
+        }
+    } else {
+        for pair in points.windows(2) {
+            let x = (pair[0].x + pair[1].x) * 0.5;
+            if x > plot.left() && x < plot.right() {
+                builder.line_to(point(x, pair[0].y));
+                builder.line_to(point(x, pair[1].y));
+            }
+        }
+    }
+    builder.line_to(point(
+        plot.right(),
+        shape_y(points, plot.right(), interpolate),
+    ));
+    if solid {
+        builder.line_to(point(plot.right(), plot.bottom()));
+        builder.close();
+    }
+    let path = builder
+        .build()
+        .map_err(|error| format!("Cannot tessellate spectrum shape: {error}"))?;
+    let bottom_fraction =
+        ((plot.bottom() - path.bounds.bottom()) / plot.size.height).clamp(0.0, 1.0);
+    let top_fraction = ((plot.bottom() - path.bounds.top()) / plot.size.height).clamp(0.0, 1.0);
+    let color = spectrum_height_gradient(palette, bottom_fraction, top_fraction);
+    window.paint_path(path, color);
     Ok(())
 }
 fn group_bands(
@@ -1197,10 +1208,27 @@ fn db_label(value: f32) -> SharedString {
 
 fn frequency_label(frequency: f32) -> SharedString {
     if frequency >= 1000.0 {
-        format!("{:.1} kHz", frequency / 1000.0).into()
+        let khz = frequency / 1000.0;
+        if (khz - khz.round()).abs() < 0.05 {
+            format!("{khz:.0} kHz").into()
+        } else {
+            format!("{khz:.1} kHz").into()
+        }
     } else {
         format!("{frequency:.0} Hz").into()
     }
+}
+
+fn spectrum_height_gradient(palette: VisualizationPalette, bottom: f32, top: f32) -> Background {
+    linear_gradient(
+        0.0,
+        linear_color_stop(rgb(palette_color_with(palette, bottom)), 0.0),
+        linear_color_stop(rgb(palette_color_with(palette, top)), 1.0),
+    )
+}
+
+fn spectrum_height_color(palette: VisualizationPalette, height: f32) -> u32 {
+    palette_color_with(palette, height.clamp(0.0, 1.0))
 }
 
 fn gradient(value: f32, stops: &[(f32, [u8; 3])]) -> [u8; 3] {
@@ -1219,14 +1247,13 @@ fn gradient(value: f32, stops: &[(f32, [u8; 3])]) -> [u8; 3] {
 }
 #[cfg(test)]
 pub(super) fn palette_color(fraction: f32) -> u32 {
-    palette_color_with(VisualizationPalette::Deadbeef, fraction)
+    palette_color_with(VisualizationPalette::B, fraction)
 }
 
 pub(super) fn palette_function(palette: VisualizationPalette) -> fn(f32) -> u32 {
     match palette {
-        VisualizationPalette::TokyoNight => tokyonight_palette_color,
-        VisualizationPalette::Deadbeef => deadbeef_palette_color,
-        VisualizationPalette::Nord => nord_palette_color,
+        VisualizationPalette::A => palette_a_color,
+        VisualizationPalette::B => palette_b_color,
     }
 }
 
@@ -1235,16 +1262,12 @@ fn palette_color_with(palette: VisualizationPalette, fraction: f32) -> u32 {
     (u32::from(color[0]) << 16) | (u32::from(color[1]) << 8) | u32::from(color[2])
 }
 
-fn tokyonight_palette_color(fraction: f32) -> u32 {
-    palette_color_with(VisualizationPalette::TokyoNight, fraction)
+fn palette_a_color(fraction: f32) -> u32 {
+    palette_color_with(VisualizationPalette::A, fraction)
 }
 
-fn deadbeef_palette_color(fraction: f32) -> u32 {
-    palette_color_with(VisualizationPalette::Deadbeef, fraction)
-}
-
-fn nord_palette_color(fraction: f32) -> u32 {
-    palette_color_with(VisualizationPalette::Nord, fraction)
+fn palette_b_color(fraction: f32) -> u32 {
+    palette_color_with(VisualizationPalette::B, fraction)
 }
 
 fn paint_label(
@@ -1289,22 +1312,9 @@ mod tests {
     use super::*;
     #[test]
     fn palettes_have_distinct_named_endpoints() {
-        assert_eq!(
-            palette_color_with(VisualizationPalette::Deadbeef, 0.0),
-            0x203a8a
-        );
-        assert_eq!(
-            palette_color_with(VisualizationPalette::TokyoNight, 0.0),
-            0x41486e
-        );
-        assert_eq!(
-            palette_color_with(VisualizationPalette::Nord, 0.0),
-            0x2e3440
-        );
-        assert_eq!(
-            palette_color_with(VisualizationPalette::TokyoNight, 1.0),
-            0xf7768e
-        );
+        assert_eq!(palette_color_with(VisualizationPalette::B, 0.0), 0x203a8a);
+        assert_eq!(palette_color_with(VisualizationPalette::A, 0.0), 0x41486e);
+        assert_eq!(palette_color_with(VisualizationPalette::A, 1.0), 0xf7768e);
     }
     fn frame(time: f64, level: f32) -> AnalysisFrame {
         AnalysisFrame {
