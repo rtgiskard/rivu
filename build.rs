@@ -4,8 +4,21 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=LIBCLANG_PATH");
 
-    println!("cargo:rerun-if-changed=.git/HEAD");
-    println!("cargo:rerun-if-changed=.git/refs/tags");
+    let git_dir = Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|path| PathBuf::from(path.trim()))
+        .unwrap_or_else(|| PathBuf::from(".git"));
+    println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
+    println!("cargo:rerun-if-changed={}", git_dir.join("packed-refs").display());
+    if let Ok(head) = std::fs::read_to_string(git_dir.join("HEAD"))
+        && let Some(reference) = head.strip_prefix("ref: ").map(str::trim)
+    {
+        println!("cargo:rerun-if-changed={}", git_dir.join(reference).display());
+    }
     println!("cargo:rerun-if-env-changed=RIVU_GIT_VERSION");
     let git_version = env::var("RIVU_GIT_VERSION").ok().or_else(|| {
         Command::new("git")
