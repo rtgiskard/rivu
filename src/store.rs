@@ -196,13 +196,17 @@ impl Store {
     }
     pub fn set_favorite(&self, ids: &[i64], favorite: bool) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
+        let mut exists = tx.prepare("SELECT EXISTS(SELECT 1 FROM tracks WHERE id=?1)")?;
+        let mut update =
+            tx.prepare("UPDATE tracks SET favorite=?1 WHERE id=?2 AND favorite<>?1")?;
         for &id in ids {
-            exists_track(&tx, id)?;
-            tx.execute(
-                "UPDATE tracks SET favorite=?1 WHERE id=?2 AND favorite<>?1",
-                params![favorite, id],
-            )?;
+            if !exists.query_row([id], |row| row.get::<_, bool>(0))? {
+                bail!("Track {id} does not exist");
+            }
+            update.execute(params![favorite, id])?;
         }
+        drop(update);
+        drop(exists);
         tx.commit()?;
         Ok(())
     }
@@ -470,19 +474,25 @@ impl Store {
             |r| r.get(0),
         )?;
         let mut seen = HashSet::with_capacity(tracks.len());
+        let mut exists_track_stmt =
+            tx.prepare("SELECT EXISTS(SELECT 1 FROM tracks WHERE id=?1)")?;
+        let mut insert = tx.prepare(
+            "INSERT INTO playlist_entries(playlist_id,track_id,position)
+             SELECT ?1,?2,?3 WHERE NOT EXISTS(
+                 SELECT 1 FROM playlist_entries WHERE playlist_id=?1 AND track_id=?2
+             )",
+        )?;
         for &track_id in tracks {
             if !seen.insert(track_id) {
                 continue;
             }
-            exists_track(&tx, track_id)?;
-            position += tx.execute(
-                "INSERT INTO playlist_entries(playlist_id,track_id,position)
-                 SELECT ?1,?2,?3 WHERE NOT EXISTS(
-                     SELECT 1 FROM playlist_entries WHERE playlist_id=?1 AND track_id=?2
-                 )",
-                params![id, track_id, position],
-            )? as i64;
+            if !exists_track_stmt.query_row([track_id], |row| row.get::<_, bool>(0))? {
+                bail!("Track {track_id} does not exist");
+            }
+            position += insert.execute(params![id, track_id, position])? as i64;
         }
+        drop(insert);
+        drop(exists_track_stmt);
         tx.commit()?;
         Ok(())
     }
@@ -548,18 +558,27 @@ impl Store {
     pub fn remove_tracks(&self, ids: &[i64]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         let mut affected = HashSet::new();
-        for id in ids {
-            exists_track(&tx, *id)?;
-            let mut query =
-                tx.prepare("SELECT DISTINCT playlist_id FROM playlist_entries WHERE track_id=?")?;
+        let mut exists = tx.prepare("SELECT EXISTS(SELECT 1 FROM tracks WHERE id=?1)")?;
+        let mut playlists =
+            tx.prepare("SELECT DISTINCT playlist_id FROM playlist_entries WHERE track_id=?1")?;
+        let mut delete_entries = tx.prepare("DELETE FROM playlist_entries WHERE track_id=?1")?;
+        let mut delete_tracks = tx.prepare("DELETE FROM tracks WHERE id=?1")?;
+        for &id in ids {
+            if !exists.query_row([id], |row| row.get::<_, bool>(0))? {
+                bail!("Track {id} does not exist");
+            }
             affected.extend(
-                query
+                playlists
                     .query_map([id], |row| row.get::<_, i64>(0))?
                     .collect::<rusqlite::Result<Vec<_>>>()?,
             );
-            tx.execute("DELETE FROM playlist_entries WHERE track_id=?", [id])?;
-            tx.execute("DELETE FROM tracks WHERE id=?", [id])?;
+            delete_entries.execute([id])?;
+            delete_tracks.execute([id])?;
         }
+        drop(delete_tracks);
+        drop(delete_entries);
+        drop(playlists);
+        drop(exists);
         for playlist in affected {
             tx.execute("WITH ordered AS (SELECT id, ROW_NUMBER() OVER (ORDER BY position,id)-1 AS new_position FROM playlist_entries WHERE playlist_id=?1) UPDATE playlist_entries SET position=(SELECT new_position FROM ordered WHERE ordered.id=playlist_entries.id) WHERE playlist_id=?1", [playlist])?;
         }
@@ -598,16 +617,6 @@ impl Store {
         self.conn.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE settings.value<>excluded.value",params![key,value])?;
         Ok(())
     }
-}
-fn exists_track(tx: &Transaction<'_>, id: i64) -> Result<()> {
-    if !tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM tracks WHERE id=?)",
-        [id],
-        |r| r.get(0),
-    )? {
-        bail!("track {id} does not exist");
-    }
-    Ok(())
 }
 fn exists_playlist(tx: &Transaction<'_>, id: i64) -> Result<()> {
     if !tx.query_row(
