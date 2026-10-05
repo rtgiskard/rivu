@@ -1,5 +1,15 @@
+use super::*;
+use anyhow::bail;
+use crossbeam_channel::{Receiver, select};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    thread,
+    time::{Duration, Instant},
+};
+
 impl Core {
-    fn run(&mut self, requests: Receiver<Request>) {
+    pub(super) fn run(&mut self, requests: Receiver<Request>) {
         let config_ticks = crossbeam_channel::tick(Duration::from_millis(100));
         loop {
             select! {
@@ -67,7 +77,7 @@ impl Core {
         }
     }
 
-    fn publish(&mut self) {
+    pub(super) fn publish(&mut self) {
         if let Some(library) = self.library.snapshot() {
             self.state.library = library;
             self.state.library_revision = self.state.library_revision.wrapping_add(1);
@@ -85,7 +95,7 @@ impl Core {
             callback();
         }
     }
-    fn request_raise(&self) -> Result<()> {
+    pub(super) fn request_raise(&self) -> Result<()> {
         let opener = self.gui_opener.read();
         let callback = opener
             .as_ref()
@@ -94,7 +104,7 @@ impl Core {
         callback();
         Ok(())
     }
-    fn save(&mut self, force_config: bool) -> Result<()> {
+    pub(super) fn save(&mut self, force_config: bool) -> Result<()> {
         let config_changed = self.state.config.volume != self.state.volume
             || self.state.config.shuffle != self.state.shuffle
             || self.state.config.repeat != self.state.repeat
@@ -126,7 +136,7 @@ impl Core {
         }
         Ok(())
     }
-    fn reload_library(&mut self, structure_changed: bool) -> Result<()> {
+    pub(super) fn reload_library(&mut self, structure_changed: bool) -> Result<()> {
         let tracks = self.store.tracks()?;
         self.state.library = self.library.replace(tracks);
         self.state.library_revision = self.state.library_revision.wrapping_add(1);
@@ -137,7 +147,7 @@ impl Core {
         Ok(())
     }
 
-    fn update_track_stats(
+    pub(super) fn update_track_stats(
         &mut self,
         track_id: i64,
         played_at: Option<i64>,
@@ -152,19 +162,19 @@ impl Core {
             }
         })
     }
-    fn reload(&mut self, structure_changed: bool) -> Result<()> {
+    pub(super) fn reload(&mut self, structure_changed: bool) -> Result<()> {
         self.reload_library(structure_changed)?;
         self.state.playlists = Arc::new(self.store.playlists()?);
         self.state.history = Arc::new(self.store.history(200)?);
         Ok(())
     }
-    fn audio(&self, command: AudioCommand) -> Result<()> {
+    pub(super) fn audio(&self, command: AudioCommand) -> Result<()> {
         self.engine
             .commands
             .send(command)
             .context("Audio worker unavailable")
     }
-    fn track(&self, id: i64) -> Result<&Track> {
+    pub(super) fn track(&self, id: i64) -> Result<&Track> {
         let index = self
             .library
             .tracks()
@@ -173,7 +183,7 @@ impl Core {
             .context("Track not found")?;
         Ok(&self.library.tracks()[index])
     }
-    fn enqueue(&mut self, ids: &[i64]) -> Result<()> {
+    pub(super) fn enqueue(&mut self, ids: &[i64]) -> Result<()> {
         for id in ids {
             self.track(*id)?;
         }
@@ -191,12 +201,12 @@ impl Core {
         }
         Ok(())
     }
-    fn randomize_queue(&mut self, rng: &mut impl rand::Rng) {
+    pub(super) fn randomize_queue(&mut self, rng: &mut impl rand::Rng) {
         if self.state.queue.len() > 1 {
             Arc::make_mut(&mut self.state.queue).shuffle(rng);
         }
     }
-    fn deduplicate_queue(&mut self) {
+    pub(super) fn deduplicate_queue(&mut self) {
         if self.state.queue.len() < 2 {
             return;
         }
@@ -223,7 +233,7 @@ impl Core {
         });
         self.prune_queue_history();
     }
-    fn prune_queue_history(&mut self) {
+    pub(super) fn prune_queue_history(&mut self) {
         let queue = &self.state.queue;
         self.shuffle_bag
             .retain(|id| queue.iter().any(|entry| entry.id == *id));
@@ -239,7 +249,7 @@ impl Core {
         });
         self.played_cursor = cursor;
     }
-    fn start(&mut self, queue_id: u64, record_history: bool) -> Result<()> {
+    pub(super) fn start(&mut self, queue_id: u64, record_history: bool) -> Result<()> {
         let entry = self
             .state
             .queue
@@ -281,7 +291,7 @@ impl Core {
         self.queue_dirty = true;
         self.save(false)
     }
-    fn count_play(&mut self) -> Result<()> {
+    pub(super) fn count_play(&mut self) -> Result<()> {
         let Some(duration) = self
             .state
             .duration
@@ -305,7 +315,7 @@ impl Core {
         }
         Ok(())
     }
-    fn playback_started(&mut self, info: library::MediaInfo) -> Result<()> {
+    pub(super) fn playback_started(&mut self, info: library::MediaInfo) -> Result<()> {
         let track_id = self.playback.as_ref().map(|playback| playback.track_id);
         let Some(track_id) = track_id else {
             return Ok(());
@@ -337,7 +347,7 @@ impl Core {
         self.state.history = Arc::new(self.store.history(200)?);
         self.count_play()
     }
-    fn playback_progress(&mut self, position: f64, heard: f64) -> Result<()> {
+    pub(super) fn playback_progress(&mut self, position: f64, heard: f64) -> Result<()> {
         if let Some(playback) = &mut self.playback
             && playback.started
         {
@@ -352,7 +362,7 @@ impl Core {
         }
         Ok(())
     }
-    fn drain_playback_events(&mut self, generation: u64) -> Result<()> {
+    pub(super) fn drain_playback_events(&mut self, generation: u64) -> Result<()> {
         while let Ok(event) = self.engine.events.try_recv() {
             match event {
                 AudioEvent::Started {
@@ -373,7 +383,7 @@ impl Core {
         }
         Ok(())
     }
-    fn finish_playback(
+    pub(super) fn finish_playback(
         &mut self,
         snapshot: Result<Option<(u64, f64)>>,
         natural: bool,
@@ -416,11 +426,11 @@ impl Core {
         self.playback = None;
         Ok(())
     }
-    fn stop(&mut self) -> Result<()> {
+    pub(super) fn stop(&mut self) -> Result<()> {
         let snapshot = self.engine.stop_and_snapshot().map(Some);
         self.finish_playback(snapshot, false)
     }
-    fn advance(&mut self, natural: bool) -> Result<()> {
+    pub(super) fn advance(&mut self, natural: bool) -> Result<()> {
         if self.state.queue.is_empty() {
             return self.stop();
         }
@@ -482,7 +492,7 @@ impl Core {
         }
         self.stop()
     }
-    fn previous(&mut self) -> Result<()> {
+    pub(super) fn previous(&mut self) -> Result<()> {
         if self.state.position > 3.0 {
             return self.seek(0.0);
         }
@@ -514,7 +524,7 @@ impl Core {
         }
         bail!("Queue is empty")
     }
-    fn seek(&mut self, seconds: f64) -> Result<()> {
+    pub(super) fn seek(&mut self, seconds: f64) -> Result<()> {
         if !seconds.is_finite() || seconds < 0.0 {
             bail!("Seek must be a finite nonnegative number");
         }
@@ -530,7 +540,7 @@ impl Core {
         self.state.seek_revision = self.state.seek_revision.wrapping_add(1);
         Ok(())
     }
-    fn scan(
+    pub(super) fn scan(
         &mut self,
         paths: Vec<PathBuf>,
         import: Option<(String, Vec<M3uItem>)>,
@@ -562,7 +572,7 @@ impl Core {
         self.state.scan_message = "Reading audio metadata…".into();
         Ok(())
     }
-    fn finish_scan(&mut self, scan: ScanFinished) -> Result<()> {
+    pub(super) fn finish_scan(&mut self, scan: ScanFinished) -> Result<()> {
         let result = scan.result?;
         self.store.apply_scan(&result)?;
         self.state.scan_message = result.summary();
@@ -603,7 +613,7 @@ impl Core {
         }
         Ok(())
     }
-    fn audio_event(&mut self, event: AudioEvent) -> Result<()> {
+    pub(super) fn audio_event(&mut self, event: AudioEvent) -> Result<()> {
         match event {
             AudioEvent::Started { generation, info } if generation == self.generation => {
                 if let Err(error) = self.playback_started(info) {
@@ -639,7 +649,7 @@ impl Core {
         }
         Ok(())
     }
-    fn remove_queue_entries(&mut self, queue_ids: &[u64]) -> Result<()> {
+    pub(super) fn remove_queue_entries(&mut self, queue_ids: &[u64]) -> Result<()> {
         if queue_ids.is_empty() {
             return Ok(());
         }
@@ -672,7 +682,7 @@ impl Core {
         Ok(())
     }
 
-    fn move_queue_entries(&mut self, queue_ids: &[u64], index: usize) -> Result<()> {
+    pub(super) fn move_queue_entries(&mut self, queue_ids: &[u64], index: usize) -> Result<()> {
         if queue_ids.is_empty() {
             return Ok(());
         }
@@ -702,7 +712,7 @@ impl Core {
         Ok(())
     }
 
-    fn command(&mut self, command: Command) -> Result<()> {
+    pub(super) fn command(&mut self, command: Command) -> Result<()> {
         let persist_queue = matches!(
             &command,
             Command::Enqueue { .. }
@@ -946,7 +956,8 @@ impl Core {
             } => {
                 self.store.set_favorite(&track_ids, favorite)?;
                 for track_id in track_ids {
-                    self.library.update(track_id, |track| track.favorite = favorite)?;
+                    self.library
+                        .update(track_id, |track| track.favorite = favorite)?;
                 }
             }
             Command::RemoveMissingTracks => {

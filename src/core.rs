@@ -355,7 +355,8 @@ struct Core {
     config_dirty: bool,
     config_last_saved: Instant,
 }
-include!("core_impl.rs");
+#[path = "core_impl.rs"]
+mod core_impl;
 
 fn now() -> i64 {
     SystemTime::now()
