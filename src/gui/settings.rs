@@ -1,10 +1,7 @@
 use super::{
     ACCENT, BORDER, ButtonTooltip, DropdownItem, DropdownState, ERROR, GuiApp, HIGHLIGHT, Measured,
-    PANEL, TEXT, UI_INSET, button, caption, column, copyable_message, dropdown_container,
-    icon_button,
-    input::Input,
-    panels::{TRACK_HEIGHT, list_row},
-    row,
+    PANEL, POPOVER_MAX_HEIGHT, UI_INSET, button, caption, column, copyable_message,
+    dropdown_container, dropdown_row, icon_button, input::Input, panels::TRACK_HEIGHT, row,
 };
 use crate::{
     config::{Config, RgbColor, SpectrumStyle, SpectrumWindow, VisualizationPalette},
@@ -419,7 +416,7 @@ impl Settings {
         select: impl Fn(&mut Settings) + 'static,
     ) -> Stateful<Div> {
         button(id, label, cx, move |this, _, cx| {
-            this.device_popup_open = false;
+            this.settings.device_dropdown.close();
             select(&mut this.settings);
             cx.notify();
         })
@@ -434,8 +431,6 @@ impl Settings {
 
 impl GuiApp {
     pub(super) fn load_settings(&mut self, cx: &mut Context<Self>) {
-        self.device_popup_open = false;
-        self.settings.session = self.settings.session.wrapping_add(1);
         self.settings.device_dropdown.close();
         let config = self.handle.state.read().config.as_ref().clone();
         self.settings.reset(&config, cx);
@@ -492,8 +487,15 @@ impl GuiApp {
         }
         self.settings.device_dropdown.select_index(index);
         self.settings.device_dropdown.close();
-        self.device_popup_open = false;
         cx.notify();
+    }
+
+    pub(super) fn device_dropdown_is_open(&self) -> bool {
+        self.settings.device_dropdown.is_open()
+    }
+
+    pub(super) fn close_device_dropdown(&mut self) {
+        self.settings.device_dropdown.close();
     }
 
     pub(super) fn device_key(&mut self, key: &str, cx: &mut Context<Self>) {
@@ -553,25 +555,25 @@ impl GuiApp {
                     })
                     .child(self.measurement(Measured::Device))
                     .on_click(cx.listener(|this, _, window, cx| {
-                        this.device_popup_open = !this.device_popup_open;
-                        let selected = this
-                            .settings
-                            .draft
-                            .output_device
-                            .as_ref()
-                            .and_then(|name| {
-                                this.state.devices.iter().position(|device| device == name)
-                            })
-                            .map_or(0, |index| index + 1);
-                        if this.device_popup_open {
+                        let open = this.settings.device_dropdown.is_open();
+                        if open {
+                            this.settings.device_dropdown.close();
+                        } else {
+                            let selected = this
+                                .settings
+                                .draft
+                                .output_device
+                                .as_ref()
+                                .and_then(|name| {
+                                    this.state.devices.iter().position(|device| device == name)
+                                })
+                                .map_or(0, |index| index + 1);
                             let items = std::iter::once(DropdownItem::new(0, "System default"))
                                 .chain(this.state.devices.iter().enumerate().map(
                                     |(index, device)| DropdownItem::new(index + 1, device.clone()),
                                 ));
                             this.settings.device_dropdown.open(items);
                             this.settings.device_dropdown.select_index(selected);
-                        } else {
-                            this.settings.device_dropdown.close();
                         }
                         if let Some(index) = this.settings.device_dropdown.selected_index() {
                             this.settings
@@ -939,40 +941,36 @@ impl GuiApp {
                     },
                 )),
         );
-        if self.device_popup_open {
+        if self.settings.device_dropdown.is_open() {
             let bounds = self.measured.borrow().get(&Measured::Device).copied();
             if let Some(bounds) = bounds {
                 let selected = self.settings.device_dropdown.selected_index().unwrap_or(0);
-                let height = ((self.state.devices.len() + 1) as f32 * TRACK_HEIGHT)
-                    .min(210.)
+                let item_count = self.settings.device_dropdown.filtered().count();
+                let height = (item_count as f32 * TRACK_HEIGHT)
+                    .min(POPOVER_MAX_HEIGHT)
                     .min(f32::from(window.viewport_size().height) * 0.45);
                 let devices = uniform_list(
                     "settings-devices",
-                    self.state.devices.len() + 1,
+                    item_count,
                     cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                         range
                             .filter_map(|index| {
-                                let label = if index == 0 {
-                                    "System default".to_owned()
-                                } else {
-                                    this.state.devices.get(index - 1)?.clone()
-                                };
+                                let (item_index, item) =
+                                    this.settings.device_dropdown.filtered_item(index)?;
+                                let label = item.label.clone();
                                 let hint: SharedString = label.clone().into();
                                 Some(
-                                    list_row(("output-device", index), index == selected)
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(rgb(TEXT))
-                                                .truncate()
-                                                .child(label),
-                                        )
-                                        .tooltip(move |_, cx| {
-                                            cx.new(|_| ButtonTooltip { text: hint.clone() }).into()
-                                        })
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.choose_device(index, cx)
-                                        })),
+                                    dropdown_row(
+                                        ("output-device", item_index),
+                                        item_index == selected,
+                                        label,
+                                    )
+                                    .tooltip(move |_, cx| {
+                                        cx.new(|_| ButtonTooltip { text: hint.clone() }).into()
+                                    })
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| this.choose_device(item_index, cx),
+                                    )),
                                 )
                             })
                             .collect()
@@ -989,7 +987,7 @@ impl GuiApp {
                             .child(
                                 dropdown_container("device-dropdown", bounds.size.width)
                                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                                        this.device_popup_open = false;
+                                        this.settings.device_dropdown.close();
                                         cx.notify();
                                     }))
                                     .child(devices),

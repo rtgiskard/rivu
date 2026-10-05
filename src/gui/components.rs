@@ -1,16 +1,16 @@
 mod dropdown;
 mod list;
-mod menu;
 mod tree;
 
 use super::{ACCENT, BORDER, HIGHLIGHT, PANEL, TEXT, UI_INSET};
-pub(crate) use dropdown::{DropdownItem, DropdownState};
+
 use gpui::{Context, Div, ElementId, Render, SharedString, Stateful, Window, div, prelude::*, rgb};
-#[allow(unused_imports)]
-pub(crate) use list::{SelectableListState, SelectionMode};
-#[allow(unused_imports)]
-pub(crate) use menu::ContextMenuState;
-#[allow(unused_imports)]
+pub(crate) const CONTROL_HEIGHT: f32 = 32.0;
+pub(crate) const ROW_HEIGHT: f32 = 42.0;
+pub(crate) const MENU_WIDTH: f32 = 260.0;
+pub(crate) const POPOVER_MAX_HEIGHT: f32 = 240.0;
+pub(crate) use dropdown::{DropdownItem, DropdownState};
+pub(crate) use list::{SelectableListState, SelectionMode, SelectionModel};
 pub(crate) use tree::{TreeKey, TreeRow, TreeState};
 
 pub(super) fn visualization_status(message: impl Into<SharedString>) -> Div {
@@ -52,6 +52,7 @@ pub(crate) fn button_style(
         .px(gpui::px(UI_INSET))
         .py_1()
         .rounded_md()
+        .min_h(gpui::px(CONTROL_HEIGHT))
         .text_sm()
         .cursor_pointer()
         .bg(rgb(PANEL))
@@ -69,7 +70,7 @@ impl gpui::Global for NerdSymbols {}
 pub(crate) fn context_menu_container(id: impl Into<ElementId>) -> Stateful<Div> {
     div()
         .id(id)
-        .w(gpui::px(260.))
+        .w(gpui::px(MENU_WIDTH))
         .occlude()
         .p_1()
         .gap_0()
@@ -77,6 +78,28 @@ pub(crate) fn context_menu_container(id: impl Into<ElementId>) -> Stateful<Div> 
         .border_1()
         .border_color(rgb(BORDER))
         .rounded_md()
+}
+
+/// Standard menu item shell; pages only provide the action callback.
+pub(crate) fn menu_item_style(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .w_full()
+        .min_h(gpui::px(CONTROL_HEIGHT))
+        .px(gpui::px(UI_INSET))
+        .py_0()
+        .flex()
+        .items_center()
+        .text_sm()
+        .cursor_pointer()
+        .border_0()
+        .bg(rgb(PANEL).alpha(0.0))
+        .rounded_sm()
+        .hover(|style| style.bg(rgb(HIGHLIGHT)))
+        .child(label.into())
 }
 
 /// Shared shell for anchored dropdowns.
@@ -93,15 +116,25 @@ pub(crate) fn dropdown_container(id: impl Into<ElementId>, width: gpui::Pixels) 
         .occlude()
 }
 
-/// Visual tree row matching the compact Neovim/Snacks-style indentation.
-#[allow(dead_code)]
+/// Shared drag preview used by panel and library drag sources.
+pub(crate) fn drag_preview(label: impl Into<SharedString>) -> Div {
+    div()
+        .px_4()
+        .py_2()
+        .bg(rgb(PANEL))
+        .border_1()
+        .border_color(rgb(ACCENT))
+        .rounded_md()
+        .text_color(rgb(TEXT))
+        .child(label.into())
+}
+
 pub(crate) fn tree_row(
     id: impl Into<ElementId>,
     depth: usize,
     selected: bool,
     expanded: bool,
     has_children: bool,
-    label: impl Into<SharedString>,
 ) -> Stateful<Div> {
     let disclosure = if has_children {
         if expanded { "▼" } else { "▶" }
@@ -111,7 +144,7 @@ pub(crate) fn tree_row(
     div()
         .id(id)
         .w_full()
-        .h(gpui::px(28.))
+        .h(gpui::px(ROW_HEIGHT))
         .px_2()
         .pl(gpui::px(depth as f32 * 16.))
         .flex()
@@ -122,10 +155,20 @@ pub(crate) fn tree_row(
         .bg(rgb(if selected { HIGHLIGHT } else { PANEL }))
         .hover(|style| style.bg(rgb(HIGHLIGHT)))
         .child(div().w(gpui::px(14.)).text_xs().child(disclosure))
-        .child(label.into())
 }
 
-pub(crate) const TRACK_HEIGHT: f32 = 42.0;
+/// Standard compact option row used by anchored dropdowns.
+pub(crate) fn dropdown_row(
+    id: impl Into<ElementId>,
+    selected: bool,
+    label: impl Into<SharedString>,
+) -> Stateful<Div> {
+    list_row(id, selected)
+        .h(gpui::px(CONTROL_HEIGHT))
+        .child(div().flex_1().min_w_0().truncate().child(label.into()))
+}
+
+pub(crate) const TRACK_HEIGHT: f32 = ROW_HEIGHT;
 /// Secondary text used throughout panels and controls.
 pub(crate) fn caption(text: impl Into<SharedString>) -> Div {
     div()
@@ -139,7 +182,7 @@ pub(crate) fn list_row(id: impl Into<ElementId>, selected: bool) -> Stateful<Div
     div()
         .id(id)
         .w_full()
-        .h(gpui::px(TRACK_HEIGHT))
+        .h(gpui::px(ROW_HEIGHT))
         .flex_shrink_0()
         .min_w_0()
         .px_2()
@@ -172,13 +215,14 @@ impl Render for TrackTooltip {
 
 /// Standard two-line row text with an overflow tooltip.
 pub(crate) fn row_text(
+    id: impl Into<ElementId>,
     title: impl Into<SharedString>,
     detail: impl Into<SharedString>,
 ) -> Stateful<Div> {
     let title = title.into();
     let detail = detail.into();
     super::column()
-        .id("track-text")
+        .id(id)
         .flex_1()
         .gap_0()
         .overflow_hidden()
@@ -197,4 +241,15 @@ pub(crate) fn row_text(
             })
             .into()
         })
+}
+
+/// Shared track row for panels whose content is a two-line track label.
+pub(crate) fn track_row(
+    id: impl Into<ElementId>,
+    text_id: impl Into<ElementId>,
+    selected: bool,
+    title: impl Into<SharedString>,
+    detail: impl Into<SharedString>,
+) -> Stateful<Div> {
+    list_row(id, selected).child(row_text(text_id, title, detail))
 }

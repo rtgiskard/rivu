@@ -1,14 +1,18 @@
 use super::{
     GuiApp, ListFocus, TRACK_HEIGHT,
     components::{TreeKey, TreeRow, tree_row},
-    row_text,
+    icon_button, row, row_text,
 };
 use crate::model::{Command, Track};
 use gpui::{
-    AnyElement, Context, Render, UniformListScrollHandle, Window, div, prelude::*, px, rgb,
-    uniform_list,
+    AnyElement, Context, Render, UniformListScrollHandle, Window, prelude::*, px, uniform_list,
 };
-use std::{collections::BTreeMap, ffi::OsStr, path::Path, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    ffi::{OsStr, OsString},
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 #[derive(Clone)]
 pub(super) struct LibraryDrag {
@@ -21,14 +25,7 @@ impl Render for LibraryDrag {
             LibraryNode::Directory(path) => path.to_string_lossy().into_owned(),
             LibraryNode::Track(_) => "Track".to_owned(),
         };
-        div()
-            .px(gpui::px(super::UI_INSET))
-            .py_2()
-            .bg(rgb(super::PANEL))
-            .border_1()
-            .border_color(rgb(super::ACCENT))
-            .rounded_md()
-            .child(label)
+        super::drag_preview(label)
     }
 }
 
@@ -40,28 +37,65 @@ pub(super) enum LibraryNode {
 
 #[derive(Default)]
 struct Directory<'a> {
-    directories: BTreeMap<&'a OsStr, Directory<'a>>,
+    directories: BTreeMap<OsString, Directory<'a>>,
     tracks: Vec<&'a Track>,
 }
 
-/// Build directory-first preorder rows without duplicating the library's tracks.
-pub(super) fn library_rows(tracks: &[Track]) -> Vec<TreeRow<LibraryNode>> {
-    let mut root = Directory::default();
+/// Build one directory tree per configured library root.
+pub(super) fn library_rows(
+    tracks: &[Track],
+    library_roots: &[PathBuf],
+) -> Vec<TreeRow<LibraryNode>> {
+    let mut configured = library_roots
+        .iter()
+        .cloned()
+        .map(|path| (path, Directory::default()))
+        .collect::<Vec<_>>();
+    let mut fallback = Directory::default();
     for track in tracks {
-        let mut directory = &mut root;
-        if let Some(parent) = track.path.parent() {
-            for component in parent.components() {
-                directory = directory
-                    .directories
-                    .entry(component.as_os_str())
-                    .or_default();
-            }
+        let match_root = configured
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (root, _))| {
+                track
+                    .path
+                    .strip_prefix(root)
+                    .ok()
+                    .map(|relative| (index, relative))
+            })
+            .max_by_key(|(_, relative)| relative.components().count());
+        let (directory, relative) = if let Some((index, relative)) = match_root {
+            (&mut configured[index].1, relative)
+        } else {
+            (&mut fallback, track.path.as_path())
+        };
+        let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+        let mut directory = directory;
+        for component in parent.components() {
+            directory = directory
+                .directories
+                .entry(component.as_os_str().to_os_string())
+                .or_default();
         }
         directory.tracks.push(track);
     }
     let mut rows = Vec::new();
-    append_directory(root, Path::new(""), None, 0, &mut rows);
+    for (path, directory) in configured {
+        append_root(directory, &path, &mut rows);
+    }
+    append_directory(fallback, Path::new(""), None, 0, &mut rows);
     rows
+}
+
+fn append_root(directory: Directory<'_>, path: &Path, rows: &mut Vec<TreeRow<LibraryNode>>) {
+    let id = LibraryNode::Directory(Arc::from(path));
+    let has_children = !directory.directories.is_empty() || !directory.tracks.is_empty();
+    let label = path.file_name().map_or_else(
+        || path.to_string_lossy().into_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    rows.push(TreeRow::new(id.clone(), None, 0, label, has_children));
+    append_directory(directory, path, Some(id), 1, rows);
 }
 
 fn append_directory(
@@ -72,7 +106,7 @@ fn append_directory(
     rows: &mut Vec<TreeRow<LibraryNode>>,
 ) {
     for (name, child) in directory.directories {
-        let path = path.join(name);
+        let path = path.join(&name);
         let id = LibraryNode::Directory(Arc::from(path.as_path()));
         rows.push(TreeRow::new(
             id.clone(),
@@ -84,12 +118,8 @@ fn append_directory(
         append_directory(child, &path, Some(id), depth + 1, rows);
     }
     let mut tracks = directory.tracks;
-    tracks.sort_unstable_by(|left, right| {
-        left.path
-            .file_name()
-            .cmp(&right.path.file_name())
-            .then(left.id.cmp(&right.id))
-    });
+    tracks
+        .sort_unstable_by_key(|track| (track.path.file_name().map(OsStr::to_os_string), track.id));
     rows.extend(tracks.into_iter().map(|track| {
         TreeRow::new(
             LibraryNode::Track(track.id),
@@ -107,6 +137,13 @@ impl GuiApp {
             .library
             .iter()
             .filter_map(|track| match node {
+                LibraryNode::Directory(path) if path.as_os_str().is_empty() => (!self
+                    .state
+                    .config
+                    .library_roots
+                    .iter()
+                    .any(|root| track.path.starts_with(root)))
+                .then_some(track.id),
                 LibraryNode::Directory(path) => {
                     track.path.starts_with(path.as_ref()).then_some(track.id)
                 }
@@ -116,8 +153,10 @@ impl GuiApp {
     }
 
     pub(super) fn rebuild_library_tree(&mut self) {
-        self.library_tree
-            .set_rows(library_rows(&self.state.library));
+        self.library_tree.set_rows(library_rows(
+            &self.state.library,
+            &self.state.config.library_roots,
+        ));
         self.library_tree_scroll = UniformListScrollHandle::new();
         if let Some(index) = self.library_tree.selected_index() {
             self.library_tree_scroll
@@ -163,6 +202,38 @@ impl GuiApp {
                             LibraryNode::Track(id) => this.panel_track_text(*id),
                             _ => (node.label.clone(), String::new()),
                         };
+                        let scan_path = match &id {
+                            LibraryNode::Directory(path) => Some(path.to_path_buf()),
+                            LibraryNode::Track(track_id) => this
+                                .library_index
+                                .get(track_id)
+                                .and_then(|index| this.state.library.get(*index))
+                                .map(|track| track.path.clone()),
+                        };
+                        let scan = scan_path.map(|path| {
+                            icon_button(
+                                ("library-scan", source_index),
+                                "↻",
+                                "Scan this path",
+                                cx,
+                                move |this, _, cx| {
+                                    this.send(
+                                        Command::Scan {
+                                            paths: vec![path.clone()],
+                                            force: this.force_scan,
+                                        },
+                                        cx,
+                                    );
+                                },
+                            )
+                            .opacity(0.35)
+                            .hover(|style| style.opacity(1.0))
+                        });
+                        let content = row()
+                            .flex_1()
+                            .min_w_0()
+                            .child(row_text(("library-node-text", source_index), title, detail))
+                            .when_some(scan, |view, scan| view.child(scan));
                         Some(
                             tree_row(
                                 ("library-node", source_index),
@@ -170,12 +241,11 @@ impl GuiApp {
                                 selected,
                                 this.library_tree.expanded().contains(&id),
                                 node.has_children,
-                                "",
                             )
                             .h(px(TRACK_HEIGHT))
                             .min_w_0()
                             .overflow_hidden()
-                            .child(row_text(title, detail))
+                            .child(content)
                             .on_drag(LibraryDrag { node: id.clone() }, |drag, _, _, cx| {
                                 cx.new(|_| drag.clone())
                             })
@@ -259,9 +329,9 @@ mod tests {
             track(4, "Music/a.flac"),
             track(1, "Music/Album/a.flac"),
         ];
-        let rows = library_rows(&tracks);
+        let rows = library_rows(&tracks, &[]);
         tracks.reverse();
-        assert_eq!(rows, library_rows(&tracks));
+        assert_eq!(rows, library_rows(&tracks, &[]));
         assert_eq!(rows.len(), 6);
         assert_eq!(
             rows[0].id,
@@ -284,7 +354,7 @@ mod tests {
 
     #[test]
     fn rootless_tracks_and_shared_file_paths_keep_distinct_ids() {
-        let rows = library_rows(&[track(2, "track.flac"), track(1, "track.flac")]);
+        let rows = library_rows(&[track(2, "track.flac"), track(1, "track.flac")], &[]);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].id, LibraryNode::Track(1));
         assert_eq!(rows[1].id, LibraryNode::Track(2));
@@ -292,6 +362,6 @@ mod tests {
             rows.iter()
                 .all(|row| row.parent.is_none() && row.depth == 0)
         );
-        assert!(library_rows(&[]).is_empty());
+        assert!(library_rows(&[], &[]).is_empty());
     }
 }

@@ -15,10 +15,10 @@ use anyhow::Result;
 use ashpd::desktop::file_chooser::SelectedFiles;
 use components::ButtonTooltip;
 pub(super) use components::{
-    DropdownItem, DropdownState, SelectableListState, SelectionMode, TRACK_HEIGHT, caption,
-    context_menu_container, dropdown_container, list_row, row_text,
+    DropdownItem, DropdownState, POPOVER_MAX_HEIGHT, SelectableListState, SelectionMode,
+    SelectionModel, TRACK_HEIGHT, TreeKey, TreeState, caption, context_menu_container,
+    drag_preview, dropdown_container, dropdown_row, list_row, row_text, track_row,
 };
-use components::{TreeKey, TreeState};
 use futures::{FutureExt, StreamExt, channel::mpsc};
 use gpui::{prelude::*, *};
 use input::{Input, InputEvent};
@@ -49,7 +49,6 @@ const SPLIT_GUTTER: f32 = 4.0;
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Field {
     Search,
-    Path,
     PlaylistName,
     Title,
     Artist,
@@ -341,15 +340,8 @@ fn menu_item(
     cx: &mut Context<GuiApp>,
     action: impl Fn(&mut GuiApp, &mut Window, &mut Context<GuiApp>) + 'static,
 ) -> Stateful<Div> {
-    button(id, label, cx, action)
-        .w_full()
-        .h(rems(2.))
-        .py_0()
-        .flex()
-        .items_center()
-        .border_0()
-        .bg(rgba(0))
-        .rounded_sm()
+    components::menu_item_style(id, label)
+        .on_click(cx.listener(move |this, _, window, cx| action(this, window, cx)))
 }
 
 fn chooser_path(files: &SelectedFiles) -> Option<PathBuf> {
@@ -399,15 +391,7 @@ struct PanelDrag {
 }
 impl Render for PanelDrag {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px_4()
-            .py_2()
-            .bg(rgb(PANEL))
-            .border_1()
-            .border_color(rgb(ACCENT))
-            .rounded_md()
-            .text_color(rgb(TEXT))
-            .child(self.title.clone())
+        drag_preview(self.title.clone())
     }
 }
 
@@ -418,15 +402,7 @@ pub(super) struct QueueDrag {
 
 impl Render for QueueDrag {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px_4()
-            .py_2()
-            .bg(rgb(PANEL))
-            .border_1()
-            .border_color(rgb(ACCENT))
-            .rounded_md()
-            .text_color(rgb(TEXT))
-            .child("Move queue entry")
+        drag_preview("Move queue entry")
     }
 }
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
@@ -488,8 +464,7 @@ struct GuiApp {
     inputs: HashMap<Field, Entity<Input>>,
     selected: HashSet<i64>,
     library_selection: SelectableListState<i64>,
-    selected_queue: HashSet<u64>,
-    queue_anchor: Option<u64>,
+    selected_queue: SelectionModel<u64>,
     list_focus: Option<ListFocus>,
     workspace_focus: FocusHandle,
 
@@ -511,7 +486,6 @@ struct GuiApp {
     visuals: visuals::Visuals,
     default_album: Entity<artwork::Artwork>,
     catalog_open: bool,
-    device_popup_open: bool,
     settings_open: bool,
     panel_menu: Option<PanelMenu>,
     playlist_delete_confirm: Option<i64>,
@@ -623,7 +597,9 @@ impl GuiApp {
                     return;
                 }
                 let current = self
-                    .queue_anchor
+                    .selected_queue
+                    .anchor()
+                    .copied()
                     .filter(|id| self.selected_queue.contains(id))
                     .and_then(|id| self.state.queue.iter().position(|entry| entry.id == id))
                     .or_else(|| {
@@ -671,7 +647,9 @@ impl GuiApp {
             }
             ListFocus::Queue => {
                 let queue_id = self
-                    .queue_anchor
+                    .selected_queue
+                    .anchor()
+                    .copied()
                     .filter(|id| self.selected_queue.contains(id))
                     .or_else(|| {
                         self.state
@@ -702,7 +680,7 @@ impl GuiApp {
             return;
         }
         self.selected_queue.clear();
-        self.queue_anchor = None;
+        self.selected_queue.clear_anchor();
         self.send(Command::RemoveQueueEntries { queue_ids }, cx);
     }
     fn new(
@@ -747,7 +725,6 @@ impl GuiApp {
         let mut inputs = HashMap::new();
         for (field, placeholder) in [
             (Field::Search, "Search title, artist or album"),
-            (Field::Path, "File, folder or playlist path"),
             (Field::PlaylistName, "Playlist name"),
             (Field::Title, "Title"),
             (Field::Artist, "Artist"),
@@ -800,8 +777,7 @@ impl GuiApp {
             inputs,
             selected: HashSet::new(),
             library_selection: SelectableListState::new([], SelectionMode::Multiple),
-            selected_queue: HashSet::new(),
-            queue_anchor: None,
+            selected_queue: SelectionModel::default(),
             selected_playlist: None,
             selected_entry: None,
             list_focus: None,
@@ -821,7 +797,6 @@ impl GuiApp {
             visuals: visuals::Visuals::new(),
             default_album: cx.new(|_| artwork::Artwork::new()),
             catalog_open: false,
-            device_popup_open: false,
             settings_open: false,
             panel_menu: None,
             playlist_delete_confirm: None,
@@ -894,6 +869,34 @@ impl GuiApp {
                     Err(error) => {
                         this.error = Some(format!("Opening playlist destination: {error}"))
                     }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+    fn choose_library_root(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let result = SelectedFiles::open_file()
+                .title("Add library folder")
+                .accept_label("Add")
+                .directory(true)
+                .modal(true)
+                .send()
+                .await
+                .and_then(|request| request.response());
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(files) => {
+                        if let Some(path) = chooser_path(&files) {
+                            let mut config = this.handle.state.read().config.as_ref().clone();
+                            if !config.library_roots.iter().any(|root| root == &path) {
+                                config.library_roots.push(path);
+                                this.send(Command::Configure { config }, cx);
+                            }
+                        }
+                    }
+                    Err(error) => this.error = Some(format!("Opening library folder: {error}")),
                 }
                 cx.notify();
             });
@@ -1061,7 +1064,9 @@ impl GuiApp {
         };
         if shift {
             let anchor = self
-                .queue_anchor
+                .selected_queue
+                .anchor()
+                .copied()
                 .filter(|anchor| self.state.queue.iter().any(|entry| entry.id == *anchor))
                 .unwrap_or(id);
             let Some(anchor_index) = self.state.queue.iter().position(|entry| entry.id == anchor)
@@ -1078,16 +1083,16 @@ impl GuiApp {
             }
             self.selected_queue
                 .extend(self.state.queue[start..=end].iter().map(|entry| entry.id));
-            self.queue_anchor = Some(anchor);
+            self.selected_queue.set_anchor(anchor);
         } else if multi {
             if !self.selected_queue.insert(id) {
                 self.selected_queue.remove(&id);
             }
-            self.queue_anchor = Some(id);
+            self.selected_queue.set_anchor(id);
         } else {
             self.selected_queue.clear();
             self.selected_queue.insert(id);
-            self.queue_anchor = Some(id);
+            self.selected_queue.set_anchor(id);
         }
         cx.notify();
     }
@@ -1117,7 +1122,7 @@ impl GuiApp {
                     .map(|entry| entry.id)
                     .collect::<HashSet<_>>();
                 self.selected_queue.retain(|id| valid.contains(id));
-                self.queue_anchor = self.queue_anchor.filter(|id| valid.contains(id));
+                self.selected_queue.clear_anchor();
             }
             self.visuals.configure(&self.state.config);
             if library_changed || library_structure_changed {
@@ -1685,9 +1690,9 @@ impl Render for GuiApp {
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = event.keystroke.key.as_str();
-                if this.device_popup_open {
+                if this.device_dropdown_is_open() {
                     if key == "escape" {
-                        this.device_popup_open = false;
+                        this.close_device_dropdown();
                         cx.notify();
                     } else {
                         this.device_key(key, cx);
@@ -1738,7 +1743,7 @@ impl Render for GuiApp {
                         this.selected.clear();
                         this.library_selection.clear_selection();
                         this.selected_queue.clear();
-                        this.queue_anchor = None;
+                        this.selected_queue.clear_anchor();
                         this.selected_playlist = None;
                         this.selected_entry = None;
                         this.metadata_track = None;
@@ -2091,7 +2096,7 @@ impl Render for GuiApp {
                                         |this, _, cx| {
                                             this.panel_menu = None;
                                             this.selected_queue.clear();
-                                            this.queue_anchor = None;
+                                            this.selected_queue.clear_anchor();
                                             this.send(Command::ClearQueue, cx);
                                             cx.notify();
                                         },
@@ -2103,11 +2108,38 @@ impl Render for GuiApp {
                 }
                 PanelMenuPage::Playlists => {
                     menu = menu.child(
-                        div()
-                            .px(gpui::px(UI_INSET))
-                            .py_2()
-                            .text_sm()
-                            .child("Add selected tracks to playlist"),
+                        menu_item(
+                            "queue-create-playlist",
+                            "Save selected queue as new playlist",
+                            cx,
+                            |this, _, cx| {
+                                let name = this.value(Field::PlaylistName, cx).trim().to_owned();
+                                if name.is_empty() {
+                                    this.panel_error(
+                                        "Enter a playlist name in Playlists first.",
+                                        cx,
+                                    );
+                                    return;
+                                }
+                                let mut track_ids = Vec::new();
+                                for entry in this.state.queue.iter() {
+                                    if this.selected_queue.contains(&entry.id)
+                                        && !track_ids.contains(&entry.track_id)
+                                    {
+                                        track_ids.push(entry.track_id);
+                                    }
+                                }
+                                if track_ids.is_empty() {
+                                    return;
+                                }
+                                this.panel_menu = None;
+                                this.send(
+                                    Command::CreatePlaylistWithTracks { name, track_ids },
+                                    cx,
+                                );
+                            },
+                        )
+                        .w_full(),
                     );
                     if has_selected_queue {
                         if self.state.playlists.is_empty() {

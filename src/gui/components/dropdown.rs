@@ -71,6 +71,10 @@ impl<T> DropdownState<T> {
             .filter(move |(_, item)| query.is_empty() || item.label.to_lowercase().contains(&query))
     }
 
+    pub(crate) fn filtered_item(&self, index: usize) -> Option<(usize, &DropdownItem<T>)> {
+        self.filtered().nth(index)
+    }
+
     pub(crate) fn move_next(&mut self) {
         let count = self.filtered().count();
         if count > 0 {
