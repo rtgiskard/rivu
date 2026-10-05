@@ -100,7 +100,12 @@ impl<T> DropdownState<T> {
     }
 
     pub(crate) fn select_index(&mut self, index: usize) {
-        self.selected = index;
+        let selected = {
+            self.filtered()
+                .position(|(item_index, _)| item_index == index)
+                .unwrap_or(0)
+        };
+        self.selected = selected;
         self.normalize_selection();
     }
 
@@ -124,5 +129,19 @@ mod tests {
         dropdown.open([DropdownItem::new(1, "Rock"), DropdownItem::new(2, "Jazz")]);
         dropdown.set_query("ja");
         assert_eq!(dropdown.selected(), Some(&2));
+    }
+
+    #[test]
+    fn selecting_original_index_respects_filtering() {
+        let mut dropdown = DropdownState::default();
+        dropdown.open([
+            DropdownItem::new(1, "Rock"),
+            DropdownItem::new(2, "Jazz"),
+            DropdownItem::new(3, "Folk"),
+        ]);
+        dropdown.set_query("ja");
+        dropdown.select_index(1);
+        assert_eq!(dropdown.selected(), Some(&2));
+        assert_eq!(dropdown.selected_index(), Some(1));
     }
 }
