@@ -1,5 +1,6 @@
 impl Core {
     fn run(&mut self, requests: Receiver<Request>) {
+        let config_ticks = crossbeam_channel::tick(Duration::from_millis(100));
         loop {
             select! {
                 recv(requests) -> request => {
@@ -26,8 +27,17 @@ impl Core {
                         self.publish();
                     }
                 }
+                recv(config_ticks) -> _ => {
+                    if self.config_dirty
+                        && self.config_last_saved.elapsed() >= Duration::from_millis(250)
+                        && self.save(false).is_ok()
+                    {
+                        self.publish();
+                    }
             }
+                }
         }
+
         if let Err(error) = self.stop() {
             self.state.last_error = Some(format!("Saving play count: {error:#}"));
         }
@@ -145,12 +155,12 @@ impl Core {
     }
     fn track(&self, id: i64) -> Result<&Track> {
         let index = self
-            .state
             .library
+            .tracks()
             .binary_search_by_key(&id, |track| track.id)
             .ok()
             .context("Track not found")?;
-        Ok(&self.state.library[index])
+        Ok(&self.library.tracks()[index])
     }
     fn enqueue(&mut self, ids: &[i64]) -> Result<()> {
         for id in ids {
@@ -896,7 +906,11 @@ impl Core {
                 album,
             } => {
                 self.store.edit_track(track_id, &title, &artist, &album)?;
-                self.reload_library(true)?;
+                self.library.update(track_id, |track| {
+                    track.title = title;
+                    track.artist = artist;
+                    track.album = album;
+                })?;
             }
             Command::RemoveTracks { track_ids } => {
                 for id in &track_ids {
@@ -920,7 +934,9 @@ impl Core {
                 favorite,
             } => {
                 self.store.set_favorite(&track_ids, favorite)?;
-                self.reload_library(false)?;
+                for track_id in track_ids {
+                    self.library.update(track_id, |track| track.favorite = favorite)?;
+                }
             }
             Command::RemoveMissingTracks => {
                 let track_ids = self
