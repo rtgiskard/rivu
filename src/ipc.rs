@@ -256,20 +256,6 @@ impl WireResponse {
     }
 }
 
-impl From<WireResponse> for Response {
-    fn from(response: WireResponse) -> Self {
-        Self {
-            ok: response.ok,
-            error: response.error,
-            state: match response.state {
-                WireState::Overview(state) => state.into(),
-                WireState::Full(state) => (*state).into(),
-                WireState::Ack { .. } => AppState::default(),
-            },
-        }
-    }
-}
-
 fn unpack_ack(frame: ResponseFrame) -> Result<Ack> {
     let ok = frame.response.ok;
     let error = frame.response.error;
@@ -552,9 +538,14 @@ fn ack_frame(ack: Ack, instance_id: u16) -> ResponseFrame {
         response: WireResponse::from_ack(ack),
     }
 }
-
-fn unpack_response(frame: ResponseFrame) -> Response {
-    frame.response.into()
+fn unpack_response(frame: ResponseFrame) -> Result<Response> {
+    let WireResponse { ok, error, state } = frame.response;
+    let state = match state {
+        WireState::Overview(state) => state.into(),
+        WireState::Full(state) => (*state).into(),
+        WireState::Ack { .. } => bail!("IPC acknowledgement used where state was required"),
+    };
+    Ok(Response { ok, error, state })
 }
 
 fn overview_response(state: AppState, overview: &Mutex<OverviewCache>) -> Response {
@@ -811,7 +802,7 @@ impl WatcherSession {
         };
         let cancelled_flag = self.cancelled.clone();
         let notify = self.cancel_notify.clone();
-        let result = self.runtime.block_on(async { let mut pending = Vec::new(); write_frame(&mut self.stream, &request).await?; tokio::select! { bytes = read_frame(&mut self.stream, MAX_RESPONSE, &mut pending) => { let bytes = bytes?; Ok(Some(unpack_response(decode_frame::<ResponseFrame>(&bytes)?))) }, _ = notify.notified() => Ok(None) } });
+        let result = self.runtime.block_on(async { let mut pending = Vec::new(); write_frame(&mut self.stream, &request).await?; tokio::select! { bytes = read_frame(&mut self.stream, MAX_RESPONSE, &mut pending) => { let bytes = bytes?; Ok(Some(unpack_response(decode_frame::<ResponseFrame>(&bytes)?)?)) }, _ = notify.notified() => Ok(None) } });
         if cancelled_flag.load(Ordering::Acquire) {
             Ok(None)
         } else {
@@ -846,7 +837,7 @@ pub fn request(path: &Path, command: &Command) -> Result<Response> {
             .await
             .context("Reading IPC response timed out")??
         };
-        Ok(unpack_response(decode_frame::<ResponseFrame>(&bytes)?))
+        Ok(unpack_response(decode_frame::<ResponseFrame>(&bytes)?)?)
     })
 }
 pub fn request_ack(path: &Path, command: &Command) -> Result<Ack> {
