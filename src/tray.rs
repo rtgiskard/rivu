@@ -35,6 +35,21 @@ fn sni_status() -> &'static str {
     "Active"
 }
 
+fn icon_pixmap() -> &'static Vec<IconPixmap> {
+    static ICON: std::sync::LazyLock<Vec<IconPixmap>> = std::sync::LazyLock::new(|| {
+        let image = image::load_from_memory(include_bytes!("../assets/rivu.png"))
+            .expect("embedded Rivu tray icon")
+            .to_rgba8();
+        let (width, height) = image.dimensions();
+        let pixels = image
+            .pixels()
+            .flat_map(|pixel| [pixel[3], pixel[0], pixel[1], pixel[2]])
+            .collect();
+        vec![(width as i32, height as i32, pixels)]
+    });
+    &ICON
+}
+
 struct TrayData {
     snapshot: TraySnapshot,
     menu_revision: u32,
@@ -364,12 +379,12 @@ impl StatusNotifierItem {
 
     #[zbus(property(emits_changed_signal = "const"))]
     fn icon_name(&self) -> &'static str {
-        "rivu"
+        ""
     }
 
     #[zbus(property(emits_changed_signal = "const"))]
     fn icon_pixmap(&self) -> Vec<(i32, i32, Vec<u8>)> {
-        Vec::new()
+        icon_pixmap().clone()
     }
 
     #[zbus(property(emits_changed_signal = "const"))]
@@ -419,7 +434,7 @@ impl StatusNotifierItem {
 
     #[zbus(property(emits_changed_signal = "const"))]
     fn item_is_menu(&self) -> bool {
-        false
+        true
     }
 
     #[zbus(property(emits_changed_signal = "const"))]
