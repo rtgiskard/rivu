@@ -29,7 +29,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread::JoinHandle,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 /// Connect to an existing core over IPC. This never creates an audio engine and
@@ -143,91 +143,123 @@ fn spawn_watcher(socket_path: &Path, revision: u64) -> Watcher {
 }
 
 fn run_loop(socket_path: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
-    let mut state = request_state(socket_path)?;
-    let updates = spawn_watcher(socket_path, state.system.revision);
-    let mut ui = UiState::default();
-    ui.sync_queue(&state, &state);
+    let snapshot = request_state(socket_path)?;
+    let updates = spawn_watcher(socket_path, snapshot.system.revision);
+    let mut tui = TuiState::new(snapshot);
+    tui.ui.sync_queue(&tui.snapshot, &tui.snapshot);
     let mut redraw = true;
-    let mut pending_revision: Option<u16> = None;
+    let mut immediate_redraw = true;
+    let mut last_draw = Instant::now() - Duration::from_millis(100);
     loop {
         while updates.receiver.try_recv().is_ok() {}
         if let Some(update) = updates.latest.lock().take() {
             let response = update.map_err(anyhow::Error::msg)?;
             let response_revision = response.state.system.revision as u16;
             if response.ok {
-                if pending_revision == Some(response_revision) {
-                    pending_revision = None;
+                if tui.pending_revision == Some(response_revision) {
+                    tui.pending_revision = None;
                 }
-                if response.state.system.revision != state.system.revision {
-                    let next = TuiSnapshot::from_client(&response.state);
-                    ui.sync_queue(&state, &next);
-                    state = next;
+                if response.state.system.revision != tui.snapshot.system.revision {
+                    tui.apply_snapshot(TuiSnapshot::from_client(&response.state));
                     redraw = true;
                 }
             }
         }
-        if redraw {
-            terminal.draw(|frame| draw(frame, &state, &mut ui))?;
+        if redraw && (immediate_redraw || last_draw.elapsed() >= Duration::from_millis(100)) {
+            terminal.draw(|frame| draw(frame, &tui.snapshot, &mut tui.ui))?;
+            last_draw = Instant::now();
             redraw = false;
+            immediate_redraw = false;
         }
         if event::poll(Duration::from_millis(50))? {
             let event = event::read()?;
             match event {
-                Event::Resize(_, _) => redraw = true,
+                Event::Resize(_, _) => {
+                    redraw = true;
+                    immediate_redraw = true;
+                }
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
-                    let local_revision = ui.local_revision;
-                    let next = match ui.key_action(key, &state) {
+                    let local_revision = tui.ui.local_revision;
+                    let previous_revision = tui.snapshot.system.revision;
+                    let next = match tui.ui.key_action(key, &tui.snapshot) {
                         KeyAction::Quit => break,
                         action @ (KeyAction::Search | KeyAction::Tree) => {
                             let response = ipc::request(socket_path, &Command::Status)?;
                             if response.ok {
                                 let library = Arc::clone(&response.state.library.tracks);
                                 if matches!(action, KeyAction::Tree) {
-                                    ui.tree = Some(LibraryTree::new(library));
-                                    ui.search = None;
+                                    tui.ui.tree = Some(LibraryTree::new(library));
+                                    tui.ui.search = None;
                                 } else {
-                                    ui.search = Some(LibrarySearch::new(library));
-                                    ui.tree = None;
+                                    tui.ui.search = Some(LibrarySearch::new(library));
+                                    tui.ui.tree = None;
                                 }
-                                ui.mark_local_change();
+                                tui.ui.mark_local_change();
                             }
-                            ui.accept_response(response)
+                            tui.ui.accept_response(response)
                         }
                         KeyAction::Command(command) => {
                             let ack = ipc::request_ack(socket_path, &command)?;
                             if ack.ok {
                                 let target = ack.revision as u16;
-                                if target != state.system.revision as u16 {
-                                    pending_revision = Some(target);
+                                if target != tui.snapshot.system.revision as u16 {
+                                    tui.pending_revision = Some(target);
                                 }
-                                ui.accept_response(StateResponse {
+                                tui.ui.accept_response(StateResponse {
                                     ok: true,
                                     error: None,
-                                    state: ClientSnapshot::from_tui(&state),
+                                    state: ClientSnapshot::from_tui(&tui.snapshot),
                                 })
                             } else {
-                                ui.accept_response(StateResponse {
+                                tui.ui.accept_response(StateResponse {
                                     ok: false,
                                     error: ack.error,
-                                    state: ClientSnapshot::from_tui(&state),
+                                    state: ClientSnapshot::from_tui(&tui.snapshot),
                                 })
                             }
                         }
                         KeyAction::Ignored => {
-                            redraw |= ui.local_revision != local_revision;
+                            if tui.ui.local_revision != local_revision {
+                                redraw = true;
+                                immediate_redraw = true;
+                            }
                             continue;
                         }
                     };
-                    redraw |= ui.local_revision != local_revision
-                        || next.system.revision != state.system.revision;
-                    ui.sync_queue(&state, &next);
-                    state = next;
+                    tui.apply_snapshot(next);
+                    redraw |= tui.ui.local_revision != local_revision
+                        || tui.snapshot.system.revision != previous_revision;
+                    immediate_redraw = true;
                 }
                 _ => {}
             }
         }
     }
     Ok(())
+}
+
+struct TuiState {
+    snapshot: TuiSnapshot,
+    ui: UiState,
+    pending_revision: Option<u16>,
+}
+
+impl TuiState {
+    fn new(snapshot: TuiSnapshot) -> Self {
+        Self {
+            snapshot,
+            ui: UiState::default(),
+            pending_revision: None,
+        }
+    }
+
+    fn apply_snapshot(&mut self, mut next: TuiSnapshot) {
+        if self.snapshot.library.revision == next.library.revision {
+            next.library.tracks = Arc::clone(&self.snapshot.library.tracks);
+        }
+        self.ui.sync_queue(&self.snapshot, &next);
+        self.snapshot = next;
+    }
 }
 
 #[derive(Default)]
@@ -971,6 +1003,7 @@ mod tests {
     fn tui_snapshot(library: LibrarySnapshot, queue: QueueState) -> TuiSnapshot {
         TuiSnapshot {
             library: TuiLibrarySnapshot {
+                revision: library.revision,
                 tracks: library.tracks,
             },
             queue,
@@ -1101,5 +1134,18 @@ mod tests {
         state.library.tracks = Arc::new(vec![changed, track(2, "Artist B", "Title B")]);
         cache.sync(&state);
         assert_eq!(cache.rows[1], "Artist A — Title A (remastered)");
+    }
+    #[test]
+    fn tui_state_reuses_tracks_when_library_revision_is_unchanged() {
+        let mut first = tui_snapshot(LibrarySnapshot::default(), QueueState::default());
+        first.library.revision = 9;
+        let old_tracks = Arc::clone(&first.library.tracks);
+        let mut next = first.clone();
+        next.library.tracks = Arc::new(Vec::new());
+
+        let mut tui = TuiState::new(first);
+        tui.apply_snapshot(next);
+
+        assert!(Arc::ptr_eq(&tui.snapshot.library.tracks, &old_tracks));
     }
 }

@@ -158,6 +158,7 @@ pub struct TuiSnapshot {
 
 #[derive(Clone, Debug, Default)]
 pub struct TuiLibrarySnapshot {
+    pub revision: u64,
     pub tracks: Arc<Vec<Track>>,
 }
 
@@ -174,6 +175,7 @@ impl TuiSnapshot {
     pub(crate) fn from_client(state: &ClientSnapshot) -> Self {
         Self {
             library: TuiLibrarySnapshot {
+                revision: state.library.revision,
                 tracks: Arc::clone(&state.library.tracks),
             },
             queue: state.queue.clone(),
