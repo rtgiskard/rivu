@@ -1,7 +1,7 @@
 //! GPU-backed analysis views. The audio worker owns the configurable FFT;
 //! these views retain every musical band supplied by `AnalysisFrame`.
 //!
-//! Immutable GPU images cache at most 180 audio-time buckets. Dense incoming
+//! Immutable GPU images cache at most 512 audio-time buckets. Dense incoming
 //! frames are max-pooled so narrow transients survive; Spectrum separately
 //! retains the latest frame. The selected history duration determines bucket
 //! width, never the publication rate or canvas width. Unavailable history is
@@ -14,7 +14,7 @@
 
 use super::{ERROR, ERROR_BG};
 use gpui::{
-    AnyElement, App, Background, Bounds, PathBuilder, Pixels, Point, RenderImage, SharedString,
+    AnyElement, App, Bounds, Path, PathBuilder, Pixels, Point, RenderImage, SharedString,
     TextAlign, Window, canvas, div, fill, linear_color_stop, linear_gradient, point, prelude::*,
     px, rgb, size,
 };
@@ -25,16 +25,8 @@ use crate::{
     config::{Config, SpectrumStyle, SpectrumWindow, VisualizationPalette},
 };
 
-const HISTORY_COLUMNS: usize = 180;
-const MAX_SPECTRUM_BARS: usize = 512;
-const DEAD_BEE_F_STOPS: &[(f32, [u8; 3])] = &[
-    (0.0, [32, 58, 138]),
-    (0.25, [30, 190, 220]),
-    (0.5, [75, 205, 120]),
-    (0.72, [240, 215, 65]),
-    (0.87, [245, 140, 50]),
-    (1.0, [235, 65, 65]),
-];
+const MAX_HISTORY_COLUMNS: usize = 512;
+const MAX_SPECTRUM_BARS: usize = 2000;
 const TOKYO_NIGHT_STOPS: &[(f32, [u8; 3])] = &[
     (0.0, [65, 72, 110]),
     (0.2, [187, 154, 247]),
@@ -43,11 +35,21 @@ const TOKYO_NIGHT_STOPS: &[(f32, [u8; 3])] = &[
     (0.82, [224, 175, 104]),
     (1.0, [247, 118, 142]),
 ];
+// Preserve DeaDBeeF's six color positions after a small black low-end floor.
+const DEADBEEF_STOPS: &[(f32, [u8; 3])] = &[
+    (0.0, [0, 0, 0]),
+    (0.06, [0, 32, 100]),
+    (0.06 + 0.94 * 0.2, [0, 148, 160]),
+    (0.06 + 0.94 * 0.4, [128, 255, 120]),
+    (0.06 + 0.94 * 0.6, [255, 255, 0]),
+    (0.06 + 0.94 * 0.8, [255, 128, 0]),
+    (1.0, [255, 0, 0]),
+];
 
 fn palette_stops(palette: VisualizationPalette) -> &'static [(f32, [u8; 3])] {
     match palette {
-        VisualizationPalette::A => TOKYO_NIGHT_STOPS,
-        VisualizationPalette::B => DEAD_BEE_F_STOPS,
+        VisualizationPalette::TokyoNight => TOKYO_NIGHT_STOPS,
+        VisualizationPalette::Deadbeef => DEADBEEF_STOPS,
     }
 }
 
@@ -62,6 +64,13 @@ struct Column {
 
 fn history_fraction(time: Duration, latest: Duration, history: Duration) -> f32 {
     (1.0 - latest.saturating_sub(time).as_secs_f32() / history.as_secs_f32()).clamp(0.0, 1.0)
+}
+
+fn history_column_count(history_seconds: u32, analysis_fps: u32) -> usize {
+    usize::try_from(history_seconds)
+        .unwrap_or(MAX_HISTORY_COLUMNS)
+        .saturating_mul(analysis_fps as usize)
+        .clamp(2, MAX_HISTORY_COLUMNS)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -85,23 +94,17 @@ struct VisualData {
     bar_levels: Vec<f32>,
     bar_deadlines: Vec<Duration>,
     smoothed_levels: Vec<f32>,
-    peak_markers: Vec<(Bounds<Pixels>, u32)>,
     spectrum_points: Vec<Point<Pixels>>,
     last_update: Option<Duration>,
     top_db: f32,
     visual_background: u32,
-    visual_palette: VisualizationPalette,
-    spectrum_min_hz: f32,
-    spectrum_max_hz: f32,
     spectrum_db_range: f32,
     spectrum_bars: u32,
     spectrum_bar_width: f32,
     spectrum_interpolate: bool,
-    spectrum_log_scale: bool,
     spectrum_show_labels: bool,
     spectrum_fft_size: u32,
     spectrum_window: SpectrumWindow,
-    spectrum_bands_per_octave: u32,
     spectrum_style: SpectrumStyle,
     spectrum_gap: f32,
     spectrum_peaks: bool,
@@ -111,13 +114,11 @@ struct VisualData {
     spectrum_bar_gravity: f32,
     spectrum_smoothing_ms: u32,
     spectrum_grid: bool,
-    spectrogram_min_hz: f32,
-    spectrogram_max_hz: f32,
     spectrogram_db_range: f32,
-    spectrogram_log_scale: bool,
-    spectrogram_interpolate: bool,
     spectrogram_show_labels: bool,
     spectrogram_history_seconds: u32,
+    analysis_fps: u32,
+    history_columns: usize,
     head: usize,
     len: usize,
     latest: Option<usize>,
@@ -143,30 +144,26 @@ impl Visuals {
                 db_labels: std::array::from_fn(|step| db_label(-70.0 * step as f32 / 3.0)),
                 spectrum_bins: Vec::new(),
                 heat_rows: Vec::new(),
-                columns: (0..HISTORY_COLUMNS).map(|_| Column::default()).collect(),
+                columns: (0..MAX_HISTORY_COLUMNS)
+                    .map(|_| Column::default())
+                    .collect(),
                 latest_levels: Vec::new(),
                 peaks: Vec::new(),
                 peak_deadlines: Vec::new(),
                 bar_levels: Vec::new(),
                 bar_deadlines: Vec::new(),
                 smoothed_levels: Vec::new(),
-                peak_markers: Vec::with_capacity(MAX_SPECTRUM_BARS),
                 spectrum_points: Vec::with_capacity(MAX_SPECTRUM_BARS),
                 last_update: None,
                 top_db: 0.0,
                 visual_background: 0x08090c,
-                visual_palette: VisualizationPalette::B,
-                spectrum_min_hz: 20.0,
-                spectrum_max_hz: 20_000.0,
                 spectrum_db_range: 70.0,
                 spectrum_bars: 0,
                 spectrum_bar_width: 3.0,
                 spectrum_interpolate: true,
-                spectrum_log_scale: true,
                 spectrum_show_labels: true,
                 spectrum_fft_size: 8192,
                 spectrum_window: SpectrumWindow::BlackmanHarris,
-                spectrum_bands_per_octave: 24,
                 spectrum_style: SpectrumStyle::Bars,
                 spectrum_gap: 1.0,
                 spectrum_peaks: true,
@@ -176,28 +173,25 @@ impl Visuals {
                 spectrum_bar_gravity: 50.0,
                 spectrum_smoothing_ms: 80,
                 spectrum_grid: true,
-                spectrogram_min_hz: 20.0,
-                spectrogram_max_hz: 20_000.0,
                 spectrogram_db_range: 70.0,
-                spectrogram_log_scale: true,
                 spectrogram_show_labels: true,
-                spectrogram_interpolate: true,
+                analysis_fps: 20,
+                history_columns: 200,
                 spectrogram_history_seconds: 10,
                 head: 0,
                 len: 0,
                 latest: None,
                 latest_sample_time: None,
-                retired: Vec::with_capacity(HISTORY_COLUMNS),
+                retired: Vec::with_capacity(MAX_HISTORY_COLUMNS),
                 error: None,
             })),
         }
     }
     pub(super) fn configure(&mut self, config: &Config) {
         let mut data = self.data.borrow_mut();
+        let history_columns =
+            history_column_count(config.spectrogram_history_seconds, config.analysis_fps);
         let changed = data.visual_background != config.visual_background.rgb()
-            || data.visual_palette != config.visual_palette
-            || data.spectrum_min_hz != config.spectrum_min_hz
-            || data.spectrum_max_hz != config.spectrum_max_hz
             || data.spectrum_bars != config.spectrum_bars
             || data.spectrum_style != config.spectrum_style
             || data.spectrum_gap != config.spectrum_gap
@@ -209,36 +203,26 @@ impl Visuals {
             || data.spectrum_smoothing_ms != config.spectrum_smoothing_ms
             || data.spectrum_bar_width != config.spectrum_bar_width
             || data.spectrum_interpolate != config.spectrum_interpolate
-            || data.spectrum_log_scale != config.spectrum_log_scale
             || data.spectrum_show_labels != config.spectrum_labels
-            || data.spectrogram_interpolate != config.spectrogram_interpolate
             || data.spectrum_fft_size != config.spectrum_fft_size
             || data.spectrum_window != config.spectrum_window
-            || data.spectrum_bands_per_octave != config.spectrum_bands_per_octave
             || data.spectrum_grid != config.spectrum_grid
-            || data.spectrogram_min_hz != config.spectrogram_min_hz
-            || data.spectrogram_max_hz != config.spectrogram_max_hz
             || data.spectrogram_db_range != config.spectrogram_db_range
-            || data.spectrogram_log_scale != config.spectrogram_log_scale
-            || data.spectrogram_history_seconds != config.spectrogram_history_seconds;
+            || data.spectrogram_show_labels != config.spectrogram_labels
+            || data.spectrogram_history_seconds != config.spectrogram_history_seconds
+            || data.analysis_fps != config.analysis_fps
+            || data.history_columns != history_columns;
         if !changed {
             return;
         }
-        let history_changed =
-            data.spectrogram_history_seconds != config.spectrogram_history_seconds;
+        let history_changed = data.spectrogram_history_seconds
+            != config.spectrogram_history_seconds
+            || data.analysis_fps != config.analysis_fps
+            || data.history_columns != history_columns;
         let analysis_changed = data.spectrum_fft_size != config.spectrum_fft_size
-            || data.spectrum_window != config.spectrum_window
-            || data.spectrum_bands_per_octave != config.spectrum_bands_per_octave;
+            || data.spectrum_window != config.spectrum_window;
         let heat_changed = data.visual_background != config.visual_background.rgb()
-            || data.visual_palette != config.visual_palette
-            || data.spectrogram_min_hz != config.spectrogram_min_hz
-            || data.spectrogram_max_hz != config.spectrogram_max_hz
-            || data.spectrogram_db_range != config.spectrogram_db_range
-            || data.spectrogram_log_scale != config.spectrogram_log_scale;
-        data.visual_background = config.visual_background.rgb();
-        data.visual_palette = config.visual_palette;
-        data.spectrum_min_hz = config.spectrum_min_hz;
-        data.spectrum_max_hz = config.spectrum_max_hz;
+            || data.spectrogram_db_range != config.spectrogram_db_range;
         data.spectrum_db_range = config.spectrum_db_range;
         data.spectrum_bars = config.spectrum_bars;
         data.spectrum_style = config.spectrum_style;
@@ -251,19 +235,15 @@ impl Visuals {
         data.spectrum_smoothing_ms = config.spectrum_smoothing_ms;
         data.spectrum_bar_width = config.spectrum_bar_width;
         data.spectrum_interpolate = config.spectrum_interpolate;
-        data.spectrum_log_scale = config.spectrum_log_scale;
         data.spectrum_show_labels = config.spectrum_labels;
         data.spectrogram_show_labels = config.spectrogram_labels;
         data.spectrum_fft_size = config.spectrum_fft_size;
         data.spectrum_window = config.spectrum_window;
-        data.spectrum_bands_per_octave = config.spectrum_bands_per_octave;
         data.spectrum_grid = config.spectrum_grid;
-        data.spectrogram_min_hz = config.spectrogram_min_hz;
-        data.spectrogram_max_hz = config.spectrogram_max_hz;
         data.spectrogram_db_range = config.spectrogram_db_range;
-        data.spectrogram_log_scale = config.spectrogram_log_scale;
         data.spectrogram_history_seconds = config.spectrogram_history_seconds;
-        data.spectrogram_interpolate = config.spectrogram_interpolate;
+        data.analysis_fps = config.analysis_fps;
+        data.history_columns = history_columns;
         if history_changed || analysis_changed {
             data.clear_history();
         } else if heat_changed {
@@ -391,14 +371,9 @@ impl Visuals {
                     VisualMode::Spectrum if data.spectrum_range().is_none() => {
                         Some("No audible spectrum data".into())
                     }
-                    VisualMode::Spectrogram if data.heat_rows.is_empty() => Some(
-                        format!(
-                            "No spectrogram data in {}–{}",
-                            frequency_label(data.spectrogram_min_hz),
-                            frequency_label(data.spectrogram_max_hz),
-                        )
-                        .into(),
-                    ),
+                    VisualMode::Spectrogram if data.heat_rows.is_empty() => {
+                        Some("No spectrogram data in 16 Hz–Nyquist".into())
+                    }
                     _ => None,
                 }
             }
@@ -497,13 +472,7 @@ impl VisualData {
         if left == right {
             return b;
         }
-        let coordinate = |value: f32| {
-            if self.spectrum_log_scale {
-                value.ln()
-            } else {
-                value
-            }
-        };
+        let coordinate = |value: f32| value.ln();
         let fraction = ((coordinate(hz) - coordinate(self.frequencies[left]))
             / (coordinate(self.frequencies[right]) - coordinate(self.frequencies[left])))
         .clamp(0.0, 1.0);
@@ -514,7 +483,7 @@ impl VisualData {
     fn push_history(&mut self, time: Duration, levels: &[f32]) {
         // One extra slot covers the partial bucket at the left edge.
         let width = Duration::from_secs_f64(
-            self.spectrogram_history_seconds as f64 / (HISTORY_COLUMNS - 1) as f64,
+            self.spectrogram_history_seconds as f64 / (self.history_columns - 1) as f64,
         );
         let bucket =
             Duration::from_nanos(((time.as_nanos() / width.as_nanos()) * width.as_nanos()) as u64);
@@ -537,8 +506,8 @@ impl VisualData {
                 .latest_sample_time
                 .unwrap_or(time)
                 .max(time.saturating_sub(Duration::from_millis(250)));
-            self.head = (index + 1) % HISTORY_COLUMNS;
-            self.len = (self.len + 1).min(HISTORY_COLUMNS);
+            self.head = (index + 1) % self.history_columns;
+            self.len = (self.len + 1).min(self.history_columns);
         }
         self.columns[index].sample_time = Some(time);
         if changed && let Some(image) = self.columns[index].image.take() {
@@ -570,8 +539,8 @@ impl VisualData {
         clipped_range(
             &self.frequencies,
             self.sample_rate,
-            self.spectrogram_min_hz,
-            self.spectrogram_max_hz,
+            16.0,
+            self.sample_rate as f32 * 0.5,
         )
     }
 
@@ -579,8 +548,8 @@ impl VisualData {
         clipped_range(
             &self.frequencies,
             self.sample_rate,
-            self.spectrum_min_hz,
-            self.spectrum_max_hz,
+            16.0,
+            self.sample_rate as f32 * 0.5,
         )
     }
 
@@ -593,19 +562,12 @@ impl VisualData {
     fn refresh_frequency_labels(&mut self) {
         self.heat_rows.clear();
         self.spectrum_bins.clear();
-        if let Some((first, last, low, high)) = self.visible_range() {
-            group_bands(
-                &self.frequencies,
-                low,
-                high,
-                last - first + 1,
-                self.spectrogram_log_scale,
-                &mut self.heat_rows,
-            );
+        if let Some((_, _, low, high)) = self.visible_range() {
+            group_heat_rows(&self.frequencies, low, high, &mut self.heat_rows);
             self.frequency_labels = [frequency_label(low), frequency_label(high)];
         }
         if let Some((_, _, low, high)) = self.spectrum_range() {
-            self.spectrum_labels = [frequency_label(low), frequency_label(high)];
+            self.spectrum_labels = [note_label(low), note_label(high)];
         }
     }
 
@@ -650,6 +612,7 @@ impl VisualData {
         // Empty display slots can interpolate between adjacent musical centers.
         let bars = spectrum_bar_count(
             plot.size.width / px(1.0),
+            self.spectrum_style == SpectrumStyle::Solid,
             self.spectrum_bars,
             self.spectrum_bar_width,
             self.spectrum_gap,
@@ -660,18 +623,19 @@ impl VisualData {
                 low,
                 high,
                 bars,
-                self.spectrum_log_scale,
+                true,
                 &mut self.spectrum_bins,
             );
         }
+        let mut grid_path = PathBuilder::stroke(px(1.0));
+        let mut has_grid = false;
         for step in 0..self.db_labels.len() {
             let fraction = step as f32 / (self.db_labels.len() - 1) as f32;
             let y = plot.top() + plot.size.height * fraction;
             if self.spectrum_grid {
-                window.paint_quad(fill(
-                    Bounds::new(point(plot.left(), y), size(plot.size.width, px(1.0))),
-                    rgb(0x14161b),
-                ));
+                grid_path.move_to(point(plot.left(), y));
+                grid_path.line_to(point(plot.right(), y));
+                has_grid = true;
             }
             if self.spectrum_show_labels {
                 paint_aligned_label(
@@ -683,18 +647,28 @@ impl VisualData {
                 );
             }
         }
+        if has_grid {
+            let path = grid_path
+                .build()
+                .map_err(|error| format!("Cannot tessellate spectrum grid: {error}"))?;
+            window.paint_path(path, rgb(0x14161b));
+        }
 
         window.with_content_mask(
             Some(gpui::ContentMask { bounds: plot }),
             |window| -> Result<(), String> {
                 // Paint markers after the continuous fill so it cannot cover them.
-                self.peak_markers.clear();
                 self.spectrum_points.clear();
                 let style = self.spectrum_style;
                 let bottom = plot.bottom();
                 let top = plot.top();
                 let continuous = matches!(style, SpectrumStyle::Line | SpectrumStyle::Solid);
+                let mut shape_path = PathBuilder::fill();
+                let mut led_path = PathBuilder::fill();
+                let mut peak_path = PathBuilder::fill();
                 let mut any_visible = false;
+                let mut any_led = false;
+                let mut any_peak = false;
                 for bar in 0..bars {
                     let left_t = bar as f32 / bars as f32;
                     let right_t = (bar + 1) as f32 / bars as f32;
@@ -703,19 +677,18 @@ impl VisualData {
                     let mut peak = f32::NEG_INFINITY;
                     for index in range.clone() {
                         level = level.max(self.display_level(index));
-                        peak = peak.max(finite_level(self.peaks[index]));
+                        if self.spectrum_peaks {
+                            peak = peak.max(finite_level(self.peaks[index]));
+                        }
                     }
-                    let center_hz = axis_frequency(
-                        low,
-                        high,
-                        (left_t + right_t) * 0.5,
-                        self.spectrum_log_scale,
-                    );
+                    let center_hz = axis_frequency(low, high, (left_t + right_t) * 0.5, true);
                     if self.spectrum_interpolate {
                         // Interpolation fills undersampled slots, but never averages
                         // away a transient already max-pooled into this slot.
                         level = level.max(self.interpolate_level(center_hz, low, high, false));
-                        peak = peak.max(self.interpolate_level(center_hz, low, high, true));
+                        if self.spectrum_peaks {
+                            peak = peak.max(self.interpolate_level(center_hz, low, high, true));
+                        }
                     }
                     let slot_width = plot.size.width * (right_t - left_t);
                     let level_fraction = db_height(level, self.top_db, self.spectrum_db_range);
@@ -740,59 +713,39 @@ impl VisualData {
                         match style {
                             SpectrumStyle::Bars => {
                                 let height = bar_height.max(px(1.0)).min(plot.size.height);
-                                window.paint_quad(fill(
+                                append_rect(
+                                    &mut shape_path,
                                     Bounds::new(point(x, bottom - height), size(width, height)),
-                                    spectrum_height_gradient(
-                                        self.visual_palette,
-                                        0.0,
-                                        level_fraction,
-                                    ),
-                                ));
+                                );
                             }
                             SpectrumStyle::Outline => {
                                 let height = bar_height.max(px(1.0)).min(plot.size.height);
                                 let edge = px(1.0).min(width * 0.5).min(height * 0.5);
-                                window.paint_quad(fill(
+                                append_rect(
+                                    &mut shape_path,
                                     Bounds::new(point(x, bottom - height), size(width, edge)),
-                                    spectrum_height_gradient(
-                                        self.visual_palette,
-                                        0.0,
-                                        level_fraction,
-                                    ),
-                                ));
+                                );
                                 if height > edge {
-                                    window.paint_quad(fill(
+                                    append_rect(
+                                        &mut shape_path,
                                         Bounds::new(point(x, bottom - edge), size(width, edge)),
-                                        spectrum_height_gradient(
-                                            self.visual_palette,
-                                            0.0,
-                                            edge / plot.size.height,
-                                        ),
-                                    ));
+                                    );
                                 }
                                 if height > edge * 2.0 {
-                                    window.paint_quad(fill(
+                                    append_rect(
+                                        &mut shape_path,
                                         Bounds::new(
                                             point(x, bottom - height + edge),
                                             size(edge, height - edge * 2.0),
                                         ),
-                                        spectrum_height_gradient(
-                                            self.visual_palette,
-                                            0.0,
-                                            level_fraction,
-                                        ),
-                                    ));
-                                    window.paint_quad(fill(
+                                    );
+                                    append_rect(
+                                        &mut shape_path,
                                         Bounds::new(
                                             point(x + width - edge, bottom - height + edge),
                                             size(edge, height - edge * 2.0),
                                         ),
-                                        spectrum_height_gradient(
-                                            self.visual_palette,
-                                            0.0,
-                                            level_fraction,
-                                        ),
-                                    ));
+                                    );
                                 }
                             }
                             SpectrumStyle::Led => {
@@ -802,17 +755,14 @@ impl VisualData {
                                 while segment_bottom > bottom - bar_height {
                                     let segment_top =
                                         (segment_bottom - segment_height).max(bottom - bar_height);
-                                    window.paint_quad(fill(
+                                    append_rect(
+                                        &mut led_path,
                                         Bounds::new(
                                             point(x, segment_top),
                                             size(width, segment_bottom - segment_top),
                                         ),
-                                        rgb(spectrum_height_color(
-                                            self.visual_palette,
-                                            ((segment_top + segment_bottom) * 0.5 - top)
-                                                / plot.size.height,
-                                        )),
-                                    ));
+                                    );
+                                    any_led = true;
                                     segment_bottom = segment_top - segment_gap;
                                 }
                             }
@@ -836,24 +786,39 @@ impl VisualData {
                             };
                         let peak_x = (x + (width - peak_width) * 0.5)
                             .clamp(plot.left(), (plot.right() - peak_width).max(plot.left()));
-                        self.peak_markers.push((
+                        append_rect(
+                            &mut peak_path,
                             Bounds::new(point(peak_x, peak_y), size(peak_width, px(1.0))),
-                            spectrum_height_color(self.visual_palette, peak_fraction),
-                        ));
+                        );
+                        any_peak = true;
                     }
+                }
+                if matches!(style, SpectrumStyle::Bars | SpectrumStyle::Outline) {
+                    let path = shape_path
+                        .build()
+                        .map_err(|error| format!("Cannot tessellate spectrum bars: {error}"))?;
+                    paint_spectrum_path(path, plot, window);
+                }
+                if style == SpectrumStyle::Led && any_led {
+                    let path = led_path
+                        .build()
+                        .map_err(|error| format!("Cannot tessellate spectrum LED bars: {error}"))?;
+                    paint_spectrum_path(path, plot, window);
                 }
                 if continuous && any_visible {
                     paint_spectrum_shape(
                         &self.spectrum_points,
                         plot,
                         style,
-                        self.visual_palette,
                         self.spectrum_interpolate || style == SpectrumStyle::Solid,
                         window,
                     )?;
                 }
-                for &(bounds, color) in &self.peak_markers {
-                    window.paint_quad(fill(bounds, rgb(color)));
+                if any_peak {
+                    let path = peak_path
+                        .build()
+                        .map_err(|error| format!("Cannot tessellate spectrum peaks: {error}"))?;
+                    paint_spectrum_path(path, plot, window);
                 }
                 Ok(())
             },
@@ -905,7 +870,7 @@ impl VisualData {
         let start_time = latest_time.saturating_sub(history);
         let height = u32::try_from(self.heat_rows.len())
             .map_err(|_| "Spectrogram image height exceeds GPU image dimensions".to_string())?;
-        for index in 0..HISTORY_COLUMNS {
+        for index in 0..self.history_columns {
             let Some(sample_time) = self.columns[index].sample_time else {
                 continue;
             };
@@ -924,13 +889,9 @@ impl VisualData {
                         / self.spectrogram_db_range)
                         .clamp(0.0, 1.0);
                     let [red, green, blue] = if intensity > 0.0 {
-                        gradient(intensity, palette_stops(self.visual_palette))
+                        gradient(intensity, DEADBEEF_STOPS)
                     } else {
-                        [
-                            (self.visual_background >> 16) as u8,
-                            (self.visual_background >> 8) as u8,
-                            self.visual_background as u8,
-                        ]
+                        [0, 0, 0]
                     };
                     pixels.put_pixel(0, row, image::Rgba([blue, green, red, 255]));
                 }
@@ -941,10 +902,7 @@ impl VisualData {
             let left = history_fraction(self.columns[index].interval_start, latest_time, history);
             let width = (plot.size.width * (right - left)).max(px(1.0));
             let column_bounds = Bounds::new(
-                point(
-                    (plot.left() + plot.size.width * right - width).max(plot.left()),
-                    plot.top(),
-                ),
+                point(plot.left() + plot.size.width * left, plot.top()),
                 size(width, plot.size.height),
             );
             if let Some(image) = &self.columns[index].image {
@@ -955,7 +913,7 @@ impl VisualData {
                         px(0.0).into(),
                         Arc::clone(image),
                         0,
-                        !self.spectrogram_interpolate,
+                        false,
                     )
                     .map_err(|error| format!("Cannot upload/paint spectrogram image: {error}"))?;
             }
@@ -1029,9 +987,11 @@ fn smooth_release(previous: f32, value: f32, decay: f32) -> f32 {
     value.max(floor) + (previous.max(floor) - value.max(floor)) * decay
 }
 
-fn spectrum_bar_count(width: f32, requested: u32, bar_width: f32, gap: f32) -> usize {
+fn spectrum_bar_count(width: f32, solid: bool, requested: u32, bar_width: f32, gap: f32) -> usize {
     let drawable = (width.floor() as usize).max(1);
-    let count = if requested == 0 {
+    let count = if solid {
+        drawable
+    } else if requested == 0 {
         (width / (bar_width + gap).max(1.0)).floor() as usize
     } else {
         requested as usize
@@ -1072,13 +1032,12 @@ fn axis_label_margin(show_labels: bool, labels: &[SharedString]) -> f32 {
     (max_chars * 7.0 + 8.0).max(32.0)
 }
 
-/// GPUI supports two gradient stops per path. Build one bounded path per
-/// palette interval, not one allocation per band or a copied full mesh.
+/// GPUI supports two gradient stops per path. Use the path's actual vertical
+/// plot span to map those endpoints to the shared global height coordinates.
 fn paint_spectrum_shape(
     points: &[Point<Pixels>],
     plot: Bounds<Pixels>,
     style: SpectrumStyle,
-    palette: VisualizationPalette,
     interpolate: bool,
     window: &mut Window,
 ) -> Result<(), String> {
@@ -1129,13 +1088,60 @@ fn paint_spectrum_shape(
     let path = builder
         .build()
         .map_err(|error| format!("Cannot tessellate spectrum shape: {error}"))?;
-    let bottom_fraction =
-        ((plot.bottom() - path.bounds.bottom()) / plot.size.height).clamp(0.0, 1.0);
-    let top_fraction = ((plot.bottom() - path.bounds.top()) / plot.size.height).clamp(0.0, 1.0);
-    let color = spectrum_height_gradient(palette, bottom_fraction, top_fraction);
-    window.paint_path(path, color);
+    paint_spectrum_path(path, plot, window);
     Ok(())
 }
+
+fn append_rect(path: &mut PathBuilder, bounds: Bounds<Pixels>) {
+    path.move_to(bounds.origin);
+    path.line_to(point(bounds.right(), bounds.top()));
+    path.line_to(point(bounds.right(), bounds.bottom()));
+    path.line_to(point(bounds.left(), bounds.bottom()));
+    path.close();
+}
+
+fn paint_spectrum_path(mut path: Path<Pixels>, plot: Bounds<Pixels>, window: &mut Window) {
+    // GPUI resolves gradient coordinates from Path::bounds; keep every segment global.
+    path.bounds = plot;
+    let mut path = Some(path);
+    for (index, pair) in DEADBEEF_STOPS.windows(2).enumerate() {
+        let low = pair[0].0;
+        let high = pair[1].0;
+        let top = plot.bottom() - plot.size.height * high;
+        let bottom = plot.bottom() - plot.size.height * low;
+        let mask = Bounds::new(
+            point(plot.left(), top),
+            size(plot.size.width, (bottom - top).max(px(1.0))),
+        );
+        let background = linear_gradient(
+            0.0,
+            linear_color_stop(rgb(stop_color(pair[0].1)), 0.0),
+            linear_color_stop(rgb(stop_color(pair[1].1)), 1.0),
+        );
+        let segment = if index + 2 == DEADBEEF_STOPS.len() {
+            path.take()
+                .expect("last Spectrum gradient segment owns the path")
+        } else {
+            path.as_ref()
+                .expect("Spectrum gradient path is retained")
+                .clone()
+        };
+        window.with_content_mask(Some(gpui::ContentMask { bounds: mask }), |window| {
+            window.paint_path(segment, background);
+        });
+    }
+}
+
+fn stop_color([red, green, blue]: [u8; 3]) -> u32 {
+    (u32::from(red) << 16) | (u32::from(green) << 8) | u32::from(blue)
+}
+fn group_heat_rows(frequencies: &[f32], low: f32, high: f32, rows: &mut Vec<Range<usize>>) {
+    rows.clear();
+    let first = frequencies.partition_point(|hz| *hz < low);
+    let end = frequencies.partition_point(|hz| *hz <= high);
+    rows.extend((first..end).map(|index| index..index + 1));
+}
+
 fn group_bands(
     frequencies: &[f32],
     low: f32,
@@ -1219,18 +1225,6 @@ fn frequency_label(frequency: f32) -> SharedString {
     }
 }
 
-fn spectrum_height_gradient(palette: VisualizationPalette, bottom: f32, top: f32) -> Background {
-    linear_gradient(
-        0.0,
-        linear_color_stop(rgb(palette_color_with(palette, bottom)), 0.0),
-        linear_color_stop(rgb(palette_color_with(palette, top)), 1.0),
-    )
-}
-
-fn spectrum_height_color(palette: VisualizationPalette, height: f32) -> u32 {
-    palette_color_with(palette, height.clamp(0.0, 1.0))
-}
-
 fn gradient(value: f32, stops: &[(f32, [u8; 3])]) -> [u8; 3] {
     let value = value.clamp(0.0, 1.0);
     for pair in stops.windows(2) {
@@ -1245,29 +1239,33 @@ fn gradient(value: f32, stops: &[(f32, [u8; 3])]) -> [u8; 3] {
     }
     stops[stops.len() - 1].1
 }
-#[cfg(test)]
+fn note_label(frequency: f32) -> SharedString {
+    const NAMES: [&str; 12] = [
+        "C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B",
+    ];
+    let midi = (12.0 * (frequency / 440.0).log2() + 69.0).round() as i32;
+    let octave = midi.div_euclid(12) - 1;
+    format!("{}{octave}", NAMES[midi.rem_euclid(12) as usize]).into()
+}
+
 pub(super) fn palette_color(fraction: f32) -> u32 {
-    palette_color_with(VisualizationPalette::B, fraction)
+    palette_color_with(VisualizationPalette::Deadbeef, fraction)
 }
 
 pub(super) fn palette_function(palette: VisualizationPalette) -> fn(f32) -> u32 {
     match palette {
-        VisualizationPalette::A => palette_a_color,
-        VisualizationPalette::B => palette_b_color,
+        VisualizationPalette::TokyoNight => palette_tokyo_night_color,
+        VisualizationPalette::Deadbeef => palette_color,
     }
+}
+
+fn palette_tokyo_night_color(fraction: f32) -> u32 {
+    palette_color_with(VisualizationPalette::TokyoNight, fraction)
 }
 
 fn palette_color_with(palette: VisualizationPalette, fraction: f32) -> u32 {
     let color = gradient(fraction, palette_stops(palette));
     (u32::from(color[0]) << 16) | (u32::from(color[1]) << 8) | u32::from(color[2])
-}
-
-fn palette_a_color(fraction: f32) -> u32 {
-    palette_color_with(VisualizationPalette::A, fraction)
-}
-
-fn palette_b_color(fraction: f32) -> u32 {
-    palette_color_with(VisualizationPalette::B, fraction)
 }
 
 fn paint_label(
@@ -1311,11 +1309,13 @@ fn paint_aligned_label(
 mod tests {
     use super::*;
     #[test]
-    fn palettes_have_distinct_named_endpoints() {
-        assert_eq!(palette_color_with(VisualizationPalette::B, 0.0), 0x203a8a);
-        assert_eq!(palette_color_with(VisualizationPalette::A, 0.0), 0x41486e);
-        assert_eq!(palette_color_with(VisualizationPalette::A, 1.0), 0xf7768e);
+    fn deadbeef_palettes_have_expected_endpoints() {
+        assert_eq!(palette_color(0.0), 0x000000);
+        assert_eq!(palette_color(1.0), 0xff0000);
+        assert_eq!(gradient(0.0, DEADBEEF_STOPS), [0, 0, 0]);
+        assert_eq!(gradient(1.0, DEADBEEF_STOPS), [255, 0, 0]);
     }
+
     fn frame(time: f64, level: f32) -> AnalysisFrame {
         AnalysisFrame {
             sample_rate: 48_000,
@@ -1338,7 +1338,7 @@ mod tests {
                 visuals.update(&frame(step as f64 / fps as f64, -30.0));
             }
             let data = visuals.data.borrow();
-            assert_eq!(data.len, HISTORY_COLUMNS);
+            assert_eq!(data.len, MAX_HISTORY_COLUMNS);
             let oldest = data
                 .columns
                 .iter()
@@ -1367,8 +1367,12 @@ mod tests {
         assert_eq!(visuals.data.borrow().top_db, 12.0);
         visuals.update(&frame(1.2, -50.0));
         let data = visuals.data.borrow();
-        assert_eq!(data.len, 1);
-        assert_eq!(data.columns[data.latest.unwrap()].levels, vec![12.0; 4]);
+        assert_eq!(data.len, 2);
+        assert!(
+            data.columns
+                .iter()
+                .any(|column| column.levels == vec![12.0; 4])
+        );
         assert_eq!(data.latest_levels, vec![-50.0; 4]);
         assert_eq!(data.top_db, 0.0);
         assert!(
@@ -1399,7 +1403,7 @@ mod tests {
     }
 
     #[test]
-    fn paused_range_changes_keep_independent_scales_and_history() {
+    fn range_changes_keep_shared_frequency_axis_and_history() {
         let mut visuals = Visuals::new();
         let mut config = Config::default();
         visuals.update(&frame(1.0, -30.0));
@@ -1407,13 +1411,12 @@ mod tests {
             image::RgbaImage::new(1, 1),
         )]));
         visuals.data.borrow_mut().columns[0].image = Some(Arc::clone(&image));
-        config.spectrum_min_hz = 200.0;
         config.spectrum_db_range = 40.0;
         visuals.configure(&config);
         {
             let data = visuals.data.borrow();
             assert_eq!(data.visible_range().unwrap().2, 20.0);
-            assert_eq!(data.spectrum_range().unwrap().2, 200.0);
+            assert_eq!(data.spectrum_range().unwrap().2, 20.0);
             assert_eq!(data.spectrogram_db_range, 70.0);
             assert!(Arc::ptr_eq(data.columns[0].image.as_ref().unwrap(), &image));
         }
@@ -1454,6 +1457,15 @@ mod tests {
                 [1, 2, 3, 4]
             );
         }
+    }
+
+    #[test]
+    fn heat_rows_never_create_empty_frequency_lines() {
+        let frequencies = [20.0, 25.0, 31.5, 40.0, 50.0, 63.0, 80.0, 100.0];
+        let mut rows = Vec::new();
+        group_heat_rows(&frequencies, 25.0, 80.0, &mut rows);
+        assert_eq!(rows, vec![1..2, 2..3, 3..4, 4..5, 5..6, 6..7]);
+        assert!(rows.iter().all(|row| row.start + 1 == row.end));
     }
 
     #[test]
@@ -1526,11 +1538,12 @@ mod tests {
 
     #[test]
     fn dense_counts_are_bounded_by_pixels_not_old_marker_capacity() {
-        assert_eq!(spectrum_bar_count(1200.0, 0, 3.0, 1.0), 300);
-        assert_eq!(spectrum_bar_count(4096.0, 0, 3.0, 1.0), 512);
-        assert_eq!(spectrum_bar_count(1200.0, 512, 20.0, 8.0), 512);
-        assert_eq!(spectrum_bar_count(7.0, 512, 3.0, 1.0), 7);
-        assert_eq!(spectrum_bar_count(0.0, 0, 3.0, 1.0), 1);
+        assert_eq!(spectrum_bar_count(1200.0, false, 0, 3.0, 1.0), 300);
+        assert_eq!(spectrum_bar_count(4096.0, false, 0, 3.0, 1.0), 1024);
+        assert_eq!(spectrum_bar_count(1200.0, false, 512, 20.0, 8.0), 512);
+        assert_eq!(spectrum_bar_count(7.0, false, 512, 3.0, 1.0), 7);
+        assert_eq!(spectrum_bar_count(0.0, false, 0, 3.0, 1.0), 1);
+        assert_eq!(spectrum_bar_count(1200.0, true, 1, 3.0, 1.0), 1200);
     }
 
     #[test]
