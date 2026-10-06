@@ -25,3 +25,11 @@
 - Use a concise Conventional Commit subject, one concrete change per body line
 - Use real newlines, no terminal punctuation, and no blank lines between items
 - Prefix every commit body item, match repository history
+ 
+## Storage
+
+- Build outputs and other large temporary artifacts MUST be created under the repository `.cache/` directory
+- Agents MUST treat `/tmp` and other memory-backed filesystems as memory resources, avoid placing large artifacts there,
+  and check RAM/swap pressure before starting memory-intensive operations
+- Agents MUST check available storage before creating large artifacts and keep cache growth bounded
+- Agents MUST clean stale cache entries when configured storage or operation thresholds are reached, while preserving active builds and artifacts still in use
