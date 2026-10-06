@@ -76,7 +76,7 @@ and path rules.
 
 [source,sh]
 ----
-# Open the desktop UI and scan configured roots
+# Open the desktop UI without scanning; use the Library scan controls when ready
 rivu gui
 
 # Alternatively, start a foreground, headless core
@@ -92,9 +92,10 @@ rivu
 rivu quit
 ----
 
-On a new core, omitted paths cause configured library roots to be scanned;
-explicit paths select what to scan but do not add library roots. On an existing
-graphical instance, `gui PATH...` requests a scan after raising the window.
+On startup, the desktop UI does not scan configured roots. Trigger a scan from
+the Library controls, or pass explicit paths to `gui PATH...`; explicit paths
+select what to scan but do not add library roots. On an existing graphical
+instance, `gui PATH...` requests a scan after raising the window.
 All clients must use the same `--data-dir` to reach the same instance. `--config`
 selects configuration when starting a core; it does not reconfigure an existing
 instance.

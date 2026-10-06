@@ -220,7 +220,7 @@ pub(crate) fn tree_row(
         .h(gpui::rems(1.75))
         .px_2()
         .pr_2()
-        .pl(gpui::px(depth as f32 * 16.))
+        .pl(gpui::px(8. + depth as f32 * 16.))
         .min_w_0()
         .flex()
         .items_center()

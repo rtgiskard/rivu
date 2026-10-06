@@ -568,17 +568,6 @@ fn start(
             }
             drop(service);
         })?;
-    let paths = if paths.is_empty() {
-        runtime
-            .handle
-            .gui_snapshot()
-            .system
-            .config
-            .library_roots
-            .clone()
-    } else {
-        paths
-    };
     if !paths.is_empty() {
         runtime.handle.send(Command::Scan {
             paths: paths.into_iter().map(client_path).collect::<Result<_>>()?,

@@ -156,11 +156,22 @@ fn visual_switch(
             cx.notify();
         },
     )
-    .size(rems(4.))
-    .text_size(rems(1.75))
+    .size(rems(2.))
+    .text_size(rems(1.))
     .when(enabled, |view| {
         view.bg(rgb(HIGHLIGHT)).text_color(rgb(ACCENT))
     })
+}
+
+fn settings_group(title: &'static str, content: impl IntoElement) -> Div {
+    column()
+        .gap_2()
+        .p_2()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(BORDER))
+        .child(caption(title))
+        .child(content)
 }
 
 fn spectrum_style_label(style: SpectrumStyle) -> &'static str {
@@ -722,19 +733,11 @@ impl GuiApp {
             .gap_1()
             .child(caption("Output device"))
             .child(
-                dropdown_trigger("output-device-selector", chosen_device.clone())
-                    .relative()
-                    .tooltip({
-                        let chosen_device = chosen_device.clone();
-                        move |_, cx| {
-                            cx.new(|_| ButtonTooltip {
-                                text: chosen_device.clone(),
-                            })
-                            .into()
-                        }
-                    })
-                    .child(self.measurement(Measured::Device))
-                    .on_click(cx.listener(|this, _, window, cx| {
+                dropdown_button(
+                    "output-device-selector",
+                    chosen_device.clone(),
+                    cx,
+                    |this, window, cx| {
                         let open = this.settings.dropdown.is_open();
                         if open {
                             this.settings.dropdown.close();
@@ -776,7 +779,19 @@ impl GuiApp {
                         }
                         this.settings_focus.focus(window, cx);
                         cx.notify();
-                    })),
+                    },
+                )
+                .relative()
+                .tooltip({
+                    let chosen_device = chosen_device.clone();
+                    move |_, cx| {
+                        cx.new(|_| ButtonTooltip {
+                            text: chosen_device.clone(),
+                        })
+                        .into()
+                    }
+                })
+                .child(self.measurement(Measured::Device)),
             );
         let draft = &self.settings.draft;
         let (shuffle, repeat, mpris, tray, ffmpeg, remix) = (
@@ -972,7 +987,8 @@ impl GuiApp {
         )
         .relative()
         .child(self.measurement(Measured::SettingsLogLevel));
-        let logging = column().gap_2().child(caption("Logging")).child(
+        let logging = settings_group(
+            "Logging",
             row()
                 .items_start()
                 .flex_wrap()
@@ -1000,22 +1016,40 @@ impl GuiApp {
                     |draft| draft.log_to_file = !draft.log_to_file,
                 )),
         );
+        let library = settings_group(
+            "Library",
+            column()
+                .gap_2()
+                .child(self.settings.field(Field::Roots))
+                .child(self.settings.field(Field::ScanMaxDepth))
+                .child(device),
+        );
+        let playback = settings_group(
+            "Playback",
+            column()
+                .gap_2()
+                .child(self.settings.pair(Field::Volume, Field::PlayCountThreshold))
+                .child(self.settings.pair(Field::QueueLimit, Field::PageSize)),
+        );
+        let interface = settings_group(
+            "Interface",
+            column()
+                .gap_2()
+                .child(caption("Font family"))
+                .child(
+                    font_dropdown
+                        .relative()
+                        .child(self.measurement(Measured::SettingsFont)),
+                )
+                .child(self.settings.field(Field::Scale))
+                .child(switches),
+        );
 
         column()
             .gap_3()
-            .child(self.settings.field(Field::Roots))
-            .child(self.settings.field(Field::ScanMaxDepth))
-            .child(device)
-            .child(self.settings.pair(Field::Volume, Field::PlayCountThreshold))
-            .child(self.settings.pair(Field::QueueLimit, Field::PageSize))
-            .child(caption("Interface font"))
-            .child(
-                font_dropdown
-                    .relative()
-                    .child(self.measurement(Measured::SettingsFont)),
-            )
-            .child(self.settings.field(Field::Scale))
-            .child(switches)
+            .child(library)
+            .child(playback)
+            .child(interface)
             .child(logging)
     }
 
@@ -1143,34 +1177,40 @@ impl GuiApp {
                 column()
                     .gap_3()
                     .child(caption("Style"))
-                    .child(dropdown_button(
-                        "radial-spectrum-style",
-                        radial_spectrum_style_label(draft.radial_spectrum_style),
-                        cx,
-                        |this, _, _| {
-                            let values = [
-                                RadialSpectrumStyle::Bars,
-                                RadialSpectrumStyle::Rings,
-                                RadialSpectrumStyle::BarsRings,
-                            ];
-                            let selected = values
-                                .iter()
-                                .position(|value| *value == this.settings.draft.radial_spectrum_style)
-                                .unwrap_or(0);
-                            this.open_setting_dropdown(
-                                values
-                                    .into_iter()
-                                    .map(|value| {
-                                        DropdownItem::new(
-                                            SettingChoice::RadialSpectrumStyle(value),
-                                            radial_spectrum_style_label(value),
-                                        )
+                    .child(
+                        dropdown_button(
+                            "radial-spectrum-style",
+                            radial_spectrum_style_label(draft.radial_spectrum_style),
+                            cx,
+                            |this, _, _| {
+                                let values = [
+                                    RadialSpectrumStyle::Bars,
+                                    RadialSpectrumStyle::Rings,
+                                    RadialSpectrumStyle::BarsRings,
+                                ];
+                                let selected = values
+                                    .iter()
+                                    .position(|value| {
+                                        *value == this.settings.draft.radial_spectrum_style
                                     })
-                                    .collect(),
-                                selected,
-                            );
-                        },
-                    ))
+                                    .unwrap_or(0);
+                                this.open_setting_dropdown(
+                                    values
+                                        .into_iter()
+                                        .map(|value| {
+                                            DropdownItem::new(
+                                                SettingChoice::RadialSpectrumStyle(value),
+                                                radial_spectrum_style_label(value),
+                                            )
+                                        })
+                                        .collect(),
+                                    selected,
+                                );
+                            },
+                        )
+                        .relative()
+                        .child(self.measurement(Measured::SettingsStyle)),
+                    )
                     .child(settings.pair(Field::RadialSpectrumSensitivity, Field::RadialSpectrumRotationSpeed))
                     .child(settings.pair(Field::RadialSpectrumBarWidth, Field::RadialSpectrumBarGlowLayers))
                     .child(settings.pair(Field::RadialSpectrumRingOpacity, Field::RadialSpectrumBloomIntensity))
@@ -1295,13 +1335,22 @@ impl GuiApp {
         };
         panel = panel.child(
             row()
+                .gap_3()
                 .flex_shrink_0()
                 .px(gpui::px(UI_INSET))
                 .py(gpui::px(UI_INSET))
                 .min_h(rems(3.))
                 .border_t_1()
                 .border_color(rgb(BORDER))
-                .child(div().flex_1().min_w_0().text_sm().child(feedback))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .max_w(gpui::relative(0.7))
+                        .overflow_hidden()
+                        .text_sm()
+                        .child(feedback),
+                )
                 .child(
                     icon_button(
                         "settings-apply",

@@ -610,13 +610,6 @@ impl GuiApp {
         if self.library_tree_active {
             panel
                 .child(self.library_directory_list(panel_id, cx))
-                .child(icon_button(
-                    ("library-add-root-bottom", panel_id),
-                    "󰐕",
-                    "Add library folder",
-                    cx,
-                    |this, _, cx| this.choose_library_root(cx),
-                ))
                 .into_any_element()
         } else {
             let rows = self.library_buffer.rows.len();
@@ -674,13 +667,6 @@ impl GuiApp {
                     .min_h_0()
                     .w_full()
                     .track_scroll(&self.library_buffer.scroll),
-                ))
-                .child(icon_button(
-                    ("library-add-root-bottom", panel_id),
-                    "󰐕",
-                    "Add library folder",
-                    cx,
-                    |this, _, cx| this.choose_library_root(cx),
                 ))
                 .into_any_element()
         }

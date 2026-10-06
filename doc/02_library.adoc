@@ -29,9 +29,11 @@ rescan before cleaning missing records.
 Scan handling: link:../src/core/catalog.rs[core scan],
 link:../src/library.rs[scanner], and link:../src/store.rs[reconciliation].
 
-Scanning runs asynchronously without stopping playback. Progress covers discovery,
-metadata reading, saving, and completion or failure. `--wait` waits for completion;
-`--force` rereads unchanged audio metadata. Matching IDs and user data are preserved;
+Scanning runs asynchronously without stopping playback. The desktop UI does not
+scan configured roots during startup; trigger scans from the Library controls or
+use `rivu library scan PATH...`. Progress covers discovery, metadata reading,
+saving, and completion or failure. `--wait` waits for completion; `--force`
+rereads unchanged audio metadata. Matching IDs and user data are preserved;
 CUE sheets are always reread. Identity handling is in link:../src/store.rs[the store].
 
 [source,sh]
