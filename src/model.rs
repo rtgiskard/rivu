@@ -19,7 +19,7 @@ impl CueSegment {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Track {
     pub id: i64,
     pub path: PathBuf,
@@ -44,21 +44,90 @@ pub struct Track {
     pub play_count: u64,
     pub last_played: Option<i64>,
 }
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PlaylistEntry {
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LibraryRow {
     pub id: i64,
-    pub track_id: i64,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub duration: Option<f64>,
+    pub favorite: bool,
+    pub missing: bool,
+    pub play_count: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LibraryPage {
+    pub total: usize,
+    pub rows: Vec<LibraryRow>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Playlist {
+pub struct TrackPage {
+    pub total: usize,
+    pub rows: Vec<Track>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LibrarySort {
+    #[default]
+    Id,
+    Album,
+    MostPlayed,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum DirectoryRow {
+    Directory { path: PathBuf },
+    Track(LibraryRow),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DirectoryPage {
+    pub total: usize,
+    pub rows: Vec<DirectoryRow>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaylistSummary {
     pub id: i64,
     pub name: String,
-    pub entries: Vec<PlaylistEntry>,
+    pub entry_count: usize,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaylistSummaryPage {
+    pub total: usize,
+    pub rows: Vec<PlaylistSummary>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaylistEntryRow {
+    pub id: i64,
+    pub track_id: i64,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub missing: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaylistEntryPage {
+    pub total: usize,
+    pub rows: Vec<PlaylistEntryRow>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibraryStats {
+    pub total: usize,
+    pub play_count: u64,
+}
+
+/// Maximum number of rows retained by any in-memory view page.
+pub const PAGE_SIZE: usize = 256;
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct QueueEntry {
     pub id: u64,
     pub track_id: i64,
@@ -99,20 +168,28 @@ pub struct DatabaseOptimization {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LibrarySnapshot {
-    pub tracks: Arc<Vec<Track>>,
+    #[serde(default)]
+    pub track_total: usize,
+    #[serde(default)]
+    pub playlist_total: usize,
     /// Changes whenever any persisted track data changes.
     #[serde(default)]
     pub revision: u64,
     /// Changes only when the library tree or visible row ordering may change.
     #[serde(default)]
     pub structure_revision: u64,
-    pub playlists: Arc<Vec<Playlist>>,
+    #[serde(default)]
+    pub playlist_revision: u64,
+    #[serde(default)]
     pub history: Arc<Vec<HistoryEntry>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct QueueState {
     pub entries: Arc<Vec<QueueEntry>>,
+    /// ID-sorted minimal metadata for distinct queued tracks.
+    #[serde(default)]
+    pub tracks: Arc<Vec<LibraryRow>>,
     pub current_id: Option<u64>,
 }
 
@@ -146,10 +223,11 @@ pub struct SystemState {
 impl Default for LibrarySnapshot {
     fn default() -> Self {
         Self {
-            tracks: Arc::new(Vec::new()),
+            track_total: 0,
+            playlist_total: 0,
             revision: 0,
             structure_revision: 0,
-            playlists: Arc::new(Vec::new()),
+            playlist_revision: 0,
             history: Arc::new(Vec::new()),
         }
     }
@@ -159,6 +237,7 @@ impl Default for QueueState {
     fn default() -> Self {
         Self {
             entries: Arc::new(Vec::new()),
+            tracks: Arc::new(Vec::new()),
             current_id: None,
         }
     }
@@ -241,6 +320,39 @@ pub enum Command {
     Status,
     Overview,
     ShowWindow,
+    LibraryPage {
+        query: Option<String>,
+        favorite: Option<bool>,
+        missing: Option<bool>,
+        sort: LibrarySort,
+        offset: usize,
+        limit: usize,
+    },
+    TrackPage {
+        query: Option<String>,
+        favorite: Option<bool>,
+        missing: Option<bool>,
+        offset: usize,
+        limit: usize,
+    },
+    DirectoryPage {
+        path: PathBuf,
+        offset: usize,
+        limit: usize,
+    },
+    PlaylistSummaries {
+        offset: usize,
+        limit: usize,
+    },
+    PlaylistEntries {
+        playlist_id: i64,
+        offset: usize,
+        limit: usize,
+    },
+    Track {
+        track_id: i64,
+    },
+    LibraryStats,
     OptimizeDatabase,
     SetFavorite {
         track_ids: Vec<i64>,
@@ -278,6 +390,10 @@ pub enum Command {
         value: f32,
     },
     Enqueue {
+        track_ids: Vec<i64>,
+    },
+    EnqueueSources {
+        directories: Vec<PathBuf>,
         track_ids: Vec<i64>,
     },
     RemoveQueue {
@@ -319,6 +435,11 @@ pub enum Command {
     },
     AddPlaylist {
         playlist_id: i64,
+        track_ids: Vec<i64>,
+    },
+    AddPlaylistSources {
+        playlist_id: i64,
+        directories: Vec<PathBuf>,
         track_ids: Vec<i64>,
     },
     RemovePlaylistEntry {

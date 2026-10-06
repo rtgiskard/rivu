@@ -127,6 +127,8 @@ impl From<RgbColor> for String {
     }
 }
 
+pub(crate) const DEFAULT_PAGE_SIZE: u32 = 64;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -142,6 +144,10 @@ pub struct Config {
     pub log_level: LogLevel,
     pub log_to_file: bool,
     pub log_retention_weeks: u32,
+    /// Maximum number of in-memory queue entries.
+    pub queue_limit: u32,
+    /// Default number of rows fetched by GUI and TUI paginated views.
+    pub page_size: u32,
     /// UI font family; empty selects the platform UI font.
     pub ui_font: String,
     pub ui_scale: f32,
@@ -208,6 +214,8 @@ impl Default for Config {
             log_level: LogLevel::Warning,
             log_to_file: false,
             log_retention_weeks: 4,
+            queue_limit: 4096,
+            page_size: DEFAULT_PAGE_SIZE,
             ui_font: String::new(),
             ui_scale: 1.0,
             analysis_fps: 20,
@@ -337,6 +345,16 @@ impl Config {
             matches!(self.media_read_buffer_mb, 1 | 2 | 4 | 8 | 16),
             "media_read_buffer_mb must be one of 1, 2, 4, 8, or 16 MiB; got {}",
             self.media_read_buffer_mb
+        );
+        ensure!(
+            (1..=4096).contains(&self.queue_limit),
+            "queue_limit must be between 1 and 4096; got {}",
+            self.queue_limit
+        );
+        ensure!(
+            (20..=crate::model::PAGE_SIZE as u32).contains(&self.page_size),
+            "page_size must be between 20 and 256; got {}",
+            self.page_size
         );
         ensure!(
             (5..=60).contains(&self.analysis_fps),
@@ -558,6 +576,7 @@ mod tests {
             log_level: LogLevel::Debug,
             log_to_file: true,
             log_retention_weeks: 4,
+            queue_limit: 128,
             ui_font: "sans-serif".to_owned(),
             ui_scale: 1.5,
             analysis_fps: 30,
@@ -602,6 +621,7 @@ mod tests {
             spectrogram_history_seconds: 20,
             waveform_cursor_color: "#eeaa66".parse().unwrap(),
             waveform_glow: 0.0,
+            page_size: 32,
         };
         config.save(&path).unwrap();
         assert_eq!(Config::load(&path).unwrap(), config);
@@ -985,5 +1005,47 @@ mod tests {
         let error = Config::load(directory.path()).unwrap_err();
         assert!(format!("{error:#}").contains("cannot read configuration"));
         directory.close().unwrap();
+    }
+    #[test]
+    fn queue_limit_must_be_bounded() {
+        assert!(Config::default().validate().is_ok());
+        for queue_limit in [0, 4097] {
+            let config = Config {
+                queue_limit,
+                ..Config::default()
+            };
+            assert!(config.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn log_retention_weeks_must_be_bounded() {
+        assert_eq!(Config::default().log_retention_weeks, 4);
+        for log_retention_weeks in [0, 521] {
+            let config = Config {
+                log_retention_weeks,
+                ..Config::default()
+            };
+            assert!(config.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn page_size_loads_defaults_and_rejects_out_of_range_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(&path, "").unwrap();
+        assert_eq!(Config::load(&path).unwrap().page_size, 64);
+        for page_size in [20, 64, 256] {
+            fs::write(&path, format!("page_size = {page_size}\n")).unwrap();
+            let config = Config::load(&path).unwrap();
+            assert_eq!(config.page_size, page_size);
+            config.save(&path).unwrap();
+            assert_eq!(Config::load(&path).unwrap().page_size, page_size);
+        }
+        for page_size in [0, 19, 257, u32::MAX] {
+            fs::write(&path, format!("page_size = {page_size}\n")).unwrap();
+            assert!(Config::load(&path).is_err());
+        }
     }
 }

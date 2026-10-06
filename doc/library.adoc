@@ -37,6 +37,35 @@ Dragging files or directories to Queue or a Playlist adds their matching tracks.
 Normal scans reuse cached probes; `--force` rereads metadata while preserving
 track identity and user data.
 
+== Database-backed views and queue limits
+
+The complete library and playlists stay in SQLite, not in published playback
+snapshots. Snapshots contain library counts and revisions, recent history,
+current-track details, and ID-sorted lightweight display rows for distinct queued
+tracks. Queue membership keeps only entry IDs and Track IDs; display rows omit
+paths, fingerprints, CUE segments and audio-format metadata. The current track
+holds complete details independently of the LRU. Read queries do not change
+playback revisions or wake state subscribers.
+
+Library search, directory children, playlist summaries, and playlist entries are
+queried in pages configured by `page_size` (default 64, range 20–256).
+Pages carry only the fields needed for display and selection, rather than full
+Track objects. This keeps rendering independent of individual detail queries
+and prevents simultaneously visible panels from churning the detail LRU.
+
+Track detail lookups retain at most `2 * page_size` distinct tracks in an
+in-memory LRU cache (128 by default). Hits refresh recency; overflow evicts
+the least recently read detail. Reducing the page size immediately trims the
+cache. Track edits, favorites, playback statistics and deletion invalidate
+affected details; scans and missing-track cleanup clear it. Failed writes may
+also discard cached details, but never publish uncommitted values. The cache
+does not add database tables or writes and does not truncate queue entries.
+
+Rust/IPC consumers use `Command::LibraryPage`, `Command::DirectoryPage`,
+`Command::PlaylistSummaries`, and `Command::PlaylistEntries` for list views, and
+`Command::Track` for full details of any library track. Whole-library and
+whole-playlist collections are no longer part of status snapshots.
+
 == Play counts and recent tracks
 
 A playback increments its track's play count once, only when confirmed heard time

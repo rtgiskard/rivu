@@ -5,6 +5,8 @@ The default configuration file is `~/.config/rivu/config.toml`.
 [source,toml]
 ----
 media_read_buffer_mb = 2
+queue_limit = 4096
+page_size = 64
 ffmpeg_enabled = false
 pipewire_auto_mix = true
 tray_enabled = true
@@ -21,6 +23,15 @@ spectrogram_history_seconds = 20
 ----
 
 Spectrogram interpolation generates logarithmic frequency rows up to the configured point count (64–4096); the default is 1024. The cached row count is the greater of the visible source rows and half the tallest active panel height, capped by this setting. Spectrogram history uses at most one time bucket per rendered horizontal pixel, bounded by the configured duration and analysis rate; narrow panels therefore retain less than the maximum. Missing history remains blank.
+`queue_limit` bounds the in-memory playback queue and defaults to `4096`; it must be between `1` and `4096`. Enqueuing beyond the limit is rejected atomically, and lowering it below the current queue length is rejected.
+Saved queues are restored up to `queue_limit`; missing library records are skipped.
+Playlist storage is not capped, but playing a playlist requires it to fit the queue.
+
+`page_size` controls GUI and TUI query pages and defaults to `64`; accepted values
+are `20` through `256`. The General settings page places it next to Queue limit.
+Applying a new size resets paged view buffers and immediately limits the internal
+Track detail LRU to twice that size. This setting lives in TOML, not in a database
+cache table; paging and resizing do not create persistent query results.
 
 Accepted media read buffer sizes are `1`, `2`, `4`, `8`, and `16` MiB.
 

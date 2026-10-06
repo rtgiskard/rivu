@@ -1,9 +1,11 @@
 use crate::library::{KnownFile, MediaInfo, ScanResult};
 use crate::model::{
-    CueSegment, DatabaseOptimization, HistoryEntry, Playlist, PlaylistEntry, Track,
+    CueSegment, DatabaseOptimization, HistoryEntry, PlaylistEntryPage, PlaylistEntryRow,
+    PlaylistSummary, Track, TrackPage,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,6 +15,32 @@ const PROBE_VERSION: i64 = 3;
 
 pub struct Store {
     conn: Connection,
+    track_cache: RefCell<TrackCache>,
+}
+
+struct TrackCache {
+    entries: HashMap<i64, (Track, u64)>,
+    capacity: usize,
+    clock: u64,
+}
+
+impl TrackCache {
+    fn evict_oldest(&mut self) -> bool {
+        let oldest = self
+            .entries
+            .iter()
+            .min_by_key(|(_, (_, age))| *age)
+            .map(|(&id, _)| id);
+        oldest
+            .map(|id| self.entries.remove(&id).is_some())
+            .unwrap_or(false)
+    }
+
+    fn trim(&mut self) {
+        while self.entries.len() > self.capacity {
+            self.evict_oldest();
+        }
+    }
 }
 struct Existing {
     id: i64,
@@ -97,6 +125,66 @@ fn create_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn track_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
+    Ok(Track {
+        id: r.get(0)?,
+        path: PathBuf::from(r.get::<_, String>(1)?),
+        fingerprint: r.get(22)?,
+        title: r.get(2)?,
+        artist: r.get(3)?,
+        album: r.get(4)?,
+        duration: r.get(5)?,
+        codec: r.get(6)?,
+        channels: r.get::<_, i64>(7)? as u16,
+        sample_rate: r.get::<_, i64>(8)? as u32,
+        bitrate_bps: r.get::<_, Option<i64>>(16)?.map(|value| value as u64),
+        track_number: r.get(17)?,
+        disc_number: r.get(18)?,
+        bits_per_sample: r.get(19)?,
+        release_date: r.get(20)?,
+        favorite: r.get(21)?,
+        missing: r.get::<_, i64>(9)? != 0,
+        play_count: r.get::<_, i64>(10)? as u64,
+        last_played: r.get(11)?,
+        cue: cue_from_row(r, 12)?,
+    })
+}
+
+const TRACK_COLUMNS: &str = "id,path,COALESCE(title_override,raw_title),COALESCE(artist_override,raw_artist),COALESCE(album_override,raw_album),duration,codec,channels,sample_rate,missing,play_count,last_played,cue_sheet,cue_number,cue_start_frame,cue_end_frame,bitrate_bps,track_number,disc_number,bits_per_sample,release_date,favorite,fingerprint";
+
+const LIBRARY_ROW_COLUMNS: &str = "id,COALESCE(title_override,raw_title),COALESCE(artist_override,raw_artist),COALESCE(album_override,raw_album),duration,favorite,missing,play_count";
+const LIBRARY_ROW_COLUMNS_QUALIFIED: &str = "t.id,COALESCE(t.title_override,t.raw_title),COALESCE(t.artist_override,t.raw_artist),COALESCE(t.album_override,t.raw_album),t.duration,t.favorite,t.missing,t.play_count";
+const SOURCE_FILTER: &str = "tracks.id IN (SELECT value FROM json_each(?2)) OR EXISTS (SELECT 1 FROM json_each(?1) AS directory WHERE substr(tracks.path,1,length(directory.value))=directory.value)";
+
+fn library_row_at(
+    row: &rusqlite::Row<'_>,
+    offset: usize,
+) -> rusqlite::Result<crate::model::LibraryRow> {
+    Ok(crate::model::LibraryRow {
+        id: row.get(offset)?,
+        title: row.get(offset + 1)?,
+        artist: row.get(offset + 2)?,
+        album: row.get(offset + 3)?,
+        duration: row.get(offset + 4)?,
+        favorite: row.get(offset + 5)?,
+        missing: row.get(offset + 6)?,
+        play_count: row.get::<_, i64>(offset + 7)? as u64,
+    })
+}
+
+fn library_row_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::model::LibraryRow> {
+    library_row_at(row, 0)
+}
+
+fn directory_prefix(path: &Path) -> Result<String> {
+    if path.as_os_str().is_empty() {
+        return Ok(String::new());
+    }
+    let path = path
+        .to_str()
+        .context("Library directory path is not UTF-8")?;
+    Ok(format!("{}/", path.trim_end_matches('/')))
+}
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(p) = path.parent()
@@ -129,7 +217,28 @@ impl Store {
                 bail!("Unsupported database version {version}; remove the old database and rescan");
             }
         }
-        let store = Self { conn: c };
+        // SQLite's built-in lower() is ASCII-only; preserve frontend Unicode search.
+        c.create_scalar_function(
+            "lower",
+            1,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+            |ctx| {
+                let value = ctx
+                    .get_raw(0)
+                    .as_str()
+                    .map_err(|error| rusqlite::Error::UserFunctionError(error.into()))?;
+                Ok(value.to_lowercase())
+            },
+        )?;
+        let store = Self {
+            conn: c,
+            track_cache: RefCell::new(TrackCache {
+                entries: HashMap::new(),
+                capacity: (crate::config::DEFAULT_PAGE_SIZE as usize).saturating_mul(2),
+                clock: 0,
+            }),
+        };
         let pending: bool = store.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM schema_meta WHERE key='compact_pending' AND value=1)",
             [],
@@ -194,7 +303,18 @@ impl Store {
             wal_bytes_after,
         })
     }
+    pub(crate) fn set_track_cache_page_size(&self, page_size: u32) {
+        let mut cache = self.track_cache.borrow_mut();
+        cache.capacity = (page_size as usize).saturating_mul(2);
+        cache.trim();
+        let capacity = cache.capacity;
+        cache.entries.shrink_to(capacity);
+    }
+
     pub fn set_favorite(&self, ids: &[i64], favorite: bool) -> Result<()> {
+        for id in ids {
+            self.track_cache.borrow_mut().entries.remove(id);
+        }
         let tx = self.conn.unchecked_transaction()?;
         let mut exists = tx.prepare("SELECT EXISTS(SELECT 1 FROM tracks WHERE id=?1)")?;
         let mut update =
@@ -210,66 +330,340 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
-    pub fn tracks(&self) -> Result<Vec<Track>> {
-        let mut q=self.conn.prepare("SELECT id,path,COALESCE(title_override,raw_title),COALESCE(artist_override,raw_artist),COALESCE(album_override,raw_album),duration,codec,channels,sample_rate,missing,play_count,last_played,cue_sheet,cue_number,cue_start_frame,cue_end_frame,bitrate_bps,track_number,disc_number,bits_per_sample,release_date,favorite,fingerprint FROM tracks ORDER BY id")?;
-        Ok(q.query_map([], |r| {
-            Ok(Track {
-                id: r.get(0)?,
-                path: PathBuf::from(r.get::<_, String>(1)?),
-                fingerprint: r.get(22)?,
-                title: r.get(2)?,
-                artist: r.get(3)?,
-                album: r.get(4)?,
-                duration: r.get(5)?,
-                codec: r.get(6)?,
-                channels: r.get::<_, i64>(7)? as u16,
-                sample_rate: r.get::<_, i64>(8)? as u32,
-                bitrate_bps: r.get::<_, Option<i64>>(16)?.map(|value| value as u64),
-                track_number: r.get(17)?,
-                disc_number: r.get(18)?,
-                bits_per_sample: r.get(19)?,
-                release_date: r.get(20)?,
-                favorite: r.get(21)?,
-                missing: r.get::<_, i64>(9)? != 0,
-                play_count: r.get::<_, i64>(10)? as u64,
-                last_played: r.get(11)?,
-                cue: cue_from_row(r, 12)?,
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?)
+
+    /// Loads only display metadata for queued IDs; unlike `track`, this never touches the full-track LRU.
+    pub fn queue_rows(&self, ids: &[i64]) -> Result<Vec<crate::model::LibraryRow>> {
+        let ids = serde_json::to_string(ids)?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {LIBRARY_ROW_COLUMNS} FROM tracks WHERE id IN (SELECT value FROM json_each(?1)) ORDER BY id"
+        ))?;
+        Ok(stmt
+            .query_map([ids], library_row_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
     }
-    pub fn playlists(&self) -> Result<Vec<Playlist>> {
-        let mut q = self.conn.prepare(
-            "SELECT p.id,p.name,e.id,e.track_id FROM playlists p
-             LEFT JOIN playlist_entries e ON e.playlist_id=p.id
-             ORDER BY p.id,e.position,e.id",
-        )?;
-        let mut rows = q.query([])?;
-        let mut out = Vec::new();
-        while let Some(row) = rows.next()? {
-            let id: i64 = row.get(0)?;
-            if out
-                .last()
-                .is_none_or(|playlist: &Playlist| playlist.id != id)
-            {
-                out.push(Playlist {
-                    id,
-                    name: row.get(1)?,
-                    entries: Vec::new(),
-                });
+
+    pub fn library_view_page(
+        &self,
+        query: Option<&str>,
+        favorite: Option<bool>,
+        missing: Option<bool>,
+        sort: crate::model::LibrarySort,
+        offset: usize,
+        limit: usize,
+    ) -> Result<crate::model::LibraryPage> {
+        use crate::model::LibrarySort;
+        let query = query
+            .filter(|query| !query.is_empty())
+            .map(str::to_lowercase);
+        let filter = "WHERE (?1 IS NULL OR instr(lower(COALESCE(title_override,raw_title)),?1)>0 OR instr(lower(COALESCE(artist_override,raw_artist)),?1)>0 OR instr(lower(COALESCE(album_override,raw_album)),?1)>0 OR instr(lower(path),?1)>0) AND (?2 IS NULL OR favorite=?2) AND (?3 IS NULL OR missing=?3)";
+        let total = self.conn.query_row(
+            &format!("SELECT COUNT(*) FROM tracks {filter}"),
+            params![query, favorite, missing],
+            |row| row.get::<_, i64>(0),
+        )? as usize;
+        let order = match sort {
+            LibrarySort::Id => "id",
+            LibrarySort::Album => {
+                "COALESCE(album_override,raw_album), CASE WHEN COALESCE(album_override,raw_album)<>'' THEN COALESCE(disc_number,4294967295) END, CASE WHEN COALESCE(album_override,raw_album)<>'' THEN COALESCE(track_number,4294967295) END, COALESCE(title_override,raw_title),id"
             }
-            if let Some(entry_id) = row.get::<_, Option<i64>>(2)? {
-                out.last_mut()
-                    .expect("playlist was just inserted")
-                    .entries
-                    .push(PlaylistEntry {
-                        id: entry_id,
-                        track_id: row.get(3)?,
-                    });
+            LibrarySort::MostPlayed => "play_count DESC,id",
+        };
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {LIBRARY_ROW_COLUMNS} FROM tracks {filter} ORDER BY {order} LIMIT ?4 OFFSET ?5"
+        ))?;
+        let rows = stmt
+            .query_map(
+                params![
+                    query,
+                    favorite,
+                    missing,
+                    limit.min(crate::model::PAGE_SIZE) as i64,
+                    offset.min(i64::MAX as usize) as i64
+                ],
+                library_row_from_row,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(crate::model::LibraryPage { total, rows })
+    }
+
+    pub fn library_stats(&self) -> Result<crate::model::LibraryStats> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*),COALESCE(SUM(play_count),0) FROM tracks",
+            [],
+            |row| {
+                Ok(crate::model::LibraryStats {
+                    total: row.get::<_, i64>(0)? as usize,
+                    play_count: row.get::<_, i64>(1)? as u64,
+                })
+            },
+        )?)
+    }
+
+    pub fn playlist_summary_page(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<crate::model::PlaylistSummaryPage> {
+        let total = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM playlists", [], |row| {
+                row.get::<_, i64>(0)
+            })? as usize;
+        let rows = self.playlist_summaries(offset, limit.min(crate::model::PAGE_SIZE))?;
+        Ok(crate::model::PlaylistSummaryPage { total, rows })
+    }
+
+    pub fn directory_page(
+        &self,
+        path: &Path,
+        offset: usize,
+        limit: usize,
+    ) -> Result<crate::model::DirectoryPage> {
+        use crate::model::{DirectoryPage, DirectoryRow};
+        let prefix = directory_prefix(path)?;
+        // SQLite derives immediate children; Rust retains only the requested page.
+        // Group directories but preserve distinct CUE tracks sharing a source path.
+        let children = "WITH sources AS (SELECT id,path,substr(path,length(?1)+1) AS rest FROM tracks WHERE substr(path,1,length(?1))=?1), children AS (SELECT 0 AS kind,CASE WHEN ?1='' AND instr(rest,'/')=1 THEN '/' ELSE ?1||substr(rest,1,instr(rest,'/')-1) END AS child,MIN(id) AS track_id FROM sources WHERE instr(rest,'/')>0 GROUP BY child UNION ALL SELECT 1,path,id FROM sources WHERE instr(rest,'/')=0)";
+        let total = self.conn.query_row(
+            &format!("{children} SELECT COUNT(*) FROM children"),
+            [&prefix],
+            |row| row.get::<_, i64>(0),
+        )? as usize;
+        let mut stmt = self.conn.prepare(&format!("{children} SELECT c.kind,c.child,{LIBRARY_ROW_COLUMNS_QUALIFIED} FROM children c JOIN tracks t ON t.id=c.track_id ORDER BY c.kind,c.child,t.id LIMIT ?2 OFFSET ?3"))?;
+        let rows = stmt
+            .query_map(
+                params![
+                    prefix,
+                    limit.min(crate::model::PAGE_SIZE) as i64,
+                    offset.min(i64::MAX as usize) as i64
+                ],
+                |row| {
+                    if row.get::<_, i64>(0)? == 0 {
+                        Ok(DirectoryRow::Directory {
+                            path: PathBuf::from(row.get::<_, String>(1)?),
+                        })
+                    } else {
+                        Ok(DirectoryRow::Track(library_row_at(row, 2)?))
+                    }
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(DirectoryPage { total, rows })
+    }
+
+    fn source_parameters(
+        &self,
+        directories: &[PathBuf],
+        track_ids: &[i64],
+    ) -> Result<(String, String)> {
+        let mut exists = self
+            .conn
+            .prepare("SELECT EXISTS(SELECT 1 FROM tracks WHERE id=?1)")?;
+        for &id in track_ids {
+            if !exists.query_row([id], |row| row.get::<_, bool>(0))? {
+                bail!("Track {id} does not exist");
             }
         }
-        Ok(out)
+        let prefixes = directories
+            .iter()
+            .map(|path| directory_prefix(path))
+            .collect::<Result<Vec<_>>>()?;
+        Ok((
+            serde_json::to_string(&prefixes)?,
+            serde_json::to_string(track_ids)?,
+        ))
     }
+
+    pub fn source_track_ids(
+        &self,
+        directories: &[PathBuf],
+        track_ids: &[i64],
+        limit: usize,
+    ) -> Result<Vec<i64>> {
+        let (directories, ids) = self.source_parameters(directories, track_ids)?;
+        let count = self.conn.query_row(
+            &format!("SELECT COUNT(*) FROM tracks WHERE {SOURCE_FILTER}"),
+            params![directories, ids],
+            |row| row.get::<_, i64>(0),
+        )? as usize;
+        let limit = limit.min(4096);
+        if count > limit {
+            bail!(
+                "Selection contains {count} tracks, exceeding the remaining queue capacity of {limit}"
+            );
+        }
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT id FROM tracks WHERE {SOURCE_FILTER} ORDER BY id LIMIT ?3"
+        ))?;
+        Ok(stmt
+            .query_map(params![directories, ids, limit as i64], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn add_playlist_sources(
+        &self,
+        playlist_id: i64,
+        directories: &[PathBuf],
+        track_ids: &[i64],
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        if !tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM playlists WHERE id=?1)",
+            [playlist_id],
+            |row| row.get::<_, bool>(0),
+        )? {
+            bail!("Playlist not found");
+        }
+        let (directories, ids) = self.source_parameters(directories, track_ids)?;
+        // Assign positions in SQL; playlist size never determines Rust allocation.
+        tx.execute(&format!(
+            "WITH selected AS (SELECT id FROM tracks WHERE ({SOURCE_FILTER}) AND NOT EXISTS (SELECT 1 FROM playlist_entries e WHERE e.playlist_id=?3 AND e.track_id=tracks.id)), ordered AS (SELECT id,row_number() OVER (ORDER BY id)-1 AS ordinal FROM selected) INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT ?3,id,(SELECT COALESCE(MAX(position),-1)+1 FROM playlist_entries WHERE playlist_id=?3)+ordinal FROM ordered"
+        ), params![directories, ids, playlist_id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn track(&self, id: i64) -> Result<Option<Track>> {
+        let mut cache = self.track_cache.borrow_mut();
+        if cache.clock == u64::MAX {
+            cache.entries.clear();
+            cache.clock = 0;
+        }
+        cache.clock += 1;
+        let age = cache.clock;
+        if let Some((track, touched)) = cache.entries.get_mut(&id) {
+            *touched = age;
+            return Ok(Some(track.clone()));
+        }
+        let sql = format!("SELECT {TRACK_COLUMNS} FROM tracks WHERE id=?1");
+        let track = self.conn.query_row(&sql, [id], track_from_row).optional()?;
+        if let Some(track) = &track
+            && cache.capacity != 0
+        {
+            // Evict before insertion so entries never transiently exceed capacity.
+            cache.trim();
+            if cache.entries.len() == cache.capacity {
+                cache.evict_oldest();
+            }
+            cache.entries.insert(id, (track.clone(), age));
+        }
+        Ok(track)
+    }
+
+    pub fn track_id_for_source(&self, path: &Path, cue_number: Option<u32>) -> Result<Option<i64>> {
+        let path = path.to_string_lossy();
+        let id = match cue_number {
+            None => self
+                .conn
+                .query_row(
+                    "SELECT id FROM tracks WHERE path=?1 AND cue_sheet IS NULL AND missing=0",
+                    [path.as_ref()],
+                    |row| row.get(0),
+                )
+                .optional()?,
+            Some(number) => self
+                .conn
+                .query_row(
+                    "SELECT id FROM tracks WHERE cue_sheet=?1 AND cue_number=?2 AND missing=0",
+                    params![path.as_ref(), number],
+                    |row| row.get(0),
+                )
+                .optional()?,
+        };
+        Ok(id)
+    }
+
+    pub fn library_page(
+        &self,
+        query: Option<&str>,
+        favorite: Option<bool>,
+        missing: Option<bool>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<TrackPage> {
+        let pattern = query
+            .filter(|value| !value.is_empty())
+            .map(str::to_lowercase);
+        let where_sql = "WHERE (?1 IS NULL OR instr(lower(COALESCE(title_override,raw_title) || ' ' || COALESCE(artist_override,raw_artist) || ' ' || COALESCE(album_override,raw_album) || ' ' || path),?1)>0) AND (?2 IS NULL OR favorite=?2) AND (?3 IS NULL OR missing=?3)";
+        let total_sql = format!("SELECT COUNT(*) FROM tracks {where_sql}");
+        let total: i64 =
+            self.conn
+                .query_row(&total_sql, params![pattern, favorite, missing], |r| {
+                    r.get(0)
+                })?;
+        let sql = format!(
+            "SELECT {TRACK_COLUMNS} FROM tracks {where_sql} ORDER BY id LIMIT ?4 OFFSET ?5"
+        );
+        let limit = limit.min(crate::model::PAGE_SIZE) as i64;
+        let offset = offset.min(i64::MAX as usize) as i64;
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(
+                params![pattern, favorite, missing, limit, offset],
+                track_from_row,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(TrackPage {
+            total: total as usize,
+            rows,
+        })
+    }
+
+    pub fn playlist_summaries(&self, offset: usize, limit: usize) -> Result<Vec<PlaylistSummary>> {
+        let mut stmt = self.conn.prepare("SELECT p.id,p.name,COUNT(e.id) FROM playlists p LEFT JOIN playlist_entries e ON e.playlist_id=p.id GROUP BY p.id ORDER BY p.id LIMIT ?1 OFFSET ?2")?;
+        let limit = limit.min(i64::MAX as usize) as i64;
+        let offset = offset.min(i64::MAX as usize) as i64;
+        Ok(stmt
+            .query_map(params![limit, offset], |r| {
+                Ok(PlaylistSummary {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    entry_count: r.get::<_, i64>(2)? as usize,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn playlist_entries_page(
+        &self,
+        playlist_id: i64,
+        offset: usize,
+        limit: usize,
+    ) -> Result<PlaylistEntryPage> {
+        let total: i64 = self.conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM playlist_entries WHERE playlist_id=?1) FROM playlists WHERE id=?1",
+            [playlist_id],
+            |r| r.get(0),
+        ).optional()?.context("Playlist not found")?;
+        let mut stmt = self.conn.prepare("SELECT e.id,e.track_id,COALESCE(t.title_override,t.raw_title),COALESCE(t.artist_override,t.raw_artist),COALESCE(t.album_override,t.raw_album),COALESCE(t.missing,1) FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id WHERE e.playlist_id=?1 ORDER BY e.position,e.id LIMIT ?2 OFFSET ?3")?;
+        let limit = limit.min(crate::model::PAGE_SIZE) as i64;
+        let offset = offset.min(i64::MAX as usize) as i64;
+        let rows = stmt
+            .query_map(params![playlist_id, limit, offset], |r| {
+                Ok(PlaylistEntryRow {
+                    id: r.get(0)?,
+                    track_id: r.get(1)?,
+                    title: r.get(2)?,
+                    artist: r.get(3)?,
+                    album: r.get(4)?,
+                    missing: r.get::<_, i64>(5)? != 0,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(PlaylistEntryPage {
+            total: total as usize,
+            rows,
+        })
+    }
+
+    pub fn playlist_track_ids(&self, playlist_id: i64, limit: usize) -> Result<Vec<i64>> {
+        let mut stmt = self.conn.prepare("SELECT track_id FROM playlist_entries WHERE playlist_id=?1 ORDER BY position,id LIMIT ?2")?;
+        let limit = limit.min(i64::MAX as usize) as i64;
+        Ok(stmt
+            .query_map(params![playlist_id, limit], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn history(&self, limit: usize) -> Result<Vec<HistoryEntry>> {
         let mut q = self.conn.prepare(
             "SELECT id,COALESCE(title_override,raw_title),last_played FROM tracks
@@ -317,6 +711,7 @@ impl Store {
         .collect::<rusqlite::Result<Vec<_>>>()?)
     }
     pub fn apply_scan(&self, result: &ScanResult) -> Result<()> {
+        self.track_cache.borrow_mut().entries.clear();
         for r in &result.records {
             if r.path.to_str().is_none() {
                 bail!("scan path is not UTF-8: {}", r.path.display());
@@ -649,6 +1044,7 @@ impl Store {
         Ok(())
     }
     pub fn edit_track(&self, id: i64, title: &str, artist: &str, album: &str) -> Result<()> {
+        self.track_cache.borrow_mut().entries.remove(&id);
         changed(
             self.conn.execute(
                 "UPDATE tracks SET title_override=?,artist_override=?,album_override=? WHERE id=?",
@@ -659,6 +1055,9 @@ impl Store {
         )
     }
     pub fn remove_tracks(&self, ids: &[i64]) -> Result<()> {
+        for id in ids {
+            self.track_cache.borrow_mut().entries.remove(id);
+        }
         let tx = self.conn.unchecked_transaction()?;
         let mut affected = HashSet::new();
         let mut exists = tx.prepare("SELECT EXISTS(SELECT 1 FROM tracks WHERE id=?1)")?;
@@ -688,7 +1087,25 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+
+    pub fn remove_missing_tracks(&self) -> Result<()> {
+        self.track_cache.borrow_mut().entries.clear();
+        let tx = self.conn.unchecked_transaction()?;
+        // SQLite owns the affected playlist set; Rust never collects missing IDs.
+        tx.execute_batch(
+            "CREATE TEMP TABLE removed_playlists(playlist_id INTEGER PRIMARY KEY);
+             INSERT INTO removed_playlists SELECT DISTINCT playlist_id FROM playlist_entries WHERE track_id IN (SELECT id FROM tracks WHERE missing=1);
+             DELETE FROM playlist_entries WHERE track_id IN (SELECT id FROM tracks WHERE missing=1);
+             DELETE FROM tracks WHERE missing=1;
+             WITH ordered AS (SELECT id,ROW_NUMBER() OVER (PARTITION BY playlist_id ORDER BY position,id)-1 AS new_position FROM playlist_entries WHERE playlist_id IN (SELECT playlist_id FROM removed_playlists))
+             UPDATE playlist_entries SET position=(SELECT new_position FROM ordered WHERE ordered.id=playlist_entries.id) WHERE playlist_id IN (SELECT playlist_id FROM removed_playlists);
+             DROP TABLE removed_playlists;"
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
     pub fn mark_played(&self, track: i64, at: i64) -> Result<()> {
+        self.track_cache.borrow_mut().entries.remove(&track);
         changed(
             self.conn.execute(
                 "UPDATE tracks SET last_played=? WHERE id=?",
@@ -699,6 +1116,7 @@ impl Store {
         )
     }
     pub fn increment_play_count(&self, track: i64) -> Result<()> {
+        self.track_cache.borrow_mut().entries.remove(&track);
         changed(
             self.conn.execute(
                 "UPDATE tracks SET play_count=play_count+1 WHERE id=?",
@@ -746,6 +1164,24 @@ fn valid_name(s: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    fn all_tracks(store: &Store) -> Vec<Track> {
+        let mut tracks = Vec::new();
+        loop {
+            let page = store
+                .library_page(None, None, None, tracks.len(), crate::model::PAGE_SIZE)
+                .unwrap();
+            tracks.extend(page.rows);
+            if tracks.len() >= page.total {
+                return tracks;
+            }
+        }
+    }
+    fn playlist_entries(store: &Store, playlist_id: i64) -> Vec<PlaylistEntryRow> {
+        store
+            .playlist_entries_page(playlist_id, 0, crate::model::PAGE_SIZE)
+            .unwrap()
+            .rows
+    }
     use super::*;
     use crate::library::{ScanRecord, ScanResult};
     fn rec(path: &str, hash: &str, title: &str, dur: f64) -> ScanRecord {
@@ -784,6 +1220,133 @@ mod tests {
         let _ = fs::remove_file(&p);
         (p.clone(), Store::open(&p).unwrap())
     }
+
+    #[test]
+    fn track_cache_refreshes_hits_before_lru_eviction() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        store
+            .apply_scan(&scan(vec![
+                rec("/music/a.mp3", "a", "A", 10.),
+                rec("/music/b.mp3", "b", "B", 10.),
+                rec("/music/c.mp3", "c", "C", 10.),
+            ]))
+            .unwrap();
+        let ids: Vec<_> = all_tracks(&store).iter().map(|track| track.id).collect();
+        store.set_track_cache_page_size(1); // capacity is two tracks
+        store.track(ids[0]).unwrap();
+        store.track(ids[1]).unwrap();
+        store.track(ids[0]).unwrap(); // refresh A's LRU age
+        store
+            .conn
+            .execute("UPDATE tracks SET title_override='A2' WHERE id=?", [ids[0]])
+            .unwrap();
+        store
+            .conn
+            .execute("UPDATE tracks SET title_override='B2' WHERE id=?", [ids[1]])
+            .unwrap();
+        store.track(ids[2]).unwrap(); // B is oldest and must be evicted
+
+        let cache = store.track_cache.borrow();
+        assert_eq!(cache.entries.len(), 2);
+        assert!(cache.entries.contains_key(&ids[0]));
+        assert!(cache.entries.contains_key(&ids[2]));
+        assert!(!cache.entries.contains_key(&ids[1]));
+        drop(cache);
+        assert_eq!(store.track(ids[0]).unwrap().unwrap().title, "A");
+        assert_eq!(store.track(ids[1]).unwrap().unwrap().title, "B2");
+        assert!(store.track_cache.borrow().entries.len() <= 2);
+    }
+
+    #[test]
+    fn track_cache_resize_shrinks_and_does_not_cache_misses() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        store
+            .apply_scan(&scan(vec![
+                rec("/music/a.mp3", "a", "A", 10.),
+                rec("/music/b.mp3", "b", "B", 10.),
+                rec("/music/c.mp3", "c", "C", 10.),
+                rec("/music/d.mp3", "d", "D", 10.),
+            ]))
+            .unwrap();
+        let ids: Vec<_> = all_tracks(&store).iter().map(|track| track.id).collect();
+        store.set_track_cache_page_size(2); // capacity is four tracks
+        for id in &ids {
+            store.track(*id).unwrap();
+        }
+        store.track(ids[0]).unwrap(); // retain A when shrinking
+        store.set_track_cache_page_size(1); // capacity is two tracks
+        let cache = store.track_cache.borrow();
+        assert_eq!(cache.capacity, 2);
+        assert_eq!(cache.entries.len(), 2);
+        assert!(cache.entries.contains_key(&ids[0]));
+        assert!(cache.entries.contains_key(&ids[3]));
+        assert!(cache.entries.len() <= cache.capacity);
+        drop(cache);
+
+        store.set_track_cache_page_size(0);
+        assert!(store.track_cache.borrow().entries.is_empty());
+        assert!(store.track(999).unwrap().is_none());
+        assert!(store.track_cache.borrow().entries.is_empty());
+    }
+
+    #[test]
+    fn track_cache_invalidates_edits_favorites_statistics_and_deletes() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        store
+            .apply_scan(&scan(vec![rec("/music/a.mp3", "a", "A", 10.)]))
+            .unwrap();
+        let id = all_tracks(&store)[0].id;
+        assert_eq!(store.track(id).unwrap().unwrap().title, "A");
+
+        store.set_favorite(&[id], true).unwrap();
+        assert!(store.track(id).unwrap().unwrap().favorite);
+        store.edit_track(id, "Edited", "Artist", "Album").unwrap();
+        assert_eq!(store.track(id).unwrap().unwrap().title, "Edited");
+        store.mark_played(id, 42).unwrap();
+        assert_eq!(store.track(id).unwrap().unwrap().last_played, Some(42));
+        store.increment_play_count(id).unwrap();
+        assert_eq!(store.track(id).unwrap().unwrap().play_count, 1);
+
+        store.remove_tracks(&[id]).unwrap();
+        assert!(store.track(id).unwrap().is_none());
+        assert!(store.track_cache.borrow().entries.is_empty());
+    }
+
+    #[test]
+    fn track_cache_rescan_invalidation_returns_new_metadata() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        store
+            .apply_scan(&scan(vec![rec("/music/a.mp3", "a", "A", 10.)]))
+            .unwrap();
+        let id = all_tracks(&store)[0].id;
+        store.track(id).unwrap();
+        store
+            .apply_scan(&scan(vec![rec("/music/a.mp3", "a", "Rescanned", 20.)]))
+            .unwrap();
+        let track = store.track(id).unwrap().unwrap();
+        assert_eq!(track.title, "Rescanned");
+        assert_eq!(track.duration, Some(20.));
+    }
+
+    #[test]
+    fn failed_track_batch_rollback_exposes_no_uncommitted_values() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        store
+            .apply_scan(&scan(vec![rec("/music/a.mp3", "a", "A", 10.)]))
+            .unwrap();
+        let id = all_tracks(&store)[0].id;
+        assert!(!store.track(id).unwrap().unwrap().favorite);
+
+        assert!(store.set_favorite(&[id, 999], true).is_err());
+        let after_favorite = store.track(id).unwrap().unwrap();
+        assert!(!after_favorite.favorite);
+
+        assert!(store.remove_tracks(&[id, 999]).is_err());
+        let after_delete = store.track(id).unwrap().unwrap();
+        assert_eq!(after_delete.id, id);
+        assert!(!after_delete.favorite);
+        assert_eq!(after_delete.title, "A");
+    }
     #[test]
     fn playlist_deduplicates_additions_and_preserves_first_order() {
         let (p, s) = db("playlist");
@@ -793,12 +1356,12 @@ mod tests {
             rec("/music/c.mp3", "c", "C", 100.),
         ]))
         .unwrap();
-        let ids: Vec<_> = s.tracks().unwrap().iter().map(|track| track.id).collect();
+        let ids: Vec<_> = all_tracks(&s).iter().map(|track| track.id).collect();
         let pl = s.create_playlist("mix").unwrap();
         s.add_playlist(pl, &[ids[0], ids[1], ids[0]]).unwrap();
-        let first_entry = s.playlists().unwrap()[0].entries[0].id;
+        let first_entry = playlist_entries(&s, pl)[0].id;
         s.add_playlist(pl, &[ids[1], ids[2], ids[2]]).unwrap();
-        let entries = s.playlists().unwrap().remove(0).entries;
+        let entries = playlist_entries(&s, pl);
         assert_eq!(
             entries
                 .iter()
@@ -811,8 +1374,7 @@ mod tests {
         s.remove_playlist_entry(first_entry).unwrap();
         drop(s);
         assert_eq!(
-            Store::open(&p).unwrap().playlists().unwrap()[0]
-                .entries
+            playlist_entries(&Store::open(&p).unwrap(), pl)
                 .iter()
                 .map(|entry| entry.track_id)
                 .collect::<Vec<_>>(),
@@ -828,7 +1390,7 @@ mod tests {
             rec("/music/b.mp3", "b", "B", 100.),
         ]))
         .unwrap();
-        let tracks = s.tracks().unwrap();
+        let tracks = all_tracks(&s);
         let (a, b) = (tracks[0].id, tracks[1].id);
         s.mark_played(a, 10).unwrap();
         s.increment_play_count(a).unwrap();
@@ -837,8 +1399,8 @@ mod tests {
         s.increment_play_count(a).unwrap();
         drop(s);
         let s = Store::open(&p).unwrap();
-        assert_eq!(s.tracks().unwrap()[0].play_count, 2);
-        assert_eq!(s.tracks().unwrap()[1].play_count, 0);
+        assert_eq!(all_tracks(&s)[0].play_count, 2);
+        assert_eq!(all_tracks(&s)[1].play_count, 0);
         assert_eq!(
             s.history(10)
                 .unwrap()
@@ -863,16 +1425,16 @@ mod tests {
         let (p, s) = db("identity");
         s.apply_scan(&scan(vec![rec("/music/a.mp3", "same", "Raw", 100.)]))
             .unwrap();
-        let id = s.tracks().unwrap()[0].id;
+        let id = all_tracks(&s)[0].id;
         s.edit_track(id, "Override", "A", "B").unwrap();
         s.apply_scan(&scan(vec![rec("/music/b.mp3", "same", "Changed", 100.)]))
             .unwrap();
-        assert_eq!(s.tracks().unwrap()[0].id, id);
-        assert_eq!(s.tracks().unwrap()[0].title, "Override");
+        assert_eq!(all_tracks(&s)[0].id, id);
+        assert_eq!(all_tracks(&s)[0].title, "Override");
         s.remove_tracks(&[id]).unwrap();
         s.apply_scan(&scan(vec![rec("/music/c.mp3", "new", "New", 100.)]))
             .unwrap();
-        assert_ne!(s.tracks().unwrap()[0].id, id);
+        assert_ne!(all_tracks(&s)[0].id, id);
         let _ = fs::remove_file(p);
     }
     #[test]
@@ -885,7 +1447,7 @@ mod tests {
                 rec("/music/c.wav", "c", "C", 100.0),
             ]))
             .unwrap();
-        let tracks = store.tracks().unwrap();
+        let tracks = all_tracks(&store);
         let playlist = store.create_playlist("mix").unwrap();
         store
             .add_playlist(
@@ -899,12 +1461,11 @@ mod tests {
                 ],
             )
             .unwrap();
-        let before = store.playlists().unwrap().remove(0).entries;
+        let before = playlist_entries(&store, playlist);
         store.remove_tracks(&[tracks[0].id]).unwrap();
         store.move_playlist_entry(before[2].id, 0).unwrap();
         assert_eq!(
-            store.playlists().unwrap()[0]
-                .entries
+            playlist_entries(&store, playlist)
                 .iter()
                 .map(|entry| entry.id)
                 .collect::<Vec<_>>(),
@@ -924,14 +1485,14 @@ mod tests {
         record.media.disc_number = Some(1);
         record.media.release_date = Some("2024-03".into());
         store.apply_scan(&scan(vec![record.clone()])).unwrap();
-        let id = store.tracks().unwrap()[0].id;
+        let id = all_tracks(&store)[0].id;
         store.set_favorite(&[id, id], true).unwrap();
         store.mark_played(id, 42).unwrap();
         store.increment_play_count(id).unwrap();
         record.media.track_number = Some(3);
         record.media.bitrate_bps = None;
         store.apply_scan(&scan(vec![record])).unwrap();
-        let track = store.tracks().unwrap().remove(0);
+        let track = all_tracks(&store).remove(0);
         assert!(track.favorite);
         assert_eq!(
             (track.track_number, track.disc_number, track.bits_per_sample),
@@ -941,7 +1502,7 @@ mod tests {
         assert_eq!(track.bitrate_bps, None);
         assert_eq!((track.play_count, track.last_played), (1, Some(42)));
         assert!(store.set_favorite(&[id, 999], false).is_err());
-        assert!(store.tracks().unwrap()[0].favorite);
+        assert!(all_tracks(&store)[0].favorite);
         assert_eq!(
             store.known_files().unwrap()[0]
                 .media
@@ -960,7 +1521,7 @@ mod tests {
         store
             .apply_scan(&scan(vec![rec("/music/a.wav", "hash", "A", 10.)]))
             .unwrap();
-        let id = store.tracks().unwrap()[0].id;
+        let id = all_tracks(&store)[0].id;
         let reader = Connection::open(&path).unwrap();
         reader
             .execute_batch("BEGIN; SELECT * FROM tracks;")
@@ -983,7 +1544,7 @@ mod tests {
         drop(reader);
         drop(store);
         let reopened = Store::open(&path).unwrap();
-        assert_eq!(reopened.tracks().unwrap()[0].last_played, Some(42));
+        assert_eq!(all_tracks(&reopened)[0].last_played, Some(42));
         assert_eq!(
             reopened
                 .conn
@@ -1006,7 +1567,7 @@ mod tests {
                 rec("/music/b.wav", "b", "B", 10.),
             ]))
             .unwrap();
-        let tracks = store.tracks().unwrap();
+        let tracks = all_tracks(&store);
         let playlist = store.create_playlist("mix").unwrap();
         store.add_playlist(playlist, &[tracks[0].id]).unwrap();
         assert!(
@@ -1015,8 +1576,7 @@ mod tests {
                 .is_err()
         );
         assert_eq!(
-            store.playlists().unwrap()[0]
-                .entries
+            playlist_entries(&store, playlist)
                 .iter()
                 .map(|entry| entry.track_id)
                 .collect::<Vec<_>>(),
@@ -1050,7 +1610,7 @@ mod tests {
         store
             .apply_scan(&scan(vec![whole, first.clone(), second.clone(), other]))
             .unwrap();
-        let tracks = store.tracks().unwrap();
+        let tracks = all_tracks(&store);
         let ids: Vec<_> = tracks.iter().map(|t| t.id).collect();
         assert_eq!(ids.iter().collect::<HashSet<_>>().len(), 4);
         store
@@ -1071,7 +1631,7 @@ mod tests {
         let mut rescan = scan(vec![changed.clone(), second.clone()]);
         rescan.roots = vec!["/music/a.cue".into()];
         store.apply_scan(&rescan).unwrap();
-        let after = store.tracks().unwrap();
+        let after = all_tracks(&store);
         assert_eq!(after.iter().map(|t| t.id).collect::<Vec<_>>(), ids);
         assert_eq!(after[1].title, "Custom");
         assert_eq!(after[1].cue, changed.cue);
@@ -1091,28 +1651,22 @@ mod tests {
         assert_eq!(known.media.as_ref().unwrap().title, "New raw title");
         rescan.records = vec![second];
         store.apply_scan(&rescan).unwrap();
-        let after = store.tracks().unwrap();
+        let after = all_tracks(&store);
         assert!(after[1].missing);
         for index in [0, 2, 3] {
             assert!(!after[index].missing);
         }
-        assert_eq!(store.playlists().unwrap()[0].entries.len(), 3);
+        assert_eq!(playlist_entries(&store, playlist).len(), 3);
         rescan.records.push(changed);
         store.apply_scan(&rescan).unwrap();
-        assert!(!store.tracks().unwrap()[1].missing);
+        assert!(!all_tracks(&store)[1].missing);
         store.remove_tracks(&[ids[1]]).unwrap();
         assert_eq!(
-            store
-                .tracks()
-                .unwrap()
-                .iter()
-                .map(|t| t.id)
-                .collect::<Vec<_>>(),
+            all_tracks(&store).iter().map(|t| t.id).collect::<Vec<_>>(),
             vec![ids[0], ids[2], ids[3]]
         );
         assert_eq!(
-            store.playlists().unwrap()[0]
-                .entries
+            playlist_entries(&store, playlist)
                 .iter()
                 .map(|e| e.track_id)
                 .collect::<Vec<_>>(),
@@ -1134,10 +1688,10 @@ mod tests {
         let mut result = scan(vec![first]);
         result.suppressed_sources.push("/music/shared.wav".into());
         store.apply_scan(&result).unwrap();
-        assert!(store.tracks().unwrap().iter().all(|t| !t.missing));
+        assert!(all_tracks(&store).iter().all(|t| !t.missing));
         result.records.clear();
         store.apply_scan(&result).unwrap();
-        let tracks = store.tracks().unwrap();
+        let tracks = all_tracks(&store);
         assert!(!tracks[0].missing);
         assert!(tracks[1].missing);
     }
@@ -1173,10 +1727,10 @@ mod tests {
             let mut result = scan(vec![old]);
             result.roots = vec![root.clone()];
             store.apply_scan(&result).unwrap();
-            let old_id = store.tracks().unwrap()[0].id;
+            let old_id = all_tracks(&store)[0].id;
             result.records = vec![new];
             store.apply_scan(&result).unwrap();
-            let tracks = store.tracks().unwrap();
+            let tracks = all_tracks(&store);
             let new_track = tracks.iter().find(|t| t.title == "New").unwrap();
             assert_eq!(new_track.id == old_id, same_id, "case {index}");
             assert_eq!(tracks.len(), if same_id { 1 } else { 2 });
@@ -1205,14 +1759,14 @@ mod tests {
             let mut result = scan(vec![old.clone()]);
             result.roots = vec![root.clone()];
             store.apply_scan(&result).unwrap();
-            let id = store.tracks().unwrap()[0].id;
+            let id = all_tracks(&store)[0].id;
             store.edit_track(id, "Override", "Artist", "Album").unwrap();
             if !sheet_exists {
                 fs::remove_file(&sheet).unwrap();
             }
             result.records = vec![moved.clone()];
             store.apply_scan(&result).unwrap();
-            let tracks = store.tracks().unwrap();
+            let tracks = all_tracks(&store);
             let new = tracks.iter().find(|t| t.cue == moved.cue).unwrap();
             assert_eq!(new.id == id, !sheet_exists);
             if !sheet_exists {
@@ -1231,11 +1785,11 @@ mod tests {
                 segment("/music/old-b.cue", 1, 0, Some(4500)),
             ]))
             .unwrap();
-        let ids: Vec<_> = store.tracks().unwrap().iter().map(|t| t.id).collect();
+        let ids: Vec<_> = all_tracks(&store).iter().map(|t| t.id).collect();
         store
             .apply_scan(&scan(vec![segment("/music/new.cue", 1, 0, Some(4500))]))
             .unwrap();
-        let tracks = store.tracks().unwrap();
+        let tracks = all_tracks(&store);
         assert_eq!(tracks.len(), 3);
         assert!(!ids.contains(&tracks[2].id));
     }
@@ -1260,9 +1814,245 @@ mod tests {
                 ]))
                 .is_err()
         );
-        let tracks = store.tracks().unwrap();
+        let tracks = all_tracks(&store);
         assert_eq!(tracks.len(), 1);
         assert_eq!(tracks[0].title, "Original");
         assert!(!tracks[0].missing);
+    }
+    #[test]
+    fn bounded_view_queries_filter_order_and_count() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        store
+            .apply_scan(&scan(vec![
+                rec("/music/c.mp3", "c", "Charlie", 1.0),
+                rec("/music/a.mp3", "a", "Alpha", 1.0),
+                rec("/music/b.mp3", "b", "Bravo", 1.0),
+            ]))
+            .unwrap();
+        let ids: Vec<_> = all_tracks(&store).iter().map(|track| track.id).collect();
+        store.set_favorite(&[ids[1]], true).unwrap();
+        let page = store.library_page(None, Some(true), None, 0, 1).unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.rows[0].id, ids[1]);
+        let page = store.library_page(Some("a"), None, None, 0, 2).unwrap();
+        assert_eq!(
+            page.rows.iter().map(|track| track.id).collect::<Vec<_>>(),
+            vec![ids[0], ids[1]]
+        );
+
+        let playlist = store.create_playlist("mix").unwrap();
+        store.add_playlist(playlist, &ids).unwrap();
+        assert_eq!(store.playlist_summaries(0, 1).unwrap()[0].entry_count, 3);
+        let entries = store.playlist_entries_page(playlist, 1, 1).unwrap();
+        assert_eq!(entries.total, 3);
+        assert_eq!(entries.rows.len(), 1);
+        assert_eq!(entries.rows[0].track_id, ids[1]);
+        assert_eq!(store.playlist_track_ids(playlist, 2).unwrap(), ids[..2]);
+    }
+
+    #[test]
+    fn directory_pages_preserve_boundaries_and_duplicate_cue_sources() {
+        use crate::model::{DirectoryRow, PAGE_SIZE};
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let mut records = (0..300)
+            .map(|index| {
+                rec(
+                    &format!("/music/Album/{index:03}.wav"),
+                    &format!("hash-{index}"),
+                    &format!("Track {index}"),
+                    60.0,
+                )
+            })
+            .collect::<Vec<_>>();
+        records.push(rec("/music/AlbumExtra/other.wav", "other", "Other", 60.0));
+        records.push(segment("/music/Album/sheet.cue", 1, 0, Some(750)));
+        records.push(segment("/music/Album/sheet.cue", 2, 750, None));
+        store.apply_scan(&scan(records)).unwrap();
+        let root = store.directory_page(Path::new(""), 0, PAGE_SIZE).unwrap();
+        assert_eq!(root.rows, [DirectoryRow::Directory { path: "/".into() }]);
+        let music = store
+            .directory_page(Path::new("/music"), 0, PAGE_SIZE)
+            .unwrap();
+        assert_eq!(music.total, 4);
+        assert!(
+            matches!(&music.rows[0], DirectoryRow::Directory { path } if path == Path::new("/music/Album"))
+        );
+        let first = store
+            .directory_page(Path::new("/music/Album/"), 0, usize::MAX)
+            .unwrap();
+        assert_eq!(first.total, 300);
+        assert_eq!(first.rows.len(), PAGE_SIZE);
+        let last = store
+            .directory_page(Path::new("/music/Album"), PAGE_SIZE, PAGE_SIZE)
+            .unwrap();
+        assert_eq!(last.rows.len(), 44);
+        assert!(matches!(&last.rows[43], DirectoryRow::Track(row) if row.title == "Track 299"));
+        let cue_sources = store
+            .directory_page(Path::new("/music"), 2, PAGE_SIZE)
+            .unwrap();
+        assert_eq!(cue_sources.rows.len(), 2);
+        assert!(
+            cue_sources
+                .rows
+                .iter()
+                .all(|row| matches!(row, DirectoryRow::Track(_)))
+        );
+        let tail_id = store
+            .track_id_for_source(Path::new("/music/Album/299.wav"), None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(store.track(tail_id).unwrap().unwrap().title, "Track 299");
+        let cue_id = store
+            .track_id_for_source(Path::new("/music/Album/sheet.cue"), Some(2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(store.track(cue_id).unwrap().unwrap().cue.unwrap().number, 2);
+        assert!(
+            store
+                .track_id_for_source(Path::new("/music/shared.wav"), None)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn library_pages_use_literal_unicode_search_and_database_sorting() {
+        use crate::model::LibrarySort;
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        store
+            .apply_scan(&scan(vec![
+                rec("/music/a.wav", "a", "ÉTÉ_100%", 60.0),
+                rec("/music/b.wav", "b", "Other", 60.0),
+            ]))
+            .unwrap();
+        let literal = store
+            .library_view_page(Some("été_100%"), None, None, LibrarySort::Id, 0, 256)
+            .unwrap();
+        assert_eq!(literal.total, 1);
+        assert_eq!(literal.rows[0].title, "ÉTÉ_100%");
+        assert_eq!(
+            store
+                .library_page(Some("été_100%"), None, None, 0, 256)
+                .unwrap()
+                .total,
+            1
+        );
+        let id = store
+            .library_page(Some("Other"), None, None, 0, 1)
+            .unwrap()
+            .rows[0]
+            .id;
+        store.increment_play_count(id).unwrap();
+        let ranked = store
+            .library_view_page(None, None, None, LibrarySort::MostPlayed, 0, 1)
+            .unwrap();
+        assert_eq!(ranked.rows[0].id, id);
+        assert_eq!(store.library_stats().unwrap().play_count, 1);
+        assert_eq!(
+            store
+                .library_view_page(None, None, None, LibrarySort::Id, 2, 256)
+                .unwrap()
+                .rows,
+            []
+        );
+    }
+
+    #[test]
+    fn directory_selections_deduplicate_atomically_without_capping_playlists() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        store.conn.execute_batch("WITH RECURSIVE ids(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM ids WHERE n<5000) INSERT INTO tracks(path) SELECT '/music/' || CASE WHEN n<=2500 THEN 'A/' ELSE 'B/' END || n || '.wav' FROM ids").unwrap();
+        let directories = vec![
+            PathBuf::from("/music/A"),
+            PathBuf::from("/music/B"),
+            PathBuf::from("/music/A"),
+        ];
+        assert!(store.source_track_ids(&directories, &[1], 4096).is_err());
+        let ids = store
+            .source_track_ids(&directories[..1], &[1, 1], 2500)
+            .unwrap();
+        assert_eq!(ids.len(), 2500);
+        assert_eq!((ids[0], ids[2499]), (1, 2500));
+        let playlist = store.create_playlist("Unlimited").unwrap();
+        store.add_playlist(playlist, &[5000]).unwrap();
+        store
+            .add_playlist_sources(playlist, &directories, &[1, 1])
+            .unwrap();
+        let first = store.playlist_entries_page(playlist, 0, 2).unwrap();
+        assert_eq!(first.total, 5000);
+        assert_eq!(
+            first
+                .rows
+                .iter()
+                .map(|entry| entry.track_id)
+                .collect::<Vec<_>>(),
+            [5000, 1]
+        );
+        let last = store.playlist_entries_page(playlist, 4999, 1).unwrap();
+        assert_eq!(last.rows[0].track_id, 4999);
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT MAX(position) FROM playlist_entries WHERE playlist_id=?1",
+                    [playlist],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            4999
+        );
+        store
+            .add_playlist_sources(playlist, &directories, &[])
+            .unwrap();
+        assert_eq!(
+            store.playlist_entries_page(playlist, 0, 0).unwrap().total,
+            5000
+        );
+        let empty = store.create_playlist("Atomic").unwrap();
+        assert!(
+            store
+                .add_playlist_sources(empty, &directories, &[99999])
+                .is_err()
+        );
+        assert_eq!(store.playlist_entries_page(empty, 0, 0).unwrap().total, 0);
+    }
+
+    #[test]
+    fn bulk_missing_cleanup_spans_pages_and_preserves_playlist_reordering() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        store.conn.execute_batch("WITH RECURSIVE ids(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM ids WHERE n<1000) INSERT INTO tracks(path,missing) SELECT '/music/'||n||'.wav',n<=500 FROM ids").unwrap();
+        let playlist = store.create_playlist("Availability").unwrap();
+        store.add_playlist(playlist, &[1000]).unwrap();
+        store
+            .add_playlist_sources(playlist, &[PathBuf::from("/music")], &[])
+            .unwrap();
+        store.mark_played(25, 42).unwrap();
+        store.mark_played(1000, 43).unwrap();
+        store.remove_missing_tracks().unwrap();
+        assert_eq!(store.library_stats().unwrap().total, 500);
+        assert_eq!(
+            store
+                .library_page(None, None, Some(true), 0, 1)
+                .unwrap()
+                .total,
+            0
+        );
+        assert_eq!(
+            store
+                .history(200)
+                .unwrap()
+                .iter()
+                .map(|entry| entry.track_id)
+                .collect::<Vec<_>>(),
+            [1000]
+        );
+        let page = store.playlist_entries_page(playlist, 0, 1).unwrap();
+        assert_eq!(page.total, 500);
+        assert_eq!(page.rows[0].track_id, 1000);
+        store.move_playlist_entry(page.rows[0].id, 499).unwrap();
+        assert_eq!(
+            store.playlist_entries_page(playlist, 499, 1).unwrap().rows[0].track_id,
+            1000
+        );
     }
 }
