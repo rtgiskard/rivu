@@ -164,8 +164,6 @@ impl WaveformPlot {
     }
 }
 
-const WAVEFORM_PALETTE_SEGMENTS: usize = 8;
-
 fn append_rect(path: &mut PathBuilder, bounds: Bounds<Pixels>) {
     path.move_to(bounds.origin);
     path.line_to(point(bounds.right(), bounds.top()));
@@ -178,15 +176,16 @@ fn paint_waveform_gradient(
     mut path: Path<Pixels>,
     plot: Bounds<Pixels>,
     upper: bool,
-    palette: fn(f32) -> u32,
+    palette: &super::visuals::PaletteLut,
     color_level: fn(f32) -> f32,
     window: &mut Window,
 ) {
     path.bounds = plot;
     let mut path = Some(path);
-    for segment in 0..WAVEFORM_PALETTE_SEGMENTS {
-        let low = segment as f32 / WAVEFORM_PALETTE_SEGMENTS as f32;
-        let high = (segment + 1) as f32 / WAVEFORM_PALETTE_SEGMENTS as f32;
+    let segments = super::visuals::palette_gradient_segments(plot.size.height / px(1.0));
+    for segment in 0..segments {
+        let low = segment as f32 / segments as f32;
+        let high = (segment + 1) as f32 / segments as f32;
         let (start, end, start_level, end_level) = if upper {
             (0.5 * (1.0 - high), 0.5 * (1.0 - low), low, high)
         } else {
@@ -199,12 +198,21 @@ fn paint_waveform_gradient(
                 (plot.size.height * (end - start)).max(px(1.0)),
             ),
         );
+        // The path bounds cover the full plot, so stops must stay in global
+        // coordinates. Using 0..1 here flattens every masked slice into a
+        // solid color and exposes the slice boundaries.
         let background = linear_gradient(
             0.0,
-            linear_color_stop(rgb(palette(color_level(start_level))), 0.0),
-            linear_color_stop(rgb(palette(color_level(end_level))), 1.0),
+            linear_color_stop(
+                rgb(palette.lookup_without_floor(color_level(start_level))),
+                start,
+            ),
+            linear_color_stop(
+                rgb(palette.lookup_without_floor(color_level(end_level))),
+                end,
+            ),
         );
-        let segment_path = if segment + 1 == WAVEFORM_PALETTE_SEGMENTS {
+        let segment_path = if segment + 1 == segments {
             path.take()
                 .expect("last waveform gradient segment owns the path")
         } else {
@@ -532,7 +540,7 @@ impl Waveform {
         let source = Rc::clone(self.source.as_ref().expect("preview source is present"));
         let shared = Arc::clone(&self.shared);
         let waveform = Rc::clone(&self.plot);
-        let palette = super::visuals::palette_function_without_floor(config.visual_palette);
+        let palette = super::visuals::active_palette_lut(config.visual_palette);
         let water = rgb(config.waveform_cursor_color.rgb());
         let background = rgb(config.visual_background.rgb());
         let glow = config.waveform_glow;
@@ -660,7 +668,7 @@ impl Waveform {
                                             path,
                                             plot,
                                             true,
-                                            palette,
+                                            palette.as_ref(),
                                             waveform_rms_color_level,
                                             window,
                                         );
@@ -672,7 +680,7 @@ impl Waveform {
                                             path,
                                             plot,
                                             false,
-                                            palette,
+                                            palette.as_ref(),
                                             waveform_rms_color_level,
                                             window,
                                         );
@@ -685,7 +693,7 @@ impl Waveform {
                                             path,
                                             plot,
                                             true,
-                                            palette,
+                                            palette.as_ref(),
                                             waveform_color_level,
                                             window,
                                         );
@@ -693,7 +701,7 @@ impl Waveform {
                                             lower_path,
                                             plot,
                                             false,
-                                            palette,
+                                            palette.as_ref(),
                                             waveform_color_level,
                                             window,
                                         );

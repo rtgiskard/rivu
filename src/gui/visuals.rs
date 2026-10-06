@@ -28,6 +28,9 @@ use crate::{
 
 const HISTORY_GAP_RESET: Duration = Duration::from_secs(1);
 const MAX_SPECTRUM_BARS: usize = 2000;
+const PALETTE_GRADIENT_MIN_SEGMENTS: usize = 8;
+const PALETTE_GRADIENT_MAX_SEGMENTS: usize = 16;
+const PALETTE_GRADIENT_MAX_SPAN_PIXELS: f32 = 16.0;
 const VERTICAL_SPECTROGRAM_SCALE: f32 = 0.5;
 const TOKYO_NIGHT_STOPS: &[(f32, [u8; 3])] = &[
     (0.0, [65, 72, 110]),
@@ -53,6 +56,61 @@ fn palette_stops(palette: VisualizationPalette) -> &'static [(f32, [u8; 3])] {
         VisualizationPalette::TokyoNight => TOKYO_NIGHT_STOPS,
         VisualizationPalette::Deadbeef => DEADBEEF_STOPS,
     }
+}
+
+const PALETTE_LUT_SIZE: usize = 1024;
+
+pub(super) struct PaletteLut {
+    palette: VisualizationPalette,
+    colors: [[u8; 3]; PALETTE_LUT_SIZE],
+}
+
+impl PaletteLut {
+    fn new(palette: VisualizationPalette) -> Self {
+        Self {
+            palette,
+            colors: std::array::from_fn(|index| {
+                let fraction = index as f32 / (PALETTE_LUT_SIZE - 1) as f32;
+                gradient(fraction, palette_stops(palette))
+            }),
+        }
+    }
+
+    pub(super) fn lookup_rgb(&self, fraction: f32) -> [u8; 3] {
+        let index = (fraction.clamp(0.0, 1.0) * (PALETTE_LUT_SIZE - 1) as f32).round() as usize;
+        self.colors[index]
+    }
+
+    pub(super) fn lookup_raw(&self, fraction: f32) -> u32 {
+        stop_color(self.lookup_rgb(fraction))
+    }
+
+    pub(super) fn lookup_without_floor(&self, fraction: f32) -> u32 {
+        let fraction = fraction.clamp(0.0, 1.0);
+        let mapped = match self.palette {
+            VisualizationPalette::Deadbeef => 0.06 + fraction * 0.94,
+            VisualizationPalette::TokyoNight => fraction,
+        };
+        self.lookup_raw(mapped)
+    }
+}
+
+thread_local! {
+    static ACTIVE_PALETTE_LUT: RefCell<Option<Rc<PaletteLut>>> = const { RefCell::new(None) };
+}
+
+pub(super) fn active_palette_lut(palette: VisualizationPalette) -> Rc<PaletteLut> {
+    ACTIVE_PALETTE_LUT.with_borrow_mut(|active| {
+        if active.as_ref().is_none_or(|lut| lut.palette != palette) {
+            *active = Some(Rc::new(PaletteLut::new(palette)));
+        }
+        Rc::clone(active.as_ref().expect("active palette LUT is initialized"))
+    })
+}
+
+pub(super) fn palette_gradient_segments(height: f32) -> usize {
+    ((height / PALETTE_GRADIENT_MAX_SPAN_PIXELS).ceil() as usize)
+        .clamp(PALETTE_GRADIENT_MIN_SEGMENTS, PALETTE_GRADIENT_MAX_SEGMENTS)
 }
 
 #[derive(Default)]
@@ -123,6 +181,7 @@ struct VisualData {
     last_update: Option<Duration>,
     top_db: f32,
     visual_background: u32,
+    palette_lut: Rc<PaletteLut>,
     spectrum_db_range: f32,
     spectrum_bars: u32,
     spectrum_bar_width: f32,
@@ -187,6 +246,7 @@ impl Visuals {
                 spectrum_points: Vec::with_capacity(MAX_SPECTRUM_BARS),
                 last_update: None,
                 top_db: 0.0,
+                palette_lut: active_palette_lut(VisualizationPalette::Deadbeef),
                 visual_background: 0x08090c,
                 spectrum_db_range: 70.0,
                 spectrum_bars: 0,
@@ -228,7 +288,9 @@ impl Visuals {
         let mut data = self.data.borrow_mut();
         let configured_history_columns =
             history_column_count(config.spectrogram_history_seconds, config.analysis_fps);
-        let changed = data.visual_background != config.visual_background.rgb()
+        let palette_changed = data.palette_lut.palette != config.visual_palette;
+        let changed = palette_changed
+            || data.visual_background != config.visual_background.rgb()
             || data.spectrum_db_range != config.spectrum_db_range
             || data.spectrum_grid != config.spectrum_grid
             || data.spectrum_bars != config.spectrum_bars
@@ -261,10 +323,16 @@ impl Visuals {
             || data.configured_history_columns != configured_history_columns;
         let analysis_changed = data.spectrum_fft_size != config.spectrum_fft_size
             || data.spectrum_window != config.spectrum_window;
-        let heat_changed = data.visual_background != config.visual_background.rgb()
+        let heat_changed = palette_changed
+            || data.visual_background != config.visual_background.rgb()
             || data.spectrogram_db_range != config.spectrogram_db_range
             || data.spectrogram_interpolate != config.spectrogram_interpolate
             || data.spectrogram_interpolation_points != config.spectrogram_interpolation_points;
+        data.palette_lut = if palette_changed {
+            active_palette_lut(config.visual_palette)
+        } else {
+            Rc::clone(&data.palette_lut)
+        };
         data.visual_background = config.visual_background.rgb();
         data.spectrum_db_range = config.spectrum_db_range;
         data.spectrum_bars = config.spectrum_bars;
@@ -925,13 +993,13 @@ impl VisualData {
                     let path = shape_path
                         .build()
                         .map_err(|error| format!("Cannot tessellate spectrum bars: {error}"))?;
-                    paint_spectrum_path(path, plot, window);
+                    paint_spectrum_path(path, plot, window, self.palette_lut.as_ref());
                 }
                 if style == SpectrumStyle::Led && any_led {
                     let path = led_path
                         .build()
                         .map_err(|error| format!("Cannot tessellate spectrum LED bars: {error}"))?;
-                    paint_spectrum_path(path, plot, window);
+                    paint_spectrum_path(path, plot, window, self.palette_lut.as_ref());
                 }
                 if continuous && any_visible {
                     paint_spectrum_shape(
@@ -939,6 +1007,7 @@ impl VisualData {
                         plot,
                         style,
                         self.spectrum_interpolate || style == SpectrumStyle::Solid,
+                        self.palette_lut.as_ref(),
                         window,
                     )?;
                 }
@@ -946,7 +1015,7 @@ impl VisualData {
                     let path = peak_path
                         .build()
                         .map_err(|error| format!("Cannot tessellate spectrum peaks: {error}"))?;
-                    paint_spectrum_path(path, plot, window);
+                    paint_spectrum_path(path, plot, window, self.palette_lut.as_ref());
                 }
                 Ok(())
             },
@@ -1050,7 +1119,7 @@ impl VisualData {
                         / self.spectrogram_db_range)
                         .clamp(0.0, 1.0);
                     let [red, green, blue] = if intensity > 0.0 {
-                        gradient(intensity, DEADBEEF_STOPS)
+                        self.palette_lut.lookup_rgb(intensity)
                     } else {
                         [0, 0, 0]
                     };
@@ -1200,6 +1269,7 @@ fn paint_spectrum_shape(
     plot: Bounds<Pixels>,
     style: SpectrumStyle,
     interpolate: bool,
+    palette: &PaletteLut,
     window: &mut Window,
 ) -> Result<(), String> {
     if points.is_empty() {
@@ -1249,7 +1319,7 @@ fn paint_spectrum_shape(
     let path = builder
         .build()
         .map_err(|error| format!("Cannot tessellate spectrum shape: {error}"))?;
-    paint_spectrum_path(path, plot, window);
+    paint_spectrum_path(path, plot, window, palette);
     Ok(())
 }
 
@@ -1261,25 +1331,33 @@ fn append_rect(path: &mut PathBuilder, bounds: Bounds<Pixels>) {
     path.close();
 }
 
-fn paint_spectrum_path(mut path: Path<Pixels>, plot: Bounds<Pixels>, window: &mut Window) {
+fn paint_spectrum_path(
+    mut path: Path<Pixels>,
+    plot: Bounds<Pixels>,
+    window: &mut Window,
+    palette: &PaletteLut,
+) {
     // GPUI resolves gradient coordinates from Path::bounds; keep every segment global.
     path.bounds = plot;
     let mut path = Some(path);
-    for (index, pair) in DEADBEEF_STOPS.windows(2).enumerate() {
-        let low = pair[0].0;
-        let high = pair[1].0;
+    let segments = palette_gradient_segments(plot.size.height / px(1.0));
+    for segment in 0..segments {
+        let low = segment as f32 / segments as f32;
+        let high = (segment + 1) as f32 / segments as f32;
         let top = plot.bottom() - plot.size.height * high;
         let bottom = plot.bottom() - plot.size.height * low;
         let mask = Bounds::new(
             point(plot.left(), top),
             size(plot.size.width, (bottom - top).max(px(1.0))),
         );
+        // Linear spans approximate the spline and share endpoint colors.
+        // Their slopes are not continuous; masks remain a rendering compromise.
         let background = linear_gradient(
             0.0,
-            linear_color_stop(rgb(stop_color(pair[0].1)), 0.0),
-            linear_color_stop(rgb(stop_color(pair[1].1)), 1.0),
+            linear_color_stop(rgb(palette.lookup_without_floor(low)), 1.0 - high),
+            linear_color_stop(rgb(palette.lookup_without_floor(high)), 1.0 - low),
         );
-        let segment = if index + 2 == DEADBEEF_STOPS.len() {
+        let segment = if segment + 1 == segments {
             path.take()
                 .expect("last Spectrum gradient segment owns the path")
         } else {
@@ -1456,19 +1534,48 @@ fn frequency_label(frequency: f32) -> SharedString {
     }
 }
 
+/// Cubic Hermite interpolation keeps the palette position and tangent
+/// continuous at every authored color stop. The renderer still accepts only
+/// two stops, so callers approximate this curve with short global spans.
 fn gradient(value: f32, stops: &[(f32, [u8; 3])]) -> [u8; 3] {
+    debug_assert!(stops.len() >= 2);
     let value = value.clamp(0.0, 1.0);
-    for pair in stops.windows(2) {
-        if value <= pair[1].0 {
-            let fraction = (value - pair[0].0) / (pair[1].0 - pair[0].0);
-            return std::array::from_fn(|channel| {
-                (pair[0].1[channel] as f32
-                    + fraction * (pair[1].1[channel] as f32 - pair[0].1[channel] as f32))
-                    as u8
-            });
+    let index = stops
+        .windows(2)
+        .position(|pair| value <= pair[1].0)
+        .unwrap_or(stops.len() - 2);
+    let (x0, c0) = stops[index];
+    let (x1, c1) = stops[index + 1];
+    let span = (x1 - x0).max(f32::EPSILON);
+    let t = ((value - x0) / span).clamp(0.0, 1.0);
+    let slope = |point: usize, channel: usize| {
+        if point == 0 {
+            (stops[1].1[channel] as f32 - stops[0].1[channel] as f32)
+                / (stops[1].0 - stops[0].0).max(f32::EPSILON)
+        } else if point + 1 == stops.len() {
+            let left = point - 1;
+            (stops[point].1[channel] as f32 - stops[left].1[channel] as f32)
+                / (stops[point].0 - stops[left].0).max(f32::EPSILON)
+        } else {
+            let left = point - 1;
+            let right = point + 1;
+            (stops[right].1[channel] as f32 - stops[left].1[channel] as f32)
+                / (stops[right].0 - stops[left].0).max(f32::EPSILON)
         }
-    }
-    stops[stops.len() - 1].1
+    };
+    let t2 = t * t;
+    let t3 = t2 * t;
+    let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
+    let h10 = t3 - 2.0 * t2 + t;
+    let h01 = -2.0 * t3 + 3.0 * t2;
+    let h11 = t3 - t2;
+    std::array::from_fn(|channel| {
+        let value = h00 * c0[channel] as f32
+            + h10 * span * slope(index, channel)
+            + h01 * c1[channel] as f32
+            + h11 * span * slope(index + 1, channel);
+        value.round().clamp(0.0, 255.0) as u8
+    })
 }
 fn note_label(frequency: f32) -> SharedString {
     const NAMES: [&str; 12] = [
@@ -1477,28 +1584,6 @@ fn note_label(frequency: f32) -> SharedString {
     let midi = (12.0 * (frequency / 440.0).log2() + 69.0).round() as i32;
     let octave = midi.div_euclid(12) - 1;
     format!("{}{octave}", NAMES[midi.rem_euclid(12) as usize]).into()
-}
-
-pub(super) fn palette_function_without_floor(palette: VisualizationPalette) -> fn(f32) -> u32 {
-    match palette {
-        VisualizationPalette::TokyoNight => palette_tokyo_night_color,
-        VisualizationPalette::Deadbeef => palette_deadbeef_without_floor,
-    }
-}
-
-fn palette_tokyo_night_color(fraction: f32) -> u32 {
-    palette_color_with(VisualizationPalette::TokyoNight, fraction)
-}
-fn palette_deadbeef_without_floor(fraction: f32) -> u32 {
-    palette_color_with(
-        VisualizationPalette::Deadbeef,
-        0.06 + fraction.clamp(0.0, 1.0) * 0.94,
-    )
-}
-
-fn palette_color_with(palette: VisualizationPalette, fraction: f32) -> u32 {
-    let color = gradient(fraction, palette_stops(palette));
-    (u32::from(color[0]) << 16) | (u32::from(color[1]) << 8) | u32::from(color[2])
 }
 
 fn paint_label(
@@ -1544,15 +1629,39 @@ mod tests {
     #[test]
     fn deadbeef_palettes_have_expected_endpoints() {
         assert_eq!(
-            palette_color_with(VisualizationPalette::Deadbeef, 0.0),
+            active_palette_lut(VisualizationPalette::Deadbeef).lookup_raw(0.0),
             0x000000
         );
         assert_eq!(
-            palette_color_with(VisualizationPalette::Deadbeef, 1.0),
+            active_palette_lut(VisualizationPalette::Deadbeef).lookup_raw(1.0),
             0xff0000
         );
         assert_eq!(gradient(0.0, DEADBEEF_STOPS), [0, 0, 0]);
         assert_eq!(gradient(1.0, DEADBEEF_STOPS), [255, 0, 0]);
+    }
+    #[test]
+    fn visual_palette_lookup_applies_deadbeef_low_end_mapping() {
+        let lut = active_palette_lut(VisualizationPalette::Deadbeef);
+        assert_eq!(lut.lookup_without_floor(0.0), lut.lookup_raw(0.06));
+        assert_eq!(lut.lookup_without_floor(1.0), lut.lookup_raw(1.0));
+        let tokyo = active_palette_lut(VisualizationPalette::TokyoNight);
+        assert_eq!(tokyo.lookup_without_floor(0.0), tokyo.lookup_raw(0.0));
+    }
+
+    #[test]
+    fn smooth_gradient_preserves_palette_stops() {
+        for stops in [TOKYO_NIGHT_STOPS, DEADBEEF_STOPS] {
+            for &(position, color) in stops {
+                assert_eq!(gradient(position, stops), color);
+            }
+        }
+    }
+    #[test]
+    fn palette_gradient_segments_are_bounded_by_pixel_height() {
+        assert_eq!(palette_gradient_segments(1.0), 8);
+        assert_eq!(palette_gradient_segments(128.0), 8);
+        assert_eq!(palette_gradient_segments(256.0), 16);
+        assert_eq!(palette_gradient_segments(1024.0), 16);
     }
 
     fn frame(time: f64, level: f32) -> AnalysisFrame {
