@@ -667,14 +667,15 @@ impl Store {
 
     pub fn history(&self, limit: usize) -> Result<Vec<HistoryEntry>> {
         let mut q = self.conn.prepare(
-            "SELECT id,COALESCE(title_override,raw_title),last_played FROM tracks
+            "SELECT id,COALESCE(title_override,raw_title),play_count,last_played FROM tracks
              WHERE last_played IS NOT NULL ORDER BY last_played DESC,id DESC LIMIT ?",
         )?;
         Ok(q.query_map([limit.min(i64::MAX as usize) as i64], |r| {
             Ok(HistoryEntry {
                 track_id: r.get(0)?,
                 title: r.get(1)?,
-                played_at: r.get(2)?,
+                play_count: r.get::<_, i64>(2)? as u64,
+                played_at: r.get(3)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?)

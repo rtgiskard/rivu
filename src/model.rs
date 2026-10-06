@@ -158,6 +158,7 @@ pub enum RepeatMode {
 pub struct HistoryEntry {
     pub track_id: i64,
     pub title: String,
+    pub play_count: u64,
     pub played_at: i64,
 }
 

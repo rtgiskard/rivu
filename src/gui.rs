@@ -340,8 +340,9 @@ fn icon_button(
             "󰑖" => Some("↻"),
             "󰑘" => Some("↻₁"),
             "󰐹" => Some("♫"),
-            "\u{f384}" => Some("F"),
             "󱀞" => Some("↔"),
+            "\u{f0193}" => Some("▣"),
+            "\u{f384}" => Some("F"),
             "󰌾" => Some("▣"),
             "󰉋" => Some("▸"),
             "󰉢" => Some("≡"),
@@ -497,6 +498,13 @@ struct PanelMenu {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+enum HistorySort {
+    Recent,
+    Title,
+    Plays,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum ListFocus {
     Library,
     Queue,
@@ -580,6 +588,8 @@ struct GuiApp {
     ranking_rows: Vec<LibraryRow>,
     ranking_total: usize,
     ranking_offset: usize,
+    history_sort: HistorySort,
+    history_sort_desc: bool,
     library_stats: Option<crate::model::LibraryStats>,
     settings: settings::Settings,
     visuals: visuals::Visuals,
@@ -886,6 +896,13 @@ impl GuiApp {
                 cx.notify();
             }
         }));
+        for field in [Field::Title, Field::Artist, Field::Album] {
+            subscriptions.push(cx.subscribe(&inputs[&field], |_, _, event, cx| {
+                if matches!(event, InputEvent::Changed) {
+                    cx.notify();
+                }
+            }));
+        }
         subscriptions.push(
             cx.observe_window_visibility(window, |this, visibility, _, cx| {
                 this.window_visible = matches!(visibility, WindowVisibility::Visible);
@@ -949,6 +966,8 @@ impl GuiApp {
             ranking_rows: Vec::new(),
             ranking_total: 0,
             ranking_offset: 0,
+            history_sort: HistorySort::Recent,
+            history_sort_desc: true,
             library_stats: None,
             visuals: visuals::Visuals::new(),
             radial_spectrum: radial_spectrum::RadialSpectrum::new(),
