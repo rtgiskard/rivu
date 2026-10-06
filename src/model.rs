@@ -127,6 +127,9 @@ pub struct LibraryStats {
 /// Maximum number of rows retained by any in-memory view page.
 pub const PAGE_SIZE: usize = 256;
 
+/// Quiet interval before interactive search submits its final query.
+pub(crate) const SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(150);
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct QueueEntry {
     pub id: u64,

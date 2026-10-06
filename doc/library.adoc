@@ -37,6 +37,11 @@ Dragging files or directories to Queue or a Playlist adds their matching tracks.
 Normal scans reuse cached probes; `--force` rereads metadata while preserving
 track identity and user data.
 
+Interactive text search uses a 150 ms quiet interval to coalesce rapid edits.
+GUI responses for superseded queries are discarded; the TUI also waits for the
+last edit's deadline before submitting a search. Typing and playback controls
+remain responsive while the database query runs.
+
 == Database-backed views and queue limits
 
 The complete library and playlists stay in SQLite, not in published playback

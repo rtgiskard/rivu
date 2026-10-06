@@ -499,6 +499,7 @@ struct GuiApp {
     selected_entry: Option<i64>,
     metadata_track: Option<i64>,
     error: Option<String>,
+    request_generations: HashMap<u8, u64>,
     filtered_rows: Vec<usize>,
     library_index: HashMap<i64, usize>,
     library_tree: TreeState<LibraryNode>,
@@ -532,6 +533,119 @@ struct GuiApp {
     _subscriptions: Vec<Subscription>,
 }
 impl GuiApp {
+    fn request_view(&mut self, command: Command, generation: u64, cx: &mut Context<Self>) {
+        let kind = match &command {
+            Command::LibraryPage {
+                sort: LibrarySort::MostPlayed,
+                ..
+            } => 5,
+            Command::LibraryPage { .. } => 0,
+            Command::PlaylistSummaries { .. } => 2,
+            Command::PlaylistEntries { .. } => 3,
+            Command::Track { .. } => 4,
+            Command::LibraryStats => 6,
+            _ => return,
+        };
+        self.request_generations.insert(kind, generation);
+        let delay = if matches!(&command, Command::LibraryPage { query: Some(_), .. }) {
+            crate::model::SEARCH_DEBOUNCE
+        } else {
+            Duration::from_millis(80)
+        };
+        let handle = self.handle.clone();
+        cx.spawn(async move |this, cx| {
+            // Search waits for a quiet interval; generations reject superseded queries.
+            cx.background_executor().timer(delay)
+                .await;
+            if !this
+                .update(cx, |this, _| {
+                    this.request_generations.get(&kind) == Some(&generation)
+                })
+                .unwrap_or(false)
+            {
+                return;
+            }
+            let response = cx
+                .background_executor()
+                .spawn(async move { handle.request(command) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.request_generations.get(&kind) != Some(&generation) {
+                    return;
+                }
+                match kind {
+                    0 => this.library_buffer.pending = false,
+                    2 => this.playlist_buffer.pending = false,
+                    3 => this.playlist_entries.pending = false,
+                    _ => {}
+                }
+                if !response.ok {
+                    this.error = response.error;
+                    cx.notify();
+                    return;
+                }
+                if (kind <= 1 || kind == 4 || kind == 5 || kind == 6)
+                    && response.state.library.revision != this.state.library.revision
+                {
+                    match kind {
+                        0 => this.request_library_page(this.library_buffer.offset, cx),
+                        4 => {
+                            if let Some(id) = this.metadata_track {
+                                this.request_track(id, cx);
+                            }
+                        }
+                        5 | 6 => this.request_ranking(this.ranking_offset, cx),
+                        _ => {}
+                    }
+                    return;
+                }
+                if (kind == 2 || kind == 3)
+                    && response.state.library.playlist_revision
+                        != this.state.library.playlist_revision
+                {
+                    if kind == 2 {
+                        this.request_playlist_summaries(this.playlist_buffer.offset, cx);
+                    } else if let Some(id) = this.playlist_entries.playlist_id {
+                        this.request_playlist_entries(id, this.playlist_entries.offset, cx);
+                    }
+                    return;
+                }
+                match response.view {
+                    Some(ViewResponse::LibraryPage(page)) if kind == 5 => {
+                        this.ranking_total = page.total;
+                        this.ranking_rows = page.rows;
+                    }
+                    Some(ViewResponse::LibraryPage(page)) => {
+                        this.library_buffer.total = page.total;
+                        this.library_buffer.rows = page.rows;
+                    }
+                    Some(ViewResponse::PlaylistSummaries(page)) => {
+                        this.playlist_buffer.total = page.total;
+                        this.playlist_buffer.rows = page.rows;
+                    }
+                    Some(ViewResponse::PlaylistEntries(page)) => {
+                        this.playlist_entries.total = page.total;
+                        this.playlist_entries.rows = page.rows;
+                        this.reconcile_playlist_selection();
+                    }
+                    Some(ViewResponse::Track(track)) => {
+                        if let Some(track) = track.as_ref() {
+                            this.set_value(Field::Title, track.title.clone(), cx);
+                            this.set_value(Field::Artist, track.artist.clone(), cx);
+                            this.set_value(Field::Album, track.album.clone(), cx);
+                        }
+                        this.full_track = track;
+                        this.sync_waveform(cx);
+                    }
+                    Some(ViewResponse::LibraryStats(stats)) => this.library_stats = Some(stats),
+                    _ => {}
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn input_focused(&self, window: &Window, cx: &App) -> bool {
         self.inputs
             .values()
@@ -831,6 +945,7 @@ impl GuiApp {
             metadata_track: None,
             error,
             library_index: HashMap::new(),
+            request_generations: HashMap::new(),
             filtered_rows: Vec::new(),
             library_tree: TreeState::new([]),
             library_tree_scroll: UniformListScrollHandle::new(),

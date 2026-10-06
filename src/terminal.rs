@@ -360,6 +360,111 @@ struct UiState {
     page_size: usize,
 }
 impl UiState {
+    fn query_request(&self, state: &TuiSnapshot) -> Option<QueryRequest> {
+        let limit = state.system.page_size as usize;
+        let (kind, offset) = match &self.view {
+            View::Search(search) if search.results.needs_page(limit) && search.ready(Instant::now()) => (
+                QueryKind::Search(search.query.clone()),
+                search.results.offset(limit),
+            ),
+            View::Tree(tree) if tree.entries.needs_page(limit) => (
+                if tree.directory.as_os_str().is_empty() {
+                    QueryKind::Roots(Arc::clone(&tree.roots))
+                } else {
+                    QueryKind::Directory(tree.directory.clone())
+                },
+                tree.entries.offset(limit),
+            ),
+            View::Playlists(playlists) if playlists.needs_page(limit) => {
+                (QueryKind::Playlists, playlists.offset(limit))
+            }
+            View::PlaylistDetail { detail, .. } if detail.entries.needs_page(limit) => (
+                QueryKind::Playlist(detail.playlist_id),
+                detail.entries.offset(limit),
+            ),
+            _ => return None,
+        };
+        Some(QueryRequest {
+            kind,
+            offset,
+            limit,
+            view_revision: self.query_revision,
+            library_revision: state.library.revision,
+            playlist_revision: state.library.playlist_revision,
+        })
+    }
+    fn apply_query(
+        &mut self,
+        state: &TuiSnapshot,
+        request: &QueryRequest,
+        result: Result<QueryResult, String>,
+    ) -> bool {
+        if self.query_request(state).as_ref() != Some(request) {
+            if self.requested.as_ref() == Some(request) {
+                self.requested = None;
+            }
+            return false;
+        }
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                self.set_message(Some(error));
+                return true;
+            }
+        };
+        if result.library_revision != request.library_revision
+            || result.playlist_revision != request.playlist_revision
+        {
+            return false;
+        }
+        match (&mut self.view, result.view) {
+            (View::Search(search), ViewResponse::LibraryPage(page)) => {
+                search
+                    .results
+                    .insert(request.offset, request.limit, page.total, page.rows);
+            }
+            (View::Tree(tree), ViewResponse::DirectoryPage(mut page)) => {
+                if let QueryKind::Roots(roots) = &request.kind {
+                    let local_count = roots
+                        .len()
+                        .saturating_sub(request.offset)
+                        .min(request.limit);
+                    page.rows.truncate(request.limit - local_count);
+                    if local_count != 0 {
+                        drop(
+                            page.rows.splice(
+                                0..0,
+                                roots
+                                    .iter()
+                                    .skip(request.offset)
+                                    .take(local_count)
+                                    .cloned()
+                                    .map(|path| DirectoryRow::Directory { path }),
+                            ),
+                        );
+                    }
+                    page.total += roots.len();
+                }
+                tree.entries
+                    .insert(request.offset, request.limit, page.total, page.rows);
+            }
+            (View::Playlists(playlists), ViewResponse::PlaylistSummaries(page)) => {
+                playlists.insert(request.offset, request.limit, page.total, page.rows);
+            }
+            (View::PlaylistDetail { detail, .. }, ViewResponse::PlaylistEntries(page)) => {
+                detail
+                    .entries
+                    .insert(request.offset, request.limit, page.total, page.rows);
+            }
+            _ => {
+                self.set_message(Some("Unexpected view response".into()));
+                return true;
+            }
+        }
+        self.mark_local_change();
+        true
+    }
+
     fn mark_local_change(&mut self) {
         self.local_revision = self.local_revision.wrapping_add(1);
     }
@@ -503,13 +608,13 @@ impl UiState {
                         }
                         KeyCode::Backspace if search.focus == SearchFocus::Query => {
                             if search.query.pop().is_some() {
-                                search.filter();
+                                search.filter(Instant::now());
                                 changed = true;
                             }
                         }
                         KeyCode::Char(character) if search.focus == SearchFocus::Query => {
                             search.query.push(character);
-                            search.filter();
+                            search.filter(Instant::now());
                             changed = true;
                         }
                         _ => {}
@@ -752,53 +857,22 @@ enum SearchFocus {
     Results,
 }
 
+#[derive(Default)]
 struct LibrarySearch {
-    library: Arc<Vec<Track>>,
-    searchable: Vec<String>,
     query: String,
-    matches: Vec<usize>,
-    selection: ListState,
+    results: PagedList<LibraryRow>,
     focus: SearchFocus,
+    query_deadline: Option<Instant>,
 }
 
 impl LibrarySearch {
-    fn new(library: Arc<Vec<Track>>) -> Self {
-        let searchable = library
-            .iter()
-            .map(|track| {
-                format!(
-                    "{} {} {} {}",
-                    track.title,
-                    track.artist,
-                    track.album,
-                    track.path.display()
-                )
-                .to_lowercase()
-            })
-            .collect();
-        let matches = (0..library.len()).collect();
-        let selection = ListState::default().with_selected((!library.is_empty()).then_some(0));
-        Self {
-            library,
-            searchable,
-            query: String::new(),
-            matches,
-            selection,
-            focus: SearchFocus::default(),
-        }
+    fn filter(&mut self, now: Instant) {
+        self.results = PagedList::default();
+        self.query_deadline = Some(now + crate::model::SEARCH_DEBOUNCE);
     }
 
-    fn filter(&mut self) {
-        let query = self.query.to_lowercase();
-        self.matches.clear();
-        self.matches.extend(
-            self.searchable
-                .iter()
-                .enumerate()
-                .filter_map(|(index, text)| text.contains(&query).then_some(index)),
-        );
-        self.selection
-            .select((!self.matches.is_empty()).then_some(0));
+    fn ready(&self, now: Instant) -> bool {
+        self.query_deadline.is_none_or(|deadline| now >= deadline)
     }
 }
 
@@ -1545,6 +1619,67 @@ fn fmt_time(seconds: f64) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn search_debounce_waits_for_the_last_edit_deadline() {
+        let now = Instant::now();
+        let mut search = LibrarySearch::default();
+        search.filter(now);
+        assert!(!search.ready(now + Duration::from_millis(149)));
+        assert!(search.ready(now + Duration::from_millis(150)));
+
+        search.filter(now + Duration::from_millis(100));
+        assert!(!search.ready(now + Duration::from_millis(249)));
+        assert!(search.ready(now + Duration::from_millis(250)));
+    }
+    #[test]
+    fn stale_search_and_revision_results_are_discarded() {
+        let state = TuiSnapshot::default();
+        let mut ui = UiState {
+            view: View::Search(LibrarySearch::default()),
+            ..UiState::default()
+        };
+        let request = ui.query_request(&state).unwrap();
+        key(&mut ui, KeyCode::Char('x'), &state);
+        assert!(!ui.apply_query(&state, &request, Err("old query".into())));
+        assert!(ui.message.is_none());
+        assert!(ui.query_request(&state).is_none());
+        if let View::Search(search) = &mut ui.view {
+            search.query_deadline = Some(Instant::now());
+        }
+        let current = ui.query_request(&state).unwrap();
+        assert!(!ui.apply_query(
+            &state,
+            &current,
+            Ok(QueryResult {
+                library_revision: 1,
+                playlist_revision: 0,
+                view: ViewResponse::LibraryPage(LibraryPage {
+                    total: 1,
+                    rows: vec![row(1)]
+                }),
+            })
+        ));
+        apply_view(
+            &mut ui,
+            &state,
+            ViewResponse::LibraryPage(LibraryPage {
+                total: 1,
+                rows: vec![row(1)],
+            }),
+        );
+        let mut tui = TuiState {
+            snapshot: state.clone(),
+            ui,
+        };
+        let mut next = state;
+        next.library.revision += 1;
+        tui.apply_snapshot(next);
+        let View::Search(search) = &tui.ui.view else {
+            panic!("search view");
+        };
+        assert!(search.results.pages.is_empty());
+        assert!(tui.ui.query_request(&tui.snapshot).is_some());
+    }
     use super::*;
     use crate::model::PlaybackState;
     use crate::model::{LibrarySnapshot, Playlist, PlaylistEntry, QueueEntry, QueueState};
