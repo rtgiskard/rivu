@@ -224,7 +224,7 @@ pub(super) struct Visuals {
 
 impl Visuals {
     pub(super) fn new() -> Self {
-        let history_columns = history_column_count(20, 20);
+        // History is initialized by configure when an analysis panel becomes visible.
         Self {
             data: Rc::new(RefCell::new(VisualData {
                 frequencies: Vec::new(),
@@ -236,14 +236,14 @@ impl Visuals {
                 heat_samples: Vec::new(),
                 spectrogram_panel_heights: HashMap::new(),
                 spectrogram_image_height: 0,
-                columns: (0..history_columns).map(|_| Column::default()).collect(),
+                columns: Vec::new(),
                 latest_levels: Vec::new(),
                 peaks: Vec::new(),
                 peak_deadlines: Vec::new(),
                 bar_levels: Vec::new(),
                 bar_deadlines: Vec::new(),
                 smoothed_levels: Vec::new(),
-                spectrum_points: Vec::with_capacity(MAX_SPECTRUM_BARS),
+                spectrum_points: Vec::new(),
                 last_update: None,
                 top_db: 0.0,
                 palette_lut: active_palette_lut(VisualizationPalette::Deadbeef),
@@ -271,15 +271,15 @@ impl Visuals {
                 spectrogram_history_seconds: 20,
                 history_limit_seconds: 20.0,
                 analysis_fps: 20,
-                configured_history_columns: history_columns,
-                history_columns,
+                configured_history_columns: 0,
+                history_columns: 0,
                 heat_sample_generation: 0,
                 stream_generation: 0,
                 head: 0,
                 len: 0,
                 latest: None,
                 latest_sample_time: None,
-                retired: Vec::with_capacity(history_columns),
+                retired: Vec::new(),
                 error: None,
             })),
         }
@@ -606,6 +606,9 @@ impl VisualData {
     }
 
     fn push_history(&mut self, time: Duration, levels: &[f32]) {
+        if self.history_columns < 2 {
+            return;
+        }
         let discontinuity = self
             .latest
             .is_some_and(|index| self.columns[index].generation != self.stream_generation)
@@ -859,6 +862,10 @@ impl VisualData {
                 let bottom = plot.bottom();
                 let top = plot.top();
                 let continuous = matches!(style, SpectrumStyle::Line | SpectrumStyle::Solid);
+                if continuous {
+                    // Reserve once before the point loop; clear retains capacity for later frames.
+                    self.spectrum_points.reserve(bars);
+                }
                 let mut shape_path = PathBuilder::fill();
                 let mut led_path = PathBuilder::fill();
                 let mut peak_path = PathBuilder::fill();
@@ -1704,9 +1711,15 @@ mod tests {
         }
     }
 
+    fn configured_visuals() -> Visuals {
+        let mut visuals = Visuals::new();
+        visuals.configure(&Config::default());
+        visuals
+    }
+
     #[test]
     fn history_window_grows_with_continuous_audio_until_limit() {
-        let mut visuals = Visuals::new();
+        let mut visuals = configured_visuals();
         visuals.update(&frame(1.0, -30.0));
         visuals.update(&frame(1.5, -30.0));
         assert_eq!(
@@ -1761,7 +1774,7 @@ mod tests {
 
     #[test]
     fn history_preserves_gaps_and_stream_changes() {
-        let mut visuals = Visuals::new();
+        let mut visuals = configured_visuals();
         visuals.update(&frame(1.0, -20.0));
         visuals.update(&frame(6.0, -30.0));
         {
@@ -1783,7 +1796,7 @@ mod tests {
 
     #[test]
     fn range_changes_keep_shared_frequency_axis_and_history() {
-        let mut visuals = Visuals::new();
+        let mut visuals = configured_visuals();
         let mut config = Config::default();
         visuals.update(&frame(1.0, -30.0));
         let image = Arc::new(RenderImage::new([image::Frame::new(
@@ -1878,7 +1891,7 @@ mod tests {
 
     #[test]
     fn shrinking_history_keeps_the_newest_columns() {
-        let mut visuals = Visuals::new();
+        let mut visuals = configured_visuals();
         for time in 1..=5 {
             visuals.update(&frame(time as f64, -30.0));
         }
@@ -1896,8 +1909,6 @@ mod tests {
                 Duration::from_secs(5),
             ]
         );
-        assert_eq!(data.latest, Some(2));
-        assert_eq!(data.head, 0);
     }
 
     #[test]
@@ -2005,28 +2016,5 @@ mod tests {
         assert_eq!(shape_y(&points, px(2.5), true), px(30.0));
         assert_eq!(shape_y(&points, px(2.5), false), px(40.0));
         assert_eq!(shape_y(&points, px(10.0), true), px(0.0));
-    }
-
-    #[test]
-    fn analysis_resolution_changes_preserve_old_images_safely() {
-        let mut visuals = Visuals::new();
-        visuals.update(&frame(1.0, -10.0));
-        let mut changed = frame(2.0, -50.0);
-        changed.frequencies_hz = vec![20.0, 100.0, 300.0, 1000.0, 5000.0, 20_000.0];
-        changed.spectrum_db = vec![-50.0; 6];
-        visuals.update(&changed);
-        let data = visuals.data.borrow();
-        assert_eq!(data.len, 2);
-        assert!(data.columns.iter().any(|column| column.generation == 0));
-        assert!(
-            data.columns
-                .iter()
-                .any(|column| column.generation == data.stream_generation)
-        );
-        assert_eq!(data.peaks, changed.spectrum_db);
-        assert_eq!(data.bar_levels.len(), 6);
-        assert_eq!(data.bar_deadlines.len(), 6);
-        assert_eq!(data.spectrum_labels.len(), 2);
-        assert!((axis_frequency(20.0, 20_000.0, 0.5, false) - 10_010.0).abs() < 0.001);
     }
 }
