@@ -1,17 +1,17 @@
 //! GPU-backed analysis views. The audio worker owns the configurable FFT;
 //! these views retain every musical band supplied by `AnalysisFrame`.
 //!
-//! Immutable GPU images cache at most 512 audio-time buckets. Dense incoming
+//! Spectrogram history follows the active plot width at one time column per
+//! pixel, bounded by the configured duration and analysis rate. Dense incoming
 //! frames are max-pooled so narrow transients survive; Spectrum separately
-//! retains the latest frame. The selected history duration determines bucket
-//! width, never the publication rate or canvas width. Unavailable history is
-//! left blank, including long gaps in publication.
+//! retains the latest frame. The available history expands until that dynamic
+//! limit; unavailable history is left blank, including long gaps in publication.
 //! Replaced images are explicitly removed from the window's atlas. Hidden
 //! spectrograms retain reusable CPU buckets but create no new GPU images.
 //! Range and axis changes remap cached levels even while paused; style changes
 //! redraw Spectrum in place. Unchanged buckets reuse their GPU image.
-//! Spectrogram columns use the tallest active panel's row count, capped by
-//! configuration; smaller panels scale the shared source image.
+//! Spectrogram image rows use half the active panel height, never fewer than
+//! the visible source frequency points, and remain capped by configuration.
 
 use super::{ERROR, ERROR_BG};
 use gpui::{
@@ -26,9 +26,9 @@ use crate::{
     config::{Config, SpectrumStyle, SpectrumWindow, VisualizationPalette},
 };
 
-const MAX_HISTORY_COLUMNS: usize = 512;
 const HISTORY_GAP_RESET: Duration = Duration::from_secs(1);
 const MAX_SPECTRUM_BARS: usize = 2000;
+const VERTICAL_SPECTROGRAM_SCALE: f32 = 0.5;
 const TOKYO_NIGHT_STOPS: &[(f32, [u8; 3])] = &[
     (0.0, [65, 72, 110]),
     (0.2, [187, 154, 247]),
@@ -81,13 +81,17 @@ fn history_fraction(time: Duration, latest: Duration, history: Duration) -> f32 
 
 fn history_column_count(history_seconds: u32, analysis_fps: u32) -> usize {
     usize::try_from(history_seconds)
-        .unwrap_or(MAX_HISTORY_COLUMNS)
+        .unwrap_or(usize::MAX)
         .saturating_mul(analysis_fps as usize)
-        .clamp(2, MAX_HISTORY_COLUMNS)
+        .max(2)
 }
-fn spectrogram_source_height(panel_height: usize, max_rows: u32) -> usize {
-    panel_height
-        .max(1)
+fn history_columns_for_width(history_seconds: u32, analysis_fps: u32, width: usize) -> usize {
+    history_column_count(history_seconds, analysis_fps).min(width.max(2))
+}
+fn spectrogram_source_height(panel_height: usize, source_rows: usize, max_rows: u32) -> usize {
+    let pixel_rows = ((panel_height as f32) * VERTICAL_SPECTROGRAM_SCALE).ceil() as usize;
+    pixel_rows
+        .max(source_rows.max(1))
         .min(usize::try_from(max_rows.max(1)).unwrap_or(usize::MAX))
 }
 
@@ -140,7 +144,9 @@ struct VisualData {
     spectrogram_interpolate: bool,
     spectrogram_interpolation_points: u32,
     spectrogram_history_seconds: u32,
+    history_limit_seconds: f64,
     analysis_fps: u32,
+    configured_history_columns: usize,
     history_columns: usize,
     stream_generation: u64,
     head: usize,
@@ -159,6 +165,7 @@ pub(super) struct Visuals {
 
 impl Visuals {
     pub(super) fn new() -> Self {
+        let history_columns = history_column_count(30, 20);
         Self {
             data: Rc::new(RefCell::new(VisualData {
                 frequencies: Vec::new(),
@@ -170,9 +177,7 @@ impl Visuals {
                 heat_samples: Vec::new(),
                 spectrogram_panel_heights: HashMap::new(),
                 spectrogram_image_height: 0,
-                columns: (0..MAX_HISTORY_COLUMNS)
-                    .map(|_| Column::default())
-                    .collect(),
+                columns: (0..history_columns).map(|_| Column::default()).collect(),
                 latest_levels: Vec::new(),
                 peaks: Vec::new(),
                 peak_deadlines: Vec::new(),
@@ -203,23 +208,25 @@ impl Visuals {
                 spectrogram_show_labels: true,
                 spectrogram_interpolate: true,
                 spectrogram_interpolation_points: 1024,
+                spectrogram_history_seconds: 30,
+                history_limit_seconds: 30.0,
                 analysis_fps: 20,
-                history_columns: MAX_HISTORY_COLUMNS,
+                configured_history_columns: history_columns,
+                history_columns,
                 heat_sample_generation: 0,
                 stream_generation: 0,
-                spectrogram_history_seconds: 30,
                 head: 0,
                 len: 0,
                 latest: None,
                 latest_sample_time: None,
-                retired: Vec::with_capacity(MAX_HISTORY_COLUMNS),
+                retired: Vec::with_capacity(history_columns),
                 error: None,
             })),
         }
     }
     pub(super) fn configure(&mut self, config: &Config) {
         let mut data = self.data.borrow_mut();
-        let history_columns =
+        let configured_history_columns =
             history_column_count(config.spectrogram_history_seconds, config.analysis_fps);
         let changed = data.visual_background != config.visual_background.rgb()
             || data.spectrum_db_range != config.spectrum_db_range
@@ -244,20 +251,21 @@ impl Visuals {
             || data.spectrogram_interpolation_points != config.spectrogram_interpolation_points
             || data.spectrogram_history_seconds != config.spectrogram_history_seconds
             || data.analysis_fps != config.analysis_fps
-            || data.history_columns != history_columns;
+            || data.configured_history_columns != configured_history_columns;
         if !changed {
             return;
         }
         let history_changed = data.spectrogram_history_seconds
             != config.spectrogram_history_seconds
             || data.analysis_fps != config.analysis_fps
-            || data.history_columns != history_columns;
+            || data.configured_history_columns != configured_history_columns;
         let analysis_changed = data.spectrum_fft_size != config.spectrum_fft_size
             || data.spectrum_window != config.spectrum_window;
         let heat_changed = data.visual_background != config.visual_background.rgb()
             || data.spectrogram_db_range != config.spectrogram_db_range
             || data.spectrogram_interpolate != config.spectrogram_interpolate
             || data.spectrogram_interpolation_points != config.spectrogram_interpolation_points;
+        data.visual_background = config.visual_background.rgb();
         data.spectrum_db_range = config.spectrum_db_range;
         data.spectrum_bars = config.spectrum_bars;
         data.spectrum_style = config.spectrum_style;
@@ -279,16 +287,18 @@ impl Visuals {
         data.spectrum_grid = config.spectrum_grid;
         data.spectrogram_db_range = config.spectrogram_db_range;
         data.spectrogram_history_seconds = config.spectrogram_history_seconds;
+        data.history_limit_seconds = config.spectrogram_history_seconds as f64;
         data.analysis_fps = config.analysis_fps;
-        data.history_columns = history_columns;
-        if history_changed || analysis_changed {
-            data.clear_history();
-        } else if heat_changed {
-            data.invalidate_images();
+        data.configured_history_columns = configured_history_columns;
+        if history_changed {
+            data.resize_history(configured_history_columns);
         }
         if analysis_changed {
+            data.clear_history();
             data.latest_levels.clear();
             data.last_update = None;
+        } else if heat_changed {
+            data.invalidate_images();
         }
         let levels = if data.spectrum_peaks {
             &data.peaks
@@ -534,9 +544,8 @@ impl VisualData {
             || self
                 .latest_sample_time
                 .is_some_and(|previous| time.saturating_sub(previous) > HISTORY_GAP_RESET);
-        let width = Duration::from_secs_f64(
-            self.spectrogram_history_seconds as f64 / (self.history_columns - 1) as f64,
-        );
+        let width =
+            Duration::from_secs_f64(self.history_limit_seconds / (self.history_columns - 1) as f64);
         let bucket =
             Duration::from_nanos(((time.as_nanos() / width.as_nanos()) * width.as_nanos()) as u64);
         let merge = self.latest.filter(|&index| {
@@ -572,6 +581,43 @@ impl VisualData {
         }
         self.latest = Some(index);
     }
+    fn resize_history(&mut self, requested_columns: usize) {
+        let new_columns = requested_columns.max(2);
+        if new_columns == self.history_columns {
+            return;
+        }
+        let mut old_columns = std::mem::take(&mut self.columns);
+        let old_capacity = old_columns.len();
+        let old_len = self.len.min(old_capacity);
+        let old_head = self.head.min(old_capacity);
+        let keep = old_len.min(new_columns);
+        let oldest = if old_capacity == 0 {
+            0
+        } else {
+            (old_head + old_capacity - old_len) % old_capacity
+        };
+        let skip = old_len - keep;
+        let mut columns = (0..new_columns)
+            .map(|_| Column::default())
+            .collect::<Vec<_>>();
+        for offset in 0..keep {
+            let index = (oldest + skip + offset) % old_capacity;
+            columns[offset] = std::mem::take(&mut old_columns[index]);
+        }
+        for mut column in old_columns {
+            if let Some(image) = column.image.take() {
+                self.retired.push(image);
+            }
+        }
+        self.columns = columns;
+        self.history_columns = new_columns;
+        self.len = keep;
+        self.head = keep % new_columns;
+        self.latest = keep.checked_sub(1);
+        if keep == 0 {
+            self.latest_sample_time = None;
+        }
+    }
     fn invalidate_images(&mut self) {
         for column in &mut self.columns {
             if let Some(image) = column.image.take() {
@@ -606,7 +652,7 @@ impl VisualData {
     }
 
     fn history_window(&self, latest: Duration) -> Duration {
-        let limit = Duration::from_secs(self.spectrogram_history_seconds as u64);
+        let limit = Duration::from_secs_f64(self.history_limit_seconds);
         let available = self
             .columns
             .iter()
@@ -945,9 +991,19 @@ impl VisualData {
         let Some(latest_time) = self.latest_sample_time else {
             return Ok(());
         };
-        let Some((_, _, low, high)) = self.visible_range() else {
+        let Some((first, last, low, high)) = self.visible_range() else {
             return Ok(());
         };
+        let plot_width = (plot.size.width / px(1.0)).ceil().max(2.0) as usize;
+        let history_columns = history_columns_for_width(
+            self.spectrogram_history_seconds,
+            self.analysis_fps,
+            plot_width,
+        );
+        self.resize_history(history_columns);
+        self.history_limit_seconds = (self.history_columns as f64
+            / self.analysis_fps.max(1) as f64)
+            .min(self.spectrogram_history_seconds as f64);
         let history = self.history_window(latest_time);
         let start_time = latest_time.saturating_sub(history);
         let fallback_height = (plot.size.height / px(1.0)).ceil() as usize;
@@ -957,8 +1013,12 @@ impl VisualData {
             .copied()
             .max()
             .unwrap_or(fallback_height);
-        let height =
-            spectrogram_source_height(max_panel_height, self.spectrogram_interpolation_points);
+        let source_rows = last.saturating_sub(first) + 1;
+        let height = spectrogram_source_height(
+            max_panel_height,
+            source_rows,
+            self.spectrogram_interpolation_points,
+        );
         let height_u32 = u32::try_from(height)
             .map_err(|_| "Spectrogram image height exceeds GPU image dimensions".to_string())?;
         if self.spectrogram_image_height != height
@@ -1510,6 +1570,7 @@ mod tests {
         for fps in [5, 60] {
             let mut visuals = Visuals::new();
             visuals.configure(&Config {
+                analysis_fps: fps,
                 spectrogram_history_seconds: 120,
                 ..Config::default()
             });
@@ -1517,7 +1578,7 @@ mod tests {
                 visuals.update(&frame(step as f64 / fps as f64, -30.0));
             }
             let data = visuals.data.borrow();
-            assert_eq!(data.len, MAX_HISTORY_COLUMNS);
+            assert_eq!(data.len, history_column_count(120, fps));
             let oldest = data
                 .columns
                 .iter()
@@ -1691,11 +1752,43 @@ mod tests {
     }
 
     #[test]
-    fn spectrogram_source_uses_tallest_panel_and_configured_cap() {
-        assert_eq!(spectrogram_source_height(320, 1024), 320);
-        assert_eq!(spectrogram_source_height(700, 1024), 700);
-        assert_eq!(spectrogram_source_height(1400, 1024), 1024);
-        assert_eq!(spectrogram_source_height(1400, 512), 512);
+    fn spectrogram_source_uses_half_height_and_source_floor() {
+        assert_eq!(spectrogram_source_height(320, 140, 1024), 160);
+        assert_eq!(spectrogram_source_height(700, 140, 1024), 350);
+        assert_eq!(spectrogram_source_height(1400, 140, 1024), 700);
+        assert_eq!(spectrogram_source_height(1400, 140, 512), 512);
+        assert_eq!(spectrogram_source_height(80, 140, 1024), 140);
+    }
+
+    #[test]
+    fn history_columns_follow_width_and_rate() {
+        assert_eq!(history_columns_for_width(30, 20, 400), 400);
+        assert_eq!(history_columns_for_width(30, 20, 800), 600);
+        assert_eq!(history_columns_for_width(5, 20, 800), 100);
+    }
+
+    #[test]
+    fn shrinking_history_keeps_the_newest_columns() {
+        let mut visuals = Visuals::new();
+        for time in 1..=5 {
+            visuals.update(&frame(time as f64, -30.0));
+        }
+        let mut data = visuals.data.borrow_mut();
+        data.resize_history(3);
+        assert_eq!(data.len, 3);
+        assert_eq!(
+            data.columns
+                .iter()
+                .filter_map(|column| column.sample_time)
+                .collect::<Vec<_>>(),
+            [
+                Duration::from_secs(3),
+                Duration::from_secs(4),
+                Duration::from_secs(5),
+            ]
+        );
+        assert_eq!(data.latest, Some(2));
+        assert_eq!(data.head, 0);
     }
 
     #[test]

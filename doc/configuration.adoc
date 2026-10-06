@@ -17,7 +17,7 @@ spectrogram_interpolation_points = 1024
 spectrogram_history_seconds = 30
 ----
 
-Spectrogram interpolation generates logarithmic frequency rows up to the configured point count (64–4096); the default is 1024. The row count is also limited by the panel's rendered height. Spectrogram history grows with continuous audio up to `spectrogram_history_seconds` (1–120 seconds; default 30).
+Spectrogram interpolation generates logarithmic frequency rows up to the configured point count (64–4096); the default is 1024. The cached row count is the greater of the visible source rows and half the tallest active panel height, capped by this setting. Spectrogram history uses at most one time bucket per rendered horizontal pixel, bounded by the configured duration and analysis rate; narrow panels therefore retain less than the maximum. Missing history remains blank.
 
 Accepted media read buffer sizes are `1`, `2`, `4`, `8`, and `16` MiB.
 
@@ -240,14 +240,16 @@ Spectrogram display settings are:
 
 * `spectrogram_db_range`: independent color span, 1–160 dB, default 70.
 * `spectrogram_history_seconds`: maximum continuous audio history, 1–120 seconds,
-  default 30. The visible window grows with available uninterrupted audio and
-  remains blank where no history exists.
+  default 30. The visible history is also bounded by the rendered panel width and
+  analysis rate; it grows with available uninterrupted audio and remains blank
+  where no history exists.
 * `spectrogram_labels`: show endpoint frequency labels, default true.
 * `spectrogram_interpolate`: interpolate dB values at logarithmic frequency positions
   before color mapping, default true. Disable it to use nearest source frequency points.
 * `spectrogram_interpolation_points`: maximum frequency rows per cached column,
-  64–4096, default 1024. The source row count follows the tallest active
-  Spectrogram panel and is capped by this setting; smaller panels scale it down.
+  64–4096, default 1024. The cached row count is at least the visible source row
+  count, otherwise half the tallest active Spectrogram panel, and is capped by
+  this setting; smaller panels scale the shared source image.
 
 The frequency axis is always logarithmic from 16 Hz to the source Nyquist limit.
 Rendering clips the fixed range to available analyzer bands; empty intersections
