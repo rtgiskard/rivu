@@ -24,6 +24,13 @@ the existing queue unchanged. See link:04_playback.adoc#_queue[Playback queue].
 Management: link:../src/core/playlists.rs[playlist commands] and
 link:../src/store.rs[playlist storage].
 
+== Desktop UI
+
+The Queue panel can save a non-empty queue as a regular playlist with the save
+icon; the playlist name is generated from the current date and time. Recent
+tracks are shown in one sortable list with title, play count, and last-played
+time columns.
+
 == Import and export
 
 CLI paths are relative to the invoking client's working directory. Referenced
