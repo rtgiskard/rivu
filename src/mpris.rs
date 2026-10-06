@@ -94,7 +94,7 @@ impl Mpris {
                                 let _ = handle.send(Command::MprisStatus {
                                     status: format!("publisher stopped: {error}"),
                                 });
-                                eprintln!("MPRIS publisher stopped: {error}");
+                                tracing::warn!(error = %error, "mpris_publisher_stopped");
                                 break;
                             }
                             if current.shutting_down { break; }

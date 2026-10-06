@@ -225,8 +225,12 @@ impl Runtime {
         let config = Config::load(config_path)?;
         config.save(config_path)?;
         std::fs::create_dir_all(data_dir)?;
+        crate::logging::init(data_dir, &config)?;
+        tracing::info!(path = %config_path.display(), "configuration_loaded");
         let store = Store::open(&data_dir.join("library.db"))?;
+        tracing::debug!("store_ready");
         let engine = AudioEngine::new(config.media_read_buffer_mb)?;
+        tracing::info!("audio_engine_ready");
         let (sender, receiver) = bounded(64);
         let shared = Arc::new(RwLock::new(CoreState::default()));
         let wakeup = Arc::new(RwLock::new(None));
@@ -290,6 +294,7 @@ impl Runtime {
         let worker = thread::Builder::new()
             .name("rivu-core".into())
             .spawn(move || {
+                tracing::debug!("core_worker_started");
                 let (scan_tx, scan_rx) = bounded(1);
                 let next_queue_id = initial
                     .queue

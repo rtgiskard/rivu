@@ -76,7 +76,7 @@ impl TrayController {
         {
             Ok(worker) => worker,
             Err(error) => {
-                eprintln!("Rivu tray unavailable: could not start D-Bus thread: {error}");
+                tracing::warn!(error = %error, "tray_unavailable: could not start D-Bus thread");
                 return Ok(None);
             }
         };
@@ -89,12 +89,12 @@ impl TrayController {
             })),
             Ok(Err(error)) => {
                 let _ = worker.join();
-                eprintln!("Rivu tray unavailable: {error}");
+                tracing::warn!(error = %error, "tray_unavailable");
                 Ok(None)
             }
             Err(error) => {
                 let _ = worker.join();
-                eprintln!("Rivu tray unavailable: startup thread stopped: {error}");
+                tracing::warn!(error = %error, "tray_unavailable: startup thread stopped");
                 Ok(None)
             }
         }
@@ -153,7 +153,7 @@ fn run_bus(
         .map(|name| format!("{}{SNI_PATH}", name.as_str()))
         .unwrap_or_else(|| service_name.clone());
     if let Err(error) = register_with_watcher(&connection, &item_address) {
-        eprintln!("Rivu tray watcher unavailable; waiting for it to appear: {error}");
+        tracing::warn!(error = %error, "tray_watcher_unavailable");
     }
 
     let updates = handle.subscribe();
@@ -190,7 +190,7 @@ fn run_bus(
     {
         Ok(watcher) => Some(watcher),
         Err(error) => {
-            eprintln!("Rivu tray watcher monitor unavailable: {error}");
+            tracing::warn!(error = %error, "tray_watcher_monitor_unavailable");
             None
         }
     };
@@ -214,14 +214,14 @@ fn watch_watcher(connection: Connection, service_name: String) {
     let proxy = match DBusProxy::new(&connection) {
         Ok(proxy) => proxy,
         Err(error) => {
-            eprintln!("Rivu tray watcher monitor unavailable: {error}");
+            tracing::warn!(error = %error, "tray_watcher_monitor_unavailable");
             return;
         }
     };
     let owner_changes = match proxy.receive_name_owner_changed_with_args(&[(0, WATCHER_SERVICE)]) {
         Ok(changes) => changes,
         Err(error) => {
-            eprintln!("Rivu tray watcher monitor unavailable: {error}");
+            tracing::warn!(error = %error, "tray_watcher_monitor_unavailable");
             return;
         }
     };
@@ -229,7 +229,7 @@ fn watch_watcher(connection: Connection, service_name: String) {
     // The watcher may have appeared between the initial registration attempt and
     // signal subscription. Retry once before waiting for future owner changes.
     if let Err(error) = register_with_watcher(&connection, &service_name) {
-        eprintln!("Rivu tray watcher not registered yet: {error}");
+        tracing::warn!(error = %error, "tray_watcher_not_registered");
     }
     for signal in owner_changes {
         let Ok(args) = signal.args() else {
@@ -238,7 +238,7 @@ fn watch_watcher(connection: Connection, service_name: String) {
         if args.new_owner().is_some()
             && let Err(error) = register_with_watcher(&connection, &service_name)
         {
-            eprintln!("Rivu tray watcher re-registration failed: {error}");
+            tracing::warn!(error = %error, "tray_watcher_reregistration_failed");
         }
     }
 }
@@ -613,7 +613,7 @@ impl DbusMenu {
         let command = match id {
             1 => {
                 if let Err(error) = self.handle.raise() {
-                    eprintln!("Rivu tray: could not show window: {error:#}");
+                    tracing::warn!(error = %error, "tray_show_window_failed");
                 }
                 return;
             }
@@ -625,7 +625,7 @@ impl DbusMenu {
             _ => return,
         };
         if let Err(error) = self.handle.send(command) {
-            eprintln!("Rivu tray: could not send command: {error:#}");
+            tracing::warn!(error = %error, "tray_command_failed");
         }
     }
 }

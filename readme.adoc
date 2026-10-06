@@ -267,8 +267,10 @@ typical Linux installation: `~/.local/share/rivu`) and
 
 The data directory contains `library.db` (library and playback state),
 `rivu.sock` (the local IPC endpoint), `workspace.json` (desktop layout), and
-the `artwork/` cache. Stop the core before operating on `library.db`; see
-link:doc/library.adoc[Library] for database maintenance and reset behavior.
+the `artwork/` cache. When file logging is enabled, weekly logs are stored in
+`logs/` and old files are retained according to `log_retention_weeks`. Stop the
+core before operating on `library.db`; see link:doc/library.adoc[Library] for
+database maintenance and reset behavior.
 
 
 == Documentation

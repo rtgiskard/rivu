@@ -42,6 +42,16 @@ pub enum SpectrumStyle {
     Solid,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogLevel {
+    Debug,
+    Info,
+    #[default]
+    Warning,
+    Error,
+}
+
 fn is_nerd_font_family(family: &str) -> bool {
     let family = family.trim().to_ascii_lowercase();
     family.contains("nerd font")
@@ -129,6 +139,9 @@ pub struct Config {
     pub play_count_threshold_percent: f64,
     pub tray_enabled: bool,
     pub mpris_enabled: bool,
+    pub log_level: LogLevel,
+    pub log_to_file: bool,
+    pub log_retention_weeks: u32,
     /// UI font family; empty selects the platform UI font.
     pub ui_font: String,
     pub ui_scale: f32,
@@ -192,6 +205,9 @@ impl Default for Config {
             play_count_threshold_percent: 20.0,
             tray_enabled: true,
             mpris_enabled: true,
+            log_level: LogLevel::Warning,
+            log_to_file: false,
+            log_retention_weeks: 4,
             ui_font: String::new(),
             ui_scale: 1.0,
             analysis_fps: 20,
@@ -302,6 +318,11 @@ impl Config {
                 && (0.0..100.0).contains(&self.play_count_threshold_percent),
             "play_count_threshold_percent must be finite and at least 0.0 but less than 100.0; got {}",
             self.play_count_threshold_percent
+        );
+        ensure!(
+            (1..=520).contains(&self.log_retention_weeks),
+            "log_retention_weeks must be between 1 and 520; got {}",
+            self.log_retention_weeks
         );
         ensure!(
             self.ui_font.len() <= 128 && !self.ui_font.chars().any(char::is_control),
@@ -534,6 +555,9 @@ mod tests {
             play_count_threshold_percent: 35.5,
             tray_enabled: false,
             mpris_enabled: false,
+            log_level: LogLevel::Debug,
+            log_to_file: true,
+            log_retention_weeks: 4,
             ui_font: "sans-serif".to_owned(),
             ui_scale: 1.5,
             analysis_fps: 30,

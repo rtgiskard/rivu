@@ -5,7 +5,7 @@ use super::{
     panels::TRACK_HEIGHT, row,
 };
 use crate::{
-    config::{Config, RadialSpectrumStyle, RgbColor, SpectrumStyle, SpectrumWindow},
+    config::{Config, LogLevel, RadialSpectrumStyle, RgbColor, SpectrumStyle, SpectrumWindow},
     model::{Command, RepeatMode},
 };
 use anyhow::{Context as _, Result};
@@ -19,6 +19,7 @@ enum SettingChoice {
     SpectrumStyle(SpectrumStyle),
     Fft(u32),
     RadialSpectrumStyle(RadialSpectrumStyle),
+    LogLevel(LogLevel),
     Window(SpectrumWindow),
 }
 
@@ -29,6 +30,12 @@ impl SettingChoice {
             Self::Font(value) => value.to_owned(),
             Self::SpectrumStyle(value) => spectrum_style_label(value).to_owned(),
             Self::RadialSpectrumStyle(value) => radial_spectrum_style_label(value).to_owned(),
+            Self::LogLevel(value) => match value {
+                LogLevel::Debug => "Debug".to_owned(),
+                LogLevel::Info => "Info".to_owned(),
+                LogLevel::Warning => "Warning".to_owned(),
+                LogLevel::Error => "Error".to_owned(),
+            },
             Self::Fft(value) => value.to_string(),
             Self::Window(SpectrumWindow::Hann) => "Hann".to_owned(),
             Self::Window(SpectrumWindow::BlackmanHarris) => "Blackman–Harris".to_owned(),
@@ -42,6 +49,7 @@ enum Field {
     Roots,
     Volume,
     PlayCountThreshold,
+    LogRetentionWeeks,
     Font,
     Scale,
     Fps,
@@ -77,6 +85,7 @@ impl Field {
             Self::Roots => "Library roots (separate paths with semicolons)",
             Self::Volume => "Volume (0–100%)",
             Self::PlayCountThreshold => "Play count threshold (%)",
+            Self::LogRetentionWeeks => "Log retention (1–520 weeks)",
             Self::Font => "Interface font family (sans-serif, serif, monospace, or installed name)",
             Self::Scale => "Interface scale (0.75–2)",
             Self::Fps => "Analysis refresh rate (5–60 fps)",
@@ -325,6 +334,11 @@ impl Settings {
             self.draft.play_count_threshold_percent.to_string(),
             cx,
         );
+        self.set_value(
+            Field::LogRetentionWeeks,
+            self.draft.log_retention_weeks.to_string(),
+            cx,
+        );
         self.set_value(Field::Font, self.draft.ui_font.clone(), cx);
         self.set_value(Field::Scale, self.draft.ui_scale.to_string(), cx);
         self.set_value(Field::Fps, self.draft.analysis_fps.to_string(), cx);
@@ -453,6 +467,7 @@ impl Settings {
             .collect();
         config.volume = self.number::<f32>(Field::Volume, cx)? / 100.;
         config.play_count_threshold_percent = self.number(Field::PlayCountThreshold, cx)?;
+        config.log_retention_weeks = self.number(Field::LogRetentionWeeks, cx)?;
         config.ui_font = self.value(Field::Font, cx).trim().to_owned();
         config.ui_scale = self.number(Field::Scale, cx)?;
         config.analysis_fps = self.number(Field::Fps, cx)?;
@@ -600,6 +615,7 @@ impl GuiApp {
                 self.settings.draft.radial_spectrum_style = value
             }
             SettingChoice::Fft(value) => self.settings.draft.spectrum_fft_size = value,
+            SettingChoice::LogLevel(value) => self.settings.draft.log_level = value,
             SettingChoice::Window(value) => self.settings.draft.spectrum_window = value,
         }
         self.settings.dropdown.select_index(index);
@@ -613,6 +629,7 @@ impl GuiApp {
                 SettingChoice::Font(_) => Measured::SettingsFont,
                 SettingChoice::SpectrumStyle(_) => Measured::SettingsStyle,
                 SettingChoice::Fft(_) => Measured::SettingsFft,
+                SettingChoice::LogLevel(_) => Measured::SettingsLogLevel,
                 SettingChoice::Window(_) => Measured::SettingsWindow,
                 SettingChoice::RadialSpectrumStyle(_) => Measured::SettingsStyle,
                 SettingChoice::Device(_) => Measured::Device,
@@ -885,6 +902,66 @@ impl GuiApp {
             },
         );
 
+        let log_level_dropdown = dropdown_button(
+            "settings-log-level",
+            SettingChoice::LogLevel(self.settings.draft.log_level).label(),
+            cx,
+            |this, _, _| {
+                let values = [
+                    LogLevel::Debug,
+                    LogLevel::Info,
+                    LogLevel::Warning,
+                    LogLevel::Error,
+                ];
+                let selected = values
+                    .iter()
+                    .position(|value| *value == this.settings.draft.log_level)
+                    .unwrap_or(0);
+                this.open_setting_dropdown(
+                    values
+                        .into_iter()
+                        .map(|value| {
+                            DropdownItem::new(
+                                SettingChoice::LogLevel(value),
+                                SettingChoice::LogLevel(value).label(),
+                            )
+                        })
+                        .collect(),
+                    selected,
+                );
+            },
+        )
+        .relative()
+        .child(self.measurement(Measured::SettingsLogLevel));
+        let logging = column().gap_2().child(caption("Logging")).child(
+            row()
+                .items_start()
+                .flex_wrap()
+                .gap_3()
+                .child(
+                    column()
+                        .flex_1()
+                        .min_w(px(180.))
+                        .gap_1()
+                        .child(caption("Log level"))
+                        .child(log_level_dropdown),
+                )
+                .child(
+                    self.settings
+                        .field(Field::LogRetentionWeeks)
+                        .flex_1()
+                        .min_w(px(180.)),
+                )
+                .child(visual_switch(
+                    "settings-log-file",
+                    "▤",
+                    "Write logs to disk",
+                    self.settings.draft.log_to_file,
+                    cx,
+                    |draft| draft.log_to_file = !draft.log_to_file,
+                )),
+        );
+
         column()
             .gap_3()
             .child(self.settings.field(Field::Roots))
@@ -898,6 +975,7 @@ impl GuiApp {
             )
             .child(self.settings.field(Field::Scale))
             .child(switches)
+            .child(logging)
     }
 
     fn visual_settings_tabs(&self, cx: &mut Context<Self>) -> Div {

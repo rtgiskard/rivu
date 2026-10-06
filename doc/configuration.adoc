@@ -9,6 +9,9 @@ ffmpeg_enabled = false
 pipewire_auto_mix = true
 tray_enabled = true
 mpris_enabled = true
+log_level = "warning"
+log_to_file = false
+log_retention_weeks = 4
 ui_font = ""
 play_count_threshold_percent = 20.0
 spectrogram_db_range = 70.0
@@ -37,6 +40,8 @@ contains the same switch.
 `tray_enabled` controls creation of the desktop StatusNotifier tray. It defaults
 to `true`; disabling it removes the local tray without affecting playback, the
 GUI host, or MPRIS.
+
+`log_level` accepts `debug`, `info`, `warning`, and `error`; the default is `warning`. Warning and error events always go to stderr. When `log_to_file` is enabled, logs are written below the data directory, rotated weekly, and retained for four weeks by default. `log_retention_weeks` accepts `1` through `520`; Apply takes effect immediately. Interactive stderr output may use colors; `NO_COLOR` or `RIVU_COLOR=never` disables them.
 
 == Desktop settings
 

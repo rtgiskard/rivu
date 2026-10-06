@@ -279,6 +279,7 @@ impl Core {
                 } else {
                     self.state.system.ffmpeg_status.clone()
                 };
+                crate::logging::reconfigure(&config)?;
                 config.save(&self.state.system.config_path)?;
                 self.audio(AudioCommand::MediaReadBuffer(config.media_read_buffer_mb))?;
                 self.audio(AudioCommand::Volume(config.volume))?;
@@ -299,6 +300,7 @@ impl Core {
                 self.state.playback.repeat = config.repeat;
                 self.state.system.ffmpeg_status = ffmpeg_status;
                 self.state.system.config = Arc::new(config);
+                tracing::info!("configuration_updated");
             }
             Command::ShowWindow => return self.request_raise(),
             Command::MprisStatus { status } => {

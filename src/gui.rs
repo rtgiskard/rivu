@@ -168,6 +168,7 @@ impl GuiHost {
         ) {
             Ok(window) => {
                 self.window = Some(window);
+                tracing::info!("gui_window_created");
                 cx.activate(true);
             }
             Err(error) => {
@@ -433,6 +434,7 @@ enum Measured {
     Volume(u64),
     Device,
     SettingsFont,
+    SettingsLogLevel,
     SettingsStyle,
     SettingsFft,
     SettingsWindow,

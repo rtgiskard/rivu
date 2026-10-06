@@ -136,7 +136,7 @@ impl Store {
             |row| row.get(0),
         )?;
         if pending && let Err(error) = store.optimize() {
-            eprintln!("rivu: database maintenance pending (will retry): {error:#}");
+            tracing::warn!(error = %error, "database_maintenance_pending");
         }
         Ok(store)
     }

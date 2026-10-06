@@ -7,6 +7,7 @@ pub mod cue;
 pub mod gui;
 pub mod ipc;
 pub mod library;
+pub mod logging;
 pub mod model;
 pub mod mpris;
 pub mod projection;
