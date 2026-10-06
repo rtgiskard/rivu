@@ -11,6 +11,13 @@ Controls wrap in narrow panels. Seeking to the end follows normal queue completi
 if paused, playback remains paused until resumed. Previous restarts a track after
 three seconds, otherwise it selects the previous queue entry.
 
+The audio worker coalesces consecutive absolute seek commands already queued,
+executing only the latest target in each batch of up to 64 seeks. It uses no
+debounce window and does not wait for later input. Every non-seek audio command,
+including pause, load, stop, and output settings, is an ordering barrier and stays
+in sequence. A seek already executing is not cancelled; coalescing reduces
+redundant decoder and output reopening rather than changing the seek pipeline.
+
 Pause uses software gating and play counts use heard time confirmed by the output
 backend. Recoverable output underruns do not start a new playback. Analysis pauses
 while playback is paused; silent backend callbacks may still consume some CPU.

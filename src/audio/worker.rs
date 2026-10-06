@@ -15,8 +15,44 @@ use std::{
     time::{Duration, Instant},
 };
 
+// Include the first seek in the bound: continuous input must not postpone execution.
+const MAX_SEEK_BATCH: usize = 64;
+
+struct CommandInbox {
+    receiver: Receiver<AudioCommand>,
+    // A non-seek read ahead is an ordering barrier, not a command to discard.
+    pending: Option<AudioCommand>,
+}
+
+impl CommandInbox {
+    fn try_recv(&mut self) -> Result<AudioCommand, TryRecvError> {
+        if let Some(command) = self.pending.take() {
+            Ok(command)
+        } else {
+            self.receiver.try_recv()
+        }
+    }
+
+    fn coalesce(&mut self, command: AudioCommand) -> AudioCommand {
+        let AudioCommand::Seek(mut seconds) = command else {
+            return command;
+        };
+        for _ in 1..MAX_SEEK_BATCH {
+            match self.receiver.try_recv() {
+                Ok(AudioCommand::Seek(target)) => seconds = target,
+                Ok(barrier) => {
+                    self.pending = Some(barrier);
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+        AudioCommand::Seek(seconds)
+    }
+}
+
 pub(super) struct Worker {
-    commands: Receiver<AudioCommand>,
+    commands: CommandInbox,
     events: Sender<AudioEvent>,
     shutdown: Receiver<()>,
     analyzer: AnalysisWorker,
@@ -42,7 +78,10 @@ impl Worker {
         media_read_buffer_len: usize,
     ) -> Self {
         Self {
-            commands,
+            commands: CommandInbox {
+                receiver: commands,
+                pending: None,
+            },
             events,
             shutdown,
             analyzer,
@@ -102,6 +141,7 @@ impl Worker {
         }
     }
     fn command(&mut self, command: AudioCommand) -> bool {
+        let command = self.commands.coalesce(command);
         match command {
             AudioCommand::Shutdown => {
                 self.stop();
@@ -245,7 +285,7 @@ impl Worker {
             if self.playback.is_none() {
                 let command = select! {
                     recv(self.shutdown) -> _ => break,
-                    recv(self.commands) -> command => match command {
+                    recv(self.commands.receiver) -> command => match command {
                         Ok(command) => command,
                         Err(_) => break,
                     },
@@ -300,7 +340,7 @@ impl Worker {
             let command = if playback.paused() {
                 select! {
                     recv(self.shutdown) -> _ => break,
-                    recv(self.commands) -> command => Some(command),
+                    recv(self.commands.receiver) -> command => Some(command),
                     recv(errors) -> error => {
                         if let Ok(error) = error { self.fail(anyhow!(error)); }
                         None
@@ -310,7 +350,7 @@ impl Worker {
             } else {
                 select! {
                     recv(self.shutdown) -> _ => break,
-                    recv(self.commands) -> command => Some(command),
+                    recv(self.commands.receiver) -> command => Some(command),
                     recv(errors) -> error => {
                         if let Ok(error) = error { self.fail(anyhow!(error)); }
                         None
@@ -350,6 +390,103 @@ fn send_event(events: &Sender<AudioEvent>, shutdown: &Receiver<()>, event: Audio
 mod tests {
     use super::*;
     use crossbeam_channel::bounded;
+
+    #[test]
+    fn consecutive_seeks_stop_at_every_non_seek_barrier() {
+        let (reply, _snapshot) = bounded(1);
+        let barriers = [
+            AudioCommand::Load {
+                path: PathBuf::from("other.wav"),
+                range: None,
+                generation: 2,
+                start_seconds: 0.0,
+                paused: true,
+            },
+            AudioCommand::Pause(true),
+            AudioCommand::Stop,
+            AudioCommand::Volume(0.5),
+            AudioCommand::OutputSettings {
+                device: None,
+                auto_mix: false,
+            },
+            AudioCommand::Analysis(false),
+            AudioCommand::MediaReadBuffer(2),
+            AudioCommand::FfmpegEnabled(false),
+            AudioCommand::AnalysisSettings(crate::analysis::AnalysisSettings::from(
+                &crate::config::Config::default(),
+            )),
+            AudioCommand::StopAndSnapshot(reply),
+            AudioCommand::Shutdown,
+        ];
+        for barrier in barriers {
+            let kind = std::mem::discriminant(&barrier);
+            let (send, receiver) = bounded(4);
+            for command in [
+                AudioCommand::Seek(10.0),
+                AudioCommand::Seek(20.0),
+                barrier,
+                AudioCommand::Seek(30.0),
+            ] {
+                send.send(command).unwrap();
+            }
+            let mut inbox = CommandInbox {
+                receiver,
+                pending: None,
+            };
+            let first = inbox.try_recv().unwrap();
+            assert!(matches!(inbox.coalesce(first), AudioCommand::Seek(20.0)));
+            let next = inbox.try_recv().unwrap();
+            assert_eq!(std::mem::discriminant(&inbox.coalesce(next)), kind);
+            let last = inbox.try_recv().unwrap();
+            assert!(matches!(inbox.coalesce(last), AudioCommand::Seek(30.0)));
+            assert!(matches!(inbox.try_recv(), Err(TryRecvError::Empty)));
+        }
+    }
+
+    #[test]
+    fn seek_batches_are_bounded_and_keep_the_remaining_targets() {
+        let (send, receiver) = bounded(MAX_SEEK_BATCH + 2);
+        for target in 1..=MAX_SEEK_BATCH + 2 {
+            send.send(AudioCommand::Seek(target as f64)).unwrap();
+        }
+        drop(send);
+        let mut inbox = CommandInbox {
+            receiver,
+            pending: None,
+        };
+        let first = inbox.try_recv().unwrap();
+        assert!(matches!(
+            inbox.coalesce(first),
+            AudioCommand::Seek(target) if target == MAX_SEEK_BATCH as f64
+        ));
+        let remainder = inbox.try_recv().unwrap();
+        assert!(matches!(
+            inbox.coalesce(remainder),
+            AudioCommand::Seek(target) if target == (MAX_SEEK_BATCH + 2) as f64
+        ));
+        assert!(matches!(inbox.try_recv(), Err(TryRecvError::Disconnected)));
+    }
+
+    #[test]
+    fn single_seek_does_not_wait_for_more_input() {
+        let (send, receiver) = bounded(1);
+        send.send(AudioCommand::Seek(7.0)).unwrap();
+        let (done, completed) = bounded(1);
+        let worker = std::thread::spawn(move || {
+            let mut inbox = CommandInbox {
+                receiver,
+                pending: None,
+            };
+            let first = inbox.try_recv().unwrap();
+            done.send(inbox.coalesce(first)).unwrap();
+        });
+        assert!(matches!(
+            completed.recv_timeout(Duration::from_secs(2)).unwrap(),
+            AudioCommand::Seek(7.0)
+        ));
+        drop(send);
+        worker.join().unwrap();
+    }
 
     #[test]
     fn engine_shutdown_and_drop_cancel_full_command_and_event_queues() {
