@@ -290,10 +290,7 @@ impl Source {
     }
 
     fn open_ffmpeg(path: &Path) -> Result<Self> {
-        let path = path
-            .canonicalize()
-            .with_context(|| format!("Opening {}", path.display()))?;
-        let decode = super::ffmpeg::Decoder::open(&path)?;
+        let decode = super::ffmpeg::Decoder::open(path)?;
         let info = decode.info().clone();
         let layout = decode.layout().to_vec();
         if info.sample_rate == 0 || layout.is_empty() {
@@ -1007,6 +1004,22 @@ mod tests {
             file.write_all(&value.to_le_bytes()).unwrap();
         }
         file
+    }
+
+    #[test]
+    fn linked_audio_keeps_logical_metadata_and_waveform_identity() {
+        let file = pcm_file();
+        let directory = tempfile::tempdir().unwrap();
+        let alias = directory.path().join("Logical title.wav");
+        std::os::unix::fs::symlink(file.path(), &alias).unwrap();
+        let mut source = Source::open(&alias, PROBE_BUFFER_LEN, false).unwrap();
+        assert_eq!(source.info().title, "Logical title");
+        assert_eq!(decode_remaining(&mut source).len(), 88_200);
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        let waveform = Source::waveform(&alias, None, 2, false, &cancelled).unwrap();
+        assert!(waveform.complete);
+        assert!(waveform.matches(&alias, None));
+        assert!(!waveform.matches(file.path(), None));
     }
 
     #[test]

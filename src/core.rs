@@ -222,7 +222,12 @@ pub struct Runtime {
 }
 impl Runtime {
     pub fn start(data_dir: &Path, config_path: &Path) -> Result<Self> {
-        let config = Config::load(config_path)?;
+        let mut config = Config::load(config_path)?;
+        config.library_roots = config
+            .library_roots
+            .iter()
+            .map(|root| library::logical_path(root))
+            .collect::<Result<_>>()?;
         config.save(config_path)?;
         std::fs::create_dir_all(data_dir)?;
         crate::logging::init(data_dir, &config)?;
@@ -492,6 +497,9 @@ mod tests {
         let mut state = CoreState::default();
         state.library.tracks = Arc::new(store.tracks().unwrap());
         state.system.config_path = directory.path().join("config.toml");
+        Arc::make_mut(&mut state.system.config)
+            .library_roots
+            .push(directory.path().to_path_buf());
         let (scan_tx, scan_rx) = bounded(1);
         let mut core = Core {
             library: library::LibraryState::new(state.library.tracks.as_ref().clone()),
@@ -518,6 +526,349 @@ mod tests {
         };
         core.enqueue(&[1, 2, 2, 3, 4]).unwrap();
         (directory, core)
+    }
+
+    fn settle_scan(core: &mut Core) -> bool {
+        let scan = core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let successful = scan.result.as_ref().unwrap().errors().is_empty();
+        core.finish_scan(scan).unwrap();
+        core.state.system.scanning = false;
+        successful
+    }
+
+    fn source_id(core: &Core, path: &Path, cue_track: Option<u32>) -> Option<i64> {
+        core.state
+            .library
+            .tracks
+            .iter()
+            .filter(|track| !track.missing)
+            .find(|track| {
+                let source = track
+                    .cue
+                    .as_ref()
+                    .map_or((track.path.as_path(), None), |cue| {
+                        (cue.sheet.as_path(), Some(cue.number))
+                    });
+                source == (path, cue_track)
+            })
+            .map(|track| track.id)
+    }
+
+    fn write_pcm(path: &Path) {
+        use std::io::Write;
+        let mut file = std::fs::File::create(path).unwrap();
+        file.write_all(b"RIFF").unwrap();
+        file.write_all(&236_u32.to_le_bytes()).unwrap();
+        file.write_all(b"WAVEfmt ").unwrap();
+        file.write_all(&16_u32.to_le_bytes()).unwrap();
+        file.write_all(&1_u16.to_le_bytes()).unwrap();
+        file.write_all(&1_u16.to_le_bytes()).unwrap();
+        file.write_all(&7500_u32.to_le_bytes()).unwrap();
+        file.write_all(&15000_u32.to_le_bytes()).unwrap();
+        file.write_all(&2_u16.to_le_bytes()).unwrap();
+        file.write_all(&16_u16.to_le_bytes()).unwrap();
+        file.write_all(b"data").unwrap();
+        file.write_all(&200_u32.to_le_bytes()).unwrap();
+        file.write_all(&[0; 200]).unwrap();
+    }
+
+    #[test]
+    fn scan_rejects_when_no_library_roots_are_configured() {
+        let (directory, mut core) = fixture();
+        Arc::make_mut(&mut core.state.system.config)
+            .library_roots
+            .clear();
+        assert!(
+            core.command(Command::Scan {
+                paths: vec![directory.path().to_path_buf()],
+                force: false,
+            })
+            .is_err()
+        );
+        assert!(!core.state.system.scanning);
+        assert!(core.scan_workers.is_empty());
+    }
+
+    #[test]
+    fn scan_accepts_a_child_of_a_configured_root() {
+        let (directory, mut core) = fixture();
+        let child = directory.path().join("nested");
+        std::fs::create_dir(&child).unwrap();
+        core.command(Command::Scan {
+            paths: vec![child],
+            force: false,
+        })
+        .unwrap();
+        assert!(settle_scan(&mut core));
+        assert_eq!(core.state.library.tracks.len(), 4);
+    }
+
+    #[test]
+    fn scan_rejects_prefix_sibling_of_a_configured_root() {
+        let (_directory, mut core) = fixture();
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("Music");
+        let sibling = parent.path().join("Music-other");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&sibling).unwrap();
+        Arc::make_mut(&mut core.state.system.config).library_roots = vec![root];
+        assert!(
+            core.command(Command::Scan {
+                paths: vec![sibling],
+                force: false,
+            })
+            .is_err()
+        );
+        assert!(core.scan_workers.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_accepts_symlinks_to_outside_a_configured_root() {
+        let (directory, mut core) = fixture();
+        let outside = tempfile::tempdir().unwrap();
+        let source = outside.path().join("source.wav");
+        write_pcm(&source);
+        let link = directory.path().join("outside-link");
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+        let logical = link.join("source.wav");
+        core.command(Command::Scan {
+            paths: vec![link.clone()],
+            force: false,
+        })
+        .unwrap();
+        assert!(settle_scan(&mut core));
+        let id = source_id(&core, &logical, None).unwrap();
+        assert_eq!(core.track(id).unwrap().path, logical);
+        assert!(source_id(&core, &source, None).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_keeps_distinct_configured_aliases_of_the_same_directory() {
+        let (directory, mut core) = fixture();
+        let outside = tempfile::tempdir().unwrap();
+        write_pcm(&outside.path().join("source.wav"));
+        let first = directory.path().join("first");
+        let second = directory.path().join("second");
+        for alias in [&first, &second] {
+            std::os::unix::fs::symlink(outside.path(), alias).unwrap();
+        }
+        let mut config = core.state.system.config.as_ref().clone();
+        config.library_roots = vec![first.join("."), second.join("unused/..")];
+        core.command(Command::Configure { config }).unwrap();
+        core.command(Command::Scan {
+            paths: vec![first.join("unused/.."), second.join(".")],
+            force: false,
+        })
+        .unwrap();
+        assert!(settle_scan(&mut core));
+        let ids = [&first, &second].map(|alias| {
+            let path = alias.join("source.wav");
+            let id = source_id(&core, &path, None).unwrap();
+            assert_eq!(core.track(id).unwrap().path, path);
+            id
+        });
+        assert_ne!(ids[0], ids[1]);
+    }
+
+    #[test]
+    fn scan_of_one_root_ignores_an_unavailable_configured_root() {
+        let (directory, mut core) = fixture();
+        let source = directory.path().join("1.wav");
+        write_pcm(&source);
+        Arc::make_mut(&mut core.state.system.config)
+            .library_roots
+            .push(directory.path().join("offline/Music"));
+        core.command(Command::Scan {
+            paths: vec![source.clone()],
+            force: false,
+        })
+        .unwrap();
+        assert!(settle_scan(&mut core));
+        assert_eq!(core.track(1).unwrap().path, source);
+        assert!(!core.track(1).unwrap().missing);
+    }
+
+    #[test]
+    fn cue_scan_can_reference_another_configured_root() {
+        let (directory, mut core) = fixture();
+        let sheets = directory.path().join("sheets");
+        let sources = directory.path().join("sources");
+        std::fs::create_dir(&sheets).unwrap();
+        std::fs::create_dir(&sources).unwrap();
+        let source = sources.join("source.wav");
+        write_pcm(&source);
+        let sheet = sheets.join("album.cue");
+        std::fs::write(
+            &sheet,
+            "FILE ../sources/source.wav WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n",
+        )
+        .unwrap();
+        Arc::make_mut(&mut core.state.system.config).library_roots = vec![sheets, sources];
+        core.command(Command::Scan {
+            paths: vec![sheet.clone()],
+            force: false,
+        })
+        .unwrap();
+        assert!(settle_scan(&mut core));
+        let id = source_id(&core, &sheet, Some(1)).unwrap();
+        let track = core.track(id).unwrap();
+        assert_eq!(track.path, source);
+        assert_eq!(track.cue.as_ref().unwrap().sheet, sheet);
+    }
+
+    #[test]
+    fn scan_rejects_a_logical_parent_escape_even_when_the_path_exists() {
+        let (_directory, mut core) = fixture();
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("Music");
+        std::fs::create_dir(&root).unwrap();
+        Arc::make_mut(&mut core.state.system.config).library_roots = vec![root.clone()];
+        assert!(
+            core.command(Command::Scan {
+                paths: vec![root.join("..")],
+                force: false,
+            })
+            .is_err()
+        );
+        assert!(core.scan_workers.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_and_broken_requests_do_not_prevent_other_roots_from_scanning() {
+        let (directory, mut core) = fixture();
+        let outside = tempfile::tempdir().unwrap();
+        let missing = outside.path().join("offline");
+        let broken = directory.path().join("broken-link");
+        std::os::unix::fs::symlink(&missing, &broken).unwrap();
+        let source = directory.path().join("1.wav");
+        write_pcm(&source);
+        Arc::make_mut(&mut core.state.system.config)
+            .library_roots
+            .push(missing.clone());
+        core.command(Command::Scan {
+            paths: vec![missing, broken, source.clone()],
+            force: false,
+        })
+        .unwrap();
+        assert!(!settle_scan(&mut core));
+        assert!(core.state.system.last_error.is_some());
+        let track = core.track(1).unwrap();
+        assert_eq!(track.path, source);
+        assert!(!track.missing);
+        assert!(track.duration.unwrap() < 1.0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn playlist_import_preserves_configured_aliases() {
+        let (directory, mut core) = fixture();
+        let outside = tempfile::tempdir().unwrap();
+        let source = outside.path().join("source.wav");
+        write_pcm(&source);
+        std::fs::write(
+            outside.path().join("playlist.m3u"),
+            "./unused/../source.wav\n",
+        )
+        .unwrap();
+        let alias = directory.path().join("Music");
+        std::os::unix::fs::symlink(outside.path(), &alias).unwrap();
+        let mut config = core.state.system.config.as_ref().clone();
+        config.library_roots = vec![alias.join("unused/.."), outside.path().to_path_buf()];
+        core.command(Command::Configure { config }).unwrap();
+        assert_eq!(
+            core.state.system.config.library_roots,
+            [alias.clone(), outside.path().to_path_buf()]
+        );
+        core.command(Command::Scan {
+            paths: vec![source.clone()],
+            force: false,
+        })
+        .unwrap();
+        assert!(settle_scan(&mut core));
+        let physical_id = source_id(&core, &source, None).unwrap();
+        core.command(Command::ImportPlaylist {
+            path: alias.join("playlist.m3u"),
+            name: Some("Alias playlist".into()),
+        })
+        .unwrap();
+        assert!(settle_scan(&mut core));
+        let logical = alias.join("source.wav");
+        let logical_id = source_id(&core, &logical, None).unwrap();
+        assert_ne!(logical_id, physical_id);
+        let entries = &core.state.library.playlists[0].entries;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].track_id, logical_id);
+        core.enqueue(&[logical_id]).unwrap();
+        let entry = core.state.queue.entries.last().unwrap();
+        assert_eq!(entry.track_id, logical_id);
+        assert_eq!(core.track(entry.track_id).unwrap().path, logical);
+    }
+
+    #[test]
+    fn configure_normalizes_unavailable_roots_without_dropping_them() {
+        let (directory, mut core) = fixture();
+        let unavailable = directory.path().join("offline/Music");
+        let mut config = core.state.system.config.as_ref().clone();
+        config.library_roots = vec![
+            directory.path().join("unused/.."),
+            unavailable.join("unused/.."),
+        ];
+        core.command(Command::Configure { config }).unwrap();
+        assert_eq!(
+            core.state.system.config.library_roots,
+            [directory.path().to_path_buf(), unavailable.clone()]
+        );
+        let saved = Config::load(&core.state.system.config_path).unwrap();
+        assert_eq!(saved.library_roots, core.state.system.config.library_roots);
+        assert!(!unavailable.exists());
+    }
+
+    #[test]
+    fn scan_rejects_an_outside_file_before_starting_a_worker() {
+        let (_directory, mut core) = fixture();
+        let outside = tempfile::tempdir().unwrap();
+        let source = outside.path().join("source.wav");
+        write_pcm(&source);
+        let error = core
+            .command(Command::Scan {
+                paths: vec![source],
+                force: false,
+            })
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("outside configured library roots")
+        );
+        assert!(!core.state.system.scanning);
+        assert!(core.scan_workers.is_empty());
+    }
+
+    #[test]
+    fn playlist_import_rejects_an_outside_source_before_starting_a_worker() {
+        let (directory, mut core) = fixture();
+        let outside = tempfile::tempdir().unwrap();
+        let source = outside.path().join("source.wav");
+        write_pcm(&source);
+        let playlist = directory.path().join("outside.m3u");
+        std::fs::write(&playlist, format!("{}\n", source.display())).unwrap();
+        let error = core
+            .command(Command::ImportPlaylist {
+                path: playlist,
+                name: None,
+            })
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("outside configured library roots")
+        );
+        assert!(!core.state.system.scanning);
+        assert!(core.scan_workers.is_empty());
+        assert!(core.state.library.playlists.is_empty());
     }
 
     fn pending(core: &mut Core, queue_id: u64) {
@@ -961,7 +1312,13 @@ mod tests {
         file.write_all(&200_u32.to_le_bytes()).unwrap();
         file.write_all(&[0; 200]).unwrap();
         drop(file);
-        let mut scanned = library::scan_paths(std::slice::from_ref(&path), &[], false).unwrap();
+        let mut scanned = library::scan_paths(
+            std::slice::from_ref(&path),
+            &[],
+            false,
+            &core.state.system.config.library_roots,
+        )
+        .unwrap();
         let probed_title = scanned.records[0].media.title.clone();
         scanned.records[0].media.title = "Cached metadata".into();
         core.store.apply_scan(&scanned).unwrap();

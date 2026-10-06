@@ -4,7 +4,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 use walkdir::WalkDir;
@@ -123,10 +123,12 @@ impl ScanResult {
 /// Scan directories, audio files and CUE sheets without touching audio output.
 /// CUE metadata is always reread; only unchanged full-source probe results may
 /// be reused. Failed sheets contribute no partial tracks or source suppression.
+/// `library_roots` are normalized absolute logical paths, as published by the core.
 pub fn scan_paths(
     paths: &[PathBuf],
     known: &[KnownFile],
     ffmpeg_enabled: bool,
+    library_roots: &[PathBuf],
 ) -> Result<ScanResult> {
     let mut known_by_path: HashMap<&Path, &KnownFile> = HashMap::with_capacity(known.len());
     for item in known {
@@ -139,18 +141,26 @@ pub fn scan_paths(
     let mut explicit_audio = HashSet::new();
     let mut result = ScanResult::default();
     for requested in paths {
-        let root = match fs::canonicalize(requested) {
-            Ok(path) => path,
+        let root = logical_path(requested)?;
+        if !library_roots
+            .iter()
+            .any(|allowed| root.starts_with(allowed))
+        {
+            result.errors.push(format!(
+                "{} is outside the configured library roots",
+                root.display()
+            ));
+            continue;
+        }
+        result.roots.push(root.clone());
+        let metadata = match fs::metadata(&root) {
+            Ok(metadata) => metadata,
             Err(error) => {
-                result.roots.push(absolute_hint(requested));
-                result
-                    .errors
-                    .push(format!("{}: {error}", requested.display()));
+                result.errors.push(format!("{}: {error}", root.display()));
                 continue;
             }
         };
-        result.roots.push(root.clone());
-        if root.is_file() {
+        if metadata.is_file() {
             if is_audio_path(&root) {
                 explicit_audio.insert(root.clone());
                 files.insert(root);
@@ -159,24 +169,17 @@ pub fn scan_paths(
             } else {
                 result.errors.push(format!(
                     "{} is not a supported audio file or CUE sheet",
-                    requested.display()
+                    root.display()
                 ));
             }
-        } else if root.is_dir() {
-            for entry in WalkDir::new(&root).follow_links(false) {
+        } else if metadata.is_dir() {
+            for entry in WalkDir::new(&root).follow_links(true) {
                 match entry {
                     Ok(entry)
                         if entry.file_type().is_file()
                             && (is_audio_path(entry.path()) || is_cue_path(entry.path())) =>
                     {
-                        match entry.path().canonicalize() {
-                            Ok(path) => {
-                                files.insert(path);
-                            }
-                            Err(error) => result
-                                .errors
-                                .push(format!("{}: {error}", entry.path().display())),
-                        }
+                        files.insert(entry.path().to_path_buf());
                     }
                     Ok(_) => {}
                     Err(error) => result.errors.push(format!("{}: {error}", root.display())),
@@ -189,7 +192,13 @@ pub fn scan_paths(
     let mut sources = HashMap::new();
     let mut suppressed = HashSet::new();
     for sheet in files.iter().filter(|path| is_cue_path(path)) {
-        match scan_cue(sheet, &known_by_path, &mut sources, ffmpeg_enabled) {
+        match scan_cue(
+            sheet,
+            &known_by_path,
+            &mut sources,
+            ffmpeg_enabled,
+            library_roots,
+        ) {
             Ok(records) => {
                 suppressed.extend(records.iter().map(|record| record.path.clone()));
                 result.records.extend(records);
@@ -243,14 +252,19 @@ fn scan_cue(
     known: &HashMap<&Path, &KnownFile>,
     sources: &mut HashMap<PathBuf, std::result::Result<ScanRecord, String>>,
     ffmpeg_enabled: bool,
+    library_roots: &[PathBuf],
 ) -> Result<Vec<ScanRecord>> {
     let sheet = crate::cue::read(path)?;
     let mut records = Vec::with_capacity(sheet.tracks.len());
     for track in sheet.tracks {
-        let source = track
-            .file
-            .canonicalize()
+        let source = logical_path(&track.file)
             .with_context(|| format!("resolve CUE source {}", track.file.display()))?;
+        if !library_roots.iter().any(|root| source.starts_with(root)) {
+            bail!(
+                "CUE source {} is outside the configured library roots",
+                source.display()
+            );
+        }
         let mut record = source_record(&source, known, sources, ffmpeg_enabled)?.clone();
         let duration = record
             .media
@@ -336,14 +350,25 @@ fn hash_file(path: &Path) -> Result<String> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
-fn absolute_hint(path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
+/// Normalize an absolute logical path without resolving symlinks or requiring it to exist.
+pub(crate) fn logical_path(path: &Path) -> Result<PathBuf> {
+    let mut normalized = if path.is_absolute() {
+        PathBuf::with_capacity(path.as_os_str().len())
     } else {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(path))
-            .unwrap_or_else(|_| path.to_path_buf())
+        let mut directory = std::env::current_dir().context("resolve current directory")?;
+        directory.reserve(path.as_os_str().len());
+        directory
+    };
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
     }
+    Ok(normalized)
 }
 
 fn is_audio_path(path: &Path) -> bool {
@@ -403,11 +428,12 @@ pub fn import_playlist(path: &Path) -> Result<Vec<M3uItem>> {
 }
 
 fn cue_items(path: &Path) -> Result<Vec<M3uItem>> {
-    Ok(crate::cue::read(path)?
+    let path = logical_path(path)?;
+    Ok(crate::cue::read(&path)?
         .tracks
         .into_iter()
         .map(|track| M3uItem {
-            path: path.to_path_buf(),
+            path: path.clone(),
             name: track.title,
             cue_track: Some(track.number),
         })
@@ -417,7 +443,8 @@ fn cue_items(path: &Path) -> Result<Vec<M3uItem>> {
 /// Read a UTF-8 M3U/M3U8 file, expanding bare CUE paths. Relative paths are
 /// resolved against its parent. CUE paths always refer to the complete sheet.
 pub fn import_m3u(path: &Path) -> Result<Vec<M3uItem>> {
-    let bytes = fs::read(path).with_context(|| format!("read playlist {}", path.display()))?;
+    let path = logical_path(path)?;
+    let bytes = fs::read(&path).with_context(|| format!("read playlist {}", path.display()))?;
     let text = std::str::from_utf8(bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes))
         .with_context(|| format!("playlist {} is not UTF-8", path.display()))?;
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
@@ -442,6 +469,7 @@ pub fn import_m3u(path: &Path) -> Result<Vec<M3uItem>> {
         } else {
             parent.join(item_path)
         };
+        let item_path = logical_path(&item_path)?;
         let name = pending_name.take();
         if is_cue_path(&item_path) {
             let items = match sheets.entry(item_path.clone()) {
@@ -463,8 +491,7 @@ pub fn import_m3u(path: &Path) -> Result<Vec<M3uItem>> {
 }
 
 /// Write an UTF-8 M3U8, retaining only the first occurrence of each track ID.
-/// Resolve the existing output directory physically before making paths relative,
-/// so `..` and directory symlinks retain their filesystem meaning.
+/// Normalize destination paths logically so relative entries retain symlink aliases.
 pub fn export_m3u(path: &Path, playlist: &Playlist, tracks: &[Track]) -> Result<()> {
     let by_id: HashMap<i64, &Track> = tracks.iter().map(|track| (track.id, track)).collect();
     let mut seen = HashSet::new();
@@ -510,7 +537,7 @@ pub fn export_m3u(path: &Path, playlist: &Playlist, tracks: &[Track]) -> Result<
                         cue.sheet.display()
                     );
                 }
-                if expected.file.canonicalize()? != selected.unwrap().path {
+                if logical_path(&expected.file)? != selected.unwrap().path {
                     bail!(
                         "CUE source changed; rescan {} before exporting",
                         cue.sheet.display()
@@ -523,14 +550,10 @@ pub fn export_m3u(path: &Path, playlist: &Playlist, tracks: &[Track]) -> Result<
         }
         output.push(track);
     }
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let parent = parent
-        .canonicalize()
-        .with_context(|| format!("resolve playlist directory {}", parent.display()))?;
-    let file = File::create(path).with_context(|| format!("create playlist {}", path.display()))?;
+    let path = logical_path(path)?;
+    let parent = path.parent().context("playlist has no parent directory")?;
+    let file =
+        File::create(&path).with_context(|| format!("create playlist {}", path.display()))?;
     let mut writer = BufWriter::new(file);
     writer.write_all(b"#EXTM3U\n")?;
     for track in output {
@@ -683,18 +706,340 @@ mod tests {
     }
 
     #[test]
+    fn logical_paths_normalize_missing_paths_and_parent_components() -> Result<()> {
+        let cwd = std::env::current_dir()?;
+        assert_eq!(
+            logical_path(Path::new("missing/.././song.wav"))?,
+            cwd.join("song.wav")
+        );
+        assert_eq!(
+            logical_path(&cwd.join("missing/../song.wav"))?,
+            cwd.join("song.wav")
+        );
+        assert_eq!(
+            logical_path(Path::new("/../../song.wav"))?,
+            PathBuf::from("/song.wav")
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_files_and_directories_outside_roots_keep_distinct_aliases() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let actual = tempfile::tempdir()?;
+        let source = actual.path().join("audio.wav");
+        wav(&source, 150)?;
+        for name in ["first.wav", "second.wav"] {
+            std::os::unix::fs::symlink(&source, directory.path().join(name))?;
+        }
+        for name in ["first", "second"] {
+            std::os::unix::fs::symlink(actual.path(), directory.path().join(name))?;
+        }
+        let result = scan_paths(
+            &[directory.path().to_path_buf()],
+            &[],
+            false,
+            &[directory.path().to_path_buf()],
+        )?;
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let mut expected: Vec<_> = [
+            "first.wav",
+            "second.wav",
+            "first/audio.wav",
+            "second/audio.wav",
+        ]
+        .into_iter()
+        .map(|name| directory.path().join(name))
+        .collect();
+        expected.sort();
+        assert_eq!(
+            result
+                .records
+                .iter()
+                .map(|record| record.path.clone())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert!(
+            result
+                .records
+                .iter()
+                .all(|record| record.fingerprint == result.records[0].fingerprint)
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ancestor_link_cycle_reports_error_without_losing_noncyclic_media() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let nested = directory.path().join("nested");
+        fs::create_dir(&nested)?;
+        wav(&directory.path().join("audio.wav"), 150)?;
+        wav(&nested.join("other.wav"), 150)?;
+        let back = nested.join("back");
+        std::os::unix::fs::symlink(directory.path(), &back)?;
+        let result = scan_paths(
+            &[directory.path().to_path_buf()],
+            &[],
+            false,
+            &[directory.path().to_path_buf()],
+        )?;
+        assert_eq!(result.errors.len(), 1);
+        assert!(result.errors[0].contains(&back.display().to_string()));
+        assert_eq!(
+            result
+                .records
+                .iter()
+                .map(|record| record.path.clone())
+                .collect::<Vec<_>>(),
+            [directory.path().join("audio.wav"), nested.join("other.wav")]
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cue_in_linked_tree_keeps_sheet_and_source_aliases_across_roots() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let actual = tempfile::tempdir()?;
+        let other_actual = tempfile::tempdir()?;
+        let root = directory.path().join("library");
+        fs::create_dir(&root)?;
+        let tree = root.join("linked");
+        let other_root = directory.path().join("other-library");
+        std::os::unix::fs::symlink(actual.path(), &tree)?;
+        std::os::unix::fs::symlink(other_actual.path(), &other_root)?;
+        wav(&tree.join("audio.wav"), 150)?;
+        let remote = other_root.join("remote.wav");
+        wav(&remote, 150)?;
+        let sheet = tree.join("album.cue");
+        fs::write(
+            &sheet,
+            format!(
+                "FILE \"./unused/../audio.wav\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\nFILE \"{}\" WAVE\nTRACK 02 AUDIO\nINDEX 01 00:00:00\n",
+                other_root.join("unused/../remote.wav").display()
+            ),
+        )?;
+        let result = super::scan_paths(
+            std::slice::from_ref(&root),
+            &[],
+            false,
+            &[root.clone(), other_root],
+        )?;
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.roots, [root]);
+        assert_eq!(result.records.len(), 2);
+        assert_eq!(result.records[0].path, tree.join("audio.wav"));
+        assert_eq!(result.records[1].path, remote);
+        assert!(
+            result
+                .records
+                .iter()
+                .all(|record| record.cue.as_ref().unwrap().sheet == sheet)
+        );
+        let mut suppressed = vec![tree.join("audio.wav"), remote];
+        suppressed.sort();
+        assert_eq!(result.suppressed_sources, suppressed);
+        Ok(())
+    }
+
+    #[test]
+    fn missing_requests_keep_normalized_logical_roots_and_allow_other_roots() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let requested = directory.path().join("unused/../missing.wav");
+        let expected = directory.path().join("missing.wav");
+        let audio = directory.path().join("audio.wav");
+        wav(&audio, 150)?;
+        let result = scan_paths(
+            &[requested, audio.clone()],
+            &[],
+            false,
+            &[directory.path().to_path_buf()],
+        )?;
+        assert_eq!(result.roots, [expected.clone(), audio.clone()]);
+        assert_eq!(result.errors.len(), 1);
+        assert!(result.errors[0].starts_with(&expected.display().to_string()));
+        assert_eq!(result.records.len(), 1);
+        assert_eq!(result.records[0].path, audio);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_root_keeps_alias_and_rejects_physical_outsiders() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let actual = tempfile::tempdir()?;
+        wav(&actual.path().join("audio.wav"), 150)?;
+        let alias = directory.path().join("linked");
+        std::os::unix::fs::symlink(actual.path(), &alias)?;
+        let result = scan_paths(
+            &[alias.join("unused/../."), actual.path().join("audio.wav")],
+            &[],
+            false,
+            std::slice::from_ref(&alias),
+        )?;
+        assert_eq!(result.errors.len(), 1);
+        assert!(result.errors[0].contains("outside the configured library roots"));
+        assert_eq!(result.roots, [alias.clone()]);
+        assert_eq!(result.records.len(), 1);
+        assert_eq!(result.records[0].path, alias.join("audio.wav"));
+        Ok(())
+    }
+
+    #[test]
+    fn cue_sources_require_logical_membership_in_any_configured_root() -> Result<()> {
+        let inside = tempfile::tempdir()?;
+        let outside = tempfile::tempdir()?;
+        let source = outside.path().join("outside.wav");
+        let sheet = inside.path().join("outside.cue");
+        wav(&source, 150)?;
+        fs::write(
+            &sheet,
+            format!(
+                "FILE \"{}\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n",
+                source.display()
+            ),
+        )?;
+        let control = scan_paths(
+            std::slice::from_ref(&sheet),
+            &[],
+            false,
+            &[logical_path(inside.path())?, logical_path(outside.path())?],
+        )?;
+        assert!(control.errors.is_empty(), "{:?}", control.errors);
+        assert_eq!(control.records.len(), 1);
+        assert_eq!(control.records[0].path, logical_path(&source)?);
+        assert!(control.records[0].cue.is_some());
+        let result = scan_paths(
+            std::slice::from_ref(&sheet),
+            &[],
+            false,
+            &[logical_path(inside.path())?],
+        )?;
+        assert!(result.records.is_empty());
+        assert_eq!(result.errors.len(), 1);
+        assert!(result.errors[0].contains("outside the configured library roots"));
+        assert!(result.suppressed_sources.is_empty());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn playlist_import_normalizes_missing_paths_without_resolving_aliases() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let actual = tempfile::tempdir()?;
+        let alias = directory.path().join("linked");
+        std::os::unix::fs::symlink(actual.path(), &alias)?;
+        let sheet = alias.join("album.cue");
+        two_track_sheet(&sheet)?;
+        let direct = import_playlist(&alias.join("unused/../album.cue"))?;
+        assert_eq!(direct.len(), 2);
+        assert!(direct.iter().all(|item| item.path == sheet));
+        let playlist = alias.join("playlist.m3u8");
+        fs::write(
+            &playlist,
+            "#EXTM3U\nunused/../missing.wav\n./unused/../album.cue\n",
+        )?;
+        let imported = import_m3u(&alias.join("unused/../playlist.m3u8"))?;
+        assert_eq!(imported.len(), 3);
+        assert_eq!(imported[0].path, alias.join("missing.wav"));
+        assert_eq!(imported[0].cue_track, None);
+        assert_eq!(imported[1].path, sheet);
+        assert_eq!(imported[1].cue_track, Some(1));
+        assert_eq!(imported[2].path, imported[1].path);
+        assert_eq!(imported[2].cue_track, Some(2));
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn logical_cue_alias_paths_roundtrip_complete_sheets() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let actual = tempfile::tempdir()?;
+        let alias = directory.path().join("linked");
+        std::os::unix::fs::symlink(actual.path(), &alias)?;
+        let audio = alias.join("audio.wav");
+        let sheet = alias.join("#album.cue");
+        wav(&audio, 225)?;
+        two_track_sheet(&sheet)?;
+        let scan = scan_paths(
+            &[sheet.clone(), audio],
+            &[],
+            false,
+            std::slice::from_ref(&alias),
+        )?;
+        assert!(scan.errors.is_empty(), "{:?}", scan.errors);
+        assert!(
+            scan.records
+                .iter()
+                .all(|record| record.path == alias.join("audio.wav"))
+        );
+        let tracks: Vec<_> = scan
+            .records
+            .iter()
+            .enumerate()
+            .map(|(index, record)| track_from_record(index as i64 + 1, record))
+            .collect();
+        let mut sequence: Vec<_> = tracks
+            .iter()
+            .filter(|track| track.cue.is_some())
+            .map(|track| track.id)
+            .collect();
+        sequence.push(tracks.iter().find(|track| track.cue.is_none()).unwrap().id);
+        let playlist = Playlist {
+            id: 1,
+            name: "Logical CUE aliases".into(),
+            entries: sequence
+                .iter()
+                .enumerate()
+                .map(|(index, track_id)| PlaylistEntry {
+                    id: index as i64 + 1,
+                    track_id: *track_id,
+                })
+                .collect(),
+        };
+        let path = alias.join("playlist.m3u8");
+        export_m3u(&path, &playlist, &tracks)?;
+        let imported = import_playlist(&path)?;
+        let expected = [sequence[0], sequence[1], *sequence.last().unwrap()];
+        assert_eq!(imported.len(), expected.len());
+        for (item, id) in imported.iter().zip(expected) {
+            let track = tracks.iter().find(|track| track.id == id).unwrap();
+            assert_eq!(item.cue_track, track.cue.as_ref().map(|cue| cue.number));
+            assert_eq!(
+                item.path,
+                *track.cue.as_ref().map_or(&track.path, |cue| &cue.sheet)
+            );
+        }
+        // Ordinary path entries, usable without interpreting player-specific tags.
+        let text = fs::read_to_string(&path)?;
+        assert_eq!(
+            text.lines().filter(|line| *line == "./#album.cue").count(),
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
     fn cue_single_source_tracks_have_relative_duration_and_metadata() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let audio = directory.path().join("audio.wav");
         let sheet = directory.path().join("album.CUE");
         wav(&audio, 225)?;
         two_track_sheet(&sheet)?;
-        let result = scan_paths(std::slice::from_ref(&sheet), &[], false)?;
+        let result = scan_paths(
+            std::slice::from_ref(&sheet),
+            &[],
+            false,
+            &[directory.path().to_path_buf()],
+        )?;
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         assert_eq!(result.records.len(), 2);
         let first = &result.records[0];
         let second = &result.records[1];
-        assert_eq!(first.path, audio.canonicalize()?);
+        assert_eq!(first.path, logical_path(&audio)?);
         assert_eq!(second.path, first.path);
         assert_eq!(first.media.title, "First");
         assert_eq!(first.media.artist, "Track artist");
@@ -711,7 +1056,7 @@ mod tests {
         assert_eq!(
             first.cue.as_ref().unwrap(),
             &CueSegment {
-                sheet: sheet.canonicalize()?,
+                sheet: logical_path(&sheet)?,
                 number: 1,
                 start_frame: 0,
                 end_frame: Some(75),
@@ -732,7 +1077,7 @@ mod tests {
             &sheet,
             "FILE \"z.wav\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nINDEX 01 00:01:00\nFILE \"a.wav\" WAVE\nTRACK 03 AUDIO\nINDEX 01 00:00:00\nTRACK 04 AUDIO\nINDEX 01 00:02:00\n",
         )?;
-        let result = scan_paths(&[sheet], &[], false)?;
+        let result = scan_paths(&[sheet], &[], false, &[directory.path().to_path_buf()])?;
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         assert_eq!(result.records.len(), 4);
         assert_eq!(
@@ -764,10 +1109,20 @@ mod tests {
         let sheet = directory.path().join("album.cue");
         wav(&audio, 225)?;
         two_track_sheet(&sheet)?;
-        let original = scan_paths(std::slice::from_ref(&sheet), &[], false)?;
+        let original = scan_paths(
+            std::slice::from_ref(&sheet),
+            &[],
+            false,
+            &[directory.path().to_path_buf()],
+        )?;
         assert!(original.errors.is_empty(), "{:?}", original.errors);
         let known = known_records(&original.records);
-        let full = scan_paths(std::slice::from_ref(&audio), &known, false)?;
+        let full = scan_paths(
+            std::slice::from_ref(&audio),
+            &known,
+            false,
+            &[directory.path().to_path_buf()],
+        )?;
         assert!(full.errors.is_empty(), "{:?}", full.errors);
         assert_eq!(full.records.len(), 1);
         assert_eq!(full.records[0].media.duration, Some(3.0));
@@ -777,7 +1132,12 @@ mod tests {
             "TITLE \"Edited album\"\nFILE \"audio.wav\" WAVE\nTRACK 01 AUDIO\nTITLE \"Renamed\"\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nINDEX 01 00:02:00\n",
         )?;
         for cache in [&known, &known_records(&full.records)] {
-            let rescanned = scan_paths(std::slice::from_ref(&sheet), cache, false)?;
+            let rescanned = scan_paths(
+                std::slice::from_ref(&sheet),
+                cache,
+                false,
+                &[directory.path().to_path_buf()],
+            )?;
             assert!(rescanned.errors.is_empty(), "{:?}", rescanned.errors);
             assert_eq!(rescanned.records.len(), 2);
             assert_eq!(rescanned.records[0].media.title, "Renamed");
@@ -811,11 +1171,21 @@ mod tests {
                 &sheet,
                 format!("FILE \"audio.wav\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n{invalid}"),
             )?;
-            let result = scan_paths(std::slice::from_ref(&sheet), &[], false)?;
+            let result = scan_paths(
+                std::slice::from_ref(&sheet),
+                &[],
+                false,
+                &[directory.path().to_path_buf()],
+            )?;
             assert!(result.records.is_empty());
             assert_eq!(result.errors.len(), 1);
             assert!(result.suppressed_sources.is_empty());
-            let directory_scan = scan_paths(&[directory.path().to_path_buf()], &[], false)?;
+            let directory_scan = scan_paths(
+                &[directory.path().to_path_buf()],
+                &[],
+                false,
+                &[directory.path().to_path_buf()],
+            )?;
             assert_eq!(directory_scan.records.len(), 1);
             assert!(directory_scan.records[0].cue.is_none());
             assert!(directory_scan.suppressed_sources.is_empty());
@@ -831,7 +1201,12 @@ mod tests {
         wav(&audio, 225)?;
         wav(&directory.path().join("unrelated.wav"), 75)?;
         two_track_sheet(&sheet)?;
-        let result = scan_paths(&[directory.path().to_path_buf(), sheet.clone()], &[], false)?;
+        let result = scan_paths(
+            &[directory.path().to_path_buf(), sheet.clone()],
+            &[],
+            false,
+            &[directory.path().to_path_buf()],
+        )?;
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         assert_eq!(result.records.len(), 3);
         assert_eq!(
@@ -842,11 +1217,12 @@ mod tests {
                 .count(),
             1
         );
-        assert_eq!(result.suppressed_sources, [audio.canonicalize()?]);
+        assert_eq!(result.suppressed_sources, [logical_path(&audio)?]);
         let explicit = scan_paths(
             &[directory.path().to_path_buf(), audio.clone(), sheet, audio],
             &[],
             false,
+            &[directory.path().to_path_buf()],
         )?;
         assert!(explicit.errors.is_empty(), "{:?}", explicit.errors);
         assert_eq!(explicit.records.len(), 4);
@@ -869,7 +1245,12 @@ mod tests {
         let sheet = directory.path().join("#album.cue");
         wav(&audio, 225)?;
         two_track_sheet(&sheet)?;
-        let scan = scan_paths(&[sheet.clone(), audio], &[], false)?;
+        let scan = scan_paths(
+            &[sheet.clone(), audio],
+            &[],
+            false,
+            &[directory.path().to_path_buf()],
+        )?;
         let tracks: Vec<_> = scan
             .records
             .iter()
@@ -924,7 +1305,12 @@ mod tests {
         wav(&directory.path().join("audio.wav"), 225)?;
         let sheet = directory.path().join("album.cue");
         two_track_sheet(&sheet)?;
-        let scan = scan_paths(std::slice::from_ref(&sheet), &[], false)?;
+        let scan = scan_paths(
+            std::slice::from_ref(&sheet),
+            &[],
+            false,
+            &[directory.path().to_path_buf()],
+        )?;
         let tracks: Vec<_> = scan
             .records
             .iter()
@@ -968,7 +1354,9 @@ mod tests {
     }
 
     fn assert_playlist_roundtrip(path: &Path) -> Result<()> {
-        let directory = path.parent().unwrap().canonicalize()?;
+        let normalized = logical_path(path)?;
+        let path = normalized.as_path();
+        let directory = logical_path(path.parent().unwrap())?;
         let tracks: Vec<_> = ["#song.wav", "other song.wav"]
             .into_iter()
             .enumerate()
@@ -1023,7 +1411,7 @@ mod tests {
         let imported = import_m3u(path)?;
         assert_eq!(imported.len(), 2);
         for (item, index) in imported.iter().zip([1, 0]) {
-            assert_eq!(item.path.canonicalize()?, tracks[index].path);
+            assert_eq!(item.path, tracks[index].path);
             assert_eq!(item.cue_track, None);
         }
         assert_eq!(imported[0].name.as_deref(), Some("other song.wav"));
@@ -1046,7 +1434,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn m3u_roundtrip_resolves_symlink_before_parent_component() -> Result<()> {
+    fn m3u_roundtrip_normalizes_symlink_parent_components_logically() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let nested = directory.path().join("physical/nested");
         fs::create_dir_all(&nested)?;

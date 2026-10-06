@@ -2,6 +2,12 @@
 
 == Import and play
 
+Configure the directory containing the sheet as a library root before importing.
+Every source audio file must have a logical path within a configured library root;
+it may use another configured root or a symlink to audio outside those roots.
+Paths are normalized without resolving symlinks. Logical references outside all
+configured roots are rejected before metadata probing or fingerprinting.
+
 [source,sh]
 ----
 rivu library scan album.cue --wait

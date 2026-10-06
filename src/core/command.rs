@@ -271,8 +271,13 @@ impl Core {
                 self.state.system.last_error = None;
                 return Ok(());
             }
-            Command::Configure { config } => {
+            Command::Configure { mut config } => {
                 config.validate()?;
+                config.library_roots = config
+                    .library_roots
+                    .iter()
+                    .map(|root| library::logical_path(root))
+                    .collect::<Result<_>>()?;
                 if let Some(device) = &config.output_device
                     && !self.state.system.devices.contains(device)
                 {

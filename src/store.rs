@@ -180,6 +180,7 @@ fn directory_prefix(path: &Path) -> Result<String> {
     if path.as_os_str().is_empty() {
         return Ok(String::new());
     }
+    let path = crate::library::logical_path(path)?;
     let path = path
         .to_str()
         .context("Library directory path is not UTF-8")?;

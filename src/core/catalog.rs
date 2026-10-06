@@ -1,4 +1,5 @@
 use super::*;
+use anyhow::ensure;
 
 impl Core {
     pub(in crate::core) fn scan(
@@ -13,17 +14,38 @@ impl Core {
         if paths.is_empty() {
             bail!("No files or directories supplied");
         }
+        let config = Arc::clone(&self.state.system.config);
+        if config.library_roots.is_empty() {
+            bail!(
+                "No library roots are configured; add a library root in the configuration before scanning"
+            );
+        }
+        let paths = paths
+            .into_iter()
+            .map(|path| library::logical_path(&path))
+            .collect::<Result<Vec<_>>>()?;
+        for requested in &paths {
+            ensure!(
+                config
+                    .library_roots
+                    .iter()
+                    .any(|root| requested.starts_with(root)),
+                "Scan path is outside configured library roots: {}",
+                requested.display()
+            );
+        }
         let known = if force {
             Vec::new()
         } else {
             self.store.known_files()?
         };
-        let ffmpeg_enabled = self.state.system.config.ffmpeg_enabled;
+        let ffmpeg_enabled = config.ffmpeg_enabled;
         let sender = self.scan_tx.clone();
         let worker = thread::Builder::new()
             .name("rivu-scan".into())
             .spawn(move || {
-                let result = library::scan_paths(&paths, &known, ffmpeg_enabled);
+                let result =
+                    library::scan_paths(&paths, &known, ffmpeg_enabled, &config.library_roots);
                 let _ = sender.send(ScanFinished { result, import });
             })?;
         self.scan_workers.retain(|worker| !worker.is_finished());
@@ -60,9 +82,8 @@ impl Core {
                 })
                 .collect();
             for item in items {
-                if let Ok(path) = item.path.canonicalize()
-                    && let Some(id) = by_source.get(&(path.as_path(), item.cue_track))
-                {
+                let path = library::logical_path(&item.path)?;
+                if let Some(id) = by_source.get(&(path.as_path(), item.cue_track)) {
                     ids.push(*id);
                 }
             }

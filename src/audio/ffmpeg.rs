@@ -345,8 +345,7 @@ pub(super) struct Decoder {
 unsafe impl Send for Decoder {}
 impl Decoder {
     pub(super) fn open(path: &Path) -> Result<Self> {
-        let path =
-            std::fs::canonicalize(path).with_context(|| format!("Opening {}", path.display()))?;
+        let path = crate::library::logical_path(path)?;
         let metadata = std::fs::metadata(&path)?;
         if !metadata.is_file() {
             bail!("FFmpeg backend only accepts regular local files");

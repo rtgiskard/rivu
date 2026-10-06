@@ -4,6 +4,18 @@ CLI scan and playlist import/export paths are relative to the invoking client's
 working directory. Playlists deduplicate track IDs while queues may repeat tracks.
 Exported playlist paths are relative to the destination directory.
 
+Scanning requires configured `library_roots`. Set absolute directory paths in
+`config.toml` before scanning.
+GUI, CLI, and IPC scans normalize `.` and `..` without resolving symlinks. Every
+requested logical path must lie within a configured root; a mixed inside/outside
+request is rejected before scanning begins. File and directory symlinks are
+followed even when their targets are outside the configured roots. Stored paths
+and directory views retain the logical aliases; distinct aliases remain distinct
+library identities. Directory symlink cycles are reported as scan errors.
+CUE audio sources may use any configured logical root, but paths outside all roots
+are rejected. An unavailable root does not prevent scanning another configured
+root. `library probe` remains an independent metadata inspection.
+
 == Library metadata and favorites
 
 `library probe PATH` reads audio metadata without starting a core. Library rows and
