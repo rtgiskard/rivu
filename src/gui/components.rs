@@ -36,21 +36,40 @@ pub(crate) fn panel_surface(id: impl Into<ElementId>) -> Stateful<Div> {
     div()
         .id(id)
         .size_full()
+        .flex_1()
         .flex()
         .flex_col()
+        .gap_2()
         .min_w_0()
         .min_h_0()
         .overflow_hidden()
 }
 
+/// Shared heading block for content panels.
+pub(crate) fn panel_header(
+    title: impl Into<SharedString>,
+    subtitle: impl Into<SharedString>,
+) -> Div {
+    super::column()
+        .gap_1()
+        .flex_shrink_0()
+        .child(div().text_lg().text_color(rgb(TEXT)).child(title.into()))
+        .child(caption(subtitle))
+}
+
 /// Shared viewport shell for virtualized lists.
 pub(crate) fn list_viewport(child: impl IntoElement) -> Div {
     div()
+        .flex()
+        .flex_col()
         .flex_1()
         .min_w_0()
         .min_h_0()
         .w_full()
         .overflow_hidden()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(BORDER))
         .child(child)
 }
 
@@ -114,7 +133,7 @@ pub(crate) fn dropdown_trigger(
         .border_1()
         .border_color(rgb(BORDER))
         .hover(|style| style.bg(rgb(HIGHLIGHT)).border_color(rgb(ACCENT)))
-        .child(div().flex_1().truncate().child(label.into()))
+        .child(div().flex_1().min_w_0().truncate().child(label.into()))
         .child("⌄")
 }
 
@@ -202,7 +221,9 @@ pub(crate) fn tree_row(
         .w_full()
         .h(gpui::rems(1.75))
         .px_2()
+        .pr_2()
         .pl(gpui::px(depth as f32 * 16.))
+        .min_w_0()
         .flex()
         .items_center()
         .gap_1()
@@ -240,6 +261,9 @@ pub(crate) fn list_row(id: impl Into<ElementId>, selected: bool) -> Stateful<Div
         .w_full()
         .h(gpui::rems(2.625))
         .flex_shrink_0()
+        .flex()
+        .items_center()
+        .gap_2()
         .min_w_0()
         .px_2()
         .rounded_sm()

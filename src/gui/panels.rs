@@ -1,7 +1,8 @@
 use super::{
     ACCENT, BORDER, Dragging, ERROR, ERROR_BG, Field, GuiApp, HIGHLIGHT, ListFocus, MUTED,
     Measured, QueueDrag, TEXT, UI_INSET, button, column, empty_state, format_time, icon_button,
-    library::LibraryDrag, list_viewport, panel_surface, panel_toolbar, row, row_text, track_row,
+    library::LibraryDrag, list_viewport, panel_header, panel_surface, panel_toolbar, row, row_text,
+    track_row,
 };
 pub(super) use super::{TRACK_HEIGHT, caption, list_row};
 use crate::model::{Command, PlaybackStatus, RepeatMode};
@@ -433,12 +434,15 @@ impl GuiApp {
                 ));
         }
         let mut panel = panel_surface(("library-panel", panel_id))
+            .child(panel_header(
+                "Library",
+                format!(
+                    "{count} tracks · {} selected · Ctrl-click to select multiple",
+                    self.selected.len()
+                ),
+            ))
             .child(self.panel_field(Field::Search, "Search title, artist or album"))
-            .child(tools)
-            .child(caption(format!(
-                "{count} tracks · {} selected · Ctrl-click to select multiple",
-                self.selected.len()
-            )));
+            .child(tools);
         if self.state.system.scanning {
             panel = panel.child(caption(self.state.system.scan_message.clone()).truncate());
         }
@@ -498,7 +502,7 @@ impl GuiApp {
                             .collect::<Vec<_>>()
                     }),
                 )
-                .flex_1()
+                .h_full()
                 .min_h_0()
                 .w_full(),
             ))
@@ -698,11 +702,14 @@ impl GuiApp {
                 }
             }))
             .drag_over::<LibraryDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
-            .child(caption(format!(
-                "{} queued · {} selected · drag an entry onto its new position",
-                self.state.queue.entries.len(),
-                selection_count,
-            )))
+            .child(panel_header(
+                "Queue",
+                format!(
+                    "{} queued · {} selected · drag an entry onto its new position",
+                    self.state.queue.entries.len(),
+                    selection_count,
+                ),
+            ))
             .when(selection_count > 0, |panel| panel.child(tools))
             .when(self.state.queue.entries.is_empty(), |panel| {
                 panel.child(empty_state(
@@ -792,7 +799,7 @@ impl GuiApp {
                     }
                 }))
                 .drag_over::<LibraryDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
-                .flex_1()
+                .h_full()
                 .min_h_0()
                 .w_full(),
             ))
@@ -900,6 +907,13 @@ impl GuiApp {
                     );
                 }
             }))
+            .child(panel_header(
+                "Playlists",
+                format!(
+                    "{} playlists · select one to manage its tracks",
+                    self.state.library.playlists.len()
+                ),
+            ))
             .child(self.panel_field(Field::PlaylistName, "Playlist name"))
             .child(row().flex_wrap().child(manage).child(files))
             .child(
@@ -1163,7 +1177,7 @@ impl GuiApp {
                                 .collect::<Vec<_>>()
                         }),
                     )
-                    .flex_1()
+                    .h_full()
                     .min_h_0()
                     .w_full(),
                 ));
@@ -1434,7 +1448,7 @@ impl GuiApp {
                             .collect::<Vec<_>>()
                     }),
                 )
-                .flex_1()
+                .h_full()
                 .min_h_0()
                 .w_full(),
             ))
@@ -1480,7 +1494,7 @@ impl GuiApp {
                             .collect::<Vec<_>>()
                     }),
                 )
-                .flex_1()
+                .h_full()
                 .min_h_0()
                 .w_full(),
             ))

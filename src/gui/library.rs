@@ -155,10 +155,14 @@ impl GuiApp {
     }
 
     pub(super) fn rebuild_library_tree(&mut self) {
+        let first_build = self.library_tree.rows().is_empty();
         self.library_tree.set_rows(library_rows(
             &self.state.library.tracks,
             &self.state.system.config.library_roots,
         ));
+        if first_build {
+            self.library_tree.expand_all();
+        }
         self.library_tree_scroll = UniformListScrollHandle::new();
         if let Some(index) = self.library_tree.selected_index() {
             self.library_tree_scroll
@@ -229,8 +233,6 @@ impl GuiApp {
                                         );
                                     },
                                 )
-                                .opacity(0.35)
-                                .hover(|style| style.opacity(1.0))
                             });
                             let content = row()
                                 .flex_1()
@@ -287,7 +289,7 @@ impl GuiApp {
                         .collect::<Vec<_>>()
                 }),
             )
-            .flex_1()
+            .h_full()
             .min_h_0()
             .w_full()
             .track_scroll(&self.library_tree_scroll),

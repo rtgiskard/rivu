@@ -108,6 +108,16 @@ impl<T: Clone + Eq + Hash> TreeState<T> {
             .and_then(|id| visible.iter().position(|index| self.rows[*index].id == id))
             .or_else(|| (!visible.is_empty()).then_some(0));
     }
+    /// Expand every branch so a rebuilt tree immediately exposes its descendants.
+    pub(crate) fn expand_all(&mut self) {
+        self.expanded.extend(
+            self.rows
+                .iter()
+                .filter(|row| row.has_children)
+                .map(|row| row.id.clone()),
+        );
+        self.refresh_visible();
+    }
 
     pub(crate) fn visible_indices(&self) -> &[usize] {
         &self.visible
@@ -206,6 +216,13 @@ mod tests {
         assert_eq!(tree.visible_indices(), vec![0, 1, 2]);
         tree.handle_key(TreeKey::Left);
         assert_eq!(tree.selected().map(|row| row.id), Some("album"));
+    }
+
+    #[test]
+    fn expand_all_exposes_every_descendant() {
+        let mut tree = tree();
+        tree.expand_all();
+        assert_eq!(tree.visible_indices(), vec![0, 1, 2]);
     }
 
     #[test]
