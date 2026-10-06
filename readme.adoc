@@ -1,185 +1,86 @@
 = Rivu
 
 Rivu is a local-first music player for Linux. A shared Rust core owns the
-library, queue, playback, analysis, and MPRIS state; the desktop UI, CLI, and
-TUI are different clients of that core.
+library, playlists, queue, playback, analysis, and MPRIS state; the desktop UI,
+CLI, and TUI are different clients of that core.
 
 == Features
 
-=== Library, queue, and playlists
-
-* Scan local audio files, directories, and CUE sheets without blocking playback
-* Read codec, sample rate, channel, bitrate, track, disc, and release-date metadata
-* Manage the library with search, favorites, metadata overrides, missing-track cleanup,
-  play counts, and recent-track history
-* Manage the playback queue with add, remove, move, play, clear, and repeatable
-  track occurrences
-* Create and manage playlists with add, remove, move, play, and delete operations;
-  exchange them through M3U/M3U8 and CUE import/export
-
-=== Playback and audio
-
-* Native audio playback through PipeWire/ALSA with seeking, volume, shuffle, and
-  repeat modes
-* Native multichannel routing with optional PipeWire channel remixing
-* Optional FFmpeg audio extension for direct playback of additional containers
-  and codecs, including audio tracks in MKV and MP4 files
-
-=== Clients and desktop integration
-
-* Desktop GUI, CLI, and terminal UI share one local core and state
-* MPRIS 2 support for desktop media keys and compatible media applications
-* Optional StatusNotifier tray with window, playback, and quit controls
-* Headless foreground `serve` mode; CLI, TUI, and MPRIS can control it without a GUI
-
-=== Customizable workspace and visualization
-
-* DIY desktop workspace: add, remove, move, resize, and reorder panels, with
-  persistent layout, tab-bar visibility, and workspace lock
-* Configurable UI font, scale, colors, visualization palettes, frequency ranges,
-  spectrum styles, and analysis rates
-* Embedded album artwork with local caching and a generated fallback cover
-* Multiple audio visualizations: progressive whole-track waveform, live Spectrum,
-  Spectrogram, and Radial Spectrum views
-* Dedicated Radial Spectrum control, based on the Noctalia Shell v5 Fancy Audio
-  Visualizer's Bars/Rings presentation model
-
-Rivu is local-first: it reads audio and artwork from local files and does not
-fetch media or cover images from the network.
-
-The default build does not require FFmpeg development headers. The optional
-extension is compiled with `--features ffmpeg` and currently supports
-little-endian x86-64 and aarch64 Linux with FFmpeg 9 development headers
-(`libavutil` 61, `libavcodec` 63, `libavformat` 63). `build.rs` rejects other
-FFmpeg ABI major versions until they are adapted.
+* Local audio and CUE libraries with search, favorites, metadata overrides,
+  missing-track cleanup, play counts, and recent history
+* Playlists with M3U/M3U8 import/export and CUE import; queues with independent
+  repeated-track occurrences
+* PipeWire/ALSA playback, multichannel routing, seek, volume, shuffle, and repeat
+* Optional FFmpeg decoding for additional formats, including audio in MKV/MP4
+* Desktop GUI, CLI, TUI, and headless mode; optional MPRIS and StatusNotifier tray
+* Persistent, editable desktop workspace with configurable appearance and layout
+* Waveform, Spectrum, Spectrogram, and Radial Spectrum visualizations
+* Generated desktop artwork and embedded-cover support for MPRIS; no network
+  media or cover fetching
 
 == Architecture
 
-Rivu runs one shared Rust core for each data directory. The core owns library
-state, queue state, audio output, playback history, waveform/FFT analysis, and
-the local IPC endpoint. Clients do not create independent playback engines.
+One core runs per data directory and owns the library, queue, playback, and live
+analysis. CLI/TUI clients connect through `rivu.sock`; GUI, tray, and MPRIS use
+in-process handles. Opening a client does not create a second playback engine.
 
-[source,text]
-----
-                 +-------------------+
-                 | Shared Rust core  |
-                 | library / queue   |
-                 | audio / analysis  |
-                 +----+---------+----+
-                      |         |
-              local IPC       subscriptions
-             rivu.sock       +---+--------+
-                 |            |            |
-              CLI / TUI    GUI host     MPRIS
-                            window       (optional)
-                            workspace
-                            tray (optional)
-----
-
-* `rivu gui [PATH...]` starts the core with a desktop host, or connects to the
-  existing instance and raises/recreates its window.
-* `rivu serve [PATH...]` starts the same core in the foreground without a GUI
-  window or tray. CLI, TUI, and MPRIS can still control it.
-* `rivu tui` is an interactive terminal client connected to the running core.
-* Playback, library, queue, and playlist CLI commands are short-lived IPC
-  clients. `library probe` and `playback devices` can run without a core.
-
-=== Performance and resource behavior
-
-* Library scans and waveform work run asynchronously and do not block playback.
-* The audio pipeline is shared by all clients; opening another GUI, CLI, or TUI
-  does not start another decoder or audio device for the same data directory.
-* Complete library and playlist collections stay in SQLite. GUI/TUI list views
-  query bounded pages; CLI listings and playlist export stream every page.
-* Playback queues are capped by `queue_limit` (4096 by default). Duplicate queue
-  occurrences share track metadata; oversized additions are rejected atomically.
-* Waveform preview storage is bounded to 1600 peak bins. Progressive decoding
-  leaves unavailable intervals blank instead of inventing samples.
-* GUI refreshes reuse unchanged state snapshots and drawing caches. Analysis is
-  parked while paused or while the GUI window is closed; closing the window
-  releases window and drawing resources but intentionally keeps the core and
-  playback alive.
-* The media read buffer is configurable at 1, 2, 4, 8, or 16 MiB. Actual CPU
-  and memory use also depends on the audio backend, output format, decoder, and
-  enabled visualizations.
+Runtime ownership: link:src/core.rs[core] and link:src/core/runtime.rs[runtime].
+Client transport: link:src/ipc.rs[IPC]. User-facing limits and usage are described
+in the numbered topical guides below.
 
 == Build and install
 
-On Arch Linux, install the native build and runtime prerequisites:
+Rivu currently targets Linux; the desktop UI uses Wayland. On Arch Linux, install
+the native build and runtime prerequisites:
 
 [source,sh]
 ----
 sudo pacman -S --needed rust pkgconf alsa-lib libpipewire opus fontconfig libxkbcommon
+cargo build --release
 ----
 
-The optional FFmpeg extension additionally needs `ffmpeg` development headers
-and `libclang` for `bindgen`:
+The default Cargo build has no FFmpeg dependency. The optional extension needs
+FFmpeg 9 development headers (`libavutil` 61, `libavcodec` 63, `libavformat` 63)
+and `libclang` for binding generation:
 
 [source,sh]
 ----
 sudo pacman -S --needed ffmpeg clang
-----
-
-[source,sh]
-----
-cargo build --release
-# Optional additional containers/codecs:
 cargo build --release --features ffmpeg
+
+# Build with FFmpeg and install the executable, desktop entry, and icons
 make install PREFIX="$HOME/.local"
 ----
 
-`ffmpeg_enabled` can only be enabled in a binary built with the `ffmpeg`
-feature. The install target places the executable in `$PREFIX/bin` and installs
-the desktop entry and icons. Ensure `~/.local/bin` is on `PATH`. The GUI
-currently uses Wayland.
+`make build` and `make install` always build with `--features ffmpeg`; they are not
+native-only build/install paths. For a native-only executable, use the first Cargo
+command and install `.cache/target/release/rivu` into a directory on `PATH`.
+Build outputs default to `.cache/target/`; `CARGO_TARGET_DIR` overrides that path.
+Ensure `~/.local/bin` is on `PATH` when using the install example.
 
+The FFmpeg feature accepts only little-endian x86-64 and aarch64 Linux and rejects
+other targets or header ABI major versions. These guards are compatibility
+requirements, not proof of a working cross-build: target-matched headers,
+pkg-config metadata, linker libraries, and platform backends are still required.
+Cross-compiling is not currently a supported build path.
 
-== Source-build compatibility
-
-The native build has no FFmpeg dependency by default. When the `ffmpeg` feature
-is enabled, the compatibility boundary is enforced by `build.rs` and the
-FFmpeg backend bindings:
-
-[cols="1,1,3", options="header"]
-|===
-|Target |Status |Notes
-
-|`x86_64-unknown-linux-gnu`
-|Validated
-|Native target. `cargo check --target x86_64-unknown-linux-gnu --features ffmpeg`
-passes with FFmpeg `libavutil` 61, `libavcodec` 63, and `libavformat` 63 headers.
-
-|`aarch64` Linux
-|Accepted, not validated
-|The architecture guard accepts little-endian aarch64 Linux, but matching
-FFmpeg headers, pkg-config files, linker/runtime libraries, and audio backends
-are still required and this target is not validated here.
-
-|Other Linux architectures
-|Unsupported with `ffmpeg`
-|The FFmpeg extension build guard rejects them until its bindings are adapted
-and validated.
-
-|Windows, macOS, and other non-Linux targets
-|Unsupported
-|The current build requires Linux audio/Wayland integration; the FFmpeg
-extension also rejects non-Linux targets.
-|===
-
-Cross-compiling is therefore not a supported build path yet. Supporting another
-target requires adapting the platform backends, generating and validating the
-FFmpeg bindings for that target, and testing the runtime audio dependencies.
-
+Compilation makes the extension available; `ffmpeg_enabled = true` enables it
+at runtime. See link:doc/04_playback.adoc[Playback] for runtime dependencies and
+decoding behavior.
 
 == Start and stop
 
+Before scanning, configure music directories using the Library `+` button or
+`library_roots` in `config.toml`. See link:doc/02_library.adoc[Library] for root
+and path rules.
+
 [source,sh]
 ----
-# Open the desktop UI; paths are imported when the core starts
-rivu gui ~/Music
+# Open the desktop UI and scan configured roots
+rivu gui
 
-# Start a foreground, headless core
-rivu serve ~/Music
+# Alternatively, start a foreground, headless core
+rivu serve
 
 # Open the terminal client for an existing core
 rivu tui
@@ -191,76 +92,61 @@ rivu
 rivu quit
 ----
 
-`gui` starts a core when none is running. A later `rivu gui` using the same data
-directory focuses the existing graphical host or recreates its window without
-restarting playback. When a StatusNotifierHost is available, the GUI host also
-publishes an always-active Rivu tray with window and basic playback controls
-when `tray_enabled` is true. `serve` has no graphical host and no tray. Closing
-the GUI window only closes the window; the tray, playback, and core continue
-until `Quit Rivu`, MPRIS `Quit` when enabled, `rivu quit`, or an explicit
-application quit. The tray does not depend on MPRIS: disabling MPRIS removes
-only the MPRIS service while the GUI host and enabled tray remain available. If
-no StatusNotifierHost or session bus is available, Rivu warns and continues
-without a tray.
+On a new core, omitted paths cause configured library roots to be scanned;
+explicit paths select what to scan but do not add library roots. On an existing
+graphical instance, `gui PATH...` requests a scan after raising the window.
+All clients must use the same `--data-dir` to reach the same instance. `--config`
+selects configuration when starting a core; it does not reconfigure an existing
+instance.
+
+Closing the GUI window leaves playback and the core running. Reopen it with
+`rivu gui`; stop the instance with `rivu quit`, `Quit Rivu`, or MPRIS `Quit` when
+enabled. A `serve` instance must be stopped before starting a graphical host in
+the same data directory.
+
+The optional StatusNotifier tray belongs to the graphical host and is independent
+of MPRIS. When `tray_enabled` is true, it offers window, playback, and quit controls.
+Without a StatusNotifierHost or session bus, Rivu warns and continues without a
+tray; `serve` never creates one.
 
 == CLI quick reference
 
-All commands accept the global options `--data-dir DIRECTORY`,
-`--config FILE`, and `--json`. Run `rivu --help` or a subcommand's `--help`
-for the complete generated reference.
+CLI/TUI controls require a running core; `library probe` and `playback devices`
+can run independently. All commands accept `--data-dir DIRECTORY`, `--config FILE`,
+and `--json`. Generated `--help` defines exact arguments; the syntax below is a
+quick reference, not a shell script.
 
-[source,sh]
+[source,text]
 ----
-# Playback and devices
-rivu playback play [TRACK_ID]
-rivu playback pause
-rivu playback toggle
-rivu playback stop
-rivu playback next
-rivu playback previous
-rivu playback seek SECONDS
-rivu playback volume PERCENT
-rivu playback shuffle on|off
-rivu playback repeat off|all|one
-rivu playback devices
-rivu playback device [EXACT_DEVICE_NAME]
+# Playback
+rivu playback ACTION
+# ACTION: play, pause, toggle, stop, next, previous, seek, volume,
+#         shuffle, repeat, devices, device
 
-# Library and metadata
+# Library
 rivu library scan PATH... [--wait] [--force]
 rivu library list [--query TEXT] [--favorites] [--missing]
+rivu library edit TRACK_ID [--title TEXT] [--artist TEXT] [--album TEXT]
 rivu library probe PATH
-rivu library status
-rivu library stats
-rivu library history
-rivu library clean-missing
-rivu library optimize
+rivu library status|stats|optimize|clean-missing
+rivu library history [--limit N]
 rivu library remove TRACK_ID...
 rivu library favorite TRACK_ID... --set on|off
 
-# Queue and playlists
-rivu queue list
-rivu queue add TRACK_ID...
-rivu queue remove QUEUE_ID
-rivu queue move QUEUE_ID INDEX
-rivu queue play QUEUE_ID
-rivu queue clear
-rivu playlist list
-rivu playlist new NAME
-rivu playlist rename PLAYLIST_ID NAME
-rivu playlist delete PLAYLIST_ID
-rivu playlist add PLAYLIST_ID TRACK_ID...
-rivu playlist remove ENTRY_ID
-rivu playlist move ENTRY_ID INDEX
-rivu playlist play PLAYLIST_ID
-rivu playlist import PATH [--name NAME] [--wait]
-rivu playlist export PLAYLIST_ID PATH
+# Playlists
+rivu playlist ACTION
+# ACTION: list, new, rename, delete, add, remove, move, play, import, export
+
+# Queue
+rivu queue ACTION
+# ACTION: list, add, remove, move, play, clear
 ----
 
-Library and playlist paths are resolved relative to the invoking client's
-current directory, not the already-running core. `library remove` and
-`library clean-missing` remove records and references only; they never delete
-audio files. `library optimize` requires stopped playback and completed scans.
-Use `--json` for machine-readable responses where the command supports it.
+Mutating commands normally acknowledge acceptance, not completed playback or
+scanning. Use `--wait` for scan/import completion and `--json` for machine-readable
+responses; response shape depends on the command. Paths are resolved relative to
+the invoking client. The topical documents below define library, playback, and
+playlist contracts; generated `--help` defines exact arguments.
 
 == Files and data directories
 
@@ -273,16 +159,16 @@ The data directory contains `library.db` (library and playback state),
 `rivu.sock` (the local IPC endpoint), `workspace.json` (desktop layout), and
 the `artwork/` cache. When file logging is enabled, weekly logs are stored in
 `logs/` and old files are retained according to `log_retention_weeks`. Stop the
-core before operating on `library.db`; see link:doc/library.adoc[Library] for
+core before operating on `library.db`; see link:doc/02_library.adoc[Library] for
 database maintenance and reset behavior.
 
 
 == Documentation
 
-* link:doc/library.adoc[Library, metadata, playlists, history, and database maintenance]
-* link:doc/playback.adoc[Playback, queue behavior, audio output, artwork, and decoder dependencies]
-* link:doc/configuration.adoc[Configuration, workspace, and visualizations]
-* link:doc/cue.adoc[CUE import, subtracks, and playlist exchange]
+. link:doc/01_config.adoc[Configuration, workspace, and visualizations]
+. link:doc/02_library.adoc[Library, metadata, history, and database maintenance]
+. link:doc/03_playlist.adoc[Playlists, M3U/M3U8 exchange, and CUE import]
+. link:doc/04_playback.adoc[Playback, audio output, queue, TUI, and desktop integration]
 
 == License
 

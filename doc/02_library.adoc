@@ -1,0 +1,125 @@
+= Library
+
+The library is stored in SQLite and is shared by the desktop GUI, CLI, and TUI.
+CLI scan paths are relative to the invoking client's working directory;
+absolute paths are accepted. Playlist management and exchange are described in
+link:03_playlist.adoc[Playlists].
+
+== Roots and scanning
+
+Scanning requires at least one configured `library_roots`. Add a directory with
+the GUI Library `+` button or set absolute directory paths in `config.toml`.
+Scan paths are normalized without resolving symlinks and must be at or below a
+configured root; a mixed inside/outside request is rejected before scanning.
+
+Symlinks are followed even when their targets are outside configured roots;
+logical aliases remain distinct library identities. Directory cycles are scan
+errors. CUE sheets and their sources must also lie within configured logical roots.
+
+`scan_max_depth` applies independently to each requested directory. The start
+directory is depth `0`; files in a directory at the limit are scanned, while
+directories beyond the limit are skipped and reported. Direct file and CUE
+requests are unaffected by this directory limit; `0` is invalid. An explicit
+nested scan has its own boundary, even when an enclosing walk skipped it.
+
+Depth exclusions and truncated diagnostics protect affected existing records
+from being marked missing. Other read, traversal, or sheet errors may still mark
+tracks missing; successfully read tracks are saved. Inspect diagnostics and
+rescan before cleaning missing records.
+Scan handling: link:../src/core/catalog.rs[core scan],
+link:../src/library.rs[scanner], and link:../src/store.rs[reconciliation].
+
+Scanning runs asynchronously without stopping playback. Progress covers discovery,
+metadata reading, saving, and completion or failure. `--wait` waits for completion;
+`--force` rereads unchanged audio metadata. Matching IDs and user data are preserved;
+CUE sheets are always reread. Identity handling is in link:../src/store.rs[the store].
+
+[source,sh]
+----
+rivu library scan ~/Music --wait
+rivu library scan ~/Music --force --wait
+----
+
+== CUE library tracks
+
+`rivu library scan album.cue --wait` creates one library track per audio entry,
+with its own metadata, history, and statistics. Invalid sheets are rejected as
+a whole. Directory scans omit sources represented by valid sheets; failed sheets
+may still leave their whole audio sources eligible for import. Explicitly
+scanning a source imports it as a whole track.
+
+Supported formats and playlist exchange: link:03_playlist.adoc#_cue_import[CUE import].
+Scan and identity handling: link:../src/library.rs[CUE scanning].
+
+== Metadata and favorites
+
+`rivu library probe PATH` reads audio metadata and decoder support without
+starting a core; it does not create or update a library row. GUI/TUI lists show
+compact display metadata. Track details and `library list --json` expose full
+technical metadata, paths, CUE boundaries, and statistics. Unknown values appear
+as `—` in human output or `null` for nullable JSON fields.
+
+Title, artist, album, and favorite edits change Rivu's database only; media
+files, tags, and CUE sheets are never rewritten. Rescans preserve matching IDs,
+overrides, favorites, counts, and last-played timestamps. `library remove` and
+`library clean-missing` remove records and their queue/playlist references only;
+they never delete media files. Missing rows remain visible in playlist views
+until removed or cleaned.
+
+[source,sh]
+----
+rivu library list --favorites
+rivu library list --missing
+rivu library favorite 12 34 --set on
+rivu library edit 12 --title "New title" --artist "Artist" --album "Album"
+rivu library clean-missing
+----
+
+== Paged views
+
+GUI/TUI views fetch library and playlist pages as needed; CLI listings and
+playlist export include every page. `page_size` controls interactive page size,
+not the total results. Query, cache, and snapshot contracts:
+link:../src/store.rs[store], link:../src/core/catalog.rs[catalog], and
+link:../src/model.rs[model].
+
+== Play counts and recent tracks
+
+A playback increments its play count once when confirmed heard time *strictly
+exceeds* `play_count_threshold_percent` of the track duration (20% by default).
+Exactly reaching the threshold does not count. Pause/resume and seeks do not
+reset count state or create additional counts; skipped or unconfirmed output
+time is not heard time. When duration is unknown, counting waits for a natural
+EOF to supply a positive duration from the final backend position; without one,
+no count is added.
+
+A successful playback start creates or updates one recent entry per track,
+ordered newest first. Paused time and failed loads do not advance activity.
+History records the last playback activity, not necessarily a counted play;
+it is not a per-play log. Timestamps are Unix seconds in JSON.
+Counting and activity persistence: link:../src/core/playback.rs[playback lifecycle]
+and link:../src/core/persistence.rs[persistence].
+
+`rivu library history --limit N` prints up to N retained rows in human mode.
+With `--json`, it returns the full status response and ignores `--limit`;
+callers must limit the returned history themselves.
+
+== SQLite maintenance
+
+Stop the core before removing `library.db` and its `-wal`/`-shm` sidecars, then scan
+the music files again. This resets playlists, saved queue, favorites, metadata
+overrides, and playback statistics; audio files, `config.toml`, and
+`workspace.json` are independent.
+
+To reclaim database/WAL space and refresh SQLite query statistics, ensure
+playback is stopped and no scan is active, then run:
+
+[source,sh]
+----
+rivu library optimize
+----
+
+Optimization is rejected while playback or scanning is active. It reports
+database and WAL sizes before and after maintenance; failures are returned as
+errors.
+Schema and maintenance: link:../src/store.rs[SQLite store].

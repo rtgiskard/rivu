@@ -1,0 +1,150 @@
+= Configuration and workspace
+
+Rivu reads `~/.config/rivu/config.toml` by default; path overrides are described in
+link:../readme.adoc[the README]. Omitted fields use defaults. A minimal example:
+
+[source,toml]
+----
+library_roots = [] # Add music-directory paths before scanning
+scan_max_depth = 64
+queue_limit = 4096
+page_size = 64
+media_read_buffer_mb = 2
+ffmpeg_enabled = false
+pipewire_auto_mix = true
+tray_enabled = true
+mpris_enabled = true
+log_level = "warning"
+log_to_file = false
+log_retention_weeks = 4
+----
+
+`library_roots` defaults to an empty list; add existing directories before
+scanning. `scan_max_depth` defaults to `64` and must be at least `1`. See
+link:02_library.adoc[Library] for root normalization, scan boundaries, and CUE/path
+rules.
+
+`queue_limit` accepts `1`–`4096`; lowering it below the current queue length is
+rejected. `page_size` accepts `20`–`256`. Queue behavior is described in
+link:04_playback.adoc#_queue[Playback]; paging in link:02_library.adoc[Library].
+
+Accepted media read buffer sizes are `1`, `2`, `4`, `8`, and `16` MiB.
+
+`ffmpeg_enabled` is available only when the binary includes the `ffmpeg` feature;
+see link:../readme.adoc[README] for build variants. In a default build the
+setting remains off and enabling it is rejected with the extension-unavailable
+error; native decoders continue to work.
+
+`play_count_threshold_percent` must be finite and in `[0, 100)`; zero still requires
+some confirmed heard time. Edit it in the configuration file or GUI preferences.
+
+`pipewire_auto_mix` controls channel remixing; see link:04_playback.adoc[Playback].
+`tray_enabled` and `mpris_enabled` independently control desktop integration.
+
+`log_level` accepts `debug`, `info`, `warning`, or `error`. Warnings and errors
+always go to stderr. `log_to_file` enables weekly logs under the data directory;
+`log_retention_weeks` accepts `1`–`520`. `NO_COLOR` or `RIVU_COLOR=never` disables
+stderr colors.
+
+The complete field set, defaults, and validation are in
+link:../src/config.rs[`Config`]; log handling is in link:../src/logging.rs[logging].
+
+== Desktop settings
+
+The bottom-right gear opens settings. Library roots are separated by semicolons;
+the output device is selected from the currently available devices in a dropdown.
+General and Visualizations are separate pages, and visualization settings are
+grouped by view.
+
+`ui_font` accepts a font family; empty uses the platform font.
+`ui_scale` accepts `0.75`–`2.0`.
+Omitted `nerd_symbols` follows installed Nerd Font detection; an explicit value
+overrides it. Omitted `output_device` uses the default output; a selected device
+must be available.
+
+Apply validates and saves all pages together; navigation preserves the draft.
+Discard drops unapplied changes. Saving library roots does not scan or enqueue
+tracks; use `Scan paths` in Library. Display-only changes do not reopen audio.
+Settings controls are implemented in link:../src/gui/settings.rs[settings].
+
+See link:../readme.adoc[README] for application lifecycle and host behavior.
+
+== Workspace
+
+The desktop workspace is persisted as `workspace.json` in the data directory,
+including panel layout, split ratios, tab order, tab-bar visibility, and the
+workspace lock. While unlocked, panels can be added, removed, moved, resized,
+and reordered. Right-click a panel to toggle its tab bar; right-click the
+bottom-right workspace button to toggle the lock, or left-click it to add a
+panel. Playback and tab selection remain available while locked.
+
+Errors and scan progress appear in the footer. Click a message or its copy icon
+to copy the complete text.
+
+Layout behavior and persistence: link:../src/gui/layout.rs[workspace layout].
+
+== Visualizations
+
+Live FFT analysis runs during playback only when the application window is
+visible and a Spectrum, Spectrogram, or Radial Spectrum panel is visible.
+`analysis_fps` accepts `5`–`60`; all views use `visual_background`.
+`visual_palette` accepts `tokyo_night` or `deadbeef` (default `deadbeef`) and is
+shared by Spectrum, Spectrogram, and Waveform. Defaults and accepted ranges are
+in link:../src/config.rs[`Config`].
+
+=== Waveform
+
+Waveform shows a whole-track timeline, relative to the subtrack for CUE. Left is
+above the centerline, right below; the filled body is RMS amplitude and the outer
+line is peak amplitude. Unknown intervals remain blank. Playback builds the
+preview progressively; `Load full waveform now` requests the complete preview.
+Click or drag to seek the current track; a non-playing selection preview does
+not seek playback.
+
+`waveform_labels`, `waveform_cursor_color`, and `waveform_glow` control labels,
+cursor, and glow. Preview and interaction:
+link:../src/gui/waveform.rs[Waveform]; peak collection:
+link:../src/audio/waveform.rs[audio waveform].
+
+=== Spectrum and Spectrogram
+
+Spectrum shows current frequency energy. `spectrum_style` accepts `bars`,
+`outline`, `led`, `line`, or `solid`; the remaining `spectrum_*` settings control
+FFT resolution/window, band density, spacing, peak hold, release motion, and labels.
+Motion freezes while paused.
+
+Spectrogram shows recent frequency history; `spectrogram_*` settings control its
+history duration, color range, labels, and interpolation. Retained history also
+depends on panel width and analysis rate; unavailable history stays blank.
+Both views use a logarithmic frequency axis and share `spectrum_fft_size` and
+`spectrum_window`; `spectrum_db_range` and `spectrogram_db_range` are independent
+display spans.
+
+Analysis: link:../src/analysis.rs[shared FFT]. Band projection, history, palettes,
+and rendering: link:../src/gui/visuals.rs[visualizations].
+
+=== Radial Spectrum
+
+`radial_spectrum_style` accepts `bars`, `rings`, or `bars_rings`. The remaining
+`radial_spectrum_*` settings control sensitivity, rotation, bar width/glow, ring
+opacity/Bloom, inner diameter, idle fade, and two endpoint colors. It shares the
+Spectrum analyzer but has no absolute frequency labels.
+
+Implementation: link:../src/gui/radial_spectrum.rs[Radial Spectrum]. The presentation
+model is based on Noctalia Shell v5's
+https://github.com/noctalia-dev/noctalia-shell/blob/e56a9db5/Widgets/AudioSpectrum/NMirroredSpectrum.qml[`NMirroredSpectrum.qml`],
+not a pixel-identical port.
+
+
+== Visual assets
+
+`assets/rivu.svg` is the application icon; `assets/rivu.png` is its 256×256 export.
+Album artwork is described in link:04_playback.adoc[Playback].
+
+To regenerate the application icon PNG after editing the SVG source (requires
+librsvg):
+
+[source,sh]
+----
+rsvg-convert -w 256 -h 256 -o assets/rivu.png assets/rivu.svg
+----

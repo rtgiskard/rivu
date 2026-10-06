@@ -1,0 +1,68 @@
+= Playlists
+
+Playlists are ordered collections of library tracks. Each track ID appears at
+most once; adding it again leaves the existing entry unchanged.
+
+== Management
+
+Use `rivu playlist` to create, rename, delete, add, remove, move, or play.
+Playlist IDs identify collections; entry IDs identify items for removal or
+movement. Move indices start at zero. `playlist list` shows both kinds of ID.
+
+[source,sh]
+----
+rivu playlist new "Mix"
+rivu playlist list
+rivu playlist add PLAYLIST_ID TRACK_ID...
+rivu playlist move ENTRY_ID 0
+rivu playlist play PLAYLIST_ID
+----
+
+Playlist storage is not capped by `queue_limit`. Playing one replaces the queue
+and requires a non-empty playlist that fits the limit; oversized loads leave
+the existing queue unchanged. See link:04_playback.adoc#_queue[Playback queue].
+Management: link:../src/core/playlists.rs[playlist commands] and
+link:../src/store.rs[playlist storage].
+
+== Import and export
+
+CLI paths are relative to the invoking client's working directory. Referenced
+media and CUE sheets must lie within configured logical roots; see
+link:02_library.adoc[Library]. Imports may create partial playlists: `--wait`
+reports scan errors even when readable tracks were saved. Import fails if no
+entries resolve to accessible library tracks. CLI listings and exports include every page.
+
+[source,sh]
+----
+rivu playlist import mix.m3u8 --name "Mix" --wait
+rivu playlist import album.cue --wait
+rivu playlist export PLAYLIST_ID exported/mix.m3u8
+----
+
+=== M3U/M3U8
+
+Import accepts UTF-8, including BOM, and resolves entries relative to the playlist
+file. Export writes standard UTF-8 M3U with paths relative to the destination
+directory. Ordinary audio and complete CUE sheets may be mixed.
+
+=== CUE import
+
+Direct CUE import, or a CUE path in M3U, expands every track in sheet order.
+Single-file and multi-file audio sheets are supported, using UTF-8 (with or
+without BOM) or BOM-marked UTF-16. `FILE` paths are relative to the sheet;
+Windows separators are accepted. Sources must be supported audio with readable,
+finite positive duration; data tracks are unsupported.
+
+CUE library identities and directory scanning: link:02_library.adoc#_cue_library_tracks[Library].
+Subtrack playback: link:04_playback.adoc#_transport_and_timing[Playback].
+Sheet syntax and boundary validation: link:../src/cue.rs[CUE parser] and
+link:../src/library.rs[CUE scanning].
+
+=== CUE export restrictions
+
+A complete, contiguous, correctly ordered sheet run exports as one CUE path.
+Standard M3U cannot select individual subtracks: partial or reordered runs fail
+and leave the existing destination untouched. Such selections remain valid inside
+Rivu. Rescan externally edited sheets before exporting.
+
+Exchange implementation: link:../src/library.rs[playlist import/export] and link:../src/main.rs[CLI paths and wait].

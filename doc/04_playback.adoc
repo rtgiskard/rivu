@@ -1,0 +1,99 @@
+= Playback
+
+Selecting a missing source manually leaves the current track running and reports
+an error. If the next entry cannot be opened at natural end, playback stops.
+Playback transitions: link:../src/core/playback.rs[core playback] and
+link:../src/audio/playback.rs[audio playback].
+
+== Transport and timing
+
+The desktop transport shows artwork, title, artist, status, elapsed and total
+time, seek, volume, Shuffle, Previous, Play/Pause, Next, and Repeat. Repeat
+cycles Off, All, and One. Previous restarts the current entry after three seconds;
+near the start it navigates back, using playback history when shuffling.
+CUE playback uses the original source without splitting or transcoding it.
+Positions and seeks are relative to the subtrack; pregap directives do not
+synthesize silence absent from the source. Range handling:
+link:../src/cue.rs[CUE parser] and link:../src/audio/source.rs[audio source].
+
+Seek targets must be finite and non-negative; a known duration clamps them to
+the end. Seeking to the end follows normal queue completion; seeking while
+paused keeps playback paused. Pause also pauses live analysis. Listening
+statistics use confirmed heard time; see link:02_library.adoc[Library].
+
+Seek scheduling and pause handling: link:../src/audio/worker.rs[audio worker].
+Output timing: link:../src/audio/output.rs[output].
+
+== Output devices and speaker layouts
+
+`output_device` is an exact name from `rivu playback devices`. The list combines
+CPAL devices and native PipeWire sinks. Omit the setting for the default PipeWire
+sink, or use `PipeWire: <node.name>` for a named sink. A failed discovery backend
+does not hide devices returned by the other backend.
+
+Multichannel output preserves speaker identities. `pipewire_auto_mix` is enabled
+by default and permits PipeWire remixing; disable it to require a compatible
+sink layout without remixing. Unsupported routes report an error.
+Device selection and routing: link:../src/audio/output.rs[output],
+link:../src/audio/output_layout.rs[layout negotiation], and
+link:../src/audio/output_pipewire.rs[PipeWire].
+
+== Optional FFmpeg decoder
+
+Native decoding is the default. Enable `ffmpeg_enabled` for additional formats,
+including audio in MKV/MP4. Missing or incompatible runtime libraries are
+reported through decoder status and playback errors. Disabling the extension
+stops an active FFmpeg-backed decoder without affecting native playback.
+
+Build prerequisites and ABI compatibility: link:../readme.adoc[README].
+Decoder selection: link:../src/audio/source.rs[source]. Runtime loading:
+link:../src/audio/ffmpeg.rs[FFmpeg].
+
+== Queue
+
+Queue entries are independent occurrences, so a track may appear more than once.
+Each occurrence counts toward `queue_limit` (4096 by default). Oversized additions,
+directory expansions, and playlist loads are rejected without changing the queue.
+Saved queues restore valid occurrences in order up to the configured limit,
+preserving duplicates and skipping removed records.
+
+Capacity settings: link:01_config.adoc[Configuration]. Queue operations
+and restoration: link:../src/core/queue.rs[queue handling] and
+link:../src/core.rs[core startup].
+
+The Queue panel displays occurrences in order and marks the current occurrence.
+Click selects one row; Ctrl/Cmd toggles; Shift selects a contiguous range;
+double-click plays the selected occurrence. A right-click on an already
+selected row preserves the selection; otherwise it selects that row. Up/Down
+navigate the focused queue, Enter plays the selected occurrence, and Delete
+removes selected occurrences.
+
+The queue toolbar plays, removes, and moves a single selected row. Dragging a
+row onto another row moves it; a multi-selection can be dragged as a group.
+Dragging library tracks or directories onto Queue appends the resolved tracks.
+Removing the current occurrence stops playback; removing other occurrences does
+not. Queue controls remain available while the workspace is locked.
+
+== Terminal client
+
+`?` toggles context-sensitive help; `/` searches, `t` browses directories, and
+`P` lists playlists. Up/Down and PageUp/PageDown navigate. Enter on search results
+or directory tracks enqueues them; Right opens playlist entries and Enter plays
+a selected playlist, playlist track, or queue occurrence. Left/Backspace goes to
+the parent directory; Left/Esc leaves playlist details. `q` exits outside the
+Search view without stopping the core.
+Implementation: link:../src/terminal.rs[terminal.rs].
+
+== Artwork and MPRIS
+
+The GUI transport shows generated Rivu artwork, not embedded covers. MPRIS
+prefers embedded front-cover artwork, then another supported image, then the
+bundled icon. Images are local, cached under `artwork/`, and exposed through
+`mpris:artUrl` when available; cache failures do not prevent playback.
+GUI artwork: link:../src/gui/artwork.rs[generated artwork]. Extraction and MPRIS:
+link:../src/artwork.rs[artwork manager] and link:../src/mpris.rs[MPRIS adapter].
+
+MPRIS supports transport, volume, shuffle, and repeat; only rate `1.0` is supported.
+Relative `Seek` beyond a known end advances when a next occurrence is available;
+out-of-range `SetPosition` is ignored. `OpenUri` is rejected: import media first.
+`Raise` is unavailable for a headless core, while `Quit` remains available.
