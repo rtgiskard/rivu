@@ -128,11 +128,14 @@ impl From<RgbColor> for String {
 }
 
 pub(crate) const DEFAULT_PAGE_SIZE: u32 = 64;
+pub(crate) const DEFAULT_SCAN_MAX_DEPTH: u32 = 64;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub library_roots: Vec<PathBuf>,
+    /// Maximum directory depth traversed from each requested scan start.
+    pub scan_max_depth: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_device: Option<String>,
     pub volume: f32,
@@ -204,6 +207,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             library_roots: Vec::new(),
+            scan_max_depth: DEFAULT_SCAN_MAX_DEPTH,
             output_device: None,
             volume: 0.7,
             shuffle: false,
@@ -317,6 +321,11 @@ impl Config {
 
     pub fn validate(&self) -> Result<()> {
         ensure!(
+            self.scan_max_depth >= 1,
+            "scan_max_depth must be at least 1; got {}",
+            self.scan_max_depth
+        );
+        ensure!(
             self.volume.is_finite() && (0.0..=1.0).contains(&self.volume),
             "volume must be finite and between 0.0 and 1.0 (inclusive); got {}",
             self.volume
@@ -326,11 +335,6 @@ impl Config {
                 && (0.0..100.0).contains(&self.play_count_threshold_percent),
             "play_count_threshold_percent must be finite and at least 0.0 but less than 100.0; got {}",
             self.play_count_threshold_percent
-        );
-        ensure!(
-            (1..=520).contains(&self.log_retention_weeks),
-            "log_retention_weeks must be between 1 and 520; got {}",
-            self.log_retention_weeks
         );
         ensure!(
             self.ui_font.len() <= 128 && !self.ui_font.chars().any(char::is_control),
@@ -350,6 +354,11 @@ impl Config {
             (1..=4096).contains(&self.queue_limit),
             "queue_limit must be between 1 and 4096; got {}",
             self.queue_limit
+        );
+        ensure!(
+            (1..=520).contains(&self.log_retention_weeks),
+            "log_retention_weeks must be between 1 and 520; got {}",
+            self.log_retention_weeks
         );
         ensure!(
             (20..=crate::model::PAGE_SIZE as u32).contains(&self.page_size),
@@ -566,6 +575,7 @@ mod tests {
                 PathBuf::from("Music/Live recordings"),
                 PathBuf::from("音楽"),
             ],
+            scan_max_depth: 32,
             output_device: Some("USB DAC".to_owned()),
             volume: 0.25,
             shuffle: true,
@@ -668,6 +678,27 @@ mod tests {
                 ..Config::default()
             }
         );
+        directory.close().unwrap();
+    }
+
+    #[test]
+    fn scan_max_depth_defaults_round_trips_and_rejects_zero() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(&path, "").unwrap();
+        assert_eq!(Config::load(&path).unwrap().scan_max_depth, 64);
+
+        let config = Config {
+            scan_max_depth: 123,
+            ..Config::default()
+        };
+        config.save(&path).unwrap();
+        assert_eq!(Config::load(&path).unwrap().scan_max_depth, 123);
+
+        fs::write(&path, "scan_max_depth = 0\n").unwrap();
+        let error = Config::load(&path).unwrap_err();
+        assert!(format!("{error:#}").contains("scan_max_depth"));
+        assert!(format!("{error:#}").contains("got 0"));
         directory.close().unwrap();
     }
 

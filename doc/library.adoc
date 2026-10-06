@@ -12,9 +12,33 @@ request is rejected before scanning begins. File and directory symlinks are
 followed even when their targets are outside the configured roots. Stored paths
 and directory views retain the logical aliases; distinct aliases remain distinct
 library identities. Directory symlink cycles are reported as scan errors.
+`scan_max_depth` limits recursive traversal for each requested scan start. The
+start directory is depth `0`; files in a directory at the limit are scanned, but
+directories beyond it are skipped and reported as scan errors. Direct file and
+CUE requests remain valid regardless of this directory limit; `0` is invalid.
+Skipped directories retain the request that excluded them. An explicit nested
+scan overrides outer-walk exclusions, but retains boundaries from its own walk.
+Duplicate normalized scan requests are processed once.
+
+At most 255 concrete scan errors plus one truncation notice, and 256
+skipped-directory paths, are retained in memory. If details are omitted, the
+scan is marked incomplete. As a conservative fallback, existing rows under all
+requested roots are neither marked missing nor used for fingerprint relocation;
+successfully read records are still saved. Rescan a root separately to restore
+normal missing-track reconciliation. `scan_progress.errors` reports retained
+diagnostics rather than an unbounded total of failures.
+
 CUE audio sources may use any configured logical root, but paths outside all roots
 are rejected. An unavailable root does not prevent scanning another configured
 root. `library probe` remains an independent metadata inspection.
+
+Library scan status reports discovery, metadata reading, database saving, and a
+retained completed/failed result. Discovery shows the number of files found;
+metadata reading shows processed/total files, errors, and the current path.
+The GUI displays a progress bar when the total is known; CLI/IPC status exposes
+the same fields in `system.scan_progress`. A valid empty directory completes with
+zero files. Normal scans reuse cached probes; `--force` rereads metadata while
+preserving track identity and user data.
 
 == Library metadata and favorites
 

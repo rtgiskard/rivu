@@ -40,23 +40,86 @@ impl Core {
             self.store.known_files()?
         };
         let ffmpeg_enabled = config.ffmpeg_enabled;
+        tracing::info!(
+            paths = ?paths,
+            force,
+            max_depth = config.scan_max_depth,
+            "library_scan_started"
+        );
         let sender = self.scan_tx.clone();
         let worker = thread::Builder::new()
             .name("rivu-scan".into())
             .spawn(move || {
-                let result =
-                    library::scan_paths(&paths, &known, ffmpeg_enabled, &config.library_roots);
-                let _ = sender.send(ScanFinished { result, import });
+                let mut latest = ScanProgress {
+                    phase: ScanPhase::Discovering,
+                    processed: 0,
+                    total: None,
+                    errors: 0,
+                    path: None,
+                };
+                let mut last_phase = None;
+                let mut last_emit = Instant::now() - Duration::from_millis(100);
+                let progress_sender = sender.clone();
+                let mut progress = |phase, processed, total, errors, path: Option<&Path>| {
+                    latest.phase = phase;
+                    latest.processed = processed;
+                    latest.total = total;
+                    latest.errors = errors;
+                    let transition = last_phase != Some(phase);
+                    if transition || last_emit.elapsed() >= Duration::from_millis(100) {
+                        last_phase = Some(phase);
+                        last_emit = Instant::now();
+                        if !progress_sender.is_full() {
+                            let event = ScanProgress {
+                                phase,
+                                processed,
+                                total,
+                                errors,
+                                path: path.map(Path::to_path_buf),
+                            };
+                            let _ = progress_sender.try_send(ScanEvent::Progress(event));
+                        }
+                    }
+                };
+                let result = library::scan_paths(
+                    &paths,
+                    &known,
+                    ffmpeg_enabled,
+                    &config.library_roots,
+                    config.scan_max_depth,
+                    &mut progress,
+                );
+                match &result {
+                    Ok(result) => tracing::info!(
+                        records = result.records.len(),
+                        errors = result.errors.len(),
+                        "library_scan_finished"
+                    ),
+                    Err(error) => tracing::info!(error = %error, "library_scan_finished"),
+                }
+                let _ = sender.send(ScanEvent::Finished(ScanFinished {
+                    result,
+                    import,
+                    progress: latest,
+                }));
             })?;
         self.scan_workers.retain(|worker| !worker.is_finished());
         self.scan_workers.push(worker);
         self.state.system.scanning = true;
         self.state.system.last_error = None;
-        self.state.system.scan_message = "Reading audio metadata…".into();
+        self.state.system.scan_progress = Some(ScanProgress {
+            phase: ScanPhase::Discovering,
+            processed: 0,
+            total: None,
+            errors: 0,
+            path: None,
+        });
+        self.state.system.scan_message = "Discovering audio files…".into();
         Ok(())
     }
-    pub(in crate::core) fn finish_scan(&mut self, scan: ScanFinished) -> Result<()> {
+    pub(in crate::core) fn finish_scan(&mut self, scan: ScanFinished) -> Result<bool> {
         let result = scan.result?;
+        let successful = result.errors().is_empty();
         self.store.apply_scan(&result)?;
         self.state.system.scan_message = result.summary();
         if !result.errors().is_empty() {
@@ -79,7 +142,7 @@ impl Core {
             self.store.add_playlist(playlist_id, &ids)?;
             self.reload(true)?;
         }
-        Ok(())
+        Ok(successful)
     }
     pub(in crate::core) fn audio_event(&mut self, event: AudioEvent) -> Result<()> {
         match event {

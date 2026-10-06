@@ -47,6 +47,7 @@ impl SettingChoice {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Field {
     Roots,
+    ScanMaxDepth,
     Volume,
     PlayCountThreshold,
     QueueLimit,
@@ -84,6 +85,7 @@ enum Field {
 impl Field {
     fn label(self) -> &'static str {
         match self {
+            Self::ScanMaxDepth => "Scan directory depth (1+; roots are depth 0)",
             Self::Roots => "Library roots (separate paths with semicolons)",
             Self::Volume => "Volume (0–100%)",
             Self::PlayCountThreshold => "Play count threshold (%)",
@@ -251,6 +253,7 @@ impl Settings {
         }
         self.inputs = [
             Field::Roots,
+            Field::ScanMaxDepth,
             Field::Volume,
             Field::PlayCountThreshold,
             Field::QueueLimit,
@@ -342,6 +345,11 @@ impl Settings {
                 .map(|path| path.to_string_lossy())
                 .collect::<Vec<_>>()
                 .join(";"),
+            cx,
+        );
+        self.set_value(
+            Field::ScanMaxDepth,
+            self.draft.scan_max_depth.to_string(),
             cx,
         );
         self.set_value(Field::Volume, (self.draft.volume * 100.).to_string(), cx);
@@ -483,6 +491,7 @@ impl Settings {
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
             .collect();
+        config.scan_max_depth = self.number(Field::ScanMaxDepth, cx)?;
         config.volume = self.number::<f32>(Field::Volume, cx)? / 100.;
         config.play_count_threshold_percent = self.number(Field::PlayCountThreshold, cx)?;
         config.queue_limit = self.number(Field::QueueLimit, cx)?;
@@ -985,6 +994,7 @@ impl GuiApp {
         column()
             .gap_3()
             .child(self.settings.field(Field::Roots))
+            .child(self.settings.field(Field::ScanMaxDepth))
             .child(device)
             .child(self.settings.pair(Field::Volume, Field::PlayCountThreshold))
             .child(self.settings.pair(Field::QueueLimit, Field::PageSize))

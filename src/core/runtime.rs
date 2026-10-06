@@ -1,3 +1,21 @@
+fn scan_message(progress: &ScanProgress) -> String {
+    let unit = progress.total.map_or_else(
+        || progress.processed.to_string(),
+        |total| format!("{} / {total}", progress.processed),
+    );
+    let phase = match progress.phase {
+        ScanPhase::Discovering => "Discovering files",
+        ScanPhase::ReadingMetadata => "Reading audio metadata",
+        ScanPhase::Saving => "Saving library",
+        ScanPhase::Completed => "Scan complete",
+        ScanPhase::Failed => "Scan failed",
+    };
+    progress.path.as_ref().map_or_else(
+        || format!("{phase} ({unit})"),
+        |path| format!("{phase} ({unit}): {}", path.display()),
+    )
+}
+
 use super::*;
 
 impl Core {
@@ -60,9 +78,50 @@ impl Core {
                 }
                 recv(self.scan_rx) -> scan => {
                     if let Ok(scan) = scan {
-                        if let Err(error) = self.finish_scan(scan) { self.state.system.last_error = Some(format!("{error:#}")); }
-                        self.state.system.scanning = false;
-                        self.publish();
+                        match scan {
+                            ScanEvent::Progress(progress) => {
+                                self.state.system.scanning = true;
+                                self.state.system.scan_message = scan_message(&progress);
+                                self.state.system.scan_progress = Some(progress);
+                                self.publish();
+                            }
+                            ScanEvent::Finished(scan) => {
+                                let progress = scan.progress.clone();
+                                self.state.system.scan_progress = Some(ScanProgress {
+                                    phase: ScanPhase::Saving,
+                                    ..progress.clone()
+                                });
+                                self.state.system.scan_message = "Saving library…".into();
+                                self.publish();
+                                let result = self.finish_scan(scan);
+                                self.state.system.scanning = false;
+                                match result {
+                                    Ok(true) => {
+                                        self.state.system.scan_progress = Some(ScanProgress {
+                                            phase: ScanPhase::Completed,
+                                            ..progress
+                                        });
+                                    }
+                                    Ok(false) => {
+                                        self.state.system.scan_progress = Some(ScanProgress {
+                                            phase: ScanPhase::Failed,
+                                            ..progress
+                                        });
+                                    }
+                                    Err(error) => {
+                                        self.state.system.last_error = Some(format!("{error:#}"));
+                                        self.state.system.scan_message = "Scan failed".into();
+                                        let errors = progress.errors.saturating_add(1);
+                                        self.state.system.scan_progress = Some(ScanProgress {
+                                            phase: ScanPhase::Failed,
+                                            errors,
+                                            ..progress
+                                        });
+                                    }
+                                }
+                                self.publish();
+                            }
+                        }
                     }
                 }
                 recv(config_ticks) -> _ => {
@@ -81,6 +140,8 @@ impl Core {
         }
         let _ = self.save(true);
         let _ = self.engine.send(AudioCommand::Shutdown);
+        // Disconnect before joining: a worker may be blocked sending its final event.
+        self.scan_rx = crossbeam_channel::never();
         for worker in self.scan_workers.drain(..) {
             let _ = worker.join();
         }

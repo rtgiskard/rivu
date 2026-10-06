@@ -1,5 +1,5 @@
 use crate::audio::probe;
-use crate::model::{CueSegment, Track};
+use crate::model::{CueSegment, ScanPhase, Track};
 use anyhow::{Context, Result, anyhow, bail};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -53,16 +53,65 @@ pub struct ScanRecord {
     pub cue: Option<CueSegment>,
 }
 
+const MAX_REPORTED_SCAN_ERRORS: usize = 256;
+const MAX_RECORDED_SKIPPED_DIRECTORIES: usize = 256;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SkippedDirectory {
+    /// Index of the requested root in `ScanResult::roots` that excluded this path.
+    pub root_index: usize,
+    pub path: PathBuf,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ScanResult {
     pub roots: Vec<PathBuf>,
     pub records: Vec<ScanRecord>,
     pub errors: Vec<String>,
+    /// Directories excluded because they exceed the configured scan depth.
+    pub skipped_directories: Vec<SkippedDirectory>,
+    /// Additional skipped-directory paths were omitted after the memory bound.
+    pub skipped_directories_truncated: bool,
+    /// A bounded error/path list omitted additional scan details.
+    pub scan_incomplete: bool,
     /// Whole sources represented by successfully scanned CUE sheets.
     pub suppressed_sources: Vec<PathBuf>,
 }
 
 impl ScanResult {
+    fn push_error(&mut self, error: impl FnOnce() -> String) {
+        if self.errors.len() < MAX_REPORTED_SCAN_ERRORS - 1 {
+            self.errors.push(error());
+        } else if self.errors.len() == MAX_REPORTED_SCAN_ERRORS - 1 {
+            self.errors.push(format!(
+                "additional scan errors omitted after {} entries",
+                MAX_REPORTED_SCAN_ERRORS - 1
+            ));
+            self.scan_incomplete = true;
+        }
+    }
+
+    fn push_skipped_directory(&mut self, root_index: usize, path: &Path) -> bool {
+        if self.skipped_directories_truncated {
+            return false;
+        }
+        if self.skipped_directories.iter().any(|entry| {
+            self.roots[entry.root_index] == self.roots[root_index] && entry.path == path
+        }) {
+            return false;
+        }
+        if self.skipped_directories.len() == MAX_RECORDED_SKIPPED_DIRECTORIES {
+            self.skipped_directories_truncated = true;
+            self.scan_incomplete = true;
+            return false;
+        }
+        self.skipped_directories.push(SkippedDirectory {
+            root_index,
+            path: path.to_path_buf(),
+        });
+        true
+    }
+
     pub fn errors(&self) -> &[String] {
         &self.errors
     }
@@ -79,12 +128,18 @@ impl ScanResult {
 /// CUE metadata is always reread; only unchanged full-source probe results may
 /// be reused. Failed sheets contribute no partial tracks or source suppression.
 /// `library_roots` are normalized absolute logical paths, as published by the core.
+/// `max_depth` is relative to each requested directory, which is itself depth 0.
 pub fn scan_paths(
     paths: &[PathBuf],
     known: &[KnownFile],
     ffmpeg_enabled: bool,
     library_roots: &[PathBuf],
+    max_depth: u32,
+    mut progress: impl FnMut(ScanPhase, usize, Option<usize>, usize, Option<&Path>),
 ) -> Result<ScanResult> {
+    if max_depth == 0 {
+        bail!("scan max depth must be at least 1");
+    }
     let mut known_by_path: HashMap<&Path, &KnownFile> = HashMap::with_capacity(known.len());
     for item in known {
         let cached = known_by_path.entry(item.path.as_path()).or_insert(item);
@@ -95,55 +150,162 @@ pub fn scan_paths(
     let mut files = HashSet::new();
     let mut explicit_audio = HashSet::new();
     let mut result = ScanResult::default();
+    let mut seen_requests = HashSet::with_capacity(paths.len());
     for requested in paths {
         let root = logical_path(requested)?;
+        if !seen_requests.insert(root.clone()) {
+            continue;
+        }
         if !library_roots
             .iter()
             .any(|allowed| root.starts_with(allowed))
         {
-            result.errors.push(format!(
-                "{} is outside the configured library roots",
-                root.display()
-            ));
+            result.push_error(|| {
+                format!("{} is outside the configured library roots", root.display())
+            });
+            progress(
+                ScanPhase::Discovering,
+                files.len(),
+                None,
+                result.errors.len(),
+                Some(root.as_path()),
+            );
             continue;
         }
         result.roots.push(root.clone());
         let metadata = match fs::metadata(&root) {
             Ok(metadata) => metadata,
             Err(error) => {
-                result.errors.push(format!("{}: {error}", root.display()));
+                result.push_error(|| format!("{}: {error}", root.display()));
+                progress(
+                    ScanPhase::Discovering,
+                    files.len(),
+                    None,
+                    result.errors.len(),
+                    Some(root.as_path()),
+                );
                 continue;
             }
         };
         if metadata.is_file() {
             if is_audio_path(&root) {
                 explicit_audio.insert(root.clone());
-                files.insert(root);
+                if files.insert(root.clone()) {
+                    progress(
+                        ScanPhase::Discovering,
+                        files.len(),
+                        None,
+                        result.errors.len(),
+                        Some(root.as_path()),
+                    );
+                }
             } else if is_cue_path(&root) {
-                files.insert(root);
+                if files.insert(root.clone()) {
+                    progress(
+                        ScanPhase::Discovering,
+                        files.len(),
+                        None,
+                        result.errors.len(),
+                        Some(root.as_path()),
+                    );
+                }
             } else {
-                result.errors.push(format!(
-                    "{} is not a supported audio file or CUE sheet",
-                    root.display()
-                ));
+                result.push_error(|| {
+                    format!(
+                        "{} is not a supported audio file or CUE sheet",
+                        root.display()
+                    )
+                });
+                progress(
+                    ScanPhase::Discovering,
+                    files.len(),
+                    None,
+                    result.errors.len(),
+                    Some(root.as_path()),
+                );
             }
         } else if metadata.is_dir() {
-            for entry in WalkDir::new(&root).follow_links(true) {
+            let max_walk_depth = (max_depth as usize).saturating_add(1);
+            let mut entries = WalkDir::new(&root)
+                .follow_links(true)
+                .max_depth(max_walk_depth)
+                .into_iter();
+            while let Some(entry) = entries.next() {
                 match entry {
+                    Ok(entry)
+                        if entry.depth() > max_depth as usize && entry.file_type().is_dir() =>
+                    {
+                        entries.skip_current_dir();
+                        let report =
+                            result.push_skipped_directory(result.roots.len() - 1, entry.path());
+                        if report {
+                            tracing::warn!(
+                                path = %entry.path().display(),
+                                max_depth,
+                                "scan_depth_limit_reached"
+                            );
+                        }
+                        result.push_error(|| {
+                            format!(
+                                "{}: directory exceeds scan depth limit {max_depth}",
+                                entry.path().display()
+                            )
+                        });
+                        progress(
+                            ScanPhase::Discovering,
+                            files.len(),
+                            None,
+                            result.errors.len(),
+                            Some(entry.path()),
+                        );
+                    }
                     Ok(entry)
                         if entry.file_type().is_file()
                             && (is_audio_path(entry.path()) || is_cue_path(entry.path())) =>
                     {
-                        files.insert(entry.path().to_path_buf());
+                        if files.insert(entry.path().to_path_buf()) {
+                            progress(
+                                ScanPhase::Discovering,
+                                files.len(),
+                                None,
+                                result.errors.len(),
+                                Some(entry.path()),
+                            );
+                        }
                     }
                     Ok(_) => {}
-                    Err(error) => result.errors.push(format!("{}: {error}", root.display())),
+                    Err(error) => {
+                        result.push_error(|| format!("{}: {error}", root.display()));
+                        progress(
+                            ScanPhase::Discovering,
+                            files.len(),
+                            None,
+                            result.errors.len(),
+                            Some(root.as_path()),
+                        );
+                    }
                 }
             }
         }
     }
+    progress(
+        ScanPhase::Discovering,
+        files.len(),
+        None,
+        result.errors.len(),
+        None,
+    );
     let mut files: Vec<_> = files.into_iter().collect();
     files.sort();
+    let total = files.len();
+    let mut processed = 0;
+    progress(
+        ScanPhase::ReadingMetadata,
+        processed,
+        Some(total),
+        result.errors.len(),
+        None,
+    );
     let mut sources = HashMap::new();
     let mut suppressed = HashSet::new();
     for sheet in files.iter().filter(|path| is_cue_path(path)) {
@@ -158,23 +320,50 @@ pub fn scan_paths(
                 suppressed.extend(records.iter().map(|record| record.path.clone()));
                 result.records.extend(records);
             }
-            Err(error) => result
-                .errors
-                .push(format!("{}: {error:#}", sheet.display())),
+            Err(error) => result.push_error(|| format!("{}: {error:#}", sheet.display())),
         }
+        processed += 1;
+        progress(
+            ScanPhase::ReadingMetadata,
+            processed,
+            Some(total),
+            result.errors.len(),
+            Some(sheet.as_path()),
+        );
     }
     for path in files.iter().filter(|path| is_audio_path(path)) {
         if suppressed.contains(path) && !explicit_audio.contains(path) {
+            processed += 1;
+            progress(
+                ScanPhase::ReadingMetadata,
+                processed,
+                Some(total),
+                result.errors.len(),
+                Some(path.as_path()),
+            );
             continue;
         }
         match source_record(path, &known_by_path, &mut sources, ffmpeg_enabled) {
             Ok(record) => result.records.push(record.clone()),
-            Err(error) => result.errors.push(format!("{}: {error:#}", path.display())),
+            Err(error) => result.push_error(|| format!("{}: {error:#}", path.display())),
         }
+        processed += 1;
+        progress(
+            ScanPhase::ReadingMetadata,
+            processed,
+            Some(total),
+            result.errors.len(),
+            Some(path.as_path()),
+        );
     }
     suppressed.retain(|path| !explicit_audio.contains(path));
     result.suppressed_sources = suppressed.into_iter().collect();
     result.suppressed_sources.sort();
+    result.skipped_directories.sort_unstable_by(|a, b| {
+        a.path
+            .cmp(&b.path)
+            .then_with(|| a.root_index.cmp(&b.root_index))
+    });
     result.records.sort_by(|a, b| {
         let identity = |record: &ScanRecord| record.cue.as_ref().map(|cue| cue.number).unwrap_or(0);
         let a_path = a.cue.as_ref().map_or(&a.path, |cue| &cue.sheet);
@@ -183,6 +372,13 @@ pub fn scan_paths(
             .cmp(b_path)
             .then_with(|| identity(a).cmp(&identity(b)))
     });
+    progress(
+        ScanPhase::ReadingMetadata,
+        processed,
+        Some(total),
+        result.errors.len(),
+        None,
+    );
     Ok(result)
 }
 
@@ -600,6 +796,68 @@ fn path_relative_to(parent: &Path, target: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn scan_paths(
+        paths: &[PathBuf],
+        known: &[KnownFile],
+        ffmpeg_enabled: bool,
+    ) -> Result<ScanResult> {
+        let library_roots: Vec<_> = paths
+            .iter()
+            .map(|path| logical_path(path))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .map(|path| {
+                if path.is_dir() {
+                    path
+                } else {
+                    path.parent()
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(|| path.clone())
+                }
+            })
+            .collect();
+        super::scan_paths(
+            paths,
+            known,
+            ffmpeg_enabled,
+            &library_roots,
+            crate::config::Config::default().scan_max_depth,
+            |_, _, _, _, _| {},
+        )
+    }
+
+    fn scan_paths_at_depth(
+        paths: &[PathBuf],
+        known: &[KnownFile],
+        ffmpeg_enabled: bool,
+        max_depth: u32,
+        progress: impl FnMut(ScanPhase, usize, Option<usize>, usize, Option<&Path>),
+    ) -> Result<ScanResult> {
+        let library_roots: Vec<_> = paths
+            .iter()
+            .map(|path| logical_path(path))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .map(|path| {
+                if path.is_dir() {
+                    path
+                } else {
+                    path.parent()
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(|| path.clone())
+                }
+            })
+            .collect();
+        super::scan_paths(
+            paths,
+            known,
+            ffmpeg_enabled,
+            &library_roots,
+            max_depth,
+            progress,
+        )
+    }
+
     // Mono PCM WAVs with exactly 100 samples per CD frame, no audio device.
     fn wav(path: &Path, frames: u32) -> Result<()> {
         let data_len = frames * 100 * 2;
@@ -647,45 +905,60 @@ mod tests {
     }
 
     #[test]
-    fn missing_requests_keep_normalized_logical_roots_and_allow_other_roots() -> Result<()> {
+    fn missing_requests_keep_normalized_logical_roots_and_progress_paths() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let requested = directory.path().join("unused/../missing.wav");
         let expected = directory.path().join("missing.wav");
-        let audio = directory.path().join("audio.wav");
-        wav(&audio, 150)?;
-        let result = scan_paths(
-            &[requested, audio.clone()],
+        let mut progress_paths = Vec::new();
+        let result = super::scan_paths(
+            &[requested],
             &[],
             false,
             &[directory.path().to_path_buf()],
+            crate::config::Config::default().scan_max_depth,
+            |_, _, _, _, path| {
+                if let Some(path) = path {
+                    progress_paths.push(path.to_path_buf());
+                }
+            },
         )?;
-        assert_eq!(result.roots, [expected.clone(), audio.clone()]);
+        assert_eq!(result.roots, [expected.clone()]);
         assert_eq!(result.errors.len(), 1);
-        assert!(result.errors[0].starts_with(&expected.display().to_string()));
-        assert_eq!(result.records.len(), 1);
-        assert_eq!(result.records[0].path, audio);
+        assert_eq!(progress_paths, [expected]);
         Ok(())
     }
 
     #[cfg(unix)]
     #[test]
-    fn linked_root_keeps_alias_and_rejects_physical_outsiders() -> Result<()> {
+    fn linked_root_keeps_alias_in_records_roots_and_progress() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let actual = tempfile::tempdir()?;
         wav(&actual.path().join("audio.wav"), 150)?;
         let alias = directory.path().join("linked");
         std::os::unix::fs::symlink(actual.path(), &alias)?;
-        let result = scan_paths(
-            &[alias.join("unused/../."), actual.path().join("audio.wav")],
+        let mut progress_paths = Vec::new();
+        let result = super::scan_paths(
+            &[alias.join("unused/../.")],
             &[],
             false,
             std::slice::from_ref(&alias),
+            crate::config::Config::default().scan_max_depth,
+            |_, _, _, _, path| {
+                if let Some(path) = path {
+                    progress_paths.push(path.to_path_buf());
+                }
+            },
         )?;
-        assert_eq!(result.errors.len(), 1);
-        assert!(result.errors[0].contains("outside the configured library roots"));
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
         assert_eq!(result.roots, [alias.clone()]);
         assert_eq!(result.records.len(), 1);
         assert_eq!(result.records[0].path, alias.join("audio.wav"));
+        assert!(!progress_paths.is_empty());
+        assert!(
+            progress_paths
+                .iter()
+                .all(|path| path == &alias.join("audio.wav"))
+        );
         Ok(())
     }
 
@@ -702,12 +975,7 @@ mod tests {
         for name in ["first", "second"] {
             std::os::unix::fs::symlink(actual.path(), directory.path().join(name))?;
         }
-        let result = scan_paths(
-            &[directory.path().to_path_buf()],
-            &[],
-            false,
-            &[directory.path().to_path_buf()],
-        )?;
+        let result = scan_paths(&[directory.path().to_path_buf()], &[], false)?;
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         let mut expected: Vec<_> = [
             "first.wav",
@@ -746,12 +1014,7 @@ mod tests {
         wav(&nested.join("other.wav"), 150)?;
         let back = nested.join("back");
         std::os::unix::fs::symlink(directory.path(), &back)?;
-        let result = scan_paths(
-            &[directory.path().to_path_buf()],
-            &[],
-            false,
-            &[directory.path().to_path_buf()],
-        )?;
+        let result = scan_paths(&[directory.path().to_path_buf()], &[], false)?;
         assert_eq!(result.errors.len(), 1);
         assert!(result.errors[0].contains(&back.display().to_string()));
         assert_eq!(
@@ -793,6 +1056,8 @@ mod tests {
             &[],
             false,
             &[root.clone(), other_root],
+            crate::config::Config::default().scan_max_depth,
+            |_, _, _, _, _| {},
         )?;
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         assert_eq!(result.roots, [root]);
@@ -812,6 +1077,260 @@ mod tests {
     }
 
     #[test]
+    fn scan_progress_reports_deduplicated_candidates_and_suppressed_tasks() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let audio = directory.path().join("audio.wav");
+        let sheet = directory.path().join("album.cue");
+        wav(&audio, 225)?;
+        two_track_sheet(&sheet)?;
+        let paths = [
+            directory.path().to_path_buf(),
+            sheet.clone(),
+            directory.path().join("unused/../."),
+        ];
+        let library_roots = vec![logical_path(directory.path())?];
+        let mut events = Vec::new();
+        let result = super::scan_paths(
+            &paths,
+            &[],
+            false,
+            &library_roots,
+            crate::config::Config::default().scan_max_depth,
+            |phase, processed, total, errors, path| {
+                events.push((phase, processed, total, errors, path.map(Path::to_path_buf)));
+            },
+        )?;
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.records.len(), 2);
+        assert!(
+            events
+                .iter()
+                .filter_map(|event| event.4.as_ref())
+                .all(|path| { path == &audio || path == &sheet })
+        );
+        let discovery: Vec<_> = events
+            .iter()
+            .filter(|(phase, ..)| matches!(phase, &ScanPhase::Discovering))
+            .collect();
+        assert_eq!(discovery.last().unwrap().1, 2);
+        assert!(discovery.iter().all(|event| event.2.is_none()));
+        let metadata: Vec<_> = events
+            .iter()
+            .filter(|(phase, ..)| matches!(phase, &ScanPhase::ReadingMetadata))
+            .collect();
+        assert_eq!(metadata.first().unwrap().1, 0);
+        assert_eq!(metadata.first().unwrap().2, Some(2));
+        assert_eq!(metadata.last().unwrap().1, 2);
+        assert!(metadata.iter().all(|event| event.1 <= event.2.unwrap()));
+        Ok(())
+    }
+
+    #[test]
+    fn scan_depth_keeps_allowed_files_and_reports_skipped_branches() -> Result<()> {
+        let outer = tempfile::tempdir()?;
+        let start = outer.path().join("nested/start");
+        fs::create_dir_all(&start)?;
+        let allowed = start.join("allowed");
+        let sibling = start.join("sibling");
+        let skipped = allowed.join("skipped");
+        let empty = start.join("empty");
+        fs::create_dir(&allowed)?;
+        fs::create_dir(&sibling)?;
+        fs::create_dir(&empty)?;
+        fs::create_dir(&skipped)?;
+        let allowed_file = allowed.join("allowed.wav");
+        let sibling_file = sibling.join("sibling.wav");
+        let skipped_file = skipped.join("skipped.wav");
+        wav(&allowed_file, 150)?;
+        wav(&sibling_file, 150)?;
+        wav(&skipped_file, 150)?;
+        let mut events = Vec::new();
+        let result = scan_paths_at_depth(
+            std::slice::from_ref(&start),
+            &[],
+            false,
+            1,
+            |phase, processed, total, errors, path| {
+                events.push((phase, processed, total, errors, path.map(Path::to_path_buf)));
+            },
+        )?;
+        let mut records: Vec<_> = result
+            .records
+            .iter()
+            .map(|record| record.path.clone())
+            .collect();
+        records.sort();
+        let mut expected = vec![allowed_file.clone(), sibling_file.clone()];
+        expected.sort();
+        assert_eq!(records, expected);
+        assert_eq!(
+            result.skipped_directories,
+            [SkippedDirectory {
+                root_index: 0,
+                path: skipped.clone()
+            }]
+        );
+        assert_eq!(result.errors.len(), 1);
+        assert!(result.errors[0].contains(&skipped.display().to_string()));
+        assert!(result.errors[0].contains("1"));
+        assert!(events.iter().any(|(phase, _, _, errors, path)| {
+            matches!(phase, ScanPhase::Discovering)
+                && *errors == 1
+                && path.as_deref() == Some(skipped.as_path())
+        }));
+        let direct = scan_paths_at_depth(
+            std::slice::from_ref(&skipped_file),
+            &[],
+            false,
+            1,
+            |_, _, _, _, _| {},
+        )?;
+        assert_eq!(direct.records.len(), 1);
+        assert_eq!(direct.records[0].path, skipped_file);
+        assert!(direct.skipped_directories.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn nested_scan_keeps_its_own_excluded_identity_and_user_data() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().to_path_buf();
+        let nested = root.join("one/nested");
+        let deep = nested.join("below/deeper/deep.wav");
+        fs::create_dir_all(deep.parent().unwrap())?;
+        wav(&deep, 150)?;
+        let baseline = scan_paths_at_depth(
+            std::slice::from_ref(&root),
+            &[],
+            false,
+            5,
+            |_, _, _, _, _| {},
+        )?;
+        let store = crate::store::Store::open(Path::new(":memory:"))?;
+        store.apply_scan(&baseline)?;
+        let id = store.track_id_for_source(&deep, None)?.unwrap();
+        store.set_favorite(&[id], true)?;
+        store.edit_track(id, "Kept title", "", "")?;
+        let copy = nested.join("copy.wav");
+        fs::rename(&deep, &copy)?;
+        let partial = scan_paths_at_depth(&[root, nested], &[], false, 1, |_, _, _, _, _| {})?;
+        store.apply_scan(&partial)?;
+        let preserved = store.track(id)?.unwrap();
+        assert_eq!(preserved.path, deep);
+        assert!(!preserved.missing);
+        assert!(preserved.favorite);
+        assert_eq!(preserved.title, "Kept title");
+        assert_ne!(store.track_id_for_source(&copy, None)?.unwrap(), id);
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_normalized_requests_do_not_exhaust_scan_diagnostics() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        fs::create_dir_all(directory.path().join("child/deeper"))?;
+        let root = directory.path().to_path_buf();
+        let paths = vec![root.join("unused/../."); MAX_REPORTED_SCAN_ERRORS + 1];
+        let result = scan_paths_at_depth(&paths, &[], false, 1, |_, _, _, _, _| {})?;
+        assert_eq!(result.errors.len(), 1);
+        assert!(!result.scan_incomplete);
+        assert!(!result.skipped_directories_truncated);
+        Ok(())
+    }
+
+    #[test]
+    fn scan_depth_zero_is_rejected_by_library_api() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = logical_path(directory.path())?;
+        let error = super::scan_paths(
+            std::slice::from_ref(&root),
+            &[],
+            false,
+            std::slice::from_ref(&root),
+            0,
+            |_, _, _, _, _| {},
+        )
+        .expect_err("zero scan depth must be rejected");
+
+        assert!(error.to_string().contains("at least 1"));
+        Ok(())
+    }
+    #[test]
+    fn scan_error_and_skipped_directory_details_are_bounded() -> Result<()> {
+        let outer = tempfile::tempdir()?;
+        let root = outer.path().join("root");
+        fs::create_dir(&root)?;
+        let missing: Vec<_> = (0..300)
+            .map(|index| root.join(format!("missing-{index}.wav")))
+            .collect();
+        let errors = scan_paths_at_depth(&missing, &[], false, 1, |_, _, _, _, _| {})?;
+        assert_eq!(errors.errors.len(), MAX_REPORTED_SCAN_ERRORS);
+        assert!(errors.scan_incomplete);
+        assert!(
+            errors
+                .errors
+                .last()
+                .unwrap()
+                .contains("additional scan errors omitted")
+        );
+
+        for index in 0..300 {
+            let branch = root.join(format!("branch-{index}")).join("too-deep");
+            fs::create_dir_all(branch)?;
+        }
+        let skipped = scan_paths_at_depth(
+            std::slice::from_ref(&root),
+            &[],
+            false,
+            1,
+            |_, _, _, _, _| {},
+        )?;
+        assert!(skipped.scan_incomplete);
+        assert!(skipped.skipped_directories_truncated);
+        assert!(skipped.skipped_directories.len() <= MAX_RECORDED_SKIPPED_DIRECTORIES);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_depth_applies_to_logical_symlink_paths() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let actual = tempfile::tempdir()?;
+        let start = directory.path().join("start");
+        let link = start.join("linked");
+        fs::create_dir(&start)?;
+        std::os::unix::fs::symlink(actual.path(), &link)?;
+        let audio = link.join("audio.wav");
+        wav(&audio, 150)?;
+        let deeper = link.join("deeper");
+        fs::create_dir(&deeper)?;
+        wav(&deeper.join("too-deep.wav"), 150)?;
+        let result = scan_paths_at_depth(
+            std::slice::from_ref(&start),
+            &[],
+            false,
+            1,
+            |_, _, _, _, _| {},
+        )?;
+        assert_eq!(
+            result
+                .records
+                .iter()
+                .map(|record| &record.path)
+                .collect::<Vec<_>>(),
+            vec![&audio]
+        );
+        assert_eq!(
+            result.skipped_directories,
+            [SkippedDirectory {
+                root_index: 0,
+                path: deeper
+            }]
+        );
+        assert_eq!(result.errors.len(), 1);
+        Ok(())
+    }
+
+    #[test]
     fn cue_sources_require_logical_membership_in_any_configured_root() -> Result<()> {
         let inside = tempfile::tempdir()?;
         let outside = tempfile::tempdir()?;
@@ -825,26 +1344,40 @@ mod tests {
                 source.display()
             ),
         )?;
-        let control = scan_paths(
+        let library_roots = vec![logical_path(inside.path())?];
+        let control = super::scan_paths(
             std::slice::from_ref(&sheet),
             &[],
             false,
             &[logical_path(inside.path())?, logical_path(outside.path())?],
+            crate::config::Config::default().scan_max_depth,
+            |_, _, _, _, _| {},
         )?;
         assert!(control.errors.is_empty(), "{:?}", control.errors);
-        assert_eq!(control.records.len(), 1);
         assert_eq!(control.records[0].path, logical_path(&source)?);
         assert!(control.records[0].cue.is_some());
-        let result = scan_paths(
+        let mut events = Vec::new();
+        let result = super::scan_paths(
             std::slice::from_ref(&sheet),
             &[],
             false,
-            &[logical_path(inside.path())?],
+            &library_roots,
+            crate::config::Config::default().scan_max_depth,
+            |phase, processed, total, errors, path| {
+                events.push((phase, processed, total, errors, path.map(Path::to_path_buf)));
+            },
         )?;
         assert!(result.records.is_empty());
         assert_eq!(result.errors.len(), 1);
-        assert!(result.errors[0].contains("outside the configured library roots"));
         assert!(result.suppressed_sources.is_empty());
+        let metadata = events
+            .iter()
+            .filter(|(phase, ..)| matches!(phase, &ScanPhase::ReadingMetadata))
+            .last()
+            .unwrap();
+        assert_eq!(metadata.1, 1);
+        assert_eq!(metadata.2, Some(1));
+        assert_eq!(metadata.3, 1);
         Ok(())
     }
 
@@ -896,12 +1429,7 @@ mod tests {
         let sheet = directory.path().join("album.CUE");
         wav(&audio, 225)?;
         two_track_sheet(&sheet)?;
-        let result = scan_paths(
-            std::slice::from_ref(&sheet),
-            &[],
-            false,
-            &[directory.path().to_path_buf()],
-        )?;
+        let result = scan_paths(std::slice::from_ref(&sheet), &[], false)?;
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         assert_eq!(result.records.len(), 2);
         let first = &result.records[0];
@@ -944,7 +1472,7 @@ mod tests {
             &sheet,
             "FILE \"z.wav\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nINDEX 01 00:01:00\nFILE \"a.wav\" WAVE\nTRACK 03 AUDIO\nINDEX 01 00:00:00\nTRACK 04 AUDIO\nINDEX 01 00:02:00\n",
         )?;
-        let result = scan_paths(&[sheet], &[], false, &[directory.path().to_path_buf()])?;
+        let result = scan_paths(&[sheet], &[], false)?;
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         assert_eq!(result.records.len(), 4);
         assert_eq!(
@@ -976,20 +1504,10 @@ mod tests {
         let sheet = directory.path().join("album.cue");
         wav(&audio, 225)?;
         two_track_sheet(&sheet)?;
-        let original = scan_paths(
-            std::slice::from_ref(&sheet),
-            &[],
-            false,
-            &[directory.path().to_path_buf()],
-        )?;
+        let original = scan_paths(std::slice::from_ref(&sheet), &[], false)?;
         assert!(original.errors.is_empty(), "{:?}", original.errors);
         let known = known_records(&original.records);
-        let full = scan_paths(
-            std::slice::from_ref(&audio),
-            &known,
-            false,
-            &[directory.path().to_path_buf()],
-        )?;
+        let full = scan_paths(std::slice::from_ref(&audio), &known, false)?;
         assert!(full.errors.is_empty(), "{:?}", full.errors);
         assert_eq!(full.records.len(), 1);
         assert_eq!(full.records[0].media.duration, Some(3.0));
@@ -999,12 +1517,7 @@ mod tests {
             "TITLE \"Edited album\"\nFILE \"audio.wav\" WAVE\nTRACK 01 AUDIO\nTITLE \"Renamed\"\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nINDEX 01 00:02:00\n",
         )?;
         for cache in [&known, &known_records(&full.records)] {
-            let rescanned = scan_paths(
-                std::slice::from_ref(&sheet),
-                cache,
-                false,
-                &[directory.path().to_path_buf()],
-            )?;
+            let rescanned = scan_paths(std::slice::from_ref(&sheet), cache, false)?;
             assert!(rescanned.errors.is_empty(), "{:?}", rescanned.errors);
             assert_eq!(rescanned.records.len(), 2);
             assert_eq!(rescanned.records[0].media.title, "Renamed");
@@ -1038,21 +1551,11 @@ mod tests {
                 &sheet,
                 format!("FILE \"audio.wav\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n{invalid}"),
             )?;
-            let result = scan_paths(
-                std::slice::from_ref(&sheet),
-                &[],
-                false,
-                &[directory.path().to_path_buf()],
-            )?;
+            let result = scan_paths(std::slice::from_ref(&sheet), &[], false)?;
             assert!(result.records.is_empty());
             assert_eq!(result.errors.len(), 1);
             assert!(result.suppressed_sources.is_empty());
-            let directory_scan = scan_paths(
-                &[directory.path().to_path_buf()],
-                &[],
-                false,
-                &[directory.path().to_path_buf()],
-            )?;
+            let directory_scan = scan_paths(&[directory.path().to_path_buf()], &[], false)?;
             assert_eq!(directory_scan.records.len(), 1);
             assert!(directory_scan.records[0].cue.is_none());
             assert!(directory_scan.suppressed_sources.is_empty());
@@ -1068,12 +1571,7 @@ mod tests {
         wav(&audio, 225)?;
         wav(&directory.path().join("unrelated.wav"), 75)?;
         two_track_sheet(&sheet)?;
-        let result = scan_paths(
-            &[directory.path().to_path_buf(), sheet.clone()],
-            &[],
-            false,
-            &[directory.path().to_path_buf()],
-        )?;
+        let result = scan_paths(&[directory.path().to_path_buf(), sheet.clone()], &[], false)?;
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         assert_eq!(result.records.len(), 3);
         assert_eq!(
@@ -1089,7 +1587,6 @@ mod tests {
             &[directory.path().to_path_buf(), audio.clone(), sheet, audio],
             &[],
             false,
-            &[directory.path().to_path_buf()],
         )?;
         assert!(explicit.errors.is_empty(), "{:?}", explicit.errors);
         assert_eq!(explicit.records.len(), 4);
@@ -1129,12 +1626,7 @@ mod tests {
         let sheet = alias.join("#album.cue");
         wav(&audio, 225)?;
         two_track_sheet(&sheet)?;
-        let scan = scan_paths(
-            &[sheet.clone(), audio],
-            &[],
-            false,
-            std::slice::from_ref(&alias),
-        )?;
+        let scan = scan_paths(&[sheet.clone(), audio], &[], false)?;
         assert!(scan.errors.is_empty(), "{:?}", scan.errors);
         assert!(
             scan.records
@@ -1181,12 +1673,7 @@ mod tests {
         wav(&directory.path().join("audio.wav"), 225)?;
         let sheet = directory.path().join("album.cue");
         two_track_sheet(&sheet)?;
-        let scan = scan_paths(
-            std::slice::from_ref(&sheet),
-            &[],
-            false,
-            &[directory.path().to_path_buf()],
-        )?;
+        let scan = scan_paths(std::slice::from_ref(&sheet), &[], false)?;
         let tracks: Vec<_> = scan
             .records
             .iter()

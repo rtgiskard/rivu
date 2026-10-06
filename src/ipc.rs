@@ -1,7 +1,8 @@
 use crate::{
     core::{AppHandle, CoreState},
     model::{
-        Command, DatabaseOptimization, LibrarySnapshot, PlaybackState, QueueState, Track,
+        Command, DatabaseOptimization, LibrarySnapshot, PlaybackState, QueueState, ScanProgress,
+        Track,
     },
     projection::ClientSnapshot,
     response::{Ack, StateResponse, ViewResponse},
@@ -115,6 +116,8 @@ mod wire_config {
 struct WireSystemState {
     scanning: bool,
     scan_message: String,
+    #[serde(default)]
+    scan_progress: Option<ScanProgress>,
     last_error: Option<String>,
     devices: Arc<Vec<String>>,
     selected_device: Option<String>,

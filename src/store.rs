@@ -755,6 +755,40 @@ impl Store {
             .iter()
             .filter_map(|r| r.fingerprint.as_deref())
             .collect();
+        let skipped_directories: HashSet<(&Path, &Path)> = result
+            .skipped_directories
+            .iter()
+            .map(|entry| {
+                let root = result
+                    .roots
+                    .get(entry.root_index)
+                    .context("Skipped directory references an unknown scan root")?;
+                Ok((root.as_path(), entry.path.as_path()))
+            })
+            .collect::<Result<_>>()?;
+        let scan_incomplete = result.scan_incomplete;
+        let requested_roots: HashSet<&Path> = result.roots.iter().map(PathBuf::as_path).collect();
+        let depth_skipped = |path: &Path| {
+            if scan_incomplete
+                && requested_roots
+                    .iter()
+                    .any(|root| path == *root || path.starts_with(root))
+            {
+                return true;
+            }
+            if skipped_directories.is_empty() {
+                return false;
+            }
+            // Only exclusions produced by the nearest explicit scan apply.
+            let Some(root) = path
+                .ancestors()
+                .find(|ancestor| requested_roots.contains(ancestor))
+            else {
+                return false;
+            };
+            path.ancestors()
+                .any(|ancestor| skipped_directories.contains(&(root, ancestor)))
+        };
         let mut byidentity = HashMap::new();
         let mut byhash: HashMap<&str, Vec<&Existing>> = HashMap::new();
         for record in &old {
@@ -766,6 +800,7 @@ impl Store {
             if !identities.contains(&key)
                 && let Some(hash) = record.hash.as_deref()
                 && candidate_hashes.contains(hash)
+                && !depth_skipped(owner)
                 && fs::symlink_metadata(owner)
                     .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
             {
@@ -932,6 +967,7 @@ impl Store {
                     .roots
                     .iter()
                     .any(|root| owner == root || owner.starts_with(root))
+                && !depth_skipped(owner)
             {
                 mark_missing.execute([o.id])?;
             }
@@ -1214,6 +1250,9 @@ mod tests {
             records,
             errors: vec![],
             suppressed_sources: Vec::new(),
+            skipped_directories: Vec::new(),
+            skipped_directories_truncated: false,
+            scan_incomplete: false,
         }
     }
     fn db(name: &str) -> (PathBuf, Store) {
@@ -1695,6 +1734,166 @@ mod tests {
         let tracks = all_tracks(&store);
         assert!(!tracks[0].missing);
         assert!(tracks[1].missing);
+    }
+
+    #[test]
+    fn depth_excluded_tracks_keep_missing_state_and_are_not_relocation_candidates() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let whole = rec("/music/deep/whole.wav", "whole", "Original", 10.0);
+        let cue = segment("/music/deep/album.cue", 1, 0, None);
+        let already_missing = rec(
+            "/music/deep/already-missing.wav",
+            "already-missing",
+            "Already missing",
+            10.0,
+        );
+        store
+            .apply_scan(&scan(vec![
+                whole.clone(),
+                cue.clone(),
+                already_missing.clone(),
+                rec("/music/deeper/absent.wav", "prefix", "Other branch", 10.0),
+            ]))
+            .unwrap();
+        let whole_id = store
+            .track_id_for_source(&whole.path, None)
+            .unwrap()
+            .unwrap();
+        let cue_id = store
+            .track_id_for_source(&cue.cue.as_ref().unwrap().sheet, Some(1))
+            .unwrap()
+            .unwrap();
+        let missing_id = store
+            .track_id_for_source(&already_missing.path, None)
+            .unwrap()
+            .unwrap();
+        store.set_favorite(&[whole_id, cue_id], true).unwrap();
+        store
+            .apply_scan(&ScanResult {
+                roots: vec![already_missing.path.clone()],
+                ..ScanResult::default()
+            })
+            .unwrap();
+        let copy = rec("/music/copy.wav", "whole", "New copy", 10.0);
+        let mut partial = scan(vec![copy.clone()]);
+        partial
+            .skipped_directories
+            .push(crate::library::SkippedDirectory {
+                root_index: 0,
+                path: "/music/deep".into(),
+            });
+        store.apply_scan(&partial).unwrap();
+        let preserved = store.track(whole_id).unwrap().unwrap();
+        assert_eq!(preserved.path, whole.path);
+        assert_eq!(preserved.title, "Original");
+        assert!(!preserved.missing);
+        assert!(preserved.favorite);
+        let preserved_cue = store.track(cue_id).unwrap().unwrap();
+        assert!(!preserved_cue.missing);
+        assert!(preserved_cue.favorite);
+        assert_eq!(
+            preserved_cue.cue.as_ref().unwrap().sheet,
+            Path::new("/music/deep/album.cue")
+        );
+        assert!(store.track(missing_id).unwrap().unwrap().missing);
+        let copy_id = store
+            .track_id_for_source(&copy.path, None)
+            .unwrap()
+            .unwrap();
+        assert_ne!(copy_id, whole_id);
+        let outside_id = all_tracks(&store)
+            .into_iter()
+            .find(|track| track.path == Path::new("/music/deeper/absent.wav"))
+            .unwrap()
+            .id;
+        assert!(store.track(outside_id).unwrap().unwrap().missing);
+        store.apply_scan(&scan(Vec::new())).unwrap();
+        assert!(store.track(whole_id).unwrap().unwrap().missing);
+        assert!(store.track(cue_id).unwrap().unwrap().missing);
+    }
+
+    #[test]
+    fn explicit_nested_scans_override_only_ancestor_depth_exclusions() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let sibling = rec("/music/deep/sibling.wav", "sibling", "Sibling", 10.0);
+        let nested = rec("/music/deep/nested/absent.wav", "nested", "Nested", 10.0);
+        let beyond = rec(
+            "/music/deep/nested/beyond/hidden.wav",
+            "beyond",
+            "Beyond",
+            10.0,
+        );
+        store
+            .apply_scan(&scan(vec![sibling.clone(), nested.clone(), beyond.clone()]))
+            .unwrap();
+        let mut partial = scan(Vec::new());
+        partial.roots.push("/music/deep/nested".into());
+        partial.skipped_directories = vec![
+            crate::library::SkippedDirectory {
+                root_index: 0,
+                path: "/music/deep".into(),
+            },
+            crate::library::SkippedDirectory {
+                root_index: 1,
+                path: "/music/deep/nested/beyond".into(),
+            },
+        ];
+        store.apply_scan(&partial).unwrap();
+        for (record, missing) in [(sibling, false), (nested, true), (beyond, false)] {
+            let id = all_tracks(&store)
+                .into_iter()
+                .find(|track| track.path == record.path)
+                .unwrap()
+                .id;
+            assert_eq!(store.track(id).unwrap().unwrap().missing, missing);
+        }
+    }
+
+    #[test]
+    fn outer_exclusions_do_not_hide_a_completed_nested_scan() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let deep = rec("/music/nested/covered/deep.wav", "deep", "Deep", 10.0);
+        store.apply_scan(&scan(vec![deep.clone()])).unwrap();
+        let id = store
+            .track_id_for_source(&deep.path, None)
+            .unwrap()
+            .unwrap();
+        let mut partial = scan(Vec::new());
+        partial.roots.push("/music/nested".into());
+        partial
+            .skipped_directories
+            .push(crate::library::SkippedDirectory {
+                root_index: 0,
+                path: "/music/nested/covered".into(),
+            });
+        store.apply_scan(&partial).unwrap();
+        assert!(store.track(id).unwrap().unwrap().missing);
+    }
+
+    #[test]
+    fn incomplete_scan_preserves_absent_identities_and_avoids_relocation() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let old = rec("/music/old.wav", "same", "Original", 10.0);
+        store.apply_scan(&scan(vec![old.clone()])).unwrap();
+        let id = store.track_id_for_source(&old.path, None).unwrap().unwrap();
+        store.set_favorite(&[id], true).unwrap();
+        let copy = rec("/music/copy.wav", "same", "Copy", 10.0);
+        let mut incomplete = scan(vec![copy.clone()]);
+        incomplete.scan_incomplete = true;
+        store.apply_scan(&incomplete).unwrap();
+        let preserved = store.track(id).unwrap().unwrap();
+        assert_eq!(preserved.path, old.path);
+        assert!(preserved.favorite);
+        assert!(!preserved.missing);
+        assert_ne!(
+            store
+                .track_id_for_source(&copy.path, None)
+                .unwrap()
+                .unwrap(),
+            id
+        );
+        store.apply_scan(&scan(vec![copy])).unwrap();
+        assert!(store.track(id).unwrap().unwrap().missing);
     }
 
     #[test]

@@ -389,6 +389,11 @@ impl PlaybackStats {
 struct ScanFinished {
     result: Result<ScanResult>,
     import: Option<(String, Vec<M3uItem>)>,
+    progress: ScanProgress,
+}
+enum ScanEvent {
+    Progress(ScanProgress),
+    Finished(ScanFinished),
 }
 struct Core {
     store: Store,
@@ -402,8 +407,8 @@ struct Core {
     generation: u64,
     next_queue_id: u64,
     playback: Option<PlaybackStats>,
-    scan_tx: Sender<ScanFinished>,
-    scan_rx: Receiver<ScanFinished>,
+    scan_tx: Sender<ScanEvent>,
+    scan_rx: Receiver<ScanEvent>,
     scan_workers: Vec<JoinHandle<()>>,
     shuffle_bag: Vec<u64>,
     played: Vec<u64>,
@@ -508,6 +513,9 @@ mod tests {
             .apply_scan(&ScanResult {
                 roots: vec![directory.path().to_path_buf()],
                 suppressed_sources: Vec::new(),
+                skipped_directories: Vec::new(),
+                skipped_directories_truncated: false,
+                scan_incomplete: false,
                 records: (1..=4)
                     .map(|id| ScanRecord {
                         path: directory.path().join(format!("{id}.wav")),
@@ -568,11 +576,16 @@ mod tests {
     }
 
     fn settle_scan(core: &mut Core) -> bool {
-        let scan = core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        let successful = scan.result.as_ref().unwrap().errors().is_empty();
-        core.finish_scan(scan).unwrap();
-        core.state.system.scanning = false;
-        successful
+        loop {
+            match core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+                ScanEvent::Progress(_) => {}
+                ScanEvent::Finished(scan) => {
+                    let successful = core.finish_scan(scan).unwrap();
+                    core.state.system.scanning = false;
+                    return successful;
+                }
+            }
+        }
     }
 
     fn write_pcm(path: &Path) {
@@ -591,6 +604,77 @@ mod tests {
         file.write_all(b"data").unwrap();
         file.write_all(&200_u32.to_le_bytes()).unwrap();
         file.write_all(&[0; 200]).unwrap();
+    }
+
+    #[test]
+    fn lowering_scan_depth_preserves_excluded_tracks_until_they_are_scanned() {
+        let (directory, mut core) = fixture();
+        let allowed = directory.path().join("allowed");
+        let excluded = allowed.join("excluded");
+        std::fs::create_dir_all(&excluded).unwrap();
+        let visible = allowed.join("visible.wav");
+        let hidden = excluded.join("hidden.wav");
+        write_pcm(&visible);
+        write_pcm(&hidden);
+        let mut config = core.state.system.config.as_ref().clone();
+        config.scan_max_depth = 2;
+        core.command(Command::Configure { config }).unwrap();
+        core.command(Command::Scan {
+            paths: vec![directory.path().to_path_buf()],
+            force: false,
+        })
+        .unwrap();
+        assert!(settle_scan(&mut core));
+        let hidden_id = core
+            .store
+            .track_id_for_source(&hidden, None)
+            .unwrap()
+            .unwrap();
+        core.store.set_favorite(&[hidden_id], true).unwrap();
+        core.store
+            .edit_track(hidden_id, "Kept title", "Artist", "Album")
+            .unwrap();
+        std::fs::remove_file(&hidden).unwrap();
+        let mut config = core.state.system.config.as_ref().clone();
+        config.scan_max_depth = 1;
+        core.command(Command::Configure { config }).unwrap();
+        core.command(Command::Scan {
+            paths: vec![directory.path().to_path_buf()],
+            force: false,
+        })
+        .unwrap();
+        assert!(!settle_scan(&mut core));
+        assert!(
+            core.state
+                .system
+                .last_error
+                .as_ref()
+                .unwrap()
+                .contains(excluded.to_str().unwrap())
+        );
+        let preserved = core.track(hidden_id).unwrap();
+        assert!(!preserved.missing);
+        assert!(preserved.favorite);
+        assert_eq!(preserved.title, "Kept title");
+        let visible_id = core
+            .store
+            .track_id_for_source(&visible, None)
+            .unwrap()
+            .unwrap();
+        assert!(!core.track(visible_id).unwrap().missing);
+        let mut config = core.state.system.config.as_ref().clone();
+        config.scan_max_depth = 2;
+        core.command(Command::Configure { config }).unwrap();
+        core.command(Command::Scan {
+            paths: vec![directory.path().to_path_buf()],
+            force: false,
+        })
+        .unwrap();
+        assert!(settle_scan(&mut core));
+        let removed = core.track(hidden_id).unwrap();
+        assert!(removed.missing);
+        assert!(removed.favorite);
+        assert_eq!(removed.title, "Kept title");
     }
 
     #[test]
@@ -1002,6 +1086,9 @@ mod tests {
             .apply_scan(&ScanResult {
                 roots: vec![directory.path().to_path_buf()],
                 suppressed_sources: Vec::new(),
+                skipped_directories: Vec::new(),
+                skipped_directories_truncated: false,
+                scan_incomplete: true,
                 records: vec![ScanRecord {
                     path: known.path,
                     cue: known.cue,
@@ -1357,6 +1444,8 @@ mod tests {
             &[],
             false,
             &[_directory.path().to_path_buf()],
+            core.state.system.config.scan_max_depth,
+            |_, _, _, _, _| {},
         )
         .unwrap();
         let probed_title = scanned.records[0].media.title.clone();
@@ -1369,7 +1458,12 @@ mod tests {
                 force,
             })
             .unwrap();
-            let finished = core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let finished = loop {
+                match core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+                    ScanEvent::Progress(_) => continue,
+                    ScanEvent::Finished(scan) => break scan,
+                }
+            };
             core.finish_scan(finished).unwrap();
             core.state.system.scanning = false;
             assert_eq!(core.track(1).unwrap().title, expected);
@@ -1510,6 +1604,13 @@ mod tests {
                 "First occurrences".into(),
                 library::import_playlist(&path).unwrap(),
             )),
+            progress: ScanProgress {
+                phase: ScanPhase::ReadingMetadata,
+                processed: 0,
+                total: Some(0),
+                errors: 0,
+                path: None,
+            },
         })
         .unwrap();
         let playlist_id = core.store.playlist_summary_page(0, 1).unwrap().rows[0].id;
@@ -1583,6 +1684,13 @@ mod tests {
                 "CUE occurrences".into(),
                 vec![items[1].clone(), items[0].clone(), items[1].clone()],
             )),
+            progress: ScanProgress {
+                phase: ScanPhase::ReadingMetadata,
+                processed: 1,
+                total: Some(1),
+                errors: 0,
+                path: None,
+            },
         })
         .unwrap();
         let playlist_id = core.store.playlist_summary_page(0, 1).unwrap().rows[0].id;
@@ -2213,6 +2321,65 @@ mod tests {
         core.run(receiver);
         assert!(observed.load(Ordering::Acquire));
     }
+    #[test]
+    fn shutdown_disconnects_a_backpressured_scan_worker() {
+        let (_directory, mut core) = fixture();
+        let shared = core.shared.clone();
+        let progress_sender = core.scan_tx.clone();
+        let finished_sender = core.scan_tx.clone();
+        let (start_sender, start_receiver) = bounded(1);
+        let (result_sender, result_receiver) = bounded(1);
+        core.scan_workers.push(thread::spawn(move || {
+            start_receiver.recv().unwrap();
+            let result = finished_sender.send_timeout(
+                ScanEvent::Finished(ScanFinished {
+                    result: Ok(ScanResult::default()),
+                    import: None,
+                    progress: ScanProgress {
+                        phase: ScanPhase::ReadingMetadata,
+                        processed: 0,
+                        total: Some(0),
+                        errors: 0,
+                        path: None,
+                    },
+                }),
+                Duration::from_secs(1),
+            );
+            result_sender
+                .send(matches!(
+                    result,
+                    Err(crossbeam_channel::SendTimeoutError::Disconnected(_))
+                ))
+                .unwrap();
+        }));
+        let started = AtomicBool::new(false);
+        *core.wakeup.write() = Some(Arc::new(move || {
+            if shared.read().system.shutting_down && !started.swap(true, Ordering::AcqRel) {
+                progress_sender
+                    .send(ScanEvent::Progress(ScanProgress {
+                        phase: ScanPhase::Discovering,
+                        processed: 0,
+                        total: None,
+                        errors: 0,
+                        path: None,
+                    }))
+                    .unwrap();
+                start_sender.send(()).unwrap();
+            }
+        }));
+        let (sender, receiver) = bounded(1);
+        sender
+            .send(Request {
+                command: Command::Shutdown,
+                reply: None,
+                ack: false,
+            })
+            .unwrap();
+        core.run(receiver);
+        assert!(result_receiver.recv().unwrap());
+        assert!(core.state.system.shutting_down);
+    }
+
     #[test]
     fn restoring_queue_skips_missing_entries_before_capacity_limit() {
         let (_directory, mut core) = fixture();

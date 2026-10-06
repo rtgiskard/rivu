@@ -368,6 +368,47 @@ impl GuiApp {
         cx.notify();
     }
 
+    fn library_scan_status(&self) -> Div {
+        use crate::model::ScanPhase;
+        let Some(progress) = self.state.system.scan_progress.as_ref() else {
+            return column().child(caption(self.state.system.scan_message.clone()));
+        };
+        let phase = match progress.phase {
+            ScanPhase::Discovering => "Discovering files",
+            ScanPhase::ReadingMetadata => "Reading metadata",
+            ScanPhase::Saving => "Saving library",
+            ScanPhase::Completed => "Scan completed",
+            ScanPhase::Failed => "Scan failed",
+        };
+        let count = match progress.total {
+            Some(total) => format!("{} / {total} files", progress.processed),
+            None => format!("{} files found", progress.processed),
+        };
+        let mut status = column().gap_1().flex_shrink_0().child(caption(format!(
+            "{phase} · {count} · {} errors",
+            progress.errors
+        )));
+        if let Some(total) = progress.total.filter(|total| *total > 0) {
+            let fraction = (progress.processed as f32 / total as f32).clamp(0., 1.);
+            status = status.child(div().w_full().h(px(3.)).bg(rgb(BORDER)).child(
+                div().h_full().w(gpui::relative(fraction)).bg(rgb(
+                    if progress.phase == ScanPhase::Failed {
+                        super::ERROR
+                    } else {
+                        ACCENT
+                    },
+                )),
+            ));
+        }
+        if let Some(path) = progress.path.as_ref() {
+            status = status.child(caption(path.to_string_lossy().into_owned()).truncate());
+        }
+        if progress.phase == ScanPhase::Completed {
+            status = status.child(caption(self.state.system.scan_message.clone()).truncate());
+        }
+        status
+    }
+
     pub(super) fn library_panel(
         &mut self,
         panel_id: u64,
@@ -563,8 +604,8 @@ impl GuiApp {
             ))
             .child(self.panel_field(Field::Search, "Search title, artist or album"))
             .child(tools);
-        if self.state.system.scanning {
-            panel = panel.child(caption(self.state.system.scan_message.clone()).truncate());
+        if self.state.system.scan_progress.is_some() || self.state.system.scanning {
+            panel = panel.child(self.library_scan_status());
         }
         if self.library_tree_active {
             panel

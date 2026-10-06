@@ -54,6 +54,7 @@ pub struct GuiLibrarySnapshot {
 pub struct GuiSystemSnapshot {
     pub scanning: bool,
     pub scan_message: String,
+    pub scan_progress: Option<crate::model::ScanProgress>,
     pub last_error: Option<String>,
     pub devices: Arc<Vec<String>>,
     pub selected_device: Option<String>,
@@ -82,6 +83,7 @@ impl GuiSnapshot {
             system: GuiSystemSnapshot {
                 scanning: state.system.scanning,
                 scan_message: state.system.scan_message.clone(),
+                scan_progress: state.system.scan_progress.clone(),
                 last_error: state.system.last_error.clone(),
                 devices: Arc::clone(&state.system.devices),
                 selected_device: state.system.selected_device.clone(),

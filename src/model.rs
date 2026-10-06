@@ -211,10 +211,31 @@ pub struct PlaybackState {
     pub seek_revision: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanPhase {
+    Discovering,
+    ReadingMetadata,
+    Saving,
+    Completed,
+    Failed,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ScanProgress {
+    pub phase: ScanPhase,
+    pub processed: usize,
+    pub total: Option<usize>,
+    pub errors: usize,
+    pub path: Option<PathBuf>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SystemState {
     pub scanning: bool,
     pub scan_message: String,
+    #[serde(default)]
+    pub scan_progress: Option<ScanProgress>,
     pub last_error: Option<String>,
     pub devices: Arc<Vec<String>>,
     pub selected_device: Option<String>,
@@ -225,6 +246,25 @@ pub struct SystemState {
     pub ffmpeg_status: String,
     pub database_optimization: Option<DatabaseOptimization>,
     pub shutting_down: bool,
+}
+impl Default for SystemState {
+    fn default() -> Self {
+        Self {
+            scanning: false,
+            scan_message: String::new(),
+            scan_progress: None,
+            last_error: None,
+            devices: Arc::new(Vec::new()),
+            selected_device: None,
+            revision: 0,
+            config: Arc::new(crate::config::Config::default()),
+            config_path: PathBuf::new(),
+            mpris_status: String::new(),
+            ffmpeg_status: "disabled".into(),
+            database_optimization: None,
+            shutting_down: false,
+        }
+    }
 }
 
 impl Default for LibrarySnapshot {
@@ -261,25 +301,6 @@ impl Default for PlaybackState {
             shuffle: false,
             repeat: RepeatMode::Off,
             seek_revision: 0,
-        }
-    }
-}
-
-impl Default for SystemState {
-    fn default() -> Self {
-        Self {
-            scanning: false,
-            scan_message: String::new(),
-            last_error: None,
-            devices: Arc::new(Vec::new()),
-            selected_device: None,
-            revision: 0,
-            config: Arc::new(crate::config::Config::default()),
-            config_path: PathBuf::new(),
-            mpris_status: String::new(),
-            ffmpeg_status: "disabled".into(),
-            database_optimization: None,
-            shutting_down: false,
         }
     }
 }
