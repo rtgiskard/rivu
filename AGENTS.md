@@ -21,7 +21,9 @@
 
 ## Commits
 
-- Keep each commit atomic and limited to one coherent responsibility
+- Prefer one coherent responsibility per commit, but do not require strict atomicity or independent compilability
+- Commit clearly separable mainline changes first; leave deeply interwoven miscellaneous changes for other commits
+- State partial commit boundaries and remaining dependencies explicitly
 - Use a concise Conventional Commit subject, one concrete change per body line
 - Use real newlines, no terminal punctuation, and no blank lines between items
 - Prefix every commit body item, match repository history
