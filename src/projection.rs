@@ -143,6 +143,7 @@ pub struct TuiSystemSnapshot {
     pub revision: u64,
     pub shutting_down: bool,
     pub nerd_symbols: bool,
+    pub library_roots: Arc<Vec<std::path::PathBuf>>,
 }
 
 impl TuiSnapshot {
@@ -161,6 +162,7 @@ impl TuiSnapshot {
                 revision: state.system.revision,
                 shutting_down: state.system.shutting_down,
                 nerd_symbols: state.system.config.nerd_symbols,
+                library_roots: Arc::new(state.system.config.library_roots.clone()),
             },
         }
     }

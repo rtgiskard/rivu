@@ -238,7 +238,10 @@ fn run_loop(socket_path: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>
                         action @ (KeyAction::Search | KeyAction::Tree) => {
                             let library = Arc::clone(&tui.snapshot.library.tracks);
                             if matches!(action, KeyAction::Tree) {
-                                tui.ui.view = View::Tree(LibraryTree::new(library));
+                                tui.ui.view = View::Tree(LibraryTree::new(
+                                    library,
+                                    Arc::clone(&tui.snapshot.system.library_roots),
+                                ));
                             } else {
                                 tui.ui.view = View::Search(LibrarySearch::new(library));
                             }
@@ -799,8 +802,8 @@ impl LibrarySearch {
     }
 }
 
-/// A library snapshot indexed into flat, directory-first lists of immediate children.
-/// `t` opens the common library directory; parent navigation stops at that root.
+/// A library snapshot indexed into a flat directory-first tree.
+/// Each configured library root is a top-level node; unconfigured tracks use a fallback tree.
 struct LibraryTree {
     library: Arc<Vec<Track>>,
     directories: BTreeMap<PathBuf, Vec<LibraryTreeEntry>>,
@@ -815,29 +818,39 @@ enum LibraryTreeEntry {
 }
 
 impl LibraryTree {
-    fn new(library: Arc<Vec<Track>>) -> Self {
-        let mut root = library
-            .first()
-            .and_then(|track| track.path.parent())
-            .unwrap_or_else(|| Path::new(""))
-            .to_path_buf();
-        for track in library.iter().skip(1) {
-            while !track.path.starts_with(&root) {
-                if !root.pop() {
-                    root.clear();
-                    break;
-                }
+    fn new(library: Arc<Vec<Track>>, library_roots: Arc<Vec<PathBuf>>) -> Self {
+        let root = PathBuf::new();
+        let mut directories = BTreeMap::from([(root.clone(), Vec::new())]);
+
+        for configured_root in library_roots
+            .iter()
+            .filter(|path| !path.as_os_str().is_empty())
+        {
+            if directories.contains_key(configured_root) {
+                continue;
             }
+            directories.insert(configured_root.clone(), Vec::new());
+            directories
+                .get_mut(&root)
+                .expect("tree root is indexed")
+                .push(LibraryTreeEntry::Directory(configured_root.clone()));
         }
-        let mut directories = BTreeMap::new();
-        directories.insert(root.clone(), Vec::new());
-        let mut ancestors = Vec::new();
+
         for (index, track) in library.iter().enumerate() {
-            let directory = track.path.parent().unwrap_or_else(|| Path::new(""));
-            let mut path = directory;
-            while !directories.contains_key(path) {
+            let track_directory = track.path.parent().unwrap_or_else(|| Path::new(""));
+            let configured_root = library_roots
+                .iter()
+                .filter(|root| !root.as_os_str().is_empty() && track.path.starts_with(root))
+                .max_by_key(|root| root.components().count());
+            let base = configured_root.unwrap_or(&root);
+            let mut path = track_directory;
+            let mut ancestors = Vec::new();
+            while path != base && !directories.contains_key(path) {
                 ancestors.push(path);
-                path = path.parent().unwrap_or(&root);
+                path = path.parent().unwrap_or(base);
+            }
+            if !directories.contains_key(path) {
+                path = base;
             }
             for child in ancestors.drain(..).rev() {
                 directories
@@ -848,7 +861,7 @@ impl LibraryTree {
                 path = child;
             }
             directories
-                .get_mut(directory)
+                .get_mut(track_directory)
                 .expect("track directory is indexed")
                 .push(LibraryTreeEntry::Track(index));
         }
@@ -1574,6 +1587,31 @@ mod tests {
             playback: PlaybackState::default(),
             system: TuiSystemSnapshot::default(),
         }
+    }
+
+    #[test]
+    fn tree_has_each_configured_root_at_top_level() {
+        let mut first = track(1, "Artist", "First");
+        first.path = PathBuf::from("/music/first.flac");
+        let mut second = track(2, "Artist", "Second");
+        second.path = PathBuf::from("/podcasts/second.flac");
+        let tree = LibraryTree::new(
+            Arc::new(vec![first, second]),
+            Arc::new(vec![PathBuf::from("/music"), PathBuf::from("/podcasts")]),
+        );
+
+        let roots: Vec<_> = tree
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                LibraryTreeEntry::Directory(path) => Some(path.clone()),
+                LibraryTreeEntry::Track(_) => None,
+            })
+            .collect();
+        assert_eq!(
+            roots,
+            vec![PathBuf::from("/music"), PathBuf::from("/podcasts")]
+        );
     }
 
     #[test]
