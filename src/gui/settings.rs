@@ -77,11 +77,12 @@ enum Field {
     SpectrumSmoothing,
     SpectrogramDb,
     SpectrogramHistory,
+    SpectrogramSamplingPointsScale,
     SpectrogramInterpolationPoints,
     CursorColor,
     Glow,
-}
 
+}
 impl Field {
     fn label(self) -> &'static str {
         match self {
@@ -117,9 +118,11 @@ impl Field {
             Self::SpectrumBarGravity => "Bar gravity (0–500 dB/s²)",
             Self::SpectrumSmoothing => "Release smoothing (0–1000 ms)",
             Self::SpectrogramHistory => "History limit (1–120 seconds)",
+            Self::SpectrogramSamplingPointsScale => "Frequency point scale (0.4–1.4)",
             Self::SpectrogramInterpolationPoints => "Interpolated frequency points (64–4096)",
             Self::CursorColor => "Waterline color (#RRGGBB)",
             Self::Glow => "Glow strength (0–2; 0 = off)",
+
         }
     }
 }
@@ -283,6 +286,7 @@ impl Settings {
             Field::SpectrumSmoothing,
             Field::SpectrogramDb,
             Field::SpectrogramHistory,
+            Field::SpectrogramSamplingPointsScale,
             Field::SpectrogramInterpolationPoints,
             Field::CursorColor,
             Field::Glow,
@@ -470,6 +474,11 @@ impl Settings {
             cx,
         );
         self.set_value(
+            Field::SpectrogramSamplingPointsScale,
+            self.draft.spectrogram_sampling_points_scale.to_string(),
+            cx,
+        );
+        self.set_value(
             Field::SpectrogramInterpolationPoints,
             self.draft.spectrogram_interpolation_points.to_string(),
             cx,
@@ -534,9 +543,10 @@ impl Settings {
         config.spectrum_bar_gravity = self.number(Field::SpectrumBarGravity, cx)?;
         config.spectrum_smoothing_ms = self.number(Field::SpectrumSmoothing, cx)?;
         config.spectrum_bar_width = self.number(Field::SpectrumBarWidth, cx)?;
-        config.spectrum_bars = self.number(Field::SpectrumBars, cx)?;
         config.spectrogram_db_range = self.number(Field::SpectrogramDb, cx)?;
         config.spectrogram_history_seconds = self.number(Field::SpectrogramHistory, cx)?;
+        config.spectrogram_sampling_points_scale =
+            self.number(Field::SpectrogramSamplingPointsScale, cx)?;
         config.spectrogram_interpolation_points =
             self.number(Field::SpectrogramInterpolationPoints, cx)?;
         config.waveform_cursor_color = self
@@ -1102,7 +1112,10 @@ impl GuiApp {
             VisualPage::Spectrogram => column()
                 .gap_3()
                 .child(settings.pair(Field::SpectrogramDb, Field::SpectrogramHistory))
-                .child(settings.field(Field::SpectrogramInterpolationPoints))
+                .child(settings.pair(
+                    Field::SpectrogramSamplingPointsScale,
+                    Field::SpectrogramInterpolationPoints,
+                ))
                 .child(
                     row()
                         .flex_wrap()

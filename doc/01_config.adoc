@@ -114,8 +114,9 @@ FFT resolution/window, band density, spacing, peak hold, release motion, and lab
 Motion freezes while paused.
 
 Spectrogram shows recent frequency history; `spectrogram_*` settings control its
-history duration, color range, labels, and interpolation. Retained history also
-depends on panel width and analysis rate; unavailable history stays blank.
+history duration, color range, labels, interpolation, and the `0.4`–`1.4`
+`spectrogram_sampling_points_scale` used to choose source frequency rows. Retained
+history also depends on panel width and analysis rate; unavailable history stays blank.
 Both views use a logarithmic frequency axis and share `spectrum_fft_size` and
 `spectrum_window`; `spectrum_db_range` and `spectrogram_db_range` are independent
 display spans.

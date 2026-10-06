@@ -31,7 +31,6 @@ const MAX_SPECTRUM_BARS: usize = 2000;
 const PALETTE_GRADIENT_MIN_SEGMENTS: usize = 8;
 const PALETTE_GRADIENT_MAX_SEGMENTS: usize = 16;
 const PALETTE_GRADIENT_MAX_SPAN_PIXELS: f32 = 16.0;
-const VERTICAL_SPECTROGRAM_SCALE: f32 = 0.5;
 const TOKYO_NIGHT_STOPS: &[(f32, [u8; 3])] = &[
     (0.0, [65, 72, 110]),
     (0.2, [187, 154, 247]),
@@ -146,8 +145,13 @@ fn history_column_count(history_seconds: u32, analysis_fps: u32) -> usize {
 fn history_columns_for_width(history_seconds: u32, analysis_fps: u32, width: usize) -> usize {
     history_column_count(history_seconds, analysis_fps).min(width.max(2))
 }
-fn spectrogram_source_height(panel_height: usize, source_rows: usize, max_rows: u32) -> usize {
-    let pixel_rows = ((panel_height as f32) * VERTICAL_SPECTROGRAM_SCALE).ceil() as usize;
+fn spectrogram_source_height(
+    panel_height: usize,
+    source_rows: usize,
+    max_rows: u32,
+    scale: f32,
+) -> usize {
+    let pixel_rows = ((panel_height as f32) * scale).ceil() as usize;
     pixel_rows
         .max(source_rows.max(1))
         .min(usize::try_from(max_rows.max(1)).unwrap_or(usize::MAX))
@@ -202,6 +206,7 @@ struct VisualData {
     spectrogram_show_labels: bool,
     spectrogram_interpolate: bool,
     spectrogram_interpolation_points: u32,
+    spectrogram_sampling_points_scale: f32,
     spectrogram_history_seconds: u32,
     history_limit_seconds: f64,
     analysis_fps: u32,
@@ -268,6 +273,7 @@ impl Visuals {
                 spectrogram_show_labels: true,
                 spectrogram_interpolate: true,
                 spectrogram_interpolation_points: 1024,
+                spectrogram_sampling_points_scale: 0.5,
                 spectrogram_history_seconds: 20,
                 history_limit_seconds: 20.0,
                 analysis_fps: 20,
@@ -307,10 +313,10 @@ impl Visuals {
             || data.spectrum_show_labels != config.spectrum_labels
             || data.spectrum_fft_size != config.spectrum_fft_size
             || data.spectrum_window != config.spectrum_window
-            || data.spectrogram_db_range != config.spectrogram_db_range
-            || data.spectrogram_show_labels != config.spectrogram_labels
             || data.spectrogram_interpolate != config.spectrogram_interpolate
             || data.spectrogram_interpolation_points != config.spectrogram_interpolation_points
+            || data.spectrogram_sampling_points_scale
+                != config.spectrogram_sampling_points_scale
             || data.spectrogram_history_seconds != config.spectrogram_history_seconds
             || data.analysis_fps != config.analysis_fps
             || data.configured_history_columns != configured_history_columns;
@@ -327,7 +333,9 @@ impl Visuals {
             || data.visual_background != config.visual_background.rgb()
             || data.spectrogram_db_range != config.spectrogram_db_range
             || data.spectrogram_interpolate != config.spectrogram_interpolate
-            || data.spectrogram_interpolation_points != config.spectrogram_interpolation_points;
+            || data.spectrogram_interpolation_points != config.spectrogram_interpolation_points
+            || data.spectrogram_sampling_points_scale
+                != config.spectrogram_sampling_points_scale;
         data.palette_lut = if palette_changed {
             active_palette_lut(config.visual_palette)
         } else {
@@ -350,6 +358,7 @@ impl Visuals {
         data.spectrogram_show_labels = config.spectrogram_labels;
         data.spectrogram_interpolate = config.spectrogram_interpolate;
         data.spectrogram_interpolation_points = config.spectrogram_interpolation_points;
+        data.spectrogram_sampling_points_scale = config.spectrogram_sampling_points_scale;
         data.spectrum_fft_size = config.spectrum_fft_size;
         data.spectrum_window = config.spectrum_window;
         data.spectrum_grid = config.spectrum_grid;
@@ -1094,6 +1103,7 @@ impl VisualData {
             max_panel_height,
             source_rows,
             self.spectrogram_interpolation_points,
+            self.spectrogram_sampling_points_scale,
         );
         let height_u32 = u32::try_from(height)
             .map_err(|_| "Spectrogram image height exceeds GPU image dimensions".to_string())?;
@@ -1874,12 +1884,13 @@ mod tests {
     }
 
     #[test]
-    fn spectrogram_source_uses_half_height_and_source_floor() {
-        assert_eq!(spectrogram_source_height(320, 140, 1024), 160);
-        assert_eq!(spectrogram_source_height(700, 140, 1024), 350);
-        assert_eq!(spectrogram_source_height(1400, 140, 1024), 700);
-        assert_eq!(spectrogram_source_height(1400, 140, 512), 512);
-        assert_eq!(spectrogram_source_height(80, 140, 1024), 140);
+    fn spectrogram_source_uses_configured_scale_and_source_floor() {
+        assert_eq!(spectrogram_source_height(320, 140, 1024, 0.5), 160);
+        assert_eq!(spectrogram_source_height(700, 140, 1024, 0.5), 350);
+        assert_eq!(spectrogram_source_height(1400, 140, 1024, 0.5), 700);
+        assert_eq!(spectrogram_source_height(1400, 140, 512, 0.5), 512);
+        assert_eq!(spectrogram_source_height(80, 140, 1024, 0.5), 140);
+        assert_eq!(spectrogram_source_height(320, 140, 1024, 1.4), 448);
     }
 
     #[test]

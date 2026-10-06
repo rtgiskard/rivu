@@ -188,6 +188,8 @@ pub struct Config {
 
     pub spectrogram_labels: bool,
     pub spectrogram_interpolate: bool,
+    /// Scale applied to the visible panel height when choosing source rows.
+    pub spectrogram_sampling_points_scale: f32,
     /// Maximum logarithmic frequency rows generated for each cached column.
     pub spectrogram_interpolation_points: u32,
     pub waveform_labels: bool,
@@ -254,6 +256,7 @@ impl Default for Config {
 
             spectrogram_labels: true,
             spectrogram_interpolate: true,
+            spectrogram_sampling_points_scale: 0.5,
             spectrogram_interpolation_points: 1024,
             waveform_labels: true,
             spectrum_db_range: 70.0,
@@ -457,6 +460,11 @@ impl Config {
         ensure!(
             self.spectrum_smoothing_ms <= 1000,
             "spectrum_smoothing_ms must be between 0 and 1000 ms"
+        );
+        ensure!(
+            self.spectrogram_sampling_points_scale.is_finite()
+                && (0.4..=1.4).contains(&self.spectrogram_sampling_points_scale),
+            "spectrogram_sampling_points_scale must be between 0.4 and 1.4"
         );
         ensure!(
             (1..=120).contains(&self.spectrogram_history_seconds),
