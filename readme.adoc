@@ -107,6 +107,8 @@ the same data directory.
 
 The optional StatusNotifier tray belongs to the graphical host and is independent
 of MPRIS. When `tray_enabled` is true, it offers window, playback, and quit controls.
+It exports `org.kde.StatusNotifierItem` with a `com.canonical.dbusmenu` menu;
+the menu includes `Show Rivu` alongside playback and quit controls.
 Without a StatusNotifierHost or session bus, Rivu warns and continues without a
 tray; `serve` never creates one.
 

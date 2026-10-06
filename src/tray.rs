@@ -26,7 +26,7 @@ const WATCHER_SERVICE: &str = "org.kde.StatusNotifierWatcher";
 const WATCHER_PATH: &str = "/StatusNotifierWatcher";
 const WATCHER_INTERFACE: &str = "org.kde.StatusNotifierWatcher";
 const SNI_PATH: &str = "/StatusNotifierItem";
-const SNI_INTERFACE: &str = "org.freedesktop.StatusNotifierItem";
+const SNI_INTERFACE: &str = "org.kde.StatusNotifierItem";
 const MENU_PATH: &str = "/Menu";
 const MENU_INTERFACE: &str = "com.canonical.dbusmenu";
 static INSTANCE_COUNTER: AtomicUsize = AtomicUsize::new(1);
@@ -338,7 +338,7 @@ struct StatusNotifierItem {
     data: Arc<RwLock<TrayData>>,
 }
 
-#[zbus::interface(name = "org.freedesktop.StatusNotifierItem")]
+#[zbus::interface(name = "org.kde.StatusNotifierItem")]
 impl StatusNotifierItem {
     fn context_menu(&self, _x: i32, _y: i32) -> fdo::Result<()> {
         Ok(())
@@ -377,7 +377,7 @@ impl StatusNotifierItem {
     }
 
     #[zbus(property(emits_changed_signal = "const"))]
-    fn window_id(&self) -> u32 {
+    fn window_id(&self) -> i32 {
         0
     }
 
@@ -438,7 +438,7 @@ impl StatusNotifierItem {
 
     #[zbus(property(emits_changed_signal = "const"))]
     fn item_is_menu(&self) -> bool {
-        true
+        false
     }
 
     #[zbus(property(emits_changed_signal = "const"))]
