@@ -314,9 +314,12 @@ fn emit_update(
     menu_revision: u32,
     menu_changed: bool,
 ) {
-    if previous.current_track_id != current.current_track_id
-        || !Arc::ptr_eq(&previous.tracks, &current.tracks)
-    {
+    let track_changed = match (&previous.current_track, &current.current_track) {
+        (None, None) => false,
+        (Some(previous), Some(current)) => !Arc::ptr_eq(previous, current),
+        _ => true,
+    };
+    if previous.current_track_id != current.current_track_id || track_changed {
         let _ = connection.emit_signal(None::<&str>, SNI_PATH, SNI_INTERFACE, "NewToolTip", &());
     }
     if menu_changed {
@@ -692,7 +695,7 @@ mod tests {
     #[test]
     fn menu_labels_follow_playback_status() {
         let mut snapshot = TraySnapshot {
-            tracks: Arc::new(Vec::new()),
+            current_track: None,
             current_track_id: None,
             status: PlaybackStatus::Playing,
             shutting_down: false,
@@ -716,7 +719,7 @@ mod tests {
     #[test]
     fn menu_contains_fixed_actions_and_active_status_is_independent() {
         let snapshot = TraySnapshot {
-            tracks: Arc::new(Vec::new()),
+            current_track: None,
             current_track_id: None,
             status: PlaybackStatus::Stopped,
             shutting_down: false,

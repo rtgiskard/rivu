@@ -1,33 +1,11 @@
-use super::{
-    GuiApp, ListFocus, TRACK_HEIGHT,
-    components::{TreeKey, TreeRow, tree_row},
-    icon_button, list_viewport, row, row_text,
-};
-use crate::model::{Command, Track};
-use gpui::{
-    AnyElement, Context, Render, UniformListScrollHandle, Window, prelude::*, px, uniform_list,
-};
-use std::{
-    collections::BTreeMap,
-    ffi::{OsStr, OsString},
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+mod tree;
 
-#[derive(Clone)]
-pub(super) struct LibraryDrag {
-    pub(super) node: LibraryNode,
-}
+use super::{GuiApp, ListFocus, icon_button, list_viewport, row};
+use crate::model::{Command, DirectoryRow};
+use gpui::{AnyElement, Context, Render, Window, div, prelude::*, px, uniform_list};
+use std::{path::Path, sync::Arc};
 
-impl Render for LibraryDrag {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let label = match &self.node {
-            LibraryNode::Directory(path) => path.to_string_lossy().into_owned(),
-            LibraryNode::Track(_) => "Track".to_owned(),
-        };
-        super::drag_preview(label)
-    }
-}
+pub(super) use tree::{BranchStatus, DirectoryTree};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) enum LibraryNode {
@@ -35,198 +13,297 @@ pub(super) enum LibraryNode {
     Track(i64),
 }
 
-#[derive(Default)]
-struct Directory<'a> {
-    directories: BTreeMap<OsString, Directory<'a>>,
-    tracks: Vec<&'a Track>,
+#[derive(Clone)]
+pub(super) struct LibraryDrag {
+    pub(super) nodes: Vec<LibraryNode>,
 }
 
-/// Build one directory tree per configured library root.
-pub(super) fn library_rows(
-    tracks: &[Track],
-    library_roots: &[PathBuf],
-) -> Vec<TreeRow<LibraryNode>> {
-    let mut configured = library_roots
-        .iter()
-        .cloned()
-        .map(|path| (path, Directory::default()))
-        .collect::<Vec<_>>();
-    let mut fallback = Directory::default();
-    for track in tracks {
-        let match_root = configured
-            .iter()
-            .enumerate()
-            .filter_map(|(index, (root, _))| {
-                track
-                    .path
-                    .strip_prefix(root)
-                    .ok()
-                    .map(|relative| (index, relative))
-            })
-            .max_by_key(|(_, relative)| relative.components().count());
-        let (directory, relative) = if let Some((index, relative)) = match_root {
-            (&mut configured[index].1, relative)
+impl Render for LibraryDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let label = if self.nodes.len() == 1 {
+            match &self.nodes[0] {
+                LibraryNode::Directory(path) => path.to_string_lossy().into_owned(),
+                LibraryNode::Track(_) => "Track".to_owned(),
+            }
         } else {
-            (&mut fallback, track.path.as_path())
+            format!("{} library entries", self.nodes.len())
         };
-        let parent = relative.parent().unwrap_or_else(|| Path::new(""));
-        let mut directory = directory;
-        for component in parent.components() {
-            directory = directory
-                .directories
-                .entry(component.as_os_str().to_os_string())
-                .or_default();
-        }
-        directory.tracks.push(track);
+        super::drag_preview(label)
     }
-    let mut rows = Vec::new();
-    for (path, directory) in configured {
-        append_root(directory, &path, &mut rows);
-    }
-    append_directory(fallback, Path::new(""), None, 0, &mut rows);
-    rows
-}
-
-fn append_root(directory: Directory<'_>, path: &Path, rows: &mut Vec<TreeRow<LibraryNode>>) {
-    let id = LibraryNode::Directory(Arc::from(path));
-    let has_children = !directory.directories.is_empty() || !directory.tracks.is_empty();
-    let label = path.file_name().map_or_else(
-        || path.to_string_lossy().into_owned(),
-        |name| name.to_string_lossy().into_owned(),
-    );
-    rows.push(TreeRow::new(id.clone(), None, 0, label, has_children));
-    append_directory(directory, path, Some(id), 1, rows);
-}
-
-fn append_directory(
-    directory: Directory<'_>,
-    path: &Path,
-    parent: Option<LibraryNode>,
-    depth: usize,
-    rows: &mut Vec<TreeRow<LibraryNode>>,
-) {
-    for (name, child) in directory.directories {
-        let path = path.join(&name);
-        let id = LibraryNode::Directory(Arc::from(path.as_path()));
-        rows.push(TreeRow::new(
-            id.clone(),
-            parent.clone(),
-            depth,
-            name.to_string_lossy(),
-            true,
-        ));
-        append_directory(child, &path, Some(id), depth + 1, rows);
-    }
-    let mut tracks = directory.tracks;
-    tracks
-        .sort_unstable_by_key(|track| (track.path.file_name().map(OsStr::to_os_string), track.id));
-    rows.extend(tracks.into_iter().map(|track| {
-        TreeRow::new(
-            LibraryNode::Track(track.id),
-            parent.clone(),
-            depth,
-            &track.title,
-            false,
-        )
-    }));
 }
 
 impl GuiApp {
-    pub(super) fn library_drag_track_ids(&self, node: &LibraryNode) -> Vec<i64> {
-        self.state
-            .library
-            .tracks
+    pub(super) fn library_drag_track_ids(&self, nodes: &[LibraryNode]) -> Vec<i64> {
+        let mut ids = nodes
             .iter()
-            .filter_map(|track| match node {
-                LibraryNode::Directory(path) if path.as_os_str().is_empty() => (!self
-                    .state
-                    .system
-                    .config
-                    .library_roots
-                    .iter()
-                    .any(|root| track.path.starts_with(root)))
-                .then_some(track.id),
-                LibraryNode::Directory(path) => {
-                    track.path.starts_with(path.as_ref()).then_some(track.id)
-                }
-                LibraryNode::Track(id) => (track.id == *id).then_some(track.id),
+            .filter_map(|node| match node {
+                LibraryNode::Track(id) => Some(*id),
+                LibraryNode::Directory(_) => None,
             })
-            .collect()
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
     }
 
-    pub(super) fn rebuild_library_tree(&mut self) {
-        let first_build = self.library_tree.rows().is_empty();
-        self.library_tree.set_rows(library_rows(
-            &self.state.library.tracks,
-            &self.state.system.config.library_roots,
-        ));
-        if first_build {
-            self.library_tree.expand_all();
+    pub(super) fn resolve_library_drag(
+        &mut self,
+        nodes: &[LibraryNode],
+        destination: super::DragDestination,
+        cx: &mut Context<Self>,
+    ) {
+        let mut directories = nodes
+            .iter()
+            .filter_map(|node| match node {
+                LibraryNode::Directory(path) => Some(path.to_path_buf()),
+                LibraryNode::Track(_) => None,
+            })
+            .collect::<Vec<_>>();
+        directories.sort();
+        directories.dedup();
+        let track_ids = self.library_drag_track_ids(nodes);
+        if directories.is_empty() && track_ids.is_empty() {
+            return;
         }
-        self.library_tree_scroll = UniformListScrollHandle::new();
-        if let Some(index) = self.library_tree.selected_index() {
-            self.library_tree_scroll
-                .scroll_to_item(index, gpui::ScrollStrategy::Nearest);
+        match destination {
+            super::DragDestination::Queue => self.send(
+                Command::EnqueueSources {
+                    directories,
+                    track_ids,
+                },
+                cx,
+            ),
+            super::DragDestination::Playlist(playlist_id) => self.send(
+                Command::AddPlaylistSources {
+                    playlist_id,
+                    directories,
+                    track_ids,
+                },
+                cx,
+            ),
         }
     }
 
-    pub(super) fn navigate_library_tree(&mut self, key: TreeKey, cx: &mut Context<Self>) {
-        self.library_tree.handle_key(key);
-        let selected = self.library_tree.selected().map(|row| row.id.clone());
-        if let Some(index) = self.library_tree.selected_index() {
-            self.library_tree_scroll
-                .scroll_to_item(index, gpui::ScrollStrategy::Nearest);
-        }
-        match selected {
-            Some(LibraryNode::Track(id)) => self.select_track(id, false, cx),
-            _ => {
-                self.selected.clear();
-                self.library_selection.clear_selection();
-                self.metadata_track = None;
-                self.sync_waveform(cx);
-                cx.notify();
+    fn selected_tree_index(&self) -> Option<usize> {
+        self.directory_tree
+            .visible_rows()
+            .iter()
+            .position(|visible| self.directory_row_selected(&visible.row))
+    }
+
+    fn select_library_directory(&mut self, path: Arc<Path>, multi: bool, cx: &mut Context<Self>) {
+        let node = LibraryNode::Directory(path);
+        if multi {
+            if !self.library_selected_nodes.insert(node.clone()) {
+                self.library_selected_nodes.remove(&node);
             }
+        } else {
+            self.selected.clear();
+            self.library_selected_nodes.clear();
+            self.library_selected_nodes.insert(node);
+        }
+        if self.selected.is_empty() {
+            self.metadata_track = None;
+            self.full_track = None;
+            self.sync_metadata_default(cx);
+        }
+        self.sync_waveform(cx);
+        cx.notify();
+    }
+
+    fn select_tree_row(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(visible) = self.directory_tree.visible_rows().get(index) else {
+            return;
+        };
+        match visible.row.clone() {
+            DirectoryRow::Directory { path } => {
+                self.select_library_directory(Arc::from(path), false, cx)
+            }
+            DirectoryRow::Track(track) => self.select_track(track.id, false, cx),
+        }
+        self.directory_tree
+            .scroll
+            .scroll_to_item(index, gpui::ScrollStrategy::Nearest);
+    }
+
+    fn set_directory_expanded(&mut self, path: &Path, expanded: bool, cx: &mut Context<Self>) {
+        if expanded {
+            self.directory_tree.expand(path);
+            if matches!(
+                self.directory_tree.status(path),
+                BranchStatus::Unloaded | BranchStatus::Error
+            ) {
+                self.request_directory_page(path.to_path_buf(), 0, cx);
+            }
+        } else {
+            self.directory_tree.collapse(path);
+            self.directory_tree
+                .retain_known_directories(&mut self.library_selected_nodes);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn navigate_library_tree(&mut self, down: bool, cx: &mut Context<Self>) {
+        let count = self.directory_tree.visible_rows().len();
+        if count == 0 {
+            return;
+        }
+        let index = match self.selected_tree_index() {
+            Some(index) if down => (index + 1).min(count - 1),
+            Some(index) => index.saturating_sub(1),
+            None if down => 0,
+            None => count - 1,
+        };
+        self.select_tree_row(index, cx);
+    }
+
+    pub(super) fn activate_library_tree(&mut self, cx: &mut Context<Self>) {
+        let Some(index) = self.selected_tree_index() else {
+            return;
+        };
+        match self.directory_tree.visible_rows()[index].row.clone() {
+            DirectoryRow::Directory { path } => {
+                self.set_directory_expanded(&path, !self.directory_tree.expanded(&path), cx);
+            }
+            DirectoryRow::Track(track) => self.send(Command::Play { track_id: track.id }, cx),
         }
     }
 
-    pub(super) fn library_tree_list(&self, panel_id: u64, cx: &mut Context<Self>) -> AnyElement {
-        list_viewport(
+    pub(super) fn library_tree_key(&mut self, key: &str, cx: &mut Context<Self>) {
+        let Some(index) = self.selected_tree_index() else {
+            return;
+        };
+        let rows = self.directory_tree.visible_rows();
+        let visible = &rows[index];
+        let depth = visible.depth;
+        match key {
+            "left" => {
+                if let DirectoryRow::Directory { path } = &visible.row
+                    && visible.expanded
+                {
+                    let path = path.clone();
+                    self.set_directory_expanded(&path, false, cx);
+                } else if let Some(parent) = rows[..index].iter().rposition(|row| row.depth < depth)
+                {
+                    self.select_tree_row(parent, cx);
+                }
+            }
+            "right" => {
+                if let DirectoryRow::Directory { path } = &visible.row {
+                    if !visible.expanded {
+                        let path = path.clone();
+                        self.set_directory_expanded(&path, true, cx);
+                    } else if rows.get(index + 1).is_some_and(|row| row.depth > depth) {
+                        self.select_tree_row(index + 1, cx);
+                    }
+                }
+            }
+            "space" | " " => {
+                if let DirectoryRow::Directory { path } = &visible.row {
+                    let path = path.clone();
+                    self.set_directory_expanded(&path, !self.directory_tree.expanded(&path), cx);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Render the visible flattened tree. Directory pages remain in the tree
+    /// cache, so expanding a child never replaces its ancestors.
+    pub(super) fn library_directory_list(
+        &self,
+        panel_id: u64,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let rows = self.directory_tree.visible_rows();
+        let row_count = rows.len();
+        let ui_scale = self.state.system.config.ui_scale;
+        let nerd_symbols = cx
+            .try_global::<super::components::NerdSymbols>()
+            .is_none_or(|settings| settings.0);
+        let scroll = &self.directory_tree.scroll;
+        let mut view = list_viewport(
             uniform_list(
-                ("library-tree", panel_id),
-                self.library_tree.visible_indices().len(),
+                ("library-directory-tree", panel_id),
+                row_count,
                 cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
-                    let focused = this.library_tree.selected().map(|row| row.id.clone());
+                    let rows = this.directory_tree.visible_rows();
+                    let page_size = this.view_page_size();
                     range
                         .filter_map(|index| {
-                            let source_index = *this.library_tree.visible_indices().get(index)?;
-                            let node = this.library_tree.rows().get(source_index)?;
-                            let id = node.id.clone();
-                            let selected = match &id {
-                                LibraryNode::Track(id) => this.selected.contains(id),
-                                _ => focused.as_ref() == Some(&id),
+                            let visible = rows.get(index)?;
+                            let entry = &visible.row;
+                            let (node, title, detail, path) = match entry {
+                                DirectoryRow::Directory { path } => {
+                                    let title = path.file_name().map_or_else(
+                                        || path.display().to_string(),
+                                        |name| name.to_string_lossy().into_owned(),
+                                    );
+                                    let detail = match visible.status {
+                                        BranchStatus::Loading => "Loading…".to_owned(),
+                                        BranchStatus::Empty => "Empty".to_owned(),
+                                        BranchStatus::Error => {
+                                            "Unavailable — click to retry".to_owned()
+                                        }
+                                        BranchStatus::Unloaded => "Folder".to_owned(),
+                                        BranchStatus::Ready => String::new(),
+                                    };
+                                    (
+                                        LibraryNode::Directory(Arc::from(path.as_path())),
+                                        title,
+                                        detail,
+                                        Some(path.clone()),
+                                    )
+                                }
+                                DirectoryRow::Track(track) => (
+                                    LibraryNode::Track(track.id),
+                                    track.title.clone(),
+                                    format!(
+                                        "{}{}{} · {}{}",
+                                        track.artist,
+                                        if track.artist.is_empty() || track.album.is_empty() {
+                                            ""
+                                        } else {
+                                            " / "
+                                        },
+                                        track.album,
+                                        super::format_time(track.duration.unwrap_or(0.)),
+                                        if track.missing {
+                                            " · File missing"
+                                        } else {
+                                            ""
+                                        },
+                                    ),
+                                    None,
+                                ),
                             };
-                            let (title, detail) = match &id {
-                                LibraryNode::Track(id) => this.panel_track_text(*id),
-                                _ => (node.label.clone(), String::new()),
+                            let selected = this.directory_row_selected(entry);
+                            let id = node.clone();
+                            let drag_nodes = if selected {
+                                let mut selected_nodes = this.library_selected_nodes.clone();
+                                selected_nodes
+                                    .extend(this.selected.iter().copied().map(LibraryNode::Track));
+                                if selected_nodes.is_empty() {
+                                    vec![id.clone()]
+                                } else {
+                                    selected_nodes.into_iter().collect()
+                                }
+                            } else {
+                                vec![id.clone()]
                             };
-                            let scan_path = match &id {
-                                LibraryNode::Directory(path) => Some(path.to_path_buf()),
-                                LibraryNode::Track(track_id) => this
-                                    .library_index
-                                    .get(track_id)
-                                    .and_then(|index| this.state.library.tracks.get(*index))
-                                    .map(|track| track.path.clone()),
-                            };
-                            let scan = scan_path.map(|path| {
+                            let row_path = path.clone();
+                            let disclosure_path = path.clone();
+                            let scan = path.clone().filter(|_| selected).map(|scan_path| {
+                                let hint = format!("Rescan {}", scan_path.display());
                                 icon_button(
-                                    ("library-scan", source_index),
-                                    "↻",
-                                    "Scan this path",
+                                    gpui::ElementId::named_usize("library-scan", index),
+                                    "󰑐",
+                                    hint,
                                     cx,
                                     move |this, _, cx| {
                                         this.send(
                                             Command::Scan {
-                                                paths: vec![path.clone()],
+                                                paths: vec![scan_path.clone()],
                                                 force: this.force_scan,
                                             },
                                             cx,
@@ -234,57 +311,148 @@ impl GuiApp {
                                     },
                                 )
                             });
-                            let content = row()
-                                .flex_1()
-                                .min_w_0()
-                                .child(row_text(("library-node-text", source_index), title, detail))
-                                .when_some(scan, |view, scan| view.child(scan));
-                            Some(
-                                tree_row(
-                                    ("library-node", source_index),
-                                    node.depth,
-                                    selected,
-                                    this.library_tree.expanded().contains(&id),
-                                    node.has_children,
-                                )
-                                .h(px(TRACK_HEIGHT * this.state.system.config.ui_scale))
-                                .min_w_0()
-                                .overflow_hidden()
-                                .child(content)
-                                .on_drag(LibraryDrag { node: id.clone() }, |drag, _, _, cx| {
-                                    cx.new(|_| drag.clone())
-                                })
-                                .on_click(cx.listener(
-                                    move |this, event: &gpui::ClickEvent, window, cx| {
-                                        this.focus_workspace(window, cx);
-                                        this.list_focus = Some(ListFocus::Library);
-                                        this.library_tree.select(&id);
-                                        match &id {
-                                            LibraryNode::Track(track_id) => {
-                                                let modifiers = event.modifiers();
-                                                this.select_track(
-                                                    *track_id,
-                                                    modifiers.control || modifiers.platform,
-                                                    cx,
-                                                );
-                                                if event.click_count() == 2 {
-                                                    this.send(
-                                                        Command::Play {
-                                                            track_id: *track_id,
-                                                        },
-                                                        cx,
-                                                    );
-                                                }
-                                            }
-                                            LibraryNode::Directory(_) => {
-                                                if event.click_count() == 1 {
-                                                    this.navigate_library_tree(TreeKey::Toggle, cx);
-                                                }
+                            let page_controls = row_path.clone().map(|path| {
+                                let mut controls = row().gap_0().flex_shrink_0();
+                                if visible.offset > 0 {
+                                    let previous = visible.offset.saturating_sub(page_size);
+                                    let previous_path = path.clone();
+                                    controls = controls.child(icon_button(
+                                        gpui::ElementId::named_usize("library-page-prev", index),
+                                        "󰁍",
+                                        "Browse earlier items",
+                                        cx,
+                                        move |this, _, cx| {
+                                            this.request_directory_page(
+                                                previous_path.clone(),
+                                                previous,
+                                                cx,
+                                            );
+                                        },
+                                    ));
+                                }
+                                if visible.offset + page_size < visible.total {
+                                    let next = visible.offset.saturating_add(page_size);
+                                    let next_path = path;
+                                    controls = controls.child(icon_button(
+                                        gpui::ElementId::named_usize("library-page-next", index),
+                                        "󰁔",
+                                        "Browse more items",
+                                        cx,
+                                        move |this, _, cx| {
+                                            this.request_directory_page(
+                                                next_path.clone(),
+                                                next,
+                                                cx,
+                                            );
+                                        },
+                                    ));
+                                }
+                                controls
+                            });
+                            let disclosure = if path.is_some() && visible.has_children {
+                                let icon = if visible.expanded {
+                                    "\u{f0140}"
+                                } else {
+                                    "\u{f0142}"
+                                };
+                                let disclosure_path =
+                                    disclosure_path.clone().expect("path checked");
+                                Some(icon_button(
+                                    gpui::ElementId::named_usize("library-disclosure", index),
+                                    icon,
+                                    if visible.expanded {
+                                        "Collapse folder"
+                                    } else {
+                                        "Expand folder"
+                                    },
+                                    cx,
+                                    move |this, _, cx| {
+                                        this.set_directory_expanded(
+                                            &disclosure_path,
+                                            !this.directory_tree.expanded(&disclosure_path),
+                                            cx,
+                                        );
+                                    },
+                                ))
+                            } else {
+                                None
+                            };
+                            let row_view = super::tree_row(
+                                gpui::ElementId::named_usize("library-node", index),
+                                visible.depth,
+                                selected,
+                                false,
+                                false,
+                            )
+                            .h(px(32.0 * ui_scale.max(0.5)))
+                            .child(
+                                disclosure
+                                    .map(IntoElement::into_any_element)
+                                    .unwrap_or_else(|| div().w(gpui::px(14.)).into_any_element()),
+                            )
+                            .child(div().flex_shrink_0().text_sm().child(
+                                match (path.is_some(), nerd_symbols) {
+                                    (true, true) => "󰉋",
+                                    (false, true) => "󰈙",
+                                    (true, false) => "▸",
+                                    (false, false) => "♪",
+                                },
+                            ))
+                            .child(
+                                row()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(div().min_w_0().truncate().child(title))
+                                    .when(!detail.is_empty(), |v| {
+                                        v.child(
+                                            div()
+                                                .min_w_0()
+                                                .text_xs()
+                                                .text_color(gpui::rgb(super::MUTED))
+                                                .truncate()
+                                                .child(detail),
+                                        )
+                                    }),
+                            )
+                            .when_some(page_controls, |v, controls| v.child(controls))
+                            .when_some(scan, |v, scan| v.child(scan))
+                            .on_drag(LibraryDrag { nodes: drag_nodes }, |drag, _, _, cx| {
+                                cx.new(|_| drag.clone())
+                            })
+                            .on_click(cx.listener(
+                                move |this, event: &gpui::ClickEvent, window, cx| {
+                                    this.focus_workspace(window, cx);
+                                    this.list_focus = Some(ListFocus::Library);
+                                    match id.clone() {
+                                        LibraryNode::Track(id) => {
+                                            let modifiers = event.modifiers();
+                                            this.select_track(
+                                                id,
+                                                modifiers.control || modifiers.platform,
+                                                cx,
+                                            );
+                                            if event.click_count() == 2 {
+                                                this.send(Command::Play { track_id: id }, cx);
                                             }
                                         }
-                                    },
-                                )),
-                            )
+                                        LibraryNode::Directory(path) => {
+                                            let modifiers = event.modifiers();
+                                            let multi = modifiers.control
+                                                || modifiers.platform
+                                                || modifiers.shift;
+                                            this.select_library_directory(path.clone(), multi, cx);
+                                            if !multi {
+                                                this.set_directory_expanded(
+                                                    path.as_ref(),
+                                                    !this.directory_tree.expanded(path.as_ref()),
+                                                    cx,
+                                                );
+                                            }
+                                        }
+                                    }
+                                },
+                            ));
+                            Some(row_view)
                         })
                         .collect::<Vec<_>>()
                 }),
@@ -292,82 +460,11 @@ impl GuiApp {
             .h_full()
             .min_h_0()
             .w_full()
-            .track_scroll(&self.library_tree_scroll),
-        )
-        .into_any_element()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn track(id: i64, path: &str) -> Track {
-        Track {
-            id,
-            path: path.into(),
-            fingerprint: None,
-            cue: None,
-            title: format!("Track {id}"),
-            artist: String::new(),
-            album: String::new(),
-            duration: None,
-            codec: String::new(),
-            channels: 2,
-            sample_rate: 44100,
-            bitrate_bps: None,
-            track_number: None,
-            disc_number: None,
-            bits_per_sample: None,
-            release_date: None,
-            favorite: false,
-            missing: false,
-            play_count: 0,
-            last_played: None,
+            .track_scroll(scroll),
+        );
+        if row_count == 0 {
+            view = view.child(super::empty_state("No library directories or tracks"));
         }
-    }
-
-    #[test]
-    fn directories_precede_files_and_order_is_independent_of_library_order() {
-        let mut tracks = vec![
-            track(3, "Music/z.flac"),
-            track(2, "Music/Album/b.flac"),
-            track(4, "Music/a.flac"),
-            track(1, "Music/Album/a.flac"),
-        ];
-        let rows = library_rows(&tracks, &[]);
-        tracks.reverse();
-        assert_eq!(rows, library_rows(&tracks, &[]));
-        assert_eq!(rows.len(), 6);
-        assert_eq!(
-            rows[0].id,
-            LibraryNode::Directory(Arc::from(Path::new("Music")))
-        );
-        assert_eq!(rows[1].parent.as_ref(), Some(&rows[0].id));
-        assert_eq!(rows[1].depth, 1);
-        assert!(rows[1].has_children);
-        assert_eq!(rows[2].parent.as_ref(), Some(&rows[1].id));
-        assert_eq!(rows[2].depth, 2);
-        let ids = rows
-            .iter()
-            .filter_map(|row| match row.id {
-                LibraryNode::Track(id) => Some(id),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(ids, vec![1, 2, 4, 3]);
-    }
-
-    #[test]
-    fn rootless_tracks_and_shared_file_paths_keep_distinct_ids() {
-        let rows = library_rows(&[track(2, "track.flac"), track(1, "track.flac")], &[]);
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].id, LibraryNode::Track(1));
-        assert_eq!(rows[1].id, LibraryNode::Track(2));
-        assert!(
-            rows.iter()
-                .all(|row| row.parent.is_none() && row.depth == 0)
-        );
-        assert!(library_rows(&[], &[]).is_empty());
+        view.into_any_element()
     }
 }

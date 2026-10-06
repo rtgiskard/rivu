@@ -30,13 +30,13 @@ impl SettingChoice {
             Self::Font(value) => value.to_owned(),
             Self::SpectrumStyle(value) => spectrum_style_label(value).to_owned(),
             Self::RadialSpectrumStyle(value) => radial_spectrum_style_label(value).to_owned(),
+            Self::Fft(value) => value.to_string(),
             Self::LogLevel(value) => match value {
                 LogLevel::Debug => "Debug".to_owned(),
                 LogLevel::Info => "Info".to_owned(),
                 LogLevel::Warning => "Warning".to_owned(),
                 LogLevel::Error => "Error".to_owned(),
             },
-            Self::Fft(value) => value.to_string(),
             Self::Window(SpectrumWindow::Hann) => "Hann".to_owned(),
             Self::Window(SpectrumWindow::BlackmanHarris) => "Blackman–Harris".to_owned(),
             Self::Window(SpectrumWindow::None) => "None".to_owned(),
@@ -49,6 +49,8 @@ enum Field {
     Roots,
     Volume,
     PlayCountThreshold,
+    QueueLimit,
+    PageSize,
     LogRetentionWeeks,
     Font,
     Scale,
@@ -85,6 +87,8 @@ impl Field {
             Self::Roots => "Library roots (separate paths with semicolons)",
             Self::Volume => "Volume (0–100%)",
             Self::PlayCountThreshold => "Play count threshold (%)",
+            Self::QueueLimit => "Queue limit (1–4096)",
+            Self::PageSize => "List batch size (20–256)",
             Self::LogRetentionWeeks => "Log retention (1–520 weeks)",
             Self::Font => "Interface font family (sans-serif, serif, monospace, or installed name)",
             Self::Scale => "Interface scale (0.75–2)",
@@ -124,10 +128,11 @@ fn dropdown_button(
     cx: &mut Context<GuiApp>,
     action: impl Fn(&mut GuiApp, &mut Window, &mut Context<GuiApp>) + 'static,
 ) -> Stateful<Div> {
-    dropdown_trigger(id, label)
-        .on_click(cx.listener(move |this, _, window, cx| action(this, window, cx)))
+    dropdown_trigger(id, label).on_click(cx.listener(move |this, _, window, cx| {
+        action(this, window, cx);
+        cx.stop_propagation();
+    }))
 }
-
 fn visual_switch(
     id: &'static str,
     icon: &'static str,
@@ -208,10 +213,11 @@ enum VisualPage {
     Waveform,
 }
 
-/// Unsaved preferences stay independent of live playback snapshots.
+/// Unsaved preferences stay independent from live playback snapshots.
 pub(super) struct Settings {
     draft: Config,
     inputs: HashMap<Field, Entity<Input>>,
+    initialized: bool,
     dropdown: DropdownState<SettingChoice>,
     device_scroll: UniformListScrollHandle,
     dropdown_anchor: Measured,
@@ -223,11 +229,33 @@ pub(super) struct Settings {
 }
 
 impl Settings {
-    pub(super) fn new(config: &Config, cx: &mut App) -> Self {
-        let inputs = [
+    pub(super) fn new(config: &Config) -> Self {
+        Self {
+            draft: config.clone(),
+            inputs: HashMap::new(),
+            initialized: false,
+            dropdown: DropdownState::default(),
+            device_scroll: UniformListScrollHandle::new(),
+            dropdown_anchor: Measured::Device,
+            applying: false,
+            session: 0,
+            feedback: None,
+            page: SettingsPage::General,
+            visual_page: VisualPage::Common,
+        }
+    }
+
+    pub(super) fn initialize(&mut self, cx: &mut App) {
+        if self.initialized {
+            return;
+        }
+        self.inputs = [
             Field::Roots,
             Field::Volume,
             Field::PlayCountThreshold,
+            Field::QueueLimit,
+            Field::PageSize,
+            Field::LogRetentionWeeks,
             Field::Font,
             Field::Scale,
             Field::Fps,
@@ -259,20 +287,8 @@ impl Settings {
         .into_iter()
         .map(|field| (field, cx.new(|cx| Input::new("", field.label(), cx))))
         .collect();
-        let mut settings = Self {
-            draft: config.clone(),
-            inputs,
-            dropdown: DropdownState::default(),
-            device_scroll: UniformListScrollHandle::new(),
-            dropdown_anchor: Measured::Device,
-            applying: false,
-            session: 0,
-            feedback: None,
-            page: SettingsPage::General,
-            visual_page: VisualPage::Common,
-        };
-        settings.fill(cx);
-        settings
+        self.initialized = true;
+        self.fill(cx);
     }
 
     fn field(&self, field: Field) -> Div {
@@ -334,6 +350,8 @@ impl Settings {
             self.draft.play_count_threshold_percent.to_string(),
             cx,
         );
+        self.set_value(Field::QueueLimit, self.draft.queue_limit.to_string(), cx);
+        self.set_value(Field::PageSize, self.draft.page_size.to_string(), cx);
         self.set_value(
             Field::LogRetentionWeeks,
             self.draft.log_retention_weeks.to_string(),
@@ -467,6 +485,8 @@ impl Settings {
             .collect();
         config.volume = self.number::<f32>(Field::Volume, cx)? / 100.;
         config.play_count_threshold_percent = self.number(Field::PlayCountThreshold, cx)?;
+        config.queue_limit = self.number(Field::QueueLimit, cx)?;
+        config.page_size = self.number(Field::PageSize, cx)?;
         config.log_retention_weeks = self.number(Field::LogRetentionWeeks, cx)?;
         config.ui_font = self.value(Field::Font, cx).trim().to_owned();
         config.ui_scale = self.number(Field::Scale, cx)?;
@@ -544,8 +564,9 @@ impl Settings {
 
 impl GuiApp {
     pub(super) fn load_settings(&mut self, cx: &mut Context<Self>) {
-        self.settings.dropdown.close();
         let config = self.handle.config_snapshot();
+        self.settings.initialize(cx);
+        self.settings.dropdown.close();
         self.settings.reset(&config, cx);
         cx.notify();
     }
@@ -639,15 +660,15 @@ impl GuiApp {
         self.settings.dropdown.select_index(selected);
     }
 
-    pub(super) fn device_dropdown_is_open(&self) -> bool {
+    pub(super) fn settings_dropdown_is_open(&self) -> bool {
         self.settings.dropdown.is_open()
     }
 
-    pub(super) fn close_device_dropdown(&mut self) {
+    pub(super) fn close_settings_dropdown(&mut self) {
         self.settings.dropdown.close();
     }
 
-    pub(super) fn device_key(&mut self, key: &str, cx: &mut Context<Self>) {
+    pub(super) fn settings_dropdown_key(&mut self, key: &str, cx: &mut Context<Self>) {
         match key {
             "up" => self.settings.dropdown.move_previous(),
             "down" => self.settings.dropdown.move_next(),
@@ -901,10 +922,9 @@ impl GuiApp {
                 );
             },
         );
-
         let log_level_dropdown = dropdown_button(
             "settings-log-level",
-            SettingChoice::LogLevel(self.settings.draft.log_level).label(),
+            SettingChoice::LogLevel(draft.log_level).label(),
             cx,
             |this, _, _| {
                 let values = [
@@ -956,7 +976,7 @@ impl GuiApp {
                     "settings-log-file",
                     "▤",
                     "Write logs to disk",
-                    self.settings.draft.log_to_file,
+                    draft.log_to_file,
                     cx,
                     |draft| draft.log_to_file = !draft.log_to_file,
                 )),
@@ -967,6 +987,7 @@ impl GuiApp {
             .child(self.settings.field(Field::Roots))
             .child(device)
             .child(self.settings.pair(Field::Volume, Field::PlayCountThreshold))
+            .child(self.settings.pair(Field::QueueLimit, Field::PageSize))
             .child(caption("Interface font"))
             .child(
                 font_dropdown
@@ -1173,6 +1194,7 @@ impl GuiApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.settings.initialize(cx);
         let category = row()
             .flex_wrap()
             .flex_shrink_0()

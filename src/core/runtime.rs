@@ -7,11 +7,33 @@ impl Core {
             select! {
                 recv(requests) -> request => {
                     let Ok(request) = request else { break; };
-                    let shutdown = matches!(request.command, Command::Shutdown);
-                    let changed = !matches!(request.command, Command::Status | Command::Overview | Command::ShowWindow);
-                    let result = self.command(request.command);
-                    if let Err(error) = &result { self.state.system.last_error = Some(format!("{error:#}")); }
-                    if changed || result.is_err() { self.publish(); }
+                    let shutdown = matches!(&request.command, Command::Shutdown);
+                    let is_view = matches!(
+                        &request.command,
+                        Command::LibraryPage { .. }
+                            | Command::TrackPage { .. }
+                            | Command::DirectoryPage { .. }
+                            | Command::PlaylistSummaries { .. }
+                            | Command::PlaylistEntries { .. }
+                            | Command::Track { .. }
+                            | Command::LibraryStats
+                    );
+                    let changed = !matches!(
+                        &request.command,
+                        Command::Status | Command::Overview | Command::ShowWindow
+                    ) && !is_view;
+                    let (result, view) = if is_view {
+                        match self.view(&request.command) {
+                            Ok(view) => (Ok(()), Some(view)),
+                            Err(error) => (Err(error), None),
+                        }
+                    } else {
+                        (self.command(request.command), None)
+                    };
+                    if !is_view && let Err(error) = &result {
+                        self.state.system.last_error = Some(format!("{error:#}"));
+                    }
+                    if changed || (!is_view && result.is_err()) { self.publish(); }
                     if let Some(reply) = request.reply {
                         let value = if request.ack {
                             CoreResponse::Ack(Ack {
@@ -24,6 +46,7 @@ impl Core {
                                 ok: result.is_ok(),
                                 error: result.err().map(|e| format!("{e:#}")),
                                 state: ClientSnapshot::from_core(&self.state),
+                                view,
                             }))
                         };
                         let _ = reply.send(value);
@@ -70,10 +93,6 @@ impl Core {
     }
 
     pub(in crate::core) fn publish(&mut self) {
-        if let Some(library) = self.library.snapshot() {
-            self.state.library.tracks = library;
-            self.state.library.revision = self.state.library.revision.wrapping_add(1);
-        }
         self.state.system.revision = self.state.system.revision.wrapping_add(1);
         *self.shared.write() = self.state.clone();
         self.subscribers.write().retain(|sender| {
@@ -102,13 +121,110 @@ impl Core {
             .send(command)
             .context("Audio worker unavailable")
     }
-    pub(in crate::core) fn track(&self, id: i64) -> Result<&Track> {
-        let index = self
-            .library
-            .tracks()
-            .binary_search_by_key(&id, |track| track.id)
-            .ok()
-            .context("Track not found")?;
-        Ok(&self.library.tracks()[index])
+    pub(in crate::core) fn track(&self, id: i64) -> Result<Track> {
+        self.store.track(id)?.context("Track not found")
+    }
+    pub(in crate::core) fn refresh_queue_rows(&mut self) -> Result<()> {
+        let mut ids = self
+            .state
+            .queue
+            .entries
+            .iter()
+            .map(|entry| entry.track_id)
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids.dedup();
+        self.state.queue.tracks = Arc::new(self.store.queue_rows(&ids)?);
+        let current_track_id = self.state.queue.current_id.and_then(|id| {
+            self.state
+                .queue
+                .entries
+                .iter()
+                .find(|entry| entry.id == id)
+                .map(|entry| entry.track_id)
+        });
+        if self
+            .state
+            .current_track
+            .as_ref()
+            .is_some_and(|track| Some(track.id) != current_track_id)
+        {
+            self.state.current_track = None;
+        }
+        Ok(())
+    }
+    pub(in crate::core) fn refresh_queue_tracks(&mut self) -> Result<()> {
+        self.refresh_queue_rows()?;
+        let current_track_id = self.state.queue.current_id.and_then(|id| {
+            self.state
+                .queue
+                .entries
+                .iter()
+                .find(|entry| entry.id == id)
+                .map(|entry| entry.track_id)
+        });
+        self.state.current_track = current_track_id
+            .map(|id| self.store.track(id))
+            .transpose()?
+            .flatten()
+            .map(Arc::new);
+        Ok(())
+    }
+    pub(in crate::core) fn view(&self, command: &Command) -> Result<ViewResponse> {
+        Ok(match command {
+            Command::LibraryPage {
+                query,
+                favorite,
+                missing,
+                sort,
+                offset,
+                limit,
+            } => ViewResponse::LibraryPage(self.store.library_view_page(
+                query.as_deref(),
+                *favorite,
+                *missing,
+                *sort,
+                *offset,
+                (*limit).min(PAGE_SIZE),
+            )?),
+            Command::TrackPage {
+                query,
+                favorite,
+                missing,
+                offset,
+                limit,
+            } => ViewResponse::TrackPage(self.store.library_page(
+                query.as_deref(),
+                *favorite,
+                *missing,
+                *offset,
+                (*limit).min(PAGE_SIZE),
+            )?),
+            Command::DirectoryPage {
+                path,
+                offset,
+                limit,
+            } => ViewResponse::DirectoryPage(self.store.directory_page(
+                path,
+                *offset,
+                (*limit).min(PAGE_SIZE),
+            )?),
+            Command::PlaylistSummaries { offset, limit } => ViewResponse::PlaylistSummaries(
+                self.store
+                    .playlist_summary_page(*offset, (*limit).min(PAGE_SIZE))?,
+            ),
+            Command::PlaylistEntries {
+                playlist_id,
+                offset,
+                limit,
+            } => ViewResponse::PlaylistEntries(self.store.playlist_entries_page(
+                *playlist_id,
+                *offset,
+                (*limit).min(PAGE_SIZE),
+            )?),
+            Command::Track { track_id } => ViewResponse::Track(self.store.track(*track_id)?),
+            Command::LibraryStats => ViewResponse::LibraryStats(self.store.library_stats()?),
+            _ => bail!("Not a view command"),
+        })
     }
 }

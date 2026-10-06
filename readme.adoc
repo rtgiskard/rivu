@@ -89,6 +89,10 @@ the local IPC endpoint. Clients do not create independent playback engines.
 * Library scans and waveform work run asynchronously and do not block playback.
 * The audio pipeline is shared by all clients; opening another GUI, CLI, or TUI
   does not start another decoder or audio device for the same data directory.
+* Complete library and playlist collections stay in SQLite. GUI/TUI list views
+  query bounded pages; CLI listings and playlist export stream every page.
+* Playback queues are capped by `queue_limit` (4096 by default). Duplicate queue
+  occurrences share track metadata; oversized additions are rejected atomically.
 * Waveform preview storage is bounded to 1600 peak bins. Progressive decoding
   leaves unavailable intervals blank instead of inventing samples.
 * GUI refreshes reuse unchanged state snapshots and drawing caches. Analysis is

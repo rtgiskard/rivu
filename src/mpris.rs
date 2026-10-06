@@ -614,7 +614,7 @@ fn publish_changes(
     // Arc comparisons avoid rebuilding metadata on ordinary audio clock ticks.
     if previous.queue.current_id != current.queue.current_id
         || previous.playback.duration != current.playback.duration
-        || !Arc::ptr_eq(&previous.tracks, &current.tracks)
+        || !Arc::ptr_eq(&previous.queue.tracks, &current.queue.tracks)
         || !Arc::ptr_eq(&previous.queue.entries, &current.queue.entries)
     {
         let next = TrackMetadata::from_snapshot(current, artwork);
@@ -646,7 +646,7 @@ fn publish_changes(
     }
     if previous.queue.current_id != current.queue.current_id
         || previous.playback.status != current.playback.status
-        || !Arc::ptr_eq(&previous.tracks, &current.tracks)
+        || !Arc::ptr_eq(&previous.queue.tracks, &current.queue.tracks)
         || !Arc::ptr_eq(&previous.queue.entries, &current.queue.entries)
     {
         for (name, before, after) in [
@@ -732,11 +732,12 @@ mod tests {
     #[test]
     fn can_pause_requires_a_valid_current_track() {
         let mut state = MprisSnapshot {
-            tracks: Arc::new(Vec::new()),
             queue: QueueState {
                 entries: Arc::new(vec![QueueEntry { id: 1, track_id: 7 }]),
                 current_id: None,
+                tracks: Arc::new(Vec::new()),
             },
+            current_track: None,
             playback: PlaybackState::default(),
             shutting_down: false,
         };
@@ -745,7 +746,7 @@ mod tests {
         state.queue.current_id = Some(1);
         assert!(!can_pause(&state));
 
-        state.tracks = Arc::new(vec![track(7)]);
+        state.current_track = Some(Arc::new(track(7)));
         assert!(can_pause(&state));
 
         state.queue.current_id = Some(2);

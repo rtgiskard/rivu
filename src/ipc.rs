@@ -1,12 +1,10 @@
 use crate::{
-    config::Config,
     core::{AppHandle, CoreState},
     model::{
-        Command, DatabaseOptimization, HistoryEntry, LibrarySnapshot, PlaybackState,
-        PlaybackStatus, Playlist, QueueEntry, QueueState, RepeatMode, SystemState, Track,
+        Command, DatabaseOptimization, LibrarySnapshot, PlaybackState, QueueState, Track,
     },
     projection::ClientSnapshot,
-    response::{Ack, StateResponse},
+    response::{Ack, StateResponse, ViewResponse},
 };
 use anyhow::{Context, Error, Result, bail};
 use bincode::{
@@ -14,15 +12,13 @@ use bincode::{
     serde::{decode_from_slice, encode_to_vec},
 };
 use bytes::{Buf, Bytes, BytesMut};
-use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashSet,
     fs,
     os::unix::fs::{FileTypeExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::{
-        Arc, Weak,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
@@ -84,52 +80,68 @@ struct ResponseFrame {
 // permits wraparound; watchers only need to know whether the current token
 // equals the token supplied by the client. Missing a full 16-bit cycle is
 // outside the protocol's bounded-observation guarantee.
-const FLAG_SHUFFLE: u16 = 1;
-const FLAG_SCANNING: u16 = 1 << 1;
-const FLAG_SHUTTING_DOWN: u16 = 1 << 2;
-
 fn revision_matches(current: u64, expected: u16) -> bool {
     current as u16 == expected
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct PlaybackSnapshot {
-    position_ms: u64,
-    duration_ms: Option<u64>,
-    volume: u16,
-    status: u8,
-    repeat: u8,
-    flags: u16,
-    revision: u16,
-    seek_revision: u16,
+
+// Config uses omitted fields in human-readable formats, which are not safe in
+// bincode's positional structs. Keep only that field as JSON on the wire.
+mod wire_config {
+    use crate::config::Config;
+    use serde::{Deserialize, Serialize};
+    use std::sync::Arc;
+
+    pub fn serialize<S: serde::Serializer>(
+        config: &Arc<Config>,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serde_json::to_string(config.as_ref())
+            .map_err(serde::ser::Error::custom)?
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Arc<Config>, D::Error> {
+        let json = String::deserialize(deserializer)?;
+        serde_json::from_str(&json)
+            .map(Arc::new)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct CompactOverview {
-    library: Vec<Track>,
-    library_revision: u64,
-    library_structure_revision: u64,
-    queue: Vec<QueueEntry>,
-    current_queue_id: Option<u64>,
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "crate::model::SystemState")]
+struct WireSystemState {
+    scanning: bool,
     scan_message: String,
     last_error: Option<String>,
-    playback: PlaybackSnapshot,
+    devices: Arc<Vec<String>>,
+    selected_device: Option<String>,
+    revision: u64,
+    #[serde(with = "wire_config")]
+    config: Arc<crate::config::Config>,
+    config_path: PathBuf,
+    mpris_status: String,
+    ffmpeg_status: String,
+    database_optimization: Option<DatabaseOptimization>,
+    shutting_down: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct FullStatus {
-    overview: CompactOverview,
-    playlists: Vec<Playlist>,
-    history: Vec<HistoryEntry>,
-    devices: Vec<String>,
-    selected_device: Option<String>,
-    config: String,
-    database_optimization: Option<DatabaseOptimization>,
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "ClientSnapshot")]
+struct WireSnapshot {
+    library: LibrarySnapshot,
+    queue: QueueState,
+    current_track: Option<Arc<Track>>,
+    playback: PlaybackState,
+    #[serde(with = "WireSystemState")]
+    system: crate::model::SystemState,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum WireState {
-    Overview(CompactOverview),
-    Full(Box<FullStatus>),
+    Snapshot(#[serde(with = "WireSnapshot")] ClientSnapshot),
     Ack { revision: u64 },
 }
 
@@ -138,146 +150,19 @@ struct WireResponse {
     ok: bool,
     error: Option<String>,
     state: WireState,
-}
-
-fn playback_snapshot(state: &ClientSnapshot) -> PlaybackSnapshot {
-    PlaybackSnapshot {
-        position_ms: (state.playback.position.max(0.0) * 1000.0).round() as u64,
-        duration_ms: state
-            .playback
-            .duration
-            .filter(|value| value.is_finite() && *value >= 0.0)
-            .map(|value| (value * 1000.0).round() as u64),
-        volume: (state.playback.volume.clamp(0.0, 1.0) * u16::MAX as f32).round() as u16,
-        status: match state.playback.status {
-            PlaybackStatus::Stopped => 0,
-            PlaybackStatus::Playing => 1,
-            PlaybackStatus::Paused => 2,
-        },
-        repeat: match state.playback.repeat {
-            RepeatMode::Off => 0,
-            RepeatMode::All => 1,
-            RepeatMode::One => 2,
-        },
-        flags: (state.playback.shuffle as u16 * FLAG_SHUFFLE)
-            | (state.system.scanning as u16 * FLAG_SCANNING)
-            | (state.system.shutting_down as u16 * FLAG_SHUTTING_DOWN),
-        revision: state.system.revision as u16,
-        seek_revision: state.playback.seek_revision as u16,
-    }
-}
-
-fn state_from_overview(state: CompactOverview) -> ClientSnapshot {
-    let CompactOverview {
-        library,
-        library_revision,
-        library_structure_revision,
-        queue,
-        current_queue_id,
-        scan_message,
-        last_error,
-        playback,
-    } = state;
-    ClientSnapshot {
-        library: LibrarySnapshot {
-            tracks: Arc::new(library),
-            revision: library_revision,
-            structure_revision: library_structure_revision,
-            playlists: Arc::new(Vec::new()),
-            history: Arc::new(Vec::new()),
-        },
-        queue: QueueState {
-            entries: Arc::new(queue),
-            current_id: current_queue_id,
-        },
-        playback: PlaybackState {
-            status: match playback.status {
-                1 => PlaybackStatus::Playing,
-                2 => PlaybackStatus::Paused,
-                _ => PlaybackStatus::Stopped,
-            },
-            position: playback.position_ms as f64 / 1000.0,
-            duration: playback.duration_ms.map(|value| value as f64 / 1000.0),
-            volume: playback.volume as f32 / u16::MAX as f32,
-            shuffle: playback.flags & FLAG_SHUFFLE != 0,
-            repeat: match playback.repeat {
-                1 => RepeatMode::All,
-                2 => RepeatMode::One,
-                _ => RepeatMode::Off,
-            },
-            seek_revision: playback.seek_revision as u64,
-        },
-        system: SystemState {
-            scanning: playback.flags & FLAG_SCANNING != 0,
-            scan_message,
-            last_error,
-            devices: Arc::new(Vec::new()),
-            selected_device: None,
-            revision: playback.revision as u64,
-            config: Arc::new(Config::default()),
-            config_path: PathBuf::new(),
-            mpris_status: String::new(),
-            ffmpeg_status: String::new(),
-            database_optimization: None,
-            shutting_down: playback.flags & FLAG_SHUTTING_DOWN != 0,
-        },
-    }
-}
-
-impl From<CompactOverview> for ClientSnapshot {
-    fn from(state: CompactOverview) -> Self {
-        state_from_overview(state)
-    }
-}
-
-impl TryFrom<FullStatus> for ClientSnapshot {
-    type Error = serde_json::Error;
-
-    fn try_from(state: FullStatus) -> Result<Self, Self::Error> {
-        let mut app = state_from_overview(state.overview);
-        app.library.playlists = Arc::new(state.playlists);
-        app.library.history = Arc::new(state.history);
-        app.system.devices = Arc::new(state.devices);
-        app.system.selected_device = state.selected_device;
-        app.system.config = Arc::new(serde_json::from_str(&state.config)?);
-        app.system.database_optimization = state.database_optimization;
-        Ok(app)
-    }
+    view: Option<ViewResponse>,
 }
 
 impl WireResponse {
-    fn from_response(response: StateResponse, compact: bool) -> Self {
-        let state = response.state;
-        let overview = CompactOverview {
-            library: state.library.tracks.as_ref().clone(),
-            library_revision: state.library.revision,
-            library_structure_revision: state.library.structure_revision,
-            queue: state.queue.entries.as_ref().clone(),
-            current_queue_id: state.queue.current_id,
-            scan_message: state.system.scan_message.clone(),
-            last_error: state.system.last_error.clone(),
-            playback: playback_snapshot(&state),
-        };
-        let state = if compact {
-            WireState::Overview(overview)
-        } else {
-            WireState::Full(Box::new(FullStatus {
-                overview,
-                playlists: state.library.playlists.as_ref().clone(),
-                history: state.library.history.as_ref().clone(),
-                devices: state.system.devices.as_ref().clone(),
-                selected_device: state.system.selected_device,
-                config: serde_json::to_string(state.system.config.as_ref())
-                    .expect("Config serialization cannot fail"),
-                database_optimization: state.system.database_optimization,
-            }))
-        };
+    fn from_response(response: StateResponse) -> Self {
         Self {
             ok: response.ok,
             error: response.error,
-            state,
+            state: WireState::Snapshot(response.state),
+            view: response.view,
         }
     }
+
     fn from_ack(ack: Ack) -> Self {
         Self {
             ok: ack.ok,
@@ -285,6 +170,7 @@ impl WireResponse {
             state: WireState::Ack {
                 revision: ack.revision,
             },
+            view: None,
         }
     }
 }
@@ -321,52 +207,6 @@ fn decode_frame<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T> {
         bail!("Trailing bytes in IPC frame");
     }
     Ok(value)
-}
-
-#[derive(Default)]
-struct OverviewCache {
-    library: Weak<Vec<Track>>,
-    queue: Weak<Vec<QueueEntry>>,
-    current: Option<u64>,
-    tracks: Arc<Vec<Track>>,
-}
-
-impl OverviewCache {
-    fn cached(&self, state: &CoreState) -> Option<Arc<Vec<Track>>> {
-        let unchanged = self.library.as_ptr() == Arc::as_ptr(&state.library.tracks)
-            && self.queue.as_ptr() == Arc::as_ptr(&state.queue.entries)
-            && self.current == state.queue.current_id;
-        unchanged.then(|| self.tracks.clone())
-    }
-
-    fn update(&mut self, state: &CoreState, tracks: Arc<Vec<Track>>) {
-        self.library = Arc::downgrade(&state.library.tracks);
-        self.queue = Arc::downgrade(&state.queue.entries);
-        self.current = state.queue.current_id;
-        self.tracks = tracks;
-    }
-
-    fn response(state: CoreState, tracks: Arc<Vec<Track>>) -> StateResponse {
-        StateResponse {
-            ok: true,
-            error: None,
-            state: ClientSnapshot {
-                library: LibrarySnapshot {
-                    tracks,
-                    revision: state.library.revision,
-                    structure_revision: state.library.structure_revision,
-                    playlists: Arc::new(Vec::new()),
-                    history: Arc::new(Vec::new()),
-                },
-                queue: QueueState {
-                    entries: state.queue.entries.clone(),
-                    current_id: state.queue.current_id,
-                },
-                playback: state.playback,
-                system: state.system,
-            },
-        }
-    }
 }
 
 pub struct Server {
@@ -534,11 +374,11 @@ async fn write_frame<S: AsyncWrite + Unpin>(stream: &mut S, value: &impl Seriali
     Ok(())
 }
 
-fn response_frame(response: StateResponse, instance_id: u16, compact: bool) -> ResponseFrame {
+fn response_frame(response: StateResponse, instance_id: u16) -> ResponseFrame {
     ResponseFrame {
         instance_id,
         revision: response.state.system.revision as u16,
-        response: WireResponse::from_response(response, compact),
+        response: WireResponse::from_response(response),
     }
 }
 
@@ -550,40 +390,31 @@ fn ack_frame(ack: Ack, instance_id: u16) -> ResponseFrame {
     }
 }
 fn unpack_response(frame: ResponseFrame) -> Result<StateResponse> {
-    let WireResponse { ok, error, state } = frame.response;
+    let WireResponse {
+        ok,
+        error,
+        state,
+        view,
+    } = frame.response;
     let state = match state {
-        WireState::Overview(state) => state.into(),
-        WireState::Full(state) => (*state).try_into()?,
+        WireState::Snapshot(state) => state,
         WireState::Ack { .. } => bail!("IPC acknowledgement used where state was required"),
     };
-    Ok(StateResponse { ok, error, state })
+    Ok(StateResponse {
+        ok,
+        error,
+        state,
+        view,
+    })
 }
 
-fn overview_response(state: CoreState, overview: &Mutex<OverviewCache>) -> StateResponse {
-    let cached = overview.lock().cached(&state);
-    let tracks = cached.unwrap_or_else(|| {
-        let mut ids: HashSet<i64> = state
-            .queue
-            .entries
-            .iter()
-            .map(|entry| entry.track_id)
-            .collect();
-        if let Some(track) = state.current_track() {
-            ids.insert(track.id);
-        }
-        let tracks: Arc<Vec<Track>> = Arc::new(
-            state
-                .library
-                .tracks
-                .iter()
-                .filter(|track| ids.contains(&track.id))
-                .cloned()
-                .collect(),
-        );
-        overview.lock().update(&state, tracks.clone());
-        tracks
-    });
-    OverviewCache::response(state, tracks)
+fn overview_response(state: &CoreState) -> StateResponse {
+    StateResponse {
+        ok: true,
+        error: None,
+        state: ClientSnapshot::from_core(state),
+        view: None,
+    }
 }
 
 async fn command(handle: &AppHandle, command: Command) -> StateResponse {
@@ -607,11 +438,13 @@ async fn command(handle: &AppHandle, command: Command) -> StateResponse {
             ok: false,
             error: Some(format!("Core command task failed: {error}")),
             state: fallback,
+            view: None,
         },
         Err(_) => StateResponse {
             ok: false,
             error: Some("Core command timed out".into()),
             state: fallback,
+            view: None,
         },
     }
 }
@@ -621,14 +454,13 @@ async fn wait_for_revision(
     pending: &mut BytesMut,
     handle: &AppHandle,
     revision: u16,
-    overview: &Mutex<OverviewCache>,
     updates: &mut watch::Receiver<u64>,
     shutdown: &mut watch::Receiver<bool>,
 ) -> Option<StateResponse> {
     loop {
         let state = handle.core_state();
         if !revision_matches(state.system.revision, revision) || state.system.shutting_down {
-            return Some(overview_response(state, overview));
+            return Some(overview_response(&state));
         }
         tokio::select! {
             changed = updates.changed() => { if changed.is_err() { return None; } }
@@ -657,7 +489,6 @@ async fn wait_for_revision(
 async fn serve_connection(
     mut stream: UnixStream,
     handle: AppHandle,
-    overview: Arc<Mutex<OverviewCache>>,
     instance_id: u16,
     mut updates: watch::Receiver<u64>,
     mut shutdown: watch::Receiver<bool>,
@@ -672,26 +503,15 @@ async fn serve_connection(
                     ok: false,
                     error: Some(format!("Invalid command: {error}")),
                     state: ClientSnapshot::from_core(&handle.core_state()),
+                    view: None,
                 };
-                write_frame(&mut stream, &response_frame(response, instance_id, false)).await?;
+                write_frame(&mut stream, &response_frame(response, instance_id)).await?;
                 continue;
             }
         };
-        let (response, compact) = match request {
-            DecodedRequest::Command(Command::Overview) => {
-                (overview_response(handle.core_state(), &overview), true)
-            }
-            DecodedRequest::Command(Command::Status) => {
-                (command(&handle, Command::Status).await, false)
-            }
-            DecodedRequest::Command(cmd) => {
-                let response = command(&handle, cmd).await;
-                if response.ok {
-                    (overview_response(handle.core_state(), &overview), true)
-                } else {
-                    (response, false)
-                }
-            }
+        let response = match request {
+            DecodedRequest::Command(Command::Overview) => overview_response(&handle.core_state()),
+            DecodedRequest::Command(cmd) => command(&handle, cmd).await,
             DecodedRequest::Ack(cmd) => {
                 let ack = tokio::task::spawn_blocking({
                     let handle = handle.clone();
@@ -708,7 +528,6 @@ async fn serve_connection(
                     &mut pending,
                     &handle,
                     revision,
-                    &overview,
                     &mut updates,
                     &mut shutdown,
                 )
@@ -716,10 +535,10 @@ async fn serve_connection(
                 else {
                     return Ok(());
                 };
-                (response, true)
+                response
             }
         };
-        write_frame(&mut stream, &response_frame(response, instance_id, compact)).await?;
+        write_frame(&mut stream, &response_frame(response, instance_id)).await?;
     }
 }
 
@@ -734,12 +553,11 @@ async fn run_server(
         .unwrap_or_default()
         .subsec_nanos() as u16)
         .wrapping_add(std::process::id() as u16);
-    let overview = Arc::new(Mutex::new(OverviewCache::default()));
     let mut clients: Vec<tokio::task::JoinHandle<Result<()>>> = Vec::new();
     let mut revisions = updates.clone();
     loop {
         tokio::select! {
-            accepted = listener.accept() => { let Ok((stream, _)) = accepted else { continue; }; clients.retain(|task| !task.is_finished()); if clients.len() < 16 { clients.push(tokio::spawn(serve_connection(stream, handle.clone(), overview.clone(), instance_id, updates.clone(), shutdown.clone()))); } }
+            accepted = listener.accept() => { let Ok((stream, _)) = accepted else { continue; }; clients.retain(|task| !task.is_finished()); if clients.len() < 16 { clients.push(tokio::spawn(serve_connection(stream, handle.clone(), instance_id, updates.clone(), shutdown.clone()))); } }
             changed = revisions.changed() => { if changed.is_err() { break; } }
             changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() { break; } }
         }
@@ -813,37 +631,45 @@ impl WatcherSession {
         self.cancel_notify.notify_waiters();
     }
     pub fn watch(&mut self, revision: u16) -> Result<StateResponse> {
-        self.watch_until(revision, || false)
+        self.watch_until(revision)
             .and_then(|response| response.ok_or_else(|| anyhow::anyhow!("Watcher cancelled")))
     }
-    pub(crate) fn watch_until(
-        &mut self,
-        revision: u16,
-        cancelled: impl Fn() -> bool,
-    ) -> Result<Option<StateResponse>> {
-        if cancelled() || self.cancelled.load(Ordering::Acquire) {
-            return Ok(None);
-        }
+    pub(crate) fn watch_until(&mut self, revision: u16) -> Result<Option<StateResponse>> {
         let request = RequestFrame {
             instance_id: CLIENT_INSTANCE_UNKNOWN,
             request: RequestKind::Watch { revision },
         };
-        let cancelled_flag = self.cancelled.clone();
-        let notify = self.cancel_notify.clone();
-        let result = self.runtime.block_on(async { let mut pending = BytesMut::new(); write_frame(&mut self.stream, &request).await?; tokio::select! { bytes = read_frame(&mut self.stream, MAX_RESPONSE, &mut pending) => { let bytes = bytes?; Ok(Some(unpack_response(decode_frame::<ResponseFrame>(&bytes)?)?)) }, _ = notify.notified() => Ok(None) } });
-        if cancelled_flag.load(Ordering::Acquire) {
-            Ok(None)
-        } else {
-            result
-        }
+        self.runtime.block_on(async {
+            let notified = self.cancel_notify.notified();
+            tokio::pin!(notified);
+            // Register before checking the flag so notify_waiters cannot be lost.
+            notified.as_mut().enable();
+            if self.cancelled.load(Ordering::Acquire) {
+                return Ok(None);
+            }
+            tokio::select! {
+                _ = &mut notified => Ok(None),
+                response = async {
+                    let mut pending = BytesMut::new();
+                    write_frame(&mut self.stream, &request).await?;
+                    let bytes = read_frame(&mut self.stream, MAX_RESPONSE, &mut pending).await?;
+                    Ok(Some(unpack_response(decode_frame::<ResponseFrame>(&bytes)?)?))
+                } => {
+                    if self.cancelled.load(Ordering::Acquire) { Ok(None) } else { response }
+                }
+            }
+        })
     }
 }
 pub fn watch(path: &Path, revision: u16) -> Result<StateResponse> {
     watch_session(path)?.watch(revision)
 }
-pub fn request(path: &Path, command: &Command) -> Result<StateResponse> {
-    let runtime = client_runtime()?;
-    runtime.block_on(async {
+async fn request_inner(
+    path: &Path,
+    command: &Command,
+    cancellation: Option<(Arc<AtomicBool>, Arc<tokio::sync::Notify>)>,
+) -> Result<StateResponse> {
+    let operation = async {
         let mut stream = UnixStream::connect(path).await.with_context(|| {
             format!(
                 "Cannot connect to Rivu at {}. Start `rivu` or `rivu serve` first.",
@@ -866,8 +692,42 @@ pub fn request(path: &Path, command: &Command) -> Result<StateResponse> {
             .context("Reading IPC response timed out")??
         };
         unpack_response(decode_frame::<ResponseFrame>(&bytes)?)
-    })
+    };
+    let Some((cancelled, cancel_notify)) = cancellation else {
+        return operation.await;
+    };
+    let notified = cancel_notify.notified();
+    tokio::pin!(notified);
+    // Register before checking the flag so notify_waiters cannot be lost.
+    notified.as_mut().enable();
+    if cancelled.load(Ordering::Acquire) {
+        bail!("IPC request cancelled");
+    }
+    tokio::select! {
+        _ = &mut notified => bail!("IPC request cancelled"),
+        response = operation => response,
+    }
 }
+
+pub fn request(path: &Path, command: &Command) -> Result<StateResponse> {
+    let runtime = client_runtime()?;
+    runtime.block_on(request_inner(path, command, None))
+}
+
+pub(crate) fn request_with_cancel(
+    path: &Path,
+    command: &Command,
+    cancelled: Arc<AtomicBool>,
+    cancel_notify: Arc<tokio::sync::Notify>,
+) -> Result<StateResponse> {
+    let runtime = client_runtime()?;
+    runtime.block_on(request_inner(
+        path,
+        command,
+        Some((cancelled, cancel_notify)),
+    ))
+}
+
 pub fn request_ack(path: &Path, command: &Command) -> Result<Ack> {
     let runtime = client_runtime()?;
     runtime.block_on(async {

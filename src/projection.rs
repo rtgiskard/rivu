@@ -1,10 +1,7 @@
 use crate::{
     config::Config,
     core::CoreState,
-    model::{
-        DatabaseOptimization, HistoryEntry, PlaybackState, PlaybackStatus, Playlist, QueueState,
-        Track,
-    },
+    model::{DatabaseOptimization, HistoryEntry, PlaybackState, PlaybackStatus, QueueState, Track},
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -13,6 +10,7 @@ use std::sync::Arc;
 pub struct ClientSnapshot {
     pub library: crate::model::LibrarySnapshot,
     pub queue: QueueState,
+    pub current_track: Option<Arc<Track>>,
     pub playback: PlaybackState,
     pub system: crate::model::SystemState,
 }
@@ -22,25 +20,14 @@ impl ClientSnapshot {
         Self {
             library: state.library.clone(),
             queue: state.queue.clone(),
+            current_track: state.current_track.clone(),
             playback: state.playback.clone(),
             system: state.system.clone(),
         }
     }
 
     pub fn current_track(&self) -> Option<&Track> {
-        let queue_id = self.queue.current_id?;
-        let track_id = self
-            .queue
-            .entries
-            .iter()
-            .find(|entry| entry.id == queue_id)?
-            .track_id;
-        let index = self
-            .library
-            .tracks
-            .binary_search_by_key(&track_id, |track| track.id)
-            .ok()?;
-        self.library.tracks.get(index)
+        self.current_track.as_deref()
     }
 }
 
@@ -48,16 +35,18 @@ impl ClientSnapshot {
 pub struct GuiSnapshot {
     pub library: GuiLibrarySnapshot,
     pub queue: QueueState,
+    pub current_track: Option<Arc<Track>>,
     pub playback: PlaybackState,
     pub system: GuiSystemSnapshot,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct GuiLibrarySnapshot {
+    pub track_total: usize,
+    pub playlist_total: usize,
     pub revision: u64,
     pub structure_revision: u64,
-    pub tracks: Arc<Vec<Track>>,
-    pub playlists: Arc<Vec<Playlist>>,
+    pub playlist_revision: u64,
     pub history: Arc<Vec<HistoryEntry>>,
 }
 
@@ -80,13 +69,15 @@ impl GuiSnapshot {
     pub(crate) fn from_core(state: &CoreState) -> Self {
         Self {
             library: GuiLibrarySnapshot {
+                track_total: state.library.track_total,
+                playlist_total: state.library.playlist_total,
                 revision: state.library.revision,
                 structure_revision: state.library.structure_revision,
-                tracks: Arc::clone(&state.library.tracks),
-                playlists: Arc::clone(&state.library.playlists),
+                playlist_revision: state.library.playlist_revision,
                 history: Arc::clone(&state.library.history),
             },
             queue: state.queue.clone(),
+            current_track: state.current_track.clone(),
             playback: state.playback.clone(),
             system: GuiSystemSnapshot {
                 scanning: state.system.scanning,
@@ -105,19 +96,7 @@ impl GuiSnapshot {
     }
 
     pub fn current_track(&self) -> Option<&Track> {
-        let queue_id = self.queue.current_id?;
-        let track_id = self
-            .queue
-            .entries
-            .iter()
-            .find(|entry| entry.id == queue_id)?
-            .track_id;
-        let index = self
-            .library
-            .tracks
-            .binary_search_by_key(&track_id, |track| track.id)
-            .ok()?;
-        self.library.tracks.get(index)
+        self.current_track.as_deref()
     }
 }
 
@@ -125,18 +104,22 @@ impl GuiSnapshot {
 pub struct TuiSnapshot {
     pub library: TuiLibrarySnapshot,
     pub queue: QueueState,
+    pub current_track: Option<Arc<Track>>,
     pub playback: PlaybackState,
     pub system: TuiSystemSnapshot,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct TuiLibrarySnapshot {
+    pub track_total: usize,
+    pub playlist_total: usize,
     pub revision: u64,
-    pub tracks: Arc<Vec<Track>>,
-    pub playlists: Arc<Vec<Playlist>>,
+    pub structure_revision: u64,
+    pub playlist_revision: u64,
+    pub history: Arc<Vec<HistoryEntry>>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct TuiSystemSnapshot {
     pub scan_message: String,
     pub last_error: Option<String>,
@@ -144,17 +127,36 @@ pub struct TuiSystemSnapshot {
     pub shutting_down: bool,
     pub nerd_symbols: bool,
     pub library_roots: Arc<Vec<std::path::PathBuf>>,
+    pub page_size: u32,
+}
+
+impl Default for TuiSystemSnapshot {
+    fn default() -> Self {
+        Self {
+            scan_message: String::new(),
+            last_error: None,
+            revision: 0,
+            shutting_down: false,
+            nerd_symbols: false,
+            library_roots: Arc::default(),
+            page_size: crate::config::DEFAULT_PAGE_SIZE,
+        }
+    }
 }
 
 impl TuiSnapshot {
     pub(crate) fn from_client(state: &ClientSnapshot) -> Self {
         Self {
             library: TuiLibrarySnapshot {
+                track_total: state.library.track_total,
+                playlist_total: state.library.playlist_total,
                 revision: state.library.revision,
-                tracks: Arc::clone(&state.library.tracks),
-                playlists: Arc::clone(&state.library.playlists),
+                structure_revision: state.library.structure_revision,
+                playlist_revision: state.library.playlist_revision,
+                history: Arc::clone(&state.library.history),
             },
             queue: state.queue.clone(),
+            current_track: state.current_track.clone(),
             playback: state.playback.clone(),
             system: TuiSystemSnapshot {
                 scan_message: state.system.scan_message.clone(),
@@ -163,6 +165,7 @@ impl TuiSnapshot {
                 shutting_down: state.system.shutting_down,
                 nerd_symbols: state.system.config.nerd_symbols,
                 library_roots: Arc::new(state.system.config.library_roots.clone()),
+                page_size: state.system.config.page_size,
             },
         }
     }
@@ -170,25 +173,13 @@ impl TuiSnapshot {
 
 impl TuiSnapshot {
     pub fn current_track(&self) -> Option<&Track> {
-        let queue_id = self.queue.current_id?;
-        let track_id = self
-            .queue
-            .entries
-            .iter()
-            .find(|entry| entry.id == queue_id)?
-            .track_id;
-        let index = self
-            .library
-            .tracks
-            .binary_search_by_key(&track_id, |track| track.id)
-            .ok()?;
-        self.library.tracks.get(index)
+        self.current_track.as_deref()
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct MprisSnapshot {
-    pub tracks: Arc<Vec<Track>>,
+    pub current_track: Option<Arc<Track>>,
     pub queue: QueueState,
     pub playback: PlaybackState,
     pub shutting_down: bool,
@@ -197,7 +188,7 @@ pub struct MprisSnapshot {
 impl MprisSnapshot {
     pub(crate) fn from_core(state: &CoreState) -> Self {
         Self {
-            tracks: Arc::clone(&state.library.tracks),
+            current_track: state.current_track.clone(),
             queue: state.queue.clone(),
             playback: state.playback.clone(),
             shutting_down: state.system.shutting_down,
@@ -205,24 +196,18 @@ impl MprisSnapshot {
     }
 
     pub fn current_track(&self) -> Option<&Track> {
-        let queue_id = self.queue.current_id?;
-        let track_id = self
-            .queue
+        let track = self.current_track.as_deref()?;
+        self.queue
             .entries
             .iter()
-            .find(|entry| entry.id == queue_id)?
-            .track_id;
-        let index = self
-            .tracks
-            .binary_search_by_key(&track_id, |track| track.id)
-            .ok()?;
-        self.tracks.get(index)
+            .any(|entry| Some(entry.id) == self.queue.current_id && entry.track_id == track.id)
+            .then_some(track)
     }
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct TraySnapshot {
-    pub(crate) tracks: Arc<Vec<Track>>,
+    pub(crate) current_track: Option<Arc<Track>>,
     pub(crate) current_track_id: Option<i64>,
     pub(crate) status: PlaybackStatus,
     pub(crate) shutting_down: bool,
@@ -230,32 +215,28 @@ pub(crate) struct TraySnapshot {
 
 impl TraySnapshot {
     pub(crate) fn from_core(state: &CoreState) -> Self {
-        let current_track_id = state.queue.current_id.and_then(|queue_id| {
-            state
-                .queue
-                .entries
-                .iter()
-                .find(|entry| entry.id == queue_id)
-                .map(|entry| entry.track_id)
-        });
         Self {
-            tracks: Arc::clone(&state.library.tracks),
-            current_track_id,
+            current_track: state.current_track.clone(),
+            current_track_id: state.current_track.as_ref().map(|track| track.id),
             status: state.playback.status,
             shutting_down: state.system.shutting_down,
         }
     }
 
     pub(crate) fn current_track(&self) -> Option<&Track> {
-        let track_id = self.current_track_id?;
-        self.tracks.iter().find(|track| track.id == track_id)
+        self.current_track.as_deref()
     }
 
     pub(crate) fn changed_from(&self, previous: &Self) -> bool {
+        let track_changed = match (&self.current_track, &previous.current_track) {
+            (None, None) => false,
+            (Some(current), Some(previous)) => !Arc::ptr_eq(current, previous),
+            _ => true,
+        };
         self.status != previous.status
             || self.current_track_id != previous.current_track_id
             || self.shutting_down != previous.shutting_down
-            || !Arc::ptr_eq(&self.tracks, &previous.tracks)
+            || track_changed
     }
     pub(crate) fn menu_changed_from(&self, previous: &Self) -> bool {
         self.status != previous.status
@@ -265,38 +246,6 @@ impl TraySnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn tui_projection_keeps_library_storage_and_selects_only_tui_fields() {
-        let tracks = Arc::new(Vec::new());
-        let mut client = ClientSnapshot::default();
-        client.library.tracks = Arc::clone(&tracks);
-        client.system.revision = 17;
-        client.system.config = Arc::new(Config {
-            nerd_symbols: true,
-            ..Config::default()
-        });
-
-        let tui = TuiSnapshot::from_client(&client);
-
-        assert!(Arc::ptr_eq(&tui.library.tracks, &tracks));
-        assert_eq!(tui.system.revision, 17);
-        assert!(tui.system.nerd_symbols);
-    }
-
-    #[test]
-    fn gui_projection_keeps_library_revisions_and_shared_arcs() {
-        let mut core = CoreState::default();
-        core.library.revision = 3;
-        core.library.structure_revision = 5;
-        let tracks = Arc::clone(&core.library.tracks);
-
-        let gui = GuiSnapshot::from_core(&core);
-
-        assert_eq!(gui.library.revision, 3);
-        assert_eq!(gui.library.structure_revision, 5);
-        assert!(Arc::ptr_eq(&gui.library.tracks, &tracks));
-    }
 
     #[test]
     fn tray_projection_ignores_playback_position_but_tracks_status_changes() {
@@ -309,20 +258,5 @@ mod tests {
         core.playback.status = PlaybackStatus::Playing;
         let playing = TraySnapshot::from_core(&core);
         assert!(playing.changed_from(&position_only));
-    }
-
-    #[test]
-    fn tray_menu_changes_only_when_playback_label_changes() {
-        let mut core = CoreState::default();
-        let previous = TraySnapshot::from_core(&core);
-
-        core.library.tracks = Arc::new(Vec::new());
-        let metadata_changed = TraySnapshot::from_core(&core);
-        assert!(metadata_changed.changed_from(&previous));
-        assert!(!metadata_changed.menu_changed_from(&previous));
-
-        core.playback.status = PlaybackStatus::Playing;
-        let playing = TraySnapshot::from_core(&core);
-        assert!(playing.menu_changed_from(&metadata_changed));
     }
 }

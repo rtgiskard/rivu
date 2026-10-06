@@ -25,13 +25,21 @@ The audio worker waits for commands and backend events instead of polling unchan
 playback positions.
 
 The TUI updates state while idle and redraws on state changes, local input, or
-terminal resize. Up/Down and Enter operate on the selected queue occurrence;
+terminal resize. Up/Down and PageUp/PageDown navigate the active list. In Queue,
+Enter plays the selected occurrence. `/` opens search; Tab changes focus and
+Enter on a result enqueues it. `t` opens the directory browser; Enter opens a
+directory or plays a track, and Left returns to the parent. `P` opens playlists;
+Right opens their entries, and `a` enqueues the selected entry.
 Space toggles playback, `n`/`p` selects next/previous, and `q` exits only the TUI.
+Quitting cancels an outstanding list query before joining its worker, so an idle
+or stalled IPC response does not hold the terminal open until its timeout.
 
 The GUI supports Space, `n`/`p`, Left/Right seeking, Home/End, `r` repeat,
 `s` shuffle, and `[`/`]` volume. Up/Down and Enter operate on the focused Library
 or Queue list; `d`/Delete removes selected queue occurrences. `q` closes the GUI
 window without stopping the core. Text fields and popups take precedence.
+When the Library directory tree has focus, Left/Right navigate its hierarchy and
+Space toggles the selected folder instead of seeking or toggling playback.
 
 Playlists support creation, renaming, deletion, import/export, playback, adding,
 removing, and moving entries. If the next track cannot be opened after EOF,

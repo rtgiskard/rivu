@@ -5,12 +5,17 @@ use rivu::{
     audio, config,
     core::Runtime,
     gui, ipc,
-    model::{Command, PlaybackStatus, RepeatMode},
+    model::{Command, PAGE_SIZE, PlaybackStatus, RepeatMode},
     mpris,
-    response::StateResponse,
+    response::{StateResponse, ViewResponse},
     terminal,
 };
-use std::{path::PathBuf, thread, time::Duration};
+use std::{
+    io::{self, Write},
+    path::{Path, PathBuf},
+    thread,
+    time::Duration,
+};
 
 #[derive(Parser)]
 #[command(
@@ -318,61 +323,57 @@ fn run() -> Result<()> {
             favorites,
             missing,
         }) => {
-            let mut response = checked(ipc::request(&socket, &Command::Status)?)?;
-            let query = query.unwrap_or_default().to_lowercase();
-            let tracks = response.state.library.tracks.iter().filter(|track| {
-                (!favorites || track.favorite)
-                    && (!missing || track.missing)
-                    && (query.is_empty()
-                        || format!(
-                            "{} {} {} {}",
-                            track.title,
-                            track.artist,
-                            track.album,
-                            track.path.display()
-                        )
-                        .to_lowercase()
-                        .contains(&query))
-            });
-            if args.json {
-                let library = tracks.cloned().collect();
-                response.state.library.tracks = std::sync::Arc::new(library);
-                return show(&response, true);
-            }
-            for track in tracks {
-                println!(
-                    "{}\t{}\t{}\t{}\t{}{}{}\t{}",
-                    track.id,
-                    track.title,
-                    track.artist,
-                    track.album,
-                    track.path.display(),
-                    if track.missing { " [missing]" } else { "" },
-                    if track.favorite { " [favorite]" } else { "" },
-                    track.bitrate_bps.map_or("—".into(), |value| format!(
-                        "{:.1} kbps",
-                        value as f64 / 1000.0
-                    ))
-                );
-            }
-            Ok(())
+            let mut command = Command::TrackPage {
+                query,
+                favorite: favorites.then_some(true),
+                missing: missing.then_some(true),
+                offset: 0,
+                limit: PAGE_SIZE,
+            };
+            stream_pages(
+                args.json,
+                |offset| {
+                    if let Command::TrackPage {
+                        offset: page_offset,
+                        ..
+                    } = &mut command
+                    {
+                        *page_offset = offset;
+                    }
+                    let ViewResponse::TrackPage(page) = query_view(&socket, &command)? else {
+                        bail!("Library query returned an unexpected response");
+                    };
+                    Ok((page.total, page.rows))
+                },
+                |_, track| {
+                    println!(
+                        "{}\t{}\t{}\t{}\t{}{}{}\t{}",
+                        track.id,
+                        track.title,
+                        track.artist,
+                        track.album,
+                        track.path.display(),
+                        if track.missing { " [missing]" } else { "" },
+                        if track.favorite { " [favorite]" } else { "" },
+                        track.bitrate_bps.map_or("—".into(), |value| format!(
+                            "{:.1} kbps",
+                            value as f64 / 1000.0
+                        ))
+                    );
+                    Ok(())
+                },
+            )
         }
         Action::Library(LibraryAction::Stats) => {
-            let response = checked(ipc::request(&socket, &Command::Status)?)?;
+            let ViewResponse::LibraryStats(stats) = query_view(&socket, &Command::LibraryStats)?
+            else {
+                bail!("Statistics query returned an unexpected response");
+            };
             if args.json {
-                return show(&response, true);
+                println!("{}", serde_json::to_string_pretty(&stats)?);
+            } else {
+                println!("Tracks: {}\nPlays: {}", stats.total, stats.play_count);
             }
-            println!(
-                "Tracks: {}\nPlays: {}",
-                response.state.library.tracks.len(),
-                response
-                    .state
-                    .library
-                    .tracks
-                    .iter()
-                    .map(|t| t.play_count)
-                    .sum::<u64>()
-            );
             Ok(())
         }
         Action::Library(LibraryAction::History { limit }) => {
@@ -393,7 +394,7 @@ fn run() -> Result<()> {
             for (index, entry) in response.state.queue.entries.iter().enumerate() {
                 let title = response
                     .state
-                    .library
+                    .queue
                     .tracks
                     .iter()
                     .find(|t| t.id == entry.track_id)
@@ -413,43 +414,23 @@ fn run() -> Result<()> {
             }
             Ok(())
         }
-        Action::Playlist(PlaylistAction::List) => {
-            let response = checked(ipc::request(&socket, &Command::Status)?)?;
-            if args.json {
-                return show(&response, true);
-            }
-            for playlist in response.state.library.playlists.iter() {
-                println!(
-                    "{}\t{}\t{} entries",
-                    playlist.id,
-                    playlist.name,
-                    playlist.entries.len()
-                );
-                for (index, entry) in playlist.entries.iter().enumerate() {
-                    println!("  {index}\tentry {}\ttrack {}", entry.id, entry.track_id);
-                }
-            }
-            Ok(())
-        }
+        Action::Playlist(PlaylistAction::List) => list_playlists(&socket, args.json),
         Action::Library(LibraryAction::Edit {
             track_id,
             title,
             artist,
             album,
         }) => {
-            let response = checked(ipc::request(&socket, &Command::Status)?)?;
-            let track = response
-                .state
-                .library
-                .tracks
-                .iter()
-                .find(|track| track.id == track_id)
-                .context("Track not found")?;
+            let ViewResponse::Track(track) = query_view(&socket, &Command::Track { track_id })?
+            else {
+                bail!("Track query returned an unexpected response");
+            };
+            let track = track.context("Track not found")?;
             let command = Command::EditTrack {
                 track_id,
-                title: title.unwrap_or_else(|| track.title.clone()),
-                artist: artist.unwrap_or_else(|| track.artist.clone()),
-                album: album.unwrap_or_else(|| track.album.clone()),
+                title: title.unwrap_or(track.title),
+                artist: artist.unwrap_or(track.artist),
+                album: album.unwrap_or(track.album),
             };
             show(&ipc::request(&socket, &command)?, args.json)
         }
@@ -621,6 +602,192 @@ fn start(
     drop(server);
     Ok(())
 }
+fn query_view(socket: &Path, command: &Command) -> Result<ViewResponse> {
+    checked(ipc::request(socket, command)?)?
+        .view
+        .context("Query returned no view")
+}
+
+fn list_playlists(socket: &Path, json: bool) -> Result<()> {
+    let stdout = io::stdout();
+    let mut output = stdout.lock();
+    let mut offset = 0;
+    let mut first_playlist = true;
+    if json {
+        write!(output, "[")?;
+    }
+    loop {
+        let ViewResponse::PlaylistSummaries(page) = query_view(
+            socket,
+            &Command::PlaylistSummaries {
+                offset,
+                limit: PAGE_SIZE,
+            },
+        )?
+        else {
+            bail!("Playlist query returned an unexpected response");
+        };
+        if page.rows.is_empty() {
+            if offset < page.total {
+                bail!("Playlist query returned an empty page before the reported total");
+            }
+            break;
+        }
+        for playlist in &page.rows {
+            if json {
+                if !first_playlist {
+                    write!(output, ",")?;
+                }
+                write!(output, "{{\"id\":{},\"name\":", playlist.id)?;
+                serde_json::to_writer(&mut output, &playlist.name)?;
+                write!(
+                    output,
+                    ",\"entry_count\":{},\"entries\":[",
+                    playlist.entry_count
+                )?;
+                let mut entry_offset = 0;
+                let mut first_entry = true;
+                loop {
+                    let ViewResponse::PlaylistEntries(page) = query_view(
+                        socket,
+                        &Command::PlaylistEntries {
+                            playlist_id: playlist.id,
+                            offset: entry_offset,
+                            limit: PAGE_SIZE,
+                        },
+                    )?
+                    else {
+                        bail!("Playlist entries query returned an unexpected response");
+                    };
+                    if page.rows.is_empty() {
+                        if entry_offset < page.total {
+                            bail!(
+                                "Playlist entries query returned an empty page before the reported total"
+                            );
+                        }
+                        break;
+                    }
+                    for entry in &page.rows {
+                        if !first_entry {
+                            write!(output, ",")?;
+                        }
+                        serde_json::to_writer(&mut output, entry)?;
+                        first_entry = false;
+                    }
+                    entry_offset += page.rows.len();
+                    if entry_offset >= page.total {
+                        break;
+                    }
+                }
+                write!(output, "]}}")?;
+                first_playlist = false;
+            } else {
+                writeln!(
+                    output,
+                    "{}\t{}\t{} entries",
+                    playlist.id, playlist.name, playlist.entry_count
+                )?;
+                let mut entry_offset = 0;
+                loop {
+                    let ViewResponse::PlaylistEntries(page) = query_view(
+                        socket,
+                        &Command::PlaylistEntries {
+                            playlist_id: playlist.id,
+                            offset: entry_offset,
+                            limit: PAGE_SIZE,
+                        },
+                    )?
+                    else {
+                        bail!("Playlist entries query returned an unexpected response");
+                    };
+                    if page.rows.is_empty() {
+                        if entry_offset < page.total {
+                            bail!(
+                                "Playlist entries query returned an empty page before the reported total"
+                            );
+                        }
+                        break;
+                    }
+                    for (index, entry) in page.rows.iter().enumerate() {
+                        writeln!(
+                            output,
+                            "  {}\tentry {}\ttrack {}",
+                            entry_offset + index,
+                            entry.id,
+                            entry.track_id
+                        )?;
+                    }
+                    entry_offset += page.rows.len();
+                    if entry_offset >= page.total {
+                        break;
+                    }
+                }
+            }
+        }
+        offset += page.rows.len();
+        if offset >= page.total {
+            break;
+        }
+    }
+    if json {
+        writeln!(output, "]")?;
+    }
+    Ok(())
+}
+
+fn stream_pages<T: serde::Serialize>(
+    json: bool,
+    mut fetch: impl FnMut(usize) -> Result<(usize, Vec<T>)>,
+    mut display: impl FnMut(usize, &T) -> Result<()>,
+) -> Result<()> {
+    let mut offset = 0;
+    let mut first = true;
+    if json {
+        let stdout = io::stdout();
+        let mut output = stdout.lock();
+        write!(output, "[")?;
+        loop {
+            let (total, rows) = fetch(offset)?;
+            if rows.is_empty() {
+                if offset < total {
+                    bail!("Paged query returned an empty page before the reported total");
+                }
+                break;
+            }
+            for row in &rows {
+                if !first {
+                    write!(output, ",")?;
+                }
+                serde_json::to_writer(&mut output, row)?;
+                first = false;
+            }
+            offset += rows.len();
+            if offset >= total {
+                break;
+            }
+        }
+        writeln!(output, "]")?;
+        return Ok(());
+    }
+    loop {
+        let (total, rows) = fetch(offset)?;
+        if rows.is_empty() {
+            if offset < total {
+                bail!("Paged query returned an empty page before the reported total");
+            }
+            break;
+        }
+        for (index, row) in rows.iter().enumerate() {
+            display(offset + index, row)?;
+        }
+        offset += rows.len();
+        if offset >= total {
+            break;
+        }
+    }
+    Ok(())
+}
+
 fn checked(response: StateResponse) -> Result<StateResponse> {
     if !response.ok {
         bail!("{}", response.error.as_deref().unwrap_or("Command failed"));
@@ -652,7 +819,7 @@ fn show(response: &StateResponse, json: bool) -> Result<()> {
         } else {
             println!(
                 "{status} · {} tracks · {} queued",
-                state.library.tracks.len(),
+                state.library.track_total,
                 state.queue.entries.len()
             );
         }

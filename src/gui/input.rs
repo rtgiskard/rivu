@@ -110,6 +110,11 @@ impl Input {
         ]);
     }
 
+    /// Returns whether this input currently owns window focus.
+    pub fn is_focused(&self, window: &Window) -> bool {
+        self.focus_handle.is_focused(window)
+    }
+
     /// Returns the current value.
     pub fn text(&self) -> &str {
         &self.content

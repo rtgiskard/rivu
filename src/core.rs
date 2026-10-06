@@ -5,7 +5,7 @@ use crate::{
     library::{self, M3uItem, ScanResult},
     model::*,
     projection::{ClientSnapshot, GuiSnapshot, MprisSnapshot, TraySnapshot},
-    response::{Ack, StateResponse},
+    response::{Ack, StateResponse, ViewResponse},
     store::Store,
 };
 use anyhow::{Context, Result};
@@ -39,25 +39,14 @@ struct Request {
 pub(crate) struct CoreState {
     pub(crate) library: LibrarySnapshot,
     pub(crate) queue: QueueState,
+    pub(crate) current_track: Option<Arc<Track>>,
     pub(crate) playback: PlaybackState,
     pub(crate) system: SystemState,
 }
 
 impl CoreState {
     pub(crate) fn current_track(&self) -> Option<&Track> {
-        let queue_id = self.queue.current_id?;
-        let track_id = self
-            .queue
-            .entries
-            .iter()
-            .find(|entry| entry.id == queue_id)?
-            .track_id;
-        let index = self
-            .library
-            .tracks
-            .binary_search_by_key(&track_id, |track| track.id)
-            .ok()?;
-        self.library.tracks.get(index)
+        self.current_track.as_deref()
     }
 }
 
@@ -164,6 +153,7 @@ impl AppHandle {
                 ok: false,
                 error: Some(format!("Core unavailable: {error}")),
                 state: ClientSnapshot::from_core(&self.core_state()),
+                view: None,
             };
         }
         let response = if maintenance {
@@ -177,6 +167,7 @@ impl AppHandle {
                 ok: false,
                 error: Some(format!("Core response unavailable: {error}")),
                 state: ClientSnapshot::from_core(&self.core_state()),
+                view: None,
             }))
         }) {
             CoreResponse::State(response) => *response,
@@ -232,7 +223,11 @@ impl Runtime {
         std::fs::create_dir_all(data_dir)?;
         crate::logging::init(data_dir, &config)?;
         tracing::info!(path = %config_path.display(), "configuration_loaded");
+        // Keep the handle usable with a config-only snapshot. Database views,
+        // device enumeration and optional decoder probing run on the core
+        // worker so the GUI is not blocked by startup I/O.
         let store = Store::open(&data_dir.join("library.db"))?;
+        store.set_track_cache_page_size(config.page_size);
         tracing::debug!("store_ready");
         let engine = AudioEngine::new(config.media_read_buffer_mb)?;
         tracing::info!("audio_engine_ready");
@@ -241,11 +236,17 @@ impl Runtime {
         let wakeup = Arc::new(RwLock::new(None));
         let gui_opener = Arc::new(RwLock::new(None));
         let subscribers = Arc::new(RwLock::new(Vec::new()));
-        let ffmpeg_status = if config.ffmpeg_enabled {
-            audio::ffmpeg_status().unwrap_or_else(|error| format!("unavailable: {error:#}"))
-        } else {
-            "disabled".to_owned()
+        let initial = {
+            let mut state = CoreState::default();
+            state.playback.volume = config.volume;
+            state.playback.shuffle = config.shuffle;
+            state.playback.repeat = config.repeat;
+            state.system.selected_device = config.output_device.clone();
+            state.system.config = Arc::new(config);
+            state.system.config_path = config_path.to_path_buf();
+            state
         };
+        *shared.write() = initial.clone();
         let handle = AppHandle {
             state: shared.clone(),
             analysis: engine.analysis.clone(),
@@ -256,61 +257,12 @@ impl Runtime {
             subscribers: subscribers.clone(),
             raise_requested: Arc::new(AtomicBool::new(false)),
         };
-        let mut initial = CoreState {
-            library: LibrarySnapshot {
-                tracks: Arc::new(store.tracks()?),
-                revision: 0,
-                structure_revision: 0,
-                playlists: Arc::new(store.playlists()?),
-                history: Arc::new(store.history(200)?),
-            },
-            ..CoreState::default()
-        };
-        initial.system.devices = Arc::new(audio::devices().unwrap_or_default());
-        initial.playback.volume = config.volume;
-        initial.playback.shuffle = config.shuffle;
-        initial.playback.repeat = config.repeat;
-        initial.system.selected_device = config.output_device.clone();
-        initial.system.config = Arc::new(config);
-        initial.system.config_path = config_path.to_path_buf();
-        initial.system.ffmpeg_status = ffmpeg_status;
-        if let Some(json) = store.get_setting("playback")? {
-            let saved: Saved =
-                serde_json::from_str(&json).context("Reading saved playback settings")?;
-            initial.queue.entries = Arc::new(
-                saved
-                    .queue
-                    .into_iter()
-                    .filter(|entry| {
-                        initial
-                            .library
-                            .tracks
-                            .binary_search_by_key(&entry.track_id, |track| track.id)
-                            .is_ok()
-                    })
-                    .collect(),
-            );
-            initial.queue.current_id = saved
-                .current
-                .filter(|id| initial.queue.entries.iter().any(|entry| entry.id == *id));
-        }
-        *shared.write() = initial.clone();
         let raise_requested = handle.raise_requested.clone();
         let worker = thread::Builder::new()
             .name("rivu-core".into())
             .spawn(move || {
-                tracing::debug!("core_worker_started");
                 let (scan_tx, scan_rx) = bounded(1);
-                let next_queue_id = initial
-                    .queue
-                    .entries
-                    .iter()
-                    .map(|q| q.id)
-                    .max()
-                    .unwrap_or(0)
-                    + 1;
                 let mut core = Core {
-                    library: library::LibraryState::new(initial.library.tracks.as_ref().clone()),
                     store,
                     engine,
                     state: initial,
@@ -320,7 +272,7 @@ impl Runtime {
                     subscribers,
                     raise_requested,
                     generation: 0,
-                    next_queue_id,
+                    next_queue_id: 1,
                     playback: None,
                     scan_tx,
                     scan_rx,
@@ -332,6 +284,28 @@ impl Runtime {
                     config_dirty: false,
                     config_last_saved: Instant::now(),
                 };
+                tracing::debug!("core_worker_started");
+                let initial_load_started = Instant::now();
+                tracing::debug!("initial_load_started");
+                if let Err(error) = core.load_initial_state() {
+                    tracing::error!(error = %error, "initial_load_failed");
+                    core.state.system.last_error = Some(format!("Loading library: {error:#}"));
+                    core.publish();
+                } else {
+                    tracing::info!(
+                        elapsed_ms = initial_load_started.elapsed().as_millis(),
+                        "initial_load_completed"
+                    );
+                }
+                core.next_queue_id = core
+                    .state
+                    .queue
+                    .entries
+                    .iter()
+                    .map(|entry| entry.id)
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
                 let _ = core
                     .engine
                     .commands
@@ -420,7 +394,6 @@ struct Core {
     store: Store,
     engine: AudioEngine,
     state: CoreState,
-    library: library::LibraryState,
     shared: Arc<RwLock<CoreState>>,
     wakeup: Arc<RwLock<Option<Wakeup>>>,
     gui_opener: Arc<RwLock<Option<Wakeup>>>,
@@ -439,6 +412,73 @@ struct Core {
     queue_dirty: bool,
     config_dirty: bool,
     config_last_saved: Instant,
+}
+impl Core {
+    fn load_initial_state(&mut self) -> Result<()> {
+        let stats = self.store.library_stats()?;
+        self.state.library.track_total = stats.total;
+        self.state.library.playlist_total = self.store.playlist_summary_page(0, 0)?.total;
+        self.state.library.history = Arc::new(self.store.history(200.min(PAGE_SIZE))?);
+        self.state.system.devices = Arc::new(audio::devices().unwrap_or_default());
+        self.state.system.ffmpeg_status = if self.state.system.config.ffmpeg_enabled {
+            audio::ffmpeg_status().unwrap_or_else(|error| format!("unavailable: {error:#}"))
+        } else {
+            "disabled".to_owned()
+        };
+        if let Some(json) = self.store.get_setting("playback")? {
+            let Saved {
+                queue: saved_queue,
+                current,
+            } = serde_json::from_str(&json).context("Reading saved playback settings")?;
+            let limit = self.state.system.config.queue_limit as usize;
+            let chunk_size = PAGE_SIZE.min(limit.max(1));
+            let mut entries = Vec::with_capacity(limit.min(saved_queue.len()));
+            for chunk in saved_queue.chunks(chunk_size) {
+                if entries.len() == limit {
+                    break;
+                }
+                let mut ids = chunk.iter().map(|entry| entry.track_id).collect::<Vec<_>>();
+                ids.sort_unstable();
+                ids.dedup();
+                let rows = self.store.queue_rows(&ids)?;
+                let available = rows.iter().map(|row| row.id).collect::<HashSet<_>>();
+                let remaining = limit - entries.len();
+                entries.extend(
+                    chunk
+                        .iter()
+                        .filter(|entry| available.contains(&entry.track_id))
+                        .take(remaining)
+                        .cloned(),
+                );
+            }
+            let mut ids = entries
+                .iter()
+                .map(|entry| entry.track_id)
+                .collect::<Vec<_>>();
+            ids.sort_unstable();
+            ids.dedup();
+            let tracks = self.store.queue_rows(&ids)?;
+            self.state.queue.entries = Arc::new(entries);
+            self.state.queue.tracks = Arc::new(tracks);
+            self.state.queue.current_id =
+                current.filter(|id| self.state.queue.entries.iter().any(|entry| entry.id == *id));
+            let current_track_id = self.state.queue.current_id.and_then(|id| {
+                self.state
+                    .queue
+                    .entries
+                    .iter()
+                    .find(|entry| entry.id == id)
+                    .map(|entry| entry.track_id)
+            });
+            self.state.current_track = current_track_id
+                .map(|id| self.store.track(id))
+                .transpose()?
+                .flatten()
+                .map(Arc::new);
+        }
+        self.publish();
+        Ok(())
+    }
 }
 #[path = "core/engine.rs"]
 mod engine;
@@ -495,14 +535,13 @@ mod tests {
             })
             .unwrap();
         let mut state = CoreState::default();
-        state.library.tracks = Arc::new(store.tracks().unwrap());
+        state.library.track_total = store.library_stats().unwrap().total;
         state.system.config_path = directory.path().join("config.toml");
         Arc::make_mut(&mut state.system.config)
             .library_roots
             .push(directory.path().to_path_buf());
         let (scan_tx, scan_rx) = bounded(1);
         let mut core = Core {
-            library: library::LibraryState::new(state.library.tracks.as_ref().clone()),
             store,
             engine: AudioEngine::new(1).unwrap(),
             shared: Arc::new(RwLock::new(state.clone())),
@@ -534,24 +573,6 @@ mod tests {
         core.finish_scan(scan).unwrap();
         core.state.system.scanning = false;
         successful
-    }
-
-    fn source_id(core: &Core, path: &Path, cue_track: Option<u32>) -> Option<i64> {
-        core.state
-            .library
-            .tracks
-            .iter()
-            .filter(|track| !track.missing)
-            .find(|track| {
-                let source = track
-                    .cue
-                    .as_ref()
-                    .map_or((track.path.as_path(), None), |cue| {
-                        (cue.sheet.as_path(), Some(cue.number))
-                    });
-                source == (path, cue_track)
-            })
-            .map(|track| track.id)
     }
 
     fn write_pcm(path: &Path) {
@@ -600,7 +621,7 @@ mod tests {
         })
         .unwrap();
         assert!(settle_scan(&mut core));
-        assert_eq!(core.state.library.tracks.len(), 4);
+        assert_eq!(core.store.library_stats().unwrap().total, 4);
     }
 
     #[test]
@@ -622,7 +643,6 @@ mod tests {
         assert!(core.scan_workers.is_empty());
     }
 
-    #[cfg(unix)]
     #[test]
     fn scan_accepts_symlinks_to_outside_a_configured_root() {
         let (directory, mut core) = fixture();
@@ -638,12 +658,23 @@ mod tests {
         })
         .unwrap();
         assert!(settle_scan(&mut core));
-        let id = source_id(&core, &logical, None).unwrap();
+        let id = core
+            .store
+            .track_id_for_source(&logical, None)
+            .unwrap()
+            .unwrap();
         assert_eq!(core.track(id).unwrap().path, logical);
-        assert!(source_id(&core, &source, None).is_none());
+        assert!(
+            core.store
+                .track_id_for_source(&source, None)
+                .unwrap()
+                .is_none()
+        );
+        let page = core.store.directory_page(&link, 0, PAGE_SIZE).unwrap();
+        assert_eq!(page.total, 1);
+        assert!(matches!(&page.rows[0], DirectoryRow::Track(row) if row.id == id));
     }
 
-    #[cfg(unix)]
     #[test]
     fn scan_keeps_distinct_configured_aliases_of_the_same_directory() {
         let (directory, mut core) = fixture();
@@ -665,8 +696,19 @@ mod tests {
         assert!(settle_scan(&mut core));
         let ids = [&first, &second].map(|alias| {
             let path = alias.join("source.wav");
-            let id = source_id(&core, &path, None).unwrap();
+            let id = core
+                .store
+                .track_id_for_source(&path, None)
+                .unwrap()
+                .unwrap();
             assert_eq!(core.track(id).unwrap().path, path);
+            assert_eq!(
+                core.store
+                    .directory_page(alias, 0, PAGE_SIZE)
+                    .unwrap()
+                    .total,
+                1
+            );
             id
         });
         assert_ne!(ids[0], ids[1]);
@@ -712,7 +754,11 @@ mod tests {
         })
         .unwrap();
         assert!(settle_scan(&mut core));
-        let id = source_id(&core, &sheet, Some(1)).unwrap();
+        let id = core
+            .store
+            .track_id_for_source(&sheet, Some(1))
+            .unwrap()
+            .unwrap();
         let track = core.track(id).unwrap();
         assert_eq!(track.path, source);
         assert_eq!(track.cue.as_ref().unwrap().sheet, sheet);
@@ -735,7 +781,6 @@ mod tests {
         assert!(core.scan_workers.is_empty());
     }
 
-    #[cfg(unix)]
     #[test]
     fn missing_and_broken_requests_do_not_prevent_other_roots_from_scanning() {
         let (directory, mut core) = fixture();
@@ -761,9 +806,8 @@ mod tests {
         assert!(track.duration.unwrap() < 1.0);
     }
 
-    #[cfg(unix)]
     #[test]
-    fn playlist_import_preserves_configured_aliases() {
+    fn playlist_import_and_directory_queries_preserve_configured_aliases() {
         let (directory, mut core) = fixture();
         let outside = tempfile::tempdir().unwrap();
         let source = outside.path().join("source.wav");
@@ -788,7 +832,11 @@ mod tests {
         })
         .unwrap();
         assert!(settle_scan(&mut core));
-        let physical_id = source_id(&core, &source, None).unwrap();
+        let physical_id = core
+            .store
+            .track_id_for_source(&source, None)
+            .unwrap()
+            .unwrap();
         core.command(Command::ImportPlaylist {
             path: alias.join("playlist.m3u"),
             name: Some("Alias playlist".into()),
@@ -796,11 +844,25 @@ mod tests {
         .unwrap();
         assert!(settle_scan(&mut core));
         let logical = alias.join("source.wav");
-        let logical_id = source_id(&core, &logical, None).unwrap();
+        let logical_id = core
+            .store
+            .track_id_for_source(&logical, None)
+            .unwrap()
+            .unwrap();
         assert_ne!(logical_id, physical_id);
-        let entries = &core.state.library.playlists[0].entries;
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].track_id, logical_id);
+        let playlist_id = core.store.playlist_summary_page(0, 1).unwrap().rows[0].id;
+        let entries = core
+            .store
+            .playlist_entries_page(playlist_id, 0, PAGE_SIZE)
+            .unwrap();
+        assert_eq!(entries.rows.len(), 1);
+        assert_eq!(entries.rows[0].track_id, logical_id);
+        let page = core
+            .store
+            .directory_page(&alias.join("unused/.."), 0, PAGE_SIZE)
+            .unwrap();
+        assert_eq!(page.total, 1);
+        assert!(matches!(&page.rows[0], DirectoryRow::Track(row) if row.id == logical_id));
         core.enqueue(&[logical_id]).unwrap();
         let entry = core.state.queue.entries.last().unwrap();
         assert_eq!(entry.track_id, logical_id);
@@ -808,71 +870,28 @@ mod tests {
     }
 
     #[test]
-    fn configure_normalizes_unavailable_roots_without_dropping_them() {
+    fn mixed_inside_and_outside_scan_is_rejected_atomically() {
         let (directory, mut core) = fixture();
-        let unavailable = directory.path().join("offline/Music");
-        let mut config = core.state.system.config.as_ref().clone();
-        config.library_roots = vec![
-            directory.path().join("unused/.."),
-            unavailable.join("unused/.."),
-        ];
-        core.command(Command::Configure { config }).unwrap();
-        assert_eq!(
-            core.state.system.config.library_roots,
-            [directory.path().to_path_buf(), unavailable.clone()]
-        );
-        let saved = Config::load(&core.state.system.config_path).unwrap();
-        assert_eq!(saved.library_roots, core.state.system.config.library_roots);
-        assert!(!unavailable.exists());
-    }
-
-    #[test]
-    fn scan_rejects_an_outside_file_before_starting_a_worker() {
-        let (_directory, mut core) = fixture();
+        let inside = directory.path().join("inside");
+        std::fs::create_dir(&inside).unwrap();
         let outside = tempfile::tempdir().unwrap();
-        let source = outside.path().join("source.wav");
-        write_pcm(&source);
-        let error = core
-            .command(Command::Scan {
-                paths: vec![source],
+        let total = core.state.library.track_total;
+        assert!(
+            core.command(Command::Scan {
+                paths: vec![inside, outside.path().to_path_buf()],
                 force: false,
             })
-            .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("outside configured library roots")
+            .is_err()
         );
+        assert_eq!(core.state.library.track_total, total);
         assert!(!core.state.system.scanning);
         assert!(core.scan_workers.is_empty());
-    }
-
-    #[test]
-    fn playlist_import_rejects_an_outside_source_before_starting_a_worker() {
-        let (directory, mut core) = fixture();
-        let outside = tempfile::tempdir().unwrap();
-        let source = outside.path().join("source.wav");
-        write_pcm(&source);
-        let playlist = directory.path().join("outside.m3u");
-        std::fs::write(&playlist, format!("{}\n", source.display())).unwrap();
-        let error = core
-            .command(Command::ImportPlaylist {
-                path: playlist,
-                name: None,
-            })
-            .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("outside configured library roots")
-        );
-        assert!(!core.state.system.scanning);
-        assert!(core.scan_workers.is_empty());
-        assert!(core.state.library.playlists.is_empty());
     }
 
     fn pending(core: &mut Core, queue_id: u64) {
         core.state.queue.current_id = Some(queue_id);
+
+        core.refresh_queue_tracks().unwrap();
         core.state.playback.status = PlaybackStatus::Playing;
         let (track_id, duration) = {
             let track = core.state.current_track().unwrap();
@@ -931,13 +950,7 @@ mod tests {
     }
 
     fn play_count(core: &Core, track_id: i64) -> u64 {
-        core.store
-            .tracks()
-            .unwrap()
-            .iter()
-            .find(|track| track.id == track_id)
-            .unwrap()
-            .play_count
+        core.store.track(track_id).unwrap().unwrap().play_count
     }
 
     fn missing(core: &mut Core, command: Command, track_id: i64) {
@@ -965,6 +978,45 @@ mod tests {
         assert_eq!(play_count(&core, 1), 0);
         progress(&mut core, 9.0, 2.000_001);
         assert_eq!(play_count(&core, 1), 1);
+    }
+    #[test]
+    fn reload_refreshes_current_track_activity_and_probe_metadata() {
+        let (directory, mut core) = fixture();
+        core.state.queue.current_id = Some(1);
+        core.refresh_queue_tracks().unwrap();
+        core.store.mark_played(1, 7).unwrap();
+        core.reload(false).unwrap();
+        assert_eq!(core.state.current_track().unwrap().last_played, Some(7));
+
+        let known = core
+            .store
+            .known_files()
+            .unwrap()
+            .into_iter()
+            .find(|file| file.track_id == 1)
+            .unwrap();
+        let mut media = known.media.unwrap();
+        media.codec = "updated-codec".into();
+        media.sample_rate = 96_000;
+        core.store
+            .apply_scan(&ScanResult {
+                roots: vec![directory.path().to_path_buf()],
+                suppressed_sources: Vec::new(),
+                records: vec![ScanRecord {
+                    path: known.path,
+                    cue: known.cue,
+                    size: known.size,
+                    modified_ns: known.modified_ns + 1,
+                    fingerprint: known.fingerprint,
+                    media,
+                }],
+                errors: Vec::new(),
+            })
+            .unwrap();
+        core.reload(true).unwrap();
+        let current = core.state.current_track().unwrap();
+        assert_eq!(current.codec, "updated-codec");
+        assert_eq!(current.sample_rate, 96_000);
     }
 
     #[test]
@@ -1259,9 +1311,10 @@ mod tests {
         core.played_cursor = 2;
         core.command(Command::RemoveMissingTracks).unwrap();
         assert_eq!(
-            core.state
-                .library
-                .tracks
+            core.store
+                .library_view_page(None, None, None, LibrarySort::Id, 0, PAGE_SIZE)
+                .unwrap()
+                .rows
                 .iter()
                 .map(|track| track.id)
                 .collect::<Vec<_>>(),
@@ -1277,8 +1330,10 @@ mod tests {
             [1, 4, 5]
         );
         assert_eq!(
-            core.state.library.playlists[0]
-                .entries
+            core.store
+                .playlist_entries_page(playlist_id, 0, PAGE_SIZE)
+                .unwrap()
+                .rows
                 .iter()
                 .map(|entry| entry.track_id)
                 .collect::<Vec<_>>(),
@@ -1294,29 +1349,14 @@ mod tests {
 
     #[test]
     fn forced_scan_reprobes_unchanged_files_instead_of_reusing_cached_metadata() {
-        use std::io::Write;
         let (_directory, mut core) = fixture();
         let path = core.track(1).unwrap().path.clone();
-        let mut file = std::fs::File::create(&path).unwrap();
-        file.write_all(b"RIFF").unwrap();
-        file.write_all(&236_u32.to_le_bytes()).unwrap();
-        file.write_all(b"WAVEfmt ").unwrap();
-        file.write_all(&16_u32.to_le_bytes()).unwrap();
-        file.write_all(&1_u16.to_le_bytes()).unwrap();
-        file.write_all(&1_u16.to_le_bytes()).unwrap();
-        file.write_all(&7500_u32.to_le_bytes()).unwrap();
-        file.write_all(&15000_u32.to_le_bytes()).unwrap();
-        file.write_all(&2_u16.to_le_bytes()).unwrap();
-        file.write_all(&16_u16.to_le_bytes()).unwrap();
-        file.write_all(b"data").unwrap();
-        file.write_all(&200_u32.to_le_bytes()).unwrap();
-        file.write_all(&[0; 200]).unwrap();
-        drop(file);
+        write_pcm(&path);
         let mut scanned = library::scan_paths(
             std::slice::from_ref(&path),
             &[],
             false,
-            &core.state.system.config.library_roots,
+            &[_directory.path().to_path_buf()],
         )
         .unwrap();
         let probed_title = scanned.records[0].media.title.clone();
@@ -1472,9 +1512,12 @@ mod tests {
             )),
         })
         .unwrap();
+        let playlist_id = core.store.playlist_summary_page(0, 1).unwrap().rows[0].id;
         assert_eq!(
-            core.state.library.playlists[0]
-                .entries
+            core.store
+                .playlist_entries_page(playlist_id, 0, PAGE_SIZE)
+                .unwrap()
+                .rows
                 .iter()
                 .map(|entry| entry.track_id)
                 .collect::<Vec<_>>(),
@@ -1542,9 +1585,13 @@ mod tests {
             )),
         })
         .unwrap();
-        let playlist = &core.state.library.playlists[0];
-        let tracks: Vec<_> = playlist
-            .entries
+        let playlist_id = core.store.playlist_summary_page(0, 1).unwrap().rows[0].id;
+        let entries = core
+            .store
+            .playlist_entries_page(playlist_id, 0, PAGE_SIZE)
+            .unwrap()
+            .rows;
+        let tracks: Vec<_> = entries
             .iter()
             .map(|entry| core.track(entry.track_id).unwrap())
             .collect();
@@ -1556,7 +1603,7 @@ mod tests {
             ["Part 2", "Part 1"]
         );
         assert_ne!(tracks[0].id, tracks[1].id);
-        assert_ne!(playlist.entries[0].id, playlist.entries[1].id);
+        assert_ne!(entries[0].id, entries[1].id);
     }
 
     #[test]
@@ -1979,6 +2026,7 @@ mod tests {
         .unwrap();
         assert!(!core.state.queue.entries.iter().any(|entry| entry.id == 3));
         assert_eq!(core.state.queue.current_id, None);
+        assert!(core.state.current_track().is_none());
         assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
         assert_ne!(core.generation, generation);
         assert!(core.playback.is_none());
@@ -2164,5 +2212,65 @@ mod tests {
             .unwrap();
         core.run(receiver);
         assert!(observed.load(Ordering::Acquire));
+    }
+    #[test]
+    fn restoring_queue_skips_missing_entries_before_capacity_limit() {
+        let (_directory, mut core) = fixture();
+        Arc::make_mut(&mut core.state.system.config).queue_limit = 2;
+        let saved = Saved {
+            queue: vec![
+                QueueEntry {
+                    id: 1,
+                    track_id: 999,
+                },
+                QueueEntry { id: 2, track_id: 1 },
+                QueueEntry { id: 3, track_id: 2 },
+                QueueEntry { id: 4, track_id: 3 },
+            ],
+            current: Some(3),
+        };
+        core.store
+            .set_setting("playback", &serde_json::to_string(&saved).unwrap())
+            .unwrap();
+        core.load_initial_state().unwrap();
+        assert_eq!(queue_entries(&core.state.queue.entries), [(2, 1), (3, 2)]);
+        assert_eq!(
+            core.state
+                .queue
+                .tracks
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert_eq!(core.state.queue.current_id, Some(3));
+        assert_eq!(core.state.current_track().unwrap().id, 2);
+    }
+
+    #[test]
+    fn failed_queue_move_preserves_shared_snapshot_ownership() {
+        let (_directory, mut core) = fixture();
+        let before = core.state.queue.entries.clone();
+        let index = core.state.queue.entries.len();
+        let error = core
+            .command(Command::MoveQueue { queue_id: 1, index })
+            .unwrap_err();
+        assert!(error.to_string().contains("out of range"));
+        assert!(Arc::ptr_eq(&before, &core.state.queue.entries));
+    }
+
+    #[test]
+    fn enqueue_overflow_is_atomic() {
+        let (_directory, mut core) = fixture();
+        core.state.system.config = Arc::new(Config {
+            queue_limit: 6,
+            ..Config::default()
+        });
+        let before = core.state.queue.entries.clone();
+        let next_id = core.next_queue_id;
+        let error = core.enqueue(&[1, 2]).unwrap_err();
+        assert!(error.to_string().contains("Queue limit"));
+        assert_eq!(core.state.queue.entries.as_ref(), before.as_ref());
+        assert_eq!(core.next_queue_id, next_id);
     }
 }

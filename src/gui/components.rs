@@ -1,6 +1,5 @@
 mod dropdown;
 mod list;
-mod tree;
 
 use super::{ACCENT, BORDER, HIGHLIGHT, PANEL, TEXT, UI_INSET};
 
@@ -9,8 +8,7 @@ pub(crate) const ROW_HEIGHT: f32 = 42.0;
 pub(crate) const MENU_WIDTH: f32 = 260.0;
 pub(crate) const POPOVER_MAX_HEIGHT: f32 = 240.0;
 pub(crate) use dropdown::{DropdownItem, DropdownState};
-pub(crate) use list::{SelectableListState, SelectionMode, SelectionModel};
-pub(crate) use tree::{TreeKey, TreeRow, TreeState};
+pub(crate) use list::SelectionModel;
 
 pub(super) fn visualization_status(message: impl Into<SharedString>) -> Div {
     div()

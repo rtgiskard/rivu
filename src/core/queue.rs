@@ -1,4 +1,5 @@
 use super::*;
+use anyhow::ensure;
 
 impl Core {
     pub(in crate::core) fn remove_queue_entries(&mut self, queue_ids: &[u64]) -> Result<()> {
@@ -39,6 +40,7 @@ impl Core {
             self.state.queue.current_id = None;
         }
         Arc::make_mut(&mut self.state.queue.entries).retain(|entry| !ids.contains(&entry.id));
+        self.refresh_queue_rows()?;
         self.prune_queue_history();
         Ok(())
     }
@@ -86,8 +88,21 @@ impl Core {
     }
 
     pub(in crate::core) fn enqueue(&mut self, ids: &[i64]) -> Result<()> {
+        let current_len = self.state.queue.entries.len();
+        let limit = self.state.system.config.queue_limit as usize;
+        ensure!(
+            ids.len() <= limit.saturating_sub(current_len),
+            "Queue limit of {} entries exceeded",
+            limit
+        );
+        let available = self
+            .store
+            .queue_rows(ids)?
+            .into_iter()
+            .map(|row| row.id)
+            .collect::<HashSet<_>>();
         for id in ids {
-            self.track(*id)?;
+            ensure!(available.contains(id), "Track {id} not found");
         }
         let queue = Arc::make_mut(&mut self.state.queue.entries);
         for id in ids {
@@ -97,6 +112,7 @@ impl Core {
             });
             self.next_queue_id += 1;
         }
+        self.refresh_queue_rows()?;
         self.shuffle_bag.clear();
         if !ids.is_empty() {
             self.queue_dirty = true;
@@ -137,13 +153,22 @@ impl Core {
         self.prune_queue_history();
     }
     pub(in crate::core) fn prune_queue_history(&mut self) {
-        let queue = &self.state.queue.entries;
-        self.shuffle_bag
-            .retain(|id| queue.iter().any(|entry| entry.id == *id));
+        if self.shuffle_bag.is_empty() && self.played.is_empty() {
+            self.played_cursor = 0;
+            return;
+        }
+        let queue_ids = self
+            .state
+            .queue
+            .entries
+            .iter()
+            .map(|entry| entry.id)
+            .collect::<HashSet<_>>();
+        self.shuffle_bag.retain(|id| queue_ids.contains(id));
         let mut index = 0;
         let mut cursor = 0;
         self.played.retain(|id| {
-            let keep = queue.iter().any(|entry| entry.id == *id);
+            let keep = queue_ids.contains(id);
             if keep && index < self.played_cursor {
                 cursor += 1;
             }

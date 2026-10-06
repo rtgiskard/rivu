@@ -1,11 +1,13 @@
 use super::{
-    ACCENT, BORDER, Dragging, ERROR, ERROR_BG, Field, GuiApp, HIGHLIGHT, ListFocus, MUTED,
-    Measured, QueueDrag, TEXT, UI_INSET, button, column, empty_state, format_time, icon_button,
-    library::LibraryDrag, list_viewport, panel_header, panel_surface, panel_toolbar, row, row_text,
-    track_row,
+    ACCENT, BORDER, Dragging, Field, GuiApp, HIGHLIGHT, ListFocus, MUTED, Measured, TEXT, UI_INSET,
+    column, empty_state, format_time, icon_button, library::LibraryDrag, list_viewport,
+    panel_header, panel_surface, panel_toolbar, row, row_text, track_row,
 };
 pub(super) use super::{TRACK_HEIGHT, caption, list_row};
-use crate::model::{Command, PlaybackStatus, RepeatMode};
+use crate::{
+    gui::QueueDrag,
+    model::{Command, PlaybackStatus, RepeatMode},
+};
 use chrono::{DateTime, Local};
 use gpui::{AnyElement, Context, Div, Window, div, prelude::*, px, rgb, uniform_list};
 
@@ -40,7 +42,6 @@ impl GuiApp {
             None => "Last played —".into(),
         }
     }
-
     pub(super) fn transport_panel(
         &mut self,
         panel_id: u64,
@@ -289,46 +290,77 @@ impl GuiApp {
     }
 
     fn panel_selected_tracks(&self) -> Vec<i64> {
-        self.state
-            .library
+        self.selected.iter().copied().collect()
+    }
+    pub(super) fn panel_track_text(&self, track_id: i64) -> (String, String) {
+        if let Some(track) = self
+            .state
+            .queue
             .tracks
             .iter()
-            .filter(|track| self.selected.contains(&track.id))
-            .map(|track| track.id)
-            .collect()
-    }
-
-    pub(super) fn panel_track_text(&self, track_id: i64) -> (String, String) {
-        match self
-            .library_index
-            .get(&track_id)
-            .and_then(|index| self.state.library.tracks.get(*index))
+            .find(|track| track.id == track_id)
         {
-            Some(track) => {
-                let detail = format!(
-                    "{}{}{}  ·  {}{}{}",
-                    track.artist,
-                    if track.artist.is_empty() || track.album.is_empty() {
+            let detail = format!(
+                "{}{}{} · {}{}",
+                track.artist,
+                if track.artist.is_empty() || track.album.is_empty() {
+                    ""
+                } else {
+                    " / "
+                },
+                track.album,
+                format_time(track.duration.unwrap_or(0.)),
+                if track.missing {
+                    " · File missing"
+                } else {
+                    ""
+                }
+            );
+            return (track.title.clone(), detail);
+        }
+        if let Some(row) = self
+            .library_buffer
+            .rows
+            .iter()
+            .find(|row| row.id == track_id)
+            .or_else(|| self.ranking_rows.iter().find(|row| row.id == track_id))
+        {
+            return (
+                row.title.clone(),
+                format!(
+                    "{}{}{} · {}",
+                    row.artist,
+                    if row.artist.is_empty() || row.album.is_empty() {
                         ""
                     } else {
                         " / "
                     },
-                    track.album,
-                    format_time(track.duration.unwrap_or(0.0)),
-                    track.bitrate_bps.map_or(String::new(), |bitrate| format!(
-                        "  ·  {:.1} kbps",
-                        bitrate as f64 / 1000.0
-                    )),
-                    if track.missing {
-                        "  ·  File missing"
-                    } else {
-                        ""
-                    }
-                );
-                (track.title.clone(), detail)
-            }
-            None => ("Missing track".into(), format!("Track #{track_id}")),
+                    row.album,
+                    format_time(row.duration.unwrap_or(0.))
+                ),
+            );
         }
+        if let Some(row) = self
+            .playlist_entries
+            .rows
+            .iter()
+            .find(|row| row.track_id == track_id)
+        {
+            return (
+                row.title.clone(),
+                format!(
+                    "{}{}{}",
+                    row.artist,
+                    if row.artist.is_empty() || row.album.is_empty() {
+                        ""
+                    } else {
+                        " / "
+                    },
+                    row.album
+                ),
+            );
+        }
+        ("Track".into(), format!("Track #{track_id}"))
     }
 
     pub(super) fn panel_error(&mut self, message: &'static str, cx: &mut Context<Self>) {
@@ -342,81 +374,161 @@ impl GuiApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let count = self.filtered_rows.len();
-        let mut tools = panel_toolbar();
-        tools = tools
-            .child(button(
-                ("library-force-scan", panel_id),
-                if self.force_scan {
-                    "Force metadata rescan: on"
+        let page_size = self.view_page_size();
+        let (total, page) = if self.library_tree_active {
+            let offset = self.directory_tree.root_offset();
+            (self.directory_tree.root_total(), offset / page_size)
+        } else {
+            (self.library_buffer.total, self.library_page)
+        };
+        let page_count = total.div_ceil(page_size).max(1);
+        let can_prev = page > 0;
+        let can_next = page + 1 < page_count;
+        let mut tools = panel_toolbar()
+            .child(icon_button(
+                ("library-view", panel_id),
+                if self.library_tree_active {
+                    "󰉋"
                 } else {
-                    "Force metadata rescan: off"
+                    "󰉢"
+                },
+                if self.library_tree_active {
+                    "Switch to flat list view"
+                } else {
+                    "Switch to directory tree view"
                 },
                 cx,
-                |this, _, cx| {
-                    this.force_scan = !this.force_scan;
-                    cx.notify();
-                },
+                |this, _, cx| this.toggle_library_view(cx),
             ))
-            .child(button(
-                ("library-filter-favorites", panel_id),
-                if self.favorites_only {
-                    "Favorites only: on"
-                } else {
-                    "Favorites only: off"
-                },
+            .when(can_prev || can_next, |tools| {
+                tools
+                    .child(
+                        icon_button(
+                            ("library-page-prev", panel_id),
+                            "󰒮",
+                            "Browse earlier tracks",
+                            cx,
+                            move |this, _, cx| {
+                                if can_prev {
+                                    this.set_library_page(page - 1, cx);
+                                }
+                            },
+                        )
+                        .when(!can_prev, |view| {
+                            view.text_color(rgb(MUTED))
+                                .border_color(rgb(BORDER))
+                                .cursor_default()
+                        }),
+                    )
+                    .child(
+                        icon_button(
+                            ("library-page-next", panel_id),
+                            "󰒭",
+                            "Browse more tracks",
+                            cx,
+                            move |this, _, cx| {
+                                if can_next {
+                                    this.set_library_page(page + 1, cx);
+                                }
+                            },
+                        )
+                        .when(!can_next, |view| {
+                            view.text_color(rgb(MUTED))
+                                .border_color(rgb(BORDER))
+                                .cursor_default()
+                        }),
+                    )
+            })
+            .child(
+                icon_button(
+                    ("library-filter-favorites", panel_id),
+                    "󰓎",
+                    "Toggle favorites filter",
+                    cx,
+                    |this, _, cx| {
+                        this.favorites_only = !this.favorites_only;
+                        this.refresh_filter(cx);
+                    },
+                )
+                .when(self.favorites_only, |view| {
+                    view.text_color(rgb(ACCENT)).border_color(rgb(ACCENT))
+                }),
+            )
+            .child(
+                icon_button(
+                    ("library-filter-missing", panel_id),
+                    "󰌶",
+                    "Toggle missing filter",
+                    cx,
+                    |this, _, cx| {
+                        this.missing_only = !this.missing_only;
+                        this.refresh_filter(cx);
+                    },
+                )
+                .when(self.missing_only, |view| {
+                    view.text_color(rgb(ACCENT)).border_color(rgb(ACCENT))
+                }),
+            )
+            .child(icon_button(
+                ("library-add-root", panel_id),
+                "󰐕",
+                "Add library folder",
                 cx,
-                |this, _, cx| {
-                    this.favorites_only = !this.favorites_only;
-                    this.refresh_filter(cx);
-                    cx.notify();
-                },
+                |this, _, cx| this.choose_library_root(cx),
             ))
-            .child(button(
-                ("library-filter-missing", panel_id),
-                if self.missing_only {
-                    "Missing only: on"
-                } else {
-                    "Missing only: off"
-                },
-                cx,
-                |this, _, cx| {
-                    this.missing_only = !this.missing_only;
-                    this.refresh_filter(cx);
-                    cx.notify();
-                },
-            ));
-        tools = tools.child(icon_button(
-            ("library-add-root", panel_id),
-            "+",
-            "Add library folder",
-            cx,
-            |this, _, cx| this.choose_library_root(cx),
-        ));
+            .child(
+                icon_button(
+                    ("library-force-scan", panel_id),
+                    "󰑐",
+                    if self.force_scan {
+                        "Force rescans: on"
+                    } else {
+                        "Force rescans: off"
+                    },
+                    cx,
+                    |this, _, cx| {
+                        this.force_scan = !this.force_scan;
+                        cx.notify();
+                    },
+                )
+                .when(self.force_scan, |view| {
+                    view.text_color(rgb(ACCENT)).border_color(rgb(ACCENT))
+                }),
+            );
         if !self.selected.is_empty() {
             tools = tools
-                .child(button(
+                .child(icon_button(
                     ("library-enqueue", panel_id),
-                    "Append selected to queue",
+                    "󰐕",
+                    "Append selected tracks to queue",
                     cx,
                     |this, _, cx| {
-                        let track_ids = this.panel_selected_tracks();
-                        this.send(Command::Enqueue { track_ids }, cx);
+                        this.send(
+                            Command::Enqueue {
+                                track_ids: this.panel_selected_tracks(),
+                            },
+                            cx,
+                        )
                     },
                 ))
-                .child(button(
+                .child(icon_button(
                     ("library-remove", panel_id),
-                    "Remove selected from library (keep files)",
+                    "󰆴",
+                    "Remove selected tracks from library",
                     cx,
                     |this, _, cx| {
-                        let track_ids = this.panel_selected_tracks();
-                        this.send(Command::RemoveTracks { track_ids }, cx);
+                        this.send(
+                            Command::RemoveTracks {
+                                track_ids: this.panel_selected_tracks(),
+                            },
+                            cx,
+                        )
                     },
-                ));
-            tools = tools
-                .child(button(
+                ))
+                .child(icon_button(
                     ("library-favorite-selected", panel_id),
-                    "Favorite selected",
+                    "󰓎",
+                    "Add selected to favorites",
                     cx,
                     |this, _, cx| {
                         this.send(
@@ -425,12 +537,13 @@ impl GuiApp {
                                 favorite: true,
                             },
                             cx,
-                        );
+                        )
                     },
                 ))
-                .child(button(
+                .child(icon_button(
                     ("library-unfavorite-selected", panel_id),
-                    "Unfavorite selected",
+                    "󰓐",
+                    "Remove selected from favorites",
                     cx,
                     |this, _, cx| {
                         this.send(
@@ -439,84 +552,97 @@ impl GuiApp {
                                 favorite: false,
                             },
                             cx,
-                        );
+                        )
                     },
                 ));
         }
         let mut panel = panel_surface(("library-panel", panel_id))
             .child(panel_header(
                 "Library",
-                format!(
-                    "{count} tracks · {} selected · Ctrl-click to select multiple",
-                    self.selected.len()
-                ),
+                format!("{total} entries · {} selected", self.selected.len()),
             ))
             .child(self.panel_field(Field::Search, "Search title, artist or album"))
             .child(tools);
         if self.state.system.scanning {
             panel = panel.child(caption(self.state.system.scan_message.clone()).truncate());
         }
-        if count == 0 {
-            panel = panel.child(empty_state(
-                "No matching tracks. Scan a music file or folder to get started.",
-            ));
-        }
         if self.library_tree_active {
-            return panel
-                .child(caption(
-                    "↑/↓ navigate · ←/→ collapse/expand · Space toggles folders · Enter plays",
+            panel
+                .child(self.library_directory_list(panel_id, cx))
+                .child(icon_button(
+                    ("library-add-root-bottom", panel_id),
+                    "󰐕",
+                    "Add library folder",
+                    cx,
+                    |this, _, cx| this.choose_library_root(cx),
                 ))
-                .child(self.library_tree_list(panel_id, cx))
-                .into_any_element();
-        }
-        panel
-            .child(list_viewport(
-                uniform_list(
-                    ("library-rows", panel_id),
-                    count,
-                    cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
-                        range
-                            .filter_map(|index| {
-                                let track = this
-                                    .state
-                                    .library
-                                    .tracks
-                                    .get(*this.filtered_rows.get(index)?)?;
-                                let id = track.id;
-                                let (title, detail) = this.panel_track_text(id);
-                                Some(
-                                    track_row(
-                                        ("library-track", id as u64),
-                                        ("library-track-text", id as u64),
-                                        this.selected.contains(&id),
-                                        title,
-                                        detail,
-                                    )
-                                    .on_click(cx.listener(
-                                        move |this, event: &gpui::ClickEvent, window, cx| {
-                                            this.focus_workspace(window, cx);
-                                            this.list_focus = Some(ListFocus::Library);
-                                            let modifiers = event.modifiers();
-                                            this.select_track(
-                                                id,
-                                                modifiers.control || modifiers.platform,
-                                                cx,
-                                            );
-                                            if event.click_count() == 2 {
-                                                this.send(Command::Play { track_id: id }, cx);
-                                            }
+                .into_any_element()
+        } else {
+            let rows = self.library_buffer.rows.len();
+            panel
+                .child(list_viewport(
+                    uniform_list(
+                        ("library-rows", panel_id),
+                        rows,
+                        cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                            range
+                                .filter_map(|index| {
+                                    let row = this.library_buffer.rows.get(index)?.clone();
+                                    let id = row.id;
+                                    let detail = format!(
+                                        "{}{}{} · {}{}",
+                                        row.artist,
+                                        if row.artist.is_empty() || row.album.is_empty() {
+                                            ""
+                                        } else {
+                                            " / "
                                         },
-                                    )),
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                    }),
-                )
-                .h_full()
-                .min_h_0()
-                .w_full(),
-            ))
-            .into_any_element()
+                                        row.album,
+                                        format_time(row.duration.unwrap_or(0.)),
+                                        if row.missing { " · File missing" } else { "" }
+                                    );
+                                    Some(
+                                        track_row(
+                                            ("library-track", id as u64),
+                                            ("library-track-text", id as u64),
+                                            this.selected.contains(&id),
+                                            row.title,
+                                            detail,
+                                        )
+                                        .on_click(cx.listener(
+                                            move |this, event: &gpui::ClickEvent, window, cx| {
+                                                this.focus_workspace(window, cx);
+                                                this.list_focus = Some(ListFocus::Library);
+                                                this.select_track(
+                                                    id,
+                                                    event.modifiers().control
+                                                        || event.modifiers().platform,
+                                                    cx,
+                                                );
+                                                if event.click_count() == 2 {
+                                                    this.send(Command::Play { track_id: id }, cx);
+                                                }
+                                            },
+                                        )),
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                        }),
+                    )
+                    .h_full()
+                    .min_h_0()
+                    .w_full()
+                    .track_scroll(&self.library_buffer.scroll),
+                ))
+                .child(icon_button(
+                    ("library-add-root-bottom", panel_id),
+                    "󰐕",
+                    "Add library folder",
+                    cx,
+                    |this, _, cx| this.choose_library_root(cx),
+                ))
+                .into_any_element()
+        }
     }
 
     fn selected_queue_ids_in_order(&self) -> Vec<u64> {
@@ -706,10 +832,7 @@ impl GuiApp {
         panel_surface(("queue-panel", panel_id))
             .on_drop(cx.listener(|this, drag: &LibraryDrag, window, cx| {
                 window.prevent_default();
-                let track_ids = this.library_drag_track_ids(&drag.node);
-                if !track_ids.is_empty() {
-                    this.send(Command::Enqueue { track_ids }, cx);
-                }
+                this.resolve_library_drag(&drag.nodes, super::DragDestination::Queue, cx);
             }))
             .drag_over::<LibraryDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
             .child(panel_header(
@@ -803,10 +926,7 @@ impl GuiApp {
                 )
                 .on_drop(cx.listener(|this, drag: &LibraryDrag, window, cx| {
                     window.prevent_default();
-                    let track_ids = this.library_drag_track_ids(&drag.node);
-                    if !track_ids.is_empty() {
-                        this.send(Command::Enqueue { track_ids }, cx);
-                    }
+                    this.resolve_library_drag(&drag.nodes, super::DragDestination::Queue, cx);
                 }))
                 .drag_over::<LibraryDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
                 .h_full()
@@ -820,17 +940,9 @@ impl GuiApp {
         let Some(entry_id) = self.selected_entry else {
             return;
         };
-        let Some(playlist) = self
-            .state
-            .library
-            .playlists
-            .iter()
-            .find(|playlist| Some(playlist.id) == self.selected_playlist)
-        else {
-            return;
-        };
-        let Some(index) = playlist
-            .entries
+        let Some(index) = self
+            .playlist_entries
+            .rows
             .iter()
             .position(|entry| entry.id == entry_id)
         else {
@@ -841,11 +953,11 @@ impl GuiApp {
         } else {
             index.saturating_sub(1)
         };
-        if target != index && target < playlist.entries.len() {
+        if target != index && target < self.playlist_entries.total {
             self.send(
                 Command::MovePlaylistEntry {
                     entry_id,
-                    index: target,
+                    index: self.playlist_entries.offset + target,
                 },
                 cx,
             );
@@ -858,183 +970,124 @@ impl GuiApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let selected = self.selected_playlist.and_then(|id| {
-            self.state
-                .library
-                .playlists
-                .iter()
-                .find(|playlist| playlist.id == id)
-        });
-        let playlist_id = selected.map(|playlist| playlist.id);
-        let entry_count = selected.map_or(0, |playlist| playlist.entries.len());
-        let selected_index = selected.and_then(|playlist| {
-            playlist
-                .entries
-                .iter()
-                .position(|entry| Some(entry.id) == self.selected_entry)
-        });
-        let selected_name = selected.map(|playlist| playlist.name.clone());
-        let manage = panel_toolbar().child(icon_button(
-            ("playlist-create", panel_id),
-            "+",
-            "Create playlist",
-            cx,
-            |this, _, cx| {
-                let name = this.value(Field::PlaylistName, cx).trim().to_owned();
-                if name.is_empty() {
-                    this.panel_error("Enter a playlist name first.", cx);
-                    return;
-                }
-                this.send(Command::CreatePlaylist { name }, cx);
-            },
-        ));
-        let files = panel_toolbar().child(icon_button(
-            ("playlist-import", panel_id),
-            "↓",
-            "Choose M3U to import",
-            cx,
-            |this, _, cx| this.choose_playlist_import(cx),
-        ));
-        let catalog_height = (self.state.library.playlists.len().max(1) as f32
-            * TRACK_HEIGHT
-            * self.state.system.config.ui_scale)
-            .min(126. * self.state.system.config.ui_scale);
+        let playlist_id = self.selected_playlist;
+        let selected_name = playlist_id
+            .and_then(|id| {
+                self.playlist_buffer
+                    .rows
+                    .iter()
+                    .find(|p| p.id == id)
+                    .map(|p| p.name.clone())
+            })
+            .unwrap_or_default();
+        let entry_count = if playlist_id == self.playlist_entries.playlist_id {
+            self.playlist_entries.total
+        } else {
+            0
+        };
+        let page_size = self.view_page_size();
+        let page = self.playlist_buffer.offset / page_size;
+        let page_count = self.playlist_buffer.total.div_ceil(page_size).max(1);
+        let entry_page = self.playlist_entries.offset / page_size;
+        let entry_page_count = entry_count.div_ceil(page_size).max(1);
         let mut panel = panel_surface(("playlists-panel", panel_id))
             .on_drop(cx.listener(|this, drag: &LibraryDrag, window, cx| {
                 window.prevent_default();
-                let Some(playlist_id) = this.selected_playlist else {
-                    this.panel_error("Select a playlist before dropping tracks.", cx);
-                    return;
-                };
-                let track_ids = this.library_drag_track_ids(&drag.node);
-                if !track_ids.is_empty() {
-                    this.send(
-                        Command::AddPlaylist {
-                            playlist_id,
-                            track_ids,
-                        },
+                if let Some(id) = this.selected_playlist {
+                    this.resolve_library_drag(
+                        &drag.nodes,
+                        super::DragDestination::Playlist(id),
                         cx,
                     );
+                } else {
+                    this.panel_error("Select a playlist before dropping tracks.", cx);
                 }
             }))
             .child(panel_header(
                 "Playlists",
                 format!(
                     "{} playlists · select one to manage its tracks",
-                    self.state.library.playlists.len()
+                    self.playlist_buffer.total
                 ),
             ))
             .child(self.panel_field(Field::PlaylistName, "Playlist name"))
-            .child(row().flex_wrap().child(manage).child(files))
             .child(
+                panel_toolbar()
+                    .child(icon_button(
+                        ("playlist-create", panel_id),
+                        "+",
+                        "Create playlist",
+                        cx,
+                        |this, _, cx| {
+                            let name = this.value(Field::PlaylistName, cx).trim().to_owned();
+                            if name.is_empty() {
+                                this.panel_error("Enter a playlist name first.", cx);
+                            } else {
+                                this.send(Command::CreatePlaylist { name }, cx);
+                            }
+                        },
+                    ))
+                    .child(icon_button(
+                        ("playlist-import", panel_id),
+                        "↓",
+                        "Import M3U",
+                        cx,
+                        |this, _, cx| this.choose_playlist_import(cx),
+                    ))
+                    .when(page > 0, |tools| {
+                        tools.child(icon_button(
+                            ("playlist-page-prev", panel_id),
+                            "󰒮",
+                            "Browse earlier playlists",
+                            cx,
+                            move |this, _, cx| {
+                                this.request_playlist_summaries(
+                                    this.playlist_buffer.offset.saturating_sub(page_size),
+                                    cx,
+                                )
+                            },
+                        ))
+                    })
+                    .when(page + 1 < page_count, |tools| {
+                        tools.child(icon_button(
+                            ("playlist-page-next", panel_id),
+                            "󰒭",
+                            "Browse more playlists",
+                            cx,
+                            move |this, _, cx| {
+                                this.request_playlist_summaries(
+                                    this.playlist_buffer.offset.saturating_add(page_size),
+                                    cx,
+                                )
+                            },
+                        ))
+                    }),
+            )
+            .child(list_viewport(
                 uniform_list(
                     ("playlist-catalog", panel_id),
-                    self.state.library.playlists.len(),
+                    self.playlist_buffer.rows.len(),
                     cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                         range
                             .filter_map(|index| {
-                                let playlist = this.state.library.playlists.get(index)?;
-                                let id = playlist.id;
-                                let entry_count = playlist.entries.len();
-                                let mut actions = row().flex_shrink_0();
-                                if this.selected_playlist == Some(id) {
-                                    actions = actions
-                                        .child(icon_button(
-                                            ("playlist-play-item", id as u64),
-                                            "▷",
-                                            "Play playlist",
-                                            cx,
-                                            move |this, _, cx| {
-                                                this.send(
-                                                    Command::PlayPlaylist { playlist_id: id },
-                                                    cx,
-                                                );
-                                            },
-                                        ))
-                                        .child(icon_button(
-                                            ("playlist-export", id as u64),
-                                            "↑",
-                                            "Choose destination for M3U export",
-                                            cx,
-                                            move |this, _, cx| this.choose_playlist_export(id, cx),
-                                        ))
-                                        .child(icon_button(
-                                            ("playlist-rename", id as u64),
-                                            "✎",
-                                            "Rename playlist",
-                                            cx,
-                                            move |this, _, cx| {
-                                                let name = this
-                                                    .value(Field::PlaylistName, cx)
-                                                    .trim()
-                                                    .to_owned();
-                                                if name.is_empty() {
-                                                    this.panel_error(
-                                                        "Enter a playlist name first.",
-                                                        cx,
-                                                    );
-                                                    return;
-                                                }
-                                                this.send(
-                                                    Command::RenamePlaylist {
-                                                        playlist_id: id,
-                                                        name,
-                                                    },
-                                                    cx,
-                                                );
-                                            },
-                                        ))
-                                        .child(icon_button(
-                                            ("playlist-delete", id as u64),
-                                            "×",
-                                            "Delete playlist",
-                                            cx,
-                                            move |this, _, cx| {
-                                                if entry_count > 0 {
-                                                    this.playlist_delete_confirm = Some(id);
-                                                } else {
-                                                    this.selected_playlist = None;
-                                                    this.selected_entry = None;
-                                                    this.send(
-                                                        Command::DeletePlaylist { playlist_id: id },
-                                                        cx,
-                                                    );
-                                                }
-                                                cx.notify();
-                                            },
-                                        ));
-                                }
-                                let content = row()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(row_text(
-                                        ("playlist-text", id as u64),
-                                        playlist.name.clone(),
-                                        format!("{} tracks", entry_count),
-                                    ))
-                                    .child(actions);
+                                let p = this.playlist_buffer.rows.get(index)?.clone();
+                                let id = p.id;
                                 Some(
                                     list_row(
                                         ("playlist", id as u64),
                                         this.selected_playlist == Some(id),
                                     )
-                                    .child(content)
+                                    .child(row_text(
+                                        ("playlist-text", id as u64),
+                                        p.name,
+                                        format!("{} tracks", p.entry_count),
+                                    ))
                                     .on_click(cx.listener(
-                                        move |this, _: &gpui::ClickEvent, window, cx| {
-                                            this.focus_workspace(window, cx);
+                                        move |this, _, _, cx| {
                                             this.selected_playlist = Some(id);
-                                            this.playlist_delete_confirm = None;
                                             this.selected_entry = None;
-                                            if let Some(name) = this
-                                                .state
-                                                .library
-                                                .playlists
-                                                .iter()
-                                                .find(|playlist| playlist.id == id)
-                                                .map(|playlist| playlist.name.clone())
-                                            {
-                                                this.set_value(Field::PlaylistName, name, cx);
-                                            }
+                                            this.clear_metadata_selection(cx);
+                                            this.request_playlist_entries(id, 0, cx);
                                             cx.notify();
                                         },
                                     )),
@@ -1043,139 +1096,197 @@ impl GuiApp {
                             .collect::<Vec<_>>()
                     }),
                 )
-                .h(px(catalog_height))
-                .flex_shrink_0()
+                .h(px(160.))
                 .w_full(),
-            );
-        if let Some(playlist_id) = playlist_id {
-            let mut tools = panel_toolbar();
-            if !self.selected.is_empty() {
-                tools = tools.child(icon_button(
-                    ("playlist-add", panel_id),
-                    "+",
-                    "Add selected tracks",
-                    cx,
-                    move |this, _, cx| {
-                        this.send(
-                            Command::AddPlaylist {
-                                playlist_id,
-                                track_ids: this.panel_selected_tracks(),
-                            },
+            ));
+        if let Some(id) = playlist_id {
+            panel = panel
+                .child(caption(format!("{} · {entry_count} tracks", selected_name)).truncate())
+                .child(
+                    panel_toolbar()
+                        .child(icon_button(
+                            ("playlist-add", panel_id),
+                            "+",
+                            "Add selected tracks",
                             cx,
-                        );
-                    },
-                ));
-            }
-            if let Some(index) = selected_index {
-                tools = tools
-                    .child(icon_button(
-                        ("entry-play", panel_id),
-                        "▶",
-                        "Play selected track",
-                        cx,
-                        |this, _, cx| {
-                            let track_id = this
-                                .state
-                                .library
-                                .playlists
-                                .iter()
-                                .find(|playlist| Some(playlist.id) == this.selected_playlist)
-                                .and_then(|playlist| {
-                                    playlist
-                                        .entries
+                            move |this, _, cx| {
+                                this.send(
+                                    Command::AddPlaylist {
+                                        playlist_id: id,
+                                        track_ids: this.panel_selected_tracks(),
+                                    },
+                                    cx,
+                                )
+                            },
+                        ))
+                        .child(icon_button(
+                            ("playlist-play", panel_id),
+                            "▶",
+                            "Play playlist",
+                            cx,
+                            move |this, _, cx| {
+                                this.send(Command::PlayPlaylist { playlist_id: id }, cx)
+                            },
+                        ))
+                        .child(icon_button(
+                            ("playlist-export", panel_id),
+                            "↑",
+                            "Export playlist",
+                            cx,
+                            move |this, _, cx| this.choose_playlist_export(id, cx),
+                        ))
+                        .child(icon_button(
+                            ("playlist-rename", panel_id),
+                            "✎",
+                            "Rename playlist",
+                            cx,
+                            move |this, _, cx| {
+                                let name = this.value(Field::PlaylistName, cx).trim().to_owned();
+                                if name.is_empty() {
+                                    this.panel_error("Enter a playlist name first.", cx);
+                                } else {
+                                    this.send(
+                                        Command::RenamePlaylist {
+                                            playlist_id: id,
+                                            name,
+                                        },
+                                        cx,
+                                    );
+                                }
+                            },
+                        ))
+                        .child(icon_button(
+                            ("playlist-delete", panel_id),
+                            "×",
+                            "Delete playlist",
+                            cx,
+                            move |this, _, cx| {
+                                this.selected_playlist = None;
+                                this.selected_entry = None;
+                                this.send(Command::DeletePlaylist { playlist_id: id }, cx);
+                            },
+                        ))
+                        .when(self.selected_entry.is_some(), |bar| {
+                            bar.child(icon_button(
+                                ("entry-play", panel_id),
+                                "▶",
+                                "Play selected track",
+                                cx,
+                                move |this, _, cx| {
+                                    if let Some(entry) = this
+                                        .playlist_entries
+                                        .rows
                                         .iter()
                                         .find(|entry| Some(entry.id) == this.selected_entry)
-                                })
-                                .map(|entry| entry.track_id);
-                            if let Some(track_id) = track_id {
-                                this.send(Command::Play { track_id }, cx);
-                            }
-                        },
-                    ))
-                    .child(icon_button(
-                        ("entry-remove", panel_id),
-                        "×",
-                        "Remove selected entry",
-                        cx,
-                        |this, _, cx| {
-                            if let Some(entry_id) = this.selected_entry.take() {
-                                this.send(Command::RemovePlaylistEntry { entry_id }, cx);
-                                cx.notify();
-                            }
-                        },
-                    ));
-                if index > 0 {
-                    tools = tools.child(icon_button(
-                        ("entry-up", panel_id),
-                        "↑",
-                        "Move selected entry up",
-                        cx,
-                        |this, _, cx| this.move_selected_playlist_entry(false, cx),
-                    ));
-                }
-                if index + 1 < entry_count {
-                    tools = tools.child(icon_button(
-                        ("entry-down", panel_id),
-                        "↓",
-                        "Move selected entry down",
-                        cx,
-                        |this, _, cx| this.move_selected_playlist_entry(true, cx),
-                    ));
-                }
-            }
-            panel = panel
-                .child(
-                    caption(format!(
-                        "{} · {entry_count} tracks",
-                        selected_name.unwrap_or_default()
-                    ))
-                    .truncate(),
+                                    {
+                                        this.send(
+                                            Command::Play {
+                                                track_id: entry.track_id,
+                                            },
+                                            cx,
+                                        );
+                                    }
+                                },
+                            ))
+                            .child(icon_button(
+                                ("entry-remove", panel_id),
+                                "×",
+                                "Remove selected entry",
+                                cx,
+                                move |this, _, cx| {
+                                    if let Some(entry_id) = this.selected_entry.take() {
+                                        this.send(Command::RemovePlaylistEntry { entry_id }, cx);
+                                        this.clear_metadata_selection(cx);
+                                    }
+                                },
+                            ))
+                            .child(icon_button(
+                                ("entry-up", panel_id),
+                                "↑",
+                                "Move entry up",
+                                cx,
+                                move |this, _, cx| this.move_selected_playlist_entry(false, cx),
+                            ))
+                            .child(icon_button(
+                                ("entry-down", panel_id),
+                                "↓",
+                                "Move entry down",
+                                cx,
+                                move |this, _, cx| this.move_selected_playlist_entry(true, cx),
+                            ))
+                        })
+                        .when(entry_page > 0, |tools| {
+                            tools.child(icon_button(
+                                ("playlist-entry-prev", panel_id),
+                                "󰒮",
+                                "Browse earlier tracks",
+                                cx,
+                                move |this, _, cx| {
+                                    this.request_playlist_entries(
+                                        id,
+                                        this.playlist_entries.offset.saturating_sub(page_size),
+                                        cx,
+                                    )
+                                },
+                            ))
+                        })
+                        .when(entry_page + 1 < entry_page_count, |tools| {
+                            tools.child(icon_button(
+                                ("playlist-entry-next", panel_id),
+                                "󰒭",
+                                "Browse more tracks",
+                                cx,
+                                move |this, _, cx| {
+                                    this.request_playlist_entries(
+                                        id,
+                                        this.playlist_entries.offset.saturating_add(page_size),
+                                        cx,
+                                    )
+                                },
+                            ))
+                        }),
                 )
-                .child(tools)
-                .when(entry_count == 0, |panel| {
-                    panel.child(caption(
-                        "Select tracks in Library, then choose Add selected.",
-                    ))
-                })
                 .child(list_viewport(
                     uniform_list(
                         ("playlist-entries", panel_id),
-                        entry_count,
+                        self.playlist_entries.rows.len(),
                         cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
-                            let Some(playlist) = this
-                                .state
-                                .library
-                                .playlists
-                                .iter()
-                                .find(|playlist| playlist.id == playlist_id)
-                            else {
-                                return Vec::new();
-                            };
                             range
                                 .filter_map(|index| {
-                                    let entry = playlist.entries.get(index)?;
-                                    let id = entry.id;
-                                    let track_id = entry.track_id;
-                                    let (title, detail) = this.panel_track_text(track_id);
+                                    let e = this.playlist_entries.rows.get(index)?.clone();
+                                    let id = e.id;
+                                    let track_id = e.track_id;
                                     Some(
                                         list_row(
                                             ("playlist-entry", id as u64),
                                             this.selected_entry == Some(id),
                                         )
                                         .child(
-                                            caption((index + 1).to_string())
-                                                .w(px(20.0))
-                                                .flex_shrink_0(),
+                                            caption(
+                                                (this.playlist_entries.offset + index + 1)
+                                                    .to_string(),
+                                            )
+                                            .w(px(28.)),
                                         )
                                         .child(row_text(
                                             ("playlist-entry-text", id as u64),
-                                            title,
-                                            detail,
+                                            e.title,
+                                            format!(
+                                                "{}{}{}",
+                                                e.artist,
+                                                if e.artist.is_empty() || e.album.is_empty() {
+                                                    ""
+                                                } else {
+                                                    " / "
+                                                },
+                                                e.album
+                                            ),
                                         ))
                                         .on_click(cx.listener(
                                             move |this, event: &gpui::ClickEvent, window, cx| {
                                                 this.focus_workspace(window, cx);
                                                 this.selected_entry = Some(id);
+                                                this.update_metadata_track(track_id, cx);
                                                 if event.click_count() == 2 {
                                                     this.send(Command::Play { track_id }, cx);
                                                 }
@@ -1191,44 +1302,6 @@ impl GuiApp {
                     .min_h_0()
                     .w_full(),
                 ));
-            if self.playlist_delete_confirm == Some(playlist_id) {
-                panel = panel.child(
-                    column()
-                        .p(gpui::px(UI_INSET))
-                        .bg(rgb(ERROR_BG))
-                        .border_1()
-                        .border_color(rgb(ERROR))
-                        .rounded_sm()
-                        .child(caption(
-                            "This playlist is not empty. Delete it and all entries?",
-                        ))
-                        .child(
-                            row()
-                                .child(button(
-                                    ("playlist-delete-confirm", playlist_id as u64),
-                                    "Delete playlist",
-                                    cx,
-                                    move |this, _, cx| {
-                                        this.playlist_delete_confirm = None;
-                                        this.selected_playlist = None;
-                                        this.selected_entry = None;
-                                        this.send(Command::DeletePlaylist { playlist_id }, cx);
-                                    },
-                                ))
-                                .child(button(
-                                    ("playlist-delete-cancel", playlist_id as u64),
-                                    "Cancel",
-                                    cx,
-                                    |this, _, cx| {
-                                        this.playlist_delete_confirm = None;
-                                        cx.notify();
-                                    },
-                                )),
-                        ),
-                );
-            }
-        } else {
-            panel = panel.child(caption("Create, import or select a playlist."));
         }
         panel.into_any_element()
     }
@@ -1240,11 +1313,7 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let mut panel = panel_surface(("metadata-panel", panel_id));
-        if let Some(track) = self
-            .metadata_track
-            .and_then(|id| self.library_index.get(&id))
-            .and_then(|index| self.state.library.tracks.get(*index))
-        {
+        if let Some(track) = self.full_track.as_ref() {
             let id = track.id;
             let favorite = track.favorite;
             let title = track.title.clone();
@@ -1291,11 +1360,11 @@ impl GuiApp {
                         )
                         .child(icon_button(
                             ("metadata-favorite", panel_id),
-                            if favorite { "♥" } else { "♡" },
+                            if favorite { "󰓎" } else { "󰓐" },
                             if favorite {
-                                "Remove favorite"
+                                "Remove from favorites"
                             } else {
-                                "Add favorite"
+                                "Add to favorites"
                             },
                             cx,
                             move |this, _, cx| {
@@ -1361,7 +1430,7 @@ impl GuiApp {
                 .child(caption(format!(
                     "{} plays · {}",
                     track.play_count,
-                    self.last_played_text(track.id, track.last_played)
+                    self.last_played_text(id, track.last_played)
                 )))
                 .when_some(track.cue.as_ref(), |details, cue| {
                     details.child(caption(format!(
@@ -1403,7 +1472,7 @@ impl GuiApp {
             panel = panel.child(details);
         } else {
             panel = panel.child(column().flex_1().p(px(UI_INSET)).gap_2().child(empty_state(
-                "Select a Library track to edit title, artist and album.",
+                "Start playback or select a Library track to view its details.",
             )));
         }
         panel.into_any_element()
@@ -1415,43 +1484,38 @@ impl GuiApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let history = self.state.library.history.clone();
         panel_surface(("history-panel", panel_id))
             .child(caption(format!(
                 "Recent tracks · {} tracks · newest first",
-                self.state.library.history.len()
+                history.len()
             )))
-            .when(self.state.library.history.is_empty(), |panel| {
-                panel.child(empty_state(
-                    "Started tracks will appear here once per track.",
-                ))
-            })
             .child(list_viewport(
                 uniform_list(
                     ("history-rows", panel_id),
-                    self.state.library.history.len(),
+                    history.len(),
                     cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                         range
                             .filter_map(|index| {
-                                let item = this.state.library.history.get(index)?;
-                                let track_id = item.track_id;
-                                let mut item_row = track_row(
-                                    ("history-entry", track_id as u64),
-                                    ("history-text", track_id as u64),
-                                    this.selected.contains(&track_id),
-                                    item.title.clone(),
-                                    this.last_played_text(item.track_id, Some(item.played_at)),
-                                );
-                                if this.library_index.contains_key(&track_id) {
-                                    item_row = item_row.on_click(cx.listener(
+                                let item = history.get(index)?;
+                                let id = item.track_id;
+                                Some(
+                                    track_row(
+                                        ("history-entry", id as u64),
+                                        ("history-text", id as u64),
+                                        this.selected.contains(&id),
+                                        item.title.clone(),
+                                        this.last_played_text(id, Some(item.played_at)),
+                                    )
+                                    .on_click(cx.listener(
                                         move |this, event: &gpui::ClickEvent, _, cx| {
-                                            this.select_track(track_id, false, cx);
+                                            this.select_track(id, false, cx);
                                             if event.click_count() == 2 {
-                                                this.send(Command::Play { track_id }, cx);
+                                                this.send(Command::Play { track_id: id }, cx);
                                             }
                                         },
-                                    ));
-                                }
-                                Some(item_row)
+                                    )),
+                                )
                             })
                             .collect::<Vec<_>>()
                     }),
@@ -1460,34 +1524,34 @@ impl GuiApp {
                 .min_h_0()
                 .w_full(),
             ))
-            .child(caption("Most played · ranked by play count"))
+            .child(caption(format!(
+                "Most played · {} total plays",
+                self.library_stats
+                    .as_ref()
+                    .map_or(0, |stats| stats.play_count)
+            )))
             .child(list_viewport(
                 uniform_list(
                     ("most-played-rows", panel_id),
-                    self.most_played.len(),
+                    self.ranking_rows.len(),
                     cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                         range
                             .filter_map(|index| {
-                                let track = this
-                                    .state
-                                    .library
-                                    .tracks
-                                    .get(*this.most_played.get(index)?)?;
-                                let id = track.id;
+                                let row = this.ranking_rows.get(index)?.clone();
+                                let id = row.id;
                                 Some(
                                     list_row(
                                         ("most-played-track", id as u64),
                                         this.selected.contains(&id),
                                     )
                                     .child(
-                                        caption((index + 1).to_string())
-                                            .w(px(24.0))
-                                            .flex_shrink_0(),
+                                        caption((this.ranking_offset + index + 1).to_string())
+                                            .w(px(24.)),
                                     )
                                     .child(row_text(
                                         ("most-played-text", id as u64),
-                                        track.title.clone(),
-                                        format!("{} plays", track.play_count),
+                                        row.title,
+                                        format!("{} plays", row.play_count),
                                     ))
                                     .on_click(cx.listener(
                                         move |this, event: &gpui::ClickEvent, _, cx| {

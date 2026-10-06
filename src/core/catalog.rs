@@ -1,5 +1,5 @@
 use super::*;
-use anyhow::ensure;
+use anyhow::{bail, ensure};
 
 impl Core {
     pub(in crate::core) fn scan(
@@ -65,34 +65,19 @@ impl Core {
         self.reload(true)?;
         if let Some((name, items)) = scan.import {
             let mut ids = Vec::with_capacity(items.len());
-            let by_source: std::collections::HashMap<(&Path, Option<u32>), i64> = self
-                .state
-                .library
-                .tracks
-                .iter()
-                .filter(|track| !track.missing)
-                .map(|track| {
-                    let key = track
-                        .cue
-                        .as_ref()
-                        .map_or((track.path.as_path(), None), |cue| {
-                            (cue.sheet.as_path(), Some(cue.number))
-                        });
-                    (key, track.id)
-                })
-                .collect();
             for item in items {
                 let path = library::logical_path(&item.path)?;
-                if let Some(id) = by_source.get(&(path.as_path(), item.cue_track)) {
-                    ids.push(*id);
+                if let Some(id) = self.store.track_id_for_source(&path, item.cue_track)? {
+                    ids.push(id);
                 }
             }
+            ids.dedup();
             if ids.is_empty() {
                 bail!("Playlist contains no supported, accessible audio tracks");
             }
             let playlist_id = self.store.create_playlist(&name)?;
             self.store.add_playlist(playlist_id, &ids)?;
-            self.state.library.playlists = Arc::new(self.store.playlists()?);
+            self.reload(true)?;
         }
         Ok(())
     }

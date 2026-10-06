@@ -24,8 +24,8 @@ spectrogram_history_seconds = 20
 ----
 
 `library_roots` contains absolute music-directory paths. It defaults to an empty
-list; add at least one existing directory before scanning. Roots and requested
-paths are
+list; add at least one existing directory before scanning. The Library `+` button
+adds a root through the same configuration. Roots and requested paths are
 normalized logically, without resolving symlinks. Scans and CUE sources must lie
 within a configured logical root, but symlink targets may be elsewhere. Multiple
 aliases of the same directory remain independent roots; unavailable roots may
@@ -42,6 +42,7 @@ are `20` through `256`. The General settings page places it next to Queue limit.
 Applying a new size resets paged view buffers and immediately limits the internal
 Track detail LRU to twice that size. This setting lives in TOML, not in a database
 cache table; paging and resizing do not create persistent query results.
+
 
 Accepted media read buffer sizes are `1`, `2`, `4`, `8`, and `16` MiB.
 

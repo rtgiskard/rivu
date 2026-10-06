@@ -9,13 +9,13 @@ impl Core {
             .iter()
             .find(|entry| entry.id == queue_id)
             .context("Queue entry not found")?;
-        let track = self.track(entry.track_id)?.clone();
+        let track = self.track(entry.track_id)?;
         if !track.path.is_file() {
             bail!("Missing audio file: {}", track.path.display());
         }
         self.stop()?;
         self.audio(AudioCommand::Load {
-            path: track.path,
+            path: track.path.clone(),
             range: track.cue.as_ref().map(|cue| audio::PlaybackRange {
                 start_seconds: cue.start_seconds(),
                 end_seconds: cue.end_seconds(),
@@ -37,12 +37,19 @@ impl Core {
         self.state.playback.last_heard_at = None;
         self.state.queue.current_id = Some(queue_id);
         self.state.playback.duration = track.duration;
+        self.state.current_track = Some(Arc::new(track));
         self.state.playback.status = PlaybackStatus::Playing;
         self.state.system.last_error = None;
         if record_history {
             self.played.truncate(self.played_cursor);
             self.played.push(queue_id);
             self.played_cursor = self.played.len();
+            let keep = self.state.system.config.queue_limit as usize;
+            if self.played.len() > keep {
+                let drop_count = self.played.len() - keep;
+                self.played.drain(..drop_count);
+                self.played_cursor = self.played_cursor.saturating_sub(drop_count);
+            }
         }
         self.shuffle_bag.retain(|id| *id != queue_id);
         self.queue_dirty = true;
@@ -110,7 +117,7 @@ impl Core {
                 .playback
                 .duration
                 .filter(|duration| duration.is_finite() && *duration > 0.0));
-        self.state.library.history = Arc::new(self.store.history(200)?);
+        self.state.library.history = Arc::new(self.store.history(PAGE_SIZE)?);
         self.count_play()
     }
     pub(in crate::core) fn playback_progress(&mut self, position: f64, heard: f64) -> Result<()> {
@@ -215,7 +222,7 @@ impl Core {
             if let Some((track_id, played_at)) = final_activity {
                 self.store.mark_played(track_id, played_at)?;
                 self.update_track_stats(track_id, Some(played_at), false)?;
-                self.state.library.history = Arc::new(self.store.history(200)?);
+                self.state.library.history = Arc::new(self.store.history(PAGE_SIZE)?);
             }
             self.count_play()
         })();

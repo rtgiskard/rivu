@@ -14,14 +14,18 @@ use crate::{
     projection::GuiSnapshot,
     tray::TrayController,
 };
+use crate::{
+    model::{LibraryRow, LibrarySort, PlaylistEntryRow, PlaylistSummary},
+    response::ViewResponse,
+};
 use anyhow::Result;
 use ashpd::desktop::file_chooser::SelectedFiles;
 use components::ButtonTooltip;
 pub(super) use components::{
-    DropdownItem, DropdownState, POPOVER_MAX_HEIGHT, SelectableListState, SelectionMode,
-    SelectionModel, TRACK_HEIGHT, TreeKey, TreeState, caption, context_menu_container,
-    drag_preview, dropdown_container, dropdown_row, dropdown_trigger, empty_state, list_row,
-    list_viewport, panel_header, panel_surface, panel_toolbar, row_text, track_row,
+    DropdownItem, DropdownState, POPOVER_MAX_HEIGHT, SelectionModel, TRACK_HEIGHT, caption,
+    context_menu_container, drag_preview, dropdown_container, dropdown_row, dropdown_trigger,
+    empty_state, list_row, list_viewport, panel_header, panel_surface, panel_toolbar, row_text,
+    track_row, tree_row,
 };
 use futures::{FutureExt, StreamExt, channel::mpsc};
 use gpui::{prelude::*, *};
@@ -31,7 +35,7 @@ use library::LibraryNode;
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     rc::Rc,
     sync::Arc,
     time::Duration,
@@ -339,6 +343,18 @@ fn icon_button(
             "\u{f384}" => Some("F"),
             "󱀞" => Some("↔"),
             "󰌾" => Some("▣"),
+            "󰉋" => Some("▸"),
+            "󰉢" => Some("≡"),
+            "󰐕" => Some("+"),
+            "󰆴" => Some("×"),
+            "󰑐" | "󰑓" => Some("↻"),
+            "󰓎" => Some("★"),
+            "󰓐" => Some("☆"),
+            "󰌶" => Some("!"),
+            "󰁍" => Some("‹"),
+            "󰁔" => Some("›"),
+            "\u{f0142}" => Some("▸"),
+            "\u{f0140}" => Some("▾"),
             _ => None,
         };
         if let Some(fallback) = fallback {
@@ -361,8 +377,10 @@ fn menu_item(
     cx: &mut Context<GuiApp>,
     action: impl Fn(&mut GuiApp, &mut Window, &mut Context<GuiApp>) + 'static,
 ) -> Stateful<Div> {
-    components::menu_item_style(id, label)
-        .on_click(cx.listener(move |this, _, window, cx| action(this, window, cx)))
+    components::menu_item_style(id, label).on_click(cx.listener(move |this, _, window, cx| {
+        action(this, window, cx);
+        cx.stop_propagation();
+    }))
 }
 
 fn chooser_path(files: &SelectedFiles) -> Option<PathBuf> {
@@ -394,6 +412,7 @@ fn copyable_message(
         })
         .on_click(cx.listener(move |_, _, _, cx| {
             cx.write_to_clipboard(ClipboardItem::new_string(message.clone()));
+            cx.stop_propagation();
         }))
 }
 fn format_time(seconds: f64) -> String {
@@ -434,9 +453,9 @@ enum Measured {
     Volume(u64),
     Device,
     SettingsFont,
-    SettingsLogLevel,
     SettingsStyle,
     SettingsFft,
+    SettingsLogLevel,
     SettingsWindow,
 }
 #[derive(Clone, Copy)]
@@ -483,6 +502,51 @@ enum ListFocus {
     Queue,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum ViewRequestKind {
+    Library,
+    Ranking,
+    PlaylistSummaries,
+    PlaylistEntries,
+    Track,
+    Stats,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum DragDestination {
+    Queue,
+    Playlist(i64),
+}
+#[derive(Default)]
+struct LibraryViewBuffer {
+    query: Option<String>,
+    favorite: Option<bool>,
+    missing: Option<bool>,
+    sort: LibrarySort,
+    offset: usize,
+    total: usize,
+    rows: Vec<LibraryRow>,
+    scroll: gpui::UniformListScrollHandle,
+    pending: bool,
+}
+
+#[derive(Default)]
+struct PlaylistSummaryBuffer {
+    offset: usize,
+    total: usize,
+    rows: Vec<PlaylistSummary>,
+    pending: bool,
+}
+
+#[derive(Default)]
+struct PlaylistEntriesBuffer {
+    playlist_id: Option<i64>,
+    offset: usize,
+    total: usize,
+    rows: Vec<PlaylistEntryRow>,
+    pending: bool,
+}
+
 struct GuiApp {
     handle: AppHandle,
     state: GuiSnapshot,
@@ -490,7 +554,6 @@ struct GuiApp {
     layout_path: PathBuf,
     inputs: HashMap<Field, Entity<Input>>,
     selected: HashSet<i64>,
-    library_selection: SelectableListState<i64>,
     selected_queue: SelectionModel<u64>,
     list_focus: Option<ListFocus>,
     workspace_focus: FocusHandle,
@@ -498,18 +561,26 @@ struct GuiApp {
     selected_playlist: Option<i64>,
     selected_entry: Option<i64>,
     metadata_track: Option<i64>,
+    full_track: Option<crate::model::Track>,
     error: Option<String>,
-    request_generations: HashMap<u8, u64>,
-    filtered_rows: Vec<usize>,
-    library_index: HashMap<i64, usize>,
-    library_tree: TreeState<LibraryNode>,
-    library_tree_scroll: UniformListScrollHandle,
+    library_buffer: LibraryViewBuffer,
+    directory_tree: library::DirectoryTree,
+    playlist_buffer: PlaylistSummaryBuffer,
+    playlist_entries: PlaylistEntriesBuffer,
+    library_page: usize,
+    library_navigation: Option<bool>,
     library_tree_active: bool,
+    library_selected_nodes: HashSet<LibraryNode>,
     favorites_only: bool,
     missing_only: bool,
     force_scan: bool,
-    most_played: Vec<usize>,
-    library_search_cache: Vec<(String, String, String)>,
+    view_generation: u64,
+    view_revision: u64,
+    request_generations: HashMap<ViewRequestKind, u64>,
+    ranking_rows: Vec<LibraryRow>,
+    ranking_total: usize,
+    ranking_offset: usize,
+    library_stats: Option<crate::model::LibraryStats>,
     settings: settings::Settings,
     visuals: visuals::Visuals,
     radial_spectrum: radial_spectrum::RadialSpectrum,
@@ -533,123 +604,14 @@ struct GuiApp {
     _subscriptions: Vec<Subscription>,
 }
 impl GuiApp {
-    fn request_view(&mut self, command: Command, generation: u64, cx: &mut Context<Self>) {
-        let kind = match &command {
-            Command::LibraryPage {
-                sort: LibrarySort::MostPlayed,
-                ..
-            } => 5,
-            Command::LibraryPage { .. } => 0,
-            Command::PlaylistSummaries { .. } => 2,
-            Command::PlaylistEntries { .. } => 3,
-            Command::Track { .. } => 4,
-            Command::LibraryStats => 6,
-            _ => return,
-        };
-        self.request_generations.insert(kind, generation);
-        let delay = if matches!(&command, Command::LibraryPage { query: Some(_), .. }) {
-            crate::model::SEARCH_DEBOUNCE
-        } else {
-            Duration::from_millis(80)
-        };
-        let handle = self.handle.clone();
-        cx.spawn(async move |this, cx| {
-            // Search waits for a quiet interval; generations reject superseded queries.
-            cx.background_executor().timer(delay)
-                .await;
-            if !this
-                .update(cx, |this, _| {
-                    this.request_generations.get(&kind) == Some(&generation)
-                })
-                .unwrap_or(false)
-            {
-                return;
-            }
-            let response = cx
-                .background_executor()
-                .spawn(async move { handle.request(command) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                if this.request_generations.get(&kind) != Some(&generation) {
-                    return;
-                }
-                match kind {
-                    0 => this.library_buffer.pending = false,
-                    2 => this.playlist_buffer.pending = false,
-                    3 => this.playlist_entries.pending = false,
-                    _ => {}
-                }
-                if !response.ok {
-                    this.error = response.error;
-                    cx.notify();
-                    return;
-                }
-                if (kind <= 1 || kind == 4 || kind == 5 || kind == 6)
-                    && response.state.library.revision != this.state.library.revision
-                {
-                    match kind {
-                        0 => this.request_library_page(this.library_buffer.offset, cx),
-                        4 => {
-                            if let Some(id) = this.metadata_track {
-                                this.request_track(id, cx);
-                            }
-                        }
-                        5 | 6 => this.request_ranking(this.ranking_offset, cx),
-                        _ => {}
-                    }
-                    return;
-                }
-                if (kind == 2 || kind == 3)
-                    && response.state.library.playlist_revision
-                        != this.state.library.playlist_revision
-                {
-                    if kind == 2 {
-                        this.request_playlist_summaries(this.playlist_buffer.offset, cx);
-                    } else if let Some(id) = this.playlist_entries.playlist_id {
-                        this.request_playlist_entries(id, this.playlist_entries.offset, cx);
-                    }
-                    return;
-                }
-                match response.view {
-                    Some(ViewResponse::LibraryPage(page)) if kind == 5 => {
-                        this.ranking_total = page.total;
-                        this.ranking_rows = page.rows;
-                    }
-                    Some(ViewResponse::LibraryPage(page)) => {
-                        this.library_buffer.total = page.total;
-                        this.library_buffer.rows = page.rows;
-                    }
-                    Some(ViewResponse::PlaylistSummaries(page)) => {
-                        this.playlist_buffer.total = page.total;
-                        this.playlist_buffer.rows = page.rows;
-                    }
-                    Some(ViewResponse::PlaylistEntries(page)) => {
-                        this.playlist_entries.total = page.total;
-                        this.playlist_entries.rows = page.rows;
-                        this.reconcile_playlist_selection();
-                    }
-                    Some(ViewResponse::Track(track)) => {
-                        if let Some(track) = track.as_ref() {
-                            this.set_value(Field::Title, track.title.clone(), cx);
-                            this.set_value(Field::Artist, track.artist.clone(), cx);
-                            this.set_value(Field::Album, track.album.clone(), cx);
-                        }
-                        this.full_track = track;
-                        this.sync_waveform(cx);
-                    }
-                    Some(ViewResponse::LibraryStats(stats)) => this.library_stats = Some(stats),
-                    _ => {}
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+    fn view_page_size(&self) -> usize {
+        self.state.system.config.page_size as usize
     }
 
     fn input_focused(&self, window: &Window, cx: &App) -> bool {
         self.inputs
             .values()
-            .any(|input| input.read(cx).focus_handle(cx).is_focused(window))
+            .any(|input| input.read(cx).is_focused(window))
     }
 
     fn focus_workspace(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -709,30 +671,61 @@ impl GuiApp {
         })
     }
 
+    fn directory_row_selected(&self, row: &crate::model::DirectoryRow) -> bool {
+        match row {
+            crate::model::DirectoryRow::Directory { path } => {
+                self.library_selected_nodes.iter().any(|node| {
+                    matches!(node, library::LibraryNode::Directory(selected) if selected.as_ref() == path.as_path())
+                })
+            }
+            crate::model::DirectoryRow::Track(row) => self.selected.contains(&row.id),
+        }
+    }
+
     fn navigate_list(&mut self, focus: ListFocus, down: bool, cx: &mut Context<Self>) {
         match focus {
             ListFocus::Library => {
                 if self.library_tree_active {
-                    self.navigate_library_tree(if down { TreeKey::Down } else { TreeKey::Up }, cx);
+                    self.navigate_library_tree(down, cx);
                     return;
                 }
-                if self.filtered_rows.is_empty() {
+                if self.library_buffer.rows.is_empty() {
                     return;
                 }
-                let current = self.filtered_rows.iter().position(|index| {
-                    self.selected
-                        .contains(&self.state.library.tracks[*index].id)
-                });
+                let current = self
+                    .library_buffer
+                    .rows
+                    .iter()
+                    .position(|row| self.selected.contains(&row.id));
+                if let Some(index) = current {
+                    let at_boundary = if down {
+                        index + 1 >= self.library_buffer.rows.len()
+                            && self.library_buffer.offset + self.library_buffer.rows.len()
+                                < self.library_buffer.total
+                    } else {
+                        index == 0 && self.library_buffer.offset > 0
+                    };
+                    if at_boundary {
+                        let offset = if down {
+                            self.library_buffer.offset + self.view_page_size()
+                        } else {
+                            self.library_buffer
+                                .offset
+                                .saturating_sub(self.view_page_size())
+                        };
+                        self.request_library_page(offset, cx);
+                        self.library_navigation = Some(down);
+                        return;
+                    }
+                }
                 let index = match current {
-                    Some(index) if down => (index + 1).min(self.filtered_rows.len() - 1),
+                    Some(index) if down => (index + 1).min(self.library_buffer.rows.len() - 1),
                     Some(index) => index.saturating_sub(1),
                     None if down => 0,
-                    None => self.filtered_rows.len() - 1,
+                    None => self.library_buffer.rows.len() - 1,
                 };
-                if let Some(&row) = self.filtered_rows.get(index)
-                    && let Some(track) = self.state.library.tracks.get(row)
-                {
-                    self.select_track(track.id, false, cx);
+                if let Some(row) = self.library_buffer.rows.get(index) {
+                    self.select_track(row.id, false, cx);
                 }
             }
             ListFocus::Queue => {
@@ -775,24 +768,16 @@ impl GuiApp {
         match focus {
             ListFocus::Library => {
                 if self.library_tree_active {
-                    match self.library_tree.selected().map(|row| row.id.clone()) {
-                        Some(LibraryNode::Track(track_id)) => {
-                            self.send(Command::Play { track_id }, cx)
-                        }
-                        Some(LibraryNode::Directory(_)) => {
-                            self.navigate_library_tree(TreeKey::Toggle, cx)
-                        }
-                        None => {}
-                    }
+                    self.activate_library_tree(cx);
                     return;
                 }
-                let track_id = self
-                    .filtered_rows
+                if let Some(row) = self
+                    .library_buffer
+                    .rows
                     .iter()
-                    .map(|&index| self.state.library.tracks[index].id)
-                    .find(|id| self.selected.contains(id));
-                if let Some(track_id) = track_id {
-                    self.send(Command::Play { track_id }, cx);
+                    .find(|row| self.selected.contains(&row.id))
+                {
+                    self.send(Command::Play { track_id: row.id }, cx);
                 }
             }
             ListFocus::Queue => {
@@ -929,32 +914,42 @@ impl GuiApp {
             }
         }).detach();
         let mut app = Self {
-            settings: settings::Settings::new(&state.system.config, cx),
+            settings: settings::Settings::new(&state.system.config),
             handle,
             state,
             layout,
             layout_path,
             inputs,
             selected: HashSet::new(),
-            library_selection: SelectableListState::new([], SelectionMode::Multiple),
             selected_queue: SelectionModel::default(),
             selected_playlist: None,
             selected_entry: None,
             list_focus: None,
             workspace_focus: cx.focus_handle(),
             metadata_track: None,
+            full_track: None,
             error,
-            library_index: HashMap::new(),
-            request_generations: HashMap::new(),
-            filtered_rows: Vec::new(),
-            library_tree: TreeState::new([]),
-            library_tree_scroll: UniformListScrollHandle::new(),
+            library_buffer: LibraryViewBuffer {
+                sort: LibrarySort::Album,
+                ..Default::default()
+            },
+            directory_tree: library::DirectoryTree::default(),
+            playlist_buffer: PlaylistSummaryBuffer::default(),
+            playlist_entries: PlaylistEntriesBuffer::default(),
+            library_page: 0,
+            library_navigation: None,
             library_tree_active: true,
+            library_selected_nodes: HashSet::new(),
             favorites_only: false,
             missing_only: false,
             force_scan: false,
-            most_played: Vec::new(),
-            library_search_cache: Vec::new(),
+            view_generation: 0,
+            view_revision: 0,
+            request_generations: HashMap::new(),
+            ranking_rows: Vec::new(),
+            ranking_total: 0,
+            ranking_offset: 0,
+            library_stats: None,
             visuals: visuals::Visuals::new(),
             radial_spectrum: radial_spectrum::RadialSpectrum::new(),
             default_album: cx.new(|_| artwork::Artwork::new()),
@@ -976,10 +971,15 @@ impl GuiApp {
             _subscriptions: subscriptions,
             ui_font,
         };
-        app.rebuild_library(cx);
-        app.visuals.configure(&app.state.system.config);
-        app.radial_spectrum.configure(&app.state.system.config);
+        app.sync_metadata_default(cx);
+        app.request_library_page(0, cx);
+        app.request_directory_page(PathBuf::new(), 0, cx);
+        app.request_playlist_summaries(0, cx);
+        app.request_ranking(0, cx);
         app.sync_analysis(cx);
+        // Initialization may have completed before the wakeup callback was
+        // installed. Reconcile once so the first frame never keeps the empty snapshot.
+        app.refresh(cx);
         app.workspace_focus.focus(window, cx);
         app
     }
@@ -1077,157 +1077,480 @@ impl GuiApp {
         let value = value.into();
         self.inputs[&field].update(cx, |input, cx| input.set_text(value, cx));
     }
-    fn refresh_library_search_cache(&mut self) {
-        self.library_search_cache.clear();
-        self.library_search_cache
-            .extend(self.state.library.tracks.iter().map(|track| {
-                (
-                    track.title.to_lowercase(),
-                    track.artist.to_lowercase(),
-                    track.album.to_lowercase(),
-                )
-            }));
+    fn next_view_generation(&mut self) -> u64 {
+        self.view_generation = self.view_generation.wrapping_add(1);
+        self.view_generation
     }
-    fn refresh_library_index(&mut self, structure_changed: bool) {
-        self.library_index.clear();
-        self.library_index.extend(
-            self.state
-                .library
-                .tracks
-                .iter()
-                .enumerate()
-                .map(|(index, track)| (track.id, index)),
-        );
-        if structure_changed {
-            let ids = self
-                .state
-                .library
-                .tracks
-                .iter()
-                .map(|track| track.id)
-                .collect::<Vec<_>>();
-            self.library_selection.replace_items(ids);
-            self.library_selection.clear_selection();
-            for index in 0..self.library_selection.items().len() {
-                if self
-                    .selected
-                    .contains(&self.library_selection.items()[index])
-                {
-                    if self.library_selection.selected_index().is_none() {
-                        self.library_selection.select(index, false);
-                    } else {
-                        self.library_selection.toggle(index, true);
-                    }
-                }
-            }
-        }
-        self.selected
-            .retain(|id| self.library_index.contains_key(id));
-    }
-    fn refresh_library_statistics(&mut self, cx: &App) {
-        self.most_played.clear();
-        self.most_played.extend(
-            self.state
-                .library
-                .tracks
-                .iter()
-                .enumerate()
-                .filter_map(|(index, track)| (track.play_count > 0).then_some(index)),
-        );
-        self.most_played.sort_unstable_by_key(|&index| {
-            (
-                std::cmp::Reverse(self.state.library.tracks[index].play_count),
-                self.state.library.tracks[index].id,
-            )
-        });
-        self.refresh_filter(cx);
-    }
-    fn rebuild_library(&mut self, cx: &App) {
-        self.refresh_library_search_cache();
-        self.refresh_library_index(true);
-        self.rebuild_library_tree();
-        self.refresh_library_statistics(cx);
-    }
-    fn refresh_filter(&mut self, cx: &App) {
-        let query = self.value(Field::Search, cx).to_lowercase();
-        self.library_tree_active = query.is_empty() && !self.favorites_only && !self.missing_only;
-        self.filtered_rows.clear();
-        self.filtered_rows
-            .extend(
-                self.state
-                    .library
-                    .tracks
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, track)| {
-                        let (title, artist, album) = &self.library_search_cache[index];
-                        ((!self.favorites_only || track.favorite)
-                            && (!self.missing_only || track.missing)
-                            && (query.is_empty()
-                                || title.contains(&query)
-                                || artist.contains(&query)
-                                || album.contains(&query)))
-                        .then_some(index)
-                    }),
-            );
-        if !self.library_tree_active {
-            // Sort only view indices; the core's ID-sorted library remains unchanged.
-            self.filtered_rows.sort_unstable_by(|&left, &right| {
-                let left = &self.state.library.tracks[left];
-                let right = &self.state.library.tracks[right];
-                left.album
-                    .cmp(&right.album)
-                    .then_with(|| {
-                        if left.album.is_empty() {
-                            std::cmp::Ordering::Equal
-                        } else {
-                            (
-                                left.disc_number.unwrap_or(u32::MAX),
-                                left.track_number.unwrap_or(u32::MAX),
-                            )
-                                .cmp(&(
-                                    right.disc_number.unwrap_or(u32::MAX),
-                                    right.track_number.unwrap_or(u32::MAX),
-                                ))
-                        }
-                    })
-                    .then_with(|| left.title.cmp(&right.title))
-                    .then_with(|| left.id.cmp(&right.id))
-            });
-        }
-    }
-    fn update_metadata_track(&mut self, id: i64, cx: &mut Context<Self>) {
-        let Some(&index) = self.library_index.get(&id) else {
-            return;
+
+    fn request_view(&mut self, command: Command, generation: u64, cx: &mut Context<Self>) {
+        let kind = match &command {
+            Command::LibraryPage {
+                sort: LibrarySort::MostPlayed,
+                ..
+            } => ViewRequestKind::Ranking,
+            Command::LibraryPage { .. } => ViewRequestKind::Library,
+            Command::PlaylistSummaries { .. } => ViewRequestKind::PlaylistSummaries,
+            Command::PlaylistEntries { .. } => ViewRequestKind::PlaylistEntries,
+            Command::Track { .. } => ViewRequestKind::Track,
+            Command::LibraryStats => ViewRequestKind::Stats,
+            _ => return,
         };
-        let track = &self.state.library.tracks[index];
-        let values = (
-            track.title.clone(),
-            track.artist.clone(),
-            track.album.clone(),
+        self.request_generations.insert(kind, generation);
+        let delay = if matches!(&command, Command::LibraryPage { query: Some(_), .. }) {
+            crate::model::SEARCH_DEBOUNCE
+        } else {
+            Duration::from_millis(80)
+        };
+        let handle = self.handle.clone();
+        cx.spawn(async move |this, cx| {
+            // Search waits for a quiet interval; generations reject superseded queries.
+            cx.background_executor().timer(delay).await;
+            if !this
+                .update(cx, |this, _| {
+                    this.request_generations.get(&kind) == Some(&generation)
+                })
+                .unwrap_or(false)
+            {
+                return;
+            }
+            let response = cx
+                .background_executor()
+                .spawn(async move { handle.request(command) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.request_generations.get(&kind) != Some(&generation) {
+                    return;
+                }
+                match kind {
+                    ViewRequestKind::Library => this.library_buffer.pending = false,
+                    ViewRequestKind::PlaylistSummaries => this.playlist_buffer.pending = false,
+                    ViewRequestKind::PlaylistEntries => this.playlist_entries.pending = false,
+                    _ => {}
+                }
+                if !response.ok {
+                    if kind == ViewRequestKind::Library {
+                        this.library_navigation = None;
+                    }
+                    this.error = response.error;
+                    cx.notify();
+                    return;
+                }
+                if matches!(
+                    kind,
+                    ViewRequestKind::Library
+                        | ViewRequestKind::Ranking
+                        | ViewRequestKind::Track
+                        | ViewRequestKind::Stats
+                ) && response.state.library.revision != this.state.library.revision
+                {
+                    match kind {
+                        ViewRequestKind::Library => {
+                            let navigation = this.library_navigation;
+                            this.request_library_page(this.library_buffer.offset, cx);
+                            this.library_navigation = navigation;
+                        }
+                        ViewRequestKind::Track => {
+                            if let Some(id) = this.metadata_track {
+                                this.request_track(id, cx);
+                            }
+                        }
+                        ViewRequestKind::Ranking | ViewRequestKind::Stats => {
+                            this.request_ranking(this.ranking_offset, cx)
+                        }
+                        _ => {}
+                    }
+                    return;
+                }
+                if matches!(
+                    kind,
+                    ViewRequestKind::PlaylistSummaries | ViewRequestKind::PlaylistEntries
+                ) && response.state.library.playlist_revision
+                    != this.state.library.playlist_revision
+                {
+                    match kind {
+                        ViewRequestKind::PlaylistSummaries => {
+                            this.request_playlist_summaries(this.playlist_buffer.offset, cx)
+                        }
+                        ViewRequestKind::PlaylistEntries => {
+                            if let Some(id) = this.playlist_entries.playlist_id {
+                                this.request_playlist_entries(id, this.playlist_entries.offset, cx);
+                            }
+                        }
+                        _ => {}
+                    }
+                    return;
+                }
+                match response.view {
+                    Some(ViewResponse::LibraryPage(page)) if kind == ViewRequestKind::Ranking => {
+                        if this.ranking_offset > 0 && this.ranking_offset >= page.total {
+                            let last = page.total.saturating_sub(1) / this.view_page_size()
+                                * this.view_page_size();
+                            this.request_ranking(last, cx);
+                            return;
+                        }
+                        this.ranking_total = page.total;
+                        this.ranking_rows = page.rows;
+                    }
+                    Some(ViewResponse::LibraryPage(page)) if kind == ViewRequestKind::Library => {
+                        if this.library_buffer.offset > 0
+                            && this.library_buffer.offset >= page.total
+                        {
+                            let last = page.total.saturating_sub(1) / this.view_page_size()
+                                * this.view_page_size();
+                            let navigation = this.library_navigation;
+                            this.request_library_page(last, cx);
+                            this.library_navigation = navigation;
+                            return;
+                        }
+                        this.library_buffer.total = page.total;
+                        this.library_buffer.rows = page.rows;
+                        if let Some(down) = this.library_navigation.take() {
+                            let index = if down {
+                                0
+                            } else {
+                                this.library_buffer.rows.len().saturating_sub(1)
+                            };
+                            let id = this.library_buffer.rows.get(index).map(|row| row.id);
+                            if let Some(id) = id {
+                                this.select_track(id, false, cx);
+                            }
+                        }
+                    }
+                    Some(ViewResponse::PlaylistSummaries(page))
+                        if kind == ViewRequestKind::PlaylistSummaries =>
+                    {
+                        if this.playlist_buffer.offset > 0
+                            && this.playlist_buffer.offset >= page.total
+                        {
+                            let last = page.total.saturating_sub(1) / this.view_page_size()
+                                * this.view_page_size();
+                            this.request_playlist_summaries(last, cx);
+                            return;
+                        }
+                        this.playlist_buffer.total = page.total;
+                        this.playlist_buffer.rows = page.rows;
+                    }
+                    Some(ViewResponse::PlaylistEntries(page))
+                        if kind == ViewRequestKind::PlaylistEntries =>
+                    {
+                        if this.playlist_entries.offset > 0
+                            && this.playlist_entries.offset >= page.total
+                        {
+                            let last = page.total.saturating_sub(1) / this.view_page_size()
+                                * this.view_page_size();
+                            if let Some(id) = this.playlist_entries.playlist_id {
+                                this.request_playlist_entries(id, last, cx);
+                            }
+                            return;
+                        }
+                        this.playlist_entries.total = page.total;
+                        this.playlist_entries.rows = page.rows;
+                        let had_selected_entry = this.selected_entry.is_some();
+                        this.reconcile_playlist_selection();
+                        if had_selected_entry && this.selected_entry.is_none() {
+                            this.clear_metadata_selection(cx);
+                        }
+                    }
+                    Some(ViewResponse::Track(track)) if kind == ViewRequestKind::Track => {
+                        let draft_dirty = this.full_track.as_ref().is_some_and(|current| {
+                            this.value(Field::Title, cx) != current.title
+                                || this.value(Field::Artist, cx) != current.artist
+                                || this.value(Field::Album, cx) != current.album
+                        });
+                        if !draft_dirty {
+                            if let Some(track) = track.as_ref() {
+                                this.set_value(Field::Title, track.title.clone(), cx);
+                                this.set_value(Field::Artist, track.artist.clone(), cx);
+                                this.set_value(Field::Album, track.album.clone(), cx);
+                            }
+                        }
+                        this.full_track = track;
+                        this.sync_waveform(cx);
+                    }
+                    Some(ViewResponse::LibraryStats(stats)) if kind == ViewRequestKind::Stats => {
+                        this.library_stats = Some(stats)
+                    }
+                    _ => {}
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn request_library_page(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let page_size = self.view_page_size();
+        let offset = offset / page_size * page_size;
+        self.library_page = offset / page_size;
+        let query = self.value(Field::Search, cx).trim().to_lowercase();
+        let generation = self.next_view_generation();
+        self.library_buffer.query = (!query.is_empty()).then_some(query.clone());
+        self.library_buffer.favorite = self.favorites_only.then_some(true);
+        self.library_buffer.missing = self.missing_only.then_some(true);
+        self.library_buffer.offset = offset;
+        self.library_navigation = None;
+        self.library_buffer.rows.clear();
+        self.request_view(
+            Command::LibraryPage {
+                query: self.library_buffer.query.clone(),
+                favorite: self.library_buffer.favorite,
+                missing: self.library_buffer.missing,
+                sort: self.library_buffer.sort,
+                offset,
+                limit: page_size,
+            },
+            generation,
+            cx,
         );
+    }
+
+    fn request_directory_page(&mut self, path: PathBuf, offset: usize, cx: &mut Context<Self>) {
+        let page_size = self.view_page_size();
+        let offset = offset / page_size * page_size;
+        let generation = self.next_view_generation();
+        self.directory_tree.begin(path.clone(), offset, generation);
+        if path.as_os_str().is_empty() {
+            let roots = &self.state.system.config.library_roots;
+            let page = crate::model::DirectoryPage {
+                total: roots.len(),
+                rows: roots
+                    .iter()
+                    .skip(offset)
+                    .take(page_size)
+                    .map(|path| crate::model::DirectoryRow::Directory { path: path.clone() })
+                    .collect(),
+            };
+            self.directory_tree.accept(&path, generation, page);
+            self.directory_tree
+                .retain_known_directories(&mut self.library_selected_nodes);
+            cx.notify();
+            return;
+        }
+        let handle = self.handle.clone();
+        cx.spawn(async move |this, cx| {
+            let request_path = path.clone();
+            let response = cx
+                .background_executor()
+                .spawn(async move {
+                    handle.request(Command::DirectoryPage {
+                        path: request_path,
+                        offset,
+                        limit: page_size,
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.directory_tree.generation(&path) != Some(generation) {
+                    return;
+                }
+                if !response.ok {
+                    this.directory_tree.fail(&path, generation);
+                    this.error = response.error;
+                } else if response.state.library.revision != this.state.library.revision {
+                    this.request_directory_page(path, offset, cx);
+                    return;
+                } else if let Some(ViewResponse::DirectoryPage(page)) = response.view {
+                    if offset > 0 && offset >= page.total {
+                        let last_offset = page.total.saturating_sub(1) / page_size * page_size;
+                        this.request_directory_page(path, last_offset, cx);
+                        return;
+                    }
+                    this.directory_tree.accept(&path, generation, page);
+                    this.directory_tree
+                        .retain_known_directories(&mut this.library_selected_nodes);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn request_playlist_summaries(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let page_size = self.view_page_size();
+        let offset = offset / page_size * page_size;
+        let generation = self.next_view_generation();
+        self.playlist_buffer.offset = offset;
+        self.playlist_buffer.rows.clear();
+        self.playlist_buffer.pending = true;
+        self.request_view(
+            Command::PlaylistSummaries {
+                offset,
+                limit: page_size,
+            },
+            generation,
+            cx,
+        );
+    }
+
+    fn request_playlist_entries(
+        &mut self,
+        playlist_id: i64,
+        offset: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let page_size = self.view_page_size();
+        let offset = offset / page_size * page_size;
+        let page_changed = self.playlist_entries.playlist_id != Some(playlist_id)
+            || self.playlist_entries.offset != offset;
+        if page_changed {
+            self.selected_entry = None;
+            self.clear_metadata_selection(cx);
+        }
+        let playlist_changed = self.playlist_entries.playlist_id != Some(playlist_id);
+        self.playlist_entries.playlist_id = Some(playlist_id);
+        self.playlist_entries.offset = offset;
+        if playlist_changed {
+            self.playlist_entries.total = 0;
+        }
+        self.playlist_entries.rows.clear();
+        self.playlist_entries.pending = true;
+        let generation = self.next_view_generation();
+        self.request_view(
+            Command::PlaylistEntries {
+                playlist_id,
+                offset,
+                limit: page_size,
+            },
+            generation,
+            cx,
+        );
+    }
+
+    fn request_track(&mut self, id: i64, cx: &mut Context<Self>) {
+        let generation = self.next_view_generation();
+        if self.metadata_track != Some(id) {
+            self.full_track = None;
+        }
         self.metadata_track = Some(id);
-        self.set_value(Field::Title, values.0, cx);
-        self.set_value(Field::Artist, values.1, cx);
-        self.set_value(Field::Album, values.2, cx);
+        self.request_view(Command::Track { track_id: id }, generation, cx);
+    }
+    pub(super) fn clear_metadata_selection(&mut self, cx: &mut Context<Self>) {
+        self.metadata_track = None;
+        self.full_track = None;
+        self.request_generations.remove(&ViewRequestKind::Track);
+        self.sync_metadata_default(cx);
+        self.sync_waveform(cx);
+    }
+
+    fn library_page_count(&self) -> usize {
+        let total = if self.library_tree_active {
+            self.directory_tree.root_total()
+        } else {
+            self.library_buffer.total
+        };
+        total.div_ceil(self.view_page_size()).max(1)
+    }
+
+    fn set_library_page(&mut self, page: usize, cx: &mut Context<Self>) {
+        let page = page.min(self.library_page_count().saturating_sub(1));
+        if self.library_tree_active {
+            self.request_directory_page(PathBuf::new(), page * self.view_page_size(), cx);
+        } else {
+            self.library_page = page;
+            self.request_library_page(page * self.view_page_size(), cx);
+        }
+    }
+
+    fn toggle_library_view(&mut self, cx: &mut Context<Self>) {
+        self.library_tree_active = !self.library_tree_active;
+        if self.library_tree_active {
+            if self.directory_tree.generation(Path::new("")).is_none() {
+                self.request_directory_page(PathBuf::new(), 0, cx);
+            }
+        } else {
+            self.request_library_page(self.library_page * self.view_page_size(), cx);
+        }
+        cx.notify();
+    }
+
+    fn refresh_filter(&mut self, cx: &mut Context<Self>) {
+        // Filters apply to SQL track queries, not locally reconstructed folders.
+        self.library_tree_active = false;
+        self.library_page = 0;
+        self.request_library_page(0, cx);
+    }
+    fn request_ranking(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let page_size = self.view_page_size();
+        let offset = offset / page_size * page_size;
+        self.ranking_offset = offset;
+        self.ranking_rows.clear();
+        let generation = self.next_view_generation();
+        self.request_view(
+            Command::LibraryPage {
+                query: None,
+                favorite: None,
+                missing: None,
+                sort: LibrarySort::MostPlayed,
+                offset,
+                limit: page_size,
+            },
+            generation,
+            cx,
+        );
+        let generation = self.next_view_generation();
+        self.request_view(Command::LibraryStats, generation, cx);
+    }
+
+    fn update_metadata_track(&mut self, id: i64, cx: &mut Context<Self>) {
+        self.request_track(id, cx);
+    }
+
+    fn sync_metadata_default(&mut self, cx: &mut Context<Self>) {
+        if self.metadata_track.is_some() {
+            return;
+        }
+        self.request_generations.remove(&ViewRequestKind::Track);
+        let current = self.state.current_track();
+        if self.full_track.as_ref() == current {
+            return;
+        }
+        self.full_track = current.cloned();
+        let (title, artist, album) = self
+            .full_track
+            .as_ref()
+            .map(|track| {
+                (
+                    track.title.clone(),
+                    track.artist.clone(),
+                    track.album.clone(),
+                )
+            })
+            .unwrap_or_default();
+        self.set_value(Field::Title, title, cx);
+        self.set_value(Field::Artist, artist, cx);
+        self.set_value(Field::Album, album, cx);
     }
 
     fn select_track(&mut self, id: i64, multi: bool, cx: &mut Context<Self>) {
-        if let Some(index) = self
-            .library_selection
-            .items()
-            .iter()
-            .position(|item| *item == id)
-        {
-            self.library_selection.toggle(index, multi);
+        if multi {
+            if !self.selected.insert(id) {
+                self.selected.remove(&id);
+            }
+        } else {
             self.selected.clear();
-            self.selected.extend(
-                self.library_selection
-                    .selected_indices()
-                    .filter_map(|index| self.library_selection.items().get(index).copied()),
-            );
+            self.library_selected_nodes.clear();
+            self.selected.insert(id);
         }
-        self.update_metadata_track(id, cx);
+        if !self.library_tree_active
+            && let Some(index) = self.library_buffer.rows.iter().position(|row| row.id == id)
+        {
+            self.library_buffer
+                .scroll
+                .scroll_to_item(index, gpui::ScrollStrategy::Nearest);
+        }
+        if let Some(selected) = self
+            .selected
+            .contains(&id)
+            .then_some(id)
+            .or_else(|| self.selected.iter().copied().min())
+        {
+            self.update_metadata_track(selected, cx);
+        } else {
+            self.metadata_track = None;
+            self.full_track = None;
+            self.sync_metadata_default(cx);
+        }
         self.sync_waveform(cx);
         cx.notify();
     }
@@ -1298,24 +1621,63 @@ impl GuiApp {
             self.playlist_delete_confirm = None;
             return;
         };
-        let Some(playlist) = self
-            .state
-            .library
-            .playlists
+        if !self
+            .playlist_buffer
+            .rows
             .iter()
-            .find(|playlist| playlist.id == playlist_id)
-        else {
-            self.selected_playlist = None;
-            self.selected_entry = None;
-            self.playlist_delete_confirm = None;
-            return;
-        };
-        if self
-            .selected_entry
-            .is_some_and(|entry_id| !playlist.entries.iter().any(|entry| entry.id == entry_id))
+            .any(|playlist| playlist.id == playlist_id)
+            && self.playlist_buffer.total > 0
         {
+            return;
+        }
+        if self.playlist_entries.playlist_id != Some(playlist_id) {
+            self.selected_entry = None;
+        } else if self.selected_entry.is_some_and(|entry_id| {
+            !self
+                .playlist_entries
+                .rows
+                .iter()
+                .any(|entry| entry.id == entry_id)
+        }) {
             self.selected_entry = None;
         }
+    }
+
+    fn refresh_page_size(&mut self, cx: &mut Context<Self>) {
+        // Keep metadata requests and editor text intact; only paged views
+        // become obsolete when their page boundaries change.
+        self.request_generations
+            .retain(|kind, _| *kind == ViewRequestKind::Track);
+        let expanded = self
+            .directory_tree
+            .visible_rows()
+            .iter()
+            .filter_map(|visible| match &visible.row {
+                crate::model::DirectoryRow::Directory { path } if visible.expanded => {
+                    Some(path.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        self.directory_tree.clear();
+        self.library_page = 0;
+        self.library_buffer.offset = 0;
+        self.library_buffer.total = 0;
+        self.library_buffer.rows.clear();
+        let playlist_id = self.playlist_entries.playlist_id;
+        self.playlist_buffer = PlaylistSummaryBuffer::default();
+        self.playlist_entries = PlaylistEntriesBuffer::default();
+        self.ranking_total = 0;
+        self.request_library_page(0, cx);
+        self.request_directory_page(PathBuf::new(), 0, cx);
+        for path in expanded {
+            self.request_directory_page(path, 0, cx);
+        }
+        self.request_playlist_summaries(0, cx);
+        if let Some(id) = playlist_id {
+            self.request_playlist_entries(id, 0, cx);
+        }
+        self.request_ranking(0, cx);
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -1326,7 +1688,13 @@ impl GuiApp {
             let library_changed = self.state.library.revision != state.library.revision;
             let library_structure_changed =
                 self.state.library.structure_revision != state.library.structure_revision;
+            let playlist_changed =
+                self.state.library.playlist_revision != state.library.playlist_revision;
             let queue_changed = !Arc::ptr_eq(&self.state.queue.entries, &state.queue.entries);
+            let roots_changed =
+                self.state.system.config.library_roots != state.system.config.library_roots;
+            let page_size_changed =
+                self.state.system.config.page_size != state.system.config.page_size;
             if !matches!(self.dragging, Some(Dragging::Seek(_)))
                 && !self.waveform_preview_active
                 && self.seek_queue_id != state.queue.current_id
@@ -1335,7 +1703,18 @@ impl GuiApp {
                 self.seek_queue_id = None;
             }
             self.state = state;
+            self.sync_metadata_default(cx);
             self.reconcile_playlist_selection();
+            if roots_changed {
+                self.directory_tree.clear();
+                self.library_selected_nodes.clear();
+                if !page_size_changed {
+                    self.request_directory_page(PathBuf::new(), 0, cx);
+                }
+            }
+            if page_size_changed {
+                self.refresh_page_size(cx);
+            }
             if queue_changed {
                 let valid = self
                     .state
@@ -1347,15 +1726,27 @@ impl GuiApp {
                 self.selected_queue.retain(|id| valid.contains(id));
                 self.selected_queue.clear_anchor();
             }
-            self.visuals.configure(&self.state.system.config);
-            self.radial_spectrum.configure(&self.state.system.config);
             if library_changed || library_structure_changed {
-                self.refresh_library_index(library_structure_changed);
-                if library_structure_changed {
-                    self.refresh_library_search_cache();
-                    self.rebuild_library_tree();
+                self.view_revision = self.state.library.revision;
+                if !page_size_changed {
+                    self.library_buffer.rows.clear();
+                    self.request_library_page(self.library_page * self.view_page_size(), cx);
+                    self.request_ranking(self.ranking_offset, cx);
+                    for (path, offset) in self.directory_tree.refresh_pages() {
+                        self.request_directory_page(path, offset, cx);
+                    }
                 }
-                self.refresh_library_statistics(cx);
+                if let Some(id) = self.metadata_track {
+                    self.request_track(id, cx);
+                }
+            }
+            if !page_size_changed
+                && (library_changed || library_structure_changed || playlist_changed)
+            {
+                self.request_playlist_summaries(self.playlist_buffer.offset, cx);
+                if let Some(id) = self.playlist_entries.playlist_id {
+                    self.request_playlist_entries(id, self.playlist_entries.offset, cx);
+                }
             }
         }
         if self.state.system.shutting_down {
@@ -1393,6 +1784,10 @@ impl GuiApp {
                     "spectrum" | "spectrogram" | "radial_spectrum"
                 )
             });
+        if analysis_visible {
+            self.visuals.configure(&self.state.system.config);
+            self.radial_spectrum.configure(&self.state.system.config);
+        }
         if analysis_visible != self.analysis_worker_enabled {
             self.analysis_worker_enabled = analysis_visible;
             self.send(
@@ -1407,22 +1802,14 @@ impl GuiApp {
 
     fn sync_waveform(&mut self, cx: &mut Context<Self>) {
         let panels = self.layout.active_panels();
-        let track = self.state.current_track().or_else(|| {
-            self.metadata_track
-                .and_then(|id| self.library_index.get(&id))
-                .and_then(|&index| self.state.library.tracks.get(index))
-        });
+        let track = self.state.current_track().or(self.full_track.as_ref());
         self.waveform.update(cx, |waveform, cx| {
             waveform.retain_panels(&panels);
             waveform.sync(track, cx);
         });
     }
     fn load_full_waveform(&mut self, cx: &mut Context<Self>) {
-        let track = self.state.current_track().or_else(|| {
-            self.metadata_track
-                .and_then(|id| self.library_index.get(&id))
-                .and_then(|&index| self.state.library.tracks.get(index))
-        });
+        let track = self.state.current_track().or(self.full_track.as_ref());
         self.waveform.update(cx, |waveform, cx| {
             waveform.load_full(track, &self.state.system.config, cx);
         });
@@ -1479,11 +1866,7 @@ impl GuiApp {
     }
     fn waveform_panel(&mut self, id: u64, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let current = self.state.current_track();
-        let track = current.or_else(|| {
-            self.metadata_track
-                .and_then(|id| self.library_index.get(&id))
-                .and_then(|&index| self.state.library.tracks.get(index))
-        });
+        let track = current.or(self.full_track.as_ref());
         let position = if current.is_some() {
             self.seek_preview.unwrap_or(self.state.playback.position)
         } else {
@@ -1942,12 +2325,12 @@ impl Render for GuiApp {
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = event.keystroke.key.as_str();
-                if this.device_dropdown_is_open() {
+                if this.settings_dropdown_is_open() {
                     if key == "escape" {
-                        this.close_device_dropdown();
+                        this.close_settings_dropdown();
                         cx.notify();
                     } else {
-                        this.device_key(key, cx);
+                        this.settings_dropdown_key(key, cx);
                     }
                     cx.stop_propagation();
                     return;
@@ -1993,12 +2376,13 @@ impl Render for GuiApp {
                     "escape" => {
                         this.focus_workspace(window, cx);
                         this.selected.clear();
-                        this.library_selection.clear_selection();
                         this.selected_queue.clear();
                         this.selected_queue.clear_anchor();
                         this.selected_playlist = None;
                         this.selected_entry = None;
                         this.metadata_track = None;
+                        this.full_track = None;
+                        this.sync_metadata_default(cx);
                         this.sync_waveform(cx);
                         cx.notify();
                     }
@@ -2017,13 +2401,7 @@ impl Render for GuiApp {
                         if this.library_tree_active
                             && this.active_list_focus() == Some(ListFocus::Library) =>
                     {
-                        this.list_focus = Some(ListFocus::Library);
-                        let key = match key {
-                            "left" => TreeKey::Left,
-                            "right" => TreeKey::Right,
-                            _ => TreeKey::Toggle,
-                        };
-                        this.navigate_library_tree(key, cx);
+                        this.library_tree_key(key, cx);
                     }
                     "enter" => {
                         if let Some(focus) = this.active_list_focus() {
@@ -2402,25 +2780,25 @@ impl Render for GuiApp {
                         .w_full(),
                     );
                     if has_selected_queue {
-                        if self.state.library.playlists.is_empty() {
+                        if self.playlist_buffer.rows.is_empty() {
                             menu = menu.child(panels::caption(
                                 "No playlists yet. Create one in Playlists.",
                             ));
                         } else {
-                            let height = (self.state.library.playlists.len() as f32
+                            let height = (self.playlist_buffer.rows.len() as f32
                                 * panels::TRACK_HEIGHT)
                                 .min(240.)
                                 .min(f32::from(window.viewport_size().height) * 0.5);
                             menu = menu.child(
                                 uniform_list(
                                     "queue-playlist-targets",
-                                    self.state.library.playlists.len(),
+                                    self.playlist_buffer.rows.len(),
                                     cx.processor(
                                         move |this, range: std::ops::Range<usize>, _, cx| {
                                             range
                                                 .filter_map(|index| {
                                                     let playlist =
-                                                        this.state.library.playlists.get(index)?;
+                                                        this.playlist_buffer.rows.get(index)?;
                                                     let playlist_id = playlist.id;
                                                     Some(
                                                         menu_item(
