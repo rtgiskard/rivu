@@ -78,12 +78,21 @@ impl Core {
                     self.start(id, true)?;
                 } else {
                     self.audio(AudioCommand::Pause(false))?;
+                    if let Some(playback) = self.playback.as_mut() {
+                        // A resumed session may continue with a larger cumulative
+                        // backend counter; release the old timestamp bound.
+                        playback.paused_at = None;
+                    }
                     self.state.playback.status = PlaybackStatus::Playing;
                 }
             }
             Command::Pause => {
                 if self.state.playback.status == PlaybackStatus::Playing {
                     self.audio(AudioCommand::Pause(true))?;
+                    if let Some(playback) = self.playback.as_mut() {
+                        // Capture the wall-clock boundary once after Pause is accepted.
+                        playback.paused_at.get_or_insert(now());
+                    }
                     self.state.playback.status = PlaybackStatus::Paused;
                 }
             }

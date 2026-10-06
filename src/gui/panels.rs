@@ -6,31 +6,41 @@ use super::{
 };
 pub(super) use super::{TRACK_HEIGHT, caption, list_row};
 use crate::model::{Command, PlaybackStatus, RepeatMode};
+use chrono::{DateTime, Local};
 use gpui::{AnyElement, Context, Div, Window, div, prelude::*, px, rgb, uniform_list};
-use std::time::{SystemTime, UNIX_EPOCH};
-
-fn last_played_text(played_at: i64) -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-        .min(i64::MAX as u64) as i64;
-    let Some(age) = now.checked_sub(played_at).filter(|age| *age >= 0) else {
-        return format!("Last played · Unix {played_at}");
-    };
-    let elapsed = if age < 60 {
-        format!("{age}s")
-    } else if age < 3600 {
-        format!("{}m", age / 60)
-    } else if age < 86400 {
-        format!("{}h", age / 3600)
-    } else {
-        format!("{}d", age / 86400)
-    };
-    format!("Last played {elapsed} ago · Unix {played_at}")
-}
 
 impl GuiApp {
+    fn last_played_text(&self, track_id: i64, stored_at: Option<i64>) -> String {
+        let current = self
+            .state
+            .current_track()
+            .is_some_and(|track| track.id == track_id);
+        if current
+            && self.state.playback.status == PlaybackStatus::Playing
+            && self.state.playback.last_heard_at.is_some()
+        {
+            return "Last played · 0s ago (playing)".into();
+        }
+
+        let played_at = if current && self.state.playback.status == PlaybackStatus::Paused {
+            self.state.playback.last_heard_at
+        } else {
+            stored_at
+        };
+        match played_at.and_then(|time| DateTime::from_timestamp(time, 0)) {
+            Some(time) => format!(
+                "Last played · {}{}",
+                time.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S"),
+                if current && self.state.playback.status == PlaybackStatus::Paused {
+                    " (paused)"
+                } else {
+                    ""
+                }
+            ),
+            None => "Last played —".into(),
+        }
+    }
+
     pub(super) fn transport_panel(
         &mut self,
         panel_id: u64,
@@ -1351,9 +1361,7 @@ impl GuiApp {
                 .child(caption(format!(
                     "{} plays · {}",
                     track.play_count,
-                    track
-                        .last_played
-                        .map_or("Last played —".into(), last_played_text)
+                    self.last_played_text(track.id, track.last_played)
                 )))
                 .when_some(track.cue.as_ref(), |details, cue| {
                     details.child(caption(format!(
@@ -1431,7 +1439,7 @@ impl GuiApp {
                                     ("history-text", track_id as u64),
                                     this.selected.contains(&track_id),
                                     item.title.clone(),
-                                    last_played_text(item.played_at),
+                                    this.last_played_text(item.track_id, Some(item.played_at)),
                                 );
                                 if this.library_index.contains_key(&track_id) {
                                     item_row = item_row.on_click(cx.listener(

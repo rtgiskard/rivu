@@ -12,6 +12,7 @@ ffmpeg = ["dep:bindgen", "dep:pkg-config"]
 anyhow = "1"
 blake3 = "1"
 clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 cpal = "0.18.2"
 bytes = "1"
 crossbeam-channel = "0.5"

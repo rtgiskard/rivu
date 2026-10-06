@@ -201,6 +201,10 @@ pub struct PlaybackState {
     pub status: PlaybackStatus,
     pub position: f64,
     pub duration: Option<f64>,
+    /// Unix timestamp of the most recent confirmed playback activity.
+    /// This is session state; durable track history is updated when the session ends.
+    #[serde(default)]
+    pub last_heard_at: Option<i64>,
     pub volume: f32,
     pub shuffle: bool,
     pub repeat: RepeatMode,
@@ -252,6 +256,7 @@ impl Default for PlaybackState {
             status: PlaybackStatus::Stopped,
             position: 0.0,
             duration: None,
+            last_heard_at: None,
             volume: 0.7,
             shuffle: false,
             repeat: RepeatMode::Off,

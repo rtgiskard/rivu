@@ -80,12 +80,24 @@ do not reset the playback's count state or create additional counts; skipped tim
 does not count as heard. When duration is unknown, counting waits until a natural
 EOF can supply a duration from the final position; without one, no play is counted.
 
-Recent history contains one entry per track, ordered by its last successful
-playback start. Failed loads, pause/resume, and seeks do not create recent entries.
+Recent history contains one entry per track, ordered by its last-played timestamp.
+A successful backend start registers the track immediately. Natural completion,
+track changes, stops, and shutdown persist the latest confirmed playback activity
+into that same entry. Progress updates only in-memory session state, not the
+database every second. Paused time never advances activity timestamps; late audio
+confirmations still contribute their full heard time to play-count decisions.
+Pause/resume and seeks do not create separate recent entries, and seeking does
+not itself count as playback activity. Failed loads do not create recent entries.
 A recent entry is not a claim that a play reached the counting threshold. Rivu
 stores only aggregate play counts and last-played timestamps, not per-play records
 or per-play/cumulative heard durations; heard time exists only in memory for
 playback and count decisions.
+The GUI Recent tracks and Track details panels show the confirmed current playback
+as `0s ago (playing)`. Paused playback shows its frozen last activity time with
+`(paused)`; other tracks and stopped playback show stored local
+`YYYY-MM-DD HH:MM:SS` times. Stored and JSON timestamps remain Unix seconds;
+unavailable or unrepresentable dates display `—`. Existing timestamps are not
+rewritten retroactively.
 
 Track identity uses path and fingerprint. Rescanning or updating tags preserves
 that identity, user metadata overrides, counts, and last-played timestamps.

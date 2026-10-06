@@ -5171,6 +5171,7 @@ dependencies = [
  "bindgen",
  "blake3",
  "bytes",
+ "chrono",
  "clap",
  "cpal",
  "crossbeam-channel",

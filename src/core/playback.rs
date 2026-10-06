@@ -30,7 +30,11 @@ impl Core {
             position: None,
             started: false,
             counted: false,
+            last_heard_at: None,
+            activity_updated: false,
+            paused_at: None,
         });
+        self.state.playback.last_heard_at = None;
         self.state.queue.current_id = Some(queue_id);
         self.state.playback.duration = track.duration;
         self.state.playback.status = PlaybackStatus::Playing;
@@ -82,6 +86,11 @@ impl Core {
             return Ok(());
         }
         let played_at = now();
+        let played_at = self
+            .playback
+            .as_ref()
+            .and_then(|playback| playback.paused_at)
+            .map_or(played_at, |paused_at| played_at.min(paused_at));
         if let Err(error) = self.store.mark_played(track_id, played_at) {
             // Rejected bookkeeping must not be revived by another queued start
             // or counted from the successful audio output's final snapshot.
@@ -91,6 +100,8 @@ impl Core {
         self.update_track_stats(track_id, Some(played_at), false)?;
         let playback = self.playback.as_mut().expect("playback was checked above");
         playback.started = true;
+        playback.last_heard_at = Some(played_at);
+        self.state.playback.last_heard_at = Some(played_at);
         self.state.playback.duration = info
             .duration
             .filter(|duration| duration.is_finite() && *duration > 0.0)
@@ -110,8 +121,13 @@ impl Core {
                 self.state.playback.position = position;
                 playback.position = Some(position);
             }
-            if heard.is_finite() {
-                playback.heard = playback.heard.max(heard);
+            if heard.is_finite() && heard > playback.heard {
+                let heard_at = playback
+                    .paused_at
+                    .map_or_else(now, |paused_at| now().min(paused_at));
+                if playback.record_heard(heard, heard_at) {
+                    self.state.playback.last_heard_at = playback.last_heard_at;
+                }
             }
             self.count_play()?;
         }
@@ -157,13 +173,27 @@ impl Core {
         self.state.playback.status = PlaybackStatus::Stopped;
         self.state.playback.position = 0.0;
         self.state.playback.seek_revision = self.state.playback.seek_revision.wrapping_add(1);
-        let snapshot = snapshot?;
+        let snapshot = match snapshot {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.playback = None;
+                return Err(error);
+            }
+        };
+        let mut final_activity = None;
         if let Some(playback) = &mut self.playback {
             if let Some((snapshot_generation, heard)) = snapshot
                 && snapshot_generation == generation
                 && heard.is_finite()
             {
-                playback.heard = playback.heard.max(heard);
+                // Late paused confirmations still count as heard audio, but
+                // their activity timestamp cannot cross the pause boundary.
+                let heard_at = playback
+                    .paused_at
+                    .map_or_else(now, |paused_at| now().min(paused_at));
+                if playback.record_heard(heard, heard_at) {
+                    self.state.playback.last_heard_at = playback.last_heard_at;
+                }
             }
             if natural
                 && !self
@@ -176,11 +206,21 @@ impl Core {
                 // duration; a seek target or accumulated heard time cannot.
                 self.state.playback.duration = playback.position.filter(|position| *position > 0.0);
             }
+            if playback.started && playback.activity_updated {
+                final_activity = playback.last_heard_at.map(|at| (playback.track_id, at));
+            }
         }
-        bookkeeping?;
-        self.count_play()?;
+        let result = (|| -> Result<()> {
+            bookkeeping?;
+            if let Some((track_id, played_at)) = final_activity {
+                self.store.mark_played(track_id, played_at)?;
+                self.update_track_stats(track_id, Some(played_at), false)?;
+                self.state.library.history = Arc::new(self.store.history(200)?);
+            }
+            self.count_play()
+        })();
         self.playback = None;
-        Ok(())
+        result
     }
     pub(in crate::core) fn stop(&mut self) -> Result<()> {
         let snapshot = self.engine.stop_and_snapshot().map(Some);

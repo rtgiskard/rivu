@@ -139,7 +139,7 @@ enum LibraryAction {
     Status,
     /// Show library size and aggregate play counts.
     Stats,
-    /// Show recently started tracks, once per track.
+    /// Show recent tracks, once per track.
     History {
         #[arg(long, default_value_t = 20)]
         limit: usize,

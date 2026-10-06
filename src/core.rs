@@ -389,6 +389,23 @@ struct PlaybackStats {
     position: Option<f64>,
     started: bool,
     counted: bool,
+    last_heard_at: Option<i64>,
+    activity_updated: bool,
+    paused_at: Option<i64>,
+}
+impl PlaybackStats {
+    fn record_heard(&mut self, heard: f64, heard_at: i64) -> bool {
+        if !heard.is_finite() || heard <= self.heard {
+            return false;
+        }
+        self.heard = heard;
+        self.last_heard_at = Some(
+            self.last_heard_at
+                .map_or(heard_at, |previous| previous.max(heard_at)),
+        );
+        self.activity_updated = true;
+        true
+    }
 }
 struct ScanFinished {
     result: Result<ScanResult>,
@@ -517,6 +534,9 @@ mod tests {
             position: None,
             started: false,
             counted: false,
+            last_heard_at: None,
+            activity_updated: false,
+            paused_at: None,
         });
     }
 
@@ -633,9 +653,37 @@ mod tests {
             progress(&mut core, 5.0, 2.0);
             progress(&mut core, 8.0, 8.0);
         }
+        let final_activity = core.state.playback.last_heard_at.unwrap();
         core.stop().unwrap();
         assert_eq!(play_count(&core, 1), 1);
-        assert_eq!(core.store.history(200).unwrap()[0].played_at, 7);
+        assert_eq!(
+            core.store.history(200).unwrap()[0].played_at,
+            final_activity
+        );
+    }
+
+    #[test]
+    fn paused_confirmations_do_not_advance_activity_at_stop() {
+        let (_directory, mut core) = fixture();
+        playing(&mut core, 1);
+        progress(&mut core, 2.0, 2.0);
+        let heard_at = core.state.playback.last_heard_at;
+        core.command(Command::Pause).unwrap();
+        let pause_bound = core.playback.as_ref().unwrap().paused_at.unwrap();
+        progress(&mut core, 20.0, 20.0);
+        assert!(core.state.playback.last_heard_at.unwrap() <= pause_bound);
+        assert_eq!(core.playback.as_ref().unwrap().heard, 20.0);
+        assert_eq!(play_count(&core, 1), 1);
+        let generation = core.generation;
+        core.finish_playback(Ok(Some((generation, 20.0))), false)
+            .unwrap();
+        assert_eq!(
+            core.store.history(200).unwrap()[0].played_at,
+            core.state
+                .playback
+                .last_heard_at
+                .unwrap_or(heard_at.unwrap())
+        );
     }
 
     #[test]
