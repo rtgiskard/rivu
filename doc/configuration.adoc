@@ -14,7 +14,7 @@ play_count_threshold_percent = 20.0
 spectrogram_db_range = 70.0
 spectrum_db_range = 70.0
 spectrogram_interpolation_points = 1024
-spectrogram_history_seconds = 30
+spectrogram_history_seconds = 20
 ----
 
 Spectrogram interpolation generates logarithmic frequency rows up to the configured point count (64–4096); the default is 1024. The cached row count is the greater of the visible source rows and half the tallest active panel height, capped by this setting. Spectrogram history uses at most one time bucket per rendered horizontal pixel, bounded by the configured duration and analysis rate; narrow panels therefore retain less than the maximum. Missing history remains blank.
@@ -240,7 +240,7 @@ Spectrogram display settings are:
 
 * `spectrogram_db_range`: independent color span, 1–160 dB, default 70.
 * `spectrogram_history_seconds`: maximum continuous audio history, 1–120 seconds,
-  default 30. The visible history is also bounded by the rendered panel width and
+  default 20. The visible history is also bounded by the rendered panel width and
   analysis rate; it grows with available uninterrupted audio and remains blank
   where no history exists.
 * `spectrogram_labels`: show endpoint frequency labels, default true.

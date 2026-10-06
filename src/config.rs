@@ -230,7 +230,7 @@ impl Default for Config {
             waveform_labels: true,
             spectrum_db_range: 70.0,
             spectrogram_db_range: 70.0,
-            spectrogram_history_seconds: 30,
+            spectrogram_history_seconds: 20,
             waveform_cursor_color: RgbColor(0x73daca),
             waveform_glow: 1.0,
             media_read_buffer_mb: 2,
@@ -575,7 +575,7 @@ mod tests {
             spectrogram_interpolation_points: 1024,
             waveform_labels: false,
             spectrogram_db_range: 100.0,
-            spectrogram_history_seconds: 30,
+            spectrogram_history_seconds: 20,
             waveform_cursor_color: "#eeaa66".parse().unwrap(),
             waveform_glow: 0.0,
         };

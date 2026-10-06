@@ -165,7 +165,7 @@ pub(super) struct Visuals {
 
 impl Visuals {
     pub(super) fn new() -> Self {
-        let history_columns = history_column_count(30, 20);
+        let history_columns = history_column_count(20, 20);
         Self {
             data: Rc::new(RefCell::new(VisualData {
                 frequencies: Vec::new(),
@@ -208,8 +208,8 @@ impl Visuals {
                 spectrogram_show_labels: true,
                 spectrogram_interpolate: true,
                 spectrogram_interpolation_points: 1024,
-                spectrogram_history_seconds: 30,
-                history_limit_seconds: 30.0,
+                spectrogram_history_seconds: 20,
+                history_limit_seconds: 20.0,
                 analysis_fps: 20,
                 configured_history_columns: history_columns,
                 history_columns,
@@ -1615,7 +1615,7 @@ mod tests {
                 .data
                 .borrow()
                 .history_window(Duration::from_secs(31)),
-            Duration::from_secs(30)
+            Duration::from_secs(20)
         );
     }
 
