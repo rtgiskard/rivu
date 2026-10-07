@@ -1,0 +1,86 @@
+= IPC
+
+== Scope
+
+IPC is the local control and state transport between the Rivu server and CLI, TUI,
+and GUI clients. The current protocol version is v2. Clients and the server must
+use the same protocol version.
+
+== Transport and frame format
+
+IPC uses a Unix domain socket. Each frame contains:
+
+[source,text]
+----
+u32 body_length       # little-endian
+u8  protocol_version
+u8  message_type
+body
+----
+
+The frame header is six bytes. `body_length` excludes the four-byte length field
+and includes the version, message type, and serialized body.
+
+Request bodies are limited to 64 KiB. Response bodies are limited to 16 MiB.
+The server accepts at most 16 concurrent clients. An unbound client must send a
+Hello request within one second.
+
+== Session handshake
+
+A client session starts unbound and must send Hello before State, Query, Command,
+or Watch. The server rejects other requests until the handshake completes and
+rejects a second Hello on the same session.
+
+The Hello response contains a random nonzero `u32` instance ID encoded as four
+little-endian bytes. The ID is generated once per server start. Zero is reserved
+as the invalid instance ID. IDs are equality tokens for detecting server
+identity changes; they are not ordered identifiers, authentication credentials,
+or globally unique identifiers.
+
+== Message types
+
+Request types:
+
+* `Hello` — initialize a session and optionally read selected state sections
+* `State` — read selected state sections
+* `Query` — execute a read-only query
+* `Command` — execute a state-changing command
+* `Watch` — wait for a revision change
+
+Response types:
+
+* `Hello` — returns the server instance ID and selected state
+* `State` — returns selected state sections
+* `Query` — returns query revisions and the query result
+* `Ack` — returns command success, error, and revision
+* `Watch` — returns changed state revisions
+* `Error` — returns a protocol or request error
+
+Wire enum variant order is part of the binary protocol. Existing variants must
+not be reordered; new variants may only be appended.
+
+== Revisions and watching
+
+State revisions are tracked independently for Playback, Queue, Library, and
+System sections. A Watch request waits until the current revisions differ from
+the expected revisions. The response contains the latest revisions rather than
+an event log.
+
+Clients initialize from a state read, watch for revision changes, then read only
+the invalidated sections. Notifications coalesce to the latest state. A server
+restart requires a fresh Hello and state read.
+
+== Wire schemas
+
+Runtime `Config` and `SystemState` use explicit positional Wire schemas. They are
+not serialized directly because their in-process serde representation is not a
+stable binary contract. Collection lengths and optional fields are encoded in
+the message body.
+
+== Implementation and tests
+
+* Protocol types and adapters: `src/ipc/protocol.rs`
+* Frame encoding and stream transport: `src/ipc/transport.rs`
+* Server lifecycle and request handling: `src/ipc/server.rs`
+* Client sessions and one-shot requests: `src/ipc/client.rs`
+* Protocol tests: `src/ipc/tests.rs`

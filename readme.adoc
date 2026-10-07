@@ -25,22 +25,17 @@ analysis. CLI/TUI clients connect through `rivu.sock`; GUI, tray, and MPRIS use
 in-process handles. Opening a client does not create a second playback engine.
 
 IPC separates command acknowledgements, query results, and explicit state reads.
-Queries carry data revisions, not a client snapshot. Clients initialize from a
-state read and then watch independent Playback, Queue, Library Summary, and
-System revisions; a notification invalidates sections, and the client reads only
-those sections. Notifications coalesce to the latest state rather than retaining
-an event log. The versioned protocol rejects incompatible clients and binds a
-persistent session to one server instance; restart requires a fresh state read.
-Revision tokens are compared for equality within that server lifetime.
-Core publication copies only changed sections; playback progress does not copy
-the unchanged System strings or increment its section token. `system.revision`
-is the global in-process wakeup sequence, not a Watch cursor.
-Wire implementation: link:src/ipc.rs[IPC]; typed contracts:
-link:src/response.rs[responses].
+Queries carry data revisions rather than a client snapshot. Clients initialize
+from a state read, watch independent Playback, Queue, Library Summary, and
+System revisions, then read only invalidated sections. Notifications coalesce to
+the latest state; a server restart requires a fresh state read.
+The current IPC protocol is v2. Frame format, Hello/session behavior, message
+types, revision watching, limits, and Wire schemas are documented in
+link:doc/21_ipc.adoc[IPC internal design].
 
+Wire implementation: link:src/ipc/protocol.rs[protocol],
+link:src/ipc/transport.rs[transport], and link:src/ipc/client.rs[client].
 Runtime ownership: link:src/core.rs[core] and link:src/core/runtime.rs[runtime].
-Client transport: link:src/ipc.rs[IPC]. User-facing limits and usage are described
-in the numbered topical guides below.
 
 == Build and install
 
