@@ -17,8 +17,8 @@ use std::{
 
 use gpui::{
     AnyElement, Bounds, Context, EventEmitter, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Path, PathBuilder, Pixels, Point, SharedString, Window, canvas, div, fill,
-    linear_color_stop, linear_gradient, point, prelude::*, px, rgb, size,
+    MouseUpEvent, Pixels, Point, SharedString, Window, canvas, div, fill, linear_color_stop,
+    linear_gradient, point, prelude::*, px, rgb, size,
 };
 use parking_lot::RwLock;
 
@@ -65,17 +65,6 @@ struct Columns {
     width: usize,
     mapping: Option<(f32, f32, f32)>,
     values: Vec<(Option<f32>, Option<f32>, Option<f32>, Option<f32>)>,
-    geometry: Option<WaveformGeometry>,
-}
-
-struct WaveformGeometry {
-    origin: Point<Pixels>,
-    width: Pixels,
-    height: Pixels,
-    upper_rms: Option<Path<Pixels>>,
-    lower_rms: Option<Path<Pixels>>,
-    upper_peak: Option<Path<Pixels>>,
-    lower_peak: Option<Path<Pixels>>,
 }
 
 #[derive(Default)]
@@ -125,7 +114,6 @@ impl WaveformPlot {
     fn clear_cache(&mut self) {
         for columns in self.columns.values_mut() {
             columns.values.clear();
-            columns.geometry = None;
         }
     }
     #[cfg(test)]
@@ -153,7 +141,6 @@ impl WaveformPlot {
             width,
             mapping: None,
             values: Vec::new(),
-            geometry: None,
         });
         let left_peaks = if frame.left_peaks.is_empty() {
             &frame.peaks
@@ -184,7 +171,6 @@ impl WaveformPlot {
             || columns.values.len() != count
         {
             columns.values.clear();
-            columns.geometry = None;
         }
         if columns.values.len() != count {
             let scale = frame.max_peak.max(1.0).recip();
@@ -213,154 +199,6 @@ impl WaveformPlot {
         columns.width = width;
         columns.mapping = Some(mapping);
         &columns.values
-    }
-    fn geometry(&mut self, panel_id: u64, plot: Bounds<Pixels>) -> &WaveformGeometry {
-        let columns = self
-            .columns
-            .get_mut(&panel_id)
-            .expect("waveform columns are initialized before geometry");
-        if columns.geometry.as_ref().is_none_or(|geometry| {
-            geometry.origin != plot.origin
-                || geometry.width != plot.size.width
-                || geometry.height != plot.size.height
-        }) {
-            let center = plot.center().y;
-            let width = plot.size.width / columns.values.len() as f32;
-            let half_height = plot.size.height * 0.5;
-            let mut upper_rms = PathBuilder::fill();
-            let mut lower_rms = PathBuilder::fill();
-            let mut upper_peak = PathBuilder::stroke(px(1.0));
-            let mut lower_peak = PathBuilder::stroke(px(1.0));
-            let mut has_upper_rms = false;
-            let mut has_lower_rms = false;
-            let mut has_upper_peak = false;
-            let mut has_lower_peak = false;
-            for (column, &(left_rms, left_peak, right_rms, right_peak)) in
-                columns.values.iter().enumerate()
-            {
-                let x = plot.left() + width * column as f32;
-                if let Some(level) = left_rms {
-                    let height = waveform_height(level, half_height);
-                    append_rect(
-                        &mut upper_rms,
-                        Bounds::new(point(x, center - height), size(width, height)),
-                    );
-                    has_upper_rms = true;
-                }
-                if let Some(level) = right_rms {
-                    let height = waveform_height(level, half_height);
-                    append_rect(
-                        &mut lower_rms,
-                        Bounds::new(point(x, center), size(width, height)),
-                    );
-                    has_lower_rms = true;
-                }
-                if let Some(level) = left_peak {
-                    let y = center - waveform_height(level, half_height);
-                    upper_peak.move_to(point(x, y));
-                    upper_peak.line_to(point(x + width, y));
-                    has_upper_peak = true;
-                }
-                if let Some(level) = right_peak {
-                    let y = center + waveform_height(level, half_height);
-                    lower_peak.move_to(point(x, y));
-                    lower_peak.line_to(point(x + width, y));
-                    has_lower_peak = true;
-                }
-            }
-            columns.geometry = Some(WaveformGeometry {
-                origin: plot.origin,
-                width: plot.size.width,
-                height: plot.size.height,
-                upper_rms: has_upper_rms.then(|| upper_rms.build().ok()).flatten(),
-                lower_rms: has_lower_rms.then(|| lower_rms.build().ok()).flatten(),
-                upper_peak: has_upper_peak.then(|| upper_peak.build().ok()).flatten(),
-                lower_peak: has_lower_peak.then(|| lower_peak.build().ok()).flatten(),
-            });
-        }
-        columns.geometry.as_ref().unwrap()
-    }
-}
-
-fn append_rect(path: &mut PathBuilder, bounds: Bounds<Pixels>) {
-    path.move_to(bounds.origin);
-    path.line_to(point(bounds.right(), bounds.top()));
-    path.line_to(point(bounds.right(), bounds.bottom()));
-    path.line_to(point(bounds.left(), bounds.bottom()));
-    path.close();
-}
-
-fn paint_waveform_gradient(
-    mut path: Path<Pixels>,
-    plot: Bounds<Pixels>,
-    upper: bool,
-    palette: &super::visuals::PaletteLut,
-    palette_max: f32,
-    window: &mut Window,
-) {
-    let half_height = plot.size.height * 0.5;
-    let half = Bounds::new(
-        point(
-            plot.left(),
-            if upper { plot.top() } else { plot.center().y },
-        ),
-        size(plot.size.width, half_height),
-    );
-    path.bounds = half;
-    let stops = palette.visible_stops();
-    let max = palette_max.clamp(0.0, 1.0);
-    let mut visible = Some(path);
-    for (index, pair) in stops.windows(2).enumerate() {
-        let start = palette.stop_position(pair[0].0).min(max);
-        let end = palette.stop_position(pair[1].0).min(max);
-        if end <= start {
-            continue;
-        }
-        let mask = if upper {
-            Bounds::new(
-                point(half.left(), half.bottom() - half_height * end),
-                size(half.size.width, half_height * (end - start)),
-            )
-        } else {
-            Bounds::new(
-                point(half.left(), half.top() + half_height * start),
-                size(half.size.width, half_height * (end - start)),
-            )
-        };
-        let low = palette.lookup_raw(pair[0].0);
-        let high = if palette.stop_position(pair[1].0) <= max {
-            palette.lookup_raw(pair[1].0)
-        } else {
-            palette.lookup_mapped(max)
-        };
-        let (low, high) = (rgb(low), rgb(high));
-        let background = if upper {
-            linear_gradient(
-                0.0,
-                linear_color_stop(low, 0.0),
-                linear_color_stop(high, 1.0),
-            )
-        } else {
-            linear_gradient(
-                0.0,
-                linear_color_stop(high, 0.0),
-                linear_color_stop(low, 1.0),
-            )
-        };
-        let mut segment_path = if index + 2 == stops.len() {
-            visible
-                .take()
-                .expect("last waveform gradient owns the path")
-        } else {
-            visible
-                .as_ref()
-                .expect("waveform gradient path is retained")
-                .clone()
-        };
-        segment_path.bounds = mask;
-        window.with_content_mask(Some(gpui::ContentMask { bounds: mask }), |window| {
-            window.paint_path(segment_path, background);
-        });
     }
 }
 
@@ -765,46 +603,55 @@ impl Waveform {
                                 if waveform.columns[&panel_id].values.is_empty() {
                                     return;
                                 }
-                                let geometry = waveform.geometry(panel_id, plot);
-                                if let Some(path) = geometry.upper_rms.clone() {
-                                    paint_waveform_gradient(
-                                        path,
-                                        plot,
-                                        true,
-                                        palette.as_ref(),
-                                        WAVEFORM_RMS_PALETTE_MAX,
-                                        window,
-                                    );
-                                }
-                                if let Some(path) = geometry.lower_rms.clone() {
-                                    paint_waveform_gradient(
-                                        path,
-                                        plot,
-                                        false,
-                                        palette.as_ref(),
-                                        WAVEFORM_RMS_PALETTE_MAX,
-                                        window,
-                                    );
-                                }
-                                if let Some(path) = geometry.upper_peak.clone() {
-                                    paint_waveform_gradient(
-                                        path,
-                                        plot,
-                                        true,
-                                        palette.as_ref(),
-                                        WAVEFORM_PEAK_PALETTE_MAX,
-                                        window,
-                                    );
-                                }
-                                if let Some(path) = geometry.lower_peak.clone() {
-                                    paint_waveform_gradient(
-                                        path,
-                                        plot,
-                                        false,
-                                        palette.as_ref(),
-                                        WAVEFORM_PEAK_PALETTE_MAX,
-                                        window,
-                                    );
+                                let columns = &waveform.columns[&panel_id].values;
+                                let width = plot.size.width / columns.len() as f32;
+                                let center = plot.center().y;
+                                let half_height = plot.size.height * 0.5;
+                                let low = rgb(palette.lookup_mapped(0.0));
+                                for (column, &(left_rms, left_peak, right_rms, right_peak)) in
+                                    columns.iter().enumerate()
+                                {
+                                    let x = plot.left() + width * column as f32;
+                                    for (level, upper) in [(left_rms, true), (right_rms, false)] {
+                                        let Some(level) = level else { continue };
+                                        let height = waveform_height(level, half_height);
+                                        let high = rgb(palette
+                                            .lookup_mapped(level.min(WAVEFORM_RMS_PALETTE_MAX)));
+                                        let (start, end) =
+                                            if upper { (low, high) } else { (high, low) };
+                                        window.paint_quad(fill(
+                                            Bounds::new(
+                                                point(
+                                                    x,
+                                                    if upper { center - height } else { center },
+                                                ),
+                                                size(width, height),
+                                            ),
+                                            linear_gradient(
+                                                0.0,
+                                                linear_color_stop(start, 0.0),
+                                                linear_color_stop(end, 1.0),
+                                            ),
+                                        ));
+                                    }
+                                    for (level, upper) in [(left_peak, true), (right_peak, false)] {
+                                        let Some(level) = level else { continue };
+                                        let height = waveform_height(level, half_height);
+                                        let y = if upper {
+                                            center - height
+                                        } else {
+                                            center + height
+                                        };
+                                        window.paint_quad(fill(
+                                            Bounds::new(
+                                                point(x, y - px(0.5)),
+                                                size(width, px(1.0)),
+                                            ),
+                                            rgb(palette.lookup_mapped(
+                                                level.min(WAVEFORM_PEAK_PALETTE_MAX),
+                                            )),
+                                        ));
+                                    }
                                 }
                                 if !cache_enabled {
                                     waveform.clear_cache();

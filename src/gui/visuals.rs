@@ -190,7 +190,6 @@ struct SpectrumGeometryKey {
 struct SpectrumGeometry {
     key: SpectrumGeometryKey,
     body: Option<Path<Pixels>>,
-    peak: Option<Path<Pixels>>,
 }
 
 struct VisualData {
@@ -953,9 +952,6 @@ impl VisualData {
                     if let Some(path) = geometry.body.clone() {
                         paint_spectrum_path(path, plot, window, self.palette_lut.as_ref());
                     }
-                    if let Some(path) = geometry.peak.clone() {
-                        paint_spectrum_path(path, plot, window, self.palette_lut.as_ref());
-                    }
                     return Ok(());
                 }
                 self.spectrum_points.clear();
@@ -976,29 +972,20 @@ impl VisualData {
                         gpui::FillOptions::default().with_fill_rule(gpui::FillRule::NonZero),
                     ))
                 };
-                let mut peak_path = PathBuilder::fill();
                 let mut any_visible = false;
-                let mut any_peak = false;
                 for bar in 0..bars {
                     let left_t = bar as f32 / bars as f32;
                     let right_t = (bar + 1) as f32 / bars as f32;
                     let range = self.spectrum_bins[bar].clone();
                     let mut level = f32::NEG_INFINITY;
-                    let mut peak = f32::NEG_INFINITY;
                     for index in range.clone() {
                         level = level.max(self.display_level(index));
-                        if self.spectrum_peaks {
-                            peak = peak.max(finite_level(self.peaks[index]));
-                        }
                     }
                     let center_hz = axis_frequency(low, high, (left_t + right_t) * 0.5, true);
                     if self.spectrum_interpolate {
                         // Interpolation fills undersampled slots, but never averages
                         // away a transient already max-pooled into this slot.
                         level = level.max(self.interpolate_level(center_hz, low, high, false));
-                        if self.spectrum_peaks {
-                            peak = peak.max(self.interpolate_level(center_hz, low, high, true));
-                        }
                     }
                     let slot_width = plot.size.width * (right_t - left_t);
                     let slot_gap = px(self.spectrum_gap)
@@ -1082,28 +1069,6 @@ impl VisualData {
                             }
                         }
                     }
-                    if self.spectrum_peaks {
-                        let peak_fraction = db_height(peak, self.top_db, self.spectrum_db_range);
-                        let peak_visible = peak_fraction > 0.0;
-                        let peak_height = plot.size.height * peak_fraction;
-                        if peak_visible {
-                            let peak_y = (bottom - peak_height).clamp(top, bottom - px(1.0));
-                            let peak_width = if style == SpectrumStyle::Solid {
-                                px(1.0)
-                            } else if style == SpectrumStyle::Line {
-                                (slot_width - slot_gap).max(px(1.0))
-                            } else {
-                                width
-                            };
-                            let peak_x = (x + (width - peak_width) * 0.5)
-                                .clamp(plot.left(), (plot.right() - peak_width).max(plot.left()));
-                            append_rect(
-                                &mut peak_path,
-                                Bounds::new(point(peak_x, peak_y), size(peak_width, px(1.0))),
-                            );
-                        }
-                        any_peak |= peak_visible;
-                    }
                 }
                 if continuous && any_visible {
                     append_spectrum_shape(
@@ -1123,21 +1088,12 @@ impl VisualData {
                 } else {
                     None
                 };
-                let peak =
-                    if any_peak {
-                        Some(peak_path.build().map_err(|error| {
-                            format!("Cannot tessellate spectrum peaks: {error}")
-                        })?)
-                    } else {
-                        None
-                    };
                 if self.visualization_cache {
                     self.spectrum_geometry.insert(
                         panel_id,
                         SpectrumGeometry {
                             key: geometry_key,
                             body: body.clone(),
-                            peak: peak.clone(),
                         },
                     );
                 } else {
@@ -1146,12 +1102,55 @@ impl VisualData {
                 if let Some(path) = body {
                     paint_spectrum_path(path, plot, window, self.palette_lut.as_ref());
                 }
-                if let Some(path) = peak {
-                    paint_spectrum_path(path, plot, window, self.palette_lut.as_ref());
-                }
                 Ok(())
             },
         )?;
+        if self.spectrum_peaks {
+            window.with_content_mask(Some(gpui::ContentMask { bounds: plot }), |window| {
+                for bar in 0..bars {
+                    let left_t = bar as f32 / bars as f32;
+                    let right_t = (bar + 1) as f32 / bars as f32;
+                    let mut peak = f32::NEG_INFINITY;
+                    for index in self.spectrum_bins[bar].clone() {
+                        peak = peak.max(finite_level(self.peaks[index]));
+                    }
+                    if self.spectrum_interpolate {
+                        let center_hz = axis_frequency(low, high, (left_t + right_t) * 0.5, true);
+                        peak = peak.max(self.interpolate_level(center_hz, low, high, true));
+                    }
+                    let peak_fraction = db_height(peak, self.top_db, self.spectrum_db_range);
+                    if peak_fraction <= 0.0 {
+                        continue;
+                    }
+                    let slot_width = plot.size.width * (right_t - left_t);
+                    let slot_gap = px(self.spectrum_gap)
+                        .max(px(0.0))
+                        .min((slot_width - px(1.0)).max(px(0.0)));
+                    let (x, width) = match self.spectrum_style {
+                        SpectrumStyle::Line | SpectrumStyle::Solid => {
+                            (plot.left() + plot.size.width * left_t, slot_width)
+                        }
+                        _ => (
+                            plot.left() + plot.size.width * left_t + slot_gap * 0.5,
+                            (slot_width - slot_gap).max(px(1.0)),
+                        ),
+                    };
+                    let peak_width = match self.spectrum_style {
+                        SpectrumStyle::Solid => px(1.0),
+                        SpectrumStyle::Line => (slot_width - slot_gap).max(px(1.0)),
+                        _ => width,
+                    };
+                    let peak_x = (x + (width - peak_width) * 0.5)
+                        .clamp(plot.left(), (plot.right() - peak_width).max(plot.left()));
+                    let peak_y = (plot.bottom() - plot.size.height * peak_fraction)
+                        .clamp(plot.top(), plot.bottom() - px(1.0));
+                    window.paint_quad(fill(
+                        Bounds::new(point(peak_x, peak_y), size(peak_width, px(1.0))),
+                        rgb(self.palette_lut.lookup_mapped(peak_fraction)),
+                    ));
+                }
+            });
+        }
         if !self.visualization_cache {
             self.spectrum_bins.clear();
             self.spectrum_bins_generation = 0;

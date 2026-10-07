@@ -1,0 +1,132 @@
+= Visualization Rendering Design
+
+== Goals
+
+Visualization primitives must match their geometry:
+
+* RMS is continuous energy area, with color and gradient defined per column.
+* Peak is a transient marker, rendered as a lightweight solid point or short line.
+* Cached data and cached geometry must have explicit, independent invalidation rules.
+
+== Waveform
+
+=== RMS
+
+Each visible RMS column is a filled Quad with its own gradient:
+
+[source,text]
+----
+RMS column
+  -> RMS height
+  -> low LUT color to lut(RMS) LinearGradient
+  -> one rectangular Quad
+----
+
+The upper channel runs from the center line upward; the lower channel runs from the center line downward. `WAVEFORM_RMS_PALETTE_MAX` limits the color mapping, not the RMS geometry height.
+
+The previous implementation combined all RMS columns into one Path, then painted it through a multi-stop gradient split into masked bands. Each palette interval used a cloned or retained Path and a `ContentMask` covering that interval. This minimized draw submissions, but it produced a global vertical gradient: columns at the same height received the same color, so adjacent columns with different RMS values had weak color separation. It also incurred Path cloning and repeated masked gradient submissions.
+
+A single GPUI LinearGradient cannot assign a different endpoint color to each column inside one Path. The exact `lut(RMS)` behavior therefore uses one Quad and one LinearGradient per RMS column. This removes per-column PathBuilder and tessellation while making the scene submission count proportional to visible columns.
+
+=== Peak
+
+Waveform Peak is a solid 1px-high Quad:
+
+[source,text]
+----
+Peak level
+  -> LUT mapping
+  -> solid color
+  -> one thin Quad
+----
+
+Upper and lower channels use their respective Peak positions. `WAVEFORM_PEAK_PALETTE_MAX` limits the color lookup. Peak does not use the old global multi-stop gradient or mask path.
+
+== Spectrum
+
+=== Body styles
+
+Spectrum body remains a batched and cached Path because the body is continuous or contains many small segments:
+
+[cols="1,2"]
+|===
+|Style |Rendering strategy
+
+|`Line`
+|Cached continuous Path with the global gradient.
+
+|`Solid`
+|Cached continuous filled Path with the global gradient.
+
+|`Bars`
+|All bar rectangles are combined into one Path.
+
+|`Outline`
+|All outline segments are combined into one Path.
+
+|`Led`
+|All LED segments are combined into one Path; one Quad per segment would add substantial submissions.
+|===
+
+The old multi-stop gradient implementation is appropriate for these body styles: the body has a shared spatial color field, and batching avoids one draw submission per bar or segment. Its cost is the gradient interval masks and Path reuse/clone operations when the body is painted.
+
+=== Peak
+
+Spectrum Peak is drawn independently as a solid 1px-high marker Quad:
+
+[source,text]
+----
+Peak dB fraction
+  -> palette LUT
+  -> solid color
+  -> 1px marker Quad
+----
+
+Peak is not stored in the body geometry cache. A body cache hit reuses the body Path while current Peak values are painted separately. This prevents Peak changes from rebuilding the body geometry.
+
+== Cache ownership
+
+* Waveform caches aggregated per-column RMS/Peak values.
+* Waveform does not cache per-column Quads or gradients; cached values are cheap to resubmit and avoid additional size/palette/configuration invalidation state.
+* Spectrum caches body Path geometry using its existing key: size, range, style, bar count, spacing, interpolation, and data revision.
+* Spectrum Peak is outside body geometry and does not invalidate the body cache.
+* Disabling visualization caching clears derived data according to the existing lifecycle; no per-column drawing objects remain retained.
+
+== Performance trade-off
+
+[cols="1,2,2"]
+|===
+|Region |Previous implementation |Current design
+
+|Waveform RMS
+|Few submissions, but multi-stop gradient masks, Path reuse/cloning, and RMS Path tessellation.
+|One gradient Quad per column; no RMS Path tessellation or gradient mask.
+
+|Waveform Peak
+|Peak Path with the global gradient and mask.
+|One solid 1px Quad per visible Peak.
+
+|Spectrum body
+|Cached Path with the global gradient and multi-stop mask behavior.
+|Same batched cached Path strategy.
+
+|Spectrum Peak
+|Peak Path with the global gradient.
+|One solid 1px marker Quad per visible Peak.
+|===
+
+No eight-color quantization is used. Quantization would reduce submissions but change the exact `lut(RMS)` and `lut(Peak)` colors.
+
+The new design moves cost rather than guaranteeing a total CPU reduction: it removes Path construction, tessellation, cloning, and mask submissions for column/marker primitives, but increases Quad submissions. Spectrum body remains batched because `Bars`, `Outline`, and `Led` can contain many primitives.
+
+== Validation
+
+Performance comparisons must use identical panel dimensions, data frames, column/bar counts, palette, and repaint count. Measure:
+
+* first-draw CPU time;
+* cache-hit repaint CPU time;
+* Path and Quad submission counts;
+* tessellation count and time;
+* vertex count and temporary allocation.
+
+Important workloads are a roughly 1200-column Waveform and a high-density Spectrum `Led` style. Submission counts alone are insufficient; the actual GPUI render path must be measured before claiming an overall speedup.
