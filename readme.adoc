@@ -29,7 +29,7 @@ Queries carry data revisions rather than a client snapshot. Clients initialize
 from a state read, watch independent Playback, Queue, Library Summary, and
 System revisions, then read only invalidated sections. Notifications coalesce to
 the latest state; a server restart requires a fresh state read.
-The current IPC protocol is v2. Frame format, Hello/session behavior, message
+IPC frame format, Hello/session behavior, message
 types, revision watching, limits, and Wire schemas are documented in
 link:doc/21_ipc.adoc[IPC internal design].
 

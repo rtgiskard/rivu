@@ -3,8 +3,7 @@
 == Scope
 
 IPC is the local control and state transport between the Rivu server and CLI, TUI,
-and GUI clients. The current protocol version is v2. Clients and the server must
-use the same protocol version.
+and GUI clients. Clients and the server must use compatible builds.
 
 == Transport and frame format
 
@@ -76,6 +75,9 @@ Runtime `Config` and `SystemState` use explicit positional Wire schemas. They ar
 not serialized directly because their in-process serde representation is not a
 stable binary contract. Collection lengths and optional fields are encoded in
 the message body.
+
+The codec and positional payload schema are not negotiated. Changes require
+coordinated client and server updates.
 
 == Implementation and tests
 
