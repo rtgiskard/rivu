@@ -168,6 +168,27 @@ enum VisualMode {
     Spectrogram,
 }
 
+#[derive(PartialEq)]
+struct SpectrumGeometryKey {
+    origin: Point<Pixels>,
+    width: Pixels,
+    height: Pixels,
+    style: SpectrumStyle,
+    bars: usize,
+    interpolate: bool,
+    peaks: bool,
+    top_db: f32,
+    db_range: f32,
+    gap: f32,
+    revision: u64,
+}
+
+struct SpectrumGeometry {
+    key: SpectrumGeometryKey,
+    body: Option<Path<Pixels>>,
+    peak: Option<Path<Pixels>>,
+}
+
 struct VisualData {
     spectrogram_panel_heights: HashMap<u64, usize>,
     frequencies: Vec<f32>,
@@ -187,6 +208,8 @@ struct VisualData {
     bar_deadlines: Vec<Duration>,
     smoothed_levels: Vec<f32>,
     spectrum_points: Vec<Point<Pixels>>,
+    spectrum_geometry: HashMap<u64, SpectrumGeometry>,
+    spectrum_geometry_revision: u64,
     last_update: Option<Duration>,
     top_db: f32,
     visual_background: u32,
@@ -254,6 +277,8 @@ impl Visuals {
                 bar_deadlines: Vec::new(),
                 smoothed_levels: Vec::new(),
                 spectrum_points: Vec::new(),
+                spectrum_geometry: HashMap::new(),
+                spectrum_geometry_revision: 0,
                 last_update: None,
                 top_db: 0.0,
                 palette_lut: active_palette_lut(VisualizationPalette::Deadbeef),
@@ -322,6 +347,7 @@ impl Visuals {
             || data.spectrogram_interpolation_points != config.spectrogram_interpolation_points
             || data.spectrogram_sampling_points_scale != config.spectrogram_sampling_points_scale
             || data.spectrogram_history_seconds != config.spectrogram_history_seconds
+            || data.spectrogram_db_range != config.spectrogram_db_range
             || data.analysis_fps != config.analysis_fps
             || data.configured_history_columns != configured_history_columns;
         if !changed {
@@ -430,6 +456,7 @@ impl Visuals {
                 .resize(frame.spectrum_db.len(), bar_deadline);
         }
         data.latest_levels.clone_from(&frame.spectrum_db);
+        data.spectrum_geometry_revision = data.spectrum_geometry_revision.wrapping_add(1);
         data.push_history(frame.sample_time, &frame.spectrum_db);
         let decay = smoothing_decay(now.saturating_sub(last), data.spectrum_smoothing_ms);
         for index in 0..data.peaks.len() {
@@ -482,6 +509,10 @@ impl Visuals {
         self.data
             .borrow_mut()
             .spectrogram_panel_heights
+            .retain(|panel_id, _| panel_ids.contains(panel_id));
+        self.data
+            .borrow_mut()
+            .spectrum_geometry
             .retain(|panel_id, _| panel_ids.contains(panel_id));
     }
 
@@ -540,7 +571,9 @@ impl Visuals {
                         }
                         if !showing_status {
                             let result = match mode {
-                                VisualMode::Spectrum => data.paint_spectrum(bounds, window, cx),
+                                VisualMode::Spectrum => {
+                                    data.paint_spectrum(panel_id, bounds, window, cx)
+                                }
                                 VisualMode::Spectrogram => {
                                     data.paint_spectrogram(bounds, window, cx)
                                 }
@@ -800,6 +833,7 @@ impl VisualData {
 
     fn paint_spectrum(
         &mut self,
+        panel_id: u64,
         bounds: Bounds<Pixels>,
         window: &mut Window,
         cx: &mut App,
@@ -864,10 +898,34 @@ impl VisualData {
                 .map_err(|error| format!("Cannot tessellate spectrum grid: {error}"))?;
             window.paint_path(path, rgb(0x14161b));
         }
+        let geometry_key = SpectrumGeometryKey {
+            origin: plot.origin,
+            width: plot.size.width,
+            height: plot.size.height,
+            style: self.spectrum_style,
+            bars,
+            interpolate: self.spectrum_interpolate,
+            peaks: self.spectrum_peaks,
+            top_db: self.top_db,
+            db_range: self.spectrum_db_range,
+            gap: self.spectrum_gap,
+            revision: self.spectrum_geometry_revision,
+        };
 
         window.with_content_mask(
             Some(gpui::ContentMask { bounds: plot }),
             |window| -> Result<(), String> {
+                if let Some(geometry) = self.spectrum_geometry.get(&panel_id)
+                    && geometry.key == geometry_key
+                {
+                    if let Some(path) = geometry.body.clone() {
+                        paint_spectrum_path(path, plot, window, self.palette_lut.as_ref());
+                    }
+                    if let Some(path) = geometry.peak.clone() {
+                        paint_spectrum_path(path, plot, window, self.palette_lut.as_ref());
+                    }
+                    return Ok(());
+                }
                 self.spectrum_points.clear();
                 let style = self.spectrum_style;
                 let bottom = plot.bottom();
@@ -1024,16 +1082,35 @@ impl VisualData {
                         style == SpectrumStyle::Line || self.spectrum_interpolate,
                     );
                 }
-                if any_visible {
-                    let path = shape_path
-                        .build()
-                        .map_err(|error| format!("Cannot tessellate spectrum: {error}"))?;
+                let body = if any_visible {
+                    Some(
+                        shape_path
+                            .build()
+                            .map_err(|error| format!("Cannot tessellate spectrum: {error}"))?,
+                    )
+                } else {
+                    None
+                };
+                let peak =
+                    if any_peak {
+                        Some(peak_path.build().map_err(|error| {
+                            format!("Cannot tessellate spectrum peaks: {error}")
+                        })?)
+                    } else {
+                        None
+                    };
+                self.spectrum_geometry.insert(
+                    panel_id,
+                    SpectrumGeometry {
+                        key: geometry_key,
+                        body: body.clone(),
+                        peak: peak.clone(),
+                    },
+                );
+                if let Some(path) = body {
                     paint_spectrum_path(path, plot, window, self.palette_lut.as_ref());
                 }
-                if any_peak {
-                    let path = peak_path
-                        .build()
-                        .map_err(|error| format!("Cannot tessellate spectrum peaks: {error}"))?;
+                if let Some(path) = peak {
                     paint_spectrum_path(path, plot, window, self.palette_lut.as_ref());
                 }
                 Ok(())
