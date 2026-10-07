@@ -100,6 +100,20 @@ but rebuilds visualization geometry on each repaint, increasing CPU use.
 Spectrum and Waveform use GPU gradients assembled from the selected palette's
 intermediate color stops. Spectrogram continues to use the full palette.
 
+=== GPUI rendering background
+
+The visualization path has three distinct stages. `PathBuilder::build` creates
+and tessellates the geometry on the CPU. `Window::paint_path` then records the
+already-built Path as a primitive in GPUI's scene. The GPU renderer rasterizes
+the resulting triangles and evaluates gradient colors and content masks while
+rendering.
+
+Palette-stop segmentation therefore adds scene items, masks, and paint
+submissions, but does not rebuild the same Path geometry for every interval.
+The number of `paint_path` calls is not the hardware draw-call count; CPU
+tessellation time, scene recording time, and GPU execution time must be measured
+separately when evaluating a rendering optimization.
+
 === Waveform
 
 Waveform shows a whole-track timeline, relative to the subtrack for CUE. Left is
@@ -140,6 +154,43 @@ the visible frequency slot. Other styles retain 1px-high filled Peak markers;
 through the same palette-stop gradient sequence. Each palette interval is
 rendered with its own masked paint so authored stop positions remain visible;
 this repeats scene submissions for each interval.
+
+==== Spectrum rendering strategies
+
+[%header,cols="1,1,1,2"]
+|===
+|Style |Body geometry |Peak geometry |Path ownership and trade-off
+
+|`bars`
+|Filled rectangle per frequency slot
+|Filled marker, slot width × 1px
+|Body and Peak use the same fill Path and are tessellated together. Lowest structural overhead for discrete bars.
+
+|`outline`
+|Filled edge rectangles forming the outline
+|Filled marker, slot width × 1px
+|Body and Peak share the fill Path. More rectangles than `bars` to preserve the outline shape.
+
+|`led`
+|Filled LED rectangles with gaps
+|Filled marker, slot width × 1px
+|Body and Peak share the fill Path. Geometry grows with the number of LED segments; dense configurations are the most tessellation-heavy.
+
+|`line`
+|Continuous 2px stroke through body points
+|Independent filled marker, slot width × 1px
+|Body uses a stroke builder and Peak uses a fill builder. They are tessellated separately, then their vertices are merged for one gradient submission; Peak points are never connected.
+
+|`solid`
+|Closed filled contour to the plot baseline
+|Filled 1px × 1px marker
+|Body and Peak share the fill Path. Interpolation controls whether the contour boundary is continuous or stepped.
+|===
+
+All styles use the same palette-stop gradient sequence. Each interval is
+masked to its authored vertical range; the mask preserves stop placement while
+the Path geometry remains reusable. `stroke` is used only where a continuous
+line is semantically required; discrete Peak values use filled markers.
 
 Spectrogram shows recent frequency history; `spectrogram_*` settings control its
 history duration, color range, labels, interpolation, and the `0.4`–`1.4`
