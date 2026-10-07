@@ -10,7 +10,7 @@ use crate::{
 };
 use chrono::{DateTime, Local};
 use gpui::{
-    AnyElement, Context, Div, SharedString, Window, div, prelude::*, px, rgb, uniform_list,
+    AnyElement, Context, Div, SharedString, Window, div, img, prelude::*, px, rgb, uniform_list,
 };
 
 fn metadata_pair(label: &'static str, value: impl Into<SharedString>) -> Div {
@@ -833,23 +833,30 @@ impl GuiApp {
         let selection_count = self.selected_queue.len();
         let mut tools = panel_toolbar().min_h(px(32.));
         if !self.state.queue.entries.is_empty() {
-            tools = tools.child(icon_button(
-                ("queue-save-playlist", panel_id),
-                "\u{f0193}",
-                "Save queue as playlist",
-                cx,
-                |this, _, cx| {
-                    let track_ids = this
-                        .state
-                        .queue
-                        .entries
-                        .iter()
-                        .map(|entry| entry.track_id)
-                        .collect();
-                    let name = format!("Queue {}", Local::now().format("%Y-%m-%d %H-%M-%S"));
-                    this.send(Command::CreatePlaylistWithTracks { name, track_ids }, cx);
-                },
-            ));
+            tools = tools.child(
+                icon_button(
+                    ("queue-save-playlist", panel_id),
+                    "\u{f0193}",
+                    if self.queue_save_pending {
+                        "Saving queue as playlist"
+                    } else {
+                        "Save queue as playlist"
+                    },
+                    cx,
+                    |this, _, cx| this.save_queue_as_playlist(cx),
+                )
+                .opacity(if self.queue_save_pending { 0.4 } else { 1.0 }),
+            );
+            if self.queue_save_pending {
+                tools = tools.child(caption("Saving…").text_color(rgb(MUTED)));
+            } else if let Some(feedback) = &self.queue_save_feedback {
+                tools = tools.child(
+                    caption(match feedback {
+                        Ok(message) | Err(message) => message.clone(),
+                    })
+                    .text_color(rgb(if feedback.is_ok() { ACCENT } else { super::ERROR })),
+                );
+            }
         }
         if selection_count > 0 {
             tools = tools
@@ -1096,9 +1103,11 @@ impl GuiApp {
                     self.playlist_buffer.total
                 ),
             ))
-            .child(self.panel_field(Field::PlaylistName, "Playlist name"))
             .child(
-                panel_toolbar()
+                row()
+                    .items_end()
+                    .gap_2()
+                    .child(self.panel_field(Field::PlaylistName, "Playlist name").flex_1())
                     .child(icon_button(
                         ("playlist-create", panel_id),
                         "+",
@@ -1112,7 +1121,10 @@ impl GuiApp {
                                 this.send(Command::CreatePlaylist { name }, cx);
                             }
                         },
-                    ))
+                    )),
+            )
+            .child(
+                panel_toolbar()
                     .child(icon_button(
                         ("playlist-import", panel_id),
                         "↓",
@@ -1182,7 +1194,8 @@ impl GuiApp {
                             .collect::<Vec<_>>()
                     }),
                 )
-                .h(px(160.))
+                .flex_1()
+                .min_h_0()
                 .w_full(),
             ));
         if let Some(id) = playlist_id {
@@ -1252,6 +1265,8 @@ impl GuiApp {
                                 this.send(Command::DeletePlaylist { playlist_id: id }, cx);
                             },
                         ))
+                        .child(caption("Playlist").text_xs().text_color(rgb(MUTED)))
+                        .child(div().w(px(1.)).h(px(20.)).bg(rgb(BORDER)))
                         .when(self.selected_entry.is_some(), |bar| {
                             bar.child(icon_button(
                                 ("entry-play", panel_id),
@@ -1468,7 +1483,7 @@ impl GuiApp {
                     ),
                 ))
                 .child(metadata_group(
-                    "Technical details",
+                    "Metadata",
                     column()
                         .gap_1()
                         .child(metadata_row(
@@ -1512,52 +1527,42 @@ impl GuiApp {
                             ),
                             metadata_pair(
                                 "Bits/sample",
-                                track
-                                    .bits_per_sample
-                                    .map_or("—".into(), |value| value.to_string()),
+                                track.bits_per_sample.map_or("—".into(), |value| value.to_string()),
                             ),
-                        ))
-                        .child(metadata_row(
-                            metadata_pair(
-                                "Disc",
-                                track
-                                    .disc_number
-                                    .map_or("—".into(), |value| value.to_string()),
-                            ),
-                            metadata_pair(
-                                "Track",
-                                track
-                                    .track_number
-                                    .map_or("—".into(), |value| value.to_string()),
-                            ),
-                        ))
-                        .child(metadata_row(
-                            metadata_pair("Release", track.release_date.as_deref().unwrap_or("—")),
-                            metadata_pair("Plays", track.play_count.to_string()),
-                        ))
-                        .child(metadata_row(
-                            metadata_pair("Last played", last_played),
-                            metadata_pair("", ""),
-                        ))
-                        .when_some(track.cue.as_ref(), |details, cue| {
-                            details.child(caption(format!(
-                                "CUE: {} · Track {} · {}–{}",
-                                cue.sheet.display(),
-                                cue.number,
-                                format_time(cue.start_seconds()),
-                                cue.end_seconds().map_or("—".into(), format_time)
-                            )))
-                        }),
+                        )),
                 ))
                 .child(metadata_group(
                     "Tags",
                     column()
                         .gap_2()
-                        .child(self.panel_field(Field::Title, "Title"))
-                        .child(self.panel_field(Field::Artist, "Artist"))
-                        .child(self.panel_field(Field::Album, "Album"))
+                        .child(metadata_row(
+                            self.panel_field(Field::Title, "Title"),
+                            self.panel_field(Field::Artist, "Artist"),
+                        ))
+                        .child(metadata_row(
+                            self.panel_field(Field::Album, "Album"),
+                            metadata_pair("Disc", track.disc_number.map_or("—".into(), |value| value.to_string())),
+                        ))
+                        .child(metadata_row(
+                            metadata_pair("Track", track.track_number.map_or("—".into(), |value| value.to_string())),
+                            metadata_pair("Release", track.release_date.as_deref().unwrap_or("—")),
+                        ))
+                        .child(metadata_row(
+                            metadata_pair("Play count", track.play_count.to_string()),
+                            metadata_pair("Last played", last_played),
+                        ))
+                        .when_some(self.artwork_manager.uri_for(track), |tags, uri| {
+                            tags.child(
+                                row()
+                                    .items_start()
+                                    .gap_2()
+                                    .child(caption("Album artwork").w(px(92.)).flex_shrink_0())
+                                    .child(img(uri).size(px(128.))),
+                            )
+                        })
                         .child(
                             row()
+                                .justify_end()
                                 .gap_2()
                                 .child(
                                     icon_button(
@@ -1670,7 +1675,7 @@ impl GuiApp {
             .child(self.history_sort_button(panel_id, "Track", HistorySort::Title, None, cx))
             .child(self.history_sort_button(
                 panel_id,
-                "Plays",
+                "Play count",
                 HistorySort::Plays,
                 Some(px(84.)),
                 cx,
@@ -1687,9 +1692,11 @@ impl GuiApp {
                 "Recent tracks",
                 format!("{} tracks · click a column to sort", history_len),
             ))
-            .child(header)
             .child(list_viewport(
-                uniform_list(
+                column()
+                    .size_full()
+                    .child(header)
+                    .child(uniform_list(
                     ("history-rows", panel_id),
                     history_len,
                     cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
@@ -1702,6 +1709,10 @@ impl GuiApp {
                                 } else {
                                     item.title.clone()
                                 };
+                                let last_played = this.last_played_text(id, Some(item.played_at));
+                                let last_played = last_played
+                                    .strip_prefix("Last played · ")
+                                    .unwrap_or(&last_played);
                                 Some(
                                     list_row(
                                         ("history-entry", id as u64),
@@ -1720,7 +1731,7 @@ impl GuiApp {
                                             .truncate(),
                                     )
                                     .child(
-                                        caption(this.last_played_text(id, Some(item.played_at)))
+                                        caption(last_played.to_owned())
                                             .w(px(148.))
                                             .flex_shrink_0()
                                             .truncate(),
@@ -1739,9 +1750,10 @@ impl GuiApp {
                     }),
                 )
                 .h_full()
+                .flex_1()
                 .min_h_0()
                 .w_full(),
-            ))
+            )))
             .into_any_element()
     }
 }
