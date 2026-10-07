@@ -25,8 +25,10 @@ link:02_library.adoc[Library] for root normalization, scan boundaries, and CUE/p
 rules.
 
 `queue_limit` accepts `1`–`4096`; lowering it below the current queue length is
-rejected. `page_size` accepts `20`–`256`. Queue behavior is described in
-link:04_playback.adoc#_queue[Playback]; paging in link:02_library.adoc[Library].
+rejected. `page_size` accepts `20`–`256` and controls GUI/TUI pages, not CLI
+listing or export batch sizes. Queue behavior is described in
+link:04_playback.adoc#_queue[Playback]; query and batch contracts in
+link:02_library.adoc#_paged_views[Library].
 
 Accepted media read buffer sizes are `1`, `2`, `4`, `8`, and `16` MiB.
 

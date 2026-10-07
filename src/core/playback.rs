@@ -117,7 +117,7 @@ impl Core {
                 .playback
                 .duration
                 .filter(|duration| duration.is_finite() && *duration > 0.0));
-        self.state.library.history = Arc::new(self.store.history(PAGE_SIZE)?);
+        self.state.library.history = Arc::new(self.store.history(MAX_QUERY_ROWS)?);
         self.count_play()
     }
     pub(in crate::core) fn playback_progress(&mut self, position: f64, heard: f64) -> Result<()> {
@@ -222,7 +222,7 @@ impl Core {
             if let Some((track_id, played_at)) = final_activity {
                 self.store.mark_played(track_id, played_at)?;
                 self.update_track_stats(track_id, Some(played_at), false)?;
-                self.state.library.history = Arc::new(self.store.history(PAGE_SIZE)?);
+                self.state.library.history = Arc::new(self.store.history(MAX_QUERY_ROWS)?);
             }
             self.count_play()
         })();

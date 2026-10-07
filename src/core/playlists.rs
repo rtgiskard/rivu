@@ -54,7 +54,7 @@ impl Core {
     }
 
     pub(in crate::core) fn export_playlist(&self, playlist_id: i64, path: &Path) -> Result<()> {
-        let mut offset = 0;
+        let mut after = None;
         let mut rows: Vec<PlaylistEntryRow> = Vec::new();
         let mut index = 0;
         let mut done = false;
@@ -70,16 +70,17 @@ impl Core {
                 if done {
                     return None;
                 }
-                let page = match self
-                    .store
-                    .playlist_entries_page(playlist_id, offset, PAGE_SIZE)
-                {
-                    Ok(page) => page,
+                let batch = match self.store.playlist_entry_batch(
+                    playlist_id,
+                    after,
+                    crate::model::MAX_QUERY_ROWS,
+                ) {
+                    Ok(batch) => batch,
                     Err(error) => return Some(Err(error)),
                 };
-                offset += page.rows.len();
-                done = page.rows.len() < PAGE_SIZE;
-                rows = page.rows;
+                after = batch.next;
+                done = after.is_none();
+                rows = batch.rows;
                 index = 0;
             }
         });

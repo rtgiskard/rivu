@@ -364,7 +364,7 @@ impl Config {
             self.log_retention_weeks
         );
         ensure!(
-            (20..=crate::model::PAGE_SIZE as u32).contains(&self.page_size),
+            (20..=crate::model::MAX_QUERY_ROWS as u32).contains(&self.page_size),
             "page_size must be between 20 and 256; got {}",
             self.page_size
         );

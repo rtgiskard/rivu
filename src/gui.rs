@@ -10,7 +10,7 @@ mod visuals;
 mod waveform;
 use crate::{
     core::AppHandle,
-    model::{Command, PlaybackStatus, playback_key_command},
+    model::{Command, PlaybackStatus, Query, playback_key_command},
     projection::GuiSnapshot,
     tray::TrayController,
 };
@@ -1101,21 +1101,21 @@ impl GuiApp {
         self.view_generation
     }
 
-    fn request_view(&mut self, command: Command, generation: u64, cx: &mut Context<Self>) {
-        let kind = match &command {
-            Command::LibraryPage {
+    fn request_view(&mut self, query: Query, generation: u64, cx: &mut Context<Self>) {
+        let kind = match &query {
+            Query::LibraryPage {
                 sort: LibrarySort::MostPlayed,
                 ..
             } => ViewRequestKind::Ranking,
-            Command::LibraryPage { .. } => ViewRequestKind::Library,
-            Command::PlaylistSummaries { .. } => ViewRequestKind::PlaylistSummaries,
-            Command::PlaylistEntries { .. } => ViewRequestKind::PlaylistEntries,
-            Command::Track { .. } => ViewRequestKind::Track,
-            Command::LibraryStats => ViewRequestKind::Stats,
+            Query::LibraryPage { .. } => ViewRequestKind::Library,
+            Query::PlaylistSummaries { .. } => ViewRequestKind::PlaylistSummaries,
+            Query::PlaylistEntries { .. } => ViewRequestKind::PlaylistEntries,
+            Query::Track { .. } => ViewRequestKind::Track,
+            Query::LibraryStats => ViewRequestKind::Stats,
             _ => return,
         };
         self.request_generations.insert(kind, generation);
-        let delay = if matches!(&command, Command::LibraryPage { query: Some(_), .. }) {
+        let delay = if matches!(&query, Query::LibraryPage { query: Some(_), .. }) {
             crate::model::SEARCH_DEBOUNCE
         } else {
             Duration::from_millis(80)
@@ -1134,8 +1134,10 @@ impl GuiApp {
             }
             let response = cx
                 .background_executor()
-                .spawn(async move { handle.request(command) })
+                .spawn(async move { handle.query(query) })
                 .await;
+            let revisions = response.revisions;
+            let result = response.result;
             let _ = this.update(cx, |this, cx| {
                 if this.request_generations.get(&kind) != Some(&generation) {
                     return;
@@ -1146,21 +1148,24 @@ impl GuiApp {
                     ViewRequestKind::PlaylistEntries => this.playlist_entries.pending = false,
                     _ => {}
                 }
-                if !response.ok {
-                    if kind == ViewRequestKind::Library {
-                        this.library_navigation = None;
+                let result = match result {
+                    Ok(result) => result,
+                    Err(error) => {
+                        if kind == ViewRequestKind::Library {
+                            this.library_navigation = None;
+                        }
+                        this.error = Some(error);
+                        cx.notify();
+                        return;
                     }
-                    this.error = response.error;
-                    cx.notify();
-                    return;
-                }
+                };
                 if matches!(
                     kind,
                     ViewRequestKind::Library
                         | ViewRequestKind::Ranking
                         | ViewRequestKind::Track
                         | ViewRequestKind::Stats
-                ) && response.state.library.revision != this.state.library.revision
+                ) && revisions.library != this.state.library.revision
                 {
                     match kind {
                         ViewRequestKind::Library => {
@@ -1183,8 +1188,7 @@ impl GuiApp {
                 if matches!(
                     kind,
                     ViewRequestKind::PlaylistSummaries | ViewRequestKind::PlaylistEntries
-                ) && response.state.library.playlist_revision
-                    != this.state.library.playlist_revision
+                ) && revisions.playlist != this.state.library.playlist_revision
                 {
                     match kind {
                         ViewRequestKind::PlaylistSummaries => {
@@ -1199,8 +1203,8 @@ impl GuiApp {
                     }
                     return;
                 }
-                match response.view {
-                    Some(ViewResponse::LibraryPage(page)) if kind == ViewRequestKind::Ranking => {
+                match result {
+                    ViewResponse::LibraryPage(page) if kind == ViewRequestKind::Ranking => {
                         if this.ranking_offset > 0 && this.ranking_offset >= page.total {
                             let last = page.total.saturating_sub(1) / this.view_page_size()
                                 * this.view_page_size();
@@ -1210,7 +1214,7 @@ impl GuiApp {
                         this.ranking_total = page.total;
                         this.ranking_rows = page.rows;
                     }
-                    Some(ViewResponse::LibraryPage(page)) if kind == ViewRequestKind::Library => {
+                    ViewResponse::LibraryPage(page) if kind == ViewRequestKind::Library => {
                         if this.library_buffer.offset > 0
                             && this.library_buffer.offset >= page.total
                         {
@@ -1235,7 +1239,7 @@ impl GuiApp {
                             }
                         }
                     }
-                    Some(ViewResponse::PlaylistSummaries(page))
+                    ViewResponse::PlaylistSummaries(page)
                         if kind == ViewRequestKind::PlaylistSummaries =>
                     {
                         if this.playlist_buffer.offset > 0
@@ -1249,7 +1253,7 @@ impl GuiApp {
                         this.playlist_buffer.total = page.total;
                         this.playlist_buffer.rows = page.rows;
                     }
-                    Some(ViewResponse::PlaylistEntries(page))
+                    ViewResponse::PlaylistEntries(page)
                         if kind == ViewRequestKind::PlaylistEntries =>
                     {
                         if this.playlist_entries.offset > 0
@@ -1270,7 +1274,7 @@ impl GuiApp {
                             this.clear_metadata_selection(cx);
                         }
                     }
-                    Some(ViewResponse::Track(track)) if kind == ViewRequestKind::Track => {
+                    ViewResponse::Track(track) if kind == ViewRequestKind::Track => {
                         let draft_dirty = this.full_track.as_ref().is_some_and(|current| {
                             this.value(Field::Title, cx) != current.title
                                 || this.value(Field::Artist, cx) != current.artist
@@ -1286,7 +1290,7 @@ impl GuiApp {
                         this.full_track = track;
                         this.sync_waveform(cx);
                     }
-                    Some(ViewResponse::LibraryStats(stats)) if kind == ViewRequestKind::Stats => {
+                    ViewResponse::LibraryStats(stats) if kind == ViewRequestKind::Stats => {
                         this.library_stats = Some(stats)
                     }
                     _ => {}
@@ -1310,7 +1314,7 @@ impl GuiApp {
         self.library_navigation = None;
         self.library_buffer.rows.clear();
         self.request_view(
-            Command::LibraryPage {
+            Query::LibraryPage {
                 query: self.library_buffer.query.clone(),
                 favorite: self.library_buffer.favorite,
                 missing: self.library_buffer.missing,
@@ -1330,7 +1334,7 @@ impl GuiApp {
         self.directory_tree.begin(path.clone(), offset, generation);
         if path.as_os_str().is_empty() {
             let roots = &self.state.system.config.library_roots;
-            let page = crate::model::DirectoryPage {
+            let page = crate::model::Page::<crate::model::DirectoryRow> {
                 total: roots.len(),
                 rows: roots
                     .iter()
@@ -1351,7 +1355,7 @@ impl GuiApp {
             let response = cx
                 .background_executor()
                 .spawn(async move {
-                    handle.request(Command::DirectoryPage {
+                    handle.query(Query::DirectoryPage {
                         path: request_path,
                         offset,
                         limit: page_size,
@@ -1362,13 +1366,20 @@ impl GuiApp {
                 if this.directory_tree.generation(&path) != Some(generation) {
                     return;
                 }
-                if !response.ok {
-                    this.directory_tree.fail(&path, generation);
-                    this.error = response.error;
-                } else if response.state.library.revision != this.state.library.revision {
+                let result = match response.result {
+                    Ok(result) => result,
+                    Err(error) => {
+                        this.directory_tree.fail(&path, generation);
+                        this.error = Some(error);
+                        cx.notify();
+                        return;
+                    }
+                };
+                if response.revisions.structure != this.state.library.structure_revision {
                     this.request_directory_page(path, offset, cx);
                     return;
-                } else if let Some(ViewResponse::DirectoryPage(page)) = response.view {
+                }
+                if let ViewResponse::DirectoryPage(page) = result {
                     if offset > 0 && offset >= page.total {
                         let last_offset = page.total.saturating_sub(1) / page_size * page_size;
                         this.request_directory_page(path, last_offset, cx);
@@ -1393,7 +1404,7 @@ impl GuiApp {
         self.playlist_buffer.rows.clear();
         self.playlist_buffer.pending = true;
         self.request_view(
-            Command::PlaylistSummaries {
+            Query::PlaylistSummaries {
                 offset,
                 limit: page_size,
             },
@@ -1426,7 +1437,7 @@ impl GuiApp {
         self.playlist_entries.pending = true;
         let generation = self.next_view_generation();
         self.request_view(
-            Command::PlaylistEntries {
+            Query::PlaylistEntries {
                 playlist_id,
                 offset,
                 limit: page_size,
@@ -1442,7 +1453,7 @@ impl GuiApp {
             self.full_track = None;
         }
         self.metadata_track = Some(id);
-        self.request_view(Command::Track { track_id: id }, generation, cx);
+        self.request_view(Query::Track { track_id: id }, generation, cx);
     }
     pub(super) fn clear_metadata_selection(&mut self, cx: &mut Context<Self>) {
         self.metadata_track = None;
@@ -1496,7 +1507,7 @@ impl GuiApp {
         self.ranking_rows.clear();
         let generation = self.next_view_generation();
         self.request_view(
-            Command::LibraryPage {
+            Query::LibraryPage {
                 query: None,
                 favorite: None,
                 missing: None,
@@ -1508,7 +1519,7 @@ impl GuiApp {
             cx,
         );
         let generation = self.next_view_generation();
-        self.request_view(Command::LibraryStats, generation, cx);
+        self.request_view(Query::LibraryStats, generation, cx);
     }
 
     fn update_metadata_track(&mut self, id: i64, cx: &mut Context<Self>) {
@@ -1751,6 +1762,7 @@ impl GuiApp {
                     self.library_buffer.rows.clear();
                     self.request_library_page(self.library_page * self.view_page_size(), cx);
                     self.request_ranking(self.ranking_offset, cx);
+                    self.directory_tree.invalidate_collapsed();
                     for (path, offset) in self.directory_tree.refresh_pages() {
                         self.request_directory_page(path, offset, cx);
                     }

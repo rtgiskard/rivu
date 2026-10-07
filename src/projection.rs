@@ -16,16 +16,6 @@ pub struct ClientSnapshot {
 }
 
 impl ClientSnapshot {
-    pub(crate) fn from_core(state: &CoreState) -> Self {
-        Self {
-            library: state.library.clone(),
-            queue: state.queue.clone(),
-            current_track: state.current_track.clone(),
-            playback: state.playback.clone(),
-            system: state.system.clone(),
-        }
-    }
-
     pub fn current_track(&self) -> Option<&Track> {
         self.current_track.as_deref()
     }

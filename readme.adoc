@@ -24,6 +24,20 @@ One core runs per data directory and owns the library, queue, playback, and live
 analysis. CLI/TUI clients connect through `rivu.sock`; GUI, tray, and MPRIS use
 in-process handles. Opening a client does not create a second playback engine.
 
+IPC separates command acknowledgements, query results, and explicit state reads.
+Queries carry data revisions, not a client snapshot. Clients initialize from a
+state read and then watch independent Playback, Queue, Library Summary, and
+System revisions; a notification invalidates sections, and the client reads only
+those sections. Notifications coalesce to the latest state rather than retaining
+an event log. The versioned protocol rejects incompatible clients and binds a
+persistent session to one server instance; restart requires a fresh state read.
+Revision tokens are compared for equality within that server lifetime.
+Core publication copies only changed sections; playback progress does not copy
+the unchanged System strings or increment its section token. `system.revision`
+is the global in-process wakeup sequence, not a Watch cursor.
+Wire implementation: link:src/ipc.rs[IPC]; typed contracts:
+link:src/response.rs[responses].
+
 Runtime ownership: link:src/core.rs[core] and link:src/core/runtime.rs[runtime].
 Client transport: link:src/ipc.rs[IPC]. User-facing limits and usage are described
 in the numbered topical guides below.
@@ -150,6 +164,12 @@ scanning. Use `--wait` for scan/import completion and `--json` for machine-reada
 responses; response shape depends on the command. Paths are resolved relative to
 the invoking client. The topical documents below define library, playback, and
 playlist contracts; generated `--help` defines exact arguments.
+
+With `--json`, ordinary mutations return an acknowledgement (`ok`, `error`,
+`revision`). State reads return section revisions and only the requested
+sections; omitted sections are `null`. Library and playlist listings remain
+streamed JSON arrays. Scan/import `--wait` returns the completed System section
+instead of fetching an unrelated queue or playback snapshot.
 
 == Files and data directories
 

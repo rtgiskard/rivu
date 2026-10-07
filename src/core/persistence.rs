@@ -88,7 +88,7 @@ impl Core {
         let playlist_total = self.store.playlist_summary_page(0, 0)?.total;
         self.state.library.playlist_total = playlist_total;
         self.state.library.playlist_revision = self.state.library.playlist_revision.wrapping_add(1);
-        self.state.library.history = Arc::new(self.store.history(PAGE_SIZE)?);
+        self.state.library.history = Arc::new(self.store.history(MAX_QUERY_ROWS)?);
         self.refresh_queue_tracks()?;
         Ok(())
     }

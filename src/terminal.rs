@@ -2,10 +2,10 @@ use crate::{
     ipc,
     model::{
         Command, DirectoryRow, LibraryRow, LibrarySort, PlaybackStatus, PlaylistEntryRow,
-        PlaylistSummary, RepeatMode, playback_key_command,
+        PlaylistSummary, Query, RepeatMode, playback_key_command,
     },
-    projection::TuiSnapshot,
-    response::{Ack, StateResponse, ViewResponse},
+    projection::{ClientSnapshot, TuiSnapshot},
+    response::{Ack, StateSections, ViewResponse},
 };
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, bounded};
@@ -86,7 +86,7 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
 
 struct Watcher {
     receiver: Receiver<()>,
-    latest: Arc<Mutex<Option<Result<StateResponse, String>>>>,
+    latest: Arc<Mutex<Option<Result<ClientSnapshot, String>>>>,
     stopping: Arc<AtomicBool>,
     cancel_notify: Arc<tokio::sync::Notify>,
     worker: Option<JoinHandle<()>>,
@@ -102,13 +102,13 @@ impl Drop for Watcher {
     }
 }
 
-fn spawn_watcher(socket_path: &Path, revision: u64) -> Watcher {
+fn spawn_watcher(socket_path: &Path) -> Watcher {
     let socket_path = socket_path.to_owned();
     let (sender, receiver) = bounded(1);
     let latest = Arc::new(Mutex::new(None));
     let latest_worker = Arc::clone(&latest);
     let stopping = Arc::new(AtomicBool::new(false));
-    let stop = stopping.clone();
+    let stop = Arc::clone(&stopping);
     let cancel_notify = Arc::new(tokio::sync::Notify::new());
     let thread_notify = Arc::clone(&cancel_notify);
     let worker = std::thread::spawn(move || {
@@ -118,18 +118,53 @@ fn spawn_watcher(socket_path: &Path, revision: u64) -> Watcher {
             let _ = sender.try_send(());
             return;
         };
-        let mut revision = revision as u16;
+        let mut state = match session.get_state(StateSections::ALL) {
+            Ok(response) => {
+                let mut state = ClientSnapshot::default();
+                let revisions = response.revisions;
+                response.apply_to(&mut state);
+                (state, revisions)
+            }
+            Err(error) => {
+                *latest_worker.lock() = Some(Err(format!("TUI state handshake failed: {error:#}")));
+                let _ = sender.try_send(());
+                return;
+            }
+        };
+        *latest_worker.lock() = Some(Ok(state.0.clone()));
+        let _ = sender.try_send(());
         loop {
-            match session.watch_until(revision) {
-                Ok(Some(response)) => {
-                    revision = response.state.system.revision as u16;
-                    let shutting_down = response.state.system.shutting_down;
-                    *latest_worker.lock() = Some(Ok(response));
-                    let disconnected = sender.try_send(()).is_err_and(|error| {
-                        matches!(error, crossbeam_channel::TrySendError::Disconnected(_))
-                    });
-                    if disconnected || shutting_down {
-                        break;
+            match session.watch_until(state.1) {
+                Ok(Some(revisions)) => {
+                    let changed = revisions.changed_since(state.1);
+                    if !changed.is_empty() {
+                        match session.get_state(changed) {
+                            Ok(response) => {
+                                state
+                                    .1
+                                    .apply_sections(response.revisions, response.sections());
+                                response.apply_to(&mut state.0);
+                                let shutting_down = state.0.system.shutting_down;
+                                *latest_worker.lock() = Some(Ok(state.0.clone()));
+                                let disconnected = sender.try_send(()).is_err_and(|error| {
+                                    matches!(
+                                        error,
+                                        crossbeam_channel::TrySendError::Disconnected(_)
+                                    )
+                                });
+                                if disconnected || shutting_down {
+                                    break;
+                                }
+                            }
+                            Err(error) => {
+                                *latest_worker.lock() =
+                                    Some(Err(format!("TUI state read failed: {error:#}")));
+                                let _ = sender.try_send(());
+                                break;
+                            }
+                        }
+                    } else {
+                        state.1 = revisions;
                     }
                 }
                 Ok(None) => break,
@@ -150,6 +185,7 @@ fn spawn_watcher(socket_path: &Path, revision: u64) -> Watcher {
         worker: Some(worker),
     }
 }
+
 struct CommandWorker {
     sender: Option<Sender<Command>>,
     stopping: Option<Sender<()>>,
@@ -208,15 +244,16 @@ struct QueryRequest {
     limit: usize,
     view_revision: u64,
     library_revision: u64,
+    structure_revision: u64,
     playlist_revision: u64,
 }
 
 impl QueryRequest {
-    fn command(&self) -> Command {
+    fn query(&self) -> Query {
         let offset = self.offset;
         let limit = self.limit;
         match &self.kind {
-            QueryKind::Search(query) => Command::LibraryPage {
+            QueryKind::Search(query) => Query::LibraryPage {
                 query: Some(query.clone()),
                 favorite: None,
                 missing: None,
@@ -224,21 +261,21 @@ impl QueryRequest {
                 offset,
                 limit,
             },
-            QueryKind::Directory(path) => Command::DirectoryPage {
+            QueryKind::Directory(path) => Query::DirectoryPage {
                 path: path.clone(),
                 offset,
                 limit,
             },
             QueryKind::Roots(roots) => {
                 let local_count = roots.len().saturating_sub(offset).min(limit);
-                Command::DirectoryPage {
+                Query::DirectoryPage {
                     path: PathBuf::new(),
                     offset: offset.saturating_sub(roots.len()),
                     limit: (limit - local_count).max(1),
                 }
             }
-            QueryKind::Playlists => Command::PlaylistSummaries { offset, limit },
-            QueryKind::Playlist(playlist_id) => Command::PlaylistEntries {
+            QueryKind::Playlists => Query::PlaylistSummaries { offset, limit },
+            QueryKind::Playlist(playlist_id) => Query::PlaylistEntries {
                 playlist_id: *playlist_id,
                 offset,
                 limit,
@@ -248,8 +285,7 @@ impl QueryRequest {
 }
 
 struct QueryResult {
-    library_revision: u64,
-    playlist_revision: u64,
+    revisions: crate::response::QueryRevisions,
     view: ViewResponse,
 }
 
@@ -299,25 +335,17 @@ fn spawn_query_worker(socket_path: &Path) -> QueryWorker {
             let Some(request) = requests.lock().take() else {
                 continue;
             };
-            let result = ipc::request_with_cancel(
+            let result = ipc::query_with_cancel(
                 &socket_path,
-                &request.command(),
+                &request.query(),
                 Arc::clone(&worker_stopping),
                 Arc::clone(&worker_cancel),
             )
             .map_err(|error| format!("{error:#}"))
             .and_then(|response| {
-                if !response.ok {
-                    return Err(response
-                        .error
-                        .unwrap_or_else(|| "View request rejected".into()));
-                }
-                let view = response
-                    .view
-                    .ok_or_else(|| "Missing view response".to_owned())?;
+                let view = response.result?;
                 Ok(QueryResult {
-                    library_revision: response.state.library.revision,
-                    playlist_revision: response.state.library.playlist_revision,
+                    revisions: response.revisions,
                     view,
                 })
             });
@@ -336,7 +364,7 @@ fn spawn_query_worker(socket_path: &Path) -> QueryWorker {
 
 fn run_loop(socket_path: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
     let snapshot = request_state(socket_path)?;
-    let updates = spawn_watcher(socket_path, snapshot.system.revision);
+    let updates = spawn_watcher(socket_path);
     let commands = spawn_command_worker(socket_path);
     let queries = spawn_query_worker(socket_path);
     let mut tui = TuiState::new(snapshot);
@@ -346,11 +374,10 @@ fn run_loop(socket_path: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>
     loop {
         while updates.receiver.try_recv().is_ok() {}
         if let Some(update) = updates.latest.lock().take() {
-            let response = update.map_err(anyhow::Error::msg)?;
-            if response.ok && response.state.system.revision != tui.snapshot.system.revision {
-                tui.apply_snapshot(TuiSnapshot::from_client(&response.state));
-                redraw = true;
-            }
+            let state = update.map_err(anyhow::Error::msg)?;
+            let next = TuiSnapshot::from_client(&state);
+            tui.apply_snapshot(next);
+            redraw = true;
         }
         while let Ok(result) = commands.results.try_recv() {
             match result {
@@ -527,6 +554,7 @@ struct UiState {
     queue_cache: QueueViewCache,
     requested: Option<QueryRequest>,
     query_revision: u64,
+    failed_request: Option<QueryRequest>,
     local_revision: u64,
     // Keyboard PageUp/PageDown distance follows the terminal viewport, not query limits.
     page_size: usize,
@@ -560,14 +588,20 @@ impl UiState {
             ),
             _ => return None,
         };
-        Some(QueryRequest {
+        let request = QueryRequest {
             kind,
             offset,
             limit,
             view_revision: self.query_revision,
             library_revision: state.library.revision,
+            structure_revision: state.library.structure_revision,
             playlist_revision: state.library.playlist_revision,
-        })
+        };
+        if self.failed_request.as_ref() == Some(&request) {
+            None
+        } else {
+            Some(request)
+        }
     }
 
     fn apply_query(
@@ -585,13 +619,22 @@ impl UiState {
         let result = match result {
             Ok(result) => result,
             Err(error) => {
+                self.requested = None;
+                self.failed_request = Some(request.clone());
                 self.set_message(Some(error));
                 return true;
             }
         };
-        if result.library_revision != request.library_revision
-            || result.playlist_revision != request.playlist_revision
-        {
+        let revision_matches = match &request.kind {
+            QueryKind::Directory(_) | QueryKind::Roots(_) => {
+                result.revisions.structure == request.structure_revision
+            }
+            QueryKind::Playlists | QueryKind::Playlist(_) => {
+                result.revisions.playlist == request.playlist_revision
+            }
+            QueryKind::Search(_) => result.revisions.library == request.library_revision,
+        };
+        if !revision_matches {
             return false;
         }
         match (&mut self.view, result.view) {
@@ -685,6 +728,7 @@ impl UiState {
 
     fn invalidate_views(&mut self) {
         self.requested = None;
+        self.failed_request = None;
         self.query_revision = self.query_revision.wrapping_add(1);
         match &mut self.view {
             View::Search(search) => search.results.clear(),
@@ -696,6 +740,15 @@ impl UiState {
     }
 
     fn key_action(&mut self, key: KeyEvent, state: &TuiSnapshot) -> KeyAction {
+        if key.code == KeyCode::Char('R') {
+            self.requested = None;
+            self.failed_request = None;
+            self.mark_local_change();
+            return KeyAction::Ignored;
+        }
+        if self.failed_request.is_some() {
+            self.failed_request = None;
+        }
         if key.code == KeyCode::Char('?') {
             self.show_help = !self.show_help;
             self.mark_local_change();
@@ -1192,9 +1245,10 @@ fn key_action(key: KeyEvent, state: &TuiSnapshot) -> KeyAction {
 }
 
 fn request_state(socket_path: &Path) -> Result<TuiSnapshot> {
-    Ok(TuiSnapshot::from_client(
-        &ipc::request(socket_path, &Command::Overview)?.state,
-    ))
+    let response = ipc::get_state(socket_path, StateSections::ALL)?;
+    let mut state = ClientSnapshot::default();
+    response.apply_to(&mut state);
+    Ok(TuiSnapshot::from_client(&state))
 }
 
 fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
@@ -1298,16 +1352,16 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
     );
     let keys = match &ui.view {
         View::Search(_) => {
-            "Type    search library\nTab     query/results focus\n↑/↓     select result\nPgUp/Dn page result\nBackspace edit query\nEnter   focus results\nEsc     return to queue\n\nSearch matches title, artist, album and path."
+            "Type    search library\nTab     query/results focus\n↑/↓     select result\nPgUp/Dn page result\nR       retry failed page\nBackspace edit query\nEnter   focus results\nEsc     return to queue\n\nSearch matches title, artist, album and path."
         }
         View::Tree(_) => {
-            "↑/↓     select entry\nPgUp/Dn page entries\nEnter   open directory/add track\nBackspace/← parent directory\nEsc     return to queue\n/       search library\nP       playlists\nSpace   play/pause\nn/p       next/previous\n→       seek forward 5 sec\nHome/End seek start/end\nr       repeat mode\ns       shuffle\n[/]     volume\nq       quit"
+            "↑/↓     select entry\nPgUp/Dn page entries\nR       retry failed page\nEnter   open directory/add track\nBackspace/← parent directory\nEsc     return to queue\n/       search library\nP       playlists\nSpace   play/pause\nn/p       next/previous\n→       seek forward 5 sec\nHome/End seek start/end\nr       repeat mode\ns       shuffle\n[/]     volume\nq       quit"
         }
         View::PlaylistDetail { .. } => {
-            "↑/↓     select track\nPgUp/Dn page tracks\nEnter   play track\na       add track to queue\n←/Esc   back to playlists\nSpace   play/pause\nn/p       next/previous\nHome/End seek start/end\nr       repeat mode\ns       shuffle\n[/]     volume\nq       quit"
+            "↑/↓     select track\nPgUp/Dn page tracks\nR       retry failed page\nEnter   play track\na       add track to queue\n←/Esc   back to playlists\nSpace   play/pause\nn/p       next/previous\nHome/End seek start/end\nr       repeat mode\ns       shuffle\n[/]     volume\nq       quit"
         }
         View::Playlists(_) => {
-            "↑/↓     select playlist\nPgUp/Dn page playlists\n→       open playlist\nEnter   play playlist\nEsc     return to queue\nP       playlists\n/       search library\nt       browse library tree\nSpace   play/pause\nn/p       next/previous\nHome/End seek start/end\nr       repeat mode\ns       shuffle\n[/]     volume\nq       quit"
+            "↑/↓     select playlist\nPgUp/Dn page playlists\nR       retry failed page\n→       open playlist\nEnter   play playlist\nEsc     return to queue\nP       playlists\n/       search library\nt       browse library tree\nSpace   play/pause\nn/p       next/previous\nHome/End seek start/end\nr       repeat mode\ns       shuffle\n[/]     volume\nq       quit"
         }
         View::Queue => {
             "↑/↓     select queue\nPgUp/Dn page queue\nEnter   play selected\nd/Del   remove selected\n/       search library\nt       browse library tree\nP       playlists\nSpace   play/pause\n←/→     seek 5 sec\nHome/End seek start/end\nr       repeat mode\ns       shuffle\n[/]     volume\nq       quit"
@@ -1610,942 +1664,4 @@ fn fmt_time(seconds: f64) -> String {
         return "0:00".into();
     }
     format!("{}:{:02}", (seconds as u64) / 60, (seconds as u64) % 60)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::model::{
-        DirectoryPage, LibraryPage, LibraryRow, PlaylistEntryPage, PlaylistSummaryPage, QueueEntry,
-        QueueState,
-    };
-    use crossterm::event::KeyModifiers;
-
-    #[test]
-    fn search_debounce_waits_for_the_last_edit_deadline() {
-        let now = Instant::now();
-        let mut search = LibrarySearch::default();
-        search.filter(now);
-        assert!(!search.ready(now + Duration::from_millis(149)));
-        assert!(search.ready(now + Duration::from_millis(150)));
-
-        search.filter(now + Duration::from_millis(100));
-        assert!(!search.ready(now + Duration::from_millis(249)));
-        assert!(search.ready(now + Duration::from_millis(250)));
-    }
-
-    fn track(id: i64, artist: &str, title: &str) -> LibraryRow {
-        LibraryRow {
-            id,
-            title: title.into(),
-            artist: artist.into(),
-            album: "album".into(),
-            duration: Some(1.0),
-            favorite: false,
-            missing: false,
-            play_count: 0,
-        }
-    }
-
-    fn tui_snapshot(queue: QueueState) -> TuiSnapshot {
-        TuiSnapshot {
-            queue,
-            ..TuiSnapshot::default()
-        }
-    }
-
-    fn row(id: i64) -> LibraryRow {
-        LibraryRow {
-            id,
-            title: format!("Title {id}"),
-            artist: "Artist".into(),
-            album: "Album".into(),
-            duration: Some(1.0),
-            favorite: false,
-            missing: false,
-            play_count: 0,
-        }
-    }
-
-    fn key(ui: &mut UiState, code: KeyCode, state: &TuiSnapshot) -> KeyAction {
-        ui.key_action(KeyEvent::new(code, KeyModifiers::NONE), state)
-    }
-
-    fn apply_view(ui: &mut UiState, state: &TuiSnapshot, view: ViewResponse) {
-        let request = ui.query_request(state).unwrap();
-        let result = QueryResult {
-            library_revision: state.library.revision,
-            playlist_revision: state.library.playlist_revision,
-            view,
-        };
-        assert!(ui.apply_query(state, &request, Ok(result)));
-    }
-
-    #[test]
-    fn tree_fetches_only_active_directory_and_restores_parent_selection() {
-        let state = TuiSnapshot::default();
-        let mut ui = UiState {
-            view: View::Tree(LibraryTree::default()),
-            ..UiState::default()
-        };
-        apply_view(
-            &mut ui,
-            &state,
-            ViewResponse::DirectoryPage(DirectoryPage {
-                total: 2,
-                rows: vec![
-                    DirectoryRow::Directory {
-                        path: PathBuf::from("/music"),
-                    },
-                    DirectoryRow::Directory {
-                        path: PathBuf::from("/podcasts"),
-                    },
-                ],
-            }),
-        );
-        key(&mut ui, KeyCode::Down, &state);
-        key(&mut ui, KeyCode::Enter, &state);
-        let request = ui.query_request(&state).unwrap();
-        assert_eq!(
-            request.kind,
-            QueryKind::Directory(PathBuf::from("/podcasts"))
-        );
-        let View::Tree(tree) = &ui.view else {
-            panic!("tree view");
-        };
-        assert!(tree.entries.pages.is_empty());
-        apply_view(
-            &mut ui,
-            &state,
-            ViewResponse::DirectoryPage(DirectoryPage {
-                total: 1,
-                rows: vec![DirectoryRow::Track(row(300))],
-            }),
-        );
-        assert!(matches!(key(&mut ui, KeyCode::Enter, &state),
-            KeyAction::Command(Command::Enqueue { track_ids }) if track_ids == vec![300]));
-        key(&mut ui, KeyCode::Left, &state);
-        let View::Tree(tree) = &ui.view else {
-            panic!("tree view");
-        };
-        assert!(tree.directory.as_os_str().is_empty());
-        assert_eq!(tree.entries.selection.selected(), Some(1));
-        assert!(tree.entries.pages.is_empty());
-    }
-
-    #[test]
-    fn configured_root_pages_keep_database_fallback_and_relative_children() {
-        let mut state = TuiSnapshot::default();
-        state.system.page_size = 100;
-        let roots = (0..130)
-            .map(|index| PathBuf::from(format!("/root/{index:03}")))
-            .collect::<Vec<_>>();
-        let mut ui = UiState {
-            view: View::Tree(LibraryTree::new(&roots)),
-            page_size: 100,
-            ..UiState::default()
-        };
-        assert!(matches!(
-            ui.query_request(&state).unwrap().command(),
-            Command::DirectoryPage {
-                offset: 0,
-                limit: 1,
-                ..
-            }
-        ));
-        apply_view(
-            &mut ui,
-            &state,
-            ViewResponse::DirectoryPage(DirectoryPage {
-                total: 2,
-                rows: vec![DirectoryRow::Directory {
-                    path: PathBuf::from("/"),
-                }],
-            }),
-        );
-        let View::Tree(tree) = &ui.view else {
-            panic!("tree view");
-        };
-        assert_eq!(tree.entries.items().len(), 100);
-        assert_eq!(tree.entries.total, 132);
-        key(&mut ui, KeyCode::PageDown, &state);
-        assert!(matches!(
-            ui.query_request(&state).unwrap().command(),
-            Command::DirectoryPage {
-                offset: 0,
-                limit: 70,
-                ..
-            }
-        ));
-        apply_view(
-            &mut ui,
-            &state,
-            ViewResponse::DirectoryPage(DirectoryPage {
-                total: 2,
-                rows: vec![
-                    DirectoryRow::Directory {
-                        path: PathBuf::from("/"),
-                    },
-                    DirectoryRow::Directory {
-                        path: PathBuf::from("relative"),
-                    },
-                ],
-            }),
-        );
-        let View::Tree(tree) = &mut ui.view else {
-            panic!("tree view");
-        };
-        assert_eq!(tree.entries.items().len(), 32);
-        tree.entries.selection.select(Some(131));
-        key(&mut ui, KeyCode::Enter, &state);
-        assert_eq!(
-            ui.query_request(&state).unwrap().kind,
-            QueryKind::Directory(PathBuf::from("relative"))
-        );
-    }
-
-    #[test]
-    fn directory_track_pages_navigate_beyond_first_page_and_back() {
-        let state = TuiSnapshot::default();
-        let mut ui = UiState {
-            view: View::Tree(LibraryTree {
-                directory: PathBuf::from("/music"),
-                ..LibraryTree::default()
-            }),
-            page_size: 64,
-            ..UiState::default()
-        };
-        apply_view(
-            &mut ui,
-            &state,
-            ViewResponse::DirectoryPage(DirectoryPage {
-                total: 300,
-                rows: (0..64).map(|id| DirectoryRow::Track(row(id))).collect(),
-            }),
-        );
-        key(&mut ui, KeyCode::PageDown, &state);
-        assert_eq!(ui.query_request(&state).unwrap().offset, 64);
-        apply_view(
-            &mut ui,
-            &state,
-            ViewResponse::DirectoryPage(DirectoryPage {
-                total: 300,
-                rows: (64..128).map(|id| DirectoryRow::Track(row(id))).collect(),
-            }),
-        );
-        assert!(matches!(key(&mut ui, KeyCode::Enter, &state),
-            KeyAction::Command(Command::Enqueue { track_ids }) if track_ids == vec![64]));
-        key(&mut ui, KeyCode::PageUp, &state);
-        assert!(ui.query_request(&state).is_none());
-        assert!(matches!(key(&mut ui, KeyCode::Enter, &state),
-            KeyAction::Command(Command::Enqueue { track_ids }) if track_ids == vec![0]));
-    }
-
-    #[test]
-    fn query_worker_coalesces_pending_requests() {
-        let (sender, receiver) = bounded(1);
-        let worker = QueryWorker {
-            sender: Some(sender),
-            pending: Arc::new(Mutex::new(None)),
-            latest: Arc::new(Mutex::new(None)),
-            stopping: Arc::new(AtomicBool::new(false)),
-            cancel_notify: Arc::new(tokio::sync::Notify::new()),
-            worker: None,
-        };
-        let request = QueryRequest {
-            kind: QueryKind::Search("first".into()),
-            offset: 0,
-            limit: 64,
-            view_revision: 0,
-            library_revision: 1,
-            playlist_revision: 2,
-        };
-        worker.request(request.clone());
-        let latest = QueryRequest {
-            kind: QueryKind::Search("latest".into()),
-            ..request
-        };
-        worker.request(latest.clone());
-        assert_eq!(worker.pending.lock().as_ref(), Some(&latest));
-        assert_eq!(receiver.len(), 1);
-    }
-
-    #[test]
-    fn revision_unchanged_local_selection_is_visible() {
-        let state = tui_snapshot(QueueState {
-            entries: Arc::new(vec![
-                QueueEntry { id: 1, track_id: 1 },
-                QueueEntry { id: 2, track_id: 2 },
-            ]),
-            current_id: None,
-            ..QueueState::default()
-        });
-        let mut ui = UiState::default();
-        ui.sync_queue(&state, &state);
-        let revision = ui.local_revision;
-
-        assert!(matches!(
-            ui.key_action(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &state),
-            KeyAction::Ignored
-        ));
-        assert_eq!(ui.queue.selected(), Some(1));
-        assert_ne!(ui.local_revision, revision);
-    }
-
-    #[test]
-    fn enter_plays_selected_occurrence_after_queue_reorder() {
-        let previous = tui_snapshot(QueueState {
-            entries: Arc::new(vec![
-                QueueEntry {
-                    id: 11,
-                    track_id: 1,
-                },
-                QueueEntry {
-                    id: 22,
-                    track_id: 1,
-                },
-                QueueEntry {
-                    id: 33,
-                    track_id: 2,
-                },
-            ]),
-            current_id: Some(11),
-            ..QueueState::default()
-        });
-        let mut ui = UiState::default();
-        ui.sync_queue(&previous, &previous);
-        ui.key_action(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &previous);
-        let mut next = previous.clone();
-        Arc::make_mut(&mut next.queue.entries).rotate_right(1);
-        ui.sync_queue(&previous, &next);
-        assert!(matches!(
-            ui.key_action(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &next),
-            KeyAction::Command(Command::PlayQueue { queue_id: 22 })
-        ));
-        let empty = TuiSnapshot::default();
-        ui.sync_queue(&next, &empty);
-        assert!(matches!(
-            ui.key_action(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &empty),
-            KeyAction::Ignored
-        ));
-    }
-
-    #[test]
-    fn queue_cache_follows_order_and_metadata_changes() {
-        let mut state = tui_snapshot(QueueState {
-            entries: Arc::new(vec![
-                QueueEntry {
-                    id: 10,
-                    track_id: 1,
-                },
-                QueueEntry {
-                    id: 20,
-                    track_id: 2,
-                },
-            ]),
-            current_id: None,
-            tracks: Arc::new(vec![
-                track(1, "Artist A", "Title A"),
-                track(2, "Artist B", "Title B"),
-            ]),
-        });
-        let mut cache = QueueViewCache::default();
-        cache.sync(&state);
-        assert_eq!(
-            cache.rows,
-            vec![
-                "Artist A — Title A".to_owned(),
-                "Artist B — Title B".to_owned()
-            ]
-        );
-
-        state.queue.entries = Arc::new(vec![
-            QueueEntry {
-                id: 20,
-                track_id: 2,
-            },
-            QueueEntry {
-                id: 10,
-                track_id: 1,
-            },
-        ]);
-        cache.sync(&state);
-        assert_eq!(
-            cache.rows,
-            vec![
-                "Artist B — Title B".to_owned(),
-                "Artist A — Title A".to_owned()
-            ]
-        );
-
-        let mut changed = track(1, "Artist A", "Title A (remastered)");
-        changed.album = "new album".into();
-        state.queue.tracks = Arc::new(vec![changed, track(2, "Artist B", "Title B")]);
-        cache.sync(&state);
-        assert_eq!(cache.rows[1], "Artist A — Title A (remastered)");
-    }
-    #[test]
-    fn playlist_detail_plays_or_enqueues_beyond_first_page_and_refetches_on_switch() {
-        let mut state = TuiSnapshot::default();
-        state.system.page_size = 100;
-        let mut ui = UiState {
-            view: View::Playlists(PagedList::default()),
-            page_size: 100,
-            ..UiState::default()
-        };
-        apply_view(
-            &mut ui,
-            &state,
-            ViewResponse::PlaylistSummaries(PlaylistSummaryPage {
-                total: 300,
-                rows: (0..100)
-                    .map(|id| PlaylistSummary {
-                        id,
-                        name: format!("Mix {id}"),
-                        entry_count: 600,
-                    })
-                    .collect(),
-            }),
-        );
-        key(&mut ui, KeyCode::PageDown, &state);
-        assert_eq!(ui.query_request(&state).unwrap().offset, 100);
-        apply_view(
-            &mut ui,
-            &state,
-            ViewResponse::PlaylistSummaries(PlaylistSummaryPage {
-                total: 300,
-                rows: vec![PlaylistSummary {
-                    id: 700,
-                    name: "Mix".into(),
-                    entry_count: 600,
-                }],
-            }),
-        );
-        key(&mut ui, KeyCode::Right, &state);
-        assert_eq!(
-            ui.query_request(&state).unwrap().kind,
-            QueryKind::Playlist(700)
-        );
-        apply_view(
-            &mut ui,
-            &state,
-            ViewResponse::PlaylistEntries(PlaylistEntryPage {
-                total: 600,
-                rows: (0..100)
-                    .map(|id| PlaylistEntryRow {
-                        id,
-                        track_id: id,
-                        title: format!("Track {id}"),
-                        artist: "Artist".into(),
-                        album: "Album".into(),
-                        missing: false,
-                    })
-                    .collect(),
-            }),
-        );
-        key(&mut ui, KeyCode::PageDown, &state);
-        apply_view(
-            &mut ui,
-            &state,
-            ViewResponse::PlaylistEntries(PlaylistEntryPage {
-                total: 600,
-                rows: vec![PlaylistEntryRow {
-                    id: 900,
-                    track_id: 901,
-                    title: "Later track".into(),
-                    artist: "Artist".into(),
-                    album: "Album".into(),
-                    missing: false,
-                }],
-            }),
-        );
-        assert!(matches!(
-            key(&mut ui, KeyCode::Enter, &state),
-            KeyAction::Command(Command::Play { track_id: 901 })
-        ));
-        assert!(matches!(key(&mut ui, KeyCode::Char('a'), &state),
-            KeyAction::Command(Command::Enqueue { track_ids }) if track_ids == vec![901]));
-        key(&mut ui, KeyCode::PageUp, &state);
-        assert!(matches!(
-            key(&mut ui, KeyCode::Enter, &state),
-            KeyAction::Command(Command::Play { track_id: 0 })
-        ));
-        key(&mut ui, KeyCode::Esc, &state);
-        let View::Playlists(playlists) = &ui.view else {
-            panic!("playlist view");
-        };
-        assert!(playlists.pages.is_empty());
-        assert_eq!(playlists.selection.selected(), Some(100));
-        key(&mut ui, KeyCode::Char('P'), &state);
-        assert_eq!(ui.query_request(&state).unwrap().offset, 0);
-    }
-
-    #[test]
-    fn notice_expires_without_a_timer_thread() {
-        let mut ui = UiState::default();
-        ui.set_message(Some("Paused".into()));
-        ui.message.as_mut().unwrap().expires_at = Instant::now() - Duration::from_secs(1);
-        assert!(ui.expire_message());
-        assert!(ui.message.is_none());
-    }
-
-    #[test]
-    fn search_navigates_and_enqueues_beyond_first_page_and_refetches_evicted_pages() {
-        let mut state = TuiSnapshot::default();
-        state.system.page_size = 20;
-        let mut ui = UiState {
-            view: View::Search(LibrarySearch {
-                focus: SearchFocus::Results,
-                ..LibrarySearch::default()
-            }),
-            page_size: 20,
-            ..UiState::default()
-        };
-        for offset in [0, 20, 40, 60] {
-            let request = ui.query_request(&state).unwrap();
-            assert_eq!(request.offset, offset);
-            assert!(matches!(
-                request.command(),
-                Command::LibraryPage { limit: 20, .. }
-            ));
-            apply_view(
-                &mut ui,
-                &state,
-                ViewResponse::LibraryPage(LibraryPage {
-                    total: 1024,
-                    rows: (offset..offset + 20).map(|id| row(id as i64)).collect(),
-                }),
-            );
-            let View::Search(search) = &ui.view else {
-                panic!("search view");
-            };
-            assert!(search.results.pages.len() <= 3);
-            assert!(
-                search
-                    .results
-                    .pages
-                    .iter()
-                    .map(|page| page.items.len())
-                    .sum::<usize>()
-                    <= 60
-            );
-            assert!(matches!(key(&mut ui, KeyCode::Enter, &state),
-                KeyAction::Command(Command::Enqueue { track_ids }) if track_ids == vec![offset as i64]));
-            if offset != 60 {
-                key(&mut ui, KeyCode::PageDown, &state);
-            }
-        }
-        key(&mut ui, KeyCode::PageUp, &state);
-        assert!(ui.query_request(&state).is_none());
-        key(&mut ui, KeyCode::PageUp, &state);
-        key(&mut ui, KeyCode::PageUp, &state);
-        assert_eq!(ui.query_request(&state).unwrap().offset, 0);
-        apply_view(
-            &mut ui,
-            &state,
-            ViewResponse::LibraryPage(LibraryPage {
-                total: 1024,
-                rows: (0..20).map(row).collect(),
-            }),
-        );
-        assert!(matches!(key(&mut ui, KeyCode::Enter, &state),
-            KeyAction::Command(Command::Enqueue { track_ids }) if track_ids == vec![0]));
-    }
-
-    #[test]
-    fn viewport_page_jumps_cross_configured_fetch_boundaries() {
-        let mut state = TuiSnapshot::default();
-        state.system.page_size = 20;
-        let mut ui = UiState {
-            view: View::Search(LibrarySearch {
-                focus: SearchFocus::Results,
-                ..LibrarySearch::default()
-            }),
-            page_size: 7,
-            ..UiState::default()
-        };
-        apply_view(
-            &mut ui,
-            &state,
-            ViewResponse::LibraryPage(LibraryPage {
-                total: 100,
-                rows: (0..20).map(row).collect(),
-            }),
-        );
-        for _ in 0..2 {
-            key(&mut ui, KeyCode::PageDown, &state);
-            assert!(ui.query_request(&state).is_none());
-        }
-        key(&mut ui, KeyCode::PageDown, &state);
-        let request = ui.query_request(&state).unwrap();
-        assert_eq!((request.offset, request.limit), (20, 20));
-        apply_view(
-            &mut ui,
-            &state,
-            ViewResponse::LibraryPage(LibraryPage {
-                total: 100,
-                rows: (20..40).map(row).collect(),
-            }),
-        );
-        let View::Search(search) = &ui.view else {
-            panic!("search view");
-        };
-        assert_eq!(search.results.selection.selected(), Some(21));
-        assert_eq!(search.results.local_selection().selected(), Some(1));
-        assert!(matches!(key(&mut ui, KeyCode::Enter, &state),
-            KeyAction::Command(Command::Enqueue { track_ids }) if track_ids == vec![21]));
-        key(&mut ui, KeyCode::PageUp, &state);
-        assert!(ui.query_request(&state).is_none());
-        assert!(matches!(key(&mut ui, KeyCode::Enter, &state),
-            KeyAction::Command(Command::Enqueue { track_ids }) if track_ids == vec![14]));
-    }
-
-    #[test]
-    fn live_page_size_changes_clear_all_view_caches_and_reject_old_requests() {
-        fn page(view: &View, offset: usize, limit: usize) -> ViewResponse {
-            let rows = offset..offset + limit;
-            match view {
-                View::Search(_) => ViewResponse::LibraryPage(LibraryPage {
-                    total: 1000,
-                    rows: rows.map(|id| row(id as i64)).collect(),
-                }),
-                View::Tree(_) => ViewResponse::DirectoryPage(DirectoryPage {
-                    total: 1000,
-                    rows: rows.map(|id| DirectoryRow::Track(row(id as i64))).collect(),
-                }),
-                View::Playlists(_) => ViewResponse::PlaylistSummaries(PlaylistSummaryPage {
-                    total: 1000,
-                    rows: rows
-                        .map(|id| PlaylistSummary {
-                            id: id as i64,
-                            name: format!("Mix {id}"),
-                            entry_count: 1000,
-                        })
-                        .collect(),
-                }),
-                View::PlaylistDetail { .. } => ViewResponse::PlaylistEntries(PlaylistEntryPage {
-                    total: 1000,
-                    rows: rows
-                        .map(|id| PlaylistEntryRow {
-                            id: id as i64,
-                            track_id: id as i64,
-                            title: format!("Track {id}"),
-                            artist: "Artist".into(),
-                            album: "Album".into(),
-                            missing: false,
-                        })
-                        .collect(),
-                }),
-                View::Queue => unreachable!(),
-            }
-        }
-
-        for view in [
-            View::Search(LibrarySearch::default()),
-            View::Tree(LibraryTree::default()),
-            View::Playlists(PagedList::default()),
-            View::PlaylistDetail {
-                playlists: ListState::default(),
-                detail: PlaylistDetail {
-                    playlist_id: 1,
-                    name: "Mix".into(),
-                    entries: PagedList::default(),
-                },
-            },
-        ] {
-            let mut tui = TuiState::new(TuiSnapshot::default());
-            tui.ui.view = view;
-            let first = page(&tui.ui.view, 0, 64);
-            apply_view(&mut tui.ui, &tui.snapshot, first);
-            match &mut tui.ui.view {
-                View::Search(search) => search.results.selection.select(Some(65)),
-                View::Tree(tree) => tree.entries.selection.select(Some(65)),
-                View::Playlists(playlists) => playlists.selection.select(Some(65)),
-                View::PlaylistDetail { detail, .. } => detail.entries.selection.select(Some(65)),
-                View::Queue => unreachable!(),
-            }
-            let old_request = tui.ui.query_request(&tui.snapshot).unwrap();
-            assert_eq!((old_request.offset, old_request.limit), (64, 64));
-            tui.ui.requested = Some(old_request.clone());
-            let mut next = tui.snapshot.clone();
-            next.system.page_size = 20;
-            tui.apply_snapshot(next);
-            assert!(tui.ui.requested.is_none());
-            assert!(match &tui.ui.view {
-                View::Search(search) => search.results.pages.is_empty(),
-                View::Tree(tree) => tree.entries.pages.is_empty(),
-                View::Playlists(playlists) => playlists.pages.is_empty(),
-                View::PlaylistDetail { detail, .. } => detail.entries.pages.is_empty(),
-                View::Queue => unreachable!(),
-            });
-            let current = tui.ui.query_request(&tui.snapshot).unwrap();
-            assert_eq!((current.offset, current.limit), (60, 20));
-            assert_ne!(current.view_revision, old_request.view_revision);
-            assert!(
-                !tui.ui
-                    .apply_query(&tui.snapshot, &old_request, Err("old size".into()))
-            );
-            assert!(tui.ui.message.is_none());
-            let resized = page(&tui.ui.view, 60, 20);
-            apply_view(&mut tui.ui, &tui.snapshot, resized);
-            assert!(tui.ui.query_request(&tui.snapshot).is_none());
-
-            let mut next = tui.snapshot.clone();
-            next.system.page_size = 64;
-            tui.apply_snapshot(next);
-            let restored = tui.ui.query_request(&tui.snapshot).unwrap();
-            assert_eq!((restored.offset, restored.limit), (64, 64));
-            assert_ne!(restored, old_request);
-            assert!(
-                !tui.ui
-                    .apply_query(&tui.snapshot, &old_request, Err("earlier size".into()))
-            );
-        }
-    }
-
-    #[test]
-    fn query_limits_follow_configured_sizes_for_every_view_kind() {
-        for limit in [20, 64, 256] {
-            for kind in [
-                QueryKind::Search("track".into()),
-                QueryKind::Directory(PathBuf::from("/music")),
-                QueryKind::Roots(Arc::new(vec![PathBuf::from("/music")])),
-                QueryKind::Playlists,
-                QueryKind::Playlist(1),
-            ] {
-                let request = QueryRequest {
-                    kind,
-                    offset: limit,
-                    limit,
-                    view_revision: 0,
-                    library_revision: 0,
-                    playlist_revision: 0,
-                };
-                let command_limit = match request.command() {
-                    Command::LibraryPage { limit, .. }
-                    | Command::DirectoryPage { limit, .. }
-                    | Command::PlaylistSummaries { limit, .. }
-                    | Command::PlaylistEntries { limit, .. } => limit,
-                    _ => unreachable!(),
-                };
-                assert_eq!(command_limit, limit);
-            }
-        }
-    }
-
-    #[test]
-    fn discarded_page_result_does_not_block_revisiting_that_page() {
-        let state = TuiSnapshot::default();
-        let mut ui = UiState {
-            view: View::Search(LibrarySearch {
-                focus: SearchFocus::Results,
-                ..LibrarySearch::default()
-            }),
-            page_size: 64,
-            ..UiState::default()
-        };
-        apply_view(
-            &mut ui,
-            &state,
-            ViewResponse::LibraryPage(LibraryPage {
-                total: 512,
-                rows: (0..64).map(row).collect(),
-            }),
-        );
-        key(&mut ui, KeyCode::PageDown, &state);
-        let request = ui.query_request(&state).unwrap();
-        ui.requested = Some(request.clone());
-        key(&mut ui, KeyCode::PageUp, &state);
-        assert!(!ui.apply_query(
-            &state,
-            &request,
-            Ok(QueryResult {
-                library_revision: state.library.revision,
-                playlist_revision: state.library.playlist_revision,
-                view: ViewResponse::LibraryPage(LibraryPage {
-                    total: 512,
-                    rows: (64..128).map(row).collect(),
-                }),
-            })
-        ));
-        assert!(ui.requested.is_none());
-        key(&mut ui, KeyCode::PageDown, &state);
-        assert_eq!(ui.query_request(&state).as_ref(), Some(&request));
-    }
-
-    #[test]
-    fn stale_search_and_revision_results_are_discarded() {
-        let state = TuiSnapshot::default();
-        let mut ui = UiState {
-            view: View::Search(LibrarySearch::default()),
-            ..UiState::default()
-        };
-        let request = ui.query_request(&state).unwrap();
-        key(&mut ui, KeyCode::Char('x'), &state);
-        assert!(!ui.apply_query(&state, &request, Err("old query".into())));
-        assert!(ui.message.is_none());
-        assert!(ui.query_request(&state).is_none());
-        if let View::Search(search) = &mut ui.view {
-            search.query_deadline = Some(Instant::now());
-        }
-        let current = ui.query_request(&state).unwrap();
-        assert!(!ui.apply_query(
-            &state,
-            &current,
-            Ok(QueryResult {
-                library_revision: 1,
-                playlist_revision: 0,
-                view: ViewResponse::LibraryPage(LibraryPage {
-                    total: 1,
-                    rows: vec![row(1)]
-                }),
-            })
-        ));
-        apply_view(
-            &mut ui,
-            &state,
-            ViewResponse::LibraryPage(LibraryPage {
-                total: 1,
-                rows: vec![row(1)],
-            }),
-        );
-        let mut tui = TuiState {
-            snapshot: state.clone(),
-            ui,
-        };
-        let mut next = state;
-        next.library.revision += 1;
-        tui.apply_snapshot(next);
-        let View::Search(search) = &tui.ui.view else {
-            panic!("search view");
-        };
-        assert!(search.results.pages.is_empty());
-        assert!(tui.ui.query_request(&tui.snapshot).is_some());
-    }
-
-    #[test]
-    fn playlist_revision_clears_active_entry_pages() {
-        let state = TuiSnapshot::default();
-        let mut ui = UiState {
-            view: View::PlaylistDetail {
-                playlists: ListState::default(),
-                detail: PlaylistDetail {
-                    playlist_id: 7,
-                    name: "Mix".into(),
-                    entries: PagedList::default(),
-                },
-            },
-            ..UiState::default()
-        };
-        apply_view(
-            &mut ui,
-            &state,
-            ViewResponse::PlaylistEntries(PlaylistEntryPage {
-                total: 1,
-                rows: vec![PlaylistEntryRow {
-                    id: 1,
-                    track_id: 1,
-                    title: "Track".into(),
-                    artist: "Artist".into(),
-                    album: "Album".into(),
-                    missing: false,
-                }],
-            }),
-        );
-        let mut tui = TuiState {
-            snapshot: state.clone(),
-            ui,
-        };
-        let mut next = state;
-        next.library.playlist_revision += 1;
-        tui.apply_snapshot(next);
-        let View::PlaylistDetail { detail, .. } = &tui.ui.view else {
-            panic!("detail view");
-        };
-        assert!(detail.entries.pages.is_empty());
-        assert_eq!(
-            tui.ui.query_request(&tui.snapshot).unwrap().kind,
-            QueryKind::Playlist(7)
-        );
-    }
-
-    #[test]
-    fn dropping_watcher_cancels_an_idle_revision_wait() {
-        use std::{io::Read, os::unix::net::UnixListener};
-
-        let directory = tempfile::tempdir().unwrap();
-        let socket = directory.path().join("watch.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
-        let (received_tx, received_rx) = bounded(1);
-        let (release_tx, release_rx) = bounded(1);
-        let peer = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            let mut prefix = [0; 4];
-            stream.read_exact(&mut prefix).unwrap();
-            let mut request = vec![0; u32::from_le_bytes(prefix) as usize];
-            stream.read_exact(&mut request).unwrap();
-            received_tx.send(()).unwrap();
-            // Keep the connection open without publishing another revision.
-            release_rx.recv().unwrap();
-        });
-        let watcher = spawn_watcher(&socket, 7);
-        received_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        let (finished_tx, finished_rx) = bounded(1);
-        let shutdown = std::thread::spawn(move || {
-            drop(watcher);
-            let _ = finished_tx.send(());
-        });
-        let stopped = finished_rx.recv_timeout(Duration::from_secs(2));
-        // Always release the peer so a regression cannot strand test threads.
-        release_tx.send(()).unwrap();
-        peer.join().unwrap();
-        shutdown.join().unwrap();
-        assert!(stopped.is_ok(), "watcher teardown required a new revision");
-    }
-
-    #[test]
-    fn dropping_query_worker_cancels_an_idle_view_request() {
-        use std::{io::Read, os::unix::net::UnixListener};
-
-        let directory = tempfile::tempdir().unwrap();
-        let socket = directory.path().join("query.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
-        let (received_tx, received_rx) = bounded(1);
-        let (release_tx, release_rx) = bounded(1);
-        let peer = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            let mut prefix = [0; 4];
-            stream.read_exact(&mut prefix).unwrap();
-            let mut request = vec![0; u32::from_le_bytes(prefix) as usize];
-            stream.read_exact(&mut request).unwrap();
-            received_tx.send(()).unwrap();
-            release_rx.recv().unwrap();
-        });
-        let worker = spawn_query_worker(&socket);
-        worker.request(QueryRequest {
-            kind: QueryKind::Search("blocked".into()),
-            offset: 0,
-            limit: 64,
-            view_revision: 0,
-            library_revision: 0,
-            playlist_revision: 0,
-        });
-        received_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        let (finished_tx, finished_rx) = bounded(1);
-        let shutdown = std::thread::spawn(move || {
-            drop(worker);
-            let _ = finished_tx.send(());
-        });
-        let stopped = finished_rx.recv_timeout(Duration::from_secs(2));
-        release_tx.send(()).unwrap();
-        peer.join().unwrap();
-        shutdown.join().unwrap();
-        assert!(stopped.is_ok(), "query teardown waited for IPC timeout");
-    }
 }

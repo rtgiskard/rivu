@@ -1,110 +1,136 @@
 #[test]
-fn wire_revision_wraps_by_equality_domain() {
-    assert!(revision_matches(u16::MAX as u64, u16::MAX));
-    assert!(revision_matches(u16::MAX as u64 + 1, 0));
-    assert!(!revision_matches(u16::MAX as u64 + 1, u16::MAX));
-}
-
-#[test]
-fn ack_wire_round_trip_does_not_require_full_state() {
+fn ack_wire_round_trip_is_independent_from_state() {
     let ack = Ack {
         ok: false,
         error: Some("failed".into()),
         revision: 42,
     };
-    let wire = WireResponse::from_ack(ack.clone());
-    let frame = ResponseFrame {
-        instance_id: 7,
-        revision: ack.revision as u16,
-        response: wire,
-    };
-    let decoded = unpack_ack(frame).unwrap();
-    assert_eq!(decoded.revision, ack.revision);
-    assert_eq!(decoded.error.as_deref(), Some("failed"));
-}
-
-#[test]
-fn response_round_trip_preserves_snapshot_and_private_view() {
-    let mut state = ClientSnapshot::default();
-    state.library.track_total = 8193;
-    let response = StateResponse {
-        ok: true,
-        error: None,
-        state,
-        view: Some(ViewResponse::TrackPage(crate::model::TrackPage {
-            total: 4097,
-            rows: Vec::new(),
-        })),
-    };
-    let frame = ResponseFrame {
-        instance_id: 7,
-        revision: 0,
-        response: WireResponse::from_response(response),
-    };
+    let frame = response_frame(WireResponse::Ack(ack.clone()), [7; 16]);
     let encoded = encode_frame(&frame).unwrap();
     let decoded = decode_frame::<ResponseFrame>(&encoded[4..]).unwrap();
-    let response = unpack_response(decoded).unwrap();
-
-    assert!(response.ok);
-    assert_eq!(response.state.system.revision, 0);
-    assert_eq!(response.state.library.track_total, 8193);
-    let Some(ViewResponse::TrackPage(page)) = response.view else {
-        panic!("expected request-local track page");
+    assert_eq!(decoded.version, PROTOCOL_VERSION);
+    assert_eq!(decoded.instance_id, [7; 16]);
+    let WireResponse::Ack(decoded) = decoded.response else {
+        panic!("expected ack");
     };
-    assert_eq!(page.total, 4097);
-    assert!(page.rows.is_empty());
+    assert_eq!(decoded.revision, ack.revision);
+    assert_eq!(decoded.error, ack.error);
+}
+#[test]
+fn query_wire_response_has_no_state_queue_payload() {
+    let response = QueryResponse {
+        revisions: crate::response::QueryRevisions::default(),
+        result: Err("query failed".into()),
+    };
+    let frame = response_frame(WireResponse::Query(response), [3; 16]);
+    let encoded = encode_frame(&frame).unwrap();
+    let decoded = decode_frame::<ResponseFrame>(&encoded[4..]).unwrap();
+    assert!(matches!(
+        decoded.response,
+        WireResponse::Query(QueryResponse { result: Err(_), .. })
+    ));
 }
 
 #[test]
-fn response_round_trip_preserves_default_and_selected_output_device() {
-    for output_device in [None, Some("USB audio output".to_owned())] {
-        let config = Arc::new(crate::config::Config {
-            output_device,
-            ..Default::default()
-        });
-        let mut state = ClientSnapshot::default();
-        state.system.config = config.clone();
-        state.system.ffmpeg_status = "decoder ready".to_owned();
-        state.system.revision = 42;
-        let frame = response_frame(
-            StateResponse {
-                ok: true,
-                error: None,
-                state,
-                view: None,
-            },
-            7,
-        );
-        let encoded = encode_frame(&frame).unwrap();
-        let decoded = decode_frame::<ResponseFrame>(&encoded[4..]).unwrap();
-        let response = unpack_response(decoded).unwrap();
-
-        assert_eq!(response.state.system.config.as_ref(), config.as_ref());
-        assert_eq!(response.state.system.ffmpeg_status, "decoder ready");
-        assert_eq!(response.state.system.revision, 42);
-        assert!(response.view.is_none());
-    }
+fn partial_state_wire_round_trip_omits_unrequested_sections() {
+    let response = StateResponse {
+        revisions: StateRevisions {
+            playback: 1,
+            queue: 2,
+            library: 3,
+            system: 4,
+        },
+        playback: None,
+        queue: None,
+        library: Some(crate::model::LibrarySnapshot::default()),
+        system: None,
+    };
+    let frame = response_frame(WireResponse::State(wire_state(response)), [9; 16]);
+    let encoded = encode_frame(&frame).unwrap();
+    let decoded = decode_frame::<ResponseFrame>(&encoded[4..]).unwrap();
+    let WireResponse::State(state) = decoded.response else {
+        panic!("expected state");
+    };
+    let state = state_response(state);
+    assert_eq!(state.revisions.library, 3);
+    assert!(state.library.is_some());
+    assert!(state.playback.is_none());
+    assert!(state.queue.is_none());
+    assert!(state.system.is_none());
 }
 
 #[test]
-fn ack_request_round_trip_preserves_command_variant() {
+fn system_config_wire_adapter_preserves_optional_fields() {
+    let config = Arc::new(crate::config::Config {
+        output_device: Some("USB audio output".to_owned()),
+        ..Default::default()
+    });
+    let mut system = crate::model::SystemState::default();
+    system.config = config.clone();
+    system.revision = 42;
+    let frame = response_frame(
+        WireResponse::State(wire_state(StateResponse {
+            revisions: StateRevisions::default(),
+            playback: None,
+            queue: None,
+            library: None,
+            system: Some(system),
+        })),
+        [1; 16],
+    );
+    let encoded = encode_frame(&frame).unwrap();
+    let decoded = decode_frame::<ResponseFrame>(&encoded[4..]).unwrap();
+    let WireResponse::State(state) = decoded.response else {
+        panic!("expected state");
+    };
+    let state = state_response(state);
+    assert_eq!(state.system.unwrap().config.as_ref(), config.as_ref());
+}
+
+#[test]
+fn request_round_trip_uses_json_for_tagged_command() {
     let frame = RequestFrame {
-        instance_id: 0,
-        request: RequestKind::Ack(serde_json::to_string(&Command::Stop).unwrap()),
+        version: PROTOCOL_VERSION,
+        instance_id: UNKNOWN_INSTANCE,
+        request: RequestKind::Command {
+            command: serde_json::to_string(&Command::Stop).unwrap(),
+        },
     };
     let encoded = encode_frame(&frame).unwrap();
     let frame = decode_frame::<RequestFrame>(&encoded[4..]).unwrap();
     let decoded = decode_request(frame).unwrap();
-    assert!(matches!(decoded, DecodedRequest::Ack(Command::Stop)));
+    assert!(matches!(decoded, DecodedRequest::Command(Command::Stop)));
 }
 
 #[test]
-fn cancellable_request_stops_before_connect_when_already_cancelled() {
+fn invalid_protocol_version_is_rejected_before_request_decode() {
+    let frame = RequestFrame {
+        version: PROTOCOL_VERSION + 1,
+        instance_id: UNKNOWN_INSTANCE,
+        request: RequestKind::State {
+            sections: StateSections::ALL,
+        },
+    };
+    let encoded = encode_frame(&frame).unwrap();
+    let error = match decode_request_frame(&encoded[4..]) {
+        Ok(_) => panic!("invalid version accepted"),
+        Err(error) => error,
+    };
+    assert!(format!("{error:#}").contains("Unsupported IPC protocol version"));
+}
+#[test]
+fn invalid_instance_is_rejected_without_dispatch() {
+    let error = validate_instance([1; 16], [2; 16]).unwrap_err();
+    assert!(format!("{error:#}").contains("instance changed"));
+    assert!(validate_instance(UNKNOWN_INSTANCE, [2; 16]).is_ok());
+}
+
+#[test]
+fn cancellable_query_stops_before_connect_when_already_cancelled() {
     let directory = tempfile::tempdir().unwrap();
     let socket = directory.path().join("missing.sock");
     let cancelled = Arc::new(AtomicBool::new(true));
-    let cancel_notify = Arc::new(tokio::sync::Notify::new());
-    let error =
-        request_with_cancel(&socket, &Command::Overview, cancelled, cancel_notify).unwrap_err();
+    let notify = Arc::new(tokio::sync::Notify::new());
+    let error = query_with_cancel(&socket, &Query::LibraryStats, cancelled, notify).unwrap_err();
     assert!(format!("{error:#}").contains("IPC request cancelled"));
 }

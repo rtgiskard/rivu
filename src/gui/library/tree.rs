@@ -1,4 +1,4 @@
-use crate::model::{DirectoryPage, DirectoryRow};
+use crate::model::{DirectoryRow, Page};
 use gpui::UniformListScrollHandle;
 use std::{
     collections::{HashMap, HashSet},
@@ -146,7 +146,7 @@ impl DirectoryTree {
         &mut self,
         path: &Path,
         generation: u64,
-        page: DirectoryPage,
+        page: Page<DirectoryRow>,
     ) -> bool {
         let Some(branch) = self.branches.get(path) else {
             return false;
@@ -204,6 +204,19 @@ impl DirectoryTree {
     pub(in crate::gui) fn clear(&mut self) {
         self.branches.clear();
         self.visible.clear();
+    }
+    /// Drop cached pages for collapsed branches; expanded branches are refreshed
+    /// by the owner on the current library revision.
+    pub(in crate::gui) fn invalidate_collapsed(&mut self) {
+        for (path, branch) in &mut self.branches {
+            if !path.as_os_str().is_empty() && !branch.expanded {
+                branch.rows = None;
+                branch.total = 0;
+                branch.pending = false;
+                branch.error = false;
+            }
+        }
+        self.refresh_visible();
     }
 
     pub(in crate::gui) fn expand(&mut self, path: &Path) {
@@ -363,15 +376,15 @@ impl DirectoryTree {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{DirectoryPage, DirectoryRow, LibraryRow};
+    use crate::model::{DirectoryRow, LibraryRow, Page};
 
     fn directory(path: &str) -> DirectoryRow {
         DirectoryRow::Directory {
             path: PathBuf::from(path),
         }
     }
-    fn page(paths: &[&str], total: usize) -> DirectoryPage {
-        DirectoryPage {
+    fn page(paths: &[&str], total: usize) -> Page<DirectoryRow> {
+        Page {
             total,
             rows: paths.iter().map(|path| directory(path)).collect(),
         }
@@ -402,7 +415,7 @@ mod tests {
         assert!(tree.accept(
             Path::new("/a/b"),
             3,
-            DirectoryPage {
+            Page {
                 total: 1,
                 rows: vec![track(1)]
             }
@@ -427,6 +440,26 @@ mod tests {
             vec![&directory("/a")]
         );
         assert_eq!(tree.generation(Path::new("/a/b")), None);
+    }
+    #[test]
+    fn revision_invalidation_drops_collapsed_branch_pages() {
+        let mut tree = DirectoryTree::default();
+        tree.begin(PathBuf::new(), 0, 1);
+        assert!(tree.accept(Path::new(""), 1, page(&["/a"], 1)));
+        tree.expand(Path::new("/a"));
+        tree.begin(PathBuf::from("/a"), 0, 2);
+        assert!(tree.accept(
+            Path::new("/a"),
+            2,
+            Page {
+                total: 1,
+                rows: vec![track(1)]
+            }
+        ));
+        tree.collapse(Path::new("/a"));
+        assert_eq!(tree.status(Path::new("/a")), BranchStatus::Ready);
+        tree.invalidate_collapsed();
+        assert_eq!(tree.status(Path::new("/a")), BranchStatus::Unloaded);
     }
 
     #[test]
@@ -459,7 +492,7 @@ mod tests {
             assert!(tree.accept(
                 &child,
                 generation + 10,
-                DirectoryPage {
+                Page {
                     total: 1,
                     rows: vec![track(generation as i64)]
                 }

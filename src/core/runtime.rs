@@ -25,51 +25,34 @@ impl Core {
             select! {
                 recv(requests) -> request => {
                     let Ok(request) = request else { break; };
-                    let shutdown = matches!(&request.command, Command::Shutdown);
-                    let is_view = matches!(
-                        &request.command,
-                        Command::LibraryPage { .. }
-                            | Command::TrackPage { .. }
-                            | Command::DirectoryPage { .. }
-                            | Command::PlaylistSummaries { .. }
-                            | Command::PlaylistEntries { .. }
-                            | Command::Track { .. }
-                            | Command::LibraryStats
-                    );
-                    let changed = !matches!(
-                        &request.command,
-                        Command::Status | Command::Overview | Command::ShowWindow
-                    ) && !is_view;
-                    let (result, view) = if is_view {
-                        match self.view(&request.command) {
-                            Ok(view) => (Ok(()), Some(view)),
-                            Err(error) => (Err(error), None),
+                    match request.operation {
+                        Operation::Query(query) => {
+                            let result = self.view(&query).map_err(|error| format!("{error:#}"));
+                            if let Some(reply) = request.reply {
+                                let _ = reply.send(CoreResponse::Query(QueryResponse {
+                                    revisions: self.state.query_revisions(),
+                                    result,
+                                }));
+                            }
                         }
-                    } else {
-                        (self.command(request.command), None)
-                    };
-                    if !is_view && let Err(error) = &result {
-                        self.state.system.last_error = Some(format!("{error:#}"));
+                        Operation::Command(command) => {
+                            let shutdown = matches!(&command, Command::Shutdown);
+                            let changed = !matches!(&command, Command::ShowWindow);
+                            let result = self.command(command);
+                            if let Err(error) = &result {
+                                self.state.system.last_error = Some(format!("{error:#}"));
+                            }
+                            if changed || result.is_err() { self.publish(); }
+                            if let Some(reply) = request.reply {
+                                let _ = reply.send(CoreResponse::Ack(Ack {
+                                    ok: result.is_ok(),
+                                    error: result.err().map(|error| format!("{error:#}")),
+                                    revision: self.state.system.revision,
+                                }));
+                            }
+                            if shutdown { break; }
+                        }
                     }
-                    if changed || (!is_view && result.is_err()) { self.publish(); }
-                    if let Some(reply) = request.reply {
-                        let value = if request.ack {
-                            CoreResponse::Ack(Ack {
-                                ok: result.is_ok(),
-                                error: result.as_ref().err().map(|e| format!("{e:#}")),
-                                revision: self.state.system.revision,
-                            })
-                        } else {
-                            CoreResponse::State(Box::new(StateResponse {
-                                ok: result.is_ok(),
-                                error: result.err().map(|e| format!("{e:#}")),
-                                state: ClientSnapshot::from_core(&self.state),
-                                view,
-                            }))
-                        };
-                        let _ = reply.send(value);
-                    }
-                    if shutdown { break; }
                 }
                 recv(self.engine.events) -> event => {
                     let Ok(event) = event else { self.state.system.last_error = Some("Audio worker stopped unexpectedly".into()); self.publish(); break; };
@@ -155,7 +138,40 @@ impl Core {
 
     pub(in crate::core) fn publish(&mut self) {
         self.state.system.revision = self.state.system.revision.wrapping_add(1);
-        *self.shared.write() = self.state.clone();
+        {
+            let mut shared = self.shared.write();
+            let changed = self.state.changed_sections(&shared);
+            let revisions = &mut self.state.revisions;
+            if changed.playback {
+                revisions.playback = revisions.playback.wrapping_add(1);
+            }
+            if changed.queue {
+                revisions.queue = revisions.queue.wrapping_add(1);
+            }
+            if changed.library {
+                revisions.library = revisions.library.wrapping_add(1);
+            }
+            if changed.system {
+                revisions.system = revisions.system.wrapping_add(1);
+            }
+            if changed.playback {
+                shared.playback = self.state.playback.clone();
+                shared.current_track = self.state.current_track.clone();
+            }
+            if changed.queue {
+                shared.queue = self.state.queue.clone();
+            }
+            if changed.library {
+                shared.library = self.state.library.clone();
+            }
+            if changed.system {
+                shared.system = self.state.system.clone();
+            } else {
+                // The in-process wakeup sequence advances even without a System change.
+                shared.system.revision = self.state.system.revision;
+            }
+            shared.revisions = *revisions;
+        }
         self.subscribers.write().retain(|sender| {
             !matches!(
                 sender.try_send(()),
@@ -231,9 +247,23 @@ impl Core {
             .map(Arc::new);
         Ok(())
     }
-    pub(in crate::core) fn view(&self, command: &Command) -> Result<ViewResponse> {
-        Ok(match command {
-            Command::LibraryPage {
+    pub(in crate::core) fn view(&self, query: &Query) -> Result<ViewResponse> {
+        let current = self.state.query_revisions();
+        let (expected, playlist) = match query {
+            Query::TrackBatch { expected, .. } => (*expected, false),
+            Query::PlaylistSummaryBatch { expected, .. }
+            | Query::PlaylistEntryBatch { expected, .. } => (*expected, true),
+            _ => (None, false),
+        };
+        if let Some(expected) = expected {
+            anyhow::ensure!(
+                expected.library == current.library
+                    && (!playlist || expected.playlist == current.playlist),
+                "Query data changed while reading; restart the listing"
+            );
+        }
+        Ok(match query {
+            Query::LibraryPage {
                 query,
                 favorite,
                 missing,
@@ -246,9 +276,9 @@ impl Core {
                 *missing,
                 *sort,
                 *offset,
-                (*limit).min(PAGE_SIZE),
+                *limit,
             )?),
-            Command::TrackPage {
+            Query::TrackPage {
                 query,
                 favorite,
                 missing,
@@ -259,33 +289,54 @@ impl Core {
                 *favorite,
                 *missing,
                 *offset,
-                (*limit).min(PAGE_SIZE),
+                *limit,
             )?),
-            Command::DirectoryPage {
+            Query::DirectoryPage {
                 path,
                 offset,
                 limit,
-            } => ViewResponse::DirectoryPage(self.store.directory_page(
-                path,
-                *offset,
-                (*limit).min(PAGE_SIZE),
-            )?),
-            Command::PlaylistSummaries { offset, limit } => ViewResponse::PlaylistSummaries(
-                self.store
-                    .playlist_summary_page(*offset, (*limit).min(PAGE_SIZE))?,
-            ),
-            Command::PlaylistEntries {
+            } => ViewResponse::DirectoryPage(self.store.directory_page(path, *offset, *limit)?),
+            Query::PlaylistSummaries { offset, limit } => {
+                ViewResponse::PlaylistSummaries(self.store.playlist_summary_page(*offset, *limit)?)
+            }
+            Query::PlaylistEntries {
                 playlist_id,
                 offset,
                 limit,
             } => ViewResponse::PlaylistEntries(self.store.playlist_entries_page(
                 *playlist_id,
                 *offset,
-                (*limit).min(PAGE_SIZE),
+                *limit,
             )?),
-            Command::Track { track_id } => ViewResponse::Track(self.store.track(*track_id)?),
-            Command::LibraryStats => ViewResponse::LibraryStats(self.store.library_stats()?),
-            _ => bail!("Not a view command"),
+            Query::Track { track_id } => ViewResponse::Track(self.store.track(*track_id)?),
+            Query::LibraryStats => ViewResponse::LibraryStats(self.store.library_stats()?),
+            Query::TrackBatch {
+                query,
+                favorite,
+                missing,
+                after,
+                limit,
+                ..
+            } => ViewResponse::TrackBatch(self.store.track_batch(
+                query.as_deref(),
+                *favorite,
+                *missing,
+                *after,
+                *limit,
+            )?),
+            Query::PlaylistSummaryBatch { after, limit, .. } => ViewResponse::PlaylistSummaryBatch(
+                self.store.playlist_summary_batch(*after, *limit)?,
+            ),
+            Query::PlaylistEntryBatch {
+                playlist_id,
+                after,
+                limit,
+                ..
+            } => ViewResponse::PlaylistEntryBatch(self.store.playlist_entry_batch(
+                *playlist_id,
+                *after,
+                *limit,
+            )?),
         })
     }
 }

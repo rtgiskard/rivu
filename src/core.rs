@@ -4,8 +4,11 @@ use crate::{
     config::Config,
     library::{self, M3uItem, ScanResult},
     model::*,
-    projection::{ClientSnapshot, GuiSnapshot, MprisSnapshot, TraySnapshot},
-    response::{Ack, StateResponse, ViewResponse},
+    projection::{GuiSnapshot, MprisSnapshot, TraySnapshot},
+    response::{
+        Ack, PlaybackSnapshot, QueryResponse, QueryRevisions, StateResponse, StateRevisions,
+        StateSections, ViewResponse,
+    },
     store::Store,
 };
 use anyhow::{Context, Result};
@@ -26,13 +29,16 @@ use std::{
 
 type Wakeup = Arc<dyn Fn() + Send + Sync>;
 enum CoreResponse {
-    State(Box<StateResponse>),
+    Query(QueryResponse),
     Ack(Ack),
 }
+enum Operation {
+    Query(Query),
+    Command(Command),
+}
 struct Request {
-    command: Command,
+    operation: Operation,
     reply: Option<Sender<CoreResponse>>,
-    ack: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -42,11 +48,53 @@ pub(crate) struct CoreState {
     pub(crate) current_track: Option<Arc<Track>>,
     pub(crate) playback: PlaybackState,
     pub(crate) system: SystemState,
+    pub(crate) revisions: StateRevisions,
 }
 
 impl CoreState {
     pub(crate) fn current_track(&self) -> Option<&Track> {
         self.current_track.as_deref()
+    }
+    pub(crate) fn query_revisions(&self) -> QueryRevisions {
+        QueryRevisions {
+            library: self.library.revision,
+            structure: self.library.structure_revision,
+            playlist: self.library.playlist_revision,
+        }
+    }
+
+    /// Arc identity avoids traversing queue/history/config on playback updates.
+    /// Replacing an Arc conservatively invalidates its section even if values match.
+    fn changed_sections(&self, previous: &Self) -> StateSections {
+        let current_track_changed = match (&self.current_track, &previous.current_track) {
+            (Some(current), Some(previous)) => !Arc::ptr_eq(current, previous),
+            (None, None) => false,
+            _ => true,
+        };
+        let system = &self.system;
+        let old = &previous.system;
+        StateSections {
+            playback: self.playback != previous.playback || current_track_changed,
+            queue: !Arc::ptr_eq(&self.queue.entries, &previous.queue.entries)
+                || !Arc::ptr_eq(&self.queue.tracks, &previous.queue.tracks)
+                || self.queue.current_id != previous.queue.current_id,
+            library: self.query_revisions() != previous.query_revisions()
+                || self.library.track_total != previous.library.track_total
+                || self.library.playlist_total != previous.library.playlist_total
+                || !Arc::ptr_eq(&self.library.history, &previous.library.history),
+            system: system.scanning != old.scanning
+                || system.scan_message != old.scan_message
+                || system.scan_progress != old.scan_progress
+                || system.last_error != old.last_error
+                || !Arc::ptr_eq(&system.devices, &old.devices)
+                || system.selected_device != old.selected_device
+                || !Arc::ptr_eq(&system.config, &old.config)
+                || system.config_path != old.config_path
+                || system.mpris_status != old.mpris_status
+                || system.ffmpeg_status != old.ffmpeg_status
+                || system.database_optimization != old.database_optimization
+                || system.shutting_down != old.shutting_down,
+        }
     }
 }
 
@@ -66,14 +114,10 @@ impl AppHandle {
     pub fn send(&self, command: Command) -> Result<()> {
         self.sender
             .try_send(Request {
-                command,
+                operation: Operation::Command(command),
                 reply: None,
-                ack: false,
             })
             .context("Rivu is busy or stopped")
-    }
-    pub(crate) fn core_state(&self) -> CoreState {
-        self.state.read().clone()
     }
     pub fn is_shutting_down(&self) -> bool {
         self.state.read().system.shutting_down
@@ -137,71 +181,76 @@ impl AppHandle {
     pub fn take_raise_request(&self) -> bool {
         self.raise_requested.swap(false, Ordering::AcqRel)
     }
-    pub fn request(&self, command: Command) -> StateResponse {
+    /// Query metadata and rows are produced in the same Core dispatch.
+    pub fn query(&self, query: Query) -> QueryResponse {
         let (tx, rx) = bounded(1);
-        let maintenance = matches!(command, Command::OptimizeDatabase);
-        let result = self.sender.send_timeout(
-            Request {
-                command,
-                reply: Some(tx),
-                ack: false,
-            },
-            Duration::from_secs(2),
-        );
-        if let Err(error) = result {
-            return StateResponse {
-                ok: false,
-                error: Some(format!("Core unavailable: {error}")),
-                state: ClientSnapshot::from_core(&self.core_state()),
-                view: None,
-            };
-        }
-        let response = if maintenance {
-            rx.recv().map_err(|error| error.to_string())
-        } else {
-            rx.recv_timeout(Duration::from_secs(12))
-                .map_err(|error| error.to_string())
+        let request = Request {
+            operation: Operation::Query(query),
+            reply: Some(tx),
         };
-        match response.unwrap_or_else(|error| {
-            CoreResponse::State(Box::new(StateResponse {
-                ok: false,
-                error: Some(format!("Core response unavailable: {error}")),
-                state: ClientSnapshot::from_core(&self.core_state()),
-                view: None,
-            }))
-        }) {
-            CoreResponse::State(response) => *response,
-            CoreResponse::Ack(_) => unreachable!("state request returned Ack"),
+        let response = self
+            .sender
+            .send_timeout(request, Duration::from_secs(2))
+            .map_err(|error| format!("Core unavailable: {error}"))
+            .and_then(|()| {
+                rx.recv_timeout(Duration::from_secs(12))
+                    .map_err(|error| format!("Core response unavailable: {error}"))
+            });
+        match response {
+            Ok(CoreResponse::Query(response)) => response,
+            Ok(CoreResponse::Ack(_)) => unreachable!("query request returned Ack"),
+            Err(error) => QueryResponse {
+                revisions: self.state.read().query_revisions(),
+                result: Err(error),
+            },
         }
     }
 
-    pub fn request_ack(&self, command: Command) -> Ack {
-        let (tx, rx) = bounded(1);
-        if let Err(error) = self.sender.send_timeout(
-            Request {
-                command,
-                reply: Some(tx),
-                ack: true,
-            },
-            Duration::from_secs(2),
-        ) {
-            return Ack {
-                ok: false,
-                error: Some(format!("Core unavailable: {error}")),
-                revision: self.core_state().system.revision,
-            };
+    /// Read only requested state sections under one short shared-state lock.
+    pub fn state(&self, sections: StateSections) -> StateResponse {
+        let state = self.state.read();
+        StateResponse {
+            revisions: state.revisions,
+            playback: sections.playback.then(|| PlaybackSnapshot {
+                playback: state.playback.clone(),
+                current_track: state.current_track.clone(),
+            }),
+            queue: sections.queue.then(|| state.queue.clone()),
+            library: sections.library.then(|| state.library.clone()),
+            system: sections.system.then(|| state.system.clone()),
         }
-        match rx.recv_timeout(Duration::from_secs(12)) {
+    }
+
+    pub fn state_revisions(&self) -> StateRevisions {
+        self.state.read().revisions
+    }
+
+    pub fn request_ack(&self, command: Command) -> Ack {
+        let duration = if matches!(command, Command::OptimizeDatabase) {
+            Duration::from_secs(120)
+        } else {
+            Duration::from_secs(12)
+        };
+        let (tx, rx) = bounded(1);
+        let request = Request {
+            operation: Operation::Command(command),
+            reply: Some(tx),
+        };
+        let response = self
+            .sender
+            .send_timeout(request, Duration::from_secs(2))
+            .map_err(|error| format!("Core unavailable: {error}"))
+            .and_then(|()| {
+                rx.recv_timeout(duration)
+                    .map_err(|error| format!("Core response unavailable: {error}"))
+            });
+        match response {
             Ok(CoreResponse::Ack(ack)) => ack,
-            Ok(CoreResponse::State(_)) => Ack {
-                ok: false,
-                error: Some("Core returned state for Ack request".into()),
-                revision: self.core_state().system.revision,
-            },
+            Ok(CoreResponse::Query(_)) => unreachable!("command request returned query"),
             Err(error) => Ack {
                 ok: false,
-                error: Some(format!("Core response unavailable: {error}")),
-                revision: self.core_state().system.revision,
+                error: Some(error),
+                revision: self.revision(),
             },
         }
     }
@@ -348,9 +397,8 @@ impl Drop for Runtime {
             .is_some_and(|worker| !worker.is_finished())
         {
             let _ = self.handle.sender.send(Request {
-                command: Command::Shutdown,
+                operation: Operation::Command(Command::Shutdown),
                 reply: None,
-                ack: false,
             });
         }
         let _ = self.join();
@@ -423,7 +471,7 @@ impl Core {
         let stats = self.store.library_stats()?;
         self.state.library.track_total = stats.total;
         self.state.library.playlist_total = self.store.playlist_summary_page(0, 0)?.total;
-        self.state.library.history = Arc::new(self.store.history(200.min(PAGE_SIZE))?);
+        self.state.library.history = Arc::new(self.store.history(200.min(MAX_QUERY_ROWS))?);
         self.state.system.devices = Arc::new(audio::devices().unwrap_or_default());
         self.state.system.ffmpeg_status = if self.state.system.config.ffmpeg_enabled {
             audio::ffmpeg_status().unwrap_or_else(|error| format!("unavailable: {error:#}"))
@@ -436,7 +484,7 @@ impl Core {
                 current,
             } = serde_json::from_str(&json).context("Reading saved playback settings")?;
             let limit = self.state.system.config.queue_limit as usize;
-            let chunk_size = PAGE_SIZE.min(limit.max(1));
+            let chunk_size = MAX_QUERY_ROWS.min(limit.max(1));
             let mut entries = Vec::with_capacity(limit.min(saved_queue.len()));
             for chunk in saved_queue.chunks(chunk_size) {
                 if entries.len() == limit {
@@ -573,6 +621,81 @@ mod tests {
         };
         core.enqueue(&[1, 2, 2, 3, 4]).unwrap();
         (directory, core)
+    }
+
+    #[test]
+    fn playback_publication_does_not_invalidate_unchanged_sections() {
+        let (_directory, mut core) = fixture();
+        core.publish();
+        let before = core.state.revisions;
+        let wakeup_revision = core.shared.read().system.revision;
+        core.state.playback.position = 2.0;
+        core.publish();
+        assert_eq!(
+            core.state.revisions.changed_since(before),
+            StateSections {
+                playback: true,
+                ..StateSections::default()
+            }
+        );
+        {
+            let published = core.shared.read();
+            assert_eq!(published.revisions.system, before.system);
+            assert_ne!(published.system.revision, wakeup_revision);
+        }
+        let before = core.state.revisions;
+        core.state.system.last_error = Some("failed scan".into());
+        core.publish();
+        assert_eq!(
+            core.state.revisions.changed_since(before),
+            StateSections {
+                system: true,
+                ..StateSections::default()
+            }
+        );
+    }
+
+    #[test]
+    fn batch_continuation_rejects_library_change_but_not_playback_change() {
+        let (_directory, mut core) = fixture();
+        let expected = core.state.query_revisions();
+        let ViewResponse::TrackBatch(first) = core
+            .view(&Query::TrackBatch {
+                query: None,
+                favorite: None,
+                missing: None,
+                after: None,
+                limit: 2,
+                expected: Some(expected),
+            })
+            .unwrap()
+        else {
+            panic!("expected track batch");
+        };
+        let query = Query::TrackBatch {
+            query: None,
+            favorite: None,
+            missing: None,
+            after: first.next,
+            limit: 2,
+            expected: Some(expected),
+        };
+        core.state.playback.position = 2.0;
+        core.publish();
+        let ViewResponse::TrackBatch(last) = core.view(&query).unwrap() else {
+            panic!("expected track batch");
+        };
+        assert_eq!(
+            last.rows.iter().map(|track| track.id).collect::<Vec<_>>(),
+            [3, 4]
+        );
+        assert_eq!(last.next, None);
+        core.command(Command::SetFavorite {
+            track_ids: vec![1],
+            favorite: true,
+        })
+        .unwrap();
+        assert!(core.view(&query).is_err());
     }
 
     fn settle_scan(core: &mut Core) -> bool {
@@ -754,7 +877,7 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        let page = core.store.directory_page(&link, 0, PAGE_SIZE).unwrap();
+        let page = core.store.directory_page(&link, 0, MAX_QUERY_ROWS).unwrap();
         assert_eq!(page.total, 1);
         assert!(matches!(&page.rows[0], DirectoryRow::Track(row) if row.id == id));
     }
@@ -788,7 +911,7 @@ mod tests {
             assert_eq!(core.track(id).unwrap().path, path);
             assert_eq!(
                 core.store
-                    .directory_page(alias, 0, PAGE_SIZE)
+                    .directory_page(alias, 0, MAX_QUERY_ROWS)
                     .unwrap()
                     .total,
                 1
@@ -937,13 +1060,13 @@ mod tests {
         let playlist_id = core.store.playlist_summary_page(0, 1).unwrap().rows[0].id;
         let entries = core
             .store
-            .playlist_entries_page(playlist_id, 0, PAGE_SIZE)
+            .playlist_entries_page(playlist_id, 0, MAX_QUERY_ROWS)
             .unwrap();
         assert_eq!(entries.rows.len(), 1);
         assert_eq!(entries.rows[0].track_id, logical_id);
         let page = core
             .store
-            .directory_page(&alias.join("unused/.."), 0, PAGE_SIZE)
+            .directory_page(&alias.join("unused/.."), 0, MAX_QUERY_ROWS)
             .unwrap();
         assert_eq!(page.total, 1);
         assert!(matches!(&page.rows[0], DirectoryRow::Track(row) if row.id == logical_id));
@@ -1399,7 +1522,7 @@ mod tests {
         core.command(Command::RemoveMissingTracks).unwrap();
         assert_eq!(
             core.store
-                .library_view_page(None, None, None, LibrarySort::Id, 0, PAGE_SIZE)
+                .library_view_page(None, None, None, LibrarySort::Id, 0, MAX_QUERY_ROWS)
                 .unwrap()
                 .rows
                 .iter()
@@ -1418,7 +1541,7 @@ mod tests {
         );
         assert_eq!(
             core.store
-                .playlist_entries_page(playlist_id, 0, PAGE_SIZE)
+                .playlist_entries_page(playlist_id, 0, MAX_QUERY_ROWS)
                 .unwrap()
                 .rows
                 .iter()
@@ -1616,7 +1739,7 @@ mod tests {
         let playlist_id = core.store.playlist_summary_page(0, 1).unwrap().rows[0].id;
         assert_eq!(
             core.store
-                .playlist_entries_page(playlist_id, 0, PAGE_SIZE)
+                .playlist_entries_page(playlist_id, 0, MAX_QUERY_ROWS)
                 .unwrap()
                 .rows
                 .iter()
@@ -1696,7 +1819,7 @@ mod tests {
         let playlist_id = core.store.playlist_summary_page(0, 1).unwrap().rows[0].id;
         let entries = core
             .store
-            .playlist_entries_page(playlist_id, 0, PAGE_SIZE)
+            .playlist_entries_page(playlist_id, 0, MAX_QUERY_ROWS)
             .unwrap()
             .rows;
         let tracks: Vec<_> = entries
@@ -2313,9 +2436,8 @@ mod tests {
         let (sender, receiver) = bounded(1);
         sender
             .send(Request {
-                command: Command::Shutdown,
+                operation: Operation::Command(Command::Shutdown),
                 reply: None,
-                ack: false,
             })
             .unwrap();
         core.run(receiver);
@@ -2370,9 +2492,8 @@ mod tests {
         let (sender, receiver) = bounded(1);
         sender
             .send(Request {
-                command: Command::Shutdown,
+                operation: Operation::Command(Command::Shutdown),
                 reply: None,
-                ack: false,
             })
             .unwrap();
         core.run(receiver);

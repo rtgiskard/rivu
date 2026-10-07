@@ -79,10 +79,28 @@ rivu library clean-missing
 
 == Paged views
 
-GUI/TUI views fetch library and playlist pages as needed; CLI listings and
-playlist export include every page. `page_size` controls interactive page size,
-not the total results. Query, cache, and snapshot contracts:
-link:../src/store.rs[store], link:../src/core/catalog.rs[catalog], and
+GUI/TUI fetch bounded library and playlist pages as needed. `page_size` controls
+interactive page size, not the total results. Each interactive page reports the
+filtered total and at most `256` rows; `limit = 0` is a count-only read. Query
+responses contain the requested projection and its data revisions, never the
+queue, configuration, or other client state. The TUI retains at most three
+pages per list; the GUI retains one page per view or directory branch.
+
+CLI listings and playlist export use bounded batches without querying pagination
+totals. Continuations follow track/playlist IDs or playlist `(position, id)`
+order instead of increasingly deep offsets. Batch `limit` accepts `1`–`256`;
+zero and values above `256` are rejected. `page_size` remains the configurable
+GUI/TUI page size and is independent of CLI batch size. Separate requests are
+not a database snapshot: CLI listings reject continuations when relevant library
+or playlist revisions change.
+Listings stream directly to stdout. If a later batch detects a revision change,
+the command stops, prints a `Listing incomplete` notice on stderr, and exits
+successfully; already emitted text may be incomplete (and JSON may be invalid),
+so callers should discard it and retry. GUI/TUI discard stale query results and
+refetch them; `R` retries a failed TUI page.
+
+Query, cache, and state contracts:
+link:../src/store.rs[store], link:../src/response.rs[responses], and
 link:../src/model.rs[model].
 
 == Play counts and recent tracks

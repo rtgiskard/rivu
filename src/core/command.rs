@@ -25,14 +25,6 @@ impl Core {
                 | Command::Configure { .. }
         );
         match command {
-            Command::Status | Command::Overview => return Ok(()),
-            Command::LibraryPage { .. }
-            | Command::TrackPage { .. }
-            | Command::DirectoryPage { .. }
-            | Command::PlaylistSummaries { .. }
-            | Command::PlaylistEntries { .. }
-            | Command::Track { .. }
-            | Command::LibraryStats => bail!("View command must use request dispatcher"),
             Command::Scan { paths, force } => self.scan(paths, None, force)?,
             Command::Play { track_id } => {
                 self.track(track_id)?;

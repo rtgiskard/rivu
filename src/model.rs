@@ -56,16 +56,24 @@ pub struct LibraryRow {
     pub play_count: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct LibraryPage {
+/// A bounded interactive result with an exact filtered total.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Page<T> {
     pub total: usize,
-    pub rows: Vec<LibraryRow>,
+    pub rows: Vec<T>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TrackPage {
-    pub total: usize,
-    pub rows: Vec<Track>,
+/// Count-free sequential result. `next` is present only when more rows exist.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Batch<T, C> {
+    pub rows: Vec<T>,
+    pub next: Option<C>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaylistEntryCursor {
+    pub position: i64,
+    pub id: i64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,23 +91,11 @@ pub enum DirectoryRow {
     Track(LibraryRow),
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct DirectoryPage {
-    pub total: usize,
-    pub rows: Vec<DirectoryRow>,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlaylistSummary {
     pub id: i64,
     pub name: String,
     pub entry_count: usize,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PlaylistSummaryPage {
-    pub total: usize,
-    pub rows: Vec<PlaylistSummary>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,19 +109,13 @@ pub struct PlaylistEntryRow {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PlaylistEntryPage {
-    pub total: usize,
-    pub rows: Vec<PlaylistEntryRow>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LibraryStats {
     pub total: usize,
     pub play_count: u64,
 }
 
-/// Maximum number of rows retained by any in-memory view page.
-pub const PAGE_SIZE: usize = 256;
+/// Maximum number of rows in a query batch or interactive page.
+pub const MAX_QUERY_ROWS: usize = 256;
 
 /// Quiet interval before interactive search submits its final query.
 pub(crate) const SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(150);
@@ -162,7 +152,7 @@ pub struct HistoryEntry {
     pub played_at: i64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DatabaseOptimization {
     pub database_bytes_before: u64,
     pub database_bytes_after: u64,
@@ -197,7 +187,7 @@ pub struct QueueState {
     pub current_id: Option<u64>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PlaybackState {
     pub status: PlaybackStatus,
     pub position: f64,
@@ -222,7 +212,7 @@ pub enum ScanPhase {
     Failed,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScanProgress {
     pub phase: ScanPhase,
     pub processed: usize,
@@ -345,11 +335,8 @@ pub(crate) fn playback_key_command(key: &str, playback: &PlaybackState) -> Optio
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "command", rename_all = "snake_case")]
-pub enum Command {
-    Status,
-    Overview,
-    ShowWindow,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Query {
     LibraryPage {
         query: Option<String>,
         favorite: Option<bool>,
@@ -383,6 +370,31 @@ pub enum Command {
         track_id: i64,
     },
     LibraryStats,
+    TrackBatch {
+        query: Option<String>,
+        favorite: Option<bool>,
+        missing: Option<bool>,
+        after: Option<i64>,
+        limit: usize,
+        expected: Option<crate::response::QueryRevisions>,
+    },
+    PlaylistSummaryBatch {
+        after: Option<i64>,
+        limit: usize,
+        expected: Option<crate::response::QueryRevisions>,
+    },
+    PlaylistEntryBatch {
+        playlist_id: i64,
+        after: Option<PlaylistEntryCursor>,
+        limit: usize,
+        expected: Option<crate::response::QueryRevisions>,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "command", rename_all = "snake_case")]
+pub enum Command {
+    ShowWindow,
     OptimizeDatabase,
     SetFavorite {
         track_ids: Vec<i64>,

@@ -1,21 +1,19 @@
 use crate::{
-    core::{AppHandle, CoreState},
-    model::{
-        Command, DatabaseOptimization, LibrarySnapshot, PlaybackState, QueueState, ScanProgress,
-        Track,
-    },
-    projection::ClientSnapshot,
-    response::{Ack, StateResponse, ViewResponse},
+    core::AppHandle,
+    model::{Command, DatabaseOptimization, Query, ScanProgress, SystemState},
+    response::{Ack, QueryResponse, StateResponse, StateRevisions, StateSections},
 };
 use anyhow::{Context, Error, Result, bail};
 use bincode::{
     config,
-    serde::{decode_from_slice, encode_to_vec},
+    serde::{decode_from_slice, encode_into_std_write},
 };
 use bytes::{Buf, Bytes, BytesMut};
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
+    io::{self, Write},
     os::unix::fs::{FileTypeExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::{
@@ -23,7 +21,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -33,86 +31,96 @@ use tokio::{
     time::timeout,
 };
 
+const PROTOCOL_VERSION: u16 = 1;
 const MAX_REQUEST: usize = 64 * 1024;
-const MAX_RESPONSE: usize = 64 * 1024 * 1024;
-// Clients do not know the server instance before the first response.
-const CLIENT_INSTANCE_UNKNOWN: u16 = 0;
+const MAX_RESPONSE: usize = 16 * 1024 * 1024;
+const MAX_CLIENTS: usize = 16;
+const UNKNOWN_INSTANCE: [u8; 16] = [0; 16];
 
-/// Length-prefixed bincode request envelope.
 #[derive(Serialize, Deserialize)]
 struct RequestFrame {
-    instance_id: u16,
+    version: u16,
+    instance_id: [u8; 16],
     request: RequestKind,
 }
 
 #[derive(Serialize, Deserialize)]
 enum RequestKind {
-    Command(String),
-    Ack(String),
-    Watch { revision: u16 },
+    Query { query: String },
+    State { sections: StateSections },
+    Command { command: String },
+    Watch { revisions: StateRevisions },
 }
 
 enum DecodedRequest {
+    Query(Query),
+    State(StateSections),
     Command(Command),
-    Ack(Command),
-    Watch { revision: u16 },
+    Watch(StateRevisions),
 }
 
 fn decode_request(frame: RequestFrame) -> Result<DecodedRequest> {
     Ok(match frame.request {
-        RequestKind::Command(command) => {
+        RequestKind::Query { query } => {
+            DecodedRequest::Query(serde_json::from_str(&query).context("Decoding query")?)
+        }
+        RequestKind::State { sections } => DecodedRequest::State(sections),
+        RequestKind::Command { command } => {
             DecodedRequest::Command(serde_json::from_str(&command).context("Decoding command")?)
         }
-        RequestKind::Ack(command) => {
-            DecodedRequest::Ack(serde_json::from_str(&command).context("Decoding command")?)
-        }
-        RequestKind::Watch { revision } => DecodedRequest::Watch { revision },
+        RequestKind::Watch { revisions } => DecodedRequest::Watch(revisions),
     })
+}
+fn decode_request_header(bytes: &[u8]) -> Result<(u16, [u8; 16])> {
+    let ((version, instance_id), _) =
+        decode_from_slice(bytes, config::standard()).context("Decoding IPC request header")?;
+    Ok((version, instance_id))
+}
+
+fn decode_request_frame(bytes: &[u8]) -> Result<RequestFrame> {
+    let (version, _) = decode_request_header(bytes)?;
+    if version != PROTOCOL_VERSION {
+        bail!("Unsupported IPC protocol version {version}");
+    }
+    decode_frame(bytes)
+}
+
+fn decode_response_frame(bytes: &[u8]) -> Result<ResponseFrame> {
+    let (version, _) = decode_from_slice::<u16, _>(bytes, config::standard())
+        .context("Decoding IPC response header")?;
+    if version != PROTOCOL_VERSION {
+        bail!("Unsupported IPC protocol version {version}");
+    }
+    decode_frame(bytes)
 }
 
 #[derive(Serialize, Deserialize)]
 struct ResponseFrame {
-    instance_id: u16,
-    revision: u16,
+    version: u16,
+    instance_id: [u8; 16],
     response: WireResponse,
 }
 
-// Wire revisions are equality tokens, not ordered counters. Truncation to u16
-// permits wraparound; watchers only need to know whether the current token
-// equals the token supplied by the client. Missing a full 16-bit cycle is
-// outside the protocol's bounded-observation guarantee.
-fn revision_matches(current: u64, expected: u16) -> bool {
-    current as u16 == expected
+#[derive(Clone, Debug, Serialize, Deserialize)]
+enum WireResponse {
+    Query(QueryResponse),
+    State(WireStateResponse),
+    Ack(Ack),
+    Watch(StateRevisions),
+    Error(String),
 }
 
-// Config uses omitted fields in human-readable formats, which are not safe in
-// bincode's positional structs. Keep only that field as JSON on the wire.
-mod wire_config {
-    use crate::config::Config;
-    use serde::{Deserialize, Serialize};
-    use std::sync::Arc;
-
-    pub fn serialize<S: serde::Serializer>(
-        config: &Arc<Config>,
-        serializer: S,
-    ) -> std::result::Result<S::Ok, S::Error> {
-        serde_json::to_string(config.as_ref())
-            .map_err(serde::ser::Error::custom)?
-            .serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> std::result::Result<Arc<Config>, D::Error> {
-        let json = String::deserialize(deserializer)?;
-        serde_json::from_str(&json)
-            .map(Arc::new)
-            .map_err(serde::de::Error::custom)
-    }
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct WireStateResponse {
+    revisions: StateRevisions,
+    playback: Option<crate::response::PlaybackSnapshot>,
+    queue: Option<crate::model::QueueState>,
+    library: Option<crate::model::LibrarySnapshot>,
+    #[serde(with = "wire_system_option")]
+    system: Option<WireSystemState>,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(remote = "crate::model::SystemState")]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct WireSystemState {
     scanning: bool,
     scan_message: String,
@@ -131,76 +139,147 @@ struct WireSystemState {
     shutting_down: bool,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(remote = "ClientSnapshot")]
-struct WireSnapshot {
-    library: LibrarySnapshot,
-    queue: QueueState,
-    current_track: Option<Arc<Track>>,
-    playback: PlaybackState,
-    #[serde(with = "WireSystemState")]
-    system: crate::model::SystemState,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-enum WireState {
-    Snapshot(#[serde(with = "WireSnapshot")] ClientSnapshot),
-    Ack { revision: u64 },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct WireResponse {
-    ok: bool,
-    error: Option<String>,
-    state: WireState,
-    view: Option<ViewResponse>,
-}
-
-impl WireResponse {
-    fn from_response(response: StateResponse) -> Self {
+impl From<&SystemState> for WireSystemState {
+    fn from(value: &SystemState) -> Self {
         Self {
-            ok: response.ok,
-            error: response.error,
-            state: WireState::Snapshot(response.state),
-            view: response.view,
-        }
-    }
-
-    fn from_ack(ack: Ack) -> Self {
-        Self {
-            ok: ack.ok,
-            error: ack.error,
-            state: WireState::Ack {
-                revision: ack.revision,
-            },
-            view: None,
+            scanning: value.scanning,
+            scan_message: value.scan_message.clone(),
+            scan_progress: value.scan_progress.clone(),
+            last_error: value.last_error.clone(),
+            devices: value.devices.clone(),
+            selected_device: value.selected_device.clone(),
+            revision: value.revision,
+            config: value.config.clone(),
+            config_path: value.config_path.clone(),
+            mpris_status: value.mpris_status.clone(),
+            ffmpeg_status: value.ffmpeg_status.clone(),
+            database_optimization: value.database_optimization.clone(),
+            shutting_down: value.shutting_down,
         }
     }
 }
 
-fn unpack_ack(frame: ResponseFrame) -> Result<Ack> {
-    let ok = frame.response.ok;
-    let error = frame.response.error;
-    match frame.response.state {
-        WireState::Ack { revision } => Ok(Ack {
-            ok,
-            error,
-            revision,
-        }),
-        _ => bail!("IPC response was not an acknowledgement"),
+impl From<WireSystemState> for SystemState {
+    fn from(value: WireSystemState) -> Self {
+        Self {
+            scanning: value.scanning,
+            scan_message: value.scan_message,
+            scan_progress: value.scan_progress,
+            last_error: value.last_error,
+            devices: value.devices,
+            selected_device: value.selected_device,
+            revision: value.revision,
+            config: value.config,
+            config_path: value.config_path,
+            mpris_status: value.mpris_status,
+            ffmpeg_status: value.ffmpeg_status,
+            database_optimization: value.database_optimization,
+            shutting_down: value.shutting_down,
+        }
     }
+}
+
+mod wire_system_option {
+    use super::WireSystemState;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(value: &Option<WireSystemState>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        value.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<WireSystemState>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Option::<WireSystemState>::deserialize(deserializer)
+    }
+}
+
+// Config's omitted fields are unsafe with bincode's positional encoding. Keep
+// the complete config as JSON while the enclosing state remains bincode.
+mod wire_config {
+    use crate::config::Config;
+    use serde::{Deserialize, Serialize};
+    use std::sync::Arc;
+
+    pub fn serialize<S: serde::Serializer>(
+        value: &Arc<Config>,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serde_json::to_string(value.as_ref())
+            .map_err(serde::ser::Error::custom)?
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Arc<Config>, D::Error> {
+        let json = String::deserialize(deserializer)?;
+        serde_json::from_str(&json)
+            .map(Arc::new)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+fn wire_state(response: StateResponse) -> WireStateResponse {
+    WireStateResponse {
+        revisions: response.revisions,
+        playback: response.playback,
+        queue: response.queue,
+        library: response.library,
+        system: response.system.as_ref().map(WireSystemState::from),
+    }
+}
+
+fn state_response(response: WireStateResponse) -> StateResponse {
+    StateResponse {
+        revisions: response.revisions,
+        playback: response.playback,
+        queue: response.queue,
+        library: response.library,
+        system: response.system.map(SystemState::from),
+    }
+}
+
+struct FrameWriter<'a> {
+    bytes: &'a mut Vec<u8>,
+}
+
+impl Write for FrameWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.bytes.len().saturating_add(bytes.len()) > 4 + MAX_RESPONSE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "IPC frame exceeds maximum size",
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn encode_frame_into<T: Serialize>(value: &T, bytes: &mut Vec<u8>) -> Result<()> {
+    bytes.clear();
+    bytes.resize(4, 0);
+    let mut writer = FrameWriter { bytes };
+    encode_into_std_write(value, &mut writer, config::standard()).context("Encoding IPC frame")?;
+    let payload_len = writer.bytes.len() - 4;
+    let length = u32::try_from(payload_len).context("IPC frame is too large")?;
+    writer.bytes[..4].copy_from_slice(&length.to_le_bytes());
+    Ok(())
 }
 
 fn encode_frame<T: Serialize>(value: &T) -> Result<Vec<u8>> {
-    let payload = encode_to_vec(value, config::standard()).context("Encoding IPC frame")?;
-    if payload.len() > MAX_RESPONSE {
-        bail!("IPC frame exceeds maximum size");
-    }
-    let len = u32::try_from(payload.len()).context("IPC frame is too large")?;
-    let mut frame = Vec::with_capacity(4 + payload.len());
-    frame.extend_from_slice(&len.to_le_bytes());
-    frame.extend_from_slice(&payload);
-    Ok(frame)
+    let mut bytes = Vec::new();
+    encode_frame_into(value, &mut bytes)?;
+    Ok(bytes)
 }
 
 fn decode_frame<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T> {
@@ -214,7 +293,6 @@ fn decode_frame<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T> {
 
 pub struct Server {
     path: PathBuf,
-    stopping: Arc<AtomicBool>,
     shutdown: watch::Sender<bool>,
     bridge_stop: crossbeam_channel::Sender<()>,
     worker: Option<JoinHandle<()>>,
@@ -250,69 +328,46 @@ pub fn bind(path: &Path) -> Result<()> {
 
 impl Server {
     pub fn start(path: PathBuf, handle: AppHandle) -> Result<Self> {
-        let stopping = Arc::new(AtomicBool::new(false));
         let (shutdown, shutdown_rx) = watch::channel(false);
         let (bridge_stop, bridge_stop_rx) = crossbeam_channel::bounded(1);
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
         let worker_path = path.clone();
-        let worker = thread::Builder::new()
-            .name("rivu-ipc".into())
-            .spawn(move || {
-                let runtime = match Builder::new_current_thread()
-                    .enable_io()
-                    .enable_time()
-                    .build()
-                {
-                    Ok(runtime) => runtime,
-                    Err(error) => {
-                        let _ = ready_tx.send(Err(anyhow::Error::from(error)));
-                        return;
-                    }
-                };
-                let listener = {
-                    let _guard = runtime.enter();
-                    UnixListener::bind(&worker_path)
-                };
-                let listener = match listener {
-                    Ok(listener) => listener,
-                    Err(error) => {
-                        let _ = ready_tx.send(Err(anyhow::Error::from(error)));
-                        return;
-                    }
-                };
-                if let Err(error) =
-                    fs::set_permissions(&worker_path, fs::Permissions::from_mode(0o600))
-                {
-                    let _ = ready_tx.send(Err(anyhow::Error::from(error)));
-                    return;
-                }
-                let (revision_tx, revision_rx) = watch::channel(handle.core_state().system.revision);
-                let updates = handle.subscribe();
-                let bridge_handle = handle.clone();
-                let bridge = thread::Builder::new()
-                    .name("rivu-ipc-revisions".into())
-                    .spawn(move || {
-                        loop {
-                            crossbeam_channel::select! {
-                                recv(updates) -> message => {
-                                    if message.is_ok() { let _ = revision_tx.send(bridge_handle.core_state().system.revision); } else { break; }
-                                }
-                                recv(bridge_stop_rx) -> _ => break,
-                            }
+        let worker = thread::Builder::new().name("rivu-ipc".into()).spawn(move || {
+            let runtime = match Builder::new_current_thread().enable_io().enable_time().build() {
+                Ok(runtime) => runtime,
+                Err(error) => { let _ = ready_tx.send(Err(anyhow::Error::from(error))); return; }
+            };
+            let listener = { let _guard = runtime.enter(); UnixListener::bind(&worker_path) };
+            let listener = match listener {
+                Ok(listener) => listener,
+                Err(error) => { let _ = ready_tx.send(Err(anyhow::Error::from(error))); return; }
+            };
+            if let Err(error) = fs::set_permissions(&worker_path, fs::Permissions::from_mode(0o600)) {
+                let _ = ready_tx.send(Err(anyhow::Error::from(error))); return;
+            }
+            let (revision_tx, revision_rx) = watch::channel(handle.state_revisions());
+            let updates = handle.subscribe();
+            let bridge_handle = handle.clone();
+            let bridge = thread::Builder::new().name("rivu-ipc-revisions".into()).spawn(move || {
+                loop {
+                    crossbeam_channel::select! {
+                        recv(updates) -> message => {
+                            if message.is_ok() { let _ = revision_tx.send(bridge_handle.state_revisions()); } else { break; }
                         }
-                    });
-                let Ok(bridge) = bridge else {
-                    let _ = ready_tx.send(Err(anyhow::anyhow!("starting IPC revision bridge")));
-                    return;
-                };
-                let _ = ready_tx.send(Ok(()));
-                runtime.block_on(run_server(listener, handle, revision_rx, shutdown_rx));
-                let _ = bridge.join();
-            })?;
+                        recv(bridge_stop_rx) -> _ => break,
+                    }
+                }
+            });
+            let Ok(bridge) = bridge else {
+                let _ = ready_tx.send(Err(anyhow::anyhow!("starting IPC revision bridge"))); return;
+            };
+            let _ = ready_tx.send(Ok(()));
+            runtime.block_on(run_server(listener, handle, revision_rx, shutdown_rx));
+            let _ = bridge.join();
+        })?;
         match ready_rx.recv() {
             Ok(Ok(())) => Ok(Self {
                 path,
-                stopping,
                 shutdown,
                 bridge_stop,
                 worker: Some(worker),
@@ -331,7 +386,6 @@ impl Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        self.stopping.store(true, Ordering::Release);
         let _ = self.shutdown.send(true);
         let _ = self.bridge_stop.send(());
         if let Some(worker) = self.worker.take() {
@@ -346,26 +400,36 @@ async fn read_frame<S: AsyncRead + Unpin>(
     limit: usize,
     pending: &mut BytesMut,
 ) -> Result<Bytes> {
-    loop {
-        if pending.len() >= 4 {
-            let length = u32::from_le_bytes(pending[..4].try_into().unwrap()) as usize;
-            if length > limit {
-                bail!("IPC frame exceeds maximum size");
-            }
-            if pending.len() >= 4 + length {
-                pending.advance(4);
-                return Ok(pending.split_to(length).freeze());
-            }
-        }
-        let before = pending.len();
-        stream
-            .read_buf(pending)
+    let mut scratch = [0u8; 8192];
+    while pending.len() < 4 {
+        let need = 4 - pending.len();
+        let read = stream
+            .read(&mut scratch[..need])
             .await
             .context("Reading IPC frame")?;
-        if pending.len() == before {
+        if read == 0 {
             bail!("IPC connection closed while reading frame");
         }
+        pending.extend_from_slice(&scratch[..read]);
     }
+    let length = u32::from_le_bytes(pending[..4].try_into().unwrap()) as usize;
+    if length > limit {
+        bail!("IPC frame exceeds maximum size");
+    }
+    pending.reserve((4 + length).saturating_sub(pending.len()));
+    while pending.len() < 4 + length {
+        let need = (4 + length - pending.len()).min(scratch.len());
+        let read = stream
+            .read(&mut scratch[..need])
+            .await
+            .context("Reading IPC frame")?;
+        if read == 0 {
+            bail!("IPC connection closed while reading frame");
+        }
+        pending.extend_from_slice(&scratch[..read]);
+    }
+    pending.advance(4);
+    Ok(pending.split_to(length).freeze())
 }
 
 async fn write_frame<S: AsyncWrite + Unpin>(stream: &mut S, value: &impl Serialize) -> Result<()> {
@@ -376,109 +440,107 @@ async fn write_frame<S: AsyncWrite + Unpin>(stream: &mut S, value: &impl Seriali
     stream.flush().await.context("Flushing IPC frame")?;
     Ok(())
 }
+async fn write_frame_buffered<S: AsyncWrite + Unpin>(
+    stream: &mut S,
+    value: &impl Serialize,
+    buffer: &mut Vec<u8>,
+) -> Result<()> {
+    encode_frame_into(value, buffer)?;
+    stream
+        .write_all(buffer)
+        .await
+        .context("Writing IPC frame")?;
+    stream.flush().await.context("Flushing IPC frame")?;
+    Ok(())
+}
 
-fn response_frame(response: StateResponse, instance_id: u16) -> ResponseFrame {
+fn error_frame(error: impl Into<String>, instance_id: [u8; 16]) -> ResponseFrame {
     ResponseFrame {
+        version: PROTOCOL_VERSION,
         instance_id,
-        revision: response.state.system.revision as u16,
-        response: WireResponse::from_response(response),
+        response: WireResponse::Error(error.into()),
     }
 }
 
-fn ack_frame(ack: Ack, instance_id: u16) -> ResponseFrame {
+fn response_frame(response: WireResponse, instance_id: [u8; 16]) -> ResponseFrame {
     ResponseFrame {
+        version: PROTOCOL_VERSION,
         instance_id,
-        revision: ack.revision as u16,
-        response: WireResponse::from_ack(ack),
+        response,
     }
 }
-fn unpack_response(frame: ResponseFrame) -> Result<StateResponse> {
-    let WireResponse {
-        ok,
-        error,
-        state,
-        view,
-    } = frame.response;
-    let state = match state {
-        WireState::Snapshot(state) => state,
-        WireState::Ack { .. } => bail!("IPC acknowledgement used where state was required"),
-    };
-    Ok(StateResponse {
-        ok,
-        error,
-        state,
-        view,
-    })
-}
-
-fn overview_response(state: &CoreState) -> StateResponse {
-    StateResponse {
-        ok: true,
-        error: None,
-        state: ClientSnapshot::from_core(state),
-        view: None,
+fn validate_instance(request: [u8; 16], server: [u8; 16]) -> Result<()> {
+    if request != UNKNOWN_INSTANCE && request != server {
+        bail!("IPC server instance changed");
     }
+    Ok(())
 }
 
-async fn command(handle: &AppHandle, command: Command) -> StateResponse {
-    let fallback = ClientSnapshot::from_core(&handle.core_state());
+fn unpack_error(response: WireResponse) -> Result<WireResponse> {
+    if let WireResponse::Error(error) = response {
+        bail!("IPC server error: {error}");
+    }
+    Ok(response)
+}
+
+async fn run_command(handle: &AppHandle, command: Command) -> Result<Ack> {
     let duration = if matches!(command, Command::OptimizeDatabase) {
         Duration::from_secs(120)
     } else {
         Duration::from_secs(15)
     };
-    match timeout(
+    timeout(
         duration,
         tokio::task::spawn_blocking({
             let handle = handle.clone();
-            move || handle.request(command)
+            move || handle.request_ack(command)
         }),
     )
     .await
-    {
-        Ok(Ok(response)) => response,
-        Ok(Err(error)) => StateResponse {
-            ok: false,
-            error: Some(format!("Core command task failed: {error}")),
-            state: fallback,
-            view: None,
-        },
-        Err(_) => StateResponse {
-            ok: false,
-            error: Some("Core command timed out".into()),
-            state: fallback,
-            view: None,
-        },
-    }
+    .context("Reading IPC acknowledgement timed out")?
+    .map_err(|error| anyhow::anyhow!("Core command task failed: {error}"))
 }
 
-async fn wait_for_revision(
+async fn run_query(handle: &AppHandle, query: Query) -> Result<QueryResponse> {
+    timeout(
+        Duration::from_secs(15),
+        tokio::task::spawn_blocking({
+            let handle = handle.clone();
+            move || handle.query(query)
+        }),
+    )
+    .await
+    .context("Reading IPC query timed out")?
+    .map_err(|error| anyhow::anyhow!("Core query task failed: {error}"))
+}
+
+async fn wait_for_revisions(
     stream: &mut UnixStream,
     pending: &mut BytesMut,
     handle: &AppHandle,
-    revision: u16,
-    updates: &mut watch::Receiver<u64>,
+    expected: StateRevisions,
+    updates: &mut watch::Receiver<StateRevisions>,
     shutdown: &mut watch::Receiver<bool>,
-) -> Option<StateResponse> {
+) -> Option<Option<StateRevisions>> {
+    let mut scratch = [0u8; 8192];
     loop {
-        let state = handle.core_state();
-        if !revision_matches(state.system.revision, revision) || state.system.shutting_down {
-            return Some(overview_response(&state));
+        let current = handle.state_revisions();
+        if current != expected {
+            return Some(Some(current));
         }
         tokio::select! {
             changed = updates.changed() => { if changed.is_err() { return None; } }
             changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() { return None; } }
             ready = stream.readable() => {
                 if ready.is_err() { return None; }
-                match stream.try_read_buf(pending) {
+                match stream.try_read(&mut scratch) {
                     Ok(0) => return None,
-                    Ok(_) => {
+                    Ok(read) => {
+                        pending.extend_from_slice(&scratch[..read]);
                         if pending.len() >= 4 {
-                            let length =
-                                u32::from_le_bytes(pending[..4].try_into().unwrap()) as usize;
-                            if length > MAX_REQUEST {
-                                return None;
-                            }
+                            let length = u32::from_le_bytes(pending[..4].try_into().unwrap()) as usize;
+                            if length > MAX_REQUEST { return None; }
+                            if pending.len() >= 4 + length { return Some(None); }
                         }
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
@@ -492,45 +554,105 @@ async fn wait_for_revision(
 async fn serve_connection(
     mut stream: UnixStream,
     handle: AppHandle,
-    instance_id: u16,
-    mut updates: watch::Receiver<u64>,
+    instance_id: [u8; 16],
+    mut updates: watch::Receiver<StateRevisions>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     let mut pending = BytesMut::new();
+    let mut handshaken = false;
     loop {
-        let bytes = tokio::select! { frame = read_frame(&mut stream, MAX_REQUEST, &mut pending) => frame?, changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() { return Ok(()); } continue; } };
-        let request = match decode_frame::<RequestFrame>(&bytes).and_then(decode_request) {
-            Ok(request) => request,
+        let bytes = tokio::select! {
+            frame = read_frame(&mut stream, MAX_REQUEST, &mut pending) => frame?,
+            changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() { return Ok(()); } continue; }
+        };
+        let (version, request_instance) = match decode_request_header(&bytes) {
+            Ok(header) => header,
             Err(error) => {
-                let response = StateResponse {
-                    ok: false,
-                    error: Some(format!("Invalid command: {error}")),
-                    state: ClientSnapshot::from_core(&handle.core_state()),
-                    view: None,
-                };
-                write_frame(&mut stream, &response_frame(response, instance_id)).await?;
+                write_frame(
+                    &mut stream,
+                    &error_frame(format!("Invalid IPC request header: {error}"), instance_id),
+                )
+                .await?;
                 continue;
             }
         };
-        let response = match request {
-            DecodedRequest::Command(Command::Overview) => overview_response(&handle.core_state()),
-            DecodedRequest::Command(cmd) => command(&handle, cmd).await,
-            DecodedRequest::Ack(cmd) => {
-                let ack = tokio::task::spawn_blocking({
-                    let handle = handle.clone();
-                    move || handle.request_ack(cmd)
-                })
-                .await
-                .map_err(|error| anyhow::anyhow!("Core command task failed: {error}"))?;
-                write_frame(&mut stream, &ack_frame(ack, instance_id)).await?;
+        if version != PROTOCOL_VERSION {
+            write_frame(
+                &mut stream,
+                &error_frame(
+                    format!("Unsupported IPC protocol version {version}"),
+                    instance_id,
+                ),
+            )
+            .await?;
+            continue;
+        }
+        if let Err(error) = validate_instance(request_instance, instance_id) {
+            write_frame(&mut stream, &error_frame(error.to_string(), instance_id)).await?;
+            continue;
+        }
+        let frame = match decode_request_frame(&bytes) {
+            Ok(frame) => frame,
+            Err(error) => {
+                write_frame(
+                    &mut stream,
+                    &error_frame(format!("Invalid IPC request: {error}"), instance_id),
+                )
+                .await?;
                 continue;
             }
-            DecodedRequest::Watch { revision } => {
-                let Some(response) = wait_for_revision(
+        };
+        let request = match decode_request(frame) {
+            Ok(request) => request,
+            Err(error) => {
+                write_frame(
+                    &mut stream,
+                    &error_frame(format!("Invalid IPC request: {error}"), instance_id),
+                )
+                .await?;
+                continue;
+            }
+        };
+        match request {
+            DecodedRequest::State(sections) => {
+                handshaken = true;
+                let state = handle.state(sections);
+                write_frame(
+                    &mut stream,
+                    &response_frame(WireResponse::State(wire_state(state)), instance_id),
+                )
+                .await?;
+            }
+            DecodedRequest::Query(query) => {
+                let response = run_query(&handle, query).await?;
+                write_frame(
+                    &mut stream,
+                    &response_frame(WireResponse::Query(response), instance_id),
+                )
+                .await?;
+            }
+            DecodedRequest::Command(command) => {
+                let response = run_command(&handle, command).await?;
+                write_frame(
+                    &mut stream,
+                    &response_frame(WireResponse::Ack(response), instance_id),
+                )
+                .await?;
+            }
+            DecodedRequest::Watch(expected) => {
+                if !handshaken {
+                    write_frame(
+                        &mut stream,
+                        &error_frame("Watcher session requires a state handshake", instance_id),
+                    )
+                    .await?;
+                    continue;
+                }
+                let Some(result) = wait_for_revisions(
                     &mut stream,
                     &mut pending,
                     &handle,
-                    revision,
+                    expected,
                     &mut updates,
                     &mut shutdown,
                 )
@@ -538,29 +660,39 @@ async fn serve_connection(
                 else {
                     return Ok(());
                 };
-                response
+                let Some(revisions) = result else {
+                    continue;
+                };
+                write_frame(
+                    &mut stream,
+                    &response_frame(WireResponse::Watch(revisions), instance_id),
+                )
+                .await?;
             }
-        };
-        write_frame(&mut stream, &response_frame(response, instance_id)).await?;
+        }
     }
 }
 
 async fn run_server(
     listener: UnixListener,
     handle: AppHandle,
-    updates: watch::Receiver<u64>,
+    updates: watch::Receiver<StateRevisions>,
     mut shutdown: watch::Receiver<bool>,
 ) {
-    let instance_id = (SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos() as u16)
-        .wrapping_add(std::process::id() as u16);
-    let mut clients: Vec<tokio::task::JoinHandle<Result<()>>> = Vec::new();
+    let mut rng = rand::rng();
+    let mut instance_id = [0u8; 16];
+    while instance_id == UNKNOWN_INSTANCE {
+        rng.fill(&mut instance_id);
+    }
+    let mut clients = Vec::new();
     let mut revisions = updates.clone();
     loop {
         tokio::select! {
-            accepted = listener.accept() => { let Ok((stream, _)) = accepted else { continue; }; clients.retain(|task| !task.is_finished()); if clients.len() < 16 { clients.push(tokio::spawn(serve_connection(stream, handle.clone(), instance_id, updates.clone(), shutdown.clone()))); } }
+            accepted = listener.accept() => {
+                let Ok((stream, _)) = accepted else { continue; };
+                clients.retain(|task: &tokio::task::JoinHandle<Result<()>>| !task.is_finished());
+                if clients.len() < MAX_CLIENTS { clients.push(tokio::spawn(serve_connection(stream, handle.clone(), instance_id, updates.clone(), shutdown.clone()))); }
+            }
             changed = revisions.changed() => { if changed.is_err() { break; } }
             changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() { break; } }
         }
@@ -587,7 +719,11 @@ pub struct WatcherSession {
     stream: UnixStream,
     cancelled: Arc<AtomicBool>,
     cancel_notify: Arc<tokio::sync::Notify>,
+    read_buffer: BytesMut,
+    write_buffer: Vec<u8>,
+    instance_id: Option<[u8; 16]>,
 }
+
 fn client_runtime() -> Result<tokio::runtime::Runtime> {
     Builder::new_current_thread()
         .enable_io()
@@ -623,6 +759,9 @@ pub fn watch_session_with_cancel(
         stream,
         cancelled,
         cancel_notify,
+        read_buffer: BytesMut::new(),
+        write_buffer: Vec::new(),
+        instance_id: None,
     })
 }
 impl WatcherSession {
@@ -633,45 +772,94 @@ impl WatcherSession {
         self.cancelled.store(true, Ordering::Release);
         self.cancel_notify.notify_waiters();
     }
-    pub fn watch(&mut self, revision: u16) -> Result<StateResponse> {
-        self.watch_until(revision)
-            .and_then(|response| response.ok_or_else(|| anyhow::anyhow!("Watcher cancelled")))
+
+    fn ensure_handshake(&self) -> Result<[u8; 16]> {
+        self.instance_id
+            .ok_or_else(|| anyhow::anyhow!("Watcher session requires a state handshake"))
     }
-    pub(crate) fn watch_until(&mut self, revision: u16) -> Result<Option<StateResponse>> {
-        let request = RequestFrame {
-            instance_id: CLIENT_INSTANCE_UNKNOWN,
-            request: RequestKind::Watch { revision },
-        };
+
+    fn request_frame(&self, request: RequestKind) -> RequestFrame {
+        RequestFrame {
+            version: PROTOCOL_VERSION,
+            instance_id: self.instance_id.unwrap_or(UNKNOWN_INSTANCE),
+            request,
+        }
+    }
+
+    fn exchange(&mut self, request: RequestFrame) -> Result<ResponseFrame> {
         self.runtime.block_on(async {
             let notified = self.cancel_notify.notified();
             tokio::pin!(notified);
-            // Register before checking the flag so notify_waiters cannot be lost.
             notified.as_mut().enable();
             if self.cancelled.load(Ordering::Acquire) {
-                return Ok(None);
+                bail!("IPC request cancelled");
             }
             tokio::select! {
-                _ = &mut notified => Ok(None),
+                _ = &mut notified => bail!("IPC request cancelled"),
                 response = async {
-                    let mut pending = BytesMut::new();
-                    write_frame(&mut self.stream, &request).await?;
-                    let bytes = read_frame(&mut self.stream, MAX_RESPONSE, &mut pending).await?;
-                    Ok(Some(unpack_response(decode_frame::<ResponseFrame>(&bytes)?)?))
+                    write_frame_buffered(&mut self.stream, &request, &mut self.write_buffer).await?;
+                    let bytes = read_frame(&mut self.stream, MAX_RESPONSE, &mut self.read_buffer).await?;
+                    decode_response_frame(&bytes)
                 } => {
-                    if self.cancelled.load(Ordering::Acquire) { Ok(None) } else { response }
+                    let frame = response?;
+                    if let Some(expected) = self.instance_id {
+                        if frame.instance_id != expected { bail!("IPC server instance changed"); }
+                    } else if frame.instance_id == UNKNOWN_INSTANCE { bail!("IPC response did not identify server instance"); }
+                    if self.cancelled.load(Ordering::Acquire) { bail!("IPC request cancelled"); }
+                    Ok(frame)
                 }
             }
         })
     }
+
+    pub fn get_state(&mut self, sections: StateSections) -> Result<StateResponse> {
+        let frame = self.exchange(self.request_frame(RequestKind::State { sections }))?;
+        match unpack_error(frame.response)? {
+            WireResponse::State(state) => {
+                self.instance_id = Some(frame.instance_id);
+                Ok(state_response(state))
+            }
+            _ => bail!("IPC response was not a state response"),
+        }
+    }
+
+    pub fn query(&mut self, query: &Query) -> Result<QueryResponse> {
+        let _ = self.ensure_handshake()?;
+        let payload = serde_json::to_string(query)?;
+        let frame = self.exchange(self.request_frame(RequestKind::Query { query: payload }))?;
+        match unpack_error(frame.response)? {
+            WireResponse::Query(response) => Ok(response),
+            _ => bail!("IPC response was not a query response"),
+        }
+    }
+
+    pub fn watch(&mut self, revisions: StateRevisions) -> Result<StateRevisions> {
+        self.watch_until(revisions)?
+            .ok_or_else(|| anyhow::anyhow!("Watcher cancelled"))
+    }
+
+    pub(crate) fn watch_until(
+        &mut self,
+        revisions: StateRevisions,
+    ) -> Result<Option<StateRevisions>> {
+        let _ = self.ensure_handshake()?;
+        let frame = match self.exchange(self.request_frame(RequestKind::Watch { revisions })) {
+            Ok(frame) => frame,
+            Err(_) if self.cancelled.load(Ordering::Acquire) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        match unpack_error(frame.response)? {
+            WireResponse::Watch(revisions) => Ok(Some(revisions)),
+            _ => bail!("IPC response was not a watch response"),
+        }
+    }
 }
-pub fn watch(path: &Path, revision: u16) -> Result<StateResponse> {
-    watch_session(path)?.watch(revision)
-}
-async fn request_inner(
+
+async fn one_shot(
     path: &Path,
-    command: &Command,
+    request: RequestKind,
     cancellation: Option<(Arc<AtomicBool>, Arc<tokio::sync::Notify>)>,
-) -> Result<StateResponse> {
+) -> Result<ResponseFrame> {
     let operation = async {
         let mut stream = UnixStream::connect(path).await.with_context(|| {
             format!(
@@ -679,81 +867,96 @@ async fn request_inner(
                 path.display()
             )
         })?;
-        let request = RequestFrame {
-            instance_id: CLIENT_INSTANCE_UNKNOWN,
-            request: RequestKind::Command(serde_json::to_string(command)?),
+        let frame = RequestFrame {
+            version: PROTOCOL_VERSION,
+            instance_id: UNKNOWN_INSTANCE,
+            request,
         };
-        write_frame(&mut stream, &request).await?;
-        let bytes = if matches!(command, Command::OptimizeDatabase) {
-            read_frame(&mut stream, MAX_RESPONSE, &mut BytesMut::new()).await?
-        } else {
-            timeout(
-                Duration::from_secs(15),
-                read_frame(&mut stream, MAX_RESPONSE, &mut BytesMut::new()),
-            )
-            .await
-            .context("Reading IPC response timed out")??
-        };
-        unpack_response(decode_frame::<ResponseFrame>(&bytes)?)
+        write_frame(&mut stream, &frame).await?;
+        let bytes = timeout(
+            Duration::from_secs(120),
+            read_frame(&mut stream, MAX_RESPONSE, &mut BytesMut::new()),
+        )
+        .await
+        .context("Reading IPC response timed out")??;
+        let frame = decode_response_frame(&bytes)?;
+        if frame.version != PROTOCOL_VERSION {
+            bail!("Unsupported IPC protocol version {}", frame.version);
+        }
+        unpack_error(frame.response.clone())?;
+        Ok(frame)
     };
-    let Some((cancelled, cancel_notify)) = cancellation else {
+    let Some((cancelled, notify)) = cancellation else {
         return operation.await;
     };
-    let notified = cancel_notify.notified();
+    let notified = notify.notified();
     tokio::pin!(notified);
-    // Register before checking the flag so notify_waiters cannot be lost.
     notified.as_mut().enable();
     if cancelled.load(Ordering::Acquire) {
         bail!("IPC request cancelled");
     }
-    tokio::select! {
-        _ = &mut notified => bail!("IPC request cancelled"),
-        response = operation => response,
+    tokio::select! { _ = &mut notified => bail!("IPC request cancelled"), response = operation => response }
+}
+
+pub fn query(path: &Path, query: &Query) -> Result<QueryResponse> {
+    let runtime = client_runtime()?;
+    let frame = runtime.block_on(one_shot(
+        path,
+        RequestKind::Query {
+            query: serde_json::to_string(query)?,
+        },
+        None,
+    ))?;
+    match frame.response {
+        WireResponse::Query(response) => Ok(response),
+        _ => bail!("IPC response was not a query response"),
     }
 }
 
-pub fn request(path: &Path, command: &Command) -> Result<StateResponse> {
+pub(crate) fn query_with_cancel(
+    path: &Path,
+    query: &Query,
+    cancelled: Arc<AtomicBool>,
+    notify: Arc<tokio::sync::Notify>,
+) -> Result<QueryResponse> {
     let runtime = client_runtime()?;
-    runtime.block_on(request_inner(path, command, None))
+    let frame = runtime.block_on(one_shot(
+        path,
+        RequestKind::Query {
+            query: serde_json::to_string(query)?,
+        },
+        Some((cancelled, notify)),
+    ))?;
+    match frame.response {
+        WireResponse::Query(response) => Ok(response),
+        _ => bail!("IPC response was not a query response"),
+    }
 }
 
-pub(crate) fn request_with_cancel(
-    path: &Path,
-    command: &Command,
-    cancelled: Arc<AtomicBool>,
-    cancel_notify: Arc<tokio::sync::Notify>,
-) -> Result<StateResponse> {
+pub fn get_state(path: &Path, sections: StateSections) -> Result<StateResponse> {
     let runtime = client_runtime()?;
-    runtime.block_on(request_inner(
-        path,
-        command,
-        Some((cancelled, cancel_notify)),
-    ))
+    let frame = runtime.block_on(one_shot(path, RequestKind::State { sections }, None))?;
+    match frame.response {
+        WireResponse::State(response) => Ok(state_response(response)),
+        _ => bail!("IPC response was not a state response"),
+    }
 }
 
 pub fn request_ack(path: &Path, command: &Command) -> Result<Ack> {
     let runtime = client_runtime()?;
-    runtime.block_on(async {
-        let mut stream = UnixStream::connect(path).await.with_context(|| {
-            format!(
-                "Cannot connect to Rivu at {}. Start `rivu` or `rivu serve` first.",
-                path.display()
-            )
-        })?;
-        let request = RequestFrame {
-            instance_id: CLIENT_INSTANCE_UNKNOWN,
-            request: RequestKind::Ack(serde_json::to_string(command)?),
-        };
-        write_frame(&mut stream, &request).await?;
-        let bytes = timeout(
-            Duration::from_secs(15),
-            read_frame(&mut stream, MAX_RESPONSE, &mut BytesMut::new()),
-        )
-        .await
-        .context("Reading IPC acknowledgement timed out")??;
-        unpack_ack(decode_frame::<ResponseFrame>(&bytes)?)
-    })
+    let frame = runtime.block_on(one_shot(
+        path,
+        RequestKind::Command {
+            command: serde_json::to_string(command)?,
+        },
+        None,
+    ))?;
+    match frame.response {
+        WireResponse::Ack(response) => Ok(response),
+        _ => bail!("IPC response was not an acknowledgement"),
+    }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
