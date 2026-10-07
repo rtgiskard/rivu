@@ -35,19 +35,75 @@ const PROTOCOL_VERSION: u8 = 2;
 const MAX_REQUEST: usize = 64 * 1024;
 const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 const MAX_CLIENTS: usize = 16;
-const UNKNOWN_INSTANCE: [u8; 16] = [0; 16];
+const HELLO_TIMEOUT: Duration = Duration::from_secs(1);
+const UNKNOWN_INSTANCE: u32 = 0;
 
-#[derive(Serialize, Deserialize)]
-struct RequestFrame {
-    version: u8,
-    instance_id: [u8; 16],
-    request: WireRequest,
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RequestType {
+    Hello = 0,
+    State = 1,
+    Query = 2,
+    Command = 3,
+    Watch = 4,
 }
 
-#[derive(Serialize, Deserialize)]
+impl TryFrom<u8> for RequestType {
+    type Error = anyhow::Error;
+
+    fn try_from(value: u8) -> Result<Self> {
+        Ok(match value {
+            0 => Self::Hello,
+            1 => Self::State,
+            2 => Self::Query,
+            3 => Self::Command,
+            4 => Self::Watch,
+            _ => bail!("Unknown IPC request type {value}"),
+        })
+    }
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResponseType {
+    Hello = 0,
+    State = 1,
+    Query = 2,
+    Ack = 3,
+    Watch = 4,
+    Error = 255,
+}
+
+impl TryFrom<u8> for ResponseType {
+    type Error = anyhow::Error;
+
+    fn try_from(value: u8) -> Result<Self> {
+        Ok(match value {
+            0 => Self::Hello,
+            1 => Self::State,
+            2 => Self::Query,
+            3 => Self::Ack,
+            4 => Self::Watch,
+            255 => Self::Error,
+            _ => bail!("Unknown IPC response type {value}"),
+        })
+    }
+}
+enum SessionState {
+    Unbound,
+    Bound,
+}
+
+impl SessionState {
+    fn is_bound(&self) -> bool {
+        matches!(self, Self::Bound)
+    }
+}
+
 enum WireRequest {
-    Query(WireQuery),
+    Hello(StateSections),
     State(StateSections),
+    Query(WireQuery),
     Command(WireCommand),
     Watch(StateRevisions),
 }
@@ -649,33 +705,104 @@ impl TryFrom<WireCommand> for Command {
     }
 }
 
-fn decode_request_frame(bytes: &[u8]) -> Result<RequestFrame> {
-    let (frame, consumed) =
-        decode_from_slice(bytes, request_config()).context("Decoding IPC request frame")?;
+fn decode_message_header(bytes: &[u8]) -> Result<(u8, u8, &[u8])> {
+    ensure!(bytes.len() >= 2, "IPC message header is truncated");
+    Ok((bytes[0], bytes[1], &bytes[2..]))
+}
+
+fn decode_body<T: for<'de> Deserialize<'de>>(
+    bytes: &[u8],
+    codec: impl bincode::config::Config,
+    context: &'static str,
+) -> Result<T> {
+    let (value, consumed) = decode_from_slice(bytes, codec).context(context)?;
     ensure!(
         consumed == bytes.len(),
-        "Trailing bytes in IPC request frame"
+        "Trailing bytes in IPC message body"
     );
-    Ok(frame)
+    Ok(value)
 }
 
-fn decode_response_frame(bytes: &[u8]) -> Result<ResponseFrame> {
-    let frame: ResponseFrame = decode_frame(bytes)?;
-    if frame.version != PROTOCOL_VERSION {
-        bail!("Unsupported IPC protocol version {}", frame.version);
-    }
-    Ok(frame)
+fn decode_request_frame(bytes: &[u8]) -> Result<(u8, WireRequest)> {
+    let (version, message_type, body) = decode_message_header(bytes)?;
+    let message_type = RequestType::try_from(message_type)?;
+    let request = match message_type {
+        RequestType::Hello => WireRequest::Hello(decode_body(
+            body,
+            request_config(),
+            "Decoding IPC Hello request",
+        )?),
+        RequestType::State => WireRequest::State(decode_body(
+            body,
+            request_config(),
+            "Decoding IPC state request",
+        )?),
+        RequestType::Query => WireRequest::Query(decode_body(
+            body,
+            request_config(),
+            "Decoding IPC query request",
+        )?),
+        RequestType::Command => WireRequest::Command(decode_body(
+            body,
+            request_config(),
+            "Decoding IPC command request",
+        )?),
+        RequestType::Watch => WireRequest::Watch(decode_body(
+            body,
+            request_config(),
+            "Decoding IPC watch request",
+        )?),
+    };
+    Ok((version, request))
 }
 
-#[derive(Serialize, Deserialize)]
-struct ResponseFrame {
-    version: u8,
-    instance_id: [u8; 16],
-    response: WireResponse,
+fn decode_response_frame(bytes: &[u8]) -> Result<(u8, WireResponse)> {
+    let (version, message_type, body) = decode_message_header(bytes)?;
+    let message_type = ResponseType::try_from(message_type)?;
+    let response = match message_type {
+        ResponseType::Hello => WireResponse::Hello(decode_body(
+            body,
+            config::standard(),
+            "Decoding IPC Hello response",
+        )?),
+        ResponseType::State => WireResponse::State(decode_body(
+            body,
+            config::standard(),
+            "Decoding IPC state response",
+        )?),
+        ResponseType::Query => WireResponse::Query(decode_body(
+            body,
+            config::standard(),
+            "Decoding IPC query response",
+        )?),
+        ResponseType::Ack => WireResponse::Ack(decode_body(
+            body,
+            config::standard(),
+            "Decoding IPC acknowledgement",
+        )?),
+        ResponseType::Watch => WireResponse::Watch(decode_body(
+            body,
+            config::standard(),
+            "Decoding IPC watch response",
+        )?),
+        ResponseType::Error => WireResponse::Error(decode_body(
+            body,
+            config::standard(),
+            "Decoding IPC error response",
+        )?),
+    };
+    Ok((version, response))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+struct HelloResponse {
+    instance_id: [u8; 4],
+    state: WireStateResponse,
+}
+
+#[derive(Clone, Debug)]
 enum WireResponse {
+    Hello(HelloResponse),
     Query(QueryResponse),
     State(WireStateResponse),
     Ack(Ack),
@@ -692,6 +819,7 @@ struct WireStateResponse {
     #[serde(with = "wire_system_option")]
     system: Option<WireSystemState>,
 }
+
 /// Complete positional IPC schema for `Config`.
 ///
 /// Keep this explicit instead of serializing `Config` directly: its human-readable
@@ -1010,7 +1138,9 @@ impl Write for FrameWriter<'_> {
     }
 }
 
-fn encode_frame_into_with<T, C>(
+fn encode_message_into_with<T, C>(
+    version: u8,
+    message_type: u8,
     value: &T,
     bytes: &mut Vec<u8>,
     codec: C,
@@ -1021,33 +1151,112 @@ where
     C: config::Config,
 {
     bytes.clear();
-    bytes.resize(4, 0);
+    bytes.resize(6, 0);
+    bytes[4] = version;
+    bytes[5] = message_type;
     let mut writer = FrameWriter { bytes, limit };
-    encode_into_std_write(value, &mut writer, codec).context("Encoding IPC frame")?;
-    let payload_len = writer.bytes.len() - 4;
-    let length = u32::try_from(payload_len).context("IPC frame is too large")?;
+    encode_into_std_write(value, &mut writer, codec).context("Encoding IPC message")?;
+    let length = u32::try_from(writer.bytes.len() - 4).context("IPC frame is too large")?;
     writer.bytes[..4].copy_from_slice(&length.to_le_bytes());
     Ok(())
 }
 
-fn encode_frame_into<T: Serialize>(value: &T, bytes: &mut Vec<u8>) -> Result<()> {
-    encode_frame_into_with(value, bytes, config::standard(), MAX_RESPONSE)
-}
-
-#[cfg(test)]
-fn encode_frame<T: Serialize>(value: &T) -> Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    encode_frame_into(value, &mut bytes)?;
-    Ok(bytes)
-}
-
-fn decode_frame<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T> {
-    let (value, consumed) =
-        decode_from_slice(bytes, config::standard()).context("Decoding IPC frame")?;
-    if consumed != bytes.len() {
-        bail!("Trailing bytes in IPC frame");
+fn encode_request_frame_into(request: &WireRequest, bytes: &mut Vec<u8>) -> Result<()> {
+    match request {
+        WireRequest::Hello(value) => encode_message_into_with(
+            PROTOCOL_VERSION,
+            RequestType::Hello as u8,
+            value,
+            bytes,
+            request_config(),
+            MAX_REQUEST,
+        ),
+        WireRequest::State(value) => encode_message_into_with(
+            PROTOCOL_VERSION,
+            RequestType::State as u8,
+            value,
+            bytes,
+            request_config(),
+            MAX_REQUEST,
+        ),
+        WireRequest::Query(value) => encode_message_into_with(
+            PROTOCOL_VERSION,
+            RequestType::Query as u8,
+            value,
+            bytes,
+            request_config(),
+            MAX_REQUEST,
+        ),
+        WireRequest::Command(value) => encode_message_into_with(
+            PROTOCOL_VERSION,
+            RequestType::Command as u8,
+            value,
+            bytes,
+            request_config(),
+            MAX_REQUEST,
+        ),
+        WireRequest::Watch(value) => encode_message_into_with(
+            PROTOCOL_VERSION,
+            RequestType::Watch as u8,
+            value,
+            bytes,
+            request_config(),
+            MAX_REQUEST,
+        ),
     }
-    Ok(value)
+}
+
+fn encode_response_frame_into(response: &WireResponse, bytes: &mut Vec<u8>) -> Result<()> {
+    match response {
+        WireResponse::Hello(value) => encode_message_into_with(
+            PROTOCOL_VERSION,
+            ResponseType::Hello as u8,
+            value,
+            bytes,
+            config::standard(),
+            MAX_RESPONSE,
+        ),
+        WireResponse::State(value) => encode_message_into_with(
+            PROTOCOL_VERSION,
+            ResponseType::State as u8,
+            value,
+            bytes,
+            config::standard(),
+            MAX_RESPONSE,
+        ),
+        WireResponse::Query(value) => encode_message_into_with(
+            PROTOCOL_VERSION,
+            ResponseType::Query as u8,
+            value,
+            bytes,
+            config::standard(),
+            MAX_RESPONSE,
+        ),
+        WireResponse::Ack(value) => encode_message_into_with(
+            PROTOCOL_VERSION,
+            ResponseType::Ack as u8,
+            value,
+            bytes,
+            config::standard(),
+            MAX_RESPONSE,
+        ),
+        WireResponse::Watch(value) => encode_message_into_with(
+            PROTOCOL_VERSION,
+            ResponseType::Watch as u8,
+            value,
+            bytes,
+            config::standard(),
+            MAX_RESPONSE,
+        ),
+        WireResponse::Error(value) => encode_message_into_with(
+            PROTOCOL_VERSION,
+            ResponseType::Error as u8,
+            value,
+            bytes,
+            config::standard(),
+            MAX_RESPONSE,
+        ),
+    }
 }
 
 pub struct Server {
@@ -1193,10 +1402,10 @@ async fn read_frame<S: AsyncRead + Unpin>(
 
 async fn write_frame_buffered<S: AsyncWrite + Unpin>(
     stream: &mut S,
-    value: &impl Serialize,
+    value: &WireResponse,
     buffer: &mut Vec<u8>,
 ) -> Result<()> {
-    encode_frame_into(value, buffer)?;
+    encode_response_frame_into(value, buffer)?;
     stream
         .write_all(buffer)
         .await
@@ -1205,63 +1414,48 @@ async fn write_frame_buffered<S: AsyncWrite + Unpin>(
     Ok(())
 }
 
-async fn write_request_frame<S: AsyncWrite + Unpin>(
+async fn write_error_frame<S: AsyncWrite + Unpin>(
     stream: &mut S,
-    frame: &RequestFrame,
+    buffer: &mut Vec<u8>,
+    error: impl Into<String>,
 ) -> Result<()> {
-    let mut buffer = Vec::new();
-    encode_request_frame_into(frame, &mut buffer)?;
-    stream
-        .write_all(&buffer)
-        .await
-        .context("Writing IPC frame")?;
-    stream.flush().await.context("Flushing IPC frame")?;
-    Ok(())
+    let response = error_frame(error);
+    write_frame_buffered(stream, &response, buffer).await
 }
 
 async fn write_request_frame_buffered<S: AsyncWrite + Unpin>(
     stream: &mut S,
-    frame: &RequestFrame,
+    request: &WireRequest,
     buffer: &mut Vec<u8>,
 ) -> Result<()> {
-    encode_request_frame_into(frame, buffer)?;
+    encode_request_frame_into(request, buffer)?;
     stream
         .write_all(buffer)
         .await
         .context("Writing IPC frame")?;
     stream.flush().await.context("Flushing IPC frame")?;
     Ok(())
+}
+
+async fn read_response_frame<S: AsyncRead + Unpin>(
+    stream: &mut S,
+    pending: &mut BytesMut,
+) -> Result<WireResponse> {
+    let bytes = read_frame(stream, MAX_RESPONSE, pending).await?;
+    let (version, response) = decode_response_frame(&bytes)?;
+    ensure!(
+        version == PROTOCOL_VERSION,
+        "Unsupported IPC protocol version {version}"
+    );
+    Ok(response)
 }
 
 fn request_config() -> impl bincode::config::Config {
     config::standard().with_limit::<MAX_REQUEST>()
 }
 
-fn encode_request_frame_into(frame: &RequestFrame, buffer: &mut Vec<u8>) -> Result<()> {
-    encode_frame_into_with(frame, buffer, request_config(), MAX_REQUEST)
-        .context("Encoding IPC request frame")
-}
-
-fn error_frame(error: impl Into<String>, instance_id: [u8; 16]) -> ResponseFrame {
-    ResponseFrame {
-        version: PROTOCOL_VERSION,
-        instance_id,
-        response: WireResponse::Error(error.into()),
-    }
-}
-
-fn response_frame(response: WireResponse, instance_id: [u8; 16]) -> ResponseFrame {
-    ResponseFrame {
-        version: PROTOCOL_VERSION,
-        instance_id,
-        response,
-    }
-}
-fn validate_instance(request: [u8; 16], server: [u8; 16]) -> Result<()> {
-    if request != UNKNOWN_INSTANCE && request != server {
-        bail!("IPC server instance changed");
-    }
-    Ok(())
+fn error_frame(error: impl Into<String>) -> WireResponse {
+    WireResponse::Error(error.into())
 }
 
 fn unpack_error(response: WireResponse) -> Result<WireResponse> {
@@ -1269,6 +1463,21 @@ fn unpack_error(response: WireResponse) -> Result<WireResponse> {
         bail!("IPC server error: {error}");
     }
     Ok(response)
+}
+
+fn validate_hello(response: HelloResponse) -> Result<HelloResponse> {
+    ensure!(
+        u32::from_le_bytes(response.instance_id) != UNKNOWN_INSTANCE,
+        "IPC Hello returned instance 0"
+    );
+    Ok(response)
+}
+
+fn unpack_hello(response: WireResponse) -> Result<HelloResponse> {
+    let WireResponse::Hello(response) = unpack_error(response)? else {
+        bail!("IPC response was not a Hello response")
+    };
+    validate_hello(response)
 }
 
 async fn run_command(handle: &AppHandle, command: Command) -> Result<Ack> {
@@ -1342,114 +1551,121 @@ async fn wait_for_revisions(
 async fn serve_connection(
     mut stream: UnixStream,
     handle: AppHandle,
-    instance_id: [u8; 16],
+    instance_id: u32,
     mut updates: watch::Receiver<StateRevisions>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     let mut pending = BytesMut::new();
     let mut write_buffer = Vec::new();
-    let mut handshaken = false;
+    let mut session = SessionState::Unbound;
     loop {
-        let bytes = tokio::select! {
-            frame = read_frame(&mut stream, MAX_REQUEST, &mut pending) => frame?,
-            changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() { return Ok(()); } continue; }
-        };
-        let frame = match decode_request_frame(&bytes) {
-            Ok(frame) => frame,
-            Err(error) => {
-                write_frame_buffered(
-                    &mut stream,
-                    &error_frame(format!("Invalid IPC request: {error}"), instance_id),
-                    &mut write_buffer,
-                )
-                .await?;
-                continue;
+        let bytes = if session.is_bound() {
+            tokio::select! {
+                frame = read_frame(&mut stream, MAX_REQUEST, &mut pending) => frame?,
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() { return Ok(()); }
+                    continue;
+                }
+            }
+        } else {
+            tokio::select! {
+                frame = timeout(HELLO_TIMEOUT, read_frame(&mut stream, MAX_REQUEST, &mut pending)) => {
+                    match frame {
+                        Ok(frame) => frame?,
+                        Err(_) => return Ok(()),
+                    }
+                }
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() { return Ok(()); }
+                    continue;
+                }
             }
         };
-        if frame.version != PROTOCOL_VERSION {
-            write_frame_buffered(
-                &mut stream,
-                &error_frame(
-                    format!("Unsupported IPC protocol version {}", frame.version),
-                    instance_id,
-                ),
-                &mut write_buffer,
-            )
-            .await?;
-            continue;
-        }
-        if let Err(error) = validate_instance(frame.instance_id, instance_id) {
-            write_frame_buffered(
-                &mut stream,
-                &error_frame(error.to_string(), instance_id),
-                &mut write_buffer,
-            )
-            .await?;
-            continue;
-        }
-        match frame.request {
-            WireRequest::State(sections) => {
-                handshaken = true;
-                let state = handle.state(sections);
-                write_frame_buffered(
+        let (version, request) = match decode_request_frame(&bytes) {
+            Ok(frame) => frame,
+            Err(error) => {
+                write_error_frame(
                     &mut stream,
-                    &response_frame(WireResponse::State(wire_state(state)), instance_id),
                     &mut write_buffer,
+                    format!("Invalid IPC request: {error}"),
                 )
                 .await?;
+                return Ok(());
+            }
+        };
+        if version != PROTOCOL_VERSION {
+            write_error_frame(
+                &mut stream,
+                &mut write_buffer,
+                format!("Unsupported IPC protocol version {version}"),
+            )
+            .await?;
+            return Ok(());
+        }
+        if !session.is_bound() && !matches!(request, WireRequest::Hello(_)) {
+            write_error_frame(
+                &mut stream,
+                &mut write_buffer,
+                "IPC session requires a Hello handshake",
+            )
+            .await?;
+            continue;
+        }
+        match request {
+            WireRequest::Hello(sections) => {
+                if session.is_bound() {
+                    write_error_frame(
+                        &mut stream,
+                        &mut write_buffer,
+                        "IPC session is already handshaken",
+                    )
+                    .await?;
+                    continue;
+                }
+                let response = WireResponse::Hello(HelloResponse {
+                    instance_id: instance_id.to_le_bytes(),
+                    state: wire_state(handle.state(sections)),
+                });
+                write_frame_buffered(&mut stream, &response, &mut write_buffer).await?;
+                session = SessionState::Bound;
+            }
+            WireRequest::State(sections) => {
+                let response = WireResponse::State(wire_state(handle.state(sections)));
+                write_frame_buffered(&mut stream, &response, &mut write_buffer).await?;
             }
             WireRequest::Query(query) => {
                 let query = match Query::try_from(query) {
                     Ok(query) => query,
                     Err(error) => {
-                        write_frame_buffered(
+                        write_error_frame(
                             &mut stream,
-                            &error_frame(format!("Invalid IPC query: {error}"), instance_id),
                             &mut write_buffer,
+                            format!("Invalid IPC query: {error}"),
                         )
                         .await?;
                         continue;
                     }
                 };
-                let response = run_query(&handle, query).await?;
-                write_frame_buffered(
-                    &mut stream,
-                    &response_frame(WireResponse::Query(response), instance_id),
-                    &mut write_buffer,
-                )
-                .await?;
+                let response = WireResponse::Query(run_query(&handle, query).await?);
+                write_frame_buffered(&mut stream, &response, &mut write_buffer).await?;
             }
             WireRequest::Command(command) => {
                 let command = match Command::try_from(command) {
                     Ok(command) => command,
                     Err(error) => {
-                        write_frame_buffered(
+                        write_error_frame(
                             &mut stream,
-                            &error_frame(format!("Invalid IPC command: {error}"), instance_id),
                             &mut write_buffer,
+                            format!("Invalid IPC command: {error}"),
                         )
                         .await?;
                         continue;
                     }
                 };
-                let response = run_command(&handle, command).await?;
-                write_frame_buffered(
-                    &mut stream,
-                    &response_frame(WireResponse::Ack(response), instance_id),
-                    &mut write_buffer,
-                )
-                .await?;
+                let response = WireResponse::Ack(run_command(&handle, command).await?);
+                write_frame_buffered(&mut stream, &response, &mut write_buffer).await?;
             }
             WireRequest::Watch(expected) => {
-                if !handshaken {
-                    write_frame_buffered(
-                        &mut stream,
-                        &error_frame("Watcher session requires a state handshake", instance_id),
-                        &mut write_buffer,
-                    )
-                    .await?;
-                    continue;
-                }
                 let Some(result) = wait_for_revisions(
                     &mut stream,
                     &mut pending,
@@ -1465,12 +1681,8 @@ async fn serve_connection(
                 let Some(revisions) = result else {
                     continue;
                 };
-                write_frame_buffered(
-                    &mut stream,
-                    &response_frame(WireResponse::Watch(revisions), instance_id),
-                    &mut write_buffer,
-                )
-                .await?;
+                let response = WireResponse::Watch(revisions);
+                write_frame_buffered(&mut stream, &response, &mut write_buffer).await?;
             }
         }
     }
@@ -1483,20 +1695,19 @@ async fn run_server(
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut rng = rand::rng();
-    let mut instance_id = [0u8; 16];
+    let mut instance_id = UNKNOWN_INSTANCE;
     while instance_id == UNKNOWN_INSTANCE {
-        rng.fill(&mut instance_id);
+        instance_id = rng.random();
     }
     let mut clients = Vec::new();
-    let mut revisions = updates.clone();
+    let revisions = updates;
     loop {
         tokio::select! {
             accepted = listener.accept() => {
                 let Ok((stream, _)) = accepted else { continue; };
                 clients.retain(|task: &tokio::task::JoinHandle<Result<()>>| !task.is_finished());
-                if clients.len() < MAX_CLIENTS { clients.push(tokio::spawn(serve_connection(stream, handle.clone(), instance_id, updates.clone(), shutdown.clone()))); }
+                if clients.len() < MAX_CLIENTS { clients.push(tokio::spawn(serve_connection(stream, handle.clone(), instance_id, revisions.clone(), shutdown.clone()))); }
             }
-            changed = revisions.changed() => { if changed.is_err() { break; } }
             changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() { break; } }
         }
     }
@@ -1515,20 +1726,6 @@ pub fn is_no_instance(error: &Error) -> bool {
             )
         })
     })
-}
-
-enum SessionState {
-    Unbound,
-    Bound([u8; 16]),
-}
-
-impl SessionState {
-    fn instance_id(&self) -> [u8; 16] {
-        match self {
-            Self::Unbound => UNKNOWN_INSTANCE,
-            Self::Bound(instance_id) => *instance_id,
-        }
-    }
 }
 
 pub struct WatcherSession {
@@ -1590,22 +1787,15 @@ impl WatcherSession {
         self.cancel_notify.notify_waiters();
     }
 
-    fn ensure_handshake(&self) -> Result<[u8; 16]> {
-        match self.session {
-            SessionState::Bound(instance_id) => Ok(instance_id),
-            SessionState::Unbound => bail!("Watcher session requires a state handshake"),
+    fn ensure_handshake(&self) -> Result<()> {
+        if self.session.is_bound() {
+            Ok(())
+        } else {
+            bail!("Watcher session requires a Hello handshake")
         }
     }
 
-    fn request_frame(&self, request: WireRequest) -> RequestFrame {
-        RequestFrame {
-            version: PROTOCOL_VERSION,
-            instance_id: self.session.instance_id(),
-            request,
-        }
-    }
-
-    fn exchange(&mut self, request: RequestFrame) -> Result<ResponseFrame> {
+    fn exchange(&mut self, request: &WireRequest) -> Result<WireResponse> {
         self.runtime.block_on(async {
             let notified = self.cancel_notify.notified();
             tokio::pin!(notified);
@@ -1616,43 +1806,40 @@ impl WatcherSession {
             tokio::select! {
                 _ = &mut notified => bail!("IPC request cancelled"),
                 response = async {
-                    write_request_frame_buffered(&mut self.stream, &request, &mut self.write_buffer).await?;
-                    let bytes = read_frame(&mut self.stream, MAX_RESPONSE, &mut self.read_buffer).await?;
-                    decode_response_frame(&bytes)
+                    write_request_frame_buffered(&mut self.stream, request, &mut self.write_buffer).await?;
+                    read_response_frame(&mut self.stream, &mut self.read_buffer).await
                 } => {
-                    let frame = response?;
-                    match self.session {
-                        SessionState::Bound(expected) if frame.instance_id != expected => {
-                            bail!("IPC server instance changed");
-                        }
-                        SessionState::Unbound if frame.instance_id == UNKNOWN_INSTANCE => {
-                            bail!("IPC response did not identify server instance");
-                        }
-                        _ => {}
+                    let response = response?;
+                    if self.cancelled.load(Ordering::Acquire) {
+                        bail!("IPC request cancelled");
                     }
-                    if self.cancelled.load(Ordering::Acquire) { bail!("IPC request cancelled"); }
-                    Ok(frame)
+                    Ok(response)
                 }
             }
         })
     }
 
     pub fn get_state(&mut self, sections: StateSections) -> Result<StateResponse> {
-        let frame = self.exchange(self.request_frame(WireRequest::State(sections)))?;
-        match unpack_error(frame.response)? {
-            WireResponse::State(state) => {
-                self.session = SessionState::Bound(frame.instance_id);
-                Ok(state_response(state))
+        let request = if self.session.is_bound() {
+            WireRequest::State(sections)
+        } else {
+            WireRequest::Hello(sections)
+        };
+        match unpack_error(self.exchange(&request)?)? {
+            WireResponse::Hello(response) => {
+                let response = validate_hello(response)?;
+                self.session = SessionState::Bound;
+                Ok(state_response(response.state))
             }
-            _ => bail!("IPC response was not a state response"),
+            WireResponse::State(state) if self.session.is_bound() => Ok(state_response(state)),
+            _ => bail!("IPC response was not a state or Hello response"),
         }
     }
 
     pub fn query(&mut self, query: &Query) -> Result<QueryResponse> {
-        let _ = self.ensure_handshake()?;
-        let frame =
-            self.exchange(self.request_frame(WireRequest::Query(WireQuery::from(query.clone()))))?;
-        match unpack_error(frame.response)? {
+        self.ensure_handshake()?;
+        let request = WireRequest::Query(WireQuery::from(query.clone()));
+        match unpack_error(self.exchange(&request)?)? {
             WireResponse::Query(response) => Ok(response),
             _ => bail!("IPC response was not a query response"),
         }
@@ -1667,13 +1854,14 @@ impl WatcherSession {
         &mut self,
         revisions: StateRevisions,
     ) -> Result<Option<StateRevisions>> {
-        let _ = self.ensure_handshake()?;
-        let frame = match self.exchange(self.request_frame(WireRequest::Watch(revisions))) {
-            Ok(frame) => frame,
+        self.ensure_handshake()?;
+        let request = WireRequest::Watch(revisions);
+        let response = match self.exchange(&request) {
+            Ok(response) => response,
             Err(_) if self.cancelled.load(Ordering::Acquire) => return Ok(None),
             Err(error) => return Err(error),
         };
-        match unpack_error(frame.response)? {
+        match unpack_error(response)? {
             WireResponse::Watch(revisions) => Ok(Some(revisions)),
             _ => bail!("IPC response was not a watch response"),
         }
@@ -1684,7 +1872,7 @@ async fn one_shot(
     path: &Path,
     request: WireRequest,
     cancellation: Option<(Arc<AtomicBool>, Arc<tokio::sync::Notify>)>,
-) -> Result<ResponseFrame> {
+) -> Result<WireResponse> {
     let operation = async {
         let mut stream = UnixStream::connect(path).await.with_context(|| {
             format!(
@@ -1692,21 +1880,36 @@ async fn one_shot(
                 path.display()
             )
         })?;
-        let frame = RequestFrame {
-            version: PROTOCOL_VERSION,
-            instance_id: UNKNOWN_INSTANCE,
-            request,
+        let mut pending = BytesMut::new();
+        let mut write_buffer = Vec::new();
+        let state_sections = match &request {
+            WireRequest::State(sections) => Some(*sections),
+            _ => None,
         };
-        write_request_frame(&mut stream, &frame).await?;
-        let bytes = timeout(
+        write_request_frame_buffered(
+            &mut stream,
+            &WireRequest::Hello(state_sections.unwrap_or_default()),
+            &mut write_buffer,
+        )
+        .await?;
+        let response = timeout(
             Duration::from_secs(120),
-            read_frame(&mut stream, MAX_RESPONSE, &mut BytesMut::new()),
+            read_response_frame(&mut stream, &mut pending),
+        )
+        .await
+        .context("Reading IPC Hello response timed out")??;
+        let hello = unpack_hello(response)?;
+        if state_sections.is_some() {
+            return Ok(WireResponse::State(hello.state));
+        }
+        write_request_frame_buffered(&mut stream, &request, &mut write_buffer).await?;
+        let response = timeout(
+            Duration::from_secs(120),
+            read_response_frame(&mut stream, &mut pending),
         )
         .await
         .context("Reading IPC response timed out")??;
-        let frame = decode_response_frame(&bytes)?;
-        unpack_error(frame.response.clone())?;
-        Ok(frame)
+        unpack_error(response)
     };
     let Some((cancelled, notify)) = cancellation else {
         return operation.await;
@@ -1727,7 +1930,7 @@ pub fn query(path: &Path, query: &Query) -> Result<QueryResponse> {
         WireRequest::Query(WireQuery::from(query.clone())),
         None,
     ))?;
-    match frame.response {
+    match frame {
         WireResponse::Query(response) => Ok(response),
         _ => bail!("IPC response was not a query response"),
     }
@@ -1745,7 +1948,7 @@ pub(crate) fn query_with_cancel(
         WireRequest::Query(WireQuery::from(query.clone())),
         Some((cancelled, notify)),
     ))?;
-    match frame.response {
+    match frame {
         WireResponse::Query(response) => Ok(response),
         _ => bail!("IPC response was not a query response"),
     }
@@ -1754,7 +1957,7 @@ pub(crate) fn query_with_cancel(
 pub fn get_state(path: &Path, sections: StateSections) -> Result<StateResponse> {
     let runtime = client_runtime()?;
     let frame = runtime.block_on(one_shot(path, WireRequest::State(sections), None))?;
-    match frame.response {
+    match frame {
         WireResponse::State(response) => Ok(state_response(response)),
         _ => bail!("IPC response was not a state response"),
     }
@@ -1767,7 +1970,7 @@ pub fn request_ack(path: &Path, command: &Command) -> Result<Ack> {
         WireRequest::Command(WireCommand::from(command.clone())),
         None,
     ))?;
-    match frame.response {
+    match frame {
         WireResponse::Ack(response) => Ok(response),
         _ => bail!("IPC response was not an acknowledgement"),
     }

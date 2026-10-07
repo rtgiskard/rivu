@@ -1,32 +1,33 @@
 #[test]
-fn ack_wire_round_trip_is_independent_from_state() {
+fn ack_wire_round_trip_has_explicit_response_type() {
     let ack = Ack {
         ok: false,
         error: Some("failed".into()),
         revision: 42,
     };
-    let frame = response_frame(WireResponse::Ack(ack.clone()), [7; 16]);
-    let encoded = encode_frame(&frame).unwrap();
-    let decoded = decode_frame::<ResponseFrame>(&encoded[4..]).unwrap();
-    assert_eq!(decoded.version, PROTOCOL_VERSION);
-    assert_eq!(decoded.instance_id, [7; 16]);
-    let WireResponse::Ack(decoded) = decoded.response else {
-        panic!("expected ack");
+    let mut encoded = Vec::new();
+    encode_response_frame_into(&WireResponse::Ack(ack.clone()), &mut encoded).unwrap();
+    assert_eq!(encoded[5], ResponseType::Ack as u8);
+    let (version, response) = decode_response_frame(&encoded[4..]).unwrap();
+    assert_eq!(version, PROTOCOL_VERSION);
+    let WireResponse::Ack(decoded) = response else {
+        panic!("expected ack")
     };
     assert_eq!(decoded.revision, ack.revision);
     assert_eq!(decoded.error, ack.error);
 }
+
 #[test]
 fn query_wire_response_has_no_state_queue_payload() {
     let response = QueryResponse {
         revisions: crate::response::QueryRevisions::default(),
         result: Err(crate::response::QueryError::Message("query failed".into())),
     };
-    let frame = response_frame(WireResponse::Query(response), [3; 16]);
-    let encoded = encode_frame(&frame).unwrap();
-    let decoded = decode_frame::<ResponseFrame>(&encoded[4..]).unwrap();
+    let mut encoded = Vec::new();
+    encode_response_frame_into(&WireResponse::Query(response), &mut encoded).unwrap();
+    let (_, response) = decode_response_frame(&encoded[4..]).unwrap();
     assert!(matches!(
-        decoded.response,
+        response,
         WireResponse::Query(QueryResponse { result: Err(_), .. })
     ));
 }
@@ -45,11 +46,11 @@ fn partial_state_wire_round_trip_omits_unrequested_sections() {
         library: Some(crate::model::LibrarySnapshot::default()),
         system: None,
     };
-    let frame = response_frame(WireResponse::State(wire_state(response)), [9; 16]);
-    let encoded = encode_frame(&frame).unwrap();
-    let decoded = decode_frame::<ResponseFrame>(&encoded[4..]).unwrap();
-    let WireResponse::State(state) = decoded.response else {
-        panic!("expected state");
+    let mut encoded = Vec::new();
+    encode_response_frame_into(&WireResponse::State(wire_state(response)), &mut encoded).unwrap();
+    let (_, response) = decode_response_frame(&encoded[4..]).unwrap();
+    let WireResponse::State(state) = response else {
+        panic!("expected state")
     };
     let state = state_response(state);
     assert_eq!(state.revisions.library, 3);
@@ -69,29 +70,33 @@ fn system_config_wire_adapter_preserves_optional_fields() {
         let mut system = crate::model::SystemState::default();
         system.config = config.clone();
         system.revision = 42;
-        let frame = response_frame(
-            WireResponse::State(wire_state(StateResponse {
+        let mut encoded = Vec::new();
+        encode_response_frame_into(
+            &WireResponse::State(wire_state(StateResponse {
                 revisions: StateRevisions::default(),
                 playback: None,
                 queue: None,
                 library: None,
                 system: Some(system),
             })),
-            [1; 16],
-        );
-        let encoded = encode_frame(&frame).unwrap();
-        let decoded = decode_frame::<ResponseFrame>(&encoded[4..]).unwrap();
-        let WireResponse::State(state) = decoded.response else {
-            panic!("expected state");
+            &mut encoded,
+        )
+        .unwrap();
+        let (_, response) = decode_response_frame(&encoded[4..]).unwrap();
+        let WireResponse::State(state) = response else {
+            panic!("expected state")
         };
-        let state = state_response(state);
-        assert_eq!(state.system.unwrap().config.as_ref(), config.as_ref());
+        assert_eq!(
+            state_response(state).system.unwrap().config.as_ref(),
+            config.as_ref()
+        );
     }
 }
 
 #[test]
-fn request_round_trip_uses_binary_wire_frame() {
+fn request_round_trip_uses_explicit_message_types() {
     let requests = [
+        WireRequest::Hello(StateSections::ALL),
         WireRequest::Query(WireQuery::from(Query::LibraryPage {
             query: Some("album".into()),
             favorite: Some(true),
@@ -113,23 +118,25 @@ fn request_round_trip_uses_binary_wire_frame() {
         }),
     ];
     for request in requests {
-        let frame = RequestFrame {
-            version: PROTOCOL_VERSION,
-            instance_id: UNKNOWN_INSTANCE,
-            request,
+        let expected_type = match &request {
+            WireRequest::Hello(_) => RequestType::Hello,
+            WireRequest::State(_) => RequestType::State,
+            WireRequest::Query(_) => RequestType::Query,
+            WireRequest::Command(_) => RequestType::Command,
+            WireRequest::Watch(_) => RequestType::Watch,
         };
         let mut encoded = Vec::new();
-        encode_request_frame_into(&frame, &mut encoded).unwrap();
-        let decoded = decode_request_frame(&encoded[4..]).unwrap();
-        assert_eq!(decoded.version, PROTOCOL_VERSION);
-        assert_eq!(decoded.instance_id, UNKNOWN_INSTANCE);
-        match decoded.request {
+        encode_request_frame_into(&request, &mut encoded).unwrap();
+        assert_eq!(encoded[5], expected_type as u8);
+        let (version, decoded) = decode_request_frame(&encoded[4..]).unwrap();
+        assert_eq!(version, PROTOCOL_VERSION);
+        match decoded {
             WireRequest::Query(WireQuery::LibraryPage { offset, limit, .. }) => {
-                assert_eq!((offset, limit), (7, 11));
+                assert_eq!((offset, limit), (7, 11))
             }
-            WireRequest::State(_) => {}
+            WireRequest::State(_) | WireRequest::Hello(_) => {}
             WireRequest::Command(WireCommand::MoveQueue { queue_id, index }) => {
-                assert_eq!((queue_id, index), (4, 9));
+                assert_eq!((queue_id, index), (4, 9))
             }
             WireRequest::Watch(StateRevisions {
                 playback,
@@ -141,6 +148,7 @@ fn request_round_trip_uses_binary_wire_frame() {
         }
     }
 }
+
 #[test]
 fn configure_request_round_trip_preserves_optional_config_field() {
     for output_device in [None, Some("USB audio output".to_owned())] {
@@ -148,21 +156,17 @@ fn configure_request_round_trip_preserves_optional_config_field() {
             output_device,
             ..Default::default()
         };
-        let frame = RequestFrame {
-            version: PROTOCOL_VERSION,
-            instance_id: UNKNOWN_INSTANCE,
-            request: WireRequest::Command(WireCommand::from(Command::Configure {
-                config: config.clone(),
-            })),
-        };
+        let request = WireRequest::Command(WireCommand::from(Command::Configure {
+            config: config.clone(),
+        }));
         let mut encoded = Vec::new();
-        encode_request_frame_into(&frame, &mut encoded).unwrap();
-        let decoded = decode_request_frame(&encoded[4..]).unwrap();
-        let WireRequest::Command(command) = decoded.request else {
-            panic!("expected command request");
+        encode_request_frame_into(&request, &mut encoded).unwrap();
+        let (_, decoded) = decode_request_frame(&encoded[4..]).unwrap();
+        let WireRequest::Command(command) = decoded else {
+            panic!("expected command request")
         };
         let Command::Configure { config: decoded } = command.try_into().unwrap() else {
-            panic!("expected configure command");
+            panic!("expected configure command")
         };
         assert_eq!(decoded, config);
     }
@@ -170,37 +174,41 @@ fn configure_request_round_trip_preserves_optional_config_field() {
 
 #[test]
 fn request_encoding_rejects_oversized_body_before_completion() {
-    let frame = RequestFrame {
-        version: PROTOCOL_VERSION,
-        instance_id: UNKNOWN_INSTANCE,
-        request: WireRequest::Command(WireCommand::from(Command::EditTrack {
-            track_id: 1,
-            title: "x".repeat(MAX_REQUEST),
-            artist: String::new(),
-            album: String::new(),
-        })),
-    };
+    let request = WireRequest::Command(WireCommand::from(Command::EditTrack {
+        track_id: 1,
+        title: "x".repeat(MAX_REQUEST),
+        artist: String::new(),
+        album: String::new(),
+    }));
     let mut encoded = Vec::new();
-    assert!(encode_request_frame_into(&frame, &mut encoded).is_err());
+    assert!(encode_request_frame_into(&request, &mut encoded).is_err());
 }
 
 #[test]
 fn invalid_protocol_version_is_available_for_dispatch_rejection() {
-    let frame = RequestFrame {
-        version: PROTOCOL_VERSION + 1,
-        instance_id: UNKNOWN_INSTANCE,
-        request: WireRequest::State(StateSections::ALL),
-    };
+    let request = WireRequest::State(StateSections::ALL);
     let mut encoded = Vec::new();
-    encode_request_frame_into(&frame, &mut encoded).unwrap();
-    let decoded = decode_request_frame(&encoded[4..]).unwrap();
-    assert_eq!(decoded.version, PROTOCOL_VERSION + 1);
+    encode_request_frame_into(&request, &mut encoded).unwrap();
+    encoded[4] = PROTOCOL_VERSION + 1;
+    let (version, _) = decode_request_frame(&encoded[4..]).unwrap();
+    assert_eq!(version, PROTOCOL_VERSION + 1);
 }
+
 #[test]
-fn invalid_instance_is_rejected_without_dispatch() {
-    let error = validate_instance([1; 16], [2; 16]).unwrap_err();
-    assert!(format!("{error:#}").contains("instance changed"));
-    assert!(validate_instance(UNKNOWN_INSTANCE, [2; 16]).is_ok());
+fn unknown_message_types_are_rejected_by_explicit_enums() {
+    assert!(RequestType::try_from(99).is_err());
+    assert!(ResponseType::try_from(99).is_err());
+}
+
+#[test]
+fn truncated_header_is_rejected() {
+    assert!(decode_message_header(&[PROTOCOL_VERSION]).is_err());
+}
+
+#[test]
+fn unknown_wire_type_is_rejected_before_body_decode() {
+    assert!(decode_request_frame(&[PROTOCOL_VERSION, 99]).is_err());
+    assert!(decode_response_frame(&[PROTOCOL_VERSION, 99]).is_err());
 }
 
 #[test]
