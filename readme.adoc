@@ -49,7 +49,7 @@ cargo build --release
 ----
 
 The default Cargo build has no FFmpeg dependency. The optional extension needs
-FFmpeg 9 development headers (`libavutil` 61, `libavcodec` 63, `libavformat` 63)
+FFmpeg 9 development headers (`libavutil 61` , `libavcodec 63` , `libavformat 63`)
 and `libclang` for binding generation:
 
 [source,sh]
