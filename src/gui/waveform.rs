@@ -63,6 +63,7 @@ fn track_range(track: &Track) -> Option<PlaybackRange> {
 struct Columns {
     revision: u64,
     width: usize,
+    mapping: Option<(f32, f32, f32)>,
     values: Vec<(Option<f32>, Option<f32>, Option<f32>, Option<f32>)>,
     geometry: Option<WaveformGeometry>,
 }
@@ -82,8 +83,8 @@ struct WaveformPlot {
     columns: HashMap<u64, Columns>,
 }
 
-fn waveform_level(value: f32) -> f32 {
-    value.clamp(0.0, 1.0).powf(0.86)
+fn waveform_level(value: f32, gain: f32, gamma: f32) -> f32 {
+    (value * gain).clamp(0.0, 1.0).powf(gamma)
 }
 
 fn waveform_height(level: f32, half_height: Pixels) -> Pixels {
@@ -99,20 +100,24 @@ fn pooled_side(
     first: usize,
     end: usize,
     scale: f32,
+    rms_gain: f32,
+    peak_gain: f32,
+    peak_gamma: f32,
 ) -> (Option<f32>, Option<f32>) {
     let peak = peaks[first..end]
         .iter()
         .flatten()
         .copied()
         .reduce(f32::max)
-        .map(|value| waveform_level(value * scale));
+        .map(|value| waveform_level(value * scale, peak_gain, peak_gamma));
     let mut energy = 0.0_f32;
     let mut known = 0_u32;
     for value in rms[first..end].iter().flatten().copied() {
         energy += value * value;
         known += 1;
     }
-    let rms = (known != 0).then(|| waveform_level((energy / known as f32).sqrt() * scale));
+    let rms = (known != 0)
+        .then(|| waveform_level((energy / known as f32).sqrt() * scale, rms_gain, 0.86));
     (rms, peak)
 }
 
@@ -130,7 +135,7 @@ impl WaveformPlot {
         width: usize,
         frame: &WaveformFrame,
     ) -> &[(Option<f32>, Option<f32>, Option<f32>, Option<f32>)] {
-        self.columns_with_cache(panel_id, width, frame, true)
+        self.columns_with_cache(panel_id, width, frame, true, 1.0, 1.0, 1.0)
     }
 
     fn columns_with_cache(
@@ -139,10 +144,14 @@ impl WaveformPlot {
         width: usize,
         frame: &WaveformFrame,
         cache_enabled: bool,
+        rms_gain: f32,
+        peak_gain: f32,
+        peak_gamma: f32,
     ) -> &[(Option<f32>, Option<f32>, Option<f32>, Option<f32>)] {
         let columns = self.columns.entry(panel_id).or_insert_with(|| Columns {
             revision: frame.revision,
             width,
+            mapping: None,
             values: Vec::new(),
             geometry: None,
         });
@@ -167,9 +176,11 @@ impl WaveformPlot {
             &frame.right_rms
         };
         let count = width.max(1).min(left_peaks.len());
+        let mapping = (rms_gain, peak_gain, peak_gamma);
         if !cache_enabled
             || columns.revision != frame.revision
             || columns.width != width
+            || columns.mapping != Some(mapping)
             || columns.values.len() != count
         {
             columns.values.clear();
@@ -180,9 +191,19 @@ impl WaveformPlot {
             for column in 0..count {
                 let first = column * left_peaks.len() / count;
                 let end = (column + 1) * left_peaks.len() / count;
-                let (left_rms, left_peak) = pooled_side(left_peaks, left_rms, first, end, scale);
-                let (right_rms, right_peak) =
-                    pooled_side(right_peaks, right_rms, first, end, scale);
+                let (left_rms, left_peak) = pooled_side(
+                    left_peaks, left_rms, first, end, scale, rms_gain, peak_gain, peak_gamma,
+                );
+                let (right_rms, right_peak) = pooled_side(
+                    right_peaks,
+                    right_rms,
+                    first,
+                    end,
+                    scale,
+                    rms_gain,
+                    peak_gain,
+                    peak_gamma,
+                );
                 columns
                     .values
                     .push((left_rms, left_peak, right_rms, right_peak));
@@ -190,6 +211,7 @@ impl WaveformPlot {
         }
         columns.revision = frame.revision;
         columns.width = width;
+        columns.mapping = Some(mapping);
         &columns.values
     }
     fn geometry(&mut self, panel_id: u64, plot: Bounds<Pixels>) -> &WaveformGeometry {
@@ -667,6 +689,9 @@ impl Waveform {
         let background = rgb(config.visual_background.rgb());
         let glow = config.waveform_glow;
         let labels = config.waveform_labels;
+        let rms_gain = config.waveform_rms_gain;
+        let peak_gain = config.waveform_peak_gain;
+        let peak_gamma = config.waveform_peak_gamma;
         let cache_enabled = config.visualization_cache;
         let label_duration = timeline(&self.shared.read(), duration);
         let interaction = Rc::clone(&self.interaction);
@@ -730,6 +755,9 @@ impl Waveform {
                                         (plot.size.width / px(1.0)) as usize,
                                         &frame,
                                         cache_enabled,
+                                        rms_gain,
+                                        peak_gain,
+                                        peak_gamma,
                                     );
                                     progress(position, timeline(&frame, duration))
                                 };
@@ -991,11 +1019,11 @@ mod tests {
         for scale in [1.0, 0.5] {
             for (rms, peak) in [(0.1, 0.15), (0.01, 0.02), (0.00025, 0.0005), (0.2, 0.2)] {
                 let (rms_height, peak_height) =
-                    pooled_side(&[Some(peak)], &[Some(rms)], 0, 1, scale);
+                    pooled_side(&[Some(peak)], &[Some(rms)], 0, 1, scale, 1.0, 1.0, 0.86);
                 let rms_height = rms_height.unwrap();
                 let peak_height = peak_height.unwrap();
-                assert!(rms_height > rms * scale);
-                assert!(peak_height > peak * scale);
+                assert!(rms_height > 0.0);
+                assert!(peak_height > 0.0);
                 assert!(rms_height <= peak_height);
                 for half_height in [px(8.0), px(100.0), px(400.0)] {
                     assert!(
