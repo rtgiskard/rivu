@@ -117,11 +117,28 @@ fn pooled_side(
 }
 
 impl WaveformPlot {
+    fn clear_cache(&mut self) {
+        for columns in self.columns.values_mut() {
+            columns.values.clear();
+            columns.geometry = None;
+        }
+    }
+    #[cfg(test)]
     fn columns(
         &mut self,
         panel_id: u64,
         width: usize,
         frame: &WaveformFrame,
+    ) -> &[(Option<f32>, Option<f32>, Option<f32>, Option<f32>)] {
+        self.columns_with_cache(panel_id, width, frame, true)
+    }
+
+    fn columns_with_cache(
+        &mut self,
+        panel_id: u64,
+        width: usize,
+        frame: &WaveformFrame,
+        cache_enabled: bool,
     ) -> &[(Option<f32>, Option<f32>, Option<f32>, Option<f32>)] {
         let columns = self.columns.entry(panel_id).or_insert_with(|| Columns {
             revision: frame.revision,
@@ -150,7 +167,8 @@ impl WaveformPlot {
             &frame.right_rms
         };
         let count = width.max(1).min(left_peaks.len());
-        if columns.revision != frame.revision
+        if !cache_enabled
+            || columns.revision != frame.revision
             || columns.width != width
             || columns.values.len() != count
         {
@@ -394,6 +412,7 @@ pub(super) struct Waveform {
     manual_error: Option<SharedString>,
     interaction: Rc<RefCell<WaveformInteraction>>,
     dragging: bool,
+    visualization_cache: bool,
 }
 
 impl Waveform {
@@ -408,6 +427,7 @@ impl Waveform {
             manual_error: None,
             interaction: Rc::new(RefCell::new(WaveformInteraction::default())),
             dragging: false,
+            visualization_cache: true,
         }
     }
 
@@ -626,6 +646,10 @@ impl Waveform {
             .min_h_0()
             .overflow_hidden()
             .bg(rgb(config.visual_background.rgb()));
+        if self.visualization_cache != config.visualization_cache {
+            self.plot.borrow_mut().clear_cache();
+            self.visualization_cache = config.visualization_cache;
+        }
         let status = self.manual_message();
         let message = preview_message(self.source.as_deref(), &self.shared.read());
         if let Some(message) = message {
@@ -701,10 +725,11 @@ impl Waveform {
                                     if !frame.matches(&source.path, source.range) {
                                         return;
                                     }
-                                    waveform.columns(
+                                    waveform.columns_with_cache(
                                         panel_id,
                                         (plot.size.width / px(1.0)) as usize,
                                         &frame,
+                                        cache_enabled,
                                     );
                                     progress(position, timeline(&frame, duration))
                                 };
@@ -754,11 +779,7 @@ impl Waveform {
                                     );
                                 }
                                 if !cache_enabled {
-                                    waveform
-                                        .columns
-                                        .get_mut(&panel_id)
-                                        .expect("waveform columns are initialized")
-                                        .geometry = None;
+                                    waveform.clear_cache();
                                 }
                                 if let Some(fraction) = progress {
                                     // Slow periodic easing gives the droplet a deliberate rhythm;

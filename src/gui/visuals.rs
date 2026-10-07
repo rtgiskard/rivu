@@ -201,6 +201,7 @@ struct VisualData {
     spectrum_labels: [SharedString; 2],
     db_labels: [SharedString; 4],
     spectrum_bins: Vec<Range<usize>>,
+    spectrum_bins_generation: u64,
     heat_samples: Vec<HeatSample>,
     heat_sample_generation: u64,
     spectrogram_image_height: usize,
@@ -271,6 +272,7 @@ impl Visuals {
                 spectrum_labels: ["20 Hz".into(), "20 kHz".into()],
                 db_labels: std::array::from_fn(|step| db_label(-70.0 * step as f32 / 3.0)),
                 spectrum_bins: Vec::new(),
+                spectrum_bins_generation: 0,
                 heat_samples: Vec::new(),
                 spectrogram_panel_heights: HashMap::new(),
                 spectrogram_image_height: 0,
@@ -331,6 +333,7 @@ impl Visuals {
         let configured_history_columns =
             history_column_count(config.spectrogram_history_seconds, config.analysis_fps);
         let palette_changed = data.palette_lut.palette != config.visual_palette;
+        let cache_changed = data.visualization_cache != config.visualization_cache;
         let changed = palette_changed
             || data.visual_background != config.visual_background.rgb()
             || data.spectrum_db_range != config.spectrum_db_range
@@ -356,7 +359,7 @@ impl Visuals {
             || data.spectrogram_db_range != config.spectrogram_db_range
             || data.analysis_fps != config.analysis_fps
             || data.configured_history_columns != configured_history_columns
-            || data.visualization_cache != config.visualization_cache;
+            || cache_changed;
         if !changed {
             return;
         }
@@ -371,8 +374,7 @@ impl Visuals {
             || data.spectrogram_db_range != config.spectrogram_db_range
             || data.spectrogram_interpolate != config.spectrogram_interpolate
             || data.spectrogram_interpolation_points != config.spectrogram_interpolation_points
-            || data.spectrogram_sampling_points_scale != config.spectrogram_sampling_points_scale
-            || data.visualization_cache != config.visualization_cache;
+            || data.spectrogram_sampling_points_scale != config.spectrogram_sampling_points_scale;
         data.palette_lut = if palette_changed {
             active_palette_lut(config.visual_palette)
         } else {
@@ -401,8 +403,8 @@ impl Visuals {
         data.spectrum_grid = config.spectrum_grid;
         data.spectrogram_db_range = config.spectrogram_db_range;
         data.visualization_cache = config.visualization_cache;
-        if !data.visualization_cache {
-            data.spectrum_geometry.clear();
+        if cache_changed {
+            data.clear_derived_caches();
         }
         data.spectrogram_history_seconds = config.spectrogram_history_seconds;
         data.history_limit_seconds = config.spectrogram_history_seconds as f64;
@@ -437,6 +439,7 @@ impl Visuals {
         let sample_rate_changed = data.sample_rate != frame.sample_rate;
         data.sample_rate = frame.sample_rate;
         if sample_rate_changed || data.frequencies != frame.frequencies_hz {
+            data.invalidate_images();
             data.stream_generation = data.stream_generation.wrapping_add(1);
             data.latest_levels.clear();
             data.frequencies.clone_from(&frame.frequencies_hz);
@@ -518,10 +521,12 @@ impl Visuals {
         self.view(panel_id, VisualMode::Spectrogram)
     }
     pub(super) fn retain_spectrogram_panels(&mut self, panel_ids: &[u64]) {
-        self.data
-            .borrow_mut()
-            .spectrogram_panel_heights
+        let mut data = self.data.borrow_mut();
+        data.spectrogram_panel_heights
             .retain(|panel_id, _| panel_ids.contains(panel_id));
+        if panel_ids.is_empty() {
+            data.invalidate_images();
+        }
     }
 
     pub(super) fn retain_spectrum_panels(&mut self, panel_ids: &[u64]) {
@@ -749,6 +754,16 @@ impl VisualData {
             self.latest_sample_time = None;
         }
     }
+    fn clear_derived_caches(&mut self) {
+        self.spectrum_bins.clear();
+        self.spectrum_bins_generation = 0;
+        self.spectrum_points.clear();
+        self.spectrum_geometry.clear();
+        self.heat_samples.clear();
+        self.heat_sample_generation = 0;
+        self.spectrogram_image_height = 0;
+        self.invalidate_images();
+    }
     fn invalidate_images(&mut self) {
         for column in &mut self.columns {
             if let Some(image) = column.image.take() {
@@ -757,15 +772,6 @@ impl VisualData {
         }
     }
 
-    fn invalidate_current_images(&mut self) {
-        for column in &mut self.columns {
-            if column.generation == self.stream_generation
-                && let Some(image) = column.image.take()
-            {
-                self.retired.push(image);
-            }
-        }
-    }
     fn clear_history(&mut self) {
         self.invalidate_images();
         for column in &mut self.columns {
@@ -877,7 +883,9 @@ impl VisualData {
             self.spectrum_bar_width,
             self.spectrum_gap,
         );
-        if self.spectrum_bins.len() != bars {
+        if self.spectrum_bins.len() != bars
+            || self.spectrum_bins_generation != self.stream_generation
+        {
             group_bands(
                 &self.frequencies,
                 low,
@@ -886,6 +894,7 @@ impl VisualData {
                 true,
                 &mut self.spectrum_bins,
             );
+            self.spectrum_bins_generation = self.stream_generation;
         }
         let mut grid_path = PathBuilder::stroke(px(1.0));
         let mut has_grid = false;
@@ -1140,6 +1149,10 @@ impl VisualData {
                 Ok(())
             },
         )?;
+        if !self.visualization_cache {
+            self.spectrum_bins.clear();
+            self.spectrum_bins_generation = 0;
+        }
         if self.spectrum_show_labels {
             let labels_y = plot.bottom() + px(3.0);
             paint_label(
@@ -1227,10 +1240,11 @@ impl VisualData {
         );
         let height_u32 = u32::try_from(height)
             .map_err(|_| "Spectrogram image height exceeds GPU image dimensions".to_string())?;
-        if self.spectrogram_image_height != height
+        if !self.visualization_cache
+            || self.spectrogram_image_height != height
             || self.heat_sample_generation != self.stream_generation
         {
-            self.invalidate_current_images();
+            self.invalidate_images();
             self.spectrogram_image_height = height;
             self.heat_samples = build_heat_samples(&self.frequencies, low, high, height);
             self.heat_sample_generation = self.stream_generation;
@@ -1265,17 +1279,25 @@ impl VisualData {
                 size(width, plot.size.height),
             );
             if let Some(image) = image {
-                window
-                    .paint_image(
-                        column_bounds,
-                        column_bounds,
-                        px(0.0).into(),
-                        image,
-                        0,
-                        false,
-                    )
+                let result = window.paint_image(
+                    column_bounds,
+                    column_bounds,
+                    px(0.0).into(),
+                    Arc::clone(&image),
+                    0,
+                    false,
+                );
+                if !self.visualization_cache {
+                    self.retired.push(image);
+                }
+                result
                     .map_err(|error| format!("Cannot upload/paint spectrogram image: {error}"))?;
             }
+        }
+        if !self.visualization_cache {
+            self.heat_samples.clear();
+            self.heat_sample_generation = 0;
+            self.spectrogram_image_height = 0;
         }
         if self.spectrogram_show_labels {
             paint_aligned_label(
