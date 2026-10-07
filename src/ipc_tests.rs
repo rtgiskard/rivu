@@ -91,26 +91,26 @@ fn system_config_wire_adapter_preserves_optional_fields() {
 fn request_round_trip_uses_binary_wire_body() {
     let requests = [
         (
-            RequestKind::Query(Query::LibraryPage {
+            WireRequest::Query(WireQuery::from(Query::LibraryPage {
                 query: Some("album".into()),
                 favorite: Some(true),
                 missing: Some(false),
                 sort: crate::model::LibrarySort::Album,
                 offset: 7,
                 limit: 11,
-            }),
+            })),
             REQUEST_QUERY,
         ),
-        (RequestKind::State(StateSections::ALL), REQUEST_STATE),
+        (WireRequest::State(StateSections::ALL), REQUEST_STATE),
         (
-            RequestKind::Command(Command::MoveQueue {
+            WireRequest::Command(WireCommand::from(Command::MoveQueue {
                 queue_id: 4,
                 index: 9,
-            }),
+            })),
             REQUEST_COMMAND,
         ),
         (
-            RequestKind::Watch(StateRevisions {
+            WireRequest::Watch(StateRevisions {
                 playback: 1,
                 queue: 2,
                 library: 3,
@@ -128,30 +128,27 @@ fn request_round_trip_uses_binary_wire_body() {
         let mut encoded = Vec::new();
         encode_request_frame_into(&frame, &mut encoded).unwrap();
         assert_eq!(encoded[4 + 2 + 16], kind);
-        let decoded = decode_request(decode_request_frame(&encoded[4..]).unwrap()).unwrap();
+        let decoded = decode_request_frame(&encoded[4..]).unwrap().request;
         match kind {
             REQUEST_QUERY => assert!(matches!(
                 decoded,
-                DecodedRequest::Query(Query::LibraryPage {
+                WireRequest::Query(WireQuery::LibraryPage {
                     offset: 7,
                     limit: 11,
                     ..
                 })
             )),
-            REQUEST_STATE => assert!(matches!(
-                decoded,
-                DecodedRequest::State(StateSections { .. })
-            )),
+            REQUEST_STATE => assert!(matches!(decoded, WireRequest::State(StateSections { .. }))),
             REQUEST_COMMAND => assert!(matches!(
                 decoded,
-                DecodedRequest::Command(Command::MoveQueue {
+                WireRequest::Command(WireCommand::MoveQueue {
                     queue_id: 4,
                     index: 9
                 })
             )),
             REQUEST_WATCH => assert!(matches!(
                 decoded,
-                DecodedRequest::Watch(StateRevisions {
+                WireRequest::Watch(StateRevisions {
                     playback: 1,
                     queue: 2,
                     library: 3,
@@ -167,12 +164,12 @@ fn request_encoding_rejects_oversized_body_before_completion() {
     let frame = RequestFrame {
         version: PROTOCOL_VERSION,
         instance_id: UNKNOWN_INSTANCE,
-        request: RequestKind::Command(Command::EditTrack {
+        request: WireRequest::Command(WireCommand::from(Command::EditTrack {
             track_id: 1,
             title: "x".repeat(MAX_REQUEST),
             artist: String::new(),
             album: String::new(),
-        }),
+        })),
     };
     let mut encoded = Vec::new();
     assert!(encode_request_frame_into(&frame, &mut encoded).is_err());
@@ -183,7 +180,7 @@ fn invalid_protocol_version_is_rejected_before_request_decode() {
     let frame = RequestFrame {
         version: PROTOCOL_VERSION + 1,
         instance_id: UNKNOWN_INSTANCE,
-        request: RequestKind::State(StateSections::ALL),
+        request: WireRequest::State(StateSections::ALL),
     };
     let mut encoded = Vec::new();
     encode_request_frame_into(&frame, &mut encoded).unwrap();
