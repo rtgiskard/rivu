@@ -20,7 +20,7 @@ fn ack_wire_round_trip_is_independent_from_state() {
 fn query_wire_response_has_no_state_queue_payload() {
     let response = QueryResponse {
         revisions: crate::response::QueryRevisions::default(),
-        result: Err("query failed".into()),
+        result: Err(crate::response::QueryError::Message("query failed".into())),
     };
     let frame = response_frame(WireResponse::Query(response), [3; 16]);
     let encoded = encode_frame(&frame).unwrap();

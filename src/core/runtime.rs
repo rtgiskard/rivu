@@ -27,7 +27,7 @@ impl Core {
                     let Ok(request) = request else { break; };
                     match request.operation {
                         Operation::Query(query) => {
-                            let result = self.view(&query).map_err(|error| format!("{error:#}"));
+                            let result = self.view(&query).map_err(|error| QueryError::from_message(format!("{error:#}")));
                             if let Some(reply) = request.reply {
                                 let _ = reply.send(CoreResponse::Query(QueryResponse {
                                     revisions: self.state.query_revisions(),

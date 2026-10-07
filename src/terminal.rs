@@ -343,7 +343,7 @@ fn spawn_query_worker(socket_path: &Path) -> QueryWorker {
             )
             .map_err(|error| format!("{error:#}"))
             .and_then(|response| {
-                let view = response.result?;
+                let view = response.result.map_err(|error| error.to_string())?;
                 Ok(QueryResult {
                     revisions: response.revisions,
                     view,

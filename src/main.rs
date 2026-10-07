@@ -7,7 +7,7 @@ use rivu::{
     gui, ipc,
     model::{Command, MAX_QUERY_ROWS, PlaybackStatus, Query, RepeatMode},
     mpris,
-    response::{StateResponse, StateSections, ViewResponse},
+    response::{QueryError, StateResponse, StateSections, ViewResponse},
     terminal,
 };
 use std::{
@@ -326,7 +326,7 @@ fn run() -> Result<()> {
         }) => list_library(&socket, args.json, query, favorites, missing),
         Action::Library(LibraryAction::Stats) => {
             let response = ipc::query(&socket, &Query::LibraryStats)?;
-            let ViewResponse::LibraryStats(stats) = response.result.map_err(anyhow::Error::msg)?
+            let ViewResponse::LibraryStats(stats) = response.result.map_err(anyhow::Error::from)?
             else {
                 bail!("Statistics query returned an unexpected response");
             };
@@ -401,7 +401,7 @@ fn run() -> Result<()> {
             album,
         }) => {
             let response = ipc::query(&socket, &Query::Track { track_id })?;
-            let ViewResponse::Track(track) = response.result.map_err(anyhow::Error::msg)? else {
+            let ViewResponse::Track(track) = response.result.map_err(anyhow::Error::from)? else {
                 bail!("Track query returned an unexpected response");
             };
             let track = track.context("Track not found")?;
@@ -769,14 +769,14 @@ fn list_playlists(socket: &Path, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn listing_result<T>(result: std::result::Result<T, String>) -> Result<Option<T>> {
+fn listing_result<T>(result: std::result::Result<T, QueryError>) -> Result<Option<T>> {
     match result {
         Ok(value) => Ok(Some(value)),
-        Err(error) if error.starts_with("Query data changed while reading") => {
+        Err(QueryError::RevisionChanged) => {
             eprintln!("Listing incomplete: data changed while reading; retry the command.");
             Ok(None)
         }
-        Err(error) => Err(anyhow::Error::msg(error)),
+        Err(error) => Err(anyhow::Error::from(error)),
     }
 }
 

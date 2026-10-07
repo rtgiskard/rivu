@@ -6,8 +6,8 @@ use crate::{
     model::*,
     projection::{GuiSnapshot, MprisSnapshot, TraySnapshot},
     response::{
-        Ack, PlaybackSnapshot, QueryResponse, QueryRevisions, StateResponse, StateRevisions,
-        StateSections, ViewResponse,
+        Ack, PlaybackSnapshot, QueryError, QueryResponse, QueryRevisions, StateResponse,
+        StateRevisions, StateSections, ViewResponse,
     },
     store::Store,
 };
@@ -201,7 +201,7 @@ impl AppHandle {
             Ok(CoreResponse::Ack(_)) => unreachable!("query request returned Ack"),
             Err(error) => QueryResponse {
                 revisions: self.state.read().query_revisions(),
-                result: Err(error),
+                result: Err(QueryError::Message(error)),
             },
         }
     }

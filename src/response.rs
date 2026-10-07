@@ -6,7 +6,7 @@ use crate::{
     projection::ClientSnapshot,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
 /// Independent invalidation domains. Tokens are compared for equality, never ordered.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,11 +85,40 @@ pub enum ViewResponse {
     PlaylistSummaryBatch(Batch<PlaylistSummary, i64>),
     PlaylistEntryBatch(Batch<PlaylistEntryRow, PlaylistEntryCursor>),
 }
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QueryError {
+    RevisionChanged,
+    Message(String),
+}
+
+impl QueryError {
+    pub fn from_message(message: impl Into<String>) -> Self {
+        let message = message.into();
+        if message.starts_with("Query data changed while reading") {
+            Self::RevisionChanged
+        } else {
+            Self::Message(message)
+        }
+    }
+}
+
+impl fmt::Display for QueryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RevisionChanged => {
+                formatter.write_str("Query data changed while reading; restart the listing")
+            }
+            Self::Message(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for QueryError {}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct QueryResponse {
     pub revisions: QueryRevisions,
-    pub result: Result<ViewResponse, String>,
+    pub result: Result<ViewResponse, QueryError>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

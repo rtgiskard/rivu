@@ -1154,7 +1154,7 @@ impl GuiApp {
                         if kind == ViewRequestKind::Library {
                             this.library_navigation = None;
                         }
-                        this.error = Some(error);
+                        this.error = Some(error.to_string());
                         cx.notify();
                         return;
                     }
@@ -1370,7 +1370,7 @@ impl GuiApp {
                     Ok(result) => result,
                     Err(error) => {
                         this.directory_tree.fail(&path, generation);
-                        this.error = Some(error);
+                        this.error = Some(error.to_string());
                         cx.notify();
                         return;
                     }
