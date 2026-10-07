@@ -105,9 +105,9 @@ const PANELS: &[PanelSpec] = &[
         render: GuiApp::spectrum_panel,
     },
     PanelSpec {
-        kind: "radial_spectrum",
-        title: "Radial Spectrum",
-        render: GuiApp::radial_spectrum_panel,
+        kind: "audio_visualizer",
+        title: "Audio Visualizer",
+        render: GuiApp::audio_visualizer_panel,
     },
     PanelSpec {
         kind: "waveform",
@@ -436,6 +436,29 @@ impl Render for PanelDrag {
     }
 }
 
+struct AboutWindow;
+
+impl Render for AboutWindow {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        column()
+            .size_full()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .p(px(24.))
+            .bg(rgb(PANEL))
+            .text_color(rgb(TEXT))
+            .child(div().text_2xl().child("Rivu"))
+            .child(caption("A local-first music player"))
+            .child(caption(format!("Version {}", env!("CARGO_PKG_VERSION"))))
+            .child(caption("GPL-3.0-or-later"))
+            .child(
+                components::button_style("about-close", "Close")
+                    .on_click(cx.listener(|_, _, window, _| window.remove_window())),
+            )
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct QueueDrag {
     pub(super) queue_id: u64,
@@ -571,6 +594,9 @@ struct GuiApp {
     metadata_track: Option<i64>,
     full_track: Option<crate::model::Track>,
     error: Option<String>,
+    artwork_manager: Arc<crate::artwork::ArtworkManager>,
+    queue_save_pending: bool,
+    queue_save_feedback: Option<Result<String, String>>,
     library_buffer: LibraryViewBuffer,
     directory_tree: library::DirectoryTree,
     playlist_buffer: PlaylistSummaryBuffer,
@@ -597,6 +623,7 @@ struct GuiApp {
     default_album: Entity<artwork::Artwork>,
     catalog_open: bool,
     settings_open: bool,
+    app_menu_open: bool,
     panel_menu: Option<PanelMenu>,
     playlist_delete_confirm: Option<i64>,
     settings_focus: FocusHandle,
@@ -930,6 +957,9 @@ impl GuiApp {
                 if this.update(cx, |this, cx| this.refresh(cx)).is_err() { break; }
             }
         }).detach();
+        let artwork_manager = Arc::new(crate::artwork::ArtworkManager::new(
+            layout_path.parent().unwrap_or_else(|| Path::new(".")),
+        ));
         let mut app = Self {
             settings: settings::Settings::new(&state.system.config),
             handle,
@@ -946,6 +976,9 @@ impl GuiApp {
             metadata_track: None,
             full_track: None,
             error,
+            queue_save_pending: false,
+            queue_save_feedback: None,
+            artwork_manager,
             library_buffer: LibraryViewBuffer {
                 sort: LibrarySort::Album,
                 ..Default::default()
@@ -974,6 +1007,7 @@ impl GuiApp {
             default_album: cx.new(|_| artwork::Artwork::new()),
             catalog_open: false,
             settings_open: false,
+            app_menu_open: false,
             panel_menu: None,
             playlist_delete_confirm: None,
             settings_focus: cx.focus_handle(),
@@ -1006,6 +1040,36 @@ impl GuiApp {
         if let Err(error) = self.handle.send(command) {
             self.error = Some(format!("{error:#}"));
         }
+        cx.notify();
+    }
+    fn save_queue_as_playlist(&mut self, cx: &mut Context<Self>) {
+        if self.queue_save_pending || self.state.queue.entries.is_empty() {
+            return;
+        }
+        let track_ids = self
+            .state
+            .queue
+            .entries
+            .iter()
+            .map(|entry| entry.track_id)
+            .collect();
+        let name = format!("Queue {}", chrono::Local::now().format("%Y-%m-%d %H-%M-%S"));
+        self.queue_save_pending = true;
+        self.queue_save_feedback = None;
+        let handle = self.handle.clone();
+        cx.spawn(async move |this, cx| {
+            let ack = handle.request_ack(Command::CreatePlaylistWithTracks { name, track_ids });
+            let _ = this.update(cx, |this, cx| {
+                this.queue_save_pending = false;
+                this.queue_save_feedback = Some(if ack.ok {
+                    Ok("Saved queue as playlist".to_owned())
+                } else {
+                    Err(ack.error.unwrap_or_else(|| "Could not save queue as playlist".to_owned()))
+                });
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -1818,7 +1882,7 @@ impl GuiApp {
             && active_panels.iter().any(|panel| {
                 matches!(
                     panel.kind.as_str(),
-                    "spectrum" | "spectrogram" | "radial_spectrum"
+                    "spectrum" | "spectrogram" | "audio_visualizer"
                 )
             });
         if analysis_visible {
@@ -1889,7 +1953,7 @@ impl GuiApp {
     fn spectrum_panel(&mut self, id: u64, _: &mut Window, _: &mut Context<Self>) -> AnyElement {
         self.visuals.spectrum(id)
     }
-    fn radial_spectrum_panel(
+    fn audio_visualizer_panel(
         &mut self,
         id: u64,
         _: &mut Window,
@@ -2381,8 +2445,9 @@ impl Render for GuiApp {
                     }
                     return;
                 }
-                if this.panel_menu.is_some() || this.catalog_open {
+                if this.app_menu_open || this.panel_menu.is_some() || this.catalog_open {
                     if key == "escape" {
+                        this.app_menu_open = false;
                         if this.panel_menu.is_some() {
                             this.panel_menu = None;
                         } else {
@@ -2565,26 +2630,69 @@ impl Render for GuiApp {
                 ),
             )
             .child(icon_button(
-                "settings",
-                "⚙",
-                "Settings",
+                "app-menu",
+                "☰",
+                "Menu",
                 cx,
-                |this, window, cx| {
-                    this.load_settings(cx);
+                |this, _, cx| {
+                    this.app_menu_open = !this.app_menu_open;
                     this.catalog_open = false;
                     this.panel_menu = None;
-                    this.settings_open = true;
-                    this.settings_focus.focus(window, cx);
                     cx.notify();
                 },
-            ))
-            .child(icon_button(
-                "shutdown",
-                "⏻",
-                "Quit Rivu and shut down the process",
-                cx,
-                |this, _, cx| this.send(Command::Shutdown, cx),
             ));
+        if self.app_menu_open {
+            let about = menu_item("app-about", "About", cx, |this, _, cx| {
+                this.app_menu_open = false;
+                let _ = cx.open_window(
+                    WindowOptions {
+                        titlebar: Some(TitlebarOptions {
+                            title: Some("About Rivu".into()),
+                            ..Default::default()
+                        }),
+                        window_min_size: Some(size(px(320.), px(260.))),
+                        ..Default::default()
+                    },
+                    |_, cx| cx.new(|_| AboutWindow),
+                );
+                cx.notify();
+            });
+            app = app.child(
+                column()
+                    .id("app-menu-popup")
+                    .absolute()
+                    .bottom(rems(3.0))
+                    .right(gpui::px(UI_INSET))
+                    .w(px(220.))
+                    .p_1()
+                    .gap_1()
+                    .bg(rgb(PANEL))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .rounded_md()
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                        this.app_menu_open = false;
+                        cx.notify();
+                    }))
+                    .child(menu_item("app-settings", "Settings", cx, |this, window, cx| {
+                        this.app_menu_open = false;
+                        this.load_settings(cx);
+                        this.settings_open = true;
+                        this.settings_focus.focus(window, cx);
+                        cx.notify();
+                    }))
+                    .child(about)
+                    .child(menu_item("app-close-window", "Close window", cx, |this, window, _| {
+                        this.app_menu_open = false;
+                        window.remove_window();
+                    }))
+                    .child(menu_item("app-quit", "Quit application", cx, |this, _, cx| {
+                        this.app_menu_open = false;
+                        this.send(Command::Shutdown, cx);
+                    })),
+            );
+        }
+
         app = app.child(footer);
 
         if self.catalog_open && !self.layout.locked {
@@ -2631,6 +2739,7 @@ impl Render for GuiApp {
                 .map(|panel| panel.kind.as_str());
             let is_queue = panel_kind == Some("queue");
             let is_waveform = panel_kind == Some("waveform");
+            let is_audio_visualizer = panel_kind == Some("audio_visualizer");
             let has_selected_queue = self
                 .state
                 .queue
@@ -2653,6 +2762,17 @@ impl Render for GuiApp {
                             |this, _, cx| {
                                 this.panel_menu = None;
                                 this.load_full_waveform(cx);
+                                cx.notify();
+                            },
+                        ));
+                    }
+                    if is_audio_visualizer {
+                        menu = menu.child(menu_item(
+                            "audio-visualizer-noctalia-fancy",
+                            "Noctalia Fancy ✓",
+                            cx,
+                            |this, _, cx| {
+                                this.panel_menu = None;
                                 cx.notify();
                             },
                         ));
@@ -2707,7 +2827,7 @@ impl Render for GuiApp {
                         ));
                     }
                     menu = menu
-                        .when(is_queue || is_waveform, |view| {
+                        .when(is_queue || is_waveform || is_audio_visualizer, |view| {
                             view.child(div().h(px(1.)).mx_2().my_1().bg(rgb(BORDER)))
                         })
                         .when(self.layout.locked, |view| {
