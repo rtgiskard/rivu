@@ -10,7 +10,7 @@ use bincode::{
 };
 use bytes::{Buf, Bytes, BytesMut};
 use rand::RngExt;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::{self, Write},
@@ -31,23 +31,20 @@ use tokio::{
     time::timeout,
 };
 
-const PROTOCOL_VERSION: u16 = 2;
-const REQUEST_QUERY: u8 = 0;
-const REQUEST_STATE: u8 = 1;
-const REQUEST_COMMAND: u8 = 2;
-const REQUEST_WATCH: u8 = 3;
+const PROTOCOL_VERSION: u8 = 2;
 const MAX_REQUEST: usize = 64 * 1024;
-const REQUEST_BODY_MAX: usize = MAX_REQUEST - (2 + 16 + 1);
 const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 const MAX_CLIENTS: usize = 16;
 const UNKNOWN_INSTANCE: [u8; 16] = [0; 16];
 
+#[derive(Serialize, Deserialize)]
 struct RequestFrame {
-    version: u16,
+    version: u8,
     instance_id: [u8; 16],
     request: WireRequest,
 }
 
+#[derive(Serialize, Deserialize)]
 enum WireRequest {
     Query(WireQuery),
     State(StateSections),
@@ -652,57 +649,27 @@ impl TryFrom<WireCommand> for Command {
     }
 }
 
-fn decode_body<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
-    let (value, consumed) =
-        decode_from_slice(bytes, request_config()).context("Decoding IPC request body")?;
+fn decode_request_frame(bytes: &[u8]) -> Result<RequestFrame> {
+    let (frame, consumed) =
+        decode_from_slice(bytes, request_config()).context("Decoding IPC request frame")?;
     ensure!(
         consumed == bytes.len(),
-        "Trailing bytes in IPC request body"
+        "Trailing bytes in IPC request frame"
     );
-    Ok(value)
-}
-
-fn decode_request_header(bytes: &[u8]) -> Result<(u16, [u8; 16])> {
-    if bytes.len() < 18 {
-        bail!("IPC request header is truncated");
-    }
-    let version = u16::from_le_bytes(bytes[..2].try_into().unwrap());
-    let instance_id = bytes[2..18].try_into().unwrap();
-    Ok((version, instance_id))
-}
-fn decode_request_frame(bytes: &[u8]) -> Result<RequestFrame> {
-    let (version, instance_id) = decode_request_header(bytes)?;
-    if version != PROTOCOL_VERSION {
-        bail!("Unsupported IPC protocol version {version}");
-    }
-    let kind = *bytes.get(18).context("IPC request kind is missing")?;
-    let body = &bytes[19..];
-    let request = match kind {
-        REQUEST_QUERY => WireRequest::Query(decode_body(body)?),
-        REQUEST_STATE => WireRequest::State(decode_body(body)?),
-        REQUEST_COMMAND => WireRequest::Command(decode_body(body)?),
-        REQUEST_WATCH => WireRequest::Watch(decode_body(body)?),
-        _ => bail!("Unknown IPC request kind {kind}"),
-    };
-    Ok(RequestFrame {
-        version,
-        instance_id,
-        request,
-    })
+    Ok(frame)
 }
 
 fn decode_response_frame(bytes: &[u8]) -> Result<ResponseFrame> {
-    let (version, _) = decode_from_slice::<u16, _>(bytes, config::standard())
-        .context("Decoding IPC response header")?;
-    if version != PROTOCOL_VERSION {
-        bail!("Unsupported IPC protocol version {version}");
+    let frame: ResponseFrame = decode_frame(bytes)?;
+    if frame.version != PROTOCOL_VERSION {
+        bail!("Unsupported IPC protocol version {}", frame.version);
     }
-    decode_frame(bytes)
+    Ok(frame)
 }
 
 #[derive(Serialize, Deserialize)]
 struct ResponseFrame {
-    version: u16,
+    version: u8,
     instance_id: [u8; 16],
     response: WireResponse,
 }
@@ -725,6 +692,10 @@ struct WireStateResponse {
     #[serde(with = "wire_system_option")]
     system: Option<WireSystemState>,
 }
+/// Complete positional IPC schema for `Config`.
+///
+/// Keep this explicit instead of serializing `Config` directly: its human-readable
+/// serde attributes are not a stable binary wire contract.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct WireConfig {
     library_roots: Vec<PathBuf>,
@@ -1019,11 +990,12 @@ fn state_response(response: WireStateResponse) -> StateResponse {
 
 struct FrameWriter<'a> {
     bytes: &'a mut Vec<u8>,
+    limit: usize,
 }
 
 impl Write for FrameWriter<'_> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if self.bytes.len().saturating_add(bytes.len()) > 4 + MAX_RESPONSE {
+        if self.bytes.len().saturating_add(bytes.len()) > 4 + self.limit {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "IPC frame exceeds maximum size",
@@ -1038,15 +1010,28 @@ impl Write for FrameWriter<'_> {
     }
 }
 
-fn encode_frame_into<T: Serialize>(value: &T, bytes: &mut Vec<u8>) -> Result<()> {
+fn encode_frame_into_with<T, C>(
+    value: &T,
+    bytes: &mut Vec<u8>,
+    codec: C,
+    limit: usize,
+) -> Result<()>
+where
+    T: Serialize,
+    C: config::Config,
+{
     bytes.clear();
     bytes.resize(4, 0);
-    let mut writer = FrameWriter { bytes };
-    encode_into_std_write(value, &mut writer, config::standard()).context("Encoding IPC frame")?;
+    let mut writer = FrameWriter { bytes, limit };
+    encode_into_std_write(value, &mut writer, codec).context("Encoding IPC frame")?;
     let payload_len = writer.bytes.len() - 4;
     let length = u32::try_from(payload_len).context("IPC frame is too large")?;
     writer.bytes[..4].copy_from_slice(&length.to_le_bytes());
     Ok(())
+}
+
+fn encode_frame_into<T: Serialize>(value: &T, bytes: &mut Vec<u8>) -> Result<()> {
+    encode_frame_into_with(value, bytes, config::standard(), MAX_RESPONSE)
 }
 
 #[cfg(test)]
@@ -1249,37 +1234,12 @@ async fn write_request_frame_buffered<S: AsyncWrite + Unpin>(
 }
 
 fn request_config() -> impl bincode::config::Config {
-    config::standard().with_limit::<REQUEST_BODY_MAX>()
+    config::standard().with_limit::<MAX_REQUEST>()
 }
 
 fn encode_request_frame_into(frame: &RequestFrame, buffer: &mut Vec<u8>) -> Result<()> {
-    buffer.clear();
-    buffer.resize(4 + 2 + 16 + 1, 0);
-    buffer[4..6].copy_from_slice(&frame.version.to_le_bytes());
-    buffer[6..22].copy_from_slice(&frame.instance_id);
-    let kind = match &frame.request {
-        WireRequest::Query(query) => {
-            encode_into_std_write(query, &mut *buffer, request_config())?;
-            REQUEST_QUERY
-        }
-        WireRequest::State(sections) => {
-            encode_into_std_write(sections, &mut *buffer, request_config())?;
-            REQUEST_STATE
-        }
-        WireRequest::Command(command) => {
-            encode_into_std_write(command, &mut *buffer, request_config())?;
-            REQUEST_COMMAND
-        }
-        WireRequest::Watch(revisions) => {
-            encode_into_std_write(revisions, &mut *buffer, request_config())?;
-            REQUEST_WATCH
-        }
-    };
-    buffer[22] = kind;
-    let payload_len = buffer.len() - 4;
-    ensure!(payload_len <= MAX_REQUEST, "IPC request exceeds 64 KiB");
-    buffer[..4].copy_from_slice(&(payload_len as u32).to_le_bytes());
-    Ok(())
+    encode_frame_into_with(frame, buffer, request_config(), MAX_REQUEST)
+        .context("Encoding IPC request frame")
 }
 
 fn error_frame(error: impl Into<String>, instance_id: [u8; 16]) -> ResponseFrame {
@@ -1394,39 +1354,6 @@ async fn serve_connection(
             frame = read_frame(&mut stream, MAX_REQUEST, &mut pending) => frame?,
             changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() { return Ok(()); } continue; }
         };
-        let (version, request_instance) = match decode_request_header(&bytes) {
-            Ok(header) => header,
-            Err(error) => {
-                write_frame_buffered(
-                    &mut stream,
-                    &error_frame(format!("Invalid IPC request header: {error}"), instance_id),
-                    &mut write_buffer,
-                )
-                .await?;
-                continue;
-            }
-        };
-        if version != PROTOCOL_VERSION {
-            write_frame_buffered(
-                &mut stream,
-                &error_frame(
-                    format!("Unsupported IPC protocol version {version}"),
-                    instance_id,
-                ),
-                &mut write_buffer,
-            )
-            .await?;
-            continue;
-        }
-        if let Err(error) = validate_instance(request_instance, instance_id) {
-            write_frame_buffered(
-                &mut stream,
-                &error_frame(error.to_string(), instance_id),
-                &mut write_buffer,
-            )
-            .await?;
-            continue;
-        }
         let frame = match decode_request_frame(&bytes) {
             Ok(frame) => frame,
             Err(error) => {
@@ -1439,6 +1366,27 @@ async fn serve_connection(
                 continue;
             }
         };
+        if frame.version != PROTOCOL_VERSION {
+            write_frame_buffered(
+                &mut stream,
+                &error_frame(
+                    format!("Unsupported IPC protocol version {}", frame.version),
+                    instance_id,
+                ),
+                &mut write_buffer,
+            )
+            .await?;
+            continue;
+        }
+        if let Err(error) = validate_instance(frame.instance_id, instance_id) {
+            write_frame_buffered(
+                &mut stream,
+                &error_frame(error.to_string(), instance_id),
+                &mut write_buffer,
+            )
+            .await?;
+            continue;
+        }
         match frame.request {
             WireRequest::State(sections) => {
                 handshaken = true;
@@ -1757,9 +1705,6 @@ async fn one_shot(
         .await
         .context("Reading IPC response timed out")??;
         let frame = decode_response_frame(&bytes)?;
-        if frame.version != PROTOCOL_VERSION {
-            bail!("Unsupported IPC protocol version {}", frame.version);
-        }
         unpack_error(frame.response.clone())?;
         Ok(frame)
     };

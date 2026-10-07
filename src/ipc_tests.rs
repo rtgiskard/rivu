@@ -90,38 +90,29 @@ fn system_config_wire_adapter_preserves_optional_fields() {
 }
 
 #[test]
-fn request_round_trip_uses_binary_wire_body() {
+fn request_round_trip_uses_binary_wire_frame() {
     let requests = [
-        (
-            WireRequest::Query(WireQuery::from(Query::LibraryPage {
-                query: Some("album".into()),
-                favorite: Some(true),
-                missing: Some(false),
-                sort: crate::model::LibrarySort::Album,
-                offset: 7,
-                limit: 11,
-            })),
-            REQUEST_QUERY,
-        ),
-        (WireRequest::State(StateSections::ALL), REQUEST_STATE),
-        (
-            WireRequest::Command(WireCommand::from(Command::MoveQueue {
-                queue_id: 4,
-                index: 9,
-            })),
-            REQUEST_COMMAND,
-        ),
-        (
-            WireRequest::Watch(StateRevisions {
-                playback: 1,
-                queue: 2,
-                library: 3,
-                system: 4,
-            }),
-            REQUEST_WATCH,
-        ),
+        WireRequest::Query(WireQuery::from(Query::LibraryPage {
+            query: Some("album".into()),
+            favorite: Some(true),
+            missing: Some(false),
+            sort: crate::model::LibrarySort::Album,
+            offset: 7,
+            limit: 11,
+        })),
+        WireRequest::State(StateSections::ALL),
+        WireRequest::Command(WireCommand::from(Command::MoveQueue {
+            queue_id: 4,
+            index: 9,
+        })),
+        WireRequest::Watch(StateRevisions {
+            playback: 1,
+            queue: 2,
+            library: 3,
+            system: 4,
+        }),
     ];
-    for (request, kind) in requests {
+    for request in requests {
         let frame = RequestFrame {
             version: PROTOCOL_VERSION,
             instance_id: UNKNOWN_INSTANCE,
@@ -129,35 +120,24 @@ fn request_round_trip_uses_binary_wire_body() {
         };
         let mut encoded = Vec::new();
         encode_request_frame_into(&frame, &mut encoded).unwrap();
-        assert_eq!(encoded[4 + 2 + 16], kind);
-        let decoded = decode_request_frame(&encoded[4..]).unwrap().request;
-        match kind {
-            REQUEST_QUERY => assert!(matches!(
-                decoded,
-                WireRequest::Query(WireQuery::LibraryPage {
-                    offset: 7,
-                    limit: 11,
-                    ..
-                })
-            )),
-            REQUEST_STATE => assert!(matches!(decoded, WireRequest::State(StateSections { .. }))),
-            REQUEST_COMMAND => assert!(matches!(
-                decoded,
-                WireRequest::Command(WireCommand::MoveQueue {
-                    queue_id: 4,
-                    index: 9
-                })
-            )),
-            REQUEST_WATCH => assert!(matches!(
-                decoded,
-                WireRequest::Watch(StateRevisions {
-                    playback: 1,
-                    queue: 2,
-                    library: 3,
-                    system: 4
-                })
-            )),
-            _ => unreachable!(),
+        let decoded = decode_request_frame(&encoded[4..]).unwrap();
+        assert_eq!(decoded.version, PROTOCOL_VERSION);
+        assert_eq!(decoded.instance_id, UNKNOWN_INSTANCE);
+        match decoded.request {
+            WireRequest::Query(WireQuery::LibraryPage { offset, limit, .. }) => {
+                assert_eq!((offset, limit), (7, 11));
+            }
+            WireRequest::State(_) => {}
+            WireRequest::Command(WireCommand::MoveQueue { queue_id, index }) => {
+                assert_eq!((queue_id, index), (4, 9));
+            }
+            WireRequest::Watch(StateRevisions {
+                playback,
+                queue,
+                library,
+                system,
+            }) => assert_eq!((playback, queue, library, system), (1, 2, 3, 4)),
+            _ => panic!("unexpected request variant"),
         }
     }
 }
@@ -205,7 +185,7 @@ fn request_encoding_rejects_oversized_body_before_completion() {
 }
 
 #[test]
-fn invalid_protocol_version_is_rejected_before_request_decode() {
+fn invalid_protocol_version_is_available_for_dispatch_rejection() {
     let frame = RequestFrame {
         version: PROTOCOL_VERSION + 1,
         instance_id: UNKNOWN_INSTANCE,
@@ -213,11 +193,8 @@ fn invalid_protocol_version_is_rejected_before_request_decode() {
     };
     let mut encoded = Vec::new();
     encode_request_frame_into(&frame, &mut encoded).unwrap();
-    let error = match decode_request_frame(&encoded[4..]) {
-        Ok(_) => panic!("invalid version accepted"),
-        Err(error) => error,
-    };
-    assert!(format!("{error:#}").contains("Unsupported IPC protocol version"));
+    let decoded = decode_request_frame(&encoded[4..]).unwrap();
+    assert_eq!(decoded.version, PROTOCOL_VERSION + 1);
 }
 #[test]
 fn invalid_instance_is_rejected_without_dispatch() {
