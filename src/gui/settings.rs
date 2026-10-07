@@ -1,8 +1,8 @@
 use super::{
     ACCENT, BORDER, ButtonTooltip, DropdownItem, DropdownState, ERROR, GuiApp, HIGHLIGHT, Measured,
-    POPOVER_MAX_HEIGHT, UI_INSET, button, caption, column, copyable_message,
-    dropdown_container, dropdown_row, dropdown_trigger, icon_button, input::Input,
-    panels::TRACK_HEIGHT, row,
+    POPOVER_MAX_HEIGHT, UI_INSET, button, caption, column, copyable_message, dropdown_container,
+    dropdown_row, dropdown_trigger, form_field, icon_button, input::Input, panels::TRACK_HEIGHT,
+    row, section_group, status_message, toggle_button, two_column, StatusKind,
 };
 use crate::{
     config::{
@@ -86,9 +86,6 @@ enum Field {
     SpectrogramInterpolationPoints,
     CursorColor,
     Glow,
-    RmsGain,
-    PeakGain,
-    PeakGamma,
 }
 impl Field {
     fn label(self) -> &'static str {
@@ -129,9 +126,6 @@ impl Field {
             Self::SpectrogramInterpolationPoints => "Interpolated frequency points (64–4096)",
             Self::CursorColor => "Waterline color (#RRGGBB)",
             Self::Glow => "Glow strength (0–2; 0 = off)",
-            Self::RmsGain => "RMS height gain (0–3)",
-            Self::PeakGain => "Peak height gain (0–2)",
-            Self::PeakGamma => "Peak gamma (0.25–3)",
         }
     }
 }
@@ -155,32 +149,13 @@ fn visual_switch(
     cx: &mut Context<GuiApp>,
     toggle: impl Fn(&mut Config) + 'static,
 ) -> Stateful<Div> {
-    icon_button(
-        id,
-        icon,
-        format!("{label}: {}", if enabled { "On" } else { "Off" }),
-        cx,
-        move |this, _, cx| {
-            toggle(&mut this.settings.draft);
-            cx.notify();
-        },
-    )
-    .size(rems(2.))
-    .text_size(rems(1.))
-    .when(enabled, |view| {
-        view.bg(rgb(HIGHLIGHT)).text_color(rgb(ACCENT))
+    toggle_button(id, icon, label, enabled, cx, move |this, _| {
+        toggle(&mut this.settings.draft);
     })
 }
 
 fn settings_group(title: &'static str, content: impl IntoElement) -> Div {
-    column()
-        .gap_2()
-        .p_2()
-        .rounded_md()
-        .border_1()
-        .border_color(rgb(BORDER))
-        .child(caption(title))
-        .child(content)
+    section_group(title, content)
 }
 
 fn spectrum_style_label(style: SpectrumStyle) -> &'static str {
@@ -316,9 +291,6 @@ impl Settings {
             Field::SpectrogramInterpolationPoints,
             Field::CursorColor,
             Field::Glow,
-            Field::RmsGain,
-            Field::PeakGain,
-            Field::PeakGamma,
         ]
         .into_iter()
         .map(|field| (field, cx.new(|cx| Input::new("", field.label(), cx))))
@@ -328,20 +300,14 @@ impl Settings {
     }
 
     fn field(&self, field: Field) -> Div {
-        column()
-            .w_full()
-            .flex_shrink_0()
-            .gap_1()
-            .child(caption(field.label()))
-            .child(self.inputs[&field].clone())
+        form_field(field.label(), self.inputs[&field].clone())
     }
 
     fn pair(&self, first: Field, second: Field) -> Div {
-        row()
-            .items_start()
-            .flex_wrap()
-            .child(self.field(first).flex_1().min_w(px(180.)))
-            .child(self.field(second).flex_1().min_w(px(180.)))
+        two_column(
+            self.field(first).min_w(px(180.)),
+            self.field(second).min_w(px(180.)),
+        )
     }
 
     fn value(&self, field: Field, cx: &App) -> String {
@@ -518,17 +484,6 @@ impl Settings {
             cx,
         );
         self.set_value(Field::Glow, self.draft.waveform_glow.to_string(), cx);
-        self.set_value(Field::RmsGain, self.draft.waveform_rms_gain.to_string(), cx);
-        self.set_value(
-            Field::PeakGain,
-            self.draft.waveform_peak_gain.to_string(),
-            cx,
-        );
-        self.set_value(
-            Field::PeakGamma,
-            self.draft.waveform_peak_gamma.to_string(),
-            cx,
-        );
     }
 
     fn parse(&self, cx: &App) -> Result<Config> {
@@ -595,9 +550,6 @@ impl Settings {
             .parse::<RgbColor>()
             .context("Waveform waterline color")?;
         config.waveform_glow = self.number(Field::Glow, cx)?;
-        config.waveform_rms_gain = self.number(Field::RmsGain, cx)?;
-        config.waveform_peak_gain = self.number(Field::PeakGain, cx)?;
-        config.waveform_peak_gamma = self.number(Field::PeakGamma, cx)?;
         config.validate()?;
         Ok(config)
     }
@@ -854,10 +806,10 @@ impl GuiApp {
             .child(
                 icon_button(
                     "settings-repeat",
-                    match repeat {
-                        RepeatMode::Off => "󰑗",
-                        RepeatMode::All => "󰑖",
-                        RepeatMode::One => "󰑘",
+                    if repeat == RepeatMode::One {
+                        "󰑘"
+                    } else {
+                        "󰑖"
                     },
                     "Repeat",
                     cx,
@@ -894,7 +846,7 @@ impl GuiApp {
                 }),
             )
             .child(
-                icon_button("settings-tray", "󱊖", "System tray", cx, |this, _, cx| {
+                icon_button("settings-tray", "▣", "System tray", cx, |this, _, cx| {
                     this.settings.draft.tray_enabled = !this.settings.draft.tray_enabled;
                     cx.notify();
                 })
@@ -905,7 +857,7 @@ impl GuiApp {
             .child(
                 icon_button(
                     "settings-ffmpeg",
-                    "",
+                    "\u{f384}",
                     ffmpeg_hint(&self.state.system.ffmpeg_status),
                     cx,
                     |this, _, cx| {
@@ -1043,7 +995,7 @@ impl GuiApp {
                 )
                 .child(visual_switch(
                     "settings-log-file",
-                    "",
+                    "▤",
                     "Write logs to disk",
                     draft.log_to_file,
                     cx,
@@ -1185,22 +1137,6 @@ impl GuiApp {
                         .relative()
                         .child(self.measurement(Measured::SettingsStyle)),
                     )
-                    .child(
-                        row()
-                            .items_center()
-                            .gap_2()
-                            .child(visual_switch(
-                                "visualization-cache",
-                                "",
-                                "Visualization cache",
-                                draft.visualization_cache,
-                                cx,
-                                |draft| draft.visualization_cache = !draft.visualization_cache,
-                            ))
-                            .child(caption(
-                                "Caches Waveform, Spectrum, and Spectrogram rendering data; disable for lower retained memory or uncached comparison.",
-                            )),
-                    )
             }
             VisualPage::Spectrum => {
                 let style = spectrum_style_label(draft.spectrum_style);
@@ -1230,13 +1166,13 @@ impl GuiApp {
                     .child(settings.pair(Field::SpectrumBarHold, Field::SpectrumBarGravity))
                     .child(settings.pair(Field::SpectrumHold, Field::SpectrumGravity))
                     .child(row().flex_wrap()
-                        .child(visual_switch("spectrum-interpolate", "", "Interpolation", draft.spectrum_interpolate, cx,
+                        .child(visual_switch("spectrum-interpolate", "≈", "Interpolation", draft.spectrum_interpolate, cx,
                             |draft| draft.spectrum_interpolate = !draft.spectrum_interpolate))
-                        .child(visual_switch("spectrum-peaks", "", "Peaks", draft.spectrum_peaks, cx,
+                        .child(visual_switch("spectrum-peaks", "∧", "Peaks", draft.spectrum_peaks, cx,
                             |draft| draft.spectrum_peaks = !draft.spectrum_peaks))
-                        .child(visual_switch("spectrum-grid", "󰋁", "Faint grid", draft.spectrum_grid, cx,
+                        .child(visual_switch("spectrum-grid", "#", "Faint grid", draft.spectrum_grid, cx,
                             |draft| draft.spectrum_grid = !draft.spectrum_grid))
-                        .child(visual_switch("spectrum-labels", "󰊄", "Labels", draft.spectrum_labels, cx,
+                        .child(visual_switch("spectrum-labels", "T", "Labels", draft.spectrum_labels, cx,
                             |draft| draft.spectrum_labels = !draft.spectrum_labels)))
                     .child(caption("Auto uses bar width plus gap, up to 512 bars. Gravity accelerates falling levels; 0 snaps to the signal after hold, bypassing smoothing. Attacks stay immediate. Labels show four dB levels and the first/last frequencies."))
             }
@@ -1252,7 +1188,7 @@ impl GuiApp {
                         .flex_wrap()
                         .child(visual_switch(
                             "spectrogram-interpolate",
-                            "",
+                            "≈",
                             "Interpolation",
                             draft.spectrogram_interpolate,
                             cx,
@@ -1260,7 +1196,7 @@ impl GuiApp {
                         ))
                         .child(visual_switch(
                             "spectrogram-labels",
-                            "󰊄",
+                            "T",
                             "Labels",
                             draft.spectrogram_labels,
                             cx,
@@ -1322,15 +1258,12 @@ impl GuiApp {
                     ))
                     .child(caption("Noctalia Fancy uses the shared FFT with Bars, Rings, or Bars/Rings rendering."))
             }
-            VisualPage::Waveform => column()
-                .gap_3()
-                .child(settings.pair(Field::RmsGain, Field::PeakGain))
-                .child(settings.field(Field::PeakGamma))
+            VisualPage::Waveform => column().gap_3()
                 .child(settings.field(Field::CursorColor))
                 .child(settings.field(Field::Glow))
-                .child(visual_switch("waveform-labels", "󰊄", "Labels", draft.waveform_labels, cx,
+                .child(visual_switch("waveform-labels", "T", "Labels", draft.waveform_labels, cx,
                     |draft| draft.waveform_labels = !draft.waveform_labels))
-                .child(caption("RMS gain raises the filled body. Peak gain and gamma reduce the peak envelope's height and vertical spread. Apply redraws the waveform without decoding the track again.")),
+                .child(caption("Appearance only: changing colors does not decode the track again. The waterline stays still while paused.")),
         }
     }
 
@@ -1382,7 +1315,6 @@ impl GuiApp {
         };
         let content = match self.settings.page {
             SettingsPage::General => self.general_settings(cx),
-            SettingsPage::About => self.about_settings(cx),
             SettingsPage::Visualizations => {
                 panel = panel.child(self.visual_settings_tabs(cx));
                 self.visual_settings(cx)
@@ -1399,13 +1331,15 @@ impl GuiApp {
                 .child(content.flex_shrink_0().p(gpui::px(UI_INSET))),
         );
         let feedback = if self.settings.applying {
-            caption("Applying settings…").into_any_element()
+            status_message("Applying settings…", StatusKind::Info).into_any_element()
         } else {
             match &self.settings.feedback {
                 Some(Err(error)) => copyable_message("copy-settings-error", error.clone(), cx)
                     .text_color(rgb(ERROR))
                     .into_any_element(),
-                Some(Ok(())) => caption("Last apply succeeded").into_any_element(),
+                Some(Ok(())) => {
+                    status_message("Last apply succeeded", StatusKind::Success).into_any_element()
+                }
                 None => div().into_any_element(),
             }
         };

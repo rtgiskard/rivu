@@ -1,9 +1,11 @@
 mod dropdown;
 mod list;
 
-use super::{ACCENT, BORDER, HIGHLIGHT, PANEL, TEXT, UI_INSET};
+use super::{ACCENT, BORDER, GuiApp, HIGHLIGHT, PANEL, TEXT, UI_INSET};
 
-use gpui::{Context, Div, ElementId, Render, SharedString, Stateful, Window, div, prelude::*, rgb};
+use gpui::{
+    Context, Div, ElementId, Render, SharedString, Stateful, Window, div, img, prelude::*, px, rgb,
+};
 pub(crate) const ROW_HEIGHT: f32 = 42.0;
 pub(crate) const MENU_WIDTH: f32 = 260.0;
 pub(crate) const POPOVER_MAX_HEIGHT: f32 = 240.0;
@@ -17,6 +19,23 @@ pub(super) fn visualization_status(message: impl Into<SharedString>) -> Div {
         .text_sm()
         .text_color(rgb(super::MUTED))
         .child(message.into())
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum StatusKind {
+    Info,
+    Success,
+    Error,
+}
+
+/// Shared inline status text for asynchronous panel and settings actions.
+pub(crate) fn status_message(message: impl Into<SharedString>, kind: StatusKind) -> Div {
+    let color = match kind {
+        StatusKind::Info => super::MUTED,
+        StatusKind::Success => ACCENT,
+        StatusKind::Error => super::ERROR,
+    };
+    caption(message).text_color(rgb(color))
 }
 
 /// Shared empty-state surface used by panels and virtualized lists.
@@ -111,6 +130,197 @@ pub(crate) fn button_style(
         .child(label.into())
 }
 
+/// Text button with shared application event handling.
+pub(crate) fn button(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    cx: &mut Context<GuiApp>,
+    action: impl Fn(&mut GuiApp, &mut Window, &mut Context<GuiApp>) + 'static,
+) -> Stateful<Div> {
+    button_style(id, label).on_click(cx.listener(move |this, _, window, cx| {
+        action(this, window, cx);
+        cx.stop_propagation();
+    }))
+}
+
+/// Sortable list header control with shared active-direction styling.
+pub(crate) fn sortable_header(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    active: bool,
+    descending: bool,
+    width: Option<gpui::Pixels>,
+    cx: &mut Context<GuiApp>,
+    action: impl Fn(&mut GuiApp, &mut Window, &mut Context<GuiApp>) + 'static,
+) -> Stateful<Div> {
+    let marker = if active {
+        if descending { " ↓" } else { " ↑" }
+    } else {
+        ""
+    };
+    let label = format!("{}{}", label.into(), marker);
+    let mut control = button(id, label, cx, action);
+    if let Some(width) = width {
+        control = control.w(width).flex_shrink_0();
+    } else {
+        control = control.flex_1().min_w_0();
+    }
+    control
+}
+
+/// Icon button with the application's fallback glyphs and tooltip behavior.
+pub(crate) fn icon_button(
+    id: impl Into<ElementId>,
+    icon: impl Into<SharedString>,
+    hint: impl Into<SharedString>,
+    cx: &mut Context<GuiApp>,
+    action: impl Fn(&mut GuiApp, &mut Window, &mut Context<GuiApp>) + 'static,
+) -> Stateful<Div> {
+    let hint = hint.into();
+    let mut icon = icon.into();
+    if !cx
+        .try_global::<NerdSymbols>()
+        .is_none_or(|settings| settings.0)
+    {
+        let fallback = match icon.as_ref() {
+            "󰒟" => Some("⤨"),
+            "󰒮" => Some("|◀"),
+            "󰒭" => Some("▶|"),
+            "󰏤" => Some("Ⅱ"),
+            "󰐊" => Some("▶"),
+            "󰑖" => Some("↻"),
+            "󰑘" => Some("↻₁"),
+            "󰐹" => Some("♫"),
+            "󱀞" => Some("↔"),
+            "\u{f0193}" => Some("▣"),
+            "\u{f384}" => Some("F"),
+            "󰌾" => Some("▣"),
+            "󰉋" => Some("▸"),
+            "󰉢" => Some("≡"),
+            "󰐕" => Some("+"),
+            "󰆴" => Some("×"),
+            "󰑐" | "󰑓" => Some("↻"),
+            "󰓎" => Some("★"),
+            "󰓐" => Some("☆"),
+            "󰌶" => Some("!"),
+            "󰁍" => Some("‹"),
+            "󰁔" => Some("›"),
+            "\u{f0142}" => Some("▸"),
+            "\u{f0140}" => Some("▾"),
+            _ => None,
+        };
+        if let Some(fallback) = fallback {
+            icon = fallback.into();
+        }
+    }
+    button(id, icon, cx, action)
+        .size(gpui::rems(2.))
+        .p_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .flex_shrink_0()
+        .tooltip(move |_, cx| cx.new(|_| ButtonTooltip { text: hint.clone() }).into())
+}
+
+/// Compact toggle button used by visual and system settings.
+pub(crate) fn toggle_button(
+    id: impl Into<ElementId>,
+    icon: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    enabled: bool,
+    cx: &mut Context<GuiApp>,
+    action: impl Fn(&mut GuiApp, &mut Context<GuiApp>) + 'static,
+) -> Stateful<Div> {
+    let label = label.into();
+    icon_button(
+        id,
+        icon,
+        format!("{}: {}", label, if enabled { "On" } else { "Off" }),
+        cx,
+        move |this, _, cx| {
+            action(this, cx);
+            cx.notify();
+        },
+    )
+    .text_size(gpui::rems(1.))
+    .when(enabled, |view| {
+        view.bg(rgb(HIGHLIGHT)).text_color(rgb(ACCENT))
+    })
+}
+
+/// Standard label/value row used by track metadata panels.
+pub(crate) fn metadata_item(label: impl Into<SharedString>, value: impl Into<SharedString>) -> Div {
+    super::row()
+        .items_start()
+        .gap_2()
+        .flex_1()
+        .min_w_0()
+        .child(caption(label).w(gpui::px(92.)).flex_shrink_0())
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_sm()
+                .truncate()
+                .child(value.into()),
+        )
+}
+
+/// Standard embedded artwork preview row for metadata panels.
+pub(crate) fn artwork_preview(uri: impl Into<SharedString>) -> Div {
+    let uri = uri.into();
+    super::row()
+        .items_start()
+        .gap_2()
+        .child(caption("Album artwork").w(px(92.)).flex_shrink_0())
+        .child(img(uri).size(px(128.)))
+}
+
+/// Menu item with shared application event handling.
+pub(crate) fn menu_item(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    cx: &mut Context<GuiApp>,
+    action: impl Fn(&mut GuiApp, &mut Window, &mut Context<GuiApp>) + 'static,
+) -> Stateful<Div> {
+    menu_item_style(id, label).on_click(cx.listener(move |this, _, window, cx| {
+        action(this, window, cx);
+        cx.stop_propagation();
+    }))
+}
+
+/// Shared bordered section used by settings and metadata panels.
+pub(crate) fn section_group(title: impl Into<SharedString>, content: impl IntoElement) -> Div {
+    super::column()
+        .gap_2()
+        .p_2()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(BORDER))
+        .child(caption(title))
+        .child(content)
+}
+
+/// Shared responsive two-column layout.
+pub(crate) fn two_column(first: Div, second: Div) -> Div {
+    super::row()
+        .items_start()
+        .flex_wrap()
+        .gap_4()
+        .child(first.flex_1())
+        .child(second.flex_1())
+}
+
+/// Shared label-and-control form field layout.
+pub(crate) fn form_field(label: impl Into<SharedString>, control: impl IntoElement) -> Div {
+    super::column()
+        .w_full()
+        .flex_shrink_0()
+        .gap_1()
+        .child(caption(label))
+        .child(control)
+}
 /// Shared trigger for settings and other anchored dropdowns.
 pub(crate) fn dropdown_trigger(
     id: impl Into<ElementId>,

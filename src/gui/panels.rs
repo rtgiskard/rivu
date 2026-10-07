@@ -1,7 +1,9 @@
 use super::{
     ACCENT, BORDER, Dragging, Field, GuiApp, HIGHLIGHT, HistorySort, ListFocus, MUTED, Measured,
-    TEXT, UI_INSET, button, column, empty_state, format_time, icon_button, library::LibraryDrag,
-    list_viewport, panel_header, panel_surface, panel_toolbar, row, row_text, track_row,
+    StatusKind, TEXT, UI_INSET, artwork_preview, column, empty_state, form_field, format_time,
+    icon_button, library::LibraryDrag, list_viewport, metadata_item, panel_header, panel_surface,
+    panel_toolbar, row, row_text, section_group, sortable_header, status_message, track_row,
+    two_column,
 };
 pub(super) use super::{TRACK_HEIGHT, caption, list_row};
 use crate::{
@@ -10,43 +12,19 @@ use crate::{
 };
 use chrono::{DateTime, Local};
 use gpui::{
-    AnyElement, Context, Div, SharedString, Window, div, img, prelude::*, px, rgb, uniform_list,
+    AnyElement, Context, Div, SharedString, Window, div, prelude::*, px, rgb, uniform_list,
 };
 
 fn metadata_pair(label: &'static str, value: impl Into<SharedString>) -> Div {
-    row()
-        .items_start()
-        .gap_2()
-        .flex_1()
-        .min_w_0()
-        .child(caption(label).w(px(92.)).flex_shrink_0())
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .text_sm()
-                .truncate()
-                .child(value.into()),
-        )
+    metadata_item(label, value)
 }
 
 fn metadata_row(first: Div, second: Div) -> Div {
-    row()
-        .items_start()
-        .gap_4()
-        .child(first.flex_1().min_w_0())
-        .child(second.flex_1().min_w_0())
+    two_column(first, second)
 }
 
 fn metadata_group(title: &'static str, content: impl IntoElement) -> Div {
-    column()
-        .gap_2()
-        .p_2()
-        .rounded_md()
-        .border_1()
-        .border_color(rgb(BORDER))
-        .child(caption(title))
-        .child(content)
+    section_group(title, content)
 }
 
 impl GuiApp {
@@ -319,12 +297,7 @@ impl GuiApp {
             .into_any_element()
     }
     fn panel_field(&self, field: Field, label: &'static str) -> Div {
-        column()
-            .w_full()
-            .flex_shrink_0()
-            .gap_1()
-            .child(caption(label))
-            .child(self.input(field))
+        form_field(label, self.input(field))
     }
 
     fn panel_selected_tracks(&self) -> Vec<i64> {
@@ -848,14 +821,19 @@ impl GuiApp {
                 .opacity(if self.queue_save_pending { 0.4 } else { 1.0 }),
             );
             if self.queue_save_pending {
-                tools = tools.child(caption("Saving…").text_color(rgb(MUTED)));
+                tools = tools.child(status_message("Saving…", StatusKind::Info));
             } else if let Some(feedback) = &self.queue_save_feedback {
-                tools = tools.child(
-                    caption(match feedback {
+                let kind = if feedback.is_ok() {
+                    StatusKind::Success
+                } else {
+                    StatusKind::Error
+                };
+                tools = tools.child(status_message(
+                    match feedback {
                         Ok(message) | Err(message) => message.clone(),
-                    })
-                    .text_color(rgb(if feedback.is_ok() { ACCENT } else { super::ERROR })),
-                );
+                    },
+                    kind,
+                ));
             }
         }
         if selection_count > 0 {
@@ -1107,7 +1085,10 @@ impl GuiApp {
                 row()
                     .items_end()
                     .gap_2()
-                    .child(self.panel_field(Field::PlaylistName, "Playlist name").flex_1())
+                    .child(
+                        self.panel_field(Field::PlaylistName, "Playlist name")
+                            .flex_1(),
+                    )
                     .child(icon_button(
                         ("playlist-create", panel_id),
                         "+",
@@ -1527,7 +1508,9 @@ impl GuiApp {
                             ),
                             metadata_pair(
                                 "Bits/sample",
-                                track.bits_per_sample.map_or("—".into(), |value| value.to_string()),
+                                track
+                                    .bits_per_sample
+                                    .map_or("—".into(), |value| value.to_string()),
                             ),
                         )),
                 ))
@@ -1541,10 +1524,20 @@ impl GuiApp {
                         ))
                         .child(metadata_row(
                             self.panel_field(Field::Album, "Album"),
-                            metadata_pair("Disc", track.disc_number.map_or("—".into(), |value| value.to_string())),
+                            metadata_pair(
+                                "Disc",
+                                track
+                                    .disc_number
+                                    .map_or("—".into(), |value| value.to_string()),
+                            ),
                         ))
                         .child(metadata_row(
-                            metadata_pair("Track", track.track_number.map_or("—".into(), |value| value.to_string())),
+                            metadata_pair(
+                                "Track",
+                                track
+                                    .track_number
+                                    .map_or("—".into(), |value| value.to_string()),
+                            ),
                             metadata_pair("Release", track.release_date.as_deref().unwrap_or("—")),
                         ))
                         .child(metadata_row(
@@ -1552,13 +1545,7 @@ impl GuiApp {
                             metadata_pair("Last played", last_played),
                         ))
                         .when_some(self.artwork_manager.uri_for(track), |tags, uri| {
-                            tags.child(
-                                row()
-                                    .items_start()
-                                    .gap_2()
-                                    .child(caption("Album artwork").w(px(92.)).flex_shrink_0())
-                                    .child(img(uri).size(px(128.))),
-                            )
+                            tags.child(artwork_preview(uri))
                         })
                         .child(
                             row()
@@ -1618,29 +1605,20 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let active = self.history_sort == sort;
-        let marker = if active {
-            if self.history_sort_desc {
-                " ↓"
-            } else {
-                " ↑"
-            }
-        } else {
-            ""
-        };
         let id = match sort {
             HistorySort::Recent => ("history-sort-recent", panel_id),
             HistorySort::Title => ("history-sort-title", panel_id),
             HistorySort::Plays => ("history-sort-plays", panel_id),
         };
-        let mut control = button(id, format!("{label}{marker}"), cx, move |this, _, cx| {
-            this.set_history_sort(sort, cx)
-        });
-        if let Some(width) = width {
-            control = control.w(width).flex_shrink_0();
-        } else {
-            control = control.flex_1().min_w_0();
-        }
-        control
+        sortable_header(
+            id,
+            label,
+            active,
+            self.history_sort_desc,
+            width,
+            cx,
+            move |this, _, cx| this.set_history_sort(sort, cx),
+        )
     }
 
     pub(super) fn history_panel(
@@ -1693,67 +1671,79 @@ impl GuiApp {
                 format!("{} tracks · click a column to sort", history_len),
             ))
             .child(list_viewport(
-                column()
-                    .size_full()
-                    .child(header)
-                    .child(uniform_list(
-                    ("history-rows", panel_id),
-                    history_len,
-                    cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
-                        range
-                            .filter_map(|index| {
-                                let item = history.get(index)?;
-                                let id = item.track_id;
-                                let title = if item.title.is_empty() {
-                                    "Untitled".to_owned()
-                                } else {
-                                    item.title.clone()
-                                };
-                                let last_played = this.last_played_text(id, Some(item.played_at));
-                                let last_played = last_played
-                                    .strip_prefix("Last played · ")
-                                    .unwrap_or(&last_played);
-                                Some(
-                                    list_row(
-                                        ("history-entry", id as u64),
-                                        this.selected.contains(&id),
+                column().size_full().child(header).child(
+                    uniform_list(
+                        ("history-rows", panel_id),
+                        history_len,
+                        cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                            range
+                                .filter_map(|index| {
+                                    let item = history.get(index)?;
+                                    let id = item.track_id;
+                                    let title = if item.title.is_empty() {
+                                        "Untitled".to_owned()
+                                    } else {
+                                        item.title.clone()
+                                    };
+                                    let last_played =
+                                        this.last_played_text(id, Some(item.played_at));
+                                    let last_played = last_played
+                                        .strip_prefix("Last played · ")
+                                        .unwrap_or(&last_played);
+                                    Some(
+                                        list_row(
+                                            ("history-entry", id as u64),
+                                            this.selected.contains(&id),
+                                        )
+                                        .child(
+                                            caption((index + 1).to_string())
+                                                .w(px(32.))
+                                                .flex_shrink_0(),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .text_sm()
+                                                .truncate()
+                                                .child(title),
+                                        )
+                                        .child(
+                                            caption(item.play_count.to_string())
+                                                .w(px(84.))
+                                                .flex_shrink_0()
+                                                .truncate(),
+                                        )
+                                        .child(
+                                            caption(last_played.to_owned())
+                                                .w(px(148.))
+                                                .flex_shrink_0()
+                                                .truncate(),
+                                        )
+                                        .on_click(
+                                            cx.listener(
+                                                move |this, event: &gpui::ClickEvent, _, cx| {
+                                                    this.select_track(id, false, cx);
+                                                    if event.click_count() == 2 {
+                                                        this.send(
+                                                            Command::Play { track_id: id },
+                                                            cx,
+                                                        );
+                                                    }
+                                                },
+                                            ),
+                                        ),
                                     )
-                                    .child(
-                                        caption((index + 1).to_string()).w(px(32.)).flex_shrink_0(),
-                                    )
-                                    .child(
-                                        div().flex_1().min_w_0().text_sm().truncate().child(title),
-                                    )
-                                    .child(
-                                        caption(item.play_count.to_string())
-                                            .w(px(84.))
-                                            .flex_shrink_0()
-                                            .truncate(),
-                                    )
-                                    .child(
-                                        caption(last_played.to_owned())
-                                            .w(px(148.))
-                                            .flex_shrink_0()
-                                            .truncate(),
-                                    )
-                                    .on_click(cx.listener(
-                                        move |this, event: &gpui::ClickEvent, _, cx| {
-                                            this.select_track(id, false, cx);
-                                            if event.click_count() == 2 {
-                                                this.send(Command::Play { track_id: id }, cx);
-                                            }
-                                        },
-                                    )),
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                    }),
-                )
-                .h_full()
-                .flex_1()
-                .min_h_0()
-                .w_full(),
-            )))
+                                })
+                                .collect::<Vec<_>>()
+                        }),
+                    )
+                    .h_full()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full(),
+                ),
+            ))
             .into_any_element()
     }
 }

@@ -20,12 +20,13 @@ use crate::{
 };
 use anyhow::Result;
 use ashpd::desktop::file_chooser::SelectedFiles;
-use components::ButtonTooltip;
 pub(super) use components::{
-    DropdownItem, DropdownState, POPOVER_MAX_HEIGHT, SelectionModel, TRACK_HEIGHT, caption,
-    context_menu_container, drag_preview, dropdown_container, dropdown_row, dropdown_trigger,
-    empty_state, list_row, list_viewport, panel_header, panel_surface, panel_toolbar, row_text,
-    track_row, tree_row,
+    ButtonTooltip, DropdownItem, DropdownState, POPOVER_MAX_HEIGHT, SelectionModel, StatusKind,
+    TRACK_HEIGHT, artwork_preview, button, caption, context_menu_container, drag_preview,
+    dropdown_container, dropdown_row, dropdown_trigger, empty_state, form_field, icon_button,
+    list_row, list_viewport, menu_item, metadata_item, panel_header, panel_surface, panel_toolbar,
+    row_text, section_group, sortable_header, status_message, toggle_button, track_row, tree_row,
+    two_column,
 };
 use futures::{FutureExt, StreamExt, channel::mpsc};
 use gpui::{prelude::*, *};
@@ -306,84 +307,6 @@ fn column() -> Div {
     div().flex().flex_col().min_w_0().min_h_0().gap_2()
 }
 
-fn button(
-    id: impl Into<ElementId>,
-    label: impl Into<SharedString>,
-    cx: &mut Context<GuiApp>,
-    action: impl Fn(&mut GuiApp, &mut Window, &mut Context<GuiApp>) + 'static,
-) -> Stateful<Div> {
-    components::button_style(id, label).on_click(cx.listener(move |this, _, window, cx| {
-        action(this, window, cx);
-        cx.stop_propagation();
-    }))
-}
-
-fn icon_button(
-    id: impl Into<ElementId>,
-    icon: impl Into<SharedString>,
-    hint: impl Into<SharedString>,
-    cx: &mut Context<GuiApp>,
-    action: impl Fn(&mut GuiApp, &mut Window, &mut Context<GuiApp>) + 'static,
-) -> Stateful<Div> {
-    let hint = hint.into();
-    let mut icon = icon.into();
-    if !cx
-        .try_global::<components::NerdSymbols>()
-        .is_none_or(|settings| settings.0)
-    {
-        let fallback = match icon.as_ref() {
-            "󰒟" => Some("⤨"),
-            "󰒮" => Some("|◀"),
-            "󰒭" => Some("▶|"),
-            "󰏤" => Some("Ⅱ"),
-            "󰐊" => Some("▶"),
-            "󰑖" => Some("↻"),
-            "󰑘" => Some("↻₁"),
-            "󰐹" => Some("♫"),
-            "󱀞" => Some("↔"),
-            "\u{f0193}" => Some("▣"),
-            "\u{f384}" => Some("F"),
-            "󰌾" => Some("▣"),
-            "󰉋" => Some("▸"),
-            "󰉢" => Some("≡"),
-            "󰐕" => Some("+"),
-            "󰆴" => Some("×"),
-            "󰑐" | "󰑓" => Some("↻"),
-            "󰓎" => Some("★"),
-            "󰓐" => Some("☆"),
-            "󰌶" => Some("!"),
-            "󰁍" => Some("‹"),
-            "󰁔" => Some("›"),
-            "\u{f0142}" => Some("▸"),
-            "\u{f0140}" => Some("▾"),
-            _ => None,
-        };
-        if let Some(fallback) = fallback {
-            icon = fallback.into();
-        }
-    }
-    button(id, icon, cx, action)
-        .size(rems(2.))
-        .p_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .flex_shrink_0()
-        .tooltip(move |_, cx| cx.new(|_| ButtonTooltip { text: hint.clone() }).into())
-}
-
-fn menu_item(
-    id: impl Into<ElementId>,
-    label: impl Into<SharedString>,
-    cx: &mut Context<GuiApp>,
-    action: impl Fn(&mut GuiApp, &mut Window, &mut Context<GuiApp>) + 'static,
-) -> Stateful<Div> {
-    components::menu_item_style(id, label).on_click(cx.listener(move |this, _, window, cx| {
-        action(this, window, cx);
-        cx.stop_propagation();
-    }))
-}
-
 fn chooser_path(files: &SelectedFiles) -> Option<PathBuf> {
     files
         .uris()
@@ -578,7 +501,7 @@ struct PlaylistEntriesBuffer {
     pending: bool,
 }
 
-struct GuiApp {
+pub(super) struct GuiApp {
     handle: AppHandle,
     state: GuiSnapshot,
     layout: Layout,
@@ -1064,7 +987,9 @@ impl GuiApp {
                 this.queue_save_feedback = Some(if ack.ok {
                     Ok("Saved queue as playlist".to_owned())
                 } else {
-                    Err(ack.error.unwrap_or_else(|| "Could not save queue as playlist".to_owned()))
+                    Err(ack
+                        .error
+                        .unwrap_or_else(|| "Could not save queue as playlist".to_owned()))
                 });
                 cx.notify();
             });
@@ -2628,18 +2553,12 @@ impl Render for GuiApp {
                     }),
                 ),
             )
-            .child(icon_button(
-                "app-menu",
-                "☰",
-                "Menu",
-                cx,
-                |this, _, cx| {
-                    this.app_menu_open = !this.app_menu_open;
-                    this.catalog_open = false;
-                    this.panel_menu = None;
-                    cx.notify();
-                },
-            ));
+            .child(icon_button("app-menu", "☰", "Menu", cx, |this, _, cx| {
+                this.app_menu_open = !this.app_menu_open;
+                this.catalog_open = false;
+                this.panel_menu = None;
+                cx.notify();
+            }));
         if self.app_menu_open {
             let about = menu_item("app-about", "About", cx, |this, _, cx| {
                 this.app_menu_open = false;
@@ -2673,22 +2592,37 @@ impl Render for GuiApp {
                         this.app_menu_open = false;
                         cx.notify();
                     }))
-                    .child(menu_item("app-settings", "Settings", cx, |this, window, cx| {
-                        this.app_menu_open = false;
-                        this.load_settings(cx);
-                        this.settings_open = true;
-                        this.settings_focus.focus(window, cx);
-                        cx.notify();
-                    }))
+                    .child(menu_item(
+                        "app-settings",
+                        "Settings",
+                        cx,
+                        |this, window, cx| {
+                            this.app_menu_open = false;
+                            this.load_settings(cx);
+                            this.settings_open = true;
+                            this.settings_focus.focus(window, cx);
+                            cx.notify();
+                        },
+                    ))
                     .child(about)
-                    .child(menu_item("app-close-window", "Close window", cx, |this, window, _| {
-                        this.app_menu_open = false;
-                        window.remove_window();
-                    }))
-                    .child(menu_item("app-quit", "Quit application", cx, |this, _, cx| {
-                        this.app_menu_open = false;
-                        this.send(Command::Shutdown, cx);
-                    })),
+                    .child(menu_item(
+                        "app-close-window",
+                        "Close window",
+                        cx,
+                        |this, window, _| {
+                            this.app_menu_open = false;
+                            window.remove_window();
+                        },
+                    ))
+                    .child(menu_item(
+                        "app-quit",
+                        "Quit application",
+                        cx,
+                        |this, _, cx| {
+                            this.app_menu_open = false;
+                            this.send(Command::Shutdown, cx);
+                        },
+                    )),
             );
         }
 
