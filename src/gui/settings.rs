@@ -841,10 +841,10 @@ impl GuiApp {
             .child(
                 icon_button(
                     "settings-repeat",
-                    if repeat == RepeatMode::One {
-                        "󰑘"
-                    } else {
-                        "󰑖"
+                    match repeat {
+                        RepeatMode::Off => "󰑗",
+                        RepeatMode::All => "󰑖",
+                        RepeatMode::One => "󰑘",
                     },
                     "Repeat",
                     cx,
@@ -881,7 +881,7 @@ impl GuiApp {
                 }),
             )
             .child(
-                icon_button("settings-tray", "▣", "System tray", cx, |this, _, cx| {
+                icon_button("settings-tray", "󱊖", "System tray", cx, |this, _, cx| {
                     this.settings.draft.tray_enabled = !this.settings.draft.tray_enabled;
                     cx.notify();
                 })
@@ -892,7 +892,7 @@ impl GuiApp {
             .child(
                 icon_button(
                     "settings-ffmpeg",
-                    "\u{f384}",
+                    "",
                     ffmpeg_hint(&self.state.system.ffmpeg_status),
                     cx,
                     |this, _, cx| {
@@ -1165,13 +1165,13 @@ impl GuiApp {
                     .child(settings.pair(Field::SpectrumBarHold, Field::SpectrumBarGravity))
                     .child(settings.pair(Field::SpectrumHold, Field::SpectrumGravity))
                     .child(row().flex_wrap()
-                        .child(visual_switch("spectrum-interpolate", "≈", "Interpolation", draft.spectrum_interpolate, cx,
+                        .child(visual_switch("spectrum-interpolate", "", "Interpolation", draft.spectrum_interpolate, cx,
                             |draft| draft.spectrum_interpolate = !draft.spectrum_interpolate))
-                        .child(visual_switch("spectrum-peaks", "∧", "Peaks", draft.spectrum_peaks, cx,
+                        .child(visual_switch("spectrum-peaks", "", "Peaks", draft.spectrum_peaks, cx,
                             |draft| draft.spectrum_peaks = !draft.spectrum_peaks))
-                        .child(visual_switch("spectrum-grid", "#", "Faint grid", draft.spectrum_grid, cx,
+                        .child(visual_switch("spectrum-grid", "󰋁", "Faint grid", draft.spectrum_grid, cx,
                             |draft| draft.spectrum_grid = !draft.spectrum_grid))
-                        .child(visual_switch("spectrum-labels", "T", "Labels", draft.spectrum_labels, cx,
+                        .child(visual_switch("spectrum-labels", "󰊄", "Labels", draft.spectrum_labels, cx,
                             |draft| draft.spectrum_labels = !draft.spectrum_labels)))
                     .child(caption("Auto uses bar width plus gap, up to 512 bars. Gravity accelerates falling levels; 0 snaps to the signal after hold, bypassing smoothing. Attacks stay immediate. Labels show four dB levels and the first/last frequencies."))
             }
@@ -1187,7 +1187,7 @@ impl GuiApp {
                         .flex_wrap()
                         .child(visual_switch(
                             "spectrogram-interpolate",
-                            "≈",
+                            "",
                             "Interpolation",
                             draft.spectrogram_interpolate,
                             cx,
@@ -1195,7 +1195,7 @@ impl GuiApp {
                         ))
                         .child(visual_switch(
                             "spectrogram-labels",
-                            "T",
+                            "󰊄",
                             "Labels",
                             draft.spectrogram_labels,
                             cx,
@@ -1263,7 +1263,7 @@ impl GuiApp {
                 .child(settings.field(Field::PeakGamma))
                 .child(settings.field(Field::CursorColor))
                 .child(settings.field(Field::Glow))
-                .child(visual_switch("waveform-labels", "T", "Labels", draft.waveform_labels, cx,
+                .child(visual_switch("waveform-labels", "󰊄", "Labels", draft.waveform_labels, cx,
                     |draft| draft.waveform_labels = !draft.waveform_labels))
                 .child(caption("RMS gain raises the filled body. Peak gain and gamma reduce the peak envelope's height and vertical spread. Apply redraws the waveform without decoding the track again.")),
         }
