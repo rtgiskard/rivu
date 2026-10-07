@@ -1,7 +1,7 @@
 use super::{
-    ACCENT, BORDER, Dragging, Field, GuiApp, HIGHLIGHT, HistorySort, ListFocus, MUTED, Measured, TEXT, UI_INSET,
-    button, column, empty_state, format_time, icon_button, library::LibraryDrag, list_viewport,
-    panel_header, panel_surface, panel_toolbar, row, row_text, track_row,
+    ACCENT, BORDER, Dragging, Field, GuiApp, HIGHLIGHT, HistorySort, ListFocus, MUTED, Measured,
+    TEXT, UI_INSET, button, column, empty_state, format_time, icon_button, library::LibraryDrag,
+    list_viewport, panel_header, panel_surface, panel_toolbar, row, row_text, track_row,
 };
 pub(super) use super::{TRACK_HEIGHT, caption, list_row};
 use crate::{
@@ -9,7 +9,9 @@ use crate::{
     model::{Command, PlaybackStatus, RepeatMode},
 };
 use chrono::{DateTime, Local};
-use gpui::{AnyElement, Context, Div, SharedString, Window, div, prelude::*, px, rgb, uniform_list};
+use gpui::{
+    AnyElement, Context, Div, SharedString, Window, div, prelude::*, px, rgb, uniform_list,
+};
 
 fn metadata_pair(label: &'static str, value: impl Into<SharedString>) -> Div {
     row()
@@ -18,7 +20,14 @@ fn metadata_pair(label: &'static str, value: impl Into<SharedString>) -> Div {
         .flex_1()
         .min_w_0()
         .child(caption(label).w(px(92.)).flex_shrink_0())
-        .child(div().flex_1().min_w_0().text_sm().truncate().child(value.into()))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_sm()
+                .truncate()
+                .child(value.into()),
+        )
 }
 
 fn metadata_row(first: Div, second: Div) -> Div {
@@ -918,7 +927,9 @@ impl GuiApp {
                     selection_count,
                 ),
             ))
-            .when(!self.state.queue.entries.is_empty(), |panel| panel.child(tools))
+            .when(!self.state.queue.entries.is_empty(), |panel| {
+                panel.child(tools)
+            })
             .when(self.state.queue.entries.is_empty(), |panel| {
                 panel.child(empty_state(
                     "Your queue is empty. Enqueue tracks from Library.",
@@ -1417,7 +1428,11 @@ impl GuiApp {
                     row()
                         .justify_between()
                         .items_center()
-                        .child(caption(format!("Track #{id}")).text_lg().text_color(rgb(TEXT)))
+                        .child(
+                            caption(format!("Track #{id}"))
+                                .text_lg()
+                                .text_color(rgb(TEXT)),
+                        )
                         .child(icon_button(
                             ("metadata-favorite", panel_id),
                             if favorite { "󰓎" } else { "󰓐" },
@@ -1442,11 +1457,14 @@ impl GuiApp {
                     "File",
                     metadata_row(
                         metadata_pair("File path", file_path),
-                        metadata_pair("Availability", if track.missing {
-                            "Missing"
-                        } else {
-                            "Available"
-                        }),
+                        metadata_pair(
+                            "Availability",
+                            if track.missing {
+                                "Missing"
+                            } else {
+                                "Available"
+                            },
+                        ),
                     ),
                 ))
                 .child(metadata_group(
@@ -1480,7 +1498,10 @@ impl GuiApp {
                                     track.channels.to_string()
                                 },
                             ),
-                            metadata_pair("Duration", track.duration.map_or("—".into(), format_time)),
+                            metadata_pair(
+                                "Duration",
+                                track.duration.map_or("—".into(), format_time),
+                            ),
                         ))
                         .child(metadata_row(
                             metadata_pair(
@@ -1499,11 +1520,15 @@ impl GuiApp {
                         .child(metadata_row(
                             metadata_pair(
                                 "Disc",
-                                track.disc_number.map_or("—".into(), |value| value.to_string()),
+                                track
+                                    .disc_number
+                                    .map_or("—".into(), |value| value.to_string()),
                             ),
                             metadata_pair(
                                 "Track",
-                                track.track_number.map_or("—".into(), |value| value.to_string()),
+                                track
+                                    .track_number
+                                    .map_or("—".into(), |value| value.to_string()),
                             ),
                         ))
                         .child(metadata_row(
@@ -1589,7 +1614,11 @@ impl GuiApp {
     ) -> impl IntoElement {
         let active = self.history_sort == sort;
         let marker = if active {
-            if self.history_sort_desc { " ↓" } else { " ↑" }
+            if self.history_sort_desc {
+                " ↓"
+            } else {
+                " ↑"
+            }
         } else {
             ""
         };
@@ -1598,12 +1627,9 @@ impl GuiApp {
             HistorySort::Title => ("history-sort-title", panel_id),
             HistorySort::Plays => ("history-sort-plays", panel_id),
         };
-        let mut control = button(
-            id,
-            format!("{label}{marker}"),
-            cx,
-            move |this, _, cx| this.set_history_sort(sort, cx),
-        );
+        let mut control = button(id, format!("{label}{marker}"), cx, move |this, _, cx| {
+            this.set_history_sort(sort, cx)
+        });
         if let Some(width) = width {
             control = control.w(width).flex_shrink_0();
         } else {
@@ -1682,17 +1708,10 @@ impl GuiApp {
                                         this.selected.contains(&id),
                                     )
                                     .child(
-                                        caption((index + 1).to_string())
-                                            .w(px(32.))
-                                            .flex_shrink_0(),
+                                        caption((index + 1).to_string()).w(px(32.)).flex_shrink_0(),
                                     )
                                     .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .text_sm()
-                                            .truncate()
-                                            .child(title),
+                                        div().flex_1().min_w_0().text_sm().truncate().child(title),
                                     )
                                     .child(
                                         caption(item.play_count.to_string())

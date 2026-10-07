@@ -81,7 +81,6 @@ enum Field {
     SpectrogramInterpolationPoints,
     CursorColor,
     Glow,
-
 }
 impl Field {
     fn label(self) -> &'static str {
@@ -122,7 +121,6 @@ impl Field {
             Self::SpectrogramInterpolationPoints => "Interpolated frequency points (64–4096)",
             Self::CursorColor => "Waterline color (#RRGGBB)",
             Self::Glow => "Glow strength (0–2; 0 = off)",
-
         }
     }
 }
@@ -1301,16 +1299,16 @@ impl GuiApp {
             (_, VisualPage::Common) => "settings-common-scroll",
             (_, VisualPage::Spectrum) => "settings-spectrum-scroll",
             (_, VisualPage::Spectrogram) => "settings-spectrogram-scroll",
-            (_, VisualPage::RadialSpectrum) => "settings-radial-spectrum-scroll",
             (_, VisualPage::Waveform) => "settings-waveform-scroll",
+            (_, VisualPage::RadialSpectrum) => "settings-radial-spectrum-scroll",
         };
         let content = match self.settings.page {
             SettingsPage::General => self.general_settings(cx),
+            SettingsPage::About => self.about_settings(cx),
             SettingsPage::Visualizations => {
                 panel = panel.child(self.visual_settings_tabs(cx));
                 self.visual_settings(cx)
             }
-            SettingsPage::About => self.about_settings(cx),
         };
         panel = panel.child(
             div()
