@@ -68,15 +68,26 @@ impl Server {
         let worker = thread::Builder::new().name("rivu-ipc".into()).spawn(move || {
             let runtime = match Builder::new_current_thread().enable_io().enable_time().build() {
                 Ok(runtime) => runtime,
-                Err(error) => { let _ = ready_tx.send(Err(anyhow::Error::from(error))); return; }
+                Err(error) => {
+                    tracing::error!(error = %error, "ipc_runtime_start_failed");
+                    let _ = ready_tx.send(Err(anyhow::Error::from(error)));
+                    return;
+                }
             };
             let listener = { let _guard = runtime.enter(); UnixListener::bind(&worker_path) };
             let listener = match listener {
                 Ok(listener) => listener,
-                Err(error) => { let _ = ready_tx.send(Err(anyhow::Error::from(error))); return; }
+                Err(error) => {
+                    tracing::error!(path = %worker_path.display(), error = %error, "ipc_socket_bind_failed");
+                    let _ = ready_tx.send(Err(anyhow::Error::from(error)));
+                    return;
+                }
             };
             if let Err(error) = fs::set_permissions(&worker_path, fs::Permissions::from_mode(0o600)) {
-                let _ = fs::remove_file(&worker_path);
+                tracing::error!(path = %worker_path.display(), error = %error, "ipc_socket_permissions_failed");
+                if let Err(cleanup_error) = fs::remove_file(&worker_path) {
+                    tracing::warn!(path = %worker_path.display(), error = %cleanup_error, "ipc_socket_cleanup_failed");
+                }
                 let _ = ready_tx.send(Err(anyhow::Error::from(error)));
                 return;
             }
@@ -96,11 +107,15 @@ impl Server {
             let bridge = match bridge {
                 Ok(bridge) => bridge,
                 Err(error) => {
-                    let _ = fs::remove_file(&worker_path);
+                    tracing::error!(path = %worker_path.display(), error = %error, "ipc_revision_bridge_start_failed");
+                    if let Err(cleanup_error) = fs::remove_file(&worker_path) {
+                        tracing::warn!(path = %worker_path.display(), error = %cleanup_error, "ipc_socket_cleanup_failed");
+                    }
                     let _ = ready_tx.send(Err(anyhow::anyhow!("starting IPC revision bridge: {error}")));
                     return;
                 }
             };
+            tracing::info!(path = %worker_path.display(), "ipc_server_started");
             let _ = ready_tx.send(Ok(()));
             runtime.block_on(run_server(listener, handle, revision_rx, shutdown_rx));
             let _ = bridge.join();
@@ -113,11 +128,13 @@ impl Server {
                 worker: Some(worker),
             }),
             Ok(Err(error)) => {
+                tracing::error!(path = %path.display(), error = %error, "ipc_server_start_failed");
                 let _ = worker.join();
                 let _ = fs::remove_file(&path);
                 Err(error)
             }
             Err(error) => {
+                tracing::error!(path = %path.display(), error = %error, "ipc_server_start_failed");
                 let _ = worker.join();
                 let _ = fs::remove_file(&path);
                 Err(anyhow::Error::from(error))
@@ -128,6 +145,7 @@ impl Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
+        tracing::info!(path = %self.path.display(), "ipc_server_stopping");
         let _ = self.shutdown.send(true);
         let _ = self.bridge_stop.send(());
         if let Some(worker) = self.worker.take() {
@@ -228,7 +246,10 @@ async fn serve_connection(
                 frame = timeout(HELLO_TIMEOUT, read_frame(&mut stream, MAX_REQUEST, &mut pending)) => {
                     match frame {
                         Ok(frame) => frame?,
-                        Err(_) => return Ok(()),
+                        Err(_) => {
+                            tracing::warn!("ipc_hello_timeout");
+                            return Ok(());
+                        }
                     }
                 }
                 changed = shutdown.changed() => {
@@ -240,6 +261,7 @@ async fn serve_connection(
         let (version, request) = match decode_request_frame(&bytes) {
             Ok(frame) => frame,
             Err(error) => {
+                tracing::warn!(error = %error, "ipc_invalid_request");
                 write_error_frame(
                     &mut stream,
                     &mut write_buffer,
@@ -250,6 +272,11 @@ async fn serve_connection(
             }
         };
         if version != PROTOCOL_VERSION {
+            tracing::warn!(
+                version,
+                expected = PROTOCOL_VERSION,
+                "ipc_unsupported_protocol_version"
+            );
             write_error_frame(
                 &mut stream,
                 &mut write_buffer,
@@ -259,6 +286,7 @@ async fn serve_connection(
             return Ok(());
         }
         if !session.is_bound() && !matches!(request, WireRequest::Hello(_)) {
+            tracing::warn!("ipc_hello_required");
             write_error_frame(
                 &mut stream,
                 &mut write_buffer,
@@ -270,6 +298,7 @@ async fn serve_connection(
         match request {
             WireRequest::Hello(sections) => {
                 if session.is_bound() {
+                    tracing::warn!("ipc_duplicate_hello");
                     write_error_frame(
                         &mut stream,
                         &mut write_buffer,
@@ -293,6 +322,7 @@ async fn serve_connection(
                 let query = match Query::try_from(query) {
                     Ok(query) => query,
                     Err(error) => {
+                        tracing::warn!(error = %error, "ipc_invalid_query");
                         write_error_frame(
                             &mut stream,
                             &mut write_buffer,
@@ -305,6 +335,7 @@ async fn serve_connection(
                 let response = match run_query(&handle, query).await {
                     Ok(response) => WireResponse::Query(response),
                     Err(error) => {
+                        tracing::warn!(error = %error, "ipc_query_failed");
                         write_error_frame(
                             &mut stream,
                             &mut write_buffer,
@@ -320,6 +351,7 @@ async fn serve_connection(
                 let command = match Command::try_from(command) {
                     Ok(command) => command,
                     Err(error) => {
+                        tracing::warn!(error = %error, "ipc_invalid_command");
                         write_error_frame(
                             &mut stream,
                             &mut write_buffer,
@@ -332,6 +364,7 @@ async fn serve_connection(
                 let response = match run_command(&handle, command).await {
                     Ok(response) => WireResponse::Ack(response),
                     Err(error) => {
+                        tracing::warn!(error = %error, "ipc_command_failed");
                         write_error_frame(
                             &mut stream,
                             &mut write_buffer,
@@ -382,7 +415,13 @@ async fn run_server(
     loop {
         tokio::select! {
             accepted = listener.accept() => {
-                let Ok((mut stream, _)) = accepted else { continue; };
+                let (mut stream, _) = match accepted {
+                    Ok(connection) => connection,
+                    Err(error) => {
+                        tracing::warn!(error = %error, "ipc_accept_failed");
+                        continue;
+                    }
+                };
                 clients.retain(|task: &tokio::task::JoinHandle<Result<()>>| !task.is_finished());
                 if clients.len() < MAX_CLIENTS {
                     clients.push(tokio::spawn(serve_connection(
@@ -393,8 +432,11 @@ async fn run_server(
                         shutdown.clone(),
                     )));
                 } else {
+                    tracing::warn!(clients = clients.len(), max_clients = MAX_CLIENTS, "ipc_client_limit_reached");
                     let mut buffer = Vec::new();
-                    let _ = write_error_frame(&mut stream, &mut buffer, "IPC server is busy").await;
+                    if let Err(error) = write_error_frame(&mut stream, &mut buffer, "IPC server is busy").await {
+                        tracing::debug!(error = %error, "ipc_busy_response_failed");
+                    }
                 }
             }
             changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() { break; } }
