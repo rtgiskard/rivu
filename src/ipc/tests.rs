@@ -219,6 +219,15 @@ fn unknown_wire_type_is_rejected_before_body_decode() {
 }
 
 #[test]
+fn response_decode_rejects_declared_body_over_limit() {
+    let mut encoded = vec![PROTOCOL_VERSION, ResponseType::Error as u8];
+    encoded.extend(
+        bincode::serde::encode_to_vec(MAX_RESPONSE as u64, bincode::config::standard()).unwrap(),
+    );
+    assert!(decode_response_frame(&encoded).is_err());
+}
+
+#[test]
 fn cancellable_query_stops_before_connect_when_already_cancelled() {
     let directory = tempfile::tempdir().unwrap();
     let socket = directory.path().join("missing.sock");

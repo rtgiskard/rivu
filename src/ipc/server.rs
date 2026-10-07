@@ -76,7 +76,9 @@ impl Server {
                 Err(error) => { let _ = ready_tx.send(Err(anyhow::Error::from(error))); return; }
             };
             if let Err(error) = fs::set_permissions(&worker_path, fs::Permissions::from_mode(0o600)) {
-                let _ = ready_tx.send(Err(anyhow::Error::from(error))); return;
+                let _ = fs::remove_file(&worker_path);
+                let _ = ready_tx.send(Err(anyhow::Error::from(error)));
+                return;
             }
             let (revision_tx, revision_rx) = watch::channel(handle.state_revisions());
             let updates = handle.subscribe();
@@ -91,8 +93,13 @@ impl Server {
                     }
                 }
             });
-            let Ok(bridge) = bridge else {
-                let _ = ready_tx.send(Err(anyhow::anyhow!("starting IPC revision bridge"))); return;
+            let bridge = match bridge {
+                Ok(bridge) => bridge,
+                Err(error) => {
+                    let _ = fs::remove_file(&worker_path);
+                    let _ = ready_tx.send(Err(anyhow::anyhow!("starting IPC revision bridge: {error}")));
+                    return;
+                }
             };
             let _ = ready_tx.send(Ok(()));
             runtime.block_on(run_server(listener, handle, revision_rx, shutdown_rx));
@@ -107,10 +114,12 @@ impl Server {
             }),
             Ok(Err(error)) => {
                 let _ = worker.join();
+                let _ = fs::remove_file(&path);
                 Err(error)
             }
             Err(error) => {
                 let _ = worker.join();
+                let _ = fs::remove_file(&path);
                 Err(anyhow::Error::from(error))
             }
         }
@@ -293,7 +302,18 @@ async fn serve_connection(
                         continue;
                     }
                 };
-                let response = WireResponse::Query(run_query(&handle, query).await?);
+                let response = match run_query(&handle, query).await {
+                    Ok(response) => WireResponse::Query(response),
+                    Err(error) => {
+                        write_error_frame(
+                            &mut stream,
+                            &mut write_buffer,
+                            format!("IPC query failed: {error:#}"),
+                        )
+                        .await?;
+                        continue;
+                    }
+                };
                 write_frame_buffered(&mut stream, &response, &mut write_buffer).await?;
             }
             WireRequest::Command(command) => {
@@ -309,7 +329,18 @@ async fn serve_connection(
                         continue;
                     }
                 };
-                let response = WireResponse::Ack(run_command(&handle, command).await?);
+                let response = match run_command(&handle, command).await {
+                    Ok(response) => WireResponse::Ack(response),
+                    Err(error) => {
+                        write_error_frame(
+                            &mut stream,
+                            &mut write_buffer,
+                            format!("IPC command failed: {error:#}"),
+                        )
+                        .await?;
+                        continue;
+                    }
+                };
                 write_frame_buffered(&mut stream, &response, &mut write_buffer).await?;
             }
             WireRequest::Watch(expected) => {
@@ -351,9 +382,20 @@ async fn run_server(
     loop {
         tokio::select! {
             accepted = listener.accept() => {
-                let Ok((stream, _)) = accepted else { continue; };
+                let Ok((mut stream, _)) = accepted else { continue; };
                 clients.retain(|task: &tokio::task::JoinHandle<Result<()>>| !task.is_finished());
-                if clients.len() < MAX_CLIENTS { clients.push(tokio::spawn(serve_connection(stream, handle.clone(), instance_id, revisions.clone(), shutdown.clone()))); }
+                if clients.len() < MAX_CLIENTS {
+                    clients.push(tokio::spawn(serve_connection(
+                        stream,
+                        handle.clone(),
+                        instance_id,
+                        revisions.clone(),
+                        shutdown.clone(),
+                    )));
+                } else {
+                    let mut buffer = Vec::new();
+                    let _ = write_error_frame(&mut stream, &mut buffer, "IPC server is busy").await;
+                }
             }
             changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() { break; } }
         }

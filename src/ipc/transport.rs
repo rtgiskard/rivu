@@ -69,32 +69,32 @@ pub(super) fn decode_response_frame(bytes: &[u8]) -> Result<(u8, WireResponse)> 
     let response = match message_type {
         ResponseType::Hello => WireResponse::Hello(decode_body(
             body,
-            config::standard(),
+            response_config(),
             "Decoding IPC Hello response",
         )?),
         ResponseType::State => WireResponse::State(decode_body(
             body,
-            config::standard(),
+            response_config(),
             "Decoding IPC state response",
         )?),
         ResponseType::Query => WireResponse::Query(decode_body(
             body,
-            config::standard(),
+            response_config(),
             "Decoding IPC query response",
         )?),
         ResponseType::Ack => WireResponse::Ack(decode_body(
             body,
-            config::standard(),
+            response_config(),
             "Decoding IPC acknowledgement",
         )?),
         ResponseType::Watch => WireResponse::Watch(decode_body(
             body,
-            config::standard(),
+            response_config(),
             "Decoding IPC watch response",
         )?),
         ResponseType::Error => WireResponse::Error(decode_body(
             body,
-            config::standard(),
+            response_config(),
             "Decoding IPC error response",
         )?),
     };
@@ -335,6 +335,10 @@ pub(super) async fn read_response_frame<S: AsyncRead + Unpin>(
 
 pub(super) fn request_config() -> impl bincode::config::Config {
     config::standard().with_limit::<MAX_REQUEST>()
+}
+
+pub(super) fn response_config() -> impl bincode::config::Config {
+    config::standard().with_limit::<MAX_RESPONSE>()
 }
 
 pub(super) fn error_frame(error: impl Into<String>) -> WireResponse {
