@@ -94,6 +94,9 @@ visible and a Spectrum, Spectrogram, or Radial Spectrum panel is visible.
 shared by Spectrum, Spectrogram, and Waveform. Defaults and accepted ranges are
 in link:../src/config.rs[`Config`].
 
+Spectrum and Waveform use GPU gradients assembled from the selected palette's
+intermediate color stops. Spectrogram continues to use the full palette.
+
 === Waveform
 
 Waveform shows a whole-track timeline, relative to the subtrack for CUE. Left is
@@ -102,6 +105,15 @@ line is peak amplitude. Unknown intervals remain blank. Playback builds the
 preview progressively; `Load full waveform now` requests the complete preview.
 Click or drag to seek the current track; a non-playing selection preview does
 not seek playback.
+
+Each channel uses an independent center-to-edge gradient assembled from the
+palette stops. Stop positions, including the Deadbeef low-end floor mapping,
+map to the corresponding center-to-edge height; RMS and Peak retain separate
+high-end palette limits. Both amplitudes use the same monotonic height mapping,
+`clamp(amplitude * scale, 0, 1)^0.86`, gently lifting low levels. The RMS fill
+retains a minimum 1px height for known data, including silence; the Peak line
+uses the mapped level directly. Unknown intervals remain blank. Adjacent stop
+intervals share their boundary color.
 
 `waveform_labels`, `waveform_cursor_color`, and `waveform_glow` control labels,
 cursor, and glow. Preview and interaction:
@@ -114,6 +126,17 @@ Spectrum shows current frequency energy. `spectrum_style` accepts `bars`,
 `outline`, `led`, `line`, or `solid`; the remaining `spectrum_*` settings control
 FFT resolution/window, band density, spacing, peak hold, release motion, and labels.
 Motion freezes while paused.
+
+`spectrum_interpolate` controls frequency-slot data interpolation and whether
+`solid` uses a continuous or stepped boundary. `line` always connects valid
+body points continuously, regardless of this setting; empty body slots are
+skipped rather than drawn at the floor. In `line` style, the body is a
+continuous 2px curve and Peak is a discrete 1px-high filled marker spanning
+the visible frequency slot. Other styles retain 1px-high filled Peak markers;
+`solid` uses 1px-wide markers. Body and Peak use separate Paths, each submitted
+through the same palette-stop gradient sequence. Each palette interval is
+rendered with its own masked paint so authored stop positions remain visible;
+this repeats scene submissions for each interval.
 
 Spectrogram shows recent frequency history; `spectrogram_*` settings control its
 history duration, color range, labels, interpolation, and the `0.4`–`1.4`

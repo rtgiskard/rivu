@@ -28,9 +28,6 @@ use crate::{
 
 const HISTORY_GAP_RESET: Duration = Duration::from_secs(1);
 const MAX_SPECTRUM_BARS: usize = 2000;
-const PALETTE_GRADIENT_MIN_SEGMENTS: usize = 8;
-const PALETTE_GRADIENT_MAX_SEGMENTS: usize = 16;
-const PALETTE_GRADIENT_MAX_SPAN_PIXELS: f32 = 16.0;
 const TOKYO_NIGHT_STOPS: &[(f32, [u8; 3])] = &[
     (0.0, [65, 72, 110]),
     (0.2, [187, 154, 247]),
@@ -84,13 +81,26 @@ impl PaletteLut {
         stop_color(self.lookup_rgb(fraction))
     }
 
-    pub(super) fn lookup_without_floor(&self, fraction: f32) -> u32 {
+    pub(super) fn lookup_mapped(&self, fraction: f32) -> u32 {
         let fraction = fraction.clamp(0.0, 1.0);
         let mapped = match self.palette {
             VisualizationPalette::Deadbeef => 0.06 + fraction * 0.94,
             VisualizationPalette::TokyoNight => fraction,
         };
         self.lookup_raw(mapped)
+    }
+    pub(super) fn visible_stops(&self) -> &'static [(f32, [u8; 3])] {
+        match self.palette {
+            VisualizationPalette::Deadbeef => &DEADBEEF_STOPS[1..],
+            VisualizationPalette::TokyoNight => TOKYO_NIGHT_STOPS,
+        }
+    }
+
+    pub(super) fn stop_position(&self, raw: f32) -> f32 {
+        match self.palette {
+            VisualizationPalette::Deadbeef => ((raw - 0.06) / 0.94).clamp(0.0, 1.0),
+            VisualizationPalette::TokyoNight => raw,
+        }
     }
 }
 
@@ -105,11 +115,6 @@ pub(super) fn active_palette_lut(palette: VisualizationPalette) -> Rc<PaletteLut
         }
         Rc::clone(active.as_ref().expect("active palette LUT is initialized"))
     })
-}
-
-pub(super) fn palette_gradient_segments(height: f32) -> usize {
-    ((height / PALETTE_GRADIENT_MAX_SPAN_PIXELS).ceil() as usize)
-        .clamp(PALETTE_GRADIENT_MIN_SEGMENTS, PALETTE_GRADIENT_MAX_SEGMENTS)
 }
 
 #[derive(Default)]
@@ -315,8 +320,7 @@ impl Visuals {
             || data.spectrum_window != config.spectrum_window
             || data.spectrogram_interpolate != config.spectrogram_interpolate
             || data.spectrogram_interpolation_points != config.spectrogram_interpolation_points
-            || data.spectrogram_sampling_points_scale
-                != config.spectrogram_sampling_points_scale
+            || data.spectrogram_sampling_points_scale != config.spectrogram_sampling_points_scale
             || data.spectrogram_history_seconds != config.spectrogram_history_seconds
             || data.analysis_fps != config.analysis_fps
             || data.configured_history_columns != configured_history_columns;
@@ -334,8 +338,7 @@ impl Visuals {
             || data.spectrogram_db_range != config.spectrogram_db_range
             || data.spectrogram_interpolate != config.spectrogram_interpolate
             || data.spectrogram_interpolation_points != config.spectrogram_interpolation_points
-            || data.spectrogram_sampling_points_scale
-                != config.spectrogram_sampling_points_scale;
+            || data.spectrogram_sampling_points_scale != config.spectrogram_sampling_points_scale;
         data.palette_lut = if palette_changed {
             active_palette_lut(config.visual_palette)
         } else {
@@ -865,7 +868,6 @@ impl VisualData {
         window.with_content_mask(
             Some(gpui::ContentMask { bounds: plot }),
             |window| -> Result<(), String> {
-                // Paint markers after the continuous fill so it cannot cover them.
                 self.spectrum_points.clear();
                 let style = self.spectrum_style;
                 let bottom = plot.bottom();
@@ -875,11 +877,17 @@ impl VisualData {
                     // Reserve once before the point loop; clear retains capacity for later frames.
                     self.spectrum_points.reserve(bars);
                 }
-                let mut shape_path = PathBuilder::fill();
-                let mut led_path = PathBuilder::fill();
+                // Fill contours share clockwise winding. NonZero keeps overlapping
+                // body regions filled instead of cutting even-odd holes.
+                let mut shape_path = if style == SpectrumStyle::Line {
+                    PathBuilder::stroke(px(2.0))
+                } else {
+                    PathBuilder::fill().with_style(gpui::PathStyle::Fill(
+                        gpui::FillOptions::default().with_fill_rule(gpui::FillRule::NonZero),
+                    ))
+                };
                 let mut peak_path = PathBuilder::fill();
                 let mut any_visible = false;
-                let mut any_led = false;
                 let mut any_peak = false;
                 for bar in 0..bars {
                     let left_t = bar as f32 / bars as f32;
@@ -903,6 +911,9 @@ impl VisualData {
                         }
                     }
                     let slot_width = plot.size.width * (right_t - left_t);
+                    let slot_gap = px(self.spectrum_gap)
+                        .max(px(0.0))
+                        .min((slot_width - px(1.0)).max(px(0.0)));
                     let level_fraction = db_height(level, self.top_db, self.spectrum_db_range);
                     let bar_height =
                         (plot.size.height * level_fraction).clamp(px(0.0), plot.size.height);
@@ -911,17 +922,14 @@ impl VisualData {
                         SpectrumStyle::Line | SpectrumStyle::Solid => {
                             (plot.left() + plot.size.width * left_t, slot_width)
                         }
-                        _ => {
-                            let gap = px(self.spectrum_gap)
-                                .max(px(0.0))
-                                .min((slot_width - px(1.0)).max(px(0.0)));
-                            (
-                                plot.left() + plot.size.width * left_t + gap * 0.5,
-                                (slot_width - gap).max(px(1.0)),
-                            )
-                        }
+                        _ => (
+                            plot.left() + plot.size.width * left_t + slot_gap * 0.5,
+                            (slot_width - slot_gap).max(px(1.0)),
+                        ),
                     };
-                    if continuous || bar_height > px(0.0) {
+                    if (style == SpectrumStyle::Line && level.is_finite())
+                        || (style != SpectrumStyle::Line && (continuous || bar_height > px(0.0)))
+                    {
                         match style {
                             SpectrumStyle::Bars => {
                                 let height = bar_height.max(px(1.0)).min(plot.size.height);
@@ -968,13 +976,12 @@ impl VisualData {
                                     let segment_top =
                                         (segment_bottom - segment_height).max(bottom - bar_height);
                                     append_rect(
-                                        &mut led_path,
+                                        &mut shape_path,
                                         Bounds::new(
                                             point(x, segment_top),
                                             size(width, segment_bottom - segment_top),
                                         ),
                                     );
-                                    any_led = true;
                                     segment_bottom = segment_top - segment_gap;
                                 }
                             }
@@ -985,47 +992,43 @@ impl VisualData {
                             }
                         }
                     }
-                    if self.spectrum_peaks && peak > self.top_db - self.spectrum_db_range {
+                    if self.spectrum_peaks {
                         let peak_fraction = db_height(peak, self.top_db, self.spectrum_db_range);
-                        let peak_height =
-                            (plot.size.height * peak_fraction).clamp(px(0.0), plot.size.height);
-                        let peak_y = (bottom - peak_height).clamp(top, bottom - px(1.0));
-                        let peak_width =
-                            if matches!(style, SpectrumStyle::Line | SpectrumStyle::Solid) {
-                                slot_width.min(px(8.0)).max(px(1.0))
+                        let peak_visible = peak_fraction > 0.0;
+                        let peak_height = plot.size.height * peak_fraction;
+                        if peak_visible {
+                            let peak_y = (bottom - peak_height).clamp(top, bottom - px(1.0));
+                            let peak_width = if style == SpectrumStyle::Solid {
+                                px(1.0)
+                            } else if style == SpectrumStyle::Line {
+                                (slot_width - slot_gap).max(px(1.0))
                             } else {
                                 width
                             };
-                        let peak_x = (x + (width - peak_width) * 0.5)
-                            .clamp(plot.left(), (plot.right() - peak_width).max(plot.left()));
-                        append_rect(
-                            &mut peak_path,
-                            Bounds::new(point(peak_x, peak_y), size(peak_width, px(1.0))),
-                        );
-                        any_peak = true;
+                            let peak_x = (x + (width - peak_width) * 0.5)
+                                .clamp(plot.left(), (plot.right() - peak_width).max(plot.left()));
+                            append_rect(
+                                &mut peak_path,
+                                Bounds::new(point(peak_x, peak_y), size(peak_width, px(1.0))),
+                            );
+                        }
+                        any_peak |= peak_visible;
                     }
                 }
-                if matches!(style, SpectrumStyle::Bars | SpectrumStyle::Outline) {
-                    let path = shape_path
-                        .build()
-                        .map_err(|error| format!("Cannot tessellate spectrum bars: {error}"))?;
-                    paint_spectrum_path(path, plot, window, self.palette_lut.as_ref());
-                }
-                if style == SpectrumStyle::Led && any_led {
-                    let path = led_path
-                        .build()
-                        .map_err(|error| format!("Cannot tessellate spectrum LED bars: {error}"))?;
-                    paint_spectrum_path(path, plot, window, self.palette_lut.as_ref());
-                }
                 if continuous && any_visible {
-                    paint_spectrum_shape(
+                    append_spectrum_shape(
+                        &mut shape_path,
                         &self.spectrum_points,
                         plot,
-                        style,
-                        self.spectrum_interpolate || style == SpectrumStyle::Solid,
-                        self.palette_lut.as_ref(),
-                        window,
-                    )?;
+                        style == SpectrumStyle::Solid,
+                        style == SpectrumStyle::Line || self.spectrum_interpolate,
+                    );
+                }
+                if any_visible {
+                    let path = shape_path
+                        .build()
+                        .map_err(|error| format!("Cannot tessellate spectrum: {error}"))?;
+                    paint_spectrum_path(path, plot, window, self.palette_lut.as_ref());
                 }
                 if any_peak {
                     let path = peak_path
@@ -1279,25 +1282,17 @@ fn axis_label_margin(show_labels: bool, labels: &[SharedString]) -> f32 {
     (max_chars * 7.0 + 8.0).max(32.0)
 }
 
-/// GPUI supports two gradient stops per path. Use the path's actual vertical
-/// plot span to map those endpoints to the shared global height coordinates.
-fn paint_spectrum_shape(
+/// Append the continuous body outline without connecting separate Peak markers.
+fn append_spectrum_shape(
+    builder: &mut PathBuilder,
     points: &[Point<Pixels>],
     plot: Bounds<Pixels>,
-    style: SpectrumStyle,
+    solid: bool,
     interpolate: bool,
-    palette: &PaletteLut,
-    window: &mut Window,
-) -> Result<(), String> {
+) {
     if points.is_empty() {
-        return Ok(());
+        return;
     }
-    let solid = style == SpectrumStyle::Solid;
-    let mut builder = if solid {
-        PathBuilder::fill()
-    } else {
-        PathBuilder::stroke(px(2.0))
-    };
     if solid {
         builder.move_to(point(plot.left(), plot.bottom()));
         builder.line_to(point(
@@ -1333,11 +1328,6 @@ fn paint_spectrum_shape(
         builder.line_to(point(plot.right(), plot.bottom()));
         builder.close();
     }
-    let path = builder
-        .build()
-        .map_err(|error| format!("Cannot tessellate spectrum shape: {error}"))?;
-    paint_spectrum_path(path, plot, window, palette);
-    Ok(())
 }
 
 fn append_rect(path: &mut PathBuilder, bounds: Bounds<Pixels>) {
@@ -1354,36 +1344,34 @@ fn paint_spectrum_path(
     window: &mut Window,
     palette: &PaletteLut,
 ) {
-    // GPUI resolves gradient coordinates from Path::bounds; keep every segment global.
     path.bounds = plot;
-    let mut path = Some(path);
-    let segments = palette_gradient_segments(plot.size.height / px(1.0));
-    for segment in 0..segments {
-        let low = segment as f32 / segments as f32;
-        let high = (segment + 1) as f32 / segments as f32;
-        let top = plot.bottom() - plot.size.height * high;
-        let bottom = plot.bottom() - plot.size.height * low;
+    let stops = palette.visible_stops();
+    let mut visible = Some(path);
+    for (index, pair) in stops.windows(2).enumerate() {
+        let start = palette.stop_position(pair[0].0);
+        let end = palette.stop_position(pair[1].0);
         let mask = Bounds::new(
-            point(plot.left(), top),
-            size(plot.size.width, (bottom - top).max(px(1.0))),
+            point(plot.left(), plot.bottom() - plot.size.height * end),
+            size(plot.size.width, plot.size.height * (end - start)),
         );
-        // Linear spans approximate the spline and share endpoint colors.
-        // Their slopes are not continuous; masks remain a rendering compromise.
         let background = linear_gradient(
             0.0,
-            linear_color_stop(rgb(palette.lookup_without_floor(low)), 1.0 - high),
-            linear_color_stop(rgb(palette.lookup_without_floor(high)), 1.0 - low),
+            linear_color_stop(rgb(stop_color(pair[0].1)), 0.0),
+            linear_color_stop(rgb(stop_color(pair[1].1)), 1.0),
         );
-        let segment = if segment + 1 == segments {
-            path.take()
-                .expect("last Spectrum gradient segment owns the path")
+        let mut segment_path = if index + 2 == stops.len() {
+            visible
+                .take()
+                .expect("last spectrum gradient owns the path")
         } else {
-            path.as_ref()
-                .expect("Spectrum gradient path is retained")
+            visible
+                .as_ref()
+                .expect("spectrum gradient path is retained")
                 .clone()
         };
+        segment_path.bounds = mask;
         window.with_content_mask(Some(gpui::ContentMask { bounds: mask }), |window| {
-            window.paint_path(segment, background);
+            window.paint_path(segment_path, background);
         });
     }
 }
@@ -1551,9 +1539,9 @@ fn frequency_label(frequency: f32) -> SharedString {
     }
 }
 
-/// Cubic Hermite interpolation keeps the palette position and tangent
-/// continuous at every authored color stop. The renderer still accepts only
-/// two stops, so callers approximate this curve with short global spans.
+/// Cubic Hermite interpolation preserves the palette position and tangent
+/// continuously inside each authored color-stop interval. The renderers use
+/// these same intervals to assemble the full gradient with masked spans.
 fn gradient(value: f32, stops: &[(f32, [u8; 3])]) -> [u8; 3] {
     debug_assert!(stops.len() >= 2);
     let value = value.clamp(0.0, 1.0);
@@ -1659,10 +1647,26 @@ mod tests {
     #[test]
     fn visual_palette_lookup_applies_deadbeef_low_end_mapping() {
         let lut = active_palette_lut(VisualizationPalette::Deadbeef);
-        assert_eq!(lut.lookup_without_floor(0.0), lut.lookup_raw(0.06));
-        assert_eq!(lut.lookup_without_floor(1.0), lut.lookup_raw(1.0));
+        assert_eq!(lut.lookup_mapped(0.0), lut.lookup_raw(0.06));
+        assert_eq!(lut.lookup_mapped(1.0), lut.lookup_raw(1.0));
         let tokyo = active_palette_lut(VisualizationPalette::TokyoNight);
-        assert_eq!(tokyo.lookup_without_floor(0.0), tokyo.lookup_raw(0.0));
+        assert_eq!(tokyo.lookup_mapped(0.0), tokyo.lookup_raw(0.0));
+    }
+
+    #[test]
+    fn palette_stop_positions_fill_the_visible_height() {
+        let deadbeef = active_palette_lut(VisualizationPalette::Deadbeef);
+        let deadbeef_stops = deadbeef.visible_stops();
+        assert_eq!(deadbeef.stop_position(deadbeef_stops[0].0), 0.0);
+        assert_eq!(
+            deadbeef.stop_position(deadbeef_stops.last().unwrap().0),
+            1.0
+        );
+
+        let tokyo = active_palette_lut(VisualizationPalette::TokyoNight);
+        let tokyo_stops = tokyo.visible_stops();
+        assert_eq!(tokyo.stop_position(tokyo_stops[0].0), 0.0);
+        assert_eq!(tokyo.stop_position(tokyo_stops.last().unwrap().0), 1.0);
     }
 
     #[test]
@@ -1672,13 +1676,6 @@ mod tests {
                 assert_eq!(gradient(position, stops), color);
             }
         }
-    }
-    #[test]
-    fn palette_gradient_segments_are_bounded_by_pixel_height() {
-        assert_eq!(palette_gradient_segments(1.0), 8);
-        assert_eq!(palette_gradient_segments(128.0), 8);
-        assert_eq!(palette_gradient_segments(256.0), 16);
-        assert_eq!(palette_gradient_segments(1024.0), 16);
     }
 
     fn frame(time: f64, level: f32) -> AnalysisFrame {

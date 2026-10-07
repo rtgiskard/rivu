@@ -72,16 +72,15 @@ struct WaveformPlot {
 }
 
 fn waveform_level(value: f32) -> f32 {
-    value.clamp(0.0, 1.0).powf(0.7)
+    value.clamp(0.0, 1.0).powf(0.86)
 }
-fn waveform_color_level(value: f32) -> f32 {
-    // Peak colors retain more palette range without making ordinary peaks red.
-    0.82 * value.clamp(0.0, 1.0).powf(1.35)
+
+fn waveform_height(level: f32, half_height: Pixels) -> Pixels {
+    (half_height * level).max(px(1.0))
 }
-fn waveform_rms_color_level(value: f32) -> f32 {
-    // Keep the RMS underlay one palette tier below the retained Peak overlay.
-    0.68 * value.clamp(0.0, 1.0).powf(1.15)
-}
+
+const WAVEFORM_PEAK_PALETTE_MAX: f32 = 0.76;
+const WAVEFORM_RMS_PALETTE_MAX: f32 = 0.68;
 
 fn pooled_side(
     peaks: &[Option<f32>],
@@ -95,7 +94,7 @@ fn pooled_side(
         .flatten()
         .copied()
         .reduce(f32::max)
-        .map(|value| (value * scale).clamp(0.0, 1.0));
+        .map(|value| waveform_level(value * scale));
     let mut energy = 0.0_f32;
     let mut known = 0_u32;
     for value in rms[first..end].iter().flatten().copied() {
@@ -177,49 +176,69 @@ fn paint_waveform_gradient(
     plot: Bounds<Pixels>,
     upper: bool,
     palette: &super::visuals::PaletteLut,
-    color_level: fn(f32) -> f32,
+    palette_max: f32,
     window: &mut Window,
 ) {
-    path.bounds = plot;
-    let mut path = Some(path);
-    let segments = super::visuals::palette_gradient_segments(plot.size.height / px(1.0));
-    for segment in 0..segments {
-        let low = segment as f32 / segments as f32;
-        let high = (segment + 1) as f32 / segments as f32;
-        let (start, end, start_level, end_level) = if upper {
-            (0.5 * (1.0 - high), 0.5 * (1.0 - low), low, high)
+    let half_height = plot.size.height * 0.5;
+    let half = Bounds::new(
+        point(
+            plot.left(),
+            if upper { plot.top() } else { plot.center().y },
+        ),
+        size(plot.size.width, half_height),
+    );
+    path.bounds = half;
+    let stops = palette.visible_stops();
+    let max = palette_max.clamp(0.0, 1.0);
+    let mut visible = Some(path);
+    for (index, pair) in stops.windows(2).enumerate() {
+        let start = palette.stop_position(pair[0].0).min(max);
+        let end = palette.stop_position(pair[1].0).min(max);
+        if end <= start {
+            continue;
+        }
+        let mask = if upper {
+            Bounds::new(
+                point(half.left(), half.bottom() - half_height * end),
+                size(half.size.width, half_height * (end - start)),
+            )
         } else {
-            (0.5 * (1.0 + low), 0.5 * (1.0 + high), high, low)
+            Bounds::new(
+                point(half.left(), half.top() + half_height * start),
+                size(half.size.width, half_height * (end - start)),
+            )
         };
-        let mask = Bounds::new(
-            point(plot.left(), plot.top() + plot.size.height * start),
-            size(
-                plot.size.width,
-                (plot.size.height * (end - start)).max(px(1.0)),
-            ),
-        );
-        // The path bounds cover the full plot, so stops must stay in global
-        // coordinates. Using 0..1 here flattens every masked slice into a
-        // solid color and exposes the slice boundaries.
-        let background = linear_gradient(
-            0.0,
-            linear_color_stop(
-                rgb(palette.lookup_without_floor(color_level(start_level))),
-                start,
-            ),
-            linear_color_stop(
-                rgb(palette.lookup_without_floor(color_level(end_level))),
-                end,
-            ),
-        );
-        let segment_path = if segment + 1 == segments {
-            path.take()
-                .expect("last waveform gradient segment owns the path")
+        let low = palette.lookup_raw(pair[0].0);
+        let high = if palette.stop_position(pair[1].0) <= max {
+            palette.lookup_raw(pair[1].0)
         } else {
-            path.as_ref()
+            palette.lookup_mapped(max)
+        };
+        let (low, high) = (rgb(low), rgb(high));
+        let background = if upper {
+            linear_gradient(
+                0.0,
+                linear_color_stop(low, 0.0),
+                linear_color_stop(high, 1.0),
+            )
+        } else {
+            linear_gradient(
+                0.0,
+                linear_color_stop(high, 0.0),
+                linear_color_stop(low, 1.0),
+            )
+        };
+        let mut segment_path = if index + 2 == stops.len() {
+            visible
+                .take()
+                .expect("last waveform gradient owns the path")
+        } else {
+            visible
+                .as_ref()
                 .expect("waveform gradient path is retained")
                 .clone()
         };
+        segment_path.bounds = mask;
         window.with_content_mask(Some(gpui::ContentMask { bounds: mask }), |window| {
             window.paint_path(segment_path, background);
         });
@@ -615,94 +634,98 @@ impl Waveform {
                                 if columns.is_empty() {
                                     return;
                                 }
-                                // RMS and Peak each submit shared geometry. Peak color is
-                                // resolved from the stroke's vertical position by the bounded
-                                // center-to-edge gradient, as in Spectrum's solid shape path.
+                                // Each half submits RMS and Peak through the
+                                // palette-stop masks, sharing the same geometry.
                                 let width = plot.size.width / columns.len() as f32;
                                 let half_height = plot.size.height * 0.5;
-                                let mut left_path = PathBuilder::fill();
-                                let mut right_path = PathBuilder::fill();
-                                let mut peak_path = PathBuilder::stroke(px(1.0));
-                                let mut has_left = false;
-                                let mut has_right = false;
-                                let mut has_peak = false;
+                                let mut upper_rms_path = PathBuilder::fill();
+                                let mut lower_rms_path = PathBuilder::fill();
+                                let mut upper_peak_path = PathBuilder::stroke(px(1.0));
+                                let mut lower_peak_path = PathBuilder::stroke(px(1.0));
+                                let mut has_upper_rms = false;
+                                let mut has_lower_rms = false;
+                                let mut has_upper_peak = false;
+                                let mut has_lower_peak = false;
                                 for (column, &(left_rms, left_peak, right_rms, right_peak)) in
                                     columns.iter().enumerate()
                                 {
                                     let x = plot.left() + width * column as f32;
                                     if let Some(level) = left_rms {
-                                        let height = (half_height * level).max(px(1.0));
+                                        let height = waveform_height(level, half_height);
                                         append_rect(
-                                            &mut left_path,
+                                            &mut upper_rms_path,
                                             Bounds::new(
                                                 point(x, center - height),
                                                 size(width, height),
                                             ),
                                         );
-                                        has_left = true;
+                                        has_upper_rms = true;
                                     }
                                     if let Some(level) = right_rms {
-                                        let height = (half_height * level).max(px(1.0));
+                                        let height = waveform_height(level, half_height);
                                         append_rect(
-                                            &mut right_path,
+                                            &mut lower_rms_path,
                                             Bounds::new(point(x, center), size(width, height)),
                                         );
-                                        has_right = true;
+                                        has_lower_rms = true;
                                     }
                                     if let Some(level) = left_peak {
-                                        let y = center - half_height * level;
-                                        peak_path.move_to(point(x, y));
-                                        peak_path.line_to(point(x + width, y));
-                                        has_peak = true;
+                                        let y = center - waveform_height(level, half_height);
+                                        upper_peak_path.move_to(point(x, y));
+                                        upper_peak_path.line_to(point(x + width, y));
+                                        has_upper_peak = true;
                                     }
                                     if let Some(level) = right_peak {
-                                        let y = center + half_height * level;
-                                        peak_path.move_to(point(x, y));
-                                        peak_path.line_to(point(x + width, y));
-                                        has_peak = true;
+                                        let y = center + waveform_height(level, half_height);
+                                        lower_peak_path.move_to(point(x, y));
+                                        lower_peak_path.line_to(point(x + width, y));
+                                        has_lower_peak = true;
                                     }
                                 }
-                                if has_left {
-                                    if let Ok(path) = left_path.build() {
+                                if has_upper_rms {
+                                    if let Ok(path) = upper_rms_path.build() {
                                         paint_waveform_gradient(
                                             path,
                                             plot,
                                             true,
                                             palette.as_ref(),
-                                            waveform_rms_color_level,
+                                            WAVEFORM_RMS_PALETTE_MAX,
                                             window,
                                         );
                                     }
                                 }
-                                if has_right {
-                                    if let Ok(path) = right_path.build() {
+                                if has_lower_rms {
+                                    if let Ok(path) = lower_rms_path.build() {
                                         paint_waveform_gradient(
                                             path,
                                             plot,
                                             false,
                                             palette.as_ref(),
-                                            waveform_rms_color_level,
+                                            WAVEFORM_RMS_PALETTE_MAX,
                                             window,
                                         );
                                     }
                                 }
-                                if has_peak {
-                                    if let Ok(path) = peak_path.build() {
-                                        let lower_path = path.clone();
+                                if has_upper_peak {
+                                    if let Ok(path) = upper_peak_path.build() {
                                         paint_waveform_gradient(
                                             path,
                                             plot,
                                             true,
                                             palette.as_ref(),
-                                            waveform_color_level,
+                                            WAVEFORM_PEAK_PALETTE_MAX,
                                             window,
                                         );
+                                    }
+                                }
+                                if has_lower_peak {
+                                    if let Ok(path) = lower_peak_path.build() {
                                         paint_waveform_gradient(
-                                            lower_path,
+                                            path,
                                             plot,
                                             false,
                                             palette.as_ref(),
-                                            waveform_color_level,
+                                            WAVEFORM_PEAK_PALETTE_MAX,
                                             window,
                                         );
                                     }
@@ -898,69 +921,84 @@ mod tests {
     fn resized_columns_preserve_transients_and_track_wide_peak_ratios() {
         let frame = frame(vec![Some(0.0), Some(0.5), Some(2.0), Some(0.25), Some(0.0)]);
         let mut plot = WaveformPlot::default();
+        let fine = amplitudes(plot.columns(2, 5, &frame));
+        assert_eq!(fine[0], Some(0.0));
+        assert_eq!(fine[2], Some(1.0));
+        assert_eq!(fine[4], Some(0.0));
+        assert!(fine[3].unwrap() < fine[1].unwrap());
+        assert!(fine[1].unwrap() < fine[2].unwrap());
         assert_eq!(
             amplitudes(plot.columns(1, 2, &frame)),
-            vec![Some(0.25), Some(1.0)]
-        );
-        assert_eq!(
-            amplitudes(plot.columns(2, 5, &frame)),
-            vec![Some(0.0), Some(0.25), Some(1.0), Some(0.125), Some(0.0)]
+            vec![fine[1], fine[2]]
         );
         assert_eq!(plot.columns(1, 1, &frame)[0].1, Some(1.0));
-        assert_eq!(
-            amplitudes(plot.columns(2, 5, &frame)),
-            vec![Some(0.0), Some(0.25), Some(1.0), Some(0.125), Some(0.0)]
-        );
+        assert_eq!(amplitudes(plot.columns(2, 5, &frame)), fine);
+    }
+
+    #[test]
+    fn low_amplitude_rms_stays_within_peak_after_display_mapping() {
+        for scale in [1.0, 0.5] {
+            for (rms, peak) in [(0.1, 0.15), (0.01, 0.02), (0.00025, 0.0005), (0.2, 0.2)] {
+                let (rms_height, peak_height) =
+                    pooled_side(&[Some(peak)], &[Some(rms)], 0, 1, scale);
+                let rms_height = rms_height.unwrap();
+                let peak_height = peak_height.unwrap();
+                assert!(rms_height > rms * scale);
+                assert!(peak_height > peak * scale);
+                assert!(rms_height <= peak_height);
+                for half_height in [px(8.0), px(100.0), px(400.0)] {
+                    assert!(
+                        waveform_height(rms_height, half_height)
+                            <= waveform_height(peak_height, half_height)
+                    );
+                }
+                if rms == peak {
+                    assert_eq!(rms_height, peak_height);
+                }
+            }
+        }
     }
 
     #[test]
     fn unknown_intervals_stay_blank_and_known_silence_stays_known() {
         let frame = frame(vec![None, None, Some(0.0), None, Some(0.25), None]);
         let mut plot = WaveformPlot::default();
+        let fine = amplitudes(plot.columns(1, 6, &frame));
+        assert_eq!(fine[..4], [None, None, Some(0.0), None]);
+        assert!(fine[4].unwrap() > 0.0);
+        assert_eq!(fine[5], None);
         assert_eq!(
             amplitudes(plot.columns(1, 3, &frame)),
-            vec![None, Some(0.0), Some(0.25)]
+            vec![None, Some(0.0), fine[4]]
         );
-        assert_eq!(amplitudes(plot.columns(1, 6, &frame)), frame.peaks);
-        assert_eq!(plot.columns(2, 1, &frame)[0].1, Some(0.25));
+        assert_eq!(plot.columns(2, 1, &frame)[0].1, fine[4]);
     }
 
     #[test]
     fn revised_peaks_update_same_width_and_rescale_existing_columns() {
         let mut frame = frame(vec![Some(0.25), None]);
         let mut plot = WaveformPlot::default();
-        assert_eq!(
-            amplitudes(plot.columns(1, 2, &frame)),
-            vec![Some(0.25), None]
-        );
+        let original = amplitudes(plot.columns(1, 2, &frame));
+        assert!(original[0].unwrap() > 0.0);
+        assert_eq!(original[1], None);
         frame.peaks[1] = Some(2.0);
         frame.left_peaks[1] = Some(2.0);
         frame.right_peaks[1] = Some(2.0);
         frame.max_peak = 2.0;
         frame.revision += 1;
-        assert_eq!(
-            amplitudes(plot.columns(1, 2, &frame)),
-            vec![Some(0.125), Some(1.0)]
-        );
-    }
-
-    #[test]
-    fn peak_and_rms_use_separate_color_scales() {
-        assert_eq!(waveform_color_level(0.0), 0.0);
-        assert_eq!(waveform_rms_color_level(0.0), 0.0);
-        assert!(waveform_color_level(0.5) < 0.5);
-        assert_eq!(waveform_color_level(1.0), 0.82);
-        assert_eq!(waveform_rms_color_level(1.0), 0.68);
-        assert!(waveform_rms_color_level(1.0) < waveform_color_level(1.0));
+        let revised = amplitudes(plot.columns(1, 2, &frame));
+        assert!(revised[0].unwrap() < original[0].unwrap());
+        assert_eq!(revised[1], Some(1.0));
     }
 
     #[test]
     fn zero_and_extreme_widths_are_bounded_and_empty_data_has_no_columns() {
         let data = frame(vec![Some(0.0), None, Some(0.5)]);
         let mut plot = WaveformPlot::default();
+        let fine = amplitudes(plot.columns(1, usize::MAX, &data));
+        assert_eq!(fine.len(), 3);
         assert_eq!(plot.columns(1, 0, &data).len(), 1);
-        assert_eq!(plot.columns(1, 0, &data)[0].1, Some(0.5));
-        assert_eq!(plot.columns(1, usize::MAX, &data).len(), 3);
+        assert_eq!(plot.columns(1, 0, &data)[0].1, fine[2]);
         let empty = frame(Vec::new());
         assert!(plot.columns(1, 0, &empty).is_empty());
         assert!(plot.columns(1, usize::MAX, &empty).is_empty());
