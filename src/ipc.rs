@@ -878,6 +878,7 @@ fn encode_frame_into<T: Serialize>(value: &T, bytes: &mut Vec<u8>) -> Result<()>
     Ok(())
 }
 
+#[cfg(test)]
 fn encode_frame<T: Serialize>(value: &T) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     encode_frame_into(value, &mut bytes)?;
@@ -1034,9 +1035,14 @@ async fn read_frame<S: AsyncRead + Unpin>(
     Ok(pending.split_to(length).freeze())
 }
 
-async fn write_frame<S: AsyncWrite + Unpin>(stream: &mut S, value: &impl Serialize) -> Result<()> {
+async fn write_frame_buffered<S: AsyncWrite + Unpin>(
+    stream: &mut S,
+    value: &impl Serialize,
+    buffer: &mut Vec<u8>,
+) -> Result<()> {
+    encode_frame_into(value, buffer)?;
     stream
-        .write_all(&encode_frame(value)?)
+        .write_all(buffer)
         .await
         .context("Writing IPC frame")?;
     stream.flush().await.context("Flushing IPC frame")?;
@@ -1210,6 +1216,7 @@ async fn serve_connection(
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     let mut pending = BytesMut::new();
+    let mut write_buffer = Vec::new();
     let mut handshaken = false;
     loop {
         let bytes = tokio::select! {
@@ -1219,35 +1226,43 @@ async fn serve_connection(
         let (version, request_instance) = match decode_request_header(&bytes) {
             Ok(header) => header,
             Err(error) => {
-                write_frame(
+                write_frame_buffered(
                     &mut stream,
                     &error_frame(format!("Invalid IPC request header: {error}"), instance_id),
+                    &mut write_buffer,
                 )
                 .await?;
                 continue;
             }
         };
         if version != PROTOCOL_VERSION {
-            write_frame(
+            write_frame_buffered(
                 &mut stream,
                 &error_frame(
                     format!("Unsupported IPC protocol version {version}"),
                     instance_id,
                 ),
+                &mut write_buffer,
             )
             .await?;
             continue;
         }
         if let Err(error) = validate_instance(request_instance, instance_id) {
-            write_frame(&mut stream, &error_frame(error.to_string(), instance_id)).await?;
+            write_frame_buffered(
+                &mut stream,
+                &error_frame(error.to_string(), instance_id),
+                &mut write_buffer,
+            )
+            .await?;
             continue;
         }
         let frame = match decode_request_frame(&bytes) {
             Ok(frame) => frame,
             Err(error) => {
-                write_frame(
+                write_frame_buffered(
                     &mut stream,
                     &error_frame(format!("Invalid IPC request: {error}"), instance_id),
+                    &mut write_buffer,
                 )
                 .await?;
                 continue;
@@ -1257,9 +1272,10 @@ async fn serve_connection(
             WireRequest::State(sections) => {
                 handshaken = true;
                 let state = handle.state(sections);
-                write_frame(
+                write_frame_buffered(
                     &mut stream,
                     &response_frame(WireResponse::State(wire_state(state)), instance_id),
+                    &mut write_buffer,
                 )
                 .await?;
             }
@@ -1267,18 +1283,20 @@ async fn serve_connection(
                 let query = match Query::try_from(query) {
                     Ok(query) => query,
                     Err(error) => {
-                        write_frame(
+                        write_frame_buffered(
                             &mut stream,
                             &error_frame(format!("Invalid IPC query: {error}"), instance_id),
+                            &mut write_buffer,
                         )
                         .await?;
                         continue;
                     }
                 };
                 let response = run_query(&handle, query).await?;
-                write_frame(
+                write_frame_buffered(
                     &mut stream,
                     &response_frame(WireResponse::Query(response), instance_id),
+                    &mut write_buffer,
                 )
                 .await?;
             }
@@ -1286,26 +1304,29 @@ async fn serve_connection(
                 let command = match Command::try_from(command) {
                     Ok(command) => command,
                     Err(error) => {
-                        write_frame(
+                        write_frame_buffered(
                             &mut stream,
                             &error_frame(format!("Invalid IPC command: {error}"), instance_id),
+                            &mut write_buffer,
                         )
                         .await?;
                         continue;
                     }
                 };
                 let response = run_command(&handle, command).await?;
-                write_frame(
+                write_frame_buffered(
                     &mut stream,
                     &response_frame(WireResponse::Ack(response), instance_id),
+                    &mut write_buffer,
                 )
                 .await?;
             }
             WireRequest::Watch(expected) => {
                 if !handshaken {
-                    write_frame(
+                    write_frame_buffered(
                         &mut stream,
                         &error_frame("Watcher session requires a state handshake", instance_id),
+                        &mut write_buffer,
                     )
                     .await?;
                     continue;
@@ -1325,9 +1346,10 @@ async fn serve_connection(
                 let Some(revisions) = result else {
                     continue;
                 };
-                write_frame(
+                write_frame_buffered(
                     &mut stream,
                     &response_frame(WireResponse::Watch(revisions), instance_id),
+                    &mut write_buffer,
                 )
                 .await?;
             }
