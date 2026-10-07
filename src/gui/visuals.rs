@@ -80,28 +80,6 @@ impl PaletteLut {
     pub(super) fn lookup_raw(&self, fraction: f32) -> u32 {
         stop_color(self.lookup_rgb(fraction))
     }
-
-    pub(super) fn lookup_mapped(&self, fraction: f32) -> u32 {
-        let fraction = fraction.clamp(0.0, 1.0);
-        let mapped = match self.palette {
-            VisualizationPalette::Deadbeef => 0.06 + fraction * 0.94,
-            VisualizationPalette::TokyoNight => fraction,
-        };
-        self.lookup_raw(mapped)
-    }
-    pub(super) fn visible_stops(&self) -> &'static [(f32, [u8; 3])] {
-        match self.palette {
-            VisualizationPalette::Deadbeef => &DEADBEEF_STOPS[1..],
-            VisualizationPalette::TokyoNight => TOKYO_NIGHT_STOPS,
-        }
-    }
-
-    pub(super) fn stop_position(&self, raw: f32) -> f32 {
-        match self.palette {
-            VisualizationPalette::Deadbeef => ((raw - 0.06) / 0.94).clamp(0.0, 1.0),
-            VisualizationPalette::TokyoNight => raw,
-        }
-    }
 }
 
 thread_local! {
@@ -1146,7 +1124,7 @@ impl VisualData {
                         .clamp(plot.top(), plot.bottom() - px(1.0));
                     window.paint_quad(fill(
                         Bounds::new(point(peak_x, peak_y), size(peak_width, px(1.0))),
-                        rgb(self.palette_lut.lookup_mapped(peak_fraction)),
+                        rgb(self.palette_lut.lookup_raw(peak_fraction)),
                     ));
                 }
             });
@@ -1478,11 +1456,11 @@ fn paint_spectrum_path(
     palette: &PaletteLut,
 ) {
     path.bounds = plot;
-    let stops = palette.visible_stops();
+    let stops = palette_stops(palette.palette);
     let mut visible = Some(path);
     for (index, pair) in stops.windows(2).enumerate() {
-        let start = palette.stop_position(pair[0].0);
-        let end = palette.stop_position(pair[1].0);
+        let start = pair[0].0;
+        let end = pair[1].0;
         let mask = Bounds::new(
             point(plot.left(), plot.bottom() - plot.size.height * end),
             size(plot.size.width, plot.size.height * (end - start)),
@@ -1776,30 +1754,6 @@ mod tests {
         );
         assert_eq!(gradient(0.0, DEADBEEF_STOPS), [0, 0, 0]);
         assert_eq!(gradient(1.0, DEADBEEF_STOPS), [255, 0, 0]);
-    }
-    #[test]
-    fn visual_palette_lookup_applies_deadbeef_low_end_mapping() {
-        let lut = active_palette_lut(VisualizationPalette::Deadbeef);
-        assert_eq!(lut.lookup_mapped(0.0), lut.lookup_raw(0.06));
-        assert_eq!(lut.lookup_mapped(1.0), lut.lookup_raw(1.0));
-        let tokyo = active_palette_lut(VisualizationPalette::TokyoNight);
-        assert_eq!(tokyo.lookup_mapped(0.0), tokyo.lookup_raw(0.0));
-    }
-
-    #[test]
-    fn palette_stop_positions_fill_the_visible_height() {
-        let deadbeef = active_palette_lut(VisualizationPalette::Deadbeef);
-        let deadbeef_stops = deadbeef.visible_stops();
-        assert_eq!(deadbeef.stop_position(deadbeef_stops[0].0), 0.0);
-        assert_eq!(
-            deadbeef.stop_position(deadbeef_stops.last().unwrap().0),
-            1.0
-        );
-
-        let tokyo = active_palette_lut(VisualizationPalette::TokyoNight);
-        let tokyo_stops = tokyo.visible_stops();
-        assert_eq!(tokyo.stop_position(tokyo_stops[0].0), 0.0);
-        assert_eq!(tokyo.stop_position(tokyo_stops.last().unwrap().0), 1.0);
     }
 
     #[test]

@@ -106,12 +106,9 @@ fn waveform_height(level: f32, half_height: Pixels) -> Pixels {
     (half_height * level).max(px(1.0))
 }
 
-const WAVEFORM_PEAK_PALETTE_MAX: f32 = 0.76;
-fn unpack_rgb(packed: u32) -> [u8; 3] {
-    [(packed >> 16) as u8, (packed >> 8) as u8, packed as u8]
+fn waveform_color_level(level: f32) -> f32 {
+    level.clamp(0.0, 1.0).powf(1.35)
 }
-
-const WAVEFORM_RMS_PALETTE_MAX: f32 = 0.68;
 
 fn pooled_side(
     peaks: &[Option<f32>],
@@ -194,19 +191,17 @@ impl WaveformPlot {
                 let height_px = (center * level).max(1.0);
                 let start = if upper { center - height_px } else { center };
                 let end = if upper { center } else { center + height_px };
-                let rms_fraction = (level.min(WAVEFORM_RMS_PALETTE_MAX) / WAVEFORM_RMS_PALETTE_MAX)
-                    .clamp(0.0, 1.0);
-                let edge_color = unpack_rgb(palette.lookup_mapped(1.0 - rms_fraction));
-                let center_color = unpack_rgb(palette.lookup_mapped(1.0));
+                let low_color = palette.lookup_rgb(0.0);
+                let rms_color = palette.lookup_rgb(waveform_color_level(level));
                 for y in (start.floor() as u32)..(end.ceil() as u32).min(height) {
                     let t = ((y as f32 + 0.5 - start) / (end - start)).clamp(0.0, 1.0);
-                    let t = if upper { t } else { 1.0 - t };
+                    let t = if upper { 1.0 - t } else { t };
                     let color = image::Rgba([
-                        (edge_color[0] as f32 + (center_color[0] as f32 - edge_color[0] as f32) * t)
+                        (low_color[2] as f32 + (rms_color[2] as f32 - low_color[2] as f32) * t)
                             as u8,
-                        (edge_color[1] as f32 + (center_color[1] as f32 - edge_color[1] as f32) * t)
+                        (low_color[1] as f32 + (rms_color[1] as f32 - low_color[1] as f32) * t)
                             as u8,
-                        (edge_color[2] as f32 + (center_color[2] as f32 - edge_color[2] as f32) * t)
+                        (low_color[0] as f32 + (rms_color[0] as f32 - low_color[0] as f32) * t)
                             as u8,
                         255,
                     ]);
@@ -224,12 +219,9 @@ impl WaveformPlot {
                 };
                 let y = y.round() as u32;
                 if y < height {
-                    let peak_fraction = (level.min(WAVEFORM_PEAK_PALETTE_MAX)
-                        / WAVEFORM_PEAK_PALETTE_MAX)
-                        .clamp(0.0, 1.0);
-                    let [red, green, blue] = unpack_rgb(palette.lookup_mapped(1.0 - peak_fraction));
+                    let [red, green, blue] = palette.lookup_rgb(waveform_color_level(level));
                     for x in x0..x1 {
-                        pixels.put_pixel(x - x_start, y, image::Rgba([red, green, blue, 255]));
+                        pixels.put_pixel(x - x_start, y, image::Rgba([blue, green, red, 255]));
                     }
                 }
             }
@@ -958,6 +950,46 @@ impl Drop for Waveform {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn waveform_tiles_preserve_palette_channels_and_dark_center() {
+        let palette = super::super::visuals::active_palette_lut(
+            crate::config::VisualizationPalette::Deadbeef,
+        );
+        let image = WaveformPlot::build_tile(
+            &[
+                (Some(0.5), Some(0.9), Some(0.5), Some(0.9)),
+                (None, Some(0.9), None, Some(0.9)),
+            ],
+            0,
+            2,
+            2,
+            100,
+            &palette,
+        );
+        let bytes = image.as_bytes(0).unwrap();
+        // GPUI consumes BGRA, even though image::RgbaImage names its channels RGBA.
+        let pixel = |x: usize, y: usize| &bytes[(y * 2 + x) * 4..(y * 2 + x + 1) * 4];
+        for (edge_y, center_y, peak_y) in [(26, 49, 5), (73, 50, 95)] {
+            let edge = pixel(0, edge_y);
+            let center = pixel(0, center_y);
+            assert!(edge[0] > edge[2], "moderate RMS must remain blue, not red");
+            let brightness = |p: &[u8]| p[..3].iter().map(|&c| u32::from(c)).sum::<u32>();
+            assert!(
+                brightness(center) < brightness(edge),
+                "gradient must darken toward the center"
+            );
+            for x in 0..2 {
+                let peak = pixel(x, peak_y);
+                assert!(
+                    peak[2] > peak[0],
+                    "strong Peak must retain its warm palette color"
+                );
+                assert_eq!(peak[3], 255);
+            }
+        }
+        assert_eq!(pixel(1, 49)[3], 0, "Peak-only data must not invent RMS");
+    }
+
     use super::*;
     #[test]
     fn seek_seconds_clamps_drag_to_timeline_bounds() {

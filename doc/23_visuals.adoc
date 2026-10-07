@@ -22,7 +22,7 @@ RMS column
   -> one rectangular Quad
 ----
 
-The upper channel runs from the center line upward; the lower channel runs from the center line downward. `WAVEFORM_RMS_PALETTE_MAX` limits the color mapping, not the RMS geometry height.
+The upper channel runs from the center line upward; the lower channel runs from the center line downward. Each gradient starts at the palette minimum on the centerline, keeping the center dark, and brightens toward that column's RMS edge. Nonlinear color compression keeps warm colors as high-energy accents while preserving access to the full palette range. It is a visual choice, not an amplitude or renderer limit, and does not change RMS geometry height.
 
 The previous implementation combined all RMS columns into one Path, then painted it through a multi-stop gradient split into masked bands. Each palette interval used a cloned or retained Path and a `ContentMask` covering that interval. This minimized draw submissions, but it produced a global vertical gradient: columns at the same height received the same color, so adjacent columns with different RMS values had weak color separation. It also incurred Path cloning and repeated masked gradient submissions.
 
@@ -40,9 +40,13 @@ Peak level
   -> one thin Quad
 ----
 
-Upper and lower channels use their respective Peak positions. `WAVEFORM_PEAK_PALETTE_MAX` limits the color lookup. Peak does not use the old global multi-stop gradient or mask path.
+Upper and lower channels use their respective Peak positions. Nonlinear color compression preserves access to the full palette range without changing Peak geometry height. Peak does not use the old global multi-stop gradient or mask path.
 
 == Spectrum
+
+Body gradients and Peak colors use the full palette domain without skipping or
+remapping its low end, including DeaDBeeF's black floor. Waveform uses the same
+palette domain but compresses its color endpoints as described above.
 
 === Body styles
 
@@ -101,7 +105,7 @@ The two Waveform caches have separate responsibilities:
 [source,text]
 ----
 values cache:  raw waveform data -> per-column RMS/Peak values
-layer cache:   per-column values -> static RGBA RenderImage
+layer cache:   per-column values -> static BGRA RenderImage
 dynamic part:  cached layer + current playback cursor
 ----
 
