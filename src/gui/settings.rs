@@ -81,6 +81,9 @@ enum Field {
     SpectrogramInterpolationPoints,
     CursorColor,
     Glow,
+    RmsGain,
+    PeakGain,
+    PeakGamma,
 }
 impl Field {
     fn label(self) -> &'static str {
@@ -121,6 +124,9 @@ impl Field {
             Self::SpectrogramInterpolationPoints => "Interpolated frequency points (64–4096)",
             Self::CursorColor => "Waterline color (#RRGGBB)",
             Self::Glow => "Glow strength (0–2; 0 = off)",
+            Self::RmsGain => "RMS height gain (0–3)",
+            Self::PeakGain => "Peak height gain (0–2)",
+            Self::PeakGamma => "Peak gamma (0.25–3)",
         }
     }
 }
@@ -299,6 +305,9 @@ impl Settings {
             Field::SpectrogramInterpolationPoints,
             Field::CursorColor,
             Field::Glow,
+            Field::RmsGain,
+            Field::PeakGain,
+            Field::PeakGamma,
         ]
         .into_iter()
         .map(|field| (field, cx.new(|cx| Input::new("", field.label(), cx))))
@@ -498,6 +507,17 @@ impl Settings {
             cx,
         );
         self.set_value(Field::Glow, self.draft.waveform_glow.to_string(), cx);
+        self.set_value(Field::RmsGain, self.draft.waveform_rms_gain.to_string(), cx);
+        self.set_value(
+            Field::PeakGain,
+            self.draft.waveform_peak_gain.to_string(),
+            cx,
+        );
+        self.set_value(
+            Field::PeakGamma,
+            self.draft.waveform_peak_gamma.to_string(),
+            cx,
+        );
     }
 
     fn parse(&self, cx: &App) -> Result<Config> {
@@ -564,6 +584,9 @@ impl Settings {
             .parse::<RgbColor>()
             .context("Waveform waterline color")?;
         config.waveform_glow = self.number(Field::Glow, cx)?;
+        config.waveform_rms_gain = self.number(Field::RmsGain, cx)?;
+        config.waveform_peak_gain = self.number(Field::PeakGain, cx)?;
+        config.waveform_peak_gamma = self.number(Field::PeakGamma, cx)?;
         config.validate()?;
         Ok(config)
     }
@@ -1223,12 +1246,15 @@ impl GuiApp {
                     ))
                     .child(caption("Radial Spectrum follows the Noctalia v5 Fancy Audio Visualizer's Bars/Rings control. Rivu uses the shared FFT and GPUI-native rendering. Fade when idle uses a 2-second opacity fade."))
             }
-            VisualPage::Waveform => column().gap_3()
+            VisualPage::Waveform => column()
+                .gap_3()
+                .child(settings.pair(Field::RmsGain, Field::PeakGain))
+                .child(settings.field(Field::PeakGamma))
                 .child(settings.field(Field::CursorColor))
                 .child(settings.field(Field::Glow))
                 .child(visual_switch("waveform-labels", "T", "Labels", draft.waveform_labels, cx,
                     |draft| draft.waveform_labels = !draft.waveform_labels))
-                .child(caption("Appearance only: changing colors does not decode the track again. The waterline stays still while paused.")),
+                .child(caption("RMS gain raises the filled body. Peak gain and gamma reduce the peak envelope's height and vertical spread. Apply redraws the waveform without decoding the track again.")),
         }
     }
 

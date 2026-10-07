@@ -199,6 +199,9 @@ pub struct Config {
     pub spectrogram_history_seconds: u32,
     pub waveform_cursor_color: RgbColor,
     pub waveform_glow: f32,
+    pub waveform_rms_gain: f32,
+    pub waveform_peak_gain: f32,
+    pub waveform_peak_gamma: f32,
     pub media_read_buffer_mb: u32,
     pub nerd_symbols: bool,
     pub ffmpeg_enabled: bool,
@@ -264,6 +267,9 @@ impl Default for Config {
             spectrogram_history_seconds: 20,
             waveform_cursor_color: RgbColor(0x73daca),
             waveform_glow: 1.0,
+            waveform_rms_gain: 1.6,
+            waveform_peak_gain: 0.75,
+            waveform_peak_gamma: 1.1,
             media_read_buffer_mb: 2,
             nerd_symbols: nerd_fonts_available(),
             ffmpeg_enabled: false,
@@ -478,6 +484,16 @@ impl Config {
             self.waveform_glow.is_finite() && (0.0..=2.0).contains(&self.waveform_glow),
             "waveform_glow must be between 0 and 2"
         );
+        for (name, value, range) in [
+            ("waveform_rms_gain", self.waveform_rms_gain, 0.0..=3.0),
+            ("waveform_peak_gain", self.waveform_peak_gain, 0.0..=2.0),
+            ("waveform_peak_gamma", self.waveform_peak_gamma, 0.25..=3.0),
+        ] {
+            ensure!(
+                value.is_finite() && range.contains(&value),
+                "{name} is outside its supported range; got {value}"
+            );
+        }
         Ok(())
     }
 
@@ -640,6 +656,9 @@ mod tests {
             waveform_labels: false,
             waveform_cursor_color: "#eeaa66".parse().unwrap(),
             waveform_glow: 0.0,
+            waveform_rms_gain: 2.0,
+            waveform_peak_gain: 0.5,
+            waveform_peak_gamma: 1.25,
             page_size: 32,
         };
         config.save(&path).unwrap();
@@ -768,6 +787,12 @@ mod tests {
             "spectrogram_history_seconds = 0",
             "waveform_glow = -1",
             "waveform_glow = 3",
+            "waveform_rms_gain = -1",
+            "waveform_rms_gain = 4",
+            "waveform_peak_gain = -1",
+            "waveform_peak_gain = 3",
+            "waveform_peak_gamma = 0.1",
+            "waveform_peak_gamma = 3.1",
             "visual_background = '#12345'",
             "visual_background = '#gg0000'",
             "visual_background = '#00000000'",
@@ -937,6 +962,9 @@ mod tests {
                 spectrogram_history_seconds: if high { 120 } else { 1 },
                 spectrogram_interpolation_points: if high { 4096 } else { 64 },
                 waveform_glow: if high { 2.0 } else { 0.0 },
+                waveform_rms_gain: if high { 3.0 } else { 0.0 },
+                waveform_peak_gain: if high { 2.0 } else { 0.0 },
+                waveform_peak_gamma: if high { 3.0 } else { 0.25 },
                 visual_background: if high {
                     RgbColor(0xffffff)
                 } else {
