@@ -714,6 +714,20 @@ pub fn is_no_instance(error: &Error) -> bool {
     })
 }
 
+enum SessionState {
+    Unbound,
+    Bound([u8; 16]),
+}
+
+impl SessionState {
+    fn instance_id(&self) -> [u8; 16] {
+        match self {
+            Self::Unbound => UNKNOWN_INSTANCE,
+            Self::Bound(instance_id) => *instance_id,
+        }
+    }
+}
+
 pub struct WatcherSession {
     runtime: tokio::runtime::Runtime,
     stream: UnixStream,
@@ -721,7 +735,7 @@ pub struct WatcherSession {
     cancel_notify: Arc<tokio::sync::Notify>,
     read_buffer: BytesMut,
     write_buffer: Vec<u8>,
-    instance_id: Option<[u8; 16]>,
+    session: SessionState,
 }
 
 fn client_runtime() -> Result<tokio::runtime::Runtime> {
@@ -761,7 +775,7 @@ pub fn watch_session_with_cancel(
         cancel_notify,
         read_buffer: BytesMut::new(),
         write_buffer: Vec::new(),
-        instance_id: None,
+        session: SessionState::Unbound,
     })
 }
 impl WatcherSession {
@@ -774,14 +788,16 @@ impl WatcherSession {
     }
 
     fn ensure_handshake(&self) -> Result<[u8; 16]> {
-        self.instance_id
-            .ok_or_else(|| anyhow::anyhow!("Watcher session requires a state handshake"))
+        match self.session {
+            SessionState::Bound(instance_id) => Ok(instance_id),
+            SessionState::Unbound => bail!("Watcher session requires a state handshake"),
+        }
     }
 
     fn request_frame(&self, request: RequestKind) -> RequestFrame {
         RequestFrame {
             version: PROTOCOL_VERSION,
-            instance_id: self.instance_id.unwrap_or(UNKNOWN_INSTANCE),
+            instance_id: self.session.instance_id(),
             request,
         }
     }
@@ -802,9 +818,15 @@ impl WatcherSession {
                     decode_response_frame(&bytes)
                 } => {
                     let frame = response?;
-                    if let Some(expected) = self.instance_id {
-                        if frame.instance_id != expected { bail!("IPC server instance changed"); }
-                    } else if frame.instance_id == UNKNOWN_INSTANCE { bail!("IPC response did not identify server instance"); }
+                    match self.session {
+                        SessionState::Bound(expected) if frame.instance_id != expected => {
+                            bail!("IPC server instance changed");
+                        }
+                        SessionState::Unbound if frame.instance_id == UNKNOWN_INSTANCE => {
+                            bail!("IPC response did not identify server instance");
+                        }
+                        _ => {}
+                    }
                     if self.cancelled.load(Ordering::Acquire) { bail!("IPC request cancelled"); }
                     Ok(frame)
                 }
@@ -816,7 +838,7 @@ impl WatcherSession {
         let frame = self.exchange(self.request_frame(RequestKind::State { sections }))?;
         match unpack_error(frame.response)? {
             WireResponse::State(state) => {
-                self.instance_id = Some(frame.instance_id);
+                self.session = SessionState::Bound(frame.instance_id);
                 Ok(state_response(state))
             }
             _ => bail!("IPC response was not a state response"),
