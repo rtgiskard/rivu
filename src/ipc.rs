@@ -3,14 +3,14 @@ use crate::{
     model::{Command, DatabaseOptimization, Query, ScanProgress, SystemState},
     response::{Ack, QueryResponse, StateResponse, StateRevisions, StateSections},
 };
-use anyhow::{Context, Error, Result, bail};
+use anyhow::{Context, Error, Result, bail, ensure};
 use bincode::{
     config,
     serde::{decode_from_slice, encode_into_std_write},
 };
 use bytes::{Buf, Bytes, BytesMut};
 use rand::RngExt;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     fs,
     io::{self, Write},
@@ -31,25 +31,217 @@ use tokio::{
     time::timeout,
 };
 
-const PROTOCOL_VERSION: u16 = 1;
+const PROTOCOL_VERSION: u16 = 2;
+const REQUEST_QUERY: u8 = 0;
+const REQUEST_STATE: u8 = 1;
+const REQUEST_COMMAND: u8 = 2;
+const REQUEST_WATCH: u8 = 3;
 const MAX_REQUEST: usize = 64 * 1024;
+const REQUEST_BODY_MAX: usize = MAX_REQUEST - (2 + 16 + 1);
 const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 const MAX_CLIENTS: usize = 16;
 const UNKNOWN_INSTANCE: [u8; 16] = [0; 16];
 
-#[derive(Serialize, Deserialize)]
 struct RequestFrame {
     version: u16,
     instance_id: [u8; 16],
     request: RequestKind,
 }
 
-#[derive(Serialize, Deserialize)]
 enum RequestKind {
-    Query { query: String },
-    State { sections: StateSections },
-    Command { command: String },
-    Watch { revisions: StateRevisions },
+    Query(Query),
+    State(StateSections),
+    Command(Command),
+    Watch(StateRevisions),
+}
+
+/// Binary query wire format. Variant order is a protocol contract; append only.
+#[derive(Serialize, Deserialize)]
+enum WireQuery {
+    LibraryPage {
+        query: Option<String>,
+        favorite: Option<bool>,
+        missing: Option<bool>,
+        sort: crate::model::LibrarySort,
+        offset: u64,
+        limit: u64,
+    },
+    TrackPage {
+        query: Option<String>,
+        favorite: Option<bool>,
+        missing: Option<bool>,
+        offset: u64,
+        limit: u64,
+    },
+    DirectoryPage {
+        path: PathBuf,
+        offset: u64,
+        limit: u64,
+    },
+    PlaylistSummaries {
+        offset: u64,
+        limit: u64,
+    },
+    PlaylistEntries {
+        playlist_id: i64,
+        offset: u64,
+        limit: u64,
+    },
+    Track {
+        track_id: i64,
+    },
+    LibraryStats,
+    TrackBatch {
+        query: Option<String>,
+        favorite: Option<bool>,
+        missing: Option<bool>,
+        after: Option<i64>,
+        limit: u64,
+        expected: Option<crate::response::QueryRevisions>,
+    },
+    PlaylistSummaryBatch {
+        after: Option<i64>,
+        limit: u64,
+        expected: Option<crate::response::QueryRevisions>,
+    },
+    PlaylistEntryBatch {
+        playlist_id: i64,
+        after: Option<crate::model::PlaylistEntryCursor>,
+        limit: u64,
+        expected: Option<crate::response::QueryRevisions>,
+    },
+}
+
+/// Binary command wire format. Variant order is a protocol contract; append only.
+#[derive(Serialize, Deserialize)]
+enum WireCommand {
+    ShowWindow,
+    OptimizeDatabase,
+    SetFavorite {
+        track_ids: Vec<i64>,
+        favorite: bool,
+    },
+    RemoveMissingTracks,
+    Scan {
+        paths: Vec<PathBuf>,
+        force: bool,
+    },
+    Play {
+        track_id: i64,
+    },
+    PlayQueue {
+        queue_id: u64,
+    },
+    PlayPlaylist {
+        playlist_id: i64,
+    },
+    Resume,
+    Pause,
+    Toggle,
+    Stop,
+    Next,
+    Previous,
+    Seek {
+        seconds: f64,
+    },
+    SeekQueue {
+        queue_id: u64,
+        seconds: f64,
+    },
+    Volume {
+        value: f32,
+    },
+    Enqueue {
+        track_ids: Vec<i64>,
+    },
+    EnqueueSources {
+        directories: Vec<PathBuf>,
+        track_ids: Vec<i64>,
+    },
+    RemoveQueue {
+        queue_id: u64,
+    },
+    RemoveQueueEntries {
+        queue_ids: Vec<u64>,
+    },
+    MoveQueue {
+        queue_id: u64,
+        index: u64,
+    },
+    MoveQueueEntries {
+        queue_ids: Vec<u64>,
+        index: u64,
+    },
+    ClearQueue,
+    RandomizeQueue,
+    DeduplicateQueue,
+    Shuffle {
+        enabled: bool,
+    },
+    Repeat {
+        mode: crate::model::RepeatMode,
+    },
+    CreatePlaylist {
+        name: String,
+    },
+    CreatePlaylistWithTracks {
+        name: String,
+        track_ids: Vec<i64>,
+    },
+    RenamePlaylist {
+        playlist_id: i64,
+        name: String,
+    },
+    DeletePlaylist {
+        playlist_id: i64,
+    },
+    AddPlaylist {
+        playlist_id: i64,
+        track_ids: Vec<i64>,
+    },
+    AddPlaylistSources {
+        playlist_id: i64,
+        directories: Vec<PathBuf>,
+        track_ids: Vec<i64>,
+    },
+    RemovePlaylistEntry {
+        entry_id: i64,
+    },
+    MovePlaylistEntry {
+        entry_id: i64,
+        index: u64,
+    },
+    ImportPlaylist {
+        path: PathBuf,
+        name: Option<String>,
+    },
+    ExportPlaylist {
+        playlist_id: i64,
+        path: PathBuf,
+    },
+    EditTrack {
+        track_id: i64,
+        title: String,
+        artist: String,
+        album: String,
+    },
+    RemoveTracks {
+        track_ids: Vec<i64>,
+    },
+    Device {
+        name: Option<String>,
+    },
+    Analysis {
+        enabled: bool,
+    },
+    DismissError,
+    Configure {
+        config: crate::config::Config,
+    },
+    MprisStatus {
+        status: String,
+    },
+    Shutdown,
 }
 
 enum DecodedRequest {
@@ -59,30 +251,457 @@ enum DecodedRequest {
     Watch(StateRevisions),
 }
 
+fn wire_usize(value: u64, field: &str) -> Result<usize> {
+    usize::try_from(value).with_context(|| format!("{field} does not fit in usize"))
+}
+
+impl From<Query> for WireQuery {
+    fn from(value: Query) -> Self {
+        match value {
+            Query::LibraryPage {
+                query,
+                favorite,
+                missing,
+                sort,
+                offset,
+                limit,
+            } => Self::LibraryPage {
+                query,
+                favorite,
+                missing,
+                sort,
+                offset: offset as u64,
+                limit: limit as u64,
+            },
+            Query::TrackPage {
+                query,
+                favorite,
+                missing,
+                offset,
+                limit,
+            } => Self::TrackPage {
+                query,
+                favorite,
+                missing,
+                offset: offset as u64,
+                limit: limit as u64,
+            },
+            Query::DirectoryPage {
+                path,
+                offset,
+                limit,
+            } => Self::DirectoryPage {
+                path,
+                offset: offset as u64,
+                limit: limit as u64,
+            },
+            Query::PlaylistSummaries { offset, limit } => Self::PlaylistSummaries {
+                offset: offset as u64,
+                limit: limit as u64,
+            },
+            Query::PlaylistEntries {
+                playlist_id,
+                offset,
+                limit,
+            } => Self::PlaylistEntries {
+                playlist_id,
+                offset: offset as u64,
+                limit: limit as u64,
+            },
+            Query::Track { track_id } => Self::Track { track_id },
+            Query::LibraryStats => Self::LibraryStats,
+            Query::TrackBatch {
+                query,
+                favorite,
+                missing,
+                after,
+                limit,
+                expected,
+            } => Self::TrackBatch {
+                query,
+                favorite,
+                missing,
+                after,
+                limit: limit as u64,
+                expected,
+            },
+            Query::PlaylistSummaryBatch {
+                after,
+                limit,
+                expected,
+            } => Self::PlaylistSummaryBatch {
+                after,
+                limit: limit as u64,
+                expected,
+            },
+            Query::PlaylistEntryBatch {
+                playlist_id,
+                after,
+                limit,
+                expected,
+            } => Self::PlaylistEntryBatch {
+                playlist_id,
+                after,
+                limit: limit as u64,
+                expected,
+            },
+        }
+    }
+}
+
+impl TryFrom<WireQuery> for Query {
+    type Error = anyhow::Error;
+
+    fn try_from(value: WireQuery) -> Result<Self> {
+        Ok(match value {
+            WireQuery::LibraryPage {
+                query,
+                favorite,
+                missing,
+                sort,
+                offset,
+                limit,
+            } => Self::LibraryPage {
+                query,
+                favorite,
+                missing,
+                sort,
+                offset: wire_usize(offset, "offset")?,
+                limit: wire_usize(limit, "limit")?,
+            },
+            WireQuery::TrackPage {
+                query,
+                favorite,
+                missing,
+                offset,
+                limit,
+            } => Self::TrackPage {
+                query,
+                favorite,
+                missing,
+                offset: wire_usize(offset, "offset")?,
+                limit: wire_usize(limit, "limit")?,
+            },
+            WireQuery::DirectoryPage {
+                path,
+                offset,
+                limit,
+            } => Self::DirectoryPage {
+                path,
+                offset: wire_usize(offset, "offset")?,
+                limit: wire_usize(limit, "limit")?,
+            },
+            WireQuery::PlaylistSummaries { offset, limit } => Self::PlaylistSummaries {
+                offset: wire_usize(offset, "offset")?,
+                limit: wire_usize(limit, "limit")?,
+            },
+            WireQuery::PlaylistEntries {
+                playlist_id,
+                offset,
+                limit,
+            } => Self::PlaylistEntries {
+                playlist_id,
+                offset: wire_usize(offset, "offset")?,
+                limit: wire_usize(limit, "limit")?,
+            },
+            WireQuery::Track { track_id } => Self::Track { track_id },
+            WireQuery::LibraryStats => Self::LibraryStats,
+            WireQuery::TrackBatch {
+                query,
+                favorite,
+                missing,
+                after,
+                limit,
+                expected,
+            } => Self::TrackBatch {
+                query,
+                favorite,
+                missing,
+                after,
+                limit: wire_usize(limit, "limit")?,
+                expected,
+            },
+            WireQuery::PlaylistSummaryBatch {
+                after,
+                limit,
+                expected,
+            } => Self::PlaylistSummaryBatch {
+                after,
+                limit: wire_usize(limit, "limit")?,
+                expected,
+            },
+            WireQuery::PlaylistEntryBatch {
+                playlist_id,
+                after,
+                limit,
+                expected,
+            } => Self::PlaylistEntryBatch {
+                playlist_id,
+                after,
+                limit: wire_usize(limit, "limit")?,
+                expected,
+            },
+        })
+    }
+}
+
+impl From<Command> for WireCommand {
+    fn from(value: Command) -> Self {
+        match value {
+            Command::ShowWindow => Self::ShowWindow,
+            Command::OptimizeDatabase => Self::OptimizeDatabase,
+            Command::SetFavorite {
+                track_ids,
+                favorite,
+            } => Self::SetFavorite {
+                track_ids,
+                favorite,
+            },
+            Command::RemoveMissingTracks => Self::RemoveMissingTracks,
+            Command::Scan { paths, force } => Self::Scan { paths, force },
+            Command::Play { track_id } => Self::Play { track_id },
+            Command::PlayQueue { queue_id } => Self::PlayQueue { queue_id },
+            Command::PlayPlaylist { playlist_id } => Self::PlayPlaylist { playlist_id },
+            Command::Resume => Self::Resume,
+            Command::Pause => Self::Pause,
+            Command::Toggle => Self::Toggle,
+            Command::Stop => Self::Stop,
+            Command::Next => Self::Next,
+            Command::Previous => Self::Previous,
+            Command::Seek { seconds } => Self::Seek { seconds },
+            Command::SeekQueue { queue_id, seconds } => Self::SeekQueue { queue_id, seconds },
+            Command::Volume { value } => Self::Volume { value },
+            Command::Enqueue { track_ids } => Self::Enqueue { track_ids },
+            Command::EnqueueSources {
+                directories,
+                track_ids,
+            } => Self::EnqueueSources {
+                directories,
+                track_ids,
+            },
+            Command::RemoveQueue { queue_id } => Self::RemoveQueue { queue_id },
+            Command::RemoveQueueEntries { queue_ids } => Self::RemoveQueueEntries { queue_ids },
+            Command::MoveQueue { queue_id, index } => Self::MoveQueue {
+                queue_id,
+                index: index as u64,
+            },
+            Command::MoveQueueEntries { queue_ids, index } => Self::MoveQueueEntries {
+                queue_ids,
+                index: index as u64,
+            },
+            Command::ClearQueue => Self::ClearQueue,
+            Command::RandomizeQueue => Self::RandomizeQueue,
+            Command::DeduplicateQueue => Self::DeduplicateQueue,
+            Command::Shuffle { enabled } => Self::Shuffle { enabled },
+            Command::Repeat { mode } => Self::Repeat { mode },
+            Command::CreatePlaylist { name } => Self::CreatePlaylist { name },
+            Command::CreatePlaylistWithTracks { name, track_ids } => {
+                Self::CreatePlaylistWithTracks { name, track_ids }
+            }
+            Command::RenamePlaylist { playlist_id, name } => {
+                Self::RenamePlaylist { playlist_id, name }
+            }
+            Command::DeletePlaylist { playlist_id } => Self::DeletePlaylist { playlist_id },
+            Command::AddPlaylist {
+                playlist_id,
+                track_ids,
+            } => Self::AddPlaylist {
+                playlist_id,
+                track_ids,
+            },
+            Command::AddPlaylistSources {
+                playlist_id,
+                directories,
+                track_ids,
+            } => Self::AddPlaylistSources {
+                playlist_id,
+                directories,
+                track_ids,
+            },
+            Command::RemovePlaylistEntry { entry_id } => Self::RemovePlaylistEntry { entry_id },
+            Command::MovePlaylistEntry { entry_id, index } => Self::MovePlaylistEntry {
+                entry_id,
+                index: index as u64,
+            },
+            Command::ImportPlaylist { path, name } => Self::ImportPlaylist { path, name },
+            Command::ExportPlaylist { playlist_id, path } => {
+                Self::ExportPlaylist { playlist_id, path }
+            }
+            Command::EditTrack {
+                track_id,
+                title,
+                artist,
+                album,
+            } => Self::EditTrack {
+                track_id,
+                title,
+                artist,
+                album,
+            },
+            Command::RemoveTracks { track_ids } => Self::RemoveTracks { track_ids },
+            Command::Device { name } => Self::Device { name },
+            Command::Analysis { enabled } => Self::Analysis { enabled },
+            Command::DismissError => Self::DismissError,
+            Command::Configure { config } => Self::Configure { config },
+            Command::MprisStatus { status } => Self::MprisStatus { status },
+            Command::Shutdown => Self::Shutdown,
+        }
+    }
+}
+
+impl TryFrom<WireCommand> for Command {
+    type Error = anyhow::Error;
+
+    fn try_from(value: WireCommand) -> Result<Self> {
+        Ok(match value {
+            WireCommand::ShowWindow => Self::ShowWindow,
+            WireCommand::OptimizeDatabase => Self::OptimizeDatabase,
+            WireCommand::SetFavorite {
+                track_ids,
+                favorite,
+            } => Self::SetFavorite {
+                track_ids,
+                favorite,
+            },
+            WireCommand::RemoveMissingTracks => Self::RemoveMissingTracks,
+            WireCommand::Scan { paths, force } => Self::Scan { paths, force },
+            WireCommand::Play { track_id } => Self::Play { track_id },
+            WireCommand::PlayQueue { queue_id } => Self::PlayQueue { queue_id },
+            WireCommand::PlayPlaylist { playlist_id } => Self::PlayPlaylist { playlist_id },
+            WireCommand::Resume => Self::Resume,
+            WireCommand::Pause => Self::Pause,
+            WireCommand::Toggle => Self::Toggle,
+            WireCommand::Stop => Self::Stop,
+            WireCommand::Next => Self::Next,
+            WireCommand::Previous => Self::Previous,
+            WireCommand::Seek { seconds } => Self::Seek { seconds },
+            WireCommand::SeekQueue { queue_id, seconds } => Self::SeekQueue { queue_id, seconds },
+            WireCommand::Volume { value } => Self::Volume { value },
+            WireCommand::Enqueue { track_ids } => Self::Enqueue { track_ids },
+            WireCommand::EnqueueSources {
+                directories,
+                track_ids,
+            } => Self::EnqueueSources {
+                directories,
+                track_ids,
+            },
+            WireCommand::RemoveQueue { queue_id } => Self::RemoveQueue { queue_id },
+            WireCommand::RemoveQueueEntries { queue_ids } => Self::RemoveQueueEntries { queue_ids },
+            WireCommand::MoveQueue { queue_id, index } => Self::MoveQueue {
+                queue_id,
+                index: wire_usize(index, "index")?,
+            },
+            WireCommand::MoveQueueEntries { queue_ids, index } => Self::MoveQueueEntries {
+                queue_ids,
+                index: wire_usize(index, "index")?,
+            },
+            WireCommand::ClearQueue => Self::ClearQueue,
+            WireCommand::RandomizeQueue => Self::RandomizeQueue,
+            WireCommand::DeduplicateQueue => Self::DeduplicateQueue,
+            WireCommand::Shuffle { enabled } => Self::Shuffle { enabled },
+            WireCommand::Repeat { mode } => Self::Repeat { mode },
+            WireCommand::CreatePlaylist { name } => Self::CreatePlaylist { name },
+            WireCommand::CreatePlaylistWithTracks { name, track_ids } => {
+                Self::CreatePlaylistWithTracks { name, track_ids }
+            }
+            WireCommand::RenamePlaylist { playlist_id, name } => {
+                Self::RenamePlaylist { playlist_id, name }
+            }
+            WireCommand::DeletePlaylist { playlist_id } => Self::DeletePlaylist { playlist_id },
+            WireCommand::AddPlaylist {
+                playlist_id,
+                track_ids,
+            } => Self::AddPlaylist {
+                playlist_id,
+                track_ids,
+            },
+            WireCommand::AddPlaylistSources {
+                playlist_id,
+                directories,
+                track_ids,
+            } => Self::AddPlaylistSources {
+                playlist_id,
+                directories,
+                track_ids,
+            },
+            WireCommand::RemovePlaylistEntry { entry_id } => Self::RemovePlaylistEntry { entry_id },
+            WireCommand::MovePlaylistEntry { entry_id, index } => Self::MovePlaylistEntry {
+                entry_id,
+                index: wire_usize(index, "index")?,
+            },
+            WireCommand::ImportPlaylist { path, name } => Self::ImportPlaylist { path, name },
+            WireCommand::ExportPlaylist { playlist_id, path } => {
+                Self::ExportPlaylist { playlist_id, path }
+            }
+            WireCommand::EditTrack {
+                track_id,
+                title,
+                artist,
+                album,
+            } => Self::EditTrack {
+                track_id,
+                title,
+                artist,
+                album,
+            },
+            WireCommand::RemoveTracks { track_ids } => Self::RemoveTracks { track_ids },
+            WireCommand::Device { name } => Self::Device { name },
+            WireCommand::Analysis { enabled } => Self::Analysis { enabled },
+            WireCommand::DismissError => Self::DismissError,
+            WireCommand::Configure { config } => Self::Configure { config },
+            WireCommand::MprisStatus { status } => Self::MprisStatus { status },
+            WireCommand::Shutdown => Self::Shutdown,
+        })
+    }
+}
+
 fn decode_request(frame: RequestFrame) -> Result<DecodedRequest> {
     Ok(match frame.request {
-        RequestKind::Query { query } => {
-            DecodedRequest::Query(serde_json::from_str(&query).context("Decoding query")?)
-        }
-        RequestKind::State { sections } => DecodedRequest::State(sections),
-        RequestKind::Command { command } => {
-            DecodedRequest::Command(serde_json::from_str(&command).context("Decoding command")?)
-        }
-        RequestKind::Watch { revisions } => DecodedRequest::Watch(revisions),
+        RequestKind::Query(query) => DecodedRequest::Query(query),
+        RequestKind::State(sections) => DecodedRequest::State(sections),
+        RequestKind::Command(command) => DecodedRequest::Command(command),
+        RequestKind::Watch(revisions) => DecodedRequest::Watch(revisions),
     })
 }
+
+fn decode_body<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
+    let (value, consumed) =
+        decode_from_slice(bytes, request_config()).context("Decoding IPC request body")?;
+    ensure!(
+        consumed == bytes.len(),
+        "Trailing bytes in IPC request body"
+    );
+    Ok(value)
+}
+
 fn decode_request_header(bytes: &[u8]) -> Result<(u16, [u8; 16])> {
-    let ((version, instance_id), _) =
-        decode_from_slice(bytes, config::standard()).context("Decoding IPC request header")?;
+    if bytes.len() < 18 {
+        bail!("IPC request header is truncated");
+    }
+    let version = u16::from_le_bytes(bytes[..2].try_into().unwrap());
+    let instance_id = bytes[2..18].try_into().unwrap();
     Ok((version, instance_id))
 }
 
 fn decode_request_frame(bytes: &[u8]) -> Result<RequestFrame> {
-    let (version, _) = decode_request_header(bytes)?;
+    let (version, instance_id) = decode_request_header(bytes)?;
     if version != PROTOCOL_VERSION {
         bail!("Unsupported IPC protocol version {version}");
     }
-    decode_frame(bytes)
+    let kind = *bytes.get(18).context("IPC request kind is missing")?;
+    let body = &bytes[19..];
+    let request = match kind {
+        REQUEST_QUERY => RequestKind::Query(decode_body::<WireQuery>(body)?.try_into()?),
+        REQUEST_STATE => RequestKind::State(decode_body(body)?),
+        REQUEST_COMMAND => RequestKind::Command(decode_body::<WireCommand>(body)?.try_into()?),
+        REQUEST_WATCH => RequestKind::Watch(decode_body(body)?),
+        _ => bail!("Unknown IPC request kind {kind}"),
+    };
+    Ok(RequestFrame {
+        version,
+        instance_id,
+        request,
+    })
 }
 
 fn decode_response_frame(bytes: &[u8]) -> Result<ResponseFrame> {
@@ -440,17 +1059,74 @@ async fn write_frame<S: AsyncWrite + Unpin>(stream: &mut S, value: &impl Seriali
     stream.flush().await.context("Flushing IPC frame")?;
     Ok(())
 }
-async fn write_frame_buffered<S: AsyncWrite + Unpin>(
+
+async fn write_request_frame<S: AsyncWrite + Unpin>(
     stream: &mut S,
-    value: &impl Serialize,
+    frame: &RequestFrame,
+) -> Result<()> {
+    let mut buffer = Vec::new();
+    encode_request_frame_into(frame, &mut buffer)?;
+    stream
+        .write_all(&buffer)
+        .await
+        .context("Writing IPC frame")?;
+    stream.flush().await.context("Flushing IPC frame")?;
+    Ok(())
+}
+
+async fn write_request_frame_buffered<S: AsyncWrite + Unpin>(
+    stream: &mut S,
+    frame: &RequestFrame,
     buffer: &mut Vec<u8>,
 ) -> Result<()> {
-    encode_frame_into(value, buffer)?;
+    encode_request_frame_into(frame, buffer)?;
     stream
         .write_all(buffer)
         .await
         .context("Writing IPC frame")?;
     stream.flush().await.context("Flushing IPC frame")?;
+    Ok(())
+}
+
+fn request_config() -> impl bincode::config::Config {
+    config::standard().with_limit::<REQUEST_BODY_MAX>()
+}
+
+fn encode_request_frame_into(frame: &RequestFrame, buffer: &mut Vec<u8>) -> Result<()> {
+    buffer.clear();
+    buffer.resize(4 + 2 + 16 + 1, 0);
+    buffer[4..6].copy_from_slice(&frame.version.to_le_bytes());
+    buffer[6..22].copy_from_slice(&frame.instance_id);
+    let kind = match &frame.request {
+        RequestKind::Query(query) => {
+            encode_into_std_write(
+                &WireQuery::from(query.clone()),
+                &mut *buffer,
+                request_config(),
+            )?;
+            REQUEST_QUERY
+        }
+        RequestKind::State(sections) => {
+            encode_into_std_write(sections, &mut *buffer, request_config())?;
+            REQUEST_STATE
+        }
+        RequestKind::Command(command) => {
+            encode_into_std_write(
+                &WireCommand::from(command.clone()),
+                &mut *buffer,
+                request_config(),
+            )?;
+            REQUEST_COMMAND
+        }
+        RequestKind::Watch(revisions) => {
+            encode_into_std_write(revisions, &mut *buffer, request_config())?;
+            REQUEST_WATCH
+        }
+    };
+    buffer[22] = kind;
+    let payload_len = buffer.len() - 4;
+    ensure!(payload_len <= MAX_REQUEST, "IPC request exceeds 64 KiB");
+    buffer[..4].copy_from_slice(&(payload_len as u32).to_le_bytes());
     Ok(())
 }
 
@@ -813,7 +1489,7 @@ impl WatcherSession {
             tokio::select! {
                 _ = &mut notified => bail!("IPC request cancelled"),
                 response = async {
-                    write_frame_buffered(&mut self.stream, &request, &mut self.write_buffer).await?;
+                    write_request_frame_buffered(&mut self.stream, &request, &mut self.write_buffer).await?;
                     let bytes = read_frame(&mut self.stream, MAX_RESPONSE, &mut self.read_buffer).await?;
                     decode_response_frame(&bytes)
                 } => {
@@ -835,7 +1511,7 @@ impl WatcherSession {
     }
 
     pub fn get_state(&mut self, sections: StateSections) -> Result<StateResponse> {
-        let frame = self.exchange(self.request_frame(RequestKind::State { sections }))?;
+        let frame = self.exchange(self.request_frame(RequestKind::State(sections)))?;
         match unpack_error(frame.response)? {
             WireResponse::State(state) => {
                 self.session = SessionState::Bound(frame.instance_id);
@@ -847,8 +1523,7 @@ impl WatcherSession {
 
     pub fn query(&mut self, query: &Query) -> Result<QueryResponse> {
         let _ = self.ensure_handshake()?;
-        let payload = serde_json::to_string(query)?;
-        let frame = self.exchange(self.request_frame(RequestKind::Query { query: payload }))?;
+        let frame = self.exchange(self.request_frame(RequestKind::Query(query.clone())))?;
         match unpack_error(frame.response)? {
             WireResponse::Query(response) => Ok(response),
             _ => bail!("IPC response was not a query response"),
@@ -865,7 +1540,7 @@ impl WatcherSession {
         revisions: StateRevisions,
     ) -> Result<Option<StateRevisions>> {
         let _ = self.ensure_handshake()?;
-        let frame = match self.exchange(self.request_frame(RequestKind::Watch { revisions })) {
+        let frame = match self.exchange(self.request_frame(RequestKind::Watch(revisions))) {
             Ok(frame) => frame,
             Err(_) if self.cancelled.load(Ordering::Acquire) => return Ok(None),
             Err(error) => return Err(error),
@@ -894,7 +1569,7 @@ async fn one_shot(
             instance_id: UNKNOWN_INSTANCE,
             request,
         };
-        write_frame(&mut stream, &frame).await?;
+        write_request_frame(&mut stream, &frame).await?;
         let bytes = timeout(
             Duration::from_secs(120),
             read_frame(&mut stream, MAX_RESPONSE, &mut BytesMut::new()),
@@ -922,13 +1597,7 @@ async fn one_shot(
 
 pub fn query(path: &Path, query: &Query) -> Result<QueryResponse> {
     let runtime = client_runtime()?;
-    let frame = runtime.block_on(one_shot(
-        path,
-        RequestKind::Query {
-            query: serde_json::to_string(query)?,
-        },
-        None,
-    ))?;
+    let frame = runtime.block_on(one_shot(path, RequestKind::Query(query.clone()), None))?;
     match frame.response {
         WireResponse::Query(response) => Ok(response),
         _ => bail!("IPC response was not a query response"),
@@ -944,9 +1613,7 @@ pub(crate) fn query_with_cancel(
     let runtime = client_runtime()?;
     let frame = runtime.block_on(one_shot(
         path,
-        RequestKind::Query {
-            query: serde_json::to_string(query)?,
-        },
+        RequestKind::Query(query.clone()),
         Some((cancelled, notify)),
     ))?;
     match frame.response {
@@ -957,7 +1624,7 @@ pub(crate) fn query_with_cancel(
 
 pub fn get_state(path: &Path, sections: StateSections) -> Result<StateResponse> {
     let runtime = client_runtime()?;
-    let frame = runtime.block_on(one_shot(path, RequestKind::State { sections }, None))?;
+    let frame = runtime.block_on(one_shot(path, RequestKind::State(sections), None))?;
     match frame.response {
         WireResponse::State(response) => Ok(state_response(response)),
         _ => bail!("IPC response was not a state response"),
@@ -966,13 +1633,7 @@ pub fn get_state(path: &Path, sections: StateSections) -> Result<StateResponse> 
 
 pub fn request_ack(path: &Path, command: &Command) -> Result<Ack> {
     let runtime = client_runtime()?;
-    let frame = runtime.block_on(one_shot(
-        path,
-        RequestKind::Command {
-            command: serde_json::to_string(command)?,
-        },
-        None,
-    ))?;
+    let frame = runtime.block_on(one_shot(path, RequestKind::Command(command.clone()), None))?;
     match frame.response {
         WireResponse::Ack(response) => Ok(response),
         _ => bail!("IPC response was not an acknowledgement"),

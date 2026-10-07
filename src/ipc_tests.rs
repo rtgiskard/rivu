@@ -88,18 +88,94 @@ fn system_config_wire_adapter_preserves_optional_fields() {
 }
 
 #[test]
-fn request_round_trip_uses_json_for_tagged_command() {
+fn request_round_trip_uses_binary_wire_body() {
+    let requests = [
+        (
+            RequestKind::Query(Query::LibraryPage {
+                query: Some("album".into()),
+                favorite: Some(true),
+                missing: Some(false),
+                sort: crate::model::LibrarySort::Album,
+                offset: 7,
+                limit: 11,
+            }),
+            REQUEST_QUERY,
+        ),
+        (RequestKind::State(StateSections::ALL), REQUEST_STATE),
+        (
+            RequestKind::Command(Command::MoveQueue {
+                queue_id: 4,
+                index: 9,
+            }),
+            REQUEST_COMMAND,
+        ),
+        (
+            RequestKind::Watch(StateRevisions {
+                playback: 1,
+                queue: 2,
+                library: 3,
+                system: 4,
+            }),
+            REQUEST_WATCH,
+        ),
+    ];
+    for (request, kind) in requests {
+        let frame = RequestFrame {
+            version: PROTOCOL_VERSION,
+            instance_id: UNKNOWN_INSTANCE,
+            request,
+        };
+        let mut encoded = Vec::new();
+        encode_request_frame_into(&frame, &mut encoded).unwrap();
+        assert_eq!(encoded[4 + 2 + 16], kind);
+        let decoded = decode_request(decode_request_frame(&encoded[4..]).unwrap()).unwrap();
+        match kind {
+            REQUEST_QUERY => assert!(matches!(
+                decoded,
+                DecodedRequest::Query(Query::LibraryPage {
+                    offset: 7,
+                    limit: 11,
+                    ..
+                })
+            )),
+            REQUEST_STATE => assert!(matches!(
+                decoded,
+                DecodedRequest::State(StateSections { .. })
+            )),
+            REQUEST_COMMAND => assert!(matches!(
+                decoded,
+                DecodedRequest::Command(Command::MoveQueue {
+                    queue_id: 4,
+                    index: 9
+                })
+            )),
+            REQUEST_WATCH => assert!(matches!(
+                decoded,
+                DecodedRequest::Watch(StateRevisions {
+                    playback: 1,
+                    queue: 2,
+                    library: 3,
+                    system: 4
+                })
+            )),
+            _ => unreachable!(),
+        }
+    }
+}
+#[test]
+fn request_encoding_rejects_oversized_body_before_completion() {
     let frame = RequestFrame {
         version: PROTOCOL_VERSION,
         instance_id: UNKNOWN_INSTANCE,
-        request: RequestKind::Command {
-            command: serde_json::to_string(&Command::Stop).unwrap(),
-        },
+        request: RequestKind::Command(Command::EditTrack {
+            track_id: 1,
+            title: "x".repeat(MAX_REQUEST),
+            artist: String::new(),
+            album: String::new(),
+        }),
     };
-    let encoded = encode_frame(&frame).unwrap();
-    let frame = decode_frame::<RequestFrame>(&encoded[4..]).unwrap();
-    let decoded = decode_request(frame).unwrap();
-    assert!(matches!(decoded, DecodedRequest::Command(Command::Stop)));
+    let mut encoded = Vec::new();
+    assert!(encode_request_frame_into(&frame, &mut encoded).is_err());
 }
 
 #[test]
@@ -107,11 +183,10 @@ fn invalid_protocol_version_is_rejected_before_request_decode() {
     let frame = RequestFrame {
         version: PROTOCOL_VERSION + 1,
         instance_id: UNKNOWN_INSTANCE,
-        request: RequestKind::State {
-            sections: StateSections::ALL,
-        },
+        request: RequestKind::State(StateSections::ALL),
     };
-    let encoded = encode_frame(&frame).unwrap();
+    let mut encoded = Vec::new();
+    encode_request_frame_into(&frame, &mut encoded).unwrap();
     let error = match decode_request_frame(&encoded[4..]) {
         Ok(_) => panic!("invalid version accepted"),
         Err(error) => error,
