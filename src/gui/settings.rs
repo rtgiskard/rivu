@@ -1,11 +1,14 @@
 use super::{
     ACCENT, BORDER, ButtonTooltip, DropdownItem, DropdownState, ERROR, GuiApp, HIGHLIGHT, Measured,
-    POPOVER_MAX_HEIGHT, UI_INSET, artwork::Artwork, button, caption, column, copyable_message,
+    POPOVER_MAX_HEIGHT, UI_INSET, button, caption, column, copyable_message,
     dropdown_container, dropdown_row, dropdown_trigger, icon_button, input::Input,
     panels::TRACK_HEIGHT, row,
 };
 use crate::{
-    config::{Config, LogLevel, RadialSpectrumStyle, RgbColor, SpectrumStyle, SpectrumWindow},
+    config::{
+        Config, LogLevel, RadialSpectrumStyle, RgbColor, SpectrumStyle, SpectrumWindow,
+        VisualizationPalette,
+    },
     model::{Command, RepeatMode},
 };
 use anyhow::{Context as _, Result};
@@ -19,6 +22,7 @@ enum SettingChoice {
     SpectrumStyle(SpectrumStyle),
     Fft(u32),
     RadialSpectrumStyle(RadialSpectrumStyle),
+    Palette(VisualizationPalette),
     LogLevel(LogLevel),
     Window(SpectrumWindow),
 }
@@ -30,6 +34,7 @@ impl SettingChoice {
             Self::Font(value) => value.to_owned(),
             Self::SpectrumStyle(value) => spectrum_style_label(value).to_owned(),
             Self::RadialSpectrumStyle(value) => radial_spectrum_style_label(value).to_owned(),
+            Self::Palette(value) => visualization_palette_label(value).to_owned(),
             Self::Fft(value) => value.to_string(),
             Self::LogLevel(value) => match value {
                 LogLevel::Debug => "Debug".to_owned(),
@@ -195,6 +200,13 @@ fn radial_spectrum_style_label(style: RadialSpectrumStyle) -> &'static str {
     }
 }
 
+fn visualization_palette_label(palette: VisualizationPalette) -> &'static str {
+    match palette {
+        VisualizationPalette::TokyoNight => "Tokyo Night",
+        VisualizationPalette::Deadbeef => "Deadbeef",
+    }
+}
+
 fn ffmpeg_hint(status: &str) -> String {
     let mut text = String::with_capacity(status.len() + 24);
     text.push_str("FFmpeg audio decoding");
@@ -222,14 +234,13 @@ fn ffmpeg_hint(status: &str) -> String {
 enum SettingsPage {
     General,
     Visualizations,
-    About,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum VisualPage {
     Common,
     Spectrum,
     Spectrogram,
-    RadialSpectrum,
+    AudioVisualizer,
     Waveform,
 }
 
@@ -686,6 +697,7 @@ impl GuiApp {
             SettingChoice::RadialSpectrumStyle(value) => {
                 self.settings.draft.radial_spectrum_style = value
             }
+            SettingChoice::Palette(value) => self.settings.draft.visual_palette = value,
             SettingChoice::Fft(value) => self.settings.draft.spectrum_fft_size = value,
             SettingChoice::LogLevel(value) => self.settings.draft.log_level = value,
             SettingChoice::Window(value) => self.settings.draft.spectrum_window = value,
@@ -704,6 +716,7 @@ impl GuiApp {
                 SettingChoice::LogLevel(_) => Measured::SettingsLogLevel,
                 SettingChoice::Window(_) => Measured::SettingsWindow,
                 SettingChoice::RadialSpectrumStyle(_) => Measured::SettingsStyle,
+                SettingChoice::Palette(_) => Measured::SettingsStyle,
                 SettingChoice::Device(_) => Measured::Device,
             };
         }
@@ -1011,7 +1024,7 @@ impl GuiApp {
         let logging = settings_group(
             "Logging",
             row()
-                .items_start()
+                .items_center()
                 .flex_wrap()
                 .gap_3()
                 .child(
@@ -1039,11 +1052,13 @@ impl GuiApp {
         );
         let library = settings_group(
             "Library",
-            column()
-                .gap_2()
-                .child(self.settings.field(Field::Roots))
-                .child(self.settings.field(Field::ScanMaxDepth))
-                .child(device),
+            row()
+                .items_start()
+                .flex_wrap()
+                .gap_3()
+                .child(self.settings.field(Field::Roots).flex_1().min_w(px(260.)))
+                .child(self.settings.field(Field::ScanMaxDepth).flex_1().min_w(px(180.)))
+                .child(device.flex_1().min_w(px(260.))),
         );
         let playback = settings_group(
             "Playback",
@@ -1054,17 +1069,25 @@ impl GuiApp {
         );
         let interface = settings_group(
             "Interface",
-            column()
-                .gap_2()
-                .child(caption("Font family"))
+            row()
+                .items_start()
+                .flex_wrap()
+                .gap_3()
                 .child(
-                    font_dropdown
-                        .relative()
-                        .child(self.measurement(Measured::SettingsFont)),
+                    column()
+                        .flex_1()
+                        .min_w(px(260.))
+                        .gap_1()
+                        .child(caption("Font family"))
+                        .child(
+                            font_dropdown
+                                .relative()
+                                .child(self.measurement(Measured::SettingsFont)),
+                        ),
                 )
-                .child(self.settings.field(Field::Scale))
-                .child(switches),
+                .child(self.settings.field(Field::Scale).flex_1().min_w(px(180.))),
         );
+        let switches_group = settings_group("Playback & system switches", switches);
 
         column()
             .gap_3()
@@ -1072,7 +1095,9 @@ impl GuiApp {
             .child(playback)
             .child(interface)
             .child(logging)
+            .child(switches_group)
     }
+
 
     fn visual_settings_tabs(&self, cx: &mut Context<Self>) -> Div {
         let selected = self.settings.visual_page;
@@ -1104,44 +1129,79 @@ impl GuiApp {
                 |settings| settings.visual_page = VisualPage::Spectrum,
             ))
             .child(self.settings.tab_button(
-                "visual-radial-spectrum",
-                "Radial Spectrum",
-                selected == VisualPage::RadialSpectrum,
-                cx,
-                |settings| settings.visual_page = VisualPage::RadialSpectrum,
-            ))
-            .child(self.settings.tab_button(
                 "visual-waveform",
                 "Waveform",
                 selected == VisualPage::Waveform,
                 cx,
                 |settings| settings.visual_page = VisualPage::Waveform,
             ))
+            .child(self.settings.tab_button(
+                "visual-audio-visualizer",
+                "Audio Visualizer",
+                selected == VisualPage::AudioVisualizer,
+                cx,
+                |settings| settings.visual_page = VisualPage::AudioVisualizer,
+            ))
     }
 
-    fn visual_settings(&mut self, cx: &mut Context<Self>) -> Div {
+    fn visual_settings(&mut self, cx: &mut Context<GuiApp>) -> Div {
         let settings = &self.settings;
         let draft = &settings.draft;
         match settings.visual_page {
-            VisualPage::Common => column()
-                .gap_3()
-                .child(settings.pair(Field::Fps, Field::Background))
-                .child(
-                    row()
-                        .items_center()
-                        .gap_2()
-                        .child(visual_switch(
-                            "visualization-cache",
-                            "",
-                            "Visualization cache",
-                            draft.visualization_cache,
+            VisualPage::Common => {
+                let palette = draft.visual_palette;
+                column()
+                    .gap_3()
+                    .child(settings.pair(Field::Fps, Field::Background))
+                    .child(caption("Global color scheme"))
+                    .child(
+                        dropdown_button(
+                            "visual-palette",
+                            visualization_palette_label(palette),
                             cx,
-                            |draft| draft.visualization_cache = !draft.visualization_cache,
-                        ))
-                        .child(caption(
-                            "Caches Waveform, Spectrum, and Spectrogram rendering data; disable for lower retained memory or uncached comparison.",
-                        )),
-                ),
+                            |this, _, _| {
+                                let values = [
+                                    VisualizationPalette::TokyoNight,
+                                    VisualizationPalette::Deadbeef,
+                                ];
+                                let selected = values
+                                    .iter()
+                                    .position(|value| *value == this.settings.draft.visual_palette)
+                                    .unwrap_or(0);
+                                this.open_setting_dropdown(
+                                    values
+                                        .into_iter()
+                                        .map(|value| {
+                                            DropdownItem::new(
+                                                SettingChoice::Palette(value),
+                                                visualization_palette_label(value),
+                                            )
+                                        })
+                                        .collect(),
+                                    selected,
+                                );
+                            },
+                        )
+                        .relative()
+                        .child(self.measurement(Measured::SettingsStyle)),
+                    )
+                    .child(
+                        row()
+                            .items_center()
+                            .gap_2()
+                            .child(visual_switch(
+                                "visualization-cache",
+                                "",
+                                "Visualization cache",
+                                draft.visualization_cache,
+                                cx,
+                                |draft| draft.visualization_cache = !draft.visualization_cache,
+                            ))
+                            .child(caption(
+                                "Caches Waveform, Spectrum, and Spectrogram rendering data; disable for lower retained memory or uncached comparison.",
+                            )),
+                    )
+            }
             VisualPage::Spectrum => {
                 let style = spectrum_style_label(draft.spectrum_style);
                 column()
@@ -1210,13 +1270,13 @@ impl GuiApp {
                 .child(caption(
                     "The frequency axis is logarithmic from 16 Hz to Nyquist; the tallest active Spectrogram panel sets the shared source resolution, capped by the configured interpolation points, and smaller panels scale it down.",
                 )),
-            VisualPage::RadialSpectrum => {
+            VisualPage::AudioVisualizer => {
                 column()
                     .gap_3()
                     .child(caption("Style"))
                     .child(
                         dropdown_button(
-                            "radial-spectrum-style",
+                            "audio-visualizer-style",
                             radial_spectrum_style_label(draft.radial_spectrum_style),
                             cx,
                             |this, _, _| {
@@ -1253,14 +1313,14 @@ impl GuiApp {
                     .child(settings.pair(Field::RadialSpectrumRingOpacity, Field::RadialSpectrumBloomIntensity))
                     .child(settings.pair(Field::RadialSpectrumPrimaryColor, Field::RadialSpectrumSecondaryColor))
                     .child(visual_switch(
-                        "radial-spectrum-fade-idle",
-                        "",
+                        "audio-visualizer-fade-idle",
+                        "◌",
                         "Fade when idle",
                         draft.radial_spectrum_fade_when_idle,
                         cx,
                         |draft| draft.radial_spectrum_fade_when_idle = !draft.radial_spectrum_fade_when_idle,
                     ))
-                    .child(caption("Radial Spectrum follows the Noctalia v5 Fancy Audio Visualizer's Bars/Rings control. Rivu uses the shared FFT and GPUI-native rendering. Fade when idle uses a 2-second opacity fade."))
+                    .child(caption("Noctalia Fancy uses the shared FFT with Bars, Rings, or Bars/Rings rendering."))
             }
             VisualPage::Waveform => column()
                 .gap_3()
@@ -1274,22 +1334,6 @@ impl GuiApp {
         }
     }
 
-    fn about_settings(&self, cx: &mut Context<GuiApp>) -> Div {
-        column()
-            .w_full()
-            .gap_3()
-            .items_center()
-            .text_center()
-            .child(
-                div()
-                    .mt(px(20.))
-                    .size(px(128.))
-                    .child(cx.new(|_| Artwork::new())),
-            )
-            .child(caption("rivu, a local-first music player"))
-            .child(caption(format!("Version {}", env!("CARGO_PKG_VERSION"))))
-            .child(caption("GPL-3.0-or-later"))
-    }
 
     pub(super) fn settings_panel(
         &mut self,
@@ -1319,13 +1363,6 @@ impl GuiApp {
                 self.settings.page == SettingsPage::Visualizations,
                 cx,
                 |settings| settings.page = SettingsPage::Visualizations,
-            ))
-            .child(self.settings.tab_button(
-                "settings-about",
-                "About",
-                self.settings.page == SettingsPage::About,
-                cx,
-                |settings| settings.page = SettingsPage::About,
             ));
         let mut panel = column()
             .id(("settings-panel", panel_id))
@@ -1337,12 +1374,11 @@ impl GuiApp {
             .child(category);
         let page_id = match (self.settings.page, self.settings.visual_page) {
             (SettingsPage::General, _) => "settings-general-scroll",
-            (SettingsPage::About, _) => "settings-about-scroll",
             (_, VisualPage::Common) => "settings-common-scroll",
             (_, VisualPage::Spectrum) => "settings-spectrum-scroll",
             (_, VisualPage::Spectrogram) => "settings-spectrogram-scroll",
             (_, VisualPage::Waveform) => "settings-waveform-scroll",
-            (_, VisualPage::RadialSpectrum) => "settings-radial-spectrum-scroll",
+            (_, VisualPage::AudioVisualizer) => "settings-audio-visualizer-scroll",
         };
         let content = match self.settings.page {
             SettingsPage::General => self.general_settings(cx),
