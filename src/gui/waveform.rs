@@ -17,8 +17,8 @@ use std::{
 
 use gpui::{
     AnyElement, Bounds, Context, EventEmitter, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Point, SharedString, Window, canvas, div, fill, linear_color_stop,
-    linear_gradient, point, prelude::*, px, rgb, size,
+    MouseUpEvent, Pixels, Point, RenderImage, SharedString, Window, canvas, div, fill, point,
+    prelude::*, px, rgb, size,
 };
 use parking_lot::RwLock;
 
@@ -28,7 +28,7 @@ use crate::{
     model::Track,
 };
 
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 struct Source {
     path: PathBuf,
     range: Option<PlaybackRange>,
@@ -65,22 +65,43 @@ struct Columns {
     width: usize,
     mapping: Option<(f32, f32, f32)>,
     values: Vec<(Option<f32>, Option<f32>, Option<f32>, Option<f32>)>,
+    layer_key: Option<LayerKey>,
+    layer: Option<Arc<RenderImage>>,
+}
+
+#[derive(PartialEq)]
+struct LayerKey {
+    revision: u64,
+    source: Rc<Source>,
+    width: u32,
+    height: u32,
+    rms_gain: u32,
+    peak_gain: u32,
+    peak_gamma: u32,
+    palette: crate::config::VisualizationPalette,
 }
 
 #[derive(Default)]
 struct WaveformPlot {
     columns: HashMap<u64, Columns>,
+    retired: Vec<Arc<RenderImage>>,
+    pending_images: Vec<Arc<RenderImage>>,
 }
 
 fn waveform_level(value: f32, gain: f32, gamma: f32) -> f32 {
     (value * gain).clamp(0.0, 1.0).powf(gamma)
 }
 
+#[cfg(test)]
 fn waveform_height(level: f32, half_height: Pixels) -> Pixels {
     (half_height * level).max(px(1.0))
 }
 
 const WAVEFORM_PEAK_PALETTE_MAX: f32 = 0.76;
+fn unpack_rgb(packed: u32) -> [u8; 3] {
+    [(packed >> 16) as u8, (packed >> 8) as u8, packed as u8]
+}
+
 const WAVEFORM_RMS_PALETTE_MAX: f32 = 0.68;
 
 fn pooled_side(
@@ -114,7 +135,73 @@ impl WaveformPlot {
     fn clear_cache(&mut self) {
         for columns in self.columns.values_mut() {
             columns.values.clear();
+            columns.layer_key = None;
+            if let Some(image) = columns.layer.take() {
+                self.retired.push(image);
+            }
         }
+    }
+
+    fn release_retired(&mut self, window: &mut Window) {
+        while let Some(image) = self.retired.pop() {
+            let _ = window.drop_image(image);
+        }
+        self.retired.append(&mut self.pending_images);
+    }
+
+    fn build_layer(
+        values: &[(Option<f32>, Option<f32>, Option<f32>, Option<f32>)],
+        width: u32,
+        height: u32,
+        palette: &super::visuals::PaletteLut,
+    ) -> Arc<RenderImage> {
+        let mut pixels = image::RgbaImage::new(width, height);
+        let low = unpack_rgb(palette.lookup_mapped(0.0));
+        let center = height as f32 * 0.5;
+        for (column, &(left_rms, left_peak, right_rms, right_peak)) in values.iter().enumerate() {
+            let x_start = (column as u32 * width / values.len() as u32).min(width);
+            let x_end = (((column + 1) as u32 * width) / values.len() as u32).min(width);
+            for (level, upper) in [(left_rms, true), (right_rms, false)] {
+                let Some(level) = level else { continue };
+                let height_px = (center * level).max(1.0);
+                let start = if upper { center - height_px } else { center };
+                let end = if upper { center } else { center + height_px };
+                let high = unpack_rgb(palette.lookup_mapped(level.min(WAVEFORM_RMS_PALETTE_MAX)));
+                for y in (start.floor() as u32)..(end.ceil() as u32).min(height) {
+                    let t = ((y as f32 + 0.5 - start) / (end - start)).clamp(0.0, 1.0);
+                    let t = if upper { t } else { 1.0 - t };
+                    let color = image::Rgba([
+                        (low[0] as f32 + (high[0] as f32 - low[0] as f32) * t) as u8,
+                        (low[1] as f32 + (high[1] as f32 - low[1] as f32) * t) as u8,
+                        (low[2] as f32 + (high[2] as f32 - low[2] as f32) * t) as u8,
+                        255,
+                    ]);
+                    for x in x_start..x_end {
+                        pixels.put_pixel(x, y, color);
+                    }
+                }
+            }
+            for (level, upper) in [(left_peak, true), (right_peak, false)] {
+                let Some(level) = level else { continue };
+                let y = if upper {
+                    center - (center * level).max(1.0)
+                } else {
+                    center + (center * level).max(1.0)
+                };
+                let y = y.round() as u32;
+                if y < height {
+                    let packed = palette.lookup_mapped(level.min(WAVEFORM_PEAK_PALETTE_MAX));
+                    let color = {
+                        let [red, green, blue] = unpack_rgb(packed);
+                        image::Rgba([red, green, blue, 255])
+                    };
+                    for x in x_start..x_end {
+                        pixels.put_pixel(x, y, color);
+                    }
+                }
+            }
+        }
+        Arc::new(RenderImage::new([image::Frame::new(pixels)]))
     }
     #[cfg(test)]
     fn columns(
@@ -141,6 +228,8 @@ impl WaveformPlot {
             width,
             mapping: None,
             values: Vec::new(),
+            layer_key: None,
+            layer: None,
         });
         let left_peaks = if frame.left_peaks.is_empty() {
             &frame.peaks
@@ -523,6 +612,7 @@ impl Waveform {
         let shared = Arc::clone(&self.shared);
         let waveform = Rc::clone(&self.plot);
         let palette = super::visuals::active_palette_lut(config.visual_palette);
+        let config_palette = config.visual_palette;
         let water = rgb(config.waveform_cursor_color.rgb());
         let background = rgb(config.visual_background.rgb());
         let glow = config.waveform_glow;
@@ -582,7 +672,8 @@ impl Waveform {
                                     ),
                                 );
                                 let mut waveform = waveform.borrow_mut();
-                                let progress = {
+                                waveform.release_retired(window);
+                                let (revision, progress) = {
                                     let frame = shared.read();
                                     // Playback may replace its source between layout and paint.
                                     if !frame.matches(&source.path, source.range) {
@@ -597,62 +688,59 @@ impl Waveform {
                                         peak_gain,
                                         peak_gamma,
                                     );
-                                    progress(position, timeline(&frame, duration))
+                                    (
+                                        frame.revision,
+                                        progress(position, timeline(&frame, duration)),
+                                    )
                                 };
-                                // No shared read lock is held while submitting draw commands.
-                                if waveform.columns[&panel_id].values.is_empty() {
-                                    return;
-                                }
-                                let columns = &waveform.columns[&panel_id].values;
-                                let width = plot.size.width / columns.len() as f32;
-                                let center = plot.center().y;
-                                let half_height = plot.size.height * 0.5;
-                                let low = rgb(palette.lookup_mapped(0.0));
-                                for (column, &(left_rms, left_peak, right_rms, right_peak)) in
-                                    columns.iter().enumerate()
-                                {
-                                    let x = plot.left() + width * column as f32;
-                                    for (level, upper) in [(left_rms, true), (right_rms, false)] {
-                                        let Some(level) = level else { continue };
-                                        let height = waveform_height(level, half_height);
-                                        let high = rgb(palette
-                                            .lookup_mapped(level.min(WAVEFORM_RMS_PALETTE_MAX)));
-                                        let (start, end) =
-                                            if upper { (low, high) } else { (high, low) };
-                                        window.paint_quad(fill(
-                                            Bounds::new(
-                                                point(
-                                                    x,
-                                                    if upper { center - height } else { center },
-                                                ),
-                                                size(width, height),
-                                            ),
-                                            linear_gradient(
-                                                0.0,
-                                                linear_color_stop(start, 0.0),
-                                                linear_color_stop(end, 1.0),
-                                            ),
-                                        ));
+                                let width_px = (plot.size.width / px(1.0)).ceil().max(1.0) as u32;
+                                let height_px = (plot.size.height / px(1.0)).ceil().max(1.0) as u32;
+                                let mut retired = None;
+                                let mut pending = false;
+                                let image = {
+                                    let columns = waveform.columns.get_mut(&panel_id).unwrap();
+                                    if columns.values.is_empty() {
+                                        return;
                                     }
-                                    for (level, upper) in [(left_peak, true), (right_peak, false)] {
-                                        let Some(level) = level else { continue };
-                                        let height = waveform_height(level, half_height);
-                                        let y = if upper {
-                                            center - height
+                                    let key = LayerKey {
+                                        revision,
+                                        source: Rc::clone(&source),
+                                        width: width_px,
+                                        height: height_px,
+                                        rms_gain: rms_gain.to_bits(),
+                                        peak_gain: peak_gain.to_bits(),
+                                        peak_gamma: peak_gamma.to_bits(),
+                                        palette: config_palette,
+                                    };
+                                    if cache_enabled && columns.layer_key.as_ref() == Some(&key) {
+                                        Arc::clone(columns.layer.as_ref().unwrap())
+                                    } else {
+                                        retired = columns.layer.take();
+                                        let image = WaveformPlot::build_layer(
+                                            &columns.values,
+                                            width_px,
+                                            height_px,
+                                            &palette,
+                                        );
+                                        if cache_enabled {
+                                            columns.layer_key = Some(key);
+                                            columns.layer = Some(Arc::clone(&image));
                                         } else {
-                                            center + height
-                                        };
-                                        window.paint_quad(fill(
-                                            Bounds::new(
-                                                point(x, y - px(0.5)),
-                                                size(width, px(1.0)),
-                                            ),
-                                            rgb(palette.lookup_mapped(
-                                                level.min(WAVEFORM_PEAK_PALETTE_MAX),
-                                            )),
-                                        ));
+                                            pending = true;
+                                        }
+                                        image
                                     }
+                                };
+                                if let Some(old) = retired {
+                                    waveform.retired.push(old);
                                 }
+                                if pending {
+                                    waveform.pending_images.push(Arc::clone(&image));
+                                }
+                                window
+                                    .paint_image(plot, plot, px(0.0).into(), image, 0, false)
+                                    .map_err(|_| ())
+                                    .ok();
                                 if !cache_enabled {
                                     waveform.clear_cache();
                                 }
