@@ -643,6 +643,7 @@ impl Waveform {
         let background = rgb(config.visual_background.rgb());
         let glow = config.waveform_glow;
         let labels = config.waveform_labels;
+        let cache_enabled = config.visualization_cache;
         let label_duration = timeline(&self.shared.read(), duration);
         let interaction = Rc::clone(&self.interaction);
         interaction
@@ -751,6 +752,13 @@ impl Waveform {
                                         WAVEFORM_PEAK_PALETTE_MAX,
                                         window,
                                     );
+                                }
+                                if !cache_enabled {
+                                    waveform
+                                        .columns
+                                        .get_mut(&panel_id)
+                                        .expect("waveform columns are initialized")
+                                        .geometry = None;
                                 }
                                 if let Some(fraction) = progress {
                                     // Slow periodic easing gives the droplet a deliberate rhythm;

@@ -1806,8 +1806,14 @@ impl GuiApp {
             .filter(|panel| panel.kind == "spectrogram")
             .map(|panel| panel.id)
             .collect::<Vec<_>>();
+        let spectrum_panel_ids = active_panels
+            .iter()
+            .filter(|panel| panel.kind == "spectrum")
+            .map(|panel| panel.id)
+            .collect::<Vec<_>>();
         self.visuals
             .retain_spectrogram_panels(&spectrogram_panel_ids);
+        self.visuals.retain_spectrum_panels(&spectrum_panel_ids);
         let analysis_visible = self.window_visible
             && active_panels.iter().any(|panel| {
                 matches!(

@@ -93,6 +93,9 @@ visible and a Spectrum, Spectrogram, or Radial Spectrum panel is visible.
 `visual_palette` accepts `tokyo_night` or `deadbeef` (default `deadbeef`) and is
 shared by Spectrum, Spectrogram, and Waveform. Defaults and accepted ranges are
 in link:../src/config.rs[`Config`].
+`visualization_cache` defaults to `true` and controls reusable caches owned by
+visualization controls. Disabling it preserves the same rendering calculations
+but rebuilds visualization geometry on each repaint, increasing CPU use.
 
 Spectrum and Waveform use GPU gradients assembled from the selected palette's
 intermediate color stops. Spectrogram continues to use the full palette.

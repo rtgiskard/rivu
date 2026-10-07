@@ -1125,7 +1125,18 @@ impl GuiApp {
         match settings.visual_page {
             VisualPage::Common => column()
                 .gap_3()
-                .child(settings.pair(Field::Fps, Field::Background)),
+                .child(settings.pair(Field::Fps, Field::Background))
+                .child(visual_switch(
+                    "visualization-cache",
+                    "◇",
+                    "Visualization cache",
+                    draft.visualization_cache,
+                    cx,
+                    |draft| draft.visualization_cache = !draft.visualization_cache,
+                ))
+                .child(caption(
+                    "Reuse cached visualization geometry and Spectrogram column images to reduce CPU usage; disabling it rebuilds visualization data on every repaint.",
+                )),
             VisualPage::Spectrum => {
                 let style = spectrum_style_label(draft.spectrum_style);
                 column()

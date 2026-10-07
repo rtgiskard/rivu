@@ -173,8 +173,12 @@ struct SpectrumGeometryKey {
     origin: Point<Pixels>,
     width: Pixels,
     height: Pixels,
+    low: f32,
+    high: f32,
     style: SpectrumStyle,
     bars: usize,
+    bar_width: f32,
+    bar_gravity: f32,
     interpolate: bool,
     peaks: bool,
     top_db: f32,
@@ -210,6 +214,7 @@ struct VisualData {
     spectrum_points: Vec<Point<Pixels>>,
     spectrum_geometry: HashMap<u64, SpectrumGeometry>,
     spectrum_geometry_revision: u64,
+    visualization_cache: bool,
     last_update: Option<Duration>,
     top_db: f32,
     visual_background: u32,
@@ -279,6 +284,7 @@ impl Visuals {
                 spectrum_points: Vec::new(),
                 spectrum_geometry: HashMap::new(),
                 spectrum_geometry_revision: 0,
+                visualization_cache: true,
                 last_update: None,
                 top_db: 0.0,
                 palette_lut: active_palette_lut(VisualizationPalette::Deadbeef),
@@ -349,7 +355,8 @@ impl Visuals {
             || data.spectrogram_history_seconds != config.spectrogram_history_seconds
             || data.spectrogram_db_range != config.spectrogram_db_range
             || data.analysis_fps != config.analysis_fps
-            || data.configured_history_columns != configured_history_columns;
+            || data.configured_history_columns != configured_history_columns
+            || data.visualization_cache != config.visualization_cache;
         if !changed {
             return;
         }
@@ -364,7 +371,8 @@ impl Visuals {
             || data.spectrogram_db_range != config.spectrogram_db_range
             || data.spectrogram_interpolate != config.spectrogram_interpolate
             || data.spectrogram_interpolation_points != config.spectrogram_interpolation_points
-            || data.spectrogram_sampling_points_scale != config.spectrogram_sampling_points_scale;
+            || data.spectrogram_sampling_points_scale != config.spectrogram_sampling_points_scale
+            || data.visualization_cache != config.visualization_cache;
         data.palette_lut = if palette_changed {
             active_palette_lut(config.visual_palette)
         } else {
@@ -392,6 +400,10 @@ impl Visuals {
         data.spectrum_window = config.spectrum_window;
         data.spectrum_grid = config.spectrum_grid;
         data.spectrogram_db_range = config.spectrogram_db_range;
+        data.visualization_cache = config.visualization_cache;
+        if !data.visualization_cache {
+            data.spectrum_geometry.clear();
+        }
         data.spectrogram_history_seconds = config.spectrogram_history_seconds;
         data.history_limit_seconds = config.spectrogram_history_seconds as f64;
         data.analysis_fps = config.analysis_fps;
@@ -510,6 +522,9 @@ impl Visuals {
             .borrow_mut()
             .spectrogram_panel_heights
             .retain(|panel_id, _| panel_ids.contains(panel_id));
+    }
+
+    pub(super) fn retain_spectrum_panels(&mut self, panel_ids: &[u64]) {
         self.data
             .borrow_mut()
             .spectrum_geometry
@@ -902,8 +917,12 @@ impl VisualData {
             origin: plot.origin,
             width: plot.size.width,
             height: plot.size.height,
+            low,
+            high,
             style: self.spectrum_style,
             bars,
+            bar_width: self.spectrum_bar_width,
+            bar_gravity: self.spectrum_bar_gravity,
             interpolate: self.spectrum_interpolate,
             peaks: self.spectrum_peaks,
             top_db: self.top_db,
@@ -915,7 +934,8 @@ impl VisualData {
         window.with_content_mask(
             Some(gpui::ContentMask { bounds: plot }),
             |window| -> Result<(), String> {
-                if let Some(geometry) = self.spectrum_geometry.get(&panel_id)
+                if self.visualization_cache
+                    && let Some(geometry) = self.spectrum_geometry.get(&panel_id)
                     && geometry.key == geometry_key
                 {
                     if let Some(path) = geometry.body.clone() {
@@ -1099,14 +1119,18 @@ impl VisualData {
                     } else {
                         None
                     };
-                self.spectrum_geometry.insert(
-                    panel_id,
-                    SpectrumGeometry {
-                        key: geometry_key,
-                        body: body.clone(),
-                        peak: peak.clone(),
-                    },
-                );
+                if self.visualization_cache {
+                    self.spectrum_geometry.insert(
+                        panel_id,
+                        SpectrumGeometry {
+                            key: geometry_key,
+                            body: body.clone(),
+                            peak: peak.clone(),
+                        },
+                    );
+                } else {
+                    self.spectrum_geometry.remove(&panel_id);
+                }
                 if let Some(path) = body {
                     paint_spectrum_path(path, plot, window, self.palette_lut.as_ref());
                 }
@@ -1134,6 +1158,22 @@ impl VisualData {
             );
         }
         Ok(())
+    }
+
+    fn build_spectrogram_image(&self, levels: &[f32], height: u32) -> Arc<RenderImage> {
+        let mut pixels = image::RgbaImage::new(1, height);
+        for (row, sample) in self.heat_samples.iter().enumerate() {
+            let level = sample_heat_level_at(levels, *sample, self.spectrogram_interpolate);
+            let intensity =
+                ((level + self.spectrogram_db_range) / self.spectrogram_db_range).clamp(0.0, 1.0);
+            let [red, green, blue] = if intensity > 0.0 {
+                self.palette_lut.lookup_rgb(intensity)
+            } else {
+                [0, 0, 0]
+            };
+            pixels.put_pixel(0, row as u32, image::Rgba([blue, green, red, 255]));
+        }
+        Arc::new(RenderImage::new([image::Frame::new(pixels)]))
     }
 
     fn paint_spectrogram(
@@ -1207,24 +1247,16 @@ impl VisualData {
             {
                 continue;
             }
-            if self.columns[index].image.is_none() {
-                let levels = &self.columns[index].levels;
-                let mut pixels = image::RgbaImage::new(1, height_u32);
-                for (row, sample) in self.heat_samples.iter().enumerate() {
-                    let level = sample_heat_level_at(levels, *sample, self.spectrogram_interpolate);
-                    let intensity = ((level + self.spectrogram_db_range)
-                        / self.spectrogram_db_range)
-                        .clamp(0.0, 1.0);
-                    let [red, green, blue] = if intensity > 0.0 {
-                        self.palette_lut.lookup_rgb(intensity)
-                    } else {
-                        [0, 0, 0]
-                    };
-                    pixels.put_pixel(0, row as u32, image::Rgba([blue, green, red, 255]));
+            let image = if self.visualization_cache {
+                if self.columns[index].image.is_none() {
+                    let image =
+                        self.build_spectrogram_image(&self.columns[index].levels, height_u32);
+                    self.columns[index].image = Some(image);
                 }
-                self.columns[index].image =
-                    Some(Arc::new(RenderImage::new([image::Frame::new(pixels)])));
-            }
+                self.columns[index].image.as_ref().map(Arc::clone)
+            } else {
+                Some(self.build_spectrogram_image(&self.columns[index].levels, height_u32))
+            };
             let right = history_fraction(sample_time, latest_time, history);
             let left = history_fraction(self.columns[index].interval_start, latest_time, history);
             let width = (plot.size.width * (right - left)).max(px(1.0));
@@ -1232,13 +1264,13 @@ impl VisualData {
                 point(plot.left() + plot.size.width * left, plot.top()),
                 size(width, plot.size.height),
             );
-            if let Some(image) = &self.columns[index].image {
+            if let Some(image) = image {
                 window
                     .paint_image(
                         column_bounds,
                         column_bounds,
                         px(0.0).into(),
-                        Arc::clone(image),
+                        image,
                         0,
                         false,
                     )

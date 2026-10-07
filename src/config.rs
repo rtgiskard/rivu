@@ -202,6 +202,8 @@ pub struct Config {
     pub waveform_rms_gain: f32,
     pub waveform_peak_gain: f32,
     pub waveform_peak_gamma: f32,
+    /// Enable reusable caches owned by visualization controls.
+    pub visualization_cache: bool,
     pub media_read_buffer_mb: u32,
     pub nerd_symbols: bool,
     pub ffmpeg_enabled: bool,
@@ -270,6 +272,7 @@ impl Default for Config {
             waveform_rms_gain: 1.6,
             waveform_peak_gain: 0.75,
             waveform_peak_gamma: 1.1,
+            visualization_cache: true,
             media_read_buffer_mb: 2,
             nerd_symbols: nerd_fonts_available(),
             ffmpeg_enabled: false,
@@ -659,6 +662,7 @@ mod tests {
             waveform_rms_gain: 2.0,
             waveform_peak_gain: 0.5,
             waveform_peak_gamma: 1.25,
+            visualization_cache: true,
             page_size: 32,
         };
         config.save(&path).unwrap();
