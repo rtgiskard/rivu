@@ -1030,7 +1030,7 @@ impl GuiApp {
                 )
                 .child(visual_switch(
                     "settings-log-file",
-                    "▤",
+                    "",
                     "Write logs to disk",
                     draft.log_to_file,
                     cx,
@@ -1128,7 +1128,7 @@ impl GuiApp {
                 .child(settings.pair(Field::Fps, Field::Background))
                 .child(visual_switch(
                     "visualization-cache",
-                    "◇",
+                    "",
                     "Visualization cache",
                     draft.visualization_cache,
                     cx,
@@ -1249,7 +1249,7 @@ impl GuiApp {
                     .child(settings.pair(Field::RadialSpectrumPrimaryColor, Field::RadialSpectrumSecondaryColor))
                     .child(visual_switch(
                         "radial-spectrum-fade-idle",
-                        "◌",
+                        "",
                         "Fade when idle",
                         draft.radial_spectrum_fade_when_idle,
                         cx,

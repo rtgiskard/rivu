@@ -252,6 +252,7 @@ struct VisualData {
     latest: Option<usize>,
     latest_sample_time: Option<Duration>,
     retired: Vec<Arc<RenderImage>>,
+    pending_images: Vec<Arc<RenderImage>>,
     error: Option<String>,
 }
 
@@ -324,6 +325,7 @@ impl Visuals {
                 latest: None,
                 latest_sample_time: None,
                 retired: Vec::new(),
+                pending_images: Vec::new(),
                 error: None,
             })),
         }
@@ -844,12 +846,13 @@ impl VisualData {
     }
 
     fn release_retired(&mut self, window: &mut Window) {
-        // Both visual canvases clean up, even when only the spectrum is shown.
+        // Retire uncached images for one complete frame before dropping their atlas entries.
         while let Some(image) = self.retired.pop() {
             if let Err(error) = window.drop_image(image) {
                 self.report_error(format!("Cannot release spectrogram image: {error}"));
             }
         }
+        self.retired.append(&mut self.pending_images);
     }
 
     fn paint_spectrum(
@@ -1288,7 +1291,7 @@ impl VisualData {
                     false,
                 );
                 if !self.visualization_cache {
-                    self.retired.push(image);
+                    self.pending_images.push(image);
                 }
                 result
                     .map_err(|error| format!("Cannot upload/paint spectrogram image: {error}"))?;
