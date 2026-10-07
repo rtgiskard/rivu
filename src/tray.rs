@@ -1,7 +1,7 @@
 use crate::{
     artwork::DEFAULT_IMAGE,
     core::AppHandle,
-    model::{Command, PlaybackStatus},
+    model::{Command, PlaybackStatus, RepeatMode},
     projection::TraySnapshot,
 };
 use anyhow::Result;
@@ -624,7 +624,17 @@ impl DbusMenu {
             2 => Command::Resume,
             3 => Command::Previous,
             4 => Command::Next,
-            6 => Command::Shutdown,
+            6 => Command::Shuffle {
+                enabled: !snapshot.shuffle,
+            },
+            7 => Command::Repeat {
+                mode: match snapshot.repeat {
+                    RepeatMode::Off => RepeatMode::All,
+                    RepeatMode::All => RepeatMode::One,
+                    RepeatMode::One => RepeatMode::Off,
+                },
+            },
+            9 => Command::Shutdown,
             _ => return,
         };
         if let Err(error) = self.handle.send(command) {
@@ -640,12 +650,15 @@ fn menu_items(snapshot: &TraySnapshot) -> Vec<MenuLayout> {
         "Play"
     };
     vec![
-        MenuLayout::item(1, "Show Rivu"),
+        MenuLayout::item(1, "Show"),
         MenuLayout::item(2, play_label),
         MenuLayout::item(3, "Previous"),
         MenuLayout::item(4, "Next"),
         MenuLayout::separator(5),
-        MenuLayout::item(6, "Quit Rivu"),
+        MenuLayout::item(6, if snapshot.shuffle { "Shuffle ✓" } else { "Shuffle" }),
+        MenuLayout::item(7, if snapshot.repeat == RepeatMode::Off { "Repeat" } else { "Repeat ✓" }),
+        MenuLayout::separator(8),
+        MenuLayout::item(9, "Quit"),
     ]
 }
 
@@ -654,7 +667,7 @@ fn menu_properties(
     id: i32,
     requested: &[String],
 ) -> Option<HashMap<String, OwnedValue>> {
-    if !(1..=6).contains(&id) {
+    if !(1..=9).contains(&id) {
         return None;
     }
     let play_label = if snapshot.status == PlaybackStatus::Playing {
@@ -663,12 +676,14 @@ fn menu_properties(
         "Play"
     };
     let (label, item_type) = match id {
-        1 => ("Show Rivu", "standard"),
+        1 => ("Show", "standard"),
         2 => (play_label, "standard"),
         3 => ("Previous", "standard"),
         4 => ("Next", "standard"),
-        5 => ("", "separator"),
-        6 => ("Quit Rivu", "standard"),
+        5 | 8 => ("", "separator"),
+        6 => (if snapshot.shuffle { "Shuffle ✓" } else { "Shuffle" }, "standard"),
+        7 => (if snapshot.repeat == RepeatMode::Off { "Repeat" } else { "Repeat ✓" }, "standard"),
+        9 => ("Quit", "standard"),
         _ => unreachable!(),
     };
     let all = requested.is_empty();
@@ -698,6 +713,8 @@ mod tests {
             current_track: None,
             current_track_id: None,
             status: PlaybackStatus::Playing,
+            shuffle: false,
+            repeat: RepeatMode::Off,
             shutting_down: false,
         };
         assert_eq!(
@@ -722,6 +739,8 @@ mod tests {
             current_track: None,
             current_track_id: None,
             status: PlaybackStatus::Stopped,
+            shuffle: false,
+            repeat: RepeatMode::Off,
             shutting_down: false,
         };
         let items = menu_items(&snapshot);
@@ -729,13 +748,16 @@ mod tests {
             .iter()
             .filter_map(|item| item.properties.get("label"))
             .collect();
-        assert_eq!(labels.len(), 5);
+        assert_eq!(labels.len(), 7);
         assert_eq!(items[0].id, 1);
         assert_eq!(items[1].id, 2);
         assert_eq!(items[2].id, 3);
         assert_eq!(items[3].id, 4);
         assert_eq!(items[4].id, 5);
         assert_eq!(items[5].id, 6);
+        assert_eq!(items[6].id, 7);
+        assert_eq!(items[7].id, 8);
+        assert_eq!(items[8].id, 9);
         assert_eq!(sni_status(), "Active");
     }
 }

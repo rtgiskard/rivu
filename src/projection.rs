@@ -1,7 +1,7 @@
 use crate::{
     config::Config,
     core::CoreState,
-    model::{DatabaseOptimization, HistoryEntry, PlaybackState, PlaybackStatus, QueueState, Track},
+    model::{DatabaseOptimization, HistoryEntry, PlaybackState, PlaybackStatus, QueueState, RepeatMode, Track},
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -202,6 +202,8 @@ pub(crate) struct TraySnapshot {
     pub(crate) current_track: Option<Arc<Track>>,
     pub(crate) current_track_id: Option<i64>,
     pub(crate) status: PlaybackStatus,
+    pub(crate) shuffle: bool,
+    pub(crate) repeat: RepeatMode,
     pub(crate) shutting_down: bool,
 }
 
@@ -211,6 +213,8 @@ impl TraySnapshot {
             current_track: state.current_track.clone(),
             current_track_id: state.current_track.as_ref().map(|track| track.id),
             status: state.playback.status,
+            shuffle: state.playback.shuffle,
+            repeat: state.playback.repeat,
             shutting_down: state.system.shutting_down,
         }
     }
@@ -227,14 +231,18 @@ impl TraySnapshot {
         };
         self.status != previous.status
             || self.current_track_id != previous.current_track_id
+            || self.shuffle != previous.shuffle
+            || self.repeat != previous.repeat
             || self.shutting_down != previous.shutting_down
             || track_changed
     }
     pub(crate) fn menu_changed_from(&self, previous: &Self) -> bool {
         self.status != previous.status
+            || self.shuffle != previous.shuffle
+            || self.repeat != previous.repeat
     }
-}
 
+}
 #[cfg(test)]
 mod tests {
     use super::*;
