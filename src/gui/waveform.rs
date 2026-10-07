@@ -7,6 +7,7 @@
 use std::{
     cell::RefCell,
     collections::HashMap,
+    hash::{Hash, Hasher},
     path::PathBuf,
     rc::Rc,
     sync::{
@@ -60,18 +61,26 @@ fn track_range(track: &Track) -> Option<PlaybackRange> {
     })
 }
 
+const WAVEFORM_TILE_WIDTH: u32 = 32;
+
+struct Tile {
+    x_start: u32,
+    x_end: u32,
+    fingerprint: u64,
+    image: Arc<RenderImage>,
+}
+
 struct Columns {
     revision: u64,
     width: usize,
     mapping: Option<(f32, f32, f32)>,
     values: Vec<(Option<f32>, Option<f32>, Option<f32>, Option<f32>)>,
     layer_key: Option<LayerKey>,
-    layer: Option<Arc<RenderImage>>,
+    tiles: Vec<Tile>,
 }
 
 #[derive(PartialEq)]
 struct LayerKey {
-    revision: u64,
     source: Rc<Source>,
     width: u32,
     height: u32,
@@ -131,13 +140,27 @@ fn pooled_side(
     (rms, peak)
 }
 
+fn tile_fingerprint(
+    values: &[(Option<f32>, Option<f32>, Option<f32>, Option<f32>)],
+    start: usize,
+    end: usize,
+) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for &(a, b, c, d) in &values[start..end] {
+        for value in [a, b, c, d] {
+            value.map(f32::to_bits).hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
 impl WaveformPlot {
     fn clear_cache(&mut self) {
         for columns in self.columns.values_mut() {
             columns.values.clear();
             columns.layer_key = None;
-            if let Some(image) = columns.layer.take() {
-                self.retired.push(image);
+            for tile in columns.tiles.drain(..) {
+                self.retired.push(tile.image);
             }
         }
     }
@@ -149,35 +172,46 @@ impl WaveformPlot {
         self.retired.append(&mut self.pending_images);
     }
 
-    fn build_layer(
+    fn build_tile(
         values: &[(Option<f32>, Option<f32>, Option<f32>, Option<f32>)],
+        x_start: u32,
+        x_end: u32,
         width: u32,
         height: u32,
         palette: &super::visuals::PaletteLut,
     ) -> Arc<RenderImage> {
-        let mut pixels = image::RgbaImage::new(width, height);
-        let low = unpack_rgb(palette.lookup_mapped(0.0));
+        let mut pixels = image::RgbaImage::new(x_end - x_start, height);
         let center = height as f32 * 0.5;
         for (column, &(left_rms, left_peak, right_rms, right_peak)) in values.iter().enumerate() {
-            let x_start = (column as u32 * width / values.len() as u32).min(width);
-            let x_end = (((column + 1) as u32 * width) / values.len() as u32).min(width);
+            let x0 = (column as u32 * width / values.len() as u32)
+                .max(x_start)
+                .min(x_end);
+            let x1 = (((column + 1) as u32 * width) / values.len() as u32)
+                .max(x_start)
+                .min(x_end);
             for (level, upper) in [(left_rms, true), (right_rms, false)] {
                 let Some(level) = level else { continue };
                 let height_px = (center * level).max(1.0);
                 let start = if upper { center - height_px } else { center };
                 let end = if upper { center } else { center + height_px };
-                let high = unpack_rgb(palette.lookup_mapped(level.min(WAVEFORM_RMS_PALETTE_MAX)));
+                let rms_fraction = (level.min(WAVEFORM_RMS_PALETTE_MAX) / WAVEFORM_RMS_PALETTE_MAX)
+                    .clamp(0.0, 1.0);
+                let edge_color = unpack_rgb(palette.lookup_mapped(1.0 - rms_fraction));
+                let center_color = unpack_rgb(palette.lookup_mapped(1.0));
                 for y in (start.floor() as u32)..(end.ceil() as u32).min(height) {
                     let t = ((y as f32 + 0.5 - start) / (end - start)).clamp(0.0, 1.0);
                     let t = if upper { t } else { 1.0 - t };
                     let color = image::Rgba([
-                        (low[0] as f32 + (high[0] as f32 - low[0] as f32) * t) as u8,
-                        (low[1] as f32 + (high[1] as f32 - low[1] as f32) * t) as u8,
-                        (low[2] as f32 + (high[2] as f32 - low[2] as f32) * t) as u8,
+                        (edge_color[0] as f32 + (center_color[0] as f32 - edge_color[0] as f32) * t)
+                            as u8,
+                        (edge_color[1] as f32 + (center_color[1] as f32 - edge_color[1] as f32) * t)
+                            as u8,
+                        (edge_color[2] as f32 + (center_color[2] as f32 - edge_color[2] as f32) * t)
+                            as u8,
                         255,
                     ]);
-                    for x in x_start..x_end {
-                        pixels.put_pixel(x, y, color);
+                    for x in x0..x1 {
+                        pixels.put_pixel(x - x_start, y, color);
                     }
                 }
             }
@@ -190,13 +224,12 @@ impl WaveformPlot {
                 };
                 let y = y.round() as u32;
                 if y < height {
-                    let packed = palette.lookup_mapped(level.min(WAVEFORM_PEAK_PALETTE_MAX));
-                    let color = {
-                        let [red, green, blue] = unpack_rgb(packed);
-                        image::Rgba([red, green, blue, 255])
-                    };
-                    for x in x_start..x_end {
-                        pixels.put_pixel(x, y, color);
+                    let peak_fraction = (level.min(WAVEFORM_PEAK_PALETTE_MAX)
+                        / WAVEFORM_PEAK_PALETTE_MAX)
+                        .clamp(0.0, 1.0);
+                    let [red, green, blue] = unpack_rgb(palette.lookup_mapped(1.0 - peak_fraction));
+                    for x in x0..x1 {
+                        pixels.put_pixel(x - x_start, y, image::Rgba([red, green, blue, 255]));
                     }
                 }
             }
@@ -229,7 +262,7 @@ impl WaveformPlot {
             mapping: None,
             values: Vec::new(),
             layer_key: None,
-            layer: None,
+            tiles: Vec::new(),
         });
         let left_peaks = if frame.left_peaks.is_empty() {
             &frame.peaks
@@ -673,7 +706,7 @@ impl Waveform {
                                 );
                                 let mut waveform = waveform.borrow_mut();
                                 waveform.release_retired(window);
-                                let (revision, progress) = {
+                                let (_revision, progress) = {
                                     let frame = shared.read();
                                     // Playback may replace its source between layout and paint.
                                     if !frame.matches(&source.path, source.range) {
@@ -695,54 +728,105 @@ impl Waveform {
                                 };
                                 let width_px = (plot.size.width / px(1.0)).ceil().max(1.0) as u32;
                                 let height_px = (plot.size.height / px(1.0)).ceil().max(1.0) as u32;
-                                let mut retired = None;
-                                let mut pending = false;
-                                let image = {
+                                let key = LayerKey {
+                                    source: Rc::clone(&source),
+                                    width: width_px,
+                                    height: height_px,
+                                    rms_gain: rms_gain.to_bits(),
+                                    peak_gain: peak_gain.to_bits(),
+                                    peak_gamma: peak_gamma.to_bits(),
+                                    palette: config_palette,
+                                };
+                                let mut paint_tiles = Vec::new();
+                                let mut retire = Vec::new();
+                                {
                                     let columns = waveform.columns.get_mut(&panel_id).unwrap();
                                     if columns.values.is_empty() {
                                         return;
                                     }
-                                    let key = LayerKey {
-                                        revision,
-                                        source: Rc::clone(&source),
-                                        width: width_px,
-                                        height: height_px,
-                                        rms_gain: rms_gain.to_bits(),
-                                        peak_gain: peak_gain.to_bits(),
-                                        peak_gamma: peak_gamma.to_bits(),
-                                        palette: config_palette,
-                                    };
-                                    if cache_enabled && columns.layer_key.as_ref() == Some(&key) {
-                                        Arc::clone(columns.layer.as_ref().unwrap())
-                                    } else {
-                                        retired = columns.layer.take();
-                                        let image = WaveformPlot::build_layer(
-                                            &columns.values,
-                                            width_px,
-                                            height_px,
-                                            &palette,
-                                        );
-                                        if cache_enabled {
-                                            columns.layer_key = Some(key);
-                                            columns.layer = Some(Arc::clone(&image));
-                                        } else {
-                                            pending = true;
-                                        }
-                                        image
+                                    if !cache_enabled || columns.layer_key.as_ref() != Some(&key) {
+                                        retire
+                                            .extend(columns.tiles.drain(..).map(|tile| tile.image));
+                                        columns.layer_key = cache_enabled.then_some(key);
                                     }
-                                };
-                                if let Some(old) = retired {
-                                    waveform.retired.push(old);
+                                    let tile_count = ((width_px + WAVEFORM_TILE_WIDTH - 1)
+                                        / WAVEFORM_TILE_WIDTH)
+                                        as usize;
+                                    for tile_index in 0..tile_count {
+                                        let x_start = tile_index as u32 * WAVEFORM_TILE_WIDTH;
+                                        let x_end = (x_start + WAVEFORM_TILE_WIDTH).min(width_px);
+                                        let first = (x_start as usize * columns.values.len()
+                                            / width_px as usize)
+                                            .min(columns.values.len());
+                                        let end = (x_end as usize * columns.values.len()
+                                            / width_px as usize)
+                                            .min(columns.values.len());
+                                        let fingerprint =
+                                            tile_fingerprint(&columns.values, first, end);
+                                        let retained = cache_enabled
+                                            && columns.tiles.get(tile_index).is_some_and(|tile| {
+                                                tile.x_start == x_start
+                                                    && tile.x_end == x_end
+                                                    && tile.fingerprint == fingerprint
+                                            });
+                                        if !retained {
+                                            if tile_index < columns.tiles.len() {
+                                                retire.push(columns.tiles.remove(tile_index).image);
+                                            }
+                                            let image = WaveformPlot::build_tile(
+                                                &columns.values,
+                                                x_start,
+                                                x_end,
+                                                width_px,
+                                                height_px,
+                                                &palette,
+                                            );
+                                            if cache_enabled {
+                                                columns.tiles.insert(
+                                                    tile_index,
+                                                    Tile {
+                                                        x_start,
+                                                        x_end,
+                                                        fingerprint,
+                                                        image: Arc::clone(&image),
+                                                    },
+                                                );
+                                            }
+                                            paint_tiles.push((x_start, x_end, image));
+                                        } else {
+                                            paint_tiles.push((
+                                                x_start,
+                                                x_end,
+                                                Arc::clone(&columns.tiles[tile_index].image),
+                                            ));
+                                        }
+                                    }
                                 }
-                                if pending {
-                                    waveform.pending_images.push(Arc::clone(&image));
+                                waveform.retired.extend(retire);
+                                for (x_start, x_end, image) in &paint_tiles {
+                                    let tile_bounds = Bounds::new(
+                                        point(plot.left() + px(*x_start as f32), plot.top()),
+                                        size(px((*x_end - *x_start) as f32), plot.size.height),
+                                    );
+                                    window
+                                        .paint_image(
+                                            tile_bounds,
+                                            tile_bounds,
+                                            px(0.0).into(),
+                                            Arc::clone(image),
+                                            0,
+                                            false,
+                                        )
+                                        .map_err(|_| ())
+                                        .ok();
                                 }
-                                window
-                                    .paint_image(plot, plot, px(0.0).into(), image, 0, false)
-                                    .map_err(|_| ())
-                                    .ok();
                                 if !cache_enabled {
                                     waveform.clear_cache();
+                                }
+                                if !cache_enabled {
+                                    waveform.pending_images.extend(
+                                        paint_tiles.iter().map(|(_, _, image)| Arc::clone(image)),
+                                    );
                                 }
                                 if let Some(fraction) = progress {
                                     // Slow periodic easing gives the droplet a deliberate rhythm;
