@@ -236,7 +236,7 @@ enum WireCommand {
     },
     DismissError,
     Configure {
-        config: crate::config::Config,
+        config: WireConfig,
     },
     MprisStatus {
         status: String,
@@ -535,7 +535,9 @@ impl From<Command> for WireCommand {
             Command::Device { name } => Self::Device { name },
             Command::Analysis { enabled } => Self::Analysis { enabled },
             Command::DismissError => Self::DismissError,
-            Command::Configure { config } => Self::Configure { config },
+            Command::Configure { config } => Self::Configure {
+                config: WireConfig::from(&config),
+            },
             Command::MprisStatus { status } => Self::MprisStatus { status },
             Command::Shutdown => Self::Shutdown,
         }
@@ -641,7 +643,9 @@ impl TryFrom<WireCommand> for Command {
             WireCommand::Device { name } => Self::Device { name },
             WireCommand::Analysis { enabled } => Self::Analysis { enabled },
             WireCommand::DismissError => Self::DismissError,
-            WireCommand::Configure { config } => Self::Configure { config },
+            WireCommand::Configure { config } => Self::Configure {
+                config: config.into(),
+            },
             WireCommand::MprisStatus { status } => Self::MprisStatus { status },
             WireCommand::Shutdown => Self::Shutdown,
         })
@@ -721,6 +725,200 @@ struct WireStateResponse {
     #[serde(with = "wire_system_option")]
     system: Option<WireSystemState>,
 }
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct WireConfig {
+    library_roots: Vec<PathBuf>,
+    scan_max_depth: u32,
+    output_device: Option<String>,
+    volume: f32,
+    shuffle: bool,
+    repeat: crate::model::RepeatMode,
+    play_count_threshold_percent: f64,
+    tray_enabled: bool,
+    mpris_enabled: bool,
+    log_level: crate::config::LogLevel,
+    log_to_file: bool,
+    log_retention_weeks: u32,
+    queue_limit: u32,
+    page_size: u32,
+    ui_font: String,
+    ui_scale: f32,
+    analysis_fps: u32,
+    visual_background: crate::config::RgbColor,
+    visual_palette: crate::config::VisualizationPalette,
+    spectrum_style: crate::config::SpectrumStyle,
+    spectrum_fft_size: u32,
+    spectrum_window: crate::config::SpectrumWindow,
+    spectrum_interpolate: bool,
+    spectrum_bar_width: f32,
+    spectrum_bars: u32,
+    spectrum_gap: f32,
+    spectrum_peaks: bool,
+    spectrum_peak_hold_ms: u32,
+    spectrum_peak_gravity: f32,
+    spectrum_bar_hold_ms: u32,
+    spectrum_bar_gravity: f32,
+    spectrum_smoothing_ms: u32,
+    spectrum_grid: bool,
+    spectrum_labels: bool,
+    radial_spectrum_style: crate::config::RadialSpectrumStyle,
+    radial_spectrum_sensitivity: f32,
+    radial_spectrum_rotation_speed: f32,
+    radial_spectrum_bar_width: f32,
+    radial_spectrum_bar_glow_layers: u32,
+    radial_spectrum_ring_opacity: f32,
+    radial_spectrum_bloom_intensity: f32,
+    radial_spectrum_inner_diameter: f32,
+    radial_spectrum_fade_when_idle: bool,
+    radial_spectrum_primary_color: crate::config::RgbColor,
+    radial_spectrum_secondary_color: crate::config::RgbColor,
+    spectrogram_labels: bool,
+    spectrogram_interpolate: bool,
+    spectrogram_sampling_points_scale: f32,
+    spectrogram_interpolation_points: u32,
+    waveform_labels: bool,
+    spectrum_db_range: f32,
+    spectrogram_db_range: f32,
+    spectrogram_history_seconds: u32,
+    waveform_cursor_color: crate::config::RgbColor,
+    waveform_glow: f32,
+    media_read_buffer_mb: u32,
+    nerd_symbols: bool,
+    ffmpeg_enabled: bool,
+    pipewire_auto_mix: bool,
+}
+
+impl From<&crate::config::Config> for WireConfig {
+    fn from(value: &crate::config::Config) -> Self {
+        Self {
+            library_roots: value.library_roots.clone(),
+            scan_max_depth: value.scan_max_depth,
+            output_device: value.output_device.clone(),
+            volume: value.volume,
+            shuffle: value.shuffle,
+            repeat: value.repeat,
+            play_count_threshold_percent: value.play_count_threshold_percent,
+            tray_enabled: value.tray_enabled,
+            mpris_enabled: value.mpris_enabled,
+            log_level: value.log_level,
+            log_to_file: value.log_to_file,
+            log_retention_weeks: value.log_retention_weeks,
+            queue_limit: value.queue_limit,
+            page_size: value.page_size,
+            ui_font: value.ui_font.clone(),
+            ui_scale: value.ui_scale,
+            analysis_fps: value.analysis_fps,
+            visual_background: value.visual_background,
+            visual_palette: value.visual_palette,
+            spectrum_style: value.spectrum_style,
+            spectrum_fft_size: value.spectrum_fft_size,
+            spectrum_window: value.spectrum_window,
+            spectrum_interpolate: value.spectrum_interpolate,
+            spectrum_bar_width: value.spectrum_bar_width,
+            spectrum_bars: value.spectrum_bars,
+            spectrum_gap: value.spectrum_gap,
+            spectrum_peaks: value.spectrum_peaks,
+            spectrum_peak_hold_ms: value.spectrum_peak_hold_ms,
+            spectrum_peak_gravity: value.spectrum_peak_gravity,
+            spectrum_bar_hold_ms: value.spectrum_bar_hold_ms,
+            spectrum_bar_gravity: value.spectrum_bar_gravity,
+            spectrum_smoothing_ms: value.spectrum_smoothing_ms,
+            spectrum_grid: value.spectrum_grid,
+            spectrum_labels: value.spectrum_labels,
+            radial_spectrum_style: value.radial_spectrum_style,
+            radial_spectrum_sensitivity: value.radial_spectrum_sensitivity,
+            radial_spectrum_rotation_speed: value.radial_spectrum_rotation_speed,
+            radial_spectrum_bar_width: value.radial_spectrum_bar_width,
+            radial_spectrum_bar_glow_layers: value.radial_spectrum_bar_glow_layers,
+            radial_spectrum_ring_opacity: value.radial_spectrum_ring_opacity,
+            radial_spectrum_bloom_intensity: value.radial_spectrum_bloom_intensity,
+            radial_spectrum_inner_diameter: value.radial_spectrum_inner_diameter,
+            radial_spectrum_fade_when_idle: value.radial_spectrum_fade_when_idle,
+            radial_spectrum_primary_color: value.radial_spectrum_primary_color,
+            radial_spectrum_secondary_color: value.radial_spectrum_secondary_color,
+            spectrogram_labels: value.spectrogram_labels,
+            spectrogram_interpolate: value.spectrogram_interpolate,
+            spectrogram_sampling_points_scale: value.spectrogram_sampling_points_scale,
+            spectrogram_interpolation_points: value.spectrogram_interpolation_points,
+            waveform_labels: value.waveform_labels,
+            spectrum_db_range: value.spectrum_db_range,
+            spectrogram_db_range: value.spectrogram_db_range,
+            spectrogram_history_seconds: value.spectrogram_history_seconds,
+            waveform_cursor_color: value.waveform_cursor_color,
+            waveform_glow: value.waveform_glow,
+            media_read_buffer_mb: value.media_read_buffer_mb,
+            nerd_symbols: value.nerd_symbols,
+            ffmpeg_enabled: value.ffmpeg_enabled,
+            pipewire_auto_mix: value.pipewire_auto_mix,
+        }
+    }
+}
+
+impl From<WireConfig> for crate::config::Config {
+    fn from(value: WireConfig) -> Self {
+        Self {
+            library_roots: value.library_roots,
+            scan_max_depth: value.scan_max_depth,
+            output_device: value.output_device,
+            volume: value.volume,
+            shuffle: value.shuffle,
+            repeat: value.repeat,
+            play_count_threshold_percent: value.play_count_threshold_percent,
+            tray_enabled: value.tray_enabled,
+            mpris_enabled: value.mpris_enabled,
+            log_level: value.log_level,
+            log_to_file: value.log_to_file,
+            log_retention_weeks: value.log_retention_weeks,
+            queue_limit: value.queue_limit,
+            page_size: value.page_size,
+            ui_font: value.ui_font,
+            ui_scale: value.ui_scale,
+            analysis_fps: value.analysis_fps,
+            visual_background: value.visual_background,
+            visual_palette: value.visual_palette,
+            spectrum_style: value.spectrum_style,
+            spectrum_fft_size: value.spectrum_fft_size,
+            spectrum_window: value.spectrum_window,
+            spectrum_interpolate: value.spectrum_interpolate,
+            spectrum_bar_width: value.spectrum_bar_width,
+            spectrum_bars: value.spectrum_bars,
+            spectrum_gap: value.spectrum_gap,
+            spectrum_peaks: value.spectrum_peaks,
+            spectrum_peak_hold_ms: value.spectrum_peak_hold_ms,
+            spectrum_peak_gravity: value.spectrum_peak_gravity,
+            spectrum_bar_hold_ms: value.spectrum_bar_hold_ms,
+            spectrum_bar_gravity: value.spectrum_bar_gravity,
+            spectrum_smoothing_ms: value.spectrum_smoothing_ms,
+            spectrum_grid: value.spectrum_grid,
+            spectrum_labels: value.spectrum_labels,
+            radial_spectrum_style: value.radial_spectrum_style,
+            radial_spectrum_sensitivity: value.radial_spectrum_sensitivity,
+            radial_spectrum_rotation_speed: value.radial_spectrum_rotation_speed,
+            radial_spectrum_bar_width: value.radial_spectrum_bar_width,
+            radial_spectrum_bar_glow_layers: value.radial_spectrum_bar_glow_layers,
+            radial_spectrum_ring_opacity: value.radial_spectrum_ring_opacity,
+            radial_spectrum_bloom_intensity: value.radial_spectrum_bloom_intensity,
+            radial_spectrum_inner_diameter: value.radial_spectrum_inner_diameter,
+            radial_spectrum_fade_when_idle: value.radial_spectrum_fade_when_idle,
+            radial_spectrum_primary_color: value.radial_spectrum_primary_color,
+            radial_spectrum_secondary_color: value.radial_spectrum_secondary_color,
+            spectrogram_labels: value.spectrogram_labels,
+            spectrogram_interpolate: value.spectrogram_interpolate,
+            spectrogram_sampling_points_scale: value.spectrogram_sampling_points_scale,
+            spectrogram_interpolation_points: value.spectrogram_interpolation_points,
+            waveform_labels: value.waveform_labels,
+            spectrum_db_range: value.spectrum_db_range,
+            spectrogram_db_range: value.spectrogram_db_range,
+            spectrogram_history_seconds: value.spectrogram_history_seconds,
+            waveform_cursor_color: value.waveform_cursor_color,
+            waveform_glow: value.waveform_glow,
+            media_read_buffer_mb: value.media_read_buffer_mb,
+            nerd_symbols: value.nerd_symbols,
+            ffmpeg_enabled: value.ffmpeg_enabled,
+            pipewire_auto_mix: value.pipewire_auto_mix,
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct WireSystemState {
@@ -732,8 +930,7 @@ struct WireSystemState {
     devices: Arc<Vec<String>>,
     selected_device: Option<String>,
     revision: u64,
-    #[serde(with = "wire_config")]
-    config: Arc<crate::config::Config>,
+    config: WireConfig,
     config_path: PathBuf,
     mpris_status: String,
     ffmpeg_status: String,
@@ -751,7 +948,7 @@ impl From<&SystemState> for WireSystemState {
             devices: value.devices.clone(),
             selected_device: value.selected_device.clone(),
             revision: value.revision,
-            config: value.config.clone(),
+            config: WireConfig::from(value.config.as_ref()),
             config_path: value.config_path.clone(),
             mpris_status: value.mpris_status.clone(),
             ffmpeg_status: value.ffmpeg_status.clone(),
@@ -771,7 +968,7 @@ impl From<WireSystemState> for SystemState {
             devices: value.devices,
             selected_device: value.selected_device,
             revision: value.revision,
-            config: value.config,
+            config: Arc::new(value.config.into()),
             config_path: value.config_path,
             mpris_status: value.mpris_status,
             ffmpeg_status: value.ffmpeg_status,
@@ -797,32 +994,6 @@ mod wire_system_option {
         D: Deserializer<'de>,
     {
         Option::<WireSystemState>::deserialize(deserializer)
-    }
-}
-
-// Config's omitted fields are unsafe with bincode's positional encoding. Keep
-// the complete config as JSON while the enclosing state remains bincode.
-mod wire_config {
-    use crate::config::Config;
-    use serde::{Deserialize, Serialize};
-    use std::sync::Arc;
-
-    pub fn serialize<S: serde::Serializer>(
-        value: &Arc<Config>,
-        serializer: S,
-    ) -> std::result::Result<S::Ok, S::Error> {
-        serde_json::to_string(value.as_ref())
-            .map_err(serde::ser::Error::custom)?
-            .serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> std::result::Result<Arc<Config>, D::Error> {
-        let json = String::deserialize(deserializer)?;
-        serde_json::from_str(&json)
-            .map(Arc::new)
-            .map_err(serde::de::Error::custom)
     }
 }
 

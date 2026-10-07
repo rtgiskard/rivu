@@ -61,30 +61,32 @@ fn partial_state_wire_round_trip_omits_unrequested_sections() {
 
 #[test]
 fn system_config_wire_adapter_preserves_optional_fields() {
-    let config = Arc::new(crate::config::Config {
-        output_device: Some("USB audio output".to_owned()),
-        ..Default::default()
-    });
-    let mut system = crate::model::SystemState::default();
-    system.config = config.clone();
-    system.revision = 42;
-    let frame = response_frame(
-        WireResponse::State(wire_state(StateResponse {
-            revisions: StateRevisions::default(),
-            playback: None,
-            queue: None,
-            library: None,
-            system: Some(system),
-        })),
-        [1; 16],
-    );
-    let encoded = encode_frame(&frame).unwrap();
-    let decoded = decode_frame::<ResponseFrame>(&encoded[4..]).unwrap();
-    let WireResponse::State(state) = decoded.response else {
-        panic!("expected state");
-    };
-    let state = state_response(state);
-    assert_eq!(state.system.unwrap().config.as_ref(), config.as_ref());
+    for output_device in [None, Some("USB audio output".to_owned())] {
+        let config = Arc::new(crate::config::Config {
+            output_device,
+            ..Default::default()
+        });
+        let mut system = crate::model::SystemState::default();
+        system.config = config.clone();
+        system.revision = 42;
+        let frame = response_frame(
+            WireResponse::State(wire_state(StateResponse {
+                revisions: StateRevisions::default(),
+                playback: None,
+                queue: None,
+                library: None,
+                system: Some(system),
+            })),
+            [1; 16],
+        );
+        let encoded = encode_frame(&frame).unwrap();
+        let decoded = decode_frame::<ResponseFrame>(&encoded[4..]).unwrap();
+        let WireResponse::State(state) = decoded.response else {
+            panic!("expected state");
+        };
+        let state = state_response(state);
+        assert_eq!(state.system.unwrap().config.as_ref(), config.as_ref());
+    }
 }
 
 #[test]
@@ -159,6 +161,33 @@ fn request_round_trip_uses_binary_wire_body() {
         }
     }
 }
+#[test]
+fn configure_request_round_trip_preserves_optional_config_field() {
+    for output_device in [None, Some("USB audio output".to_owned())] {
+        let config = crate::config::Config {
+            output_device,
+            ..Default::default()
+        };
+        let frame = RequestFrame {
+            version: PROTOCOL_VERSION,
+            instance_id: UNKNOWN_INSTANCE,
+            request: WireRequest::Command(WireCommand::from(Command::Configure {
+                config: config.clone(),
+            })),
+        };
+        let mut encoded = Vec::new();
+        encode_request_frame_into(&frame, &mut encoded).unwrap();
+        let decoded = decode_request_frame(&encoded[4..]).unwrap();
+        let WireRequest::Command(command) = decoded.request else {
+            panic!("expected command request");
+        };
+        let Command::Configure { config: decoded } = command.try_into().unwrap() else {
+            panic!("expected configure command");
+        };
+        assert_eq!(decoded, config);
+    }
+}
+
 #[test]
 fn request_encoding_rejects_oversized_body_before_completion() {
     let frame = RequestFrame {
