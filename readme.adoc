@@ -37,6 +37,20 @@ Wire implementation: link:src/ipc/protocol.rs[protocol],
 link:src/ipc/transport.rs[transport], and link:src/ipc/client.rs[client].
 Runtime ownership: link:src/core.rs[core] and link:src/core/runtime.rs[runtime].
 
+== Desktop UI controls
+
+Shared GPUI controls live in link:src/gui/components.rs[components] and keep
+visual treatment separate from application actions. Buttons and select triggers
+share their geometry, typography, and hover surface; `active_control` supplies
+the selected treatment for toggles, tabs, and sortable headers. Primary playback
+emphasis is distinct from selection. Reuse these primitives instead of adding
+page-specific highlight styles.
+
+Dropdown state wraps keyboard navigation, clamps out-of-range selection, and
+does not open an empty popover. Settings triggers own focus and repaint after
+opening; the popup uses the same rem-based row height as its rendered options
+and reveals the selected option when opened.
+
 == Build and install
 
 Rivu currently targets Linux; the desktop UI uses Wayland. On Arch Linux, install

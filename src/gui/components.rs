@@ -9,6 +9,7 @@ use gpui::{
 pub(crate) const ROW_HEIGHT: f32 = 42.0;
 pub(crate) const MENU_WIDTH: f32 = 260.0;
 pub(crate) const POPOVER_MAX_HEIGHT: f32 = 240.0;
+pub(crate) const DROPDOWN_ROW_REMS: f32 = 2.0;
 pub(crate) use dropdown::{DropdownItem, DropdownState};
 pub(crate) use list::SelectionModel;
 
@@ -110,24 +111,41 @@ impl Render for ButtonTooltip {
     }
 }
 
-/// Reusable visual button primitive. It has no application-specific behavior.
-pub(crate) fn button_style(
-    id: impl Into<ElementId>,
-    label: impl Into<SharedString>,
-) -> Stateful<Div> {
+/// Applies the shared selected state to any control with a selectable meaning.
+pub(crate) fn active_control(control: Stateful<Div>, active: bool) -> Stateful<Div> {
+    control.when(active, |view| {
+        view.bg(rgb(HIGHLIGHT))
+            .border_color(rgb(ACCENT))
+            .text_color(rgb(ACCENT))
+    })
+}
+
+/// Shared geometry and interaction surface for buttons and select triggers.
+fn control_surface(id: impl Into<ElementId>) -> Stateful<Div> {
     div()
         .id(id)
+        .flex()
+        .items_center()
+        .min_w_0()
         .px(gpui::px(UI_INSET))
         .py_1()
         .rounded_md()
         .min_h(gpui::rems(2.0))
         .text_sm()
+        .text_color(rgb(TEXT))
         .cursor_pointer()
         .bg(rgb(PANEL))
         .border_1()
         .border_color(rgb(BORDER))
         .hover(|style| style.bg(rgb(HIGHLIGHT)).border_color(rgb(ACCENT)))
-        .child(label.into())
+}
+
+/// Reusable visual button primitive. It has no application-specific behavior.
+pub(crate) fn button_style(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+) -> Stateful<Div> {
+    control_surface(id).justify_center().child(label.into())
 }
 
 /// Text button with shared application event handling.
@@ -159,7 +177,7 @@ pub(crate) fn sortable_header(
         ""
     };
     let label = format!("{}{}", label.into(), marker);
-    let mut control = button(id, label, cx, action);
+    let mut control = active_control(button(id, label, cx, action), active);
     if let Some(width) = width {
         control = control.w(width).flex_shrink_0();
     } else {
@@ -233,20 +251,20 @@ pub(crate) fn toggle_button(
     action: impl Fn(&mut GuiApp, &mut Context<GuiApp>) + 'static,
 ) -> Stateful<Div> {
     let label = label.into();
-    icon_button(
-        id,
-        icon,
-        format!("{}: {}", label, if enabled { "On" } else { "Off" }),
-        cx,
-        move |this, _, cx| {
-            action(this, cx);
-            cx.notify();
-        },
+    active_control(
+        icon_button(
+            id,
+            icon,
+            format!("{}: {}", label, if enabled { "On" } else { "Off" }),
+            cx,
+            move |this, _, cx| {
+                action(this, cx);
+                cx.notify();
+            },
+        )
+        .text_size(gpui::rems(1.)),
+        enabled,
     )
-    .text_size(gpui::rems(1.))
-    .when(enabled, |view| {
-        view.bg(rgb(HIGHLIGHT)).text_color(rgb(ACCENT))
-    })
 }
 
 /// Standard label/value row used by track metadata panels.
@@ -326,23 +344,16 @@ pub(crate) fn dropdown_trigger(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
 ) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex()
-        .items_center()
+    control_surface(id)
         .w_full()
-        .px(gpui::px(UI_INSET))
-        .py_1()
-        .rounded_md()
-        .min_h(gpui::rems(2.0))
-        .text_sm()
-        .cursor_pointer()
-        .bg(rgb(PANEL))
-        .border_1()
-        .border_color(rgb(BORDER))
-        .hover(|style| style.bg(rgb(HIGHLIGHT)).border_color(rgb(ACCENT)))
+        .gap_2()
         .child(div().flex_1().min_w_0().truncate().child(label.into()))
-        .child("⌄")
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_color(rgb(super::MUTED))
+                .child("⌄"),
+        )
 }
 
 pub(super) struct NerdSymbols(pub bool);
@@ -449,7 +460,7 @@ pub(crate) fn dropdown_row(
     label: impl Into<SharedString>,
 ) -> Stateful<Div> {
     list_row(id, selected)
-        .h(gpui::rems(2.0))
+        .h(gpui::rems(DROPDOWN_ROW_REMS))
         .child(div().flex_1().min_w_0().truncate().child(label.into()))
 }
 

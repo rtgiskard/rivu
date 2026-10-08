@@ -1,9 +1,9 @@
 use super::{
     ACCENT, BORDER, Dragging, Field, GuiApp, HIGHLIGHT, HistorySort, ListFocus, MUTED, Measured,
-    StatusKind, TEXT, UI_INSET, artwork_preview, column, empty_state, form_field, format_time,
-    icon_button, library::LibraryDrag, list_viewport, metadata_item, panel_header, panel_surface,
-    panel_toolbar, row, row_text, section_group, sortable_header, status_message, track_row,
-    two_column,
+    StatusKind, TEXT, UI_INSET, active_control, artwork_preview, column, empty_state, form_field,
+    format_time, icon_button, library::LibraryDrag, list_viewport, metadata_item, panel_header,
+    panel_surface, panel_toolbar, row, row_text, section_group, sortable_header, status_message,
+    track_row, two_column,
 };
 pub(super) use super::{TRACK_HEIGHT, caption, list_row};
 use crate::{
@@ -101,7 +101,7 @@ impl GuiApp {
             .gap_1()
             .flex_wrap()
             .justify_center()
-            .child(
+            .child(active_control(
                 icon_button(
                     ("shuffle", panel_id),
                     "󰒟",
@@ -121,11 +121,9 @@ impl GuiApp {
                     },
                 )
                 .size(gpui::rems(3.))
-                .text_2xl()
-                .when(self.state.playback.shuffle, |view| {
-                    view.text_color(rgb(ACCENT)).border_color(rgb(ACCENT))
-                }),
-            )
+                .text_2xl(),
+                self.state.playback.shuffle,
+            ))
             .child(
                 icon_button(
                     ("previous", panel_id),
@@ -169,7 +167,7 @@ impl GuiApp {
                 .size(gpui::rems(3.))
                 .text_2xl(),
             )
-            .child(
+            .child(active_control(
                 icon_button(
                     ("repeat", panel_id),
                     if self.state.playback.repeat == RepeatMode::One {
@@ -193,11 +191,9 @@ impl GuiApp {
                     },
                 )
                 .size(gpui::rems(3.))
-                .text_2xl()
-                .when(self.state.playback.repeat != RepeatMode::Off, |view| {
-                    view.text_color(rgb(ACCENT)).border_color(rgb(ACCENT))
-                }),
-            );
+                .text_2xl(),
+                self.state.playback.repeat != RepeatMode::Off,
+            ));
         let volume_control = row()
             .w(px(172.))
             .max_w(gpui::relative(1.))
@@ -491,7 +487,7 @@ impl GuiApp {
                         }),
                     )
             })
-            .child(
+            .child(active_control(
                 icon_button(
                     ("library-filter-favorites", panel_id),
                     "󰓎",
@@ -501,12 +497,10 @@ impl GuiApp {
                         this.favorites_only = !this.favorites_only;
                         this.refresh_filter(cx);
                     },
-                )
-                .when(self.favorites_only, |view| {
-                    view.text_color(rgb(ACCENT)).border_color(rgb(ACCENT))
-                }),
-            )
-            .child(
+                ),
+                self.favorites_only,
+            ))
+            .child(active_control(
                 icon_button(
                     ("library-filter-missing", panel_id),
                     "󰌶",
@@ -516,11 +510,9 @@ impl GuiApp {
                         this.missing_only = !this.missing_only;
                         this.refresh_filter(cx);
                     },
-                )
-                .when(self.missing_only, |view| {
-                    view.text_color(rgb(ACCENT)).border_color(rgb(ACCENT))
-                }),
-            )
+                ),
+                self.missing_only,
+            ))
             .child(icon_button(
                 ("library-add-root", panel_id),
                 "󰐕",
@@ -528,7 +520,7 @@ impl GuiApp {
                 cx,
                 |this, _, cx| this.choose_library_root(cx),
             ))
-            .child(
+            .child(active_control(
                 icon_button(
                     ("library-force-scan", panel_id),
                     "󰑐",
@@ -542,11 +534,9 @@ impl GuiApp {
                         this.force_scan = !this.force_scan;
                         cx.notify();
                     },
-                )
-                .when(self.force_scan, |view| {
-                    view.text_color(rgb(ACCENT)).border_color(rgb(ACCENT))
-                }),
-            );
+                ),
+                self.force_scan,
+            ));
         if !self.selected.is_empty() {
             tools = tools
                 .child(icon_button(

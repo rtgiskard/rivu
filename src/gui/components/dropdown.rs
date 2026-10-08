@@ -35,8 +35,7 @@ impl<T> DropdownState<T> {
     pub(crate) fn open(&mut self, items: impl IntoIterator<Item = DropdownItem<T>>) {
         self.items = items.into_iter().collect();
         self.selected = 0;
-        self.open = true;
-        self.normalize_selection();
+        self.open = !self.items.is_empty();
     }
 
     pub(crate) fn close(&mut self) {
@@ -53,43 +52,87 @@ impl<T> DropdownState<T> {
     }
 
     pub(crate) fn filtered_item(&self, index: usize) -> Option<(usize, &DropdownItem<T>)> {
-        self.filtered().nth(index)
+        self.items.get(index).map(|item| (index, item))
     }
 
     pub(crate) fn move_next(&mut self) {
-        let count = self.filtered().count();
+        let count = self.items.len();
         if count > 0 {
             self.selected = (self.selected + 1) % count;
         }
     }
 
     pub(crate) fn move_previous(&mut self) {
-        let count = self.filtered().count();
+        let count = self.items.len();
         if count > 0 {
             self.selected = self.selected.checked_sub(1).unwrap_or(count - 1);
         }
     }
 
     pub(crate) fn selected_index(&self) -> Option<usize> {
-        self.filtered().nth(self.selected).map(|(index, _)| index)
+        (!self.items.is_empty()).then_some(self.selected)
     }
 
     pub(crate) fn select_index(&mut self, index: usize) {
-        let selected = {
-            self.filtered()
-                .position(|(item_index, _)| item_index == index)
-                .unwrap_or(0)
-        };
-        self.selected = selected;
-        self.normalize_selection();
+        self.selected = index.min(self.items.len().saturating_sub(1));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DropdownItem, DropdownState};
+
+    #[test]
+    fn empty_open_does_not_leave_a_zero_height_popup() {
+        let mut state = DropdownState::<u8>::default();
+        state.open([]);
+        assert!(!state.is_open());
+        assert_eq!(state.selected_index(), None);
+        state.move_next();
+        state.move_previous();
+        state.select_index(usize::MAX);
+        assert_eq!(state.selected_index(), None);
     }
 
-    fn normalize_selection(&mut self) {
-        let count = self.filtered().count();
-        if count == 0 {
-            self.selected = 0;
-        } else {
-            self.selected = self.selected.min(count - 1);
-        }
+    #[test]
+    fn keyboard_selection_wraps_and_clamps() {
+        let mut state = DropdownState::default();
+        state.open([
+            DropdownItem::new(1, "one"),
+            DropdownItem::new(2, "two"),
+            DropdownItem::new(3, "three"),
+        ]);
+        state.move_previous();
+        assert_eq!(state.selected_index(), Some(2));
+        state.move_next();
+        assert_eq!(state.selected_index(), Some(0));
+        state.select_index(99);
+        assert_eq!(state.selected_index(), Some(2));
+    }
+
+    #[test]
+    fn replacing_choices_resets_selection_and_empty_choices_close_popup() {
+        let mut state = DropdownState::default();
+        state.open([
+            DropdownItem::new(10, "ten"),
+            DropdownItem::new(20, "twenty"),
+        ]);
+        state.move_next();
+        state.close();
+        assert!(!state.is_open());
+
+        state.open([DropdownItem::new(30, "thirty")]);
+        assert!(state.is_open());
+        assert_eq!(state.selected_index(), Some(0));
+        assert_eq!(state.filtered_item(0).map(|(_, item)| item.value), Some(30));
+        assert!(state.filtered_item(1).is_none());
+        state.move_next();
+        state.move_previous();
+        assert_eq!(state.selected_index(), Some(0));
+
+        state.open([]);
+        assert!(!state.is_open());
+        assert_eq!(state.selected_index(), None);
+        assert_eq!(state.filtered().count(), 0);
     }
 }

@@ -1,8 +1,9 @@
 use super::{
     ACCENT, BORDER, ButtonTooltip, DropdownItem, DropdownState, ERROR, GuiApp, HIGHLIGHT, Measured,
-    POPOVER_MAX_HEIGHT, StatusKind, UI_INSET, button, caption, column, copyable_message,
-    dropdown_container, dropdown_row, dropdown_trigger, form_field, icon_button, input::Input,
-    panels::TRACK_HEIGHT, row, section_group, status_message, toggle_button, two_column,
+    POPOVER_MAX_HEIGHT, StatusKind, UI_INSET, active_control, button, caption, column,
+    components::DROPDOWN_ROW_REMS, copyable_message, dropdown_container, dropdown_row,
+    dropdown_trigger, form_field, icon_button, input::Input, row, section_group, status_message,
+    toggle_button, two_column,
 };
 use crate::{
     config::{
@@ -145,6 +146,8 @@ fn dropdown_button(
 ) -> Stateful<Div> {
     dropdown_trigger(id, label).on_click(cx.listener(move |this, _, window, cx| {
         action(this, window, cx);
+        this.settings_focus.focus(window, cx);
+        cx.notify();
         cx.stop_propagation();
     }))
 }
@@ -602,17 +605,15 @@ impl Settings {
         cx: &mut Context<GuiApp>,
         select: impl Fn(&mut Settings) + 'static,
     ) -> Stateful<Div> {
-        button(id, label, cx, move |this, _, cx| {
-            this.settings.dropdown.close();
-            select(&mut this.settings);
-            cx.notify();
-        })
+        active_control(
+            button(id, label, cx, move |this, _, cx| {
+                this.settings.dropdown.close();
+                select(&mut this.settings);
+                cx.notify();
+            }),
+            active,
+        )
         .flex_shrink_0()
-        .when(active, |view| {
-            view.bg(rgb(HIGHLIGHT))
-                .text_color(rgb(ACCENT))
-                .border_color(rgb(ACCENT))
-        })
     }
 }
 
@@ -714,6 +715,11 @@ impl GuiApp {
         }
         self.settings.dropdown.open(items);
         self.settings.dropdown.select_index(selected);
+        if let Some(index) = self.settings.dropdown.selected_index() {
+            self.settings
+                .device_scroll
+                .scroll_to_item(index, ScrollStrategy::Nearest);
+        }
     }
 
     pub(super) fn settings_dropdown_is_open(&self) -> bool {
@@ -763,7 +769,7 @@ impl GuiApp {
                     "output-device-selector",
                     chosen_device.clone(),
                     cx,
-                    |this, window, cx| {
+                    |this, _, _| {
                         let open = this.settings.dropdown.is_open();
                         if open {
                             this.settings.dropdown.close();
@@ -803,8 +809,6 @@ impl GuiApp {
                                 .device_scroll
                                 .scroll_to_item(index, ScrollStrategy::Nearest);
                         }
-                        this.settings_focus.focus(window, cx);
-                        cx.notify();
                     },
                 )
                 .relative()
@@ -1389,7 +1393,8 @@ impl GuiApp {
             if let Some(bounds) = bounds {
                 let selected = self.settings.dropdown.selected_index().unwrap_or(0);
                 let item_count = self.settings.dropdown.filtered().count();
-                let height = (item_count as f32 * TRACK_HEIGHT * self.state.system.config.ui_scale)
+                let row_height = DROPDOWN_ROW_REMS * f32::from(window.rem_size());
+                let height = (item_count as f32 * row_height)
                     .min(POPOVER_MAX_HEIGHT * self.state.system.config.ui_scale)
                     .min(f32::from(window.viewport_size().height) * 0.45);
                 let choices = uniform_list(
@@ -1400,8 +1405,8 @@ impl GuiApp {
                             .filter_map(|index| {
                                 let (item_index, item) =
                                     this.settings.dropdown.filtered_item(index)?;
-                                let label = item.label.clone();
-                                let hint: SharedString = label.clone().into();
+                                let label: SharedString = item.label.clone().into();
+                                let hint = label.clone();
                                 Some(
                                     dropdown_row(
                                         ("settings-choice", item_index),
