@@ -55,8 +55,31 @@ link:../src/config.rs[`Config`]; log handling is in link:../src/logging.rs[loggi
 
 The bottom-right gear opens settings. Library roots are separated by semicolons;
 the output device is selected from the currently available devices in a dropdown.
-General and Visualizations are separate pages, and visualization settings are
-grouped by view.
+General groups Library, Playback, Audio, Interface, Desktop integration, and
+Logging. Audio contains output selection, media read buffering, and decoder/remix
+switches; Interface contains the editable font family, font presets, scale,
+list batch size, and Nerd Font symbols. The system tray switch takes effect after
+restarting the graphical host, not merely reopening its window. Media read
+buffering applies to future source opens, including full waveform scans; it does
+not reopen the current track.
+
+Visualizations is grouped by view, with shared controls in Common:
+
+* Appearance: background for all views; color scheme for Spectrum, Spectrogram,
+  and Waveform. Radial Spectrum has independent primary and secondary colors.
+* Frequency analysis: FFT size, window, and analysis rate for Spectrum,
+  Spectrogram, and Radial Spectrum, not Waveform. FFT size defaults to `8192`;
+  configuration keys remain `spectrum_fft_size` and `spectrum_window`. Changing
+  size or window clears Spectrogram history. The Spectrum / Radial range controls
+  `spectrum_db_range`; Spectrogram retains its independent color range.
+* Rendering: `visualization_cache` reuses derived graphics in Spectrum,
+  Spectrogram, and Waveform; it is separate from media read buffering.
+
+Spectrum separates shape/detail, body motion, and peak markers. Spectrogram
+separates color/history from frequency sampling. Radial Spectrum separates
+shape/motion, bars/rings effects, and colors. Waveform separates appearance from
+amplitude display. Toggle labels are visible; related fields share a row when
+space permits and wrap on narrower panels.
 
 `ui_font` accepts a font family; empty uses the platform font.
 `ui_scale` accepts `0.75`–`2.0`.
@@ -126,14 +149,19 @@ not seek playback.
 Each channel uses an independent center-to-edge gradient assembled from the
 palette stops. Stop positions, including the Deadbeef low-end floor mapping,
 map to the corresponding center-to-edge height; RMS and Peak retain separate
-high-end palette limits. Both amplitudes use the same monotonic height mapping,
-`clamp(amplitude * scale, 0, 1)^0.86`, gently lifting low levels. The RMS fill
-retains a minimum 1px height for known data, including silence; the Peak line
+high-end palette limits. RMS uses the monotonic height mapping
+`clamp(normalized_amplitude * waveform_rms_gain, 0, 1)^0.86`, gently lifting low
+levels. Peak uses its own `waveform_peak_gain` and `waveform_peak_gamma` in the
+same formula (default gamma `1.1`). The RMS fill retains a minimum 1px height for
+known data, including silence; the Peak line
 uses the mapped level directly. Unknown intervals remain blank. Adjacent stop
 intervals share their boundary color.
 
 `waveform_labels`, `waveform_cursor_color`, and `waveform_glow` control labels,
-cursor, and glow. Preview and interaction:
+cursor, and glow. The Amplitude display group exposes RMS gain (`0`–`3`), Peak
+gain (`0`–`2`), and Peak gamma (`0.25`–`3`). Gamma above `1` reduces low peaks;
+below `1` lifts them. These controls affect rendering only, not playback volume
+or decoded preview data. Preview and interaction:
 link:../src/gui/waveform.rs[Waveform]; peak collection:
 link:../src/audio/waveform.rs[audio waveform].
 
@@ -196,6 +224,10 @@ Spectrogram shows recent frequency history; `spectrogram_*` settings control its
 history duration, color range, labels, interpolation, and the `0.4`–`1.4`
 `spectrogram_sampling_points_scale` used to choose source frequency rows. Retained
 history also depends on panel width and analysis rate; unavailable history stays blank.
+`spectrogram_interpolation_points` defaults to `1024`; the settings page labels
+it Maximum frequency rows. This rendering row limit applies with or without
+frequency interpolation; it is not the FFT size, and increasing it does not add
+measured frequency detail.
 Both views use a logarithmic frequency axis and share `spectrum_fft_size` and
 `spectrum_window`; `spectrum_db_range` and `spectrogram_db_range` are independent
 display spans.
