@@ -316,6 +316,7 @@ impl Visuals {
         let changed = palette_changed
             || data.visual_background != config.visual_background.rgb()
             || data.spectrum_db_range != config.spectrum_db_range
+            || data.spectrogram_db_range != config.spectrogram_db_range
             || data.spectrum_grid != config.spectrum_grid
             || data.spectrum_bars != config.spectrum_bars
             || data.spectrum_style != config.spectrum_style
@@ -329,13 +330,13 @@ impl Visuals {
             || data.spectrum_bar_width != config.spectrum_bar_width
             || data.spectrum_interpolate != config.spectrum_interpolate
             || data.spectrum_show_labels != config.spectrum_labels
+            || data.spectrogram_show_labels != config.spectrogram_labels
             || data.spectrum_fft_size != config.spectrum_fft_size
             || data.spectrum_window != config.spectrum_window
             || data.spectrogram_interpolate != config.spectrogram_interpolate
             || data.spectrogram_interpolation_points != config.spectrogram_interpolation_points
             || data.spectrogram_sampling_points_scale != config.spectrogram_sampling_points_scale
             || data.spectrogram_history_seconds != config.spectrogram_history_seconds
-            || data.spectrogram_db_range != config.spectrogram_db_range
             || data.analysis_fps != config.analysis_fps
             || data.configured_history_columns != configured_history_columns
             || cache_changed;
@@ -1934,6 +1935,22 @@ mod tests {
         visuals.configure(&grid);
         let data = visuals.data.borrow();
         assert!(!data.spectrum_grid);
+    }
+
+    #[test]
+    fn spectrogram_labels_toggle_without_resetting_history() {
+        let mut visuals = configured_visuals();
+        let mut config = Config::default();
+        visuals.update(&frame(1.0, -30.0));
+        for visible in [false, true] {
+            config.spectrogram_labels = visible;
+            visuals.configure(&config);
+            let data = visuals.data.borrow();
+            assert_eq!(data.spectrogram_show_labels, visible);
+            assert!(data.spectrum_show_labels);
+            assert_eq!(data.len, 1);
+            assert_eq!(data.columns[0].levels, vec![-30.0; 4]);
+        }
     }
 
     #[test]
