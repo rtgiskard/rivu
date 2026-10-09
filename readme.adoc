@@ -52,7 +52,7 @@ Linux builds prefer `mold` when available and otherwise use the toolchain's
 default linker. Install it optionally with `sudo pacman -S --needed mold`.
 
 The default Cargo build has no FFmpeg dependency. The optional extension needs
-FFmpeg 9 development headers (`libavutil 61` , `libavcodec 63` , `libavformat 63`)
+FFmpeg development headers (`libavutil`, `libavcodec`, `libavformat`)
 and `libclang` for binding generation:
 
 [source,sh]
