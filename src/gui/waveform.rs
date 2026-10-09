@@ -77,6 +77,7 @@ struct Columns {
     values: Vec<(Option<f32>, Option<f32>, Option<f32>, Option<f32>)>,
     layer_key: Option<LayerKey>,
     tiles: Vec<Tile>,
+    tile_revision: Option<u64>,
 }
 
 #[derive(PartialEq)]
@@ -95,6 +96,8 @@ struct WaveformPlot {
     columns: HashMap<u64, Columns>,
     retired: Vec<Arc<RenderImage>>,
     pending_images: Vec<Arc<RenderImage>>,
+    paint_tiles: Vec<(u32, u32, Arc<RenderImage>)>,
+    retire_scratch: Vec<Arc<RenderImage>>,
 }
 
 fn waveform_level(value: f32, gain: f32, gamma: f32) -> f32 {
@@ -137,6 +140,17 @@ fn pooled_side(
     (rms, peak)
 }
 
+fn tile_columns(x_start: u32, x_end: u32, width: u32, count: usize) -> std::ops::Range<usize> {
+    if count == 0 || width == 0 || x_start >= x_end {
+        return 0..0;
+    }
+    let width = u64::from(width);
+    let count64 = count as u64;
+    let first = ((u64::from(x_start) + 1) * count64 - 1) / width;
+    let end = (u64::from(x_end) * count64).div_ceil(width);
+    (first as usize).min(count)..(end as usize).min(count)
+}
+
 fn tile_fingerprint(
     values: &[(Option<f32>, Option<f32>, Option<f32>, Option<f32>)],
     start: usize,
@@ -169,6 +183,57 @@ impl WaveformPlot {
         self.retired.append(&mut self.pending_images);
     }
 
+    fn update_tiles(
+        &mut self,
+        panel_id: u64,
+        key: LayerKey,
+        cache_enabled: bool,
+        palette: &super::visuals::PaletteLut,
+    ) {
+        self.paint_tiles.clear();
+        let columns = self.columns.get_mut(&panel_id).unwrap();
+        if columns.values.is_empty() {
+            return;
+        }
+        let unchanged = cache_enabled
+            && columns.layer_key.as_ref() == Some(&key)
+            && columns.tile_revision == Some(columns.revision);
+        if !cache_enabled || columns.layer_key.as_ref() != Some(&key) {
+            self.retire_scratch.extend(columns.tiles.drain(..).map(|tile| tile.image));
+        }
+        let tile_count = key.width.div_ceil(WAVEFORM_TILE_WIDTH) as usize;
+        for tile_index in 0..tile_count {
+            let x_start = tile_index as u32 * WAVEFORM_TILE_WIDTH;
+            let x_end = (x_start + WAVEFORM_TILE_WIDTH).min(key.width);
+            let fingerprint = if unchanged {
+                columns.tiles[tile_index].fingerprint
+            } else {
+                let range = tile_columns(x_start, x_end, key.width, columns.values.len());
+                tile_fingerprint(&columns.values, range.start, range.end)
+            };
+            let retained = cache_enabled && columns.tiles.get(tile_index).is_some_and(|tile| {
+                tile.x_start == x_start && tile.x_end == x_end && tile.fingerprint == fingerprint
+            });
+            if retained {
+                self.paint_tiles.push((x_start, x_end, Arc::clone(&columns.tiles[tile_index].image)));
+                continue;
+            }
+            let image = Self::build_tile(&columns.values, x_start, x_end, key.width, key.height, palette);
+            if cache_enabled {
+                let tile = Tile { x_start, x_end, fingerprint, image: Arc::clone(&image) };
+                if tile_index < columns.tiles.len() {
+                    self.retire_scratch.push(std::mem::replace(&mut columns.tiles[tile_index], tile).image);
+                } else {
+                    columns.tiles.push(tile);
+                }
+            }
+            self.paint_tiles.push((x_start, x_end, image));
+        }
+        columns.layer_key = cache_enabled.then_some(key);
+        columns.tile_revision = cache_enabled.then_some(columns.revision);
+        self.retired.append(&mut self.retire_scratch);
+    }
+
     fn build_tile(
         values: &[(Option<f32>, Option<f32>, Option<f32>, Option<f32>)],
         x_start: u32,
@@ -179,13 +244,14 @@ impl WaveformPlot {
     ) -> Arc<RenderImage> {
         let mut pixels = image::RgbaImage::new(x_end - x_start, height);
         let center = height as f32 * 0.5;
-        for (column, &(left_rms, left_peak, right_rms, right_peak)) in values.iter().enumerate() {
-            let x0 = (column as u32 * width / values.len() as u32)
-                .max(x_start)
-                .min(x_end);
-            let x1 = (((column + 1) as u32 * width) / values.len() as u32)
-                .max(x_start)
-                .min(x_end);
+        let range = tile_columns(x_start, x_end, width, values.len());
+        for column in range {
+            let (left_rms, left_peak, right_rms, right_peak) = values[column];
+            let x0 = (column as u32 * width / values.len() as u32).max(x_start);
+            let x1 = (((column + 1) as u32 * width) / values.len() as u32).min(x_end);
+            if x0 >= x1 {
+                continue;
+            }
             for (level, upper) in [(left_rms, true), (right_rms, false)] {
                 let Some(level) = level else { continue };
                 let height_px = (center * level).max(1.0);
@@ -255,6 +321,7 @@ impl WaveformPlot {
             values: Vec::new(),
             layer_key: None,
             tiles: Vec::new(),
+            tile_revision: None,
         });
         let left_peaks = if frame.left_peaks.is_empty() {
             &frame.peaks
@@ -746,73 +813,8 @@ impl Waveform {
                                     peak_gamma: peak_gamma.to_bits(),
                                     palette: config_palette,
                                 };
-                                let mut paint_tiles = Vec::new();
-                                let mut retire = Vec::new();
-                                {
-                                    let columns = waveform.columns.get_mut(&panel_id).unwrap();
-                                    if columns.values.is_empty() {
-                                        return;
-                                    }
-                                    if !cache_enabled || columns.layer_key.as_ref() != Some(&key) {
-                                        retire
-                                            .extend(columns.tiles.drain(..).map(|tile| tile.image));
-                                        columns.layer_key = cache_enabled.then_some(key);
-                                    }
-                                    let tile_count = ((width_px + WAVEFORM_TILE_WIDTH - 1)
-                                        / WAVEFORM_TILE_WIDTH)
-                                        as usize;
-                                    for tile_index in 0..tile_count {
-                                        let x_start = tile_index as u32 * WAVEFORM_TILE_WIDTH;
-                                        let x_end = (x_start + WAVEFORM_TILE_WIDTH).min(width_px);
-                                        let first = (x_start as usize * columns.values.len()
-                                            / width_px as usize)
-                                            .min(columns.values.len());
-                                        let end = (x_end as usize * columns.values.len()
-                                            / width_px as usize)
-                                            .min(columns.values.len());
-                                        let fingerprint =
-                                            tile_fingerprint(&columns.values, first, end);
-                                        let retained = cache_enabled
-                                            && columns.tiles.get(tile_index).is_some_and(|tile| {
-                                                tile.x_start == x_start
-                                                    && tile.x_end == x_end
-                                                    && tile.fingerprint == fingerprint
-                                            });
-                                        if !retained {
-                                            if tile_index < columns.tiles.len() {
-                                                retire.push(columns.tiles.remove(tile_index).image);
-                                            }
-                                            let image = WaveformPlot::build_tile(
-                                                &columns.values,
-                                                x_start,
-                                                x_end,
-                                                width_px,
-                                                height_px,
-                                                &palette,
-                                            );
-                                            if cache_enabled {
-                                                columns.tiles.insert(
-                                                    tile_index,
-                                                    Tile {
-                                                        x_start,
-                                                        x_end,
-                                                        fingerprint,
-                                                        image: Arc::clone(&image),
-                                                    },
-                                                );
-                                            }
-                                            paint_tiles.push((x_start, x_end, image));
-                                        } else {
-                                            paint_tiles.push((
-                                                x_start,
-                                                x_end,
-                                                Arc::clone(&columns.tiles[tile_index].image),
-                                            ));
-                                        }
-                                    }
-                                }
-                                waveform.retired.extend(retire);
-                                for (x_start, x_end, image) in &paint_tiles {
+                                waveform.update_tiles(panel_id, key, cache_enabled, &palette);
+                                for (x_start, x_end, image) in &waveform.paint_tiles {
                                     let tile_bounds = Bounds::new(
                                         point(plot.left() + px(*x_start as f32), plot.top()),
                                         size(px((*x_end - *x_start) as f32), plot.size.height),
@@ -833,9 +835,8 @@ impl Waveform {
                                     waveform.clear_cache();
                                 }
                                 if !cache_enabled {
-                                    waveform.pending_images.extend(
-                                        paint_tiles.iter().map(|(_, _, image)| Arc::clone(image)),
-                                    );
+                                    let WaveformPlot { pending_images, paint_tiles, .. } = &mut *waveform;
+                                    pending_images.extend(paint_tiles.iter().map(|(_, _, image)| Arc::clone(image)));
                                 }
                                 if let Some(fraction) = progress {
                                     // Slow periodic easing gives the droplet a deliberate rhythm;
@@ -1005,6 +1006,37 @@ mod tests {
             }
         }
         assert_eq!(pixel(1, 49)[3], 0, "Peak-only data must not invent RMS");
+    }
+
+    #[test]
+    fn boundary_columns_refresh_all_and_only_intersecting_tiles() {
+        let palette = super::super::visuals::active_palette_lut(crate::config::VisualizationPalette::Deadbeef);
+        for (count, changed_column, changed_tiles) in [(100, 95, vec![2]), (70, 22, vec![0, 1])] {
+            let mut data = frame(vec![Some(0.25); count]);
+            let mut plot = WaveformPlot::default();
+            let key = |data: &WaveformFrame| LayerKey {
+                source: Rc::new(Source::from_frame(data).unwrap()),
+                width: 101, height: 40, rms_gain: 1.0_f32.to_bits(),
+                peak_gain: 1.0_f32.to_bits(), peak_gamma: 1.0_f32.to_bits(),
+                palette: crate::config::VisualizationPalette::Deadbeef,
+            };
+            plot.columns(1, count, &data);
+            plot.update_tiles(1, key(&data), true, &palette);
+            let before: Vec<_> = plot.columns[&1].tiles.iter().map(|tile| Arc::clone(&tile.image)).collect();
+            data.peaks[changed_column] = Some(0.75);
+            data.rms[changed_column] = Some(0.75);
+            data.left_peaks[changed_column] = Some(0.75);
+            data.left_rms[changed_column] = Some(0.75);
+            data.revision += 1;
+            plot.columns(1, count, &data);
+            plot.update_tiles(1, key(&data), true, &palette);
+            for (index, image) in before.iter().enumerate() {
+                assert_eq!(Arc::ptr_eq(image, &plot.columns[&1].tiles[index].image), !changed_tiles.contains(&index));
+            }
+            let before: Vec<_> = plot.columns[&1].tiles.iter().map(|tile| Arc::clone(&tile.image)).collect();
+            plot.update_tiles(1, key(&data), true, &palette);
+            assert!(before.iter().zip(&plot.columns[&1].tiles).all(|(image, tile)| Arc::ptr_eq(image, &tile.image)));
+        }
     }
 
     use super::*;
