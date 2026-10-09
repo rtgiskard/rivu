@@ -25,7 +25,19 @@ break. Same-frequency historical buckets remain available. Sample time measures
 accepted audio, not wall time or the track seek position. The worker drains a
 bounded queued prefix using a reusable 1024-frame input buffer.
 
+The output callback publishes analysis samples in bounded 256-frame blocks,
+before output volume gain. Tap backpressure never blocks audio output; the next
+accepted block marks any dropped prefix as a discontinuity. GUI snapshot staging
+reuses buffers and follows visible-view demand rather than cloning both shared
+analysis and waveform frames every update.
+
 == Waveform
+
+Playback computes PCM statistics and unknown-duration timeline compaction in its
+owned accumulator, outside the shared waveform write lock. Publication copies
+only the dirty bin interval and metadata. No dirty interval is represented by
+`None`; timeline compaction marks every bin dirty. An independently installed
+complete waveform scan takes precedence over in-flight playback publication.
 
 === RMS
 
@@ -108,12 +120,13 @@ Peak is not stored in the body geometry cache. A body cache hit reuses the body 
 == Cache ownership
 
 * Waveform retains the compact per-column `values` cache. It skips raw-data binning and RMS/Peak aggregation when the frame revision, width, and mapping are unchanged.
-* Waveform also retains a per-panel static layer `RenderImage` containing RMS and Peak. A layer hit paints one image instead of resubmitting all waveform Quads.
-* The layer key contains frame revision/source, plot dimensions, RMS gain, Peak gain/gamma, and palette.
-* Playback cursor and glow remain dynamic and never invalidate the static layer.
-* A layer miss reuses `values` to generate the image; `values` therefore remains necessary and is cheaper to retain than re-aggregating raw waveform data.
-* Cache-disabled mode creates a temporary layer image and does not retain it.
-* Replaced images enter a retired/pending queue and are released through the existing window image lifecycle.
+* Static waveform layers are per-panel 32-pixel `RenderImage` tiles. A changed frame reuses tiles whose pooled-value fingerprints remain unchanged.
+* The layer key contains source identity, plot dimensions, RMS gain, Peak gain/gamma, and palette; a mapping or source change invalidates the relevant derived data.
+* Every tile includes all pooled columns intersecting its pixel interval, including fractional-width fringes. Playback cursor and glow remain dynamic and never invalidate the static layer.
+* A cache hit bypasses both bin pooling and tile fingerprint traversal; drawing reuses scratch storage for retained image handles.
+* Cache-disabled images remain alive for their submitting scene but are not retained as reusable tiles.
+* Shared Spectrogram history uses the maximum demand of visible Spectrogram panels, independent of paint order. Resizing keeps the newest chronological columns and retires only discarded images.
+* Hidden or removed panels and replaced images transfer resources to window-level retirement; release does not depend on that panel being painted again. Window closure drains its retained image resources.
 * Spectrum caches body Path geometry using its existing key: size, range, style, bar count, spacing, interpolation, and data revision.
 * Spectrum Peak is outside body geometry and does not invalidate the body cache.
 
@@ -122,8 +135,8 @@ The two Waveform caches have separate responsibilities:
 [source,text]
 ----
 values cache:  raw waveform data -> per-column RMS/Peak values
-layer cache:   per-column values -> static BGRA RenderImage
-dynamic part:  cached layer + current playback cursor
+layer cache:   per-column values -> static BGRA RenderImage tiles
+dynamic part:  cached tiles + current playback cursor
 ----
 
 == Performance trade-off
@@ -134,7 +147,7 @@ dynamic part:  cached layer + current playback cursor
 
 |Waveform RMS
 |Few submissions, but multi-stop gradient masks, Path reuse/cloning, and RMS Path tessellation.
-|Layer miss rasterizes one image; layer hit uses one image submission.
+|Layer miss rasterizes changed tiles; layer hit submits retained tile images.
 
 |Waveform Peak
 |Peak Path with the global gradient and mask.
@@ -151,7 +164,7 @@ dynamic part:  cached layer + current playback cursor
 
 No eight-color quantization is used. Quantization would reduce submissions but change the exact `lut(RMS)` and `lut(Peak)` colors.
 
-The new design moves cost rather than guaranteeing a total CPU reduction: it removes Path construction, tessellation, cloning, and mask submissions for column/marker primitives, but increases Quad submissions. Spectrum body remains batched because `Bars`, `Outline`, and `Led` can contain many primitives.
+The design moves cost rather than guaranteeing a total CPU reduction: static tile images remove repeated scene-time RMS/Peak Quad submissions, while misses rasterize changed tiles and hits still submit each retained image. Spectrum body remains batched because `Bars`, `Outline`, and `Led` can contain many primitives.
 
 == Validation
 
@@ -186,3 +199,6 @@ Measured CPU usage on the same workload:
 The Quad renderer reduced CPU usage by approximately `1.0–2.6` percentage points relative to the old renderer. A layer-cache hit reduced it by a further `0.4–1.2` percentage points relative to uncached Quad rendering.
 
 These values apply only to the measured workload; panel dimensions, data, refresh rate, and display configuration were not generalized.
+
+These earlier renderer measurements predate the 32-pixel tiled cache and the
+audio-pipeline optimizations; they are not a before/after benchmark of that work.

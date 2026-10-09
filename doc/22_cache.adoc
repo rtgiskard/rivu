@@ -22,28 +22,17 @@ The current scope is:
 
 === Waveform
 
-A cached Waveform geometry is reusable while the following remain unchanged:
+Waveform pools source bins into a reusable per-column values buffer, keyed by
+frame revision, width, and display mapping. Its static images are 32-pixel tiles,
+keyed by source, dimensions, palette, gains, and pooled-value fingerprints.
+Revision changes recompute pooled values, but only changed tiles are rasterized.
+An unchanged revision and mapping skips fingerprinting as well as bin pooling.
 
-* Waveform frame revision;
-* panel plot origin;
-* plot width and height;
-* display mapping parameters that affect the pooled levels.
-
-Playback cursor movement does not invalidate the waveform paths. Once a
-waveform is stable, the first repaint builds the paths and subsequent repaints
-normally hit the cache. During progressive decoding, each new frame revision
-causes one rebuild; additional repaints for that revision can reuse it.
-
-For an approximate UI rate of 60 FPS and a waveform revision rate of 10 FPS,
-the upper-bound repaint hit ratio is approximately:
-
-[source,text]
-----
-(60 - 10) / 60 = 83%
-----
-
-The actual ratio depends on layout, repaint scheduling, and progressive scan
-activity.
+Each tile covers every intersecting pooled column, including columns straddling
+fractional pixel boundaries. Plot origin and playback cursor movement do not
+invalidate the static images. Resizing, changing mapping, or selecting another
+source invalidates the affected cached data. Cache cost depends on the number of
+changed tiles, not just the ratio of analysis frames to UI repaints.
 
 === Spectrum
 
@@ -72,6 +61,11 @@ Spectrogram history columns retain their own `RenderImage`. A column can be
 reused while its levels, image height, stream generation, palette, dB range,
 and interpolation inputs remain valid. During continuous playback, new or
 max-pooled columns change while older history columns remain reusable.
+
+All visible Spectrogram panels share one history. The GUI chooses the maximum
+requested column count once per update, so narrow and wide panels cannot
+alternately shrink and expand it during painting. A capacity change preserves
+the newest chronological columns and their images.
 
 For example, with 1200 retained columns and one changed column per update, the
 stable-column ratio is approximately:
@@ -166,8 +160,10 @@ has the highest retained image cost, but also the highest reuse potential for
 stable history.
 
 When cache settings or image inputs change, old atlas images are retired and
-released through the Window image-drop path. A short-lived peak is expected
-while old resources await the next paint lifecycle.
+released through the Window image-drop path. Hidden and removed panels hand
+their images to window-level retirement even if they are never painted again;
+window closure drains remaining retained resources. Cache-disabled images are
+kept alive until their submitting scene is replaced, then released normally.
 
 == Cache switch behavior
 
