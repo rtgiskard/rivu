@@ -4,6 +4,7 @@
 //! and parameter model, using GPUI-native paths for the local rendering backend.
 
 use super::analysis_visualizer::{AnalysisVisualizer, analysis_style};
+use super::fractal_visualizer::{FractalVisualizer, fractal_style};
 use crate::{
     analysis::{AnalysisFrame, AnalysisSettings},
     config::{Config, RadialSpectrumStyle},
@@ -33,6 +34,7 @@ const BAR_GLOW_PASSES: [(f32, f32, f32); 4] = [
 pub(super) struct RadialSpectrum {
     data: Rc<RefCell<VisualizerData>>,
     analysis: AnalysisVisualizer,
+    fractal: FractalVisualizer,
 }
 
 struct VisualizerData {
@@ -62,6 +64,7 @@ impl RadialSpectrum {
     pub(super) fn new() -> Self {
         Self {
             analysis: AnalysisVisualizer::new(),
+            fractal: FractalVisualizer::new(),
             data: Rc::new(RefCell::new(VisualizerData {
                 background: 0x08090c,
                 style: RadialSpectrumStyle::BarsRings,
@@ -90,6 +93,7 @@ impl RadialSpectrum {
 
     pub(super) fn configure(&mut self, config: &Config) -> bool {
         let analysis_changed = self.analysis.configure(config);
+        let fractal_changed = self.fractal.configure(config);
         let mut data = self.data.borrow_mut();
         let db_range = config.radial_spectrum_db_range();
         let expected_settings = AnalysisSettings::from(config);
@@ -109,7 +113,7 @@ impl RadialSpectrum {
             || data.expected_settings.fft_size != expected_settings.fft_size
             || data.expected_settings.window != expected_settings.window;
         if !changed {
-            return analysis_changed;
+            return analysis_changed || fractal_changed;
         }
         data.background = config.visual_background.rgb();
         data.style = config.radial_spectrum_style;
@@ -134,6 +138,7 @@ impl RadialSpectrum {
 
     pub(super) fn set_visible(&self, visible: bool) -> bool {
         self.analysis.set_visible(visible);
+        self.fractal.set_visible(visible);
         let mut data = self.data.borrow_mut();
         let restored = visible && !data.visible;
         if data.visible != visible {
@@ -147,6 +152,10 @@ impl RadialSpectrum {
     }
 
     pub(super) fn update(&mut self, frame: &AnalysisFrame) {
+        if fractal_style(self.data.borrow().style) {
+            self.fractal.update(frame);
+            return;
+        }
         if analysis_style(self.data.borrow().style) {
             self.analysis.update(frame);
             return;
@@ -229,6 +238,9 @@ impl RadialSpectrum {
     }
 
     pub(super) fn view(&self, panel_id: u64, playing: bool) -> AnyElement {
+        if fractal_style(self.data.borrow().style) {
+            return self.fractal.view(panel_id);
+        }
         if analysis_style(self.data.borrow().style) {
             return self.analysis.view(panel_id);
         }
@@ -270,7 +282,8 @@ impl RadialSpectrum {
                                 paint_bars(bounds, &data, window);
                             }
                             RadialSpectrumStyle::StereoDensity
-                            | RadialSpectrumStyle::SpatialSpectrum => {}
+                            | RadialSpectrumStyle::SpatialSpectrum
+                            | RadialSpectrumStyle::FractalBeams => {}
                         }
                         if fade_alpha < 1.0 {
                             window.paint_quad(gpui::fill(

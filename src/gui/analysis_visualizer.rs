@@ -284,7 +284,7 @@ impl PlotData {
                     changed = true;
                 }
             }
-            VisualizerMode::Off => return,
+            VisualizerMode::Off | VisualizerMode::Generative => return,
         }
         self.sample_time = Some(frame.sample_time);
         self.sequence = Some(frame.sequence);
@@ -297,7 +297,7 @@ impl PlotData {
         let (width, height) = match self.mode {
             VisualizerMode::StereoDensity => (DENSITY_SIDE, DENSITY_SIDE),
             VisualizerMode::SpatialSpectrum => (SPATIAL_WIDTH, SPATIAL_HEIGHT),
-            VisualizerMode::Off => return,
+            VisualizerMode::Off | VisualizerMode::Generative => return,
         };
         let mut pixels = image::RgbaImage::new(width as u32, height as u32);
         for (pixel, value) in pixels.pixels_mut().zip(&self.field) {

@@ -237,6 +237,7 @@ fn radial_spectrum_style_label(style: RadialSpectrumStyle) -> &'static str {
         RadialSpectrumStyle::BarsRings => "Bars + Rings",
         RadialSpectrumStyle::StereoDensity => "Stereo Density",
         RadialSpectrumStyle::SpatialSpectrum => "Spatial Spectrum",
+        RadialSpectrumStyle::FractalBeams => "Fractal Beams",
     }
 }
 
@@ -1689,13 +1690,25 @@ impl GuiApp {
                 let bars = matches!(draft.radial_spectrum_style, RadialSpectrumStyle::Bars | RadialSpectrumStyle::BarsRings);
                 let rings = matches!(draft.radial_spectrum_style, RadialSpectrumStyle::Rings | RadialSpectrumStyle::BarsRings);
                 let style = dropdown_button("audio-visualizer-style", radial_spectrum_style_label(draft.radial_spectrum_style), cx, |this, _, _| {
-                    let values = [RadialSpectrumStyle::Bars, RadialSpectrumStyle::Rings, RadialSpectrumStyle::BarsRings, RadialSpectrumStyle::StereoDensity, RadialSpectrumStyle::SpatialSpectrum];
+                    let values = [RadialSpectrumStyle::Bars, RadialSpectrumStyle::Rings, RadialSpectrumStyle::BarsRings, RadialSpectrumStyle::StereoDensity, RadialSpectrumStyle::SpatialSpectrum, RadialSpectrumStyle::FractalBeams];
                     let selected = values.iter().position(|value| *value == this.settings.draft.radial_spectrum_style).unwrap_or(0);
                     this.open_setting_dropdown(values.into_iter().map(|value| DropdownItem::new(SettingChoice::RadialSpectrumStyle(value), radial_spectrum_style_label(value))).collect(), selected);
                 }).relative().child(self.measurement(Measured::SettingsStyle));
                 let colors = settings_group("Colors", column().gap_2()
                     .child(settings.pair(Field::RadialSpectrumPrimaryColor, Field::RadialSpectrumSecondaryColor))
                     .child(caption("Independent of the shared color scheme.")));
+                if super::fractal_visualizer::fractal_style(draft.radial_spectrum_style) {
+                    return column().gap_3()
+                        .child(settings_group("Generative light", column().gap_2()
+                            .child(form_field("Style", style))
+                            .child(caption("Stable recursive branches. Bass extends the trunks, mids bend the forks, treble lights the fine branches. Energy rises send pulses toward the tips; this is not beat detection."))
+                            .child(caption("Motion follows accepted audio time and freezes while paused. Shared FFT and background: Common. Seeking or changing style/FFT clears the scene."))))
+                        .child(settings_group("Response & glow", column().gap_2()
+                            .child(settings.pair(Field::RadialSpectrumSensitivity, Field::RadialSpectrumBloomIntensity))
+                            .child(settings.single(Field::RadialSpectrumDb))
+                            .child(caption("Sensitivity and dB range map measured energy to visual response, not playback volume. Bloom controls the light halo. Radial rotation, shape and idle fade do not apply."))))
+                        .child(colors);
+                }
                 if !radial {
                     let hint = match draft.radial_spectrum_style {
                         RadialSpectrumStyle::StereoDensity => "Fixed ±1 Mid/Side axes, no auto gain. Color indicates occupancy in dB, not audio dBFS. Correlation, balance and Side energy describe the current FFT window; silence has no correlation.",

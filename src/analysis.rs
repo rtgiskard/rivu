@@ -20,6 +20,7 @@ pub enum VisualizerMode {
     Off,
     StereoDensity,
     SpatialSpectrum,
+    Generative,
 }
 
 impl VisualizerMode {
@@ -27,6 +28,7 @@ impl VisualizerMode {
         match bits & 3 {
             1 => Self::StereoDensity,
             2 => Self::SpatialSpectrum,
+            3 => Self::Generative,
             _ => Self::Off,
         }
     }
@@ -50,6 +52,8 @@ pub struct VisualizerFrame {
     pub correlation: Option<f32>,
     pub balance: Option<f32>,
     pub side_ratio: Option<f32>,
+    /// Window-power-normalized stereo RMS in 20–250, 250–2500, 2500–20000 Hz.
+    pub band_rms: [f32; 3],
 }
 
 impl Clone for VisualizerFrame {
@@ -66,6 +70,7 @@ impl Clone for VisualizerFrame {
         self.correlation = source.correlation;
         self.balance = source.balance;
         self.side_ratio = source.side_ratio;
+        self.band_rms = source.band_rms;
     }
 }
 
@@ -296,6 +301,8 @@ struct SpectrumAnalyzer {
     frequency: Vec<Complex32>,
     window: Vec<f32>,
     normalization: f32,
+    power_normalization: f32,
+    drive_bins: [(usize, usize); 3],
     frequencies: Vec<f32>,
     bands: Vec<(usize, usize)>,
     levels: Vec<f32>,
@@ -327,6 +334,15 @@ impl SpectrumAnalyzer {
             .collect();
         // Coherent gain keeps bin-centered sine amplitudes calibrated across windows.
         let normalization = 2.0 / window.iter().sum::<f32>();
+        // Parseval / window energy, not coherent gain or max-pooled display bands.
+        let power_normalization = 1.0 / (n as f32 * window.iter().map(|w| w * w).sum::<f32>());
+        let edge_bin = |hz: f32| {
+            (hz * n as f32 / sample_rate.max(1) as f32)
+                .ceil()
+                .clamp(1.0, (n / 2 + 1) as f32) as usize
+        };
+        let edges = [20.0, 250.0, 2500.0, 20_000.0].map(edge_bin);
+        let drive_bins = std::array::from_fn(|i| (edges[i], edges[i + 1]));
         let frequencies = musical_frequencies(sample_rate);
         let half_band = 2.0_f32.powf(0.5 / 12.0);
         let bin_scale = n as f32 / sample_rate.max(1) as f32;
@@ -352,6 +368,8 @@ impl SpectrumAnalyzer {
             fft,
             window,
             normalization,
+            power_normalization,
+            drive_bins,
             levels: vec![-140.0; frequencies.len()],
             frequencies,
             bands,
@@ -377,6 +395,7 @@ impl SpectrumAnalyzer {
         self.visualizer.correlation = None;
         self.visualizer.balance = None;
         self.visualizer.side_ratio = None;
+        self.visualizer.band_rms = [0.0; 3];
     }
 
     fn set_visualizer_mode(&mut self, mode: VisualizerMode) {
@@ -395,7 +414,7 @@ impl SpectrumAnalyzer {
             VisualizerMode::SpatialSpectrum => {
                 self.visualizer.spatial.reserve(self.rolling.len() / 2);
             }
-            VisualizerMode::Off => {}
+            VisualizerMode::Off | VisualizerMode::Generative => {}
         }
     }
 
@@ -448,6 +467,21 @@ impl SpectrumAnalyzer {
         }
         self.fft
             .process_with_scratch(&mut self.frequency, &mut self.scratch);
+        if self.visualizer.mode == VisualizerMode::Generative {
+            for (target, &(first, last)) in
+                self.visualizer.band_rms.iter_mut().zip(&self.drive_bins)
+            {
+                let mut power = 0.0;
+                for bin in first..last {
+                    let endpoint = if bin == n / 2 { 0.5 } else { 1.0 };
+                    power += (self.frequency[bin].norm_sqr()
+                        + self.frequency[(n - bin) % n].norm_sqr())
+                        * 0.5
+                        * endpoint;
+                }
+                *target = (power * self.power_normalization).sqrt();
+            }
+        }
         if density_mode {
             let [left, right, cross] = energies;
             let total = left + right;
@@ -632,6 +666,64 @@ mod tests {
         );
         analyzer.set_visualizer_mode(mode);
         analyzer
+    }
+
+    #[test]
+    fn generative_bands_integrate_power_without_phase_cancellation() {
+        for window in [
+            SpectrumWindow::None,
+            SpectrumWindow::Hann,
+            SpectrumWindow::BlackmanHarris,
+        ] {
+            for (frequency, band) in [(128.0, 0), (1024.0, 1), (8192.0, 2)] {
+                let mut analyzer = SpectrumAnalyzer::new(
+                    AnalysisSettings {
+                        fps: 20,
+                        fft_size: 4096,
+                        window,
+                    },
+                    32768,
+                );
+                analyzer.set_visualizer_mode(VisualizerMode::Generative);
+                for i in 0..4096 {
+                    let value =
+                        0.5 * (std::f32::consts::TAU * frequency * i as f32 / 32768.0).sin();
+                    analyzer.push([value, -value]);
+                }
+                analyzer.transform();
+                assert!((analyzer.visualizer.band_rms[band] - 0.5 / 2.0_f32.sqrt()).abs() < 0.0001);
+                for other in 0..3 {
+                    if other != band {
+                        assert!(analyzer.visualizer.band_rms[other] < 0.0001);
+                    }
+                }
+                analyzer.reset();
+                assert_eq!(analyzer.visualizer.band_rms, [0.0; 3]);
+            }
+        }
+    }
+
+    #[test]
+    fn generative_nyquist_is_not_doubled_and_silence_has_no_drive() {
+        let mut analyzer = SpectrumAnalyzer::new(
+            AnalysisSettings {
+                fps: 20,
+                fft_size: 512,
+                window: SpectrumWindow::None,
+            },
+            8000,
+        );
+        analyzer.set_visualizer_mode(VisualizerMode::Generative);
+        for i in 0..512 {
+            analyzer.push([if i % 2 == 0 { 0.5 } else { -0.5 }, 0.0]);
+        }
+        analyzer.transform();
+        assert!((analyzer.visualizer.band_rms[2] - 0.5 / 2.0_f32.sqrt()).abs() < 0.0001);
+        for _ in 0..512 {
+            analyzer.push([0.0; 2]);
+        }
+        analyzer.transform();
+        assert_eq!(analyzer.visualizer.band_rms, [0.0; 3]);
     }
 
     #[test]

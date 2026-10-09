@@ -100,6 +100,22 @@ resolution does not create additional FFT information. Multiple panels share
 history rather than maintaining competing copies; the cache document describes
 capacity changes and image retirement.
 
+== Generative light
+
+Fractal Beams uses fixed recursive topology rather than rebuilding random
+branches on each frame. Three integrated frequency bands drive different
+spatial scales; root-to-tip pulses follow rises in energy, not beat estimates.
+Band power comes from the stereo FFT bins with window-energy normalization,
+not from summed dB values or maximum-pooled display bands. Opposite-phase
+channels retain their energy.
+
+Simulation advances once per accepted analysis frame and is shared across
+visible panels. Paint and resize never advance the scene. Discontinuities clear
+the state, and hidden views do not request the optional band-power analysis.
+Glow uses batched, widening translucent strokes rather than an unbounded image
+feedback history. Beams retains 189 branches, 756 line segments, and 12 pulse
+slots; drawing uses at most 27 light paths per panel.
+
 == Evaluating tradeoffs
 
 The design moves work between aggregation, geometry construction, image

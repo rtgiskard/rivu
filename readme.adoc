@@ -15,7 +15,7 @@ CLI, and TUI are different clients of that core.
 * Desktop GUI, CLI, TUI, and headless mode; optional MPRIS and StatusNotifier tray
 * Persistent, editable desktop layout with configurable appearance
 * Waveform, Spectrum, Spectrogram, and Audio Visualizer with radial, stereo-density,
-  and spatial-spectrum styles
+  spatial-spectrum, and fractal-beam styles
 * Generated desktop artwork and embedded-cover support for MPRIS; no network
   media or cover fetching
 

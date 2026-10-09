@@ -32,6 +32,7 @@ pub enum RadialSpectrumStyle {
     BarsRings,
     StereoDensity,
     SpatialSpectrum,
+    FractalBeams,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
