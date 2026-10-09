@@ -337,8 +337,7 @@ pub(super) struct Decoder {
     draining: bool,
     require_timestamp: bool,
     next_sample: i64,
-    frames: Vec<f32>,
-    primed: Option<f64>,
+    primed: Option<(Vec<f32>, f64)>,
     layout: Vec<Channel>,
     info: MediaInfo,
 }
@@ -564,18 +563,17 @@ impl Decoder {
                 draining: false,
                 require_timestamp: false,
                 next_sample: 0,
-                frames: Vec::new(),
                 layout: Vec::new(),
                 info,
                 primed: None,
             };
             format = ptr::null_mut();
             close_on_error = false;
+            let mut frames = Vec::new();
             let timestamp = decoder
-                .next_frames()?
-                .context("FFmpeg audio stream contains no decodable frames")?
-                .1;
-            decoder.primed = Some(timestamp);
+                .next_frames(&mut frames)?
+                .context("FFmpeg audio stream contains no decodable frames")?;
+            decoder.primed = Some((frames, timestamp));
             Ok(decoder)
         })();
         if result.is_err() && close_on_error {
@@ -595,9 +593,11 @@ impl Decoder {
     pub(super) fn layout(&self) -> &[Channel] {
         &self.layout
     }
-    pub(super) fn next_frames(&mut self) -> Result<Option<(&[f32], f64)>> {
-        if let Some(timestamp) = self.primed.take() {
-            return Ok(Some((&self.frames, timestamp)));
+    /// Replaces caller-owned PCM on success; only `Some` makes its contents valid.
+    pub(super) fn next_frames(&mut self, frames: &mut Vec<f32>) -> Result<Option<f64>> {
+        if let Some((primed, timestamp)) = self.primed.take() {
+            *frames = primed;
+            return Ok(Some(timestamp));
         }
         loop {
             let ret = unsafe { (self.rt.f.receive_frame)(self.codec, self.frame) };
@@ -652,10 +652,9 @@ impl Decoder {
                 self.require_timestamp = false;
                 self.next_sample = ((timestamp.max(0.0) * rate as f64).round() as i64)
                     .saturating_add(frame.nb_samples as i64);
-                self.frames
-                    .resize(frame.nb_samples as usize * channels as usize, 0.0);
-                copy_frame(frame, &mut self.frames)?;
-                return Ok(Some((&self.frames, timestamp.max(0.0))));
+                frames.resize(frame.nb_samples as usize * channels as usize, 0.0);
+                copy_frame(frame, frames)?;
+                return Ok(Some(timestamp.max(0.0)));
             }
             if ret != ERR_EAGAIN {
                 if ret == ERR_EOF {
@@ -719,7 +718,6 @@ impl Decoder {
         self.draining = false;
         self.require_timestamp = seconds > 0.0;
         self.next_sample = 0;
-        self.frames.clear();
         self.primed = None;
         Ok(())
     }

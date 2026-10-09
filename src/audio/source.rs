@@ -302,7 +302,7 @@ impl Source {
             track: 0,
             decode: Decode::Ffmpeg(Box::new(decode)),
             time_base: TimeBase::try_new(1, info.sample_rate).unwrap(),
-            frames: Vec::with_capacity(8192 * layout.len()),
+            frames: Vec::new(),
             frame_start: 0.0,
             layout,
             info,
@@ -624,15 +624,22 @@ impl Source {
 
     fn read_ffmpeg_next(&mut self) -> Result<bool> {
         loop {
-            self.frames.clear();
-            let Some((samples, packet_start)) = (match &mut self.decode {
-                Decode::Ffmpeg(decoder) => decoder.next_frames()?,
+            let decoded = match &mut self.decode {
+                Decode::Ffmpeg(decoder) => decoder.next_frames(&mut self.frames),
                 _ => unreachable!(),
-            }) else {
-                self.exhausted = true;
-                return Ok(false);
             };
-            self.frames.extend_from_slice(samples);
+            let packet_start = match decoded {
+                Ok(Some(timestamp)) => timestamp,
+                Ok(None) => {
+                    self.frames.clear();
+                    self.exhausted = true;
+                    return Ok(false);
+                }
+                Err(error) => {
+                    self.frames.clear();
+                    return Err(error);
+                }
+            };
             let mut retained_start = packet_start;
             let channels = self.layout.len();
             if channels == 0 || !self.frames.len().is_multiple_of(channels) {
@@ -1004,6 +1011,68 @@ mod tests {
             file.write_all(&value.to_le_bytes()).unwrap();
         }
         file
+    }
+
+    #[cfg(feature = "ffmpeg")]
+    fn assert_ffmpeg_pcm(source: &mut Source, expected: &[f32], start_seconds: f64) {
+        let rate = source.info().sample_rate as f64;
+        let channels = source.layout().len();
+        let mut consumed = 0;
+        while let Some((samples, timestamp)) = source.next_frames().unwrap() {
+            assert!(!samples.is_empty());
+            assert_eq!(samples.len() % channels, 0);
+            let expected_timestamp = start_seconds + (consumed / channels) as f64 / rate;
+            assert!((timestamp - expected_timestamp).abs() < 1e-9);
+            assert_eq!(samples, &expected[consumed..consumed + samples.len()]);
+            consumed += samples.len();
+        }
+        assert_eq!(consumed, expected.len());
+        assert!(source.next_frames().unwrap().is_none());
+    }
+
+    #[cfg(feature = "ffmpeg")]
+    #[test]
+    fn ffmpeg_preserves_primed_pcm_packet_timestamps_and_seek_after_eof() {
+        let file = pcm_file();
+        let mut native = Source::open(file.path(), PROBE_BUFFER_LEN, false).unwrap();
+        let reference = decode_remaining(&mut native);
+        let mut source = Source::open_ffmpeg(file.path()).unwrap();
+        // Exercise decoder EOF rather than stopping at the metadata duration.
+        source.range_end = None;
+        assert_ffmpeg_pcm(&mut source, &reference, 0.0);
+        source.seek(0.2).unwrap();
+        assert_ffmpeg_pcm(&mut source, &reference[8_820..], 0.2);
+        source.seek(0.0).unwrap();
+        assert_ffmpeg_pcm(&mut source, &reference, 0.0);
+    }
+
+    #[cfg(feature = "ffmpeg")]
+    #[test]
+    fn ffmpeg_cue_trims_primed_pcm_and_seeks_with_segment_relative_timestamps() {
+        let file = pcm_file();
+        let mut native = Source::open(file.path(), PROBE_BUFFER_LEN, false).unwrap();
+        let reference = decode_remaining(&mut native);
+        for (start_frame, end_frame) in [(0, Some(30)), (30, Some(31)), (30, Some(80)), (80, None)]
+        {
+            let start = start_frame * 588;
+            let end = end_frame.map_or(reference.len(), |frame| frame * 588);
+            let mut source = Source::open_ffmpeg(file.path()).unwrap();
+            source
+                .restrict(super::super::PlaybackRange {
+                    start_seconds: start_frame as f64 / 75.0,
+                    end_seconds: end_frame.map(|frame| frame as f64 / 75.0),
+                })
+                .unwrap();
+            assert_ffmpeg_pcm(&mut source, &reference[start..end], 0.0);
+            let offset = (end - start) / 2;
+            let target = offset as f64 / 44_100.0;
+            source.seek(target).unwrap();
+            assert_ffmpeg_pcm(&mut source, &reference[start + offset..end], target);
+            source.seek(source.info().duration.unwrap()).unwrap();
+            assert!(source.next_frames().unwrap().is_none());
+            source.seek(0.0).unwrap();
+            assert_ffmpeg_pcm(&mut source, &reference[start..end], 0.0);
+        }
     }
 
     #[test]

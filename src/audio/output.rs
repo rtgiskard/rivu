@@ -1,17 +1,12 @@
-//! Device output and rate conversion; callback state and ring buffers stay private.
+//! Native device output; callback state and ring buffers stay private.
 
 use super::Channel;
 use crate::analysis::{AnalysisControl, AnalysisWorker, TapFrame};
-use anyhow::{Context, Result, bail};
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use anyhow::{Result, bail};
 use crossbeam_channel::{Receiver, bounded};
 use ringbuf::{
     HeapCons, HeapProd, HeapRb,
     traits::{Consumer, Observer, Producer, Split},
-};
-use rubato::{
-    Async, FixedAsync, Resampler, SincInterpolationParameters, SincInterpolationType,
-    WindowFunction, audioadapter_buffers::direct::InterleavedSlice,
 };
 use std::{
     collections::VecDeque,
@@ -25,178 +20,73 @@ use std::{
 #[path = "output_layout.rs"]
 mod layout;
 
-#[cfg(target_os = "linux")]
 #[path = "output_pipewire.rs"]
 mod pipewire;
 
 pub fn devices() -> Result<Vec<String>> {
-    // A broken host or device description must not hide the other backend.
-    let cpal = cpal::default_host().output_devices().map(|devices| {
-        devices
-            .filter_map(|device| device.description().ok())
-            .map(|description| description.name().to_owned())
-            .collect::<Vec<_>>()
-    });
-    #[cfg(target_os = "linux")]
-    let mut names = merge_devices(cpal.map_err(Into::into), pipewire::devices())?;
-    #[cfg(not(target_os = "linux"))]
-    let mut names = cpal?;
+    let mut names = pipewire::devices()?;
     names.sort();
     names.dedup();
     Ok(names)
 }
 
-#[cfg(target_os = "linux")]
-fn merge_devices(cpal: Result<Vec<String>>, native: Result<Vec<String>>) -> Result<Vec<String>> {
-    match (cpal, native) {
-        (Ok(mut names), Ok(native)) => {
-            names.extend(native);
-            Ok(names)
-        }
-        (Ok(names), Err(_)) | (Err(_), Ok(names)) => Ok(names),
-        (Err(cpal), Err(native)) => {
-            bail!("Audio device discovery failed: CPAL: {cpal:#}; PipeWire: {native:#}")
-        }
-    }
+fn target_name(name: Option<&str>) -> Result<Option<&str>> {
+    name.map(|name| {
+        name.strip_prefix(pipewire::PREFIX)
+            .ok_or_else(|| anyhow::anyhow!("Output device not found: {name}"))
+    })
+    .transpose()
 }
 
 pub(super) fn validate_device(name: Option<&str>) -> Result<()> {
-    #[cfg(target_os = "linux")]
-    if name.is_none() || name.is_some_and(|name| name.starts_with(pipewire::PREFIX)) {
-        return pipewire::validate(name.and_then(|name| name.strip_prefix(pipewire::PREFIX)));
-    }
-    find_device(name).map(|_| ())
+    pipewire::validate(target_name(name)?)
 }
 
-fn find_device(name: Option<&str>) -> Result<cpal::Device> {
-    let host = cpal::default_host();
-    if let Some(name) = name {
-        for device in host.output_devices()? {
-            if device
-                .description()
-                .is_ok_and(|description| description.name() == name)
-            {
-                return Ok(device);
-            }
-        }
-        bail!("Output device not found: {name}");
+/// Nanoseconds in PipeWire's monotonic clock domain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct StreamInstant(u64);
+
+impl StreamInstant {
+    fn from_nanos(nanos: u64) -> Self {
+        Self(nanos)
     }
-    if let Some(device) = host.default_output_device() {
-        return Ok(device);
+
+    #[cfg(test)]
+    fn from_millis(millis: u64) -> Self {
+        Self(
+            millis
+                .checked_mul(1_000_000)
+                .expect("test timestamp overflow"),
+        )
     }
-    host.output_devices()
-        .context("No default audio output device")?
-        .next()
-        .context("No audio output devices available")
+
+    fn checked_add(self, duration: Duration) -> Option<Self> {
+        self.0
+            .checked_add(u64::try_from(duration.as_nanos()).ok()?)
+            .map(Self)
+    }
+
+    fn duration_since(self, earlier: Self) -> Duration {
+        Duration::from_nanos(self.0.saturating_sub(earlier.0))
+    }
 }
 
-pub(super) struct Converter {
-    sinc: Option<Async<f32>>,
-    input: Vec<f32>,
-    output: Vec<f32>,
-    fill: usize,
-    delay: usize,
-    input_count: u64,
-    output_count: u64,
-    ratio: f64,
-    channels: usize,
+#[derive(Clone, Copy)]
+struct OutputTimestamp {
+    callback: StreamInstant,
+    playback: StreamInstant,
 }
-impl Converter {
-    const CHUNK: usize = 1024;
-    pub(super) fn new(source_rate: u32, output_rate: u32, channels: usize) -> Result<Self> {
-        if source_rate == 0 || output_rate == 0 || channels == 0 {
-            bail!("Invalid resampler rate or channel count");
-        }
-        let ratio = output_rate as f64 / source_rate as f64;
-        let sinc = if source_rate == output_rate {
-            None
-        } else {
-            Some(Async::new_sinc(
-                ratio,
-                1.0,
-                &SincInterpolationParameters {
-                    sinc_len: 256,
-                    f_cutoff: Some(0.95),
-                    interpolation: SincInterpolationType::Quadratic,
-                    oversampling_factor: 128,
-                    window: WindowFunction::BlackmanHarris2,
-                },
-                Self::CHUNK,
-                channels,
-                FixedAsync::Input,
-            )?)
-        };
-        let delay = sinc.as_ref().map_or(0, Resampler::output_delay);
-        let output = sinc.as_ref().map_or_else(Vec::new, |sinc| {
-            vec![0.0; channels * sinc.output_frames_max()]
-        });
-        Ok(Self {
-            sinc,
-            input: vec![0.0; channels * Self::CHUNK],
-            output,
-            fill: 0,
-            delay,
-            input_count: 0,
-            output_count: 0,
-            ratio,
-            channels,
-        })
-    }
-    pub(super) fn push(&mut self, samples: &[f32], output: &mut Vec<f32>) -> Result<()> {
-        if !samples.len().is_multiple_of(self.channels) {
-            bail!("Decoded audio ends in an incomplete interleaved frame");
-        }
-        let frames = samples.len() / self.channels;
-        self.input_count += frames as u64;
-        if self.sinc.is_none() {
-            output.extend_from_slice(samples);
-            self.output_count += frames as u64;
-            return Ok(());
-        }
-        let mut remaining = samples;
-        while !remaining.is_empty() {
-            let count = (Self::CHUNK - self.fill).min(remaining.len() / self.channels);
-            let end = count * self.channels;
-            self.input[self.fill * self.channels..(self.fill + count) * self.channels]
-                .copy_from_slice(&remaining[..end]);
-            self.fill += count;
-            remaining = &remaining[end..];
-            if self.fill == Self::CHUNK {
-                self.process(output, usize::MAX)?;
-            }
-        }
-        Ok(())
-    }
-    fn process(&mut self, output: &mut Vec<f32>, limit: usize) -> Result<()> {
-        let input = InterleavedSlice::new(&self.input, self.channels, Self::CHUNK)?;
-        let output_frames = self.output.len() / self.channels;
-        let mut output_buffer =
-            InterleavedSlice::new_mut(&mut self.output, self.channels, output_frames)?;
-        let (_, count) = self
-            .sinc
-            .as_mut()
-            .expect("sinc converter")
-            .process_into_buffer(&input, &mut output_buffer, None)?;
-        let skip = self.delay.min(count);
-        self.delay -= skip;
-        let end = count.min(skip.saturating_add(limit));
-        output.extend_from_slice(&self.output[self.channels * skip..self.channels * end]);
-        self.output_count += (end - skip) as u64;
-        self.fill = 0;
-        Ok(())
-    }
-    pub(super) fn finish(&mut self, output: &mut Vec<f32>) -> Result<()> {
-        if self.sinc.is_none() {
-            return Ok(());
-        }
-        let target = (self.input_count as f64 * self.ratio).round() as u64;
-        while self.output_count < target {
-            self.input[self.channels * self.fill..].fill(0.0);
-            self.process(output, (target - self.output_count) as usize)?;
-        }
-        Ok(())
+
+#[derive(Debug)]
+pub(super) struct OutputError(String);
+
+impl std::fmt::Display for OutputError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
     }
 }
+
+impl std::error::Error for OutputError {}
 
 struct OutputShared {
     paused: AtomicBool,
@@ -206,7 +96,6 @@ struct OutputShared {
     refill_armed: AtomicBool,
     heard: AtomicU64,
     retired: AtomicU64,
-    xruns: AtomicU64,
     timing_error: AtomicU32,
     volume: AtomicU32,
 }
@@ -221,7 +110,6 @@ impl OutputShared {
             refill_armed: AtomicBool::new(false),
             heard: AtomicU64::new(0),
             retired: AtomicU64::new(0),
-            xruns: AtomicU64::new(0),
             timing_error: AtomicU32::new(0),
             volume: AtomicU32::new(volume.to_bits()),
         }
@@ -235,7 +123,7 @@ impl OutputShared {
 }
 
 struct ScheduledFrames {
-    start: cpal::StreamInstant,
+    start: StreamInstant,
     frames: u64,
     heard: u64,
 }
@@ -247,10 +135,9 @@ struct ScheduledFrames {
 // backend estimate as a clock failure.
 struct PlaybackClock {
     pending: VecDeque<ScheduledFrames>,
-    last_callback: Option<cpal::StreamInstant>,
+    last_callback: Option<StreamInstant>,
     heard: u64,
     retired: u64,
-    xruns: u64,
 }
 impl PlaybackClock {
     fn new() -> Self {
@@ -259,15 +146,10 @@ impl PlaybackClock {
             last_callback: None,
             heard: 0,
             retired: 0,
-            xruns: 0,
         }
     }
 
-    fn schedule_start(
-        &self,
-        predicted: cpal::StreamInstant,
-        rate: u32,
-    ) -> Option<cpal::StreamInstant> {
+    fn schedule_start(&self, predicted: StreamInstant, rate: u32) -> Option<StreamInstant> {
         let Some(previous) = self.pending.back() else {
             return Some(predicted);
         };
@@ -278,24 +160,7 @@ impl PlaybackClock {
         Some(if end > predicted { end } else { predicted })
     }
 
-    fn advance(
-        &mut self,
-        timestamp: cpal::OutputStreamTimestamp,
-        rate: u32,
-        shared: &OutputShared,
-    ) {
-        let xruns = shared.xruns.load(Ordering::Acquire);
-        if self.xruns != xruns {
-            // CPAL may discard device buffers while recovering an xrun. It
-            // cannot report which samples survived: do not count unconfirmed
-            // samples as heard, or wait forever for the discarded buffers.
-            self.retired += self
-                .pending
-                .drain(..)
-                .map(|span| span.frames - span.heard)
-                .sum::<u64>();
-            self.xruns = xruns;
-        }
+    fn advance(&mut self, timestamp: OutputTimestamp, rate: u32, shared: &OutputShared) {
         // PipeWire's playback prediction includes queue and device latency;
         // either can shrink without the callback clock moving backwards.
         if self
@@ -323,23 +188,14 @@ impl PlaybackClock {
         shared.retired.store(self.retired, Ordering::Release);
     }
 }
-enum OutputStream {
-    Cpal {
-        _stream: cpal::Stream,
-    },
-    #[cfg(target_os = "linux")]
-    PipeWire {
-        _stream: pipewire::NativeStream,
-    },
-}
 
 pub(super) struct Output {
-    stream: Option<OutputStream>,
+    stream: Option<pipewire::NativeStream>,
     producer: HeapProd<f32>,
     shared: Arc<OutputShared>,
     rate: u32,
     source_channels: usize,
-    errors: Receiver<cpal::Error>,
+    errors: Receiver<OutputError>,
     submitted: u64,
 }
 impl Output {
@@ -352,124 +208,8 @@ impl Output {
         pipewire_auto_mix: bool,
         analyzer: &AnalysisWorker,
     ) -> Result<Self> {
-        #[cfg(target_os = "linux")]
-        if name.is_none() {
-            return Self::native(
-                None,
-                source_rate,
-                source_layout,
-                volume,
-                paused,
-                pipewire_auto_mix,
-                analyzer,
-            );
-        }
-        #[cfg(target_os = "linux")]
-        if let Some(target) = name.and_then(|name| name.strip_prefix(pipewire::PREFIX)) {
-            return Self::native(
-                Some(target),
-                source_rate,
-                source_layout,
-                volume,
-                paused,
-                pipewire_auto_mix,
-                analyzer,
-            );
-        }
-        let device = find_device(name)?;
-        #[cfg(target_os = "linux")]
-        if source_layout.len() > 2 {
-            let id = device.id()?;
-            if id.host() == cpal::HostId::Alsa && matches!(id.id(), "default" | "pipewire") {
-                return Self::native(
-                    None,
-                    source_rate,
-                    source_layout,
-                    volume,
-                    paused,
-                    pipewire_auto_mix,
-                    analyzer,
-                );
-            }
-        }
-        let (supported, mapping) = layout::negotiate(&device, source_rate, source_layout)?;
-        let config = supported.config();
-        let rate = config.sample_rate;
-        if config.channels == 0 || rate == 0 {
-            bail!("Invalid output device configuration");
-        }
-        let source_channels = source_layout.len();
-        let (producer, consumer) =
-            HeapRb::new((rate / 4).max(2048) as usize * source_channels).split();
-        let shared = Arc::new(OutputShared::new(volume, paused));
-        let (error_send, errors) = bounded(4);
-        analyzer.reset(rate);
-        let callback = OutputCallback {
-            consumer,
-            tap: analyzer.producer(),
-            tap_gap: false,
-            control: analyzer.control.clone(),
-            shared: shared.clone(),
-            channels: config.channels as usize,
-            scratch: vec![0.0; source_channels * OutputCallback::BLOCK_FRAMES],
-            mapping,
-            analysis_weights: analysis_weights(source_layout),
-            rate,
-            clock: PlaybackClock::new(),
-        };
-        let shared_errors = shared.clone();
-        macro_rules! build {
-            ($sample:ty) => {{
-                let mut callback = callback;
-                device.build_output_stream(
-                    config,
-                    move |data: &mut [$sample], info| callback.render(data, info.timestamp()),
-                    move |error| {
-                        report_stream_error(error, &shared_errors, &error_send);
-                    },
-                    None,
-                )?
-            }};
-        }
-        let stream = match supported.sample_format() {
-            cpal::SampleFormat::F32 => build!(f32),
-            cpal::SampleFormat::F64 => build!(f64),
-            cpal::SampleFormat::I8 => build!(i8),
-            cpal::SampleFormat::I16 => build!(i16),
-            cpal::SampleFormat::I24 => build!(cpal::I24),
-            cpal::SampleFormat::I32 => build!(i32),
-            cpal::SampleFormat::I64 => build!(i64),
-            cpal::SampleFormat::U8 => build!(u8),
-            cpal::SampleFormat::U16 => build!(u16),
-            cpal::SampleFormat::U24 => build!(cpal::U24),
-            cpal::SampleFormat::U32 => build!(u32),
-            cpal::SampleFormat::U64 => build!(u64),
-            other => bail!("Unsupported device sample format: {other:?}"),
-        };
-        // Software pause keeps timestamps advancing and never depends on
-        // optional backend / hardware pause support.
-        stream.play()?;
-        Ok(Self {
-            stream: Some(OutputStream::Cpal { _stream: stream }),
-            producer,
-            shared,
-            rate,
-            source_channels,
-            errors,
-            submitted: 0,
-        })
-    }
-
-    #[cfg(target_os = "linux")]
-    fn native(
-        target: Option<&str>,
-        rate: u32,
-        source_layout: &[Channel],
-        volume: f32,
-        paused: bool,
-        pipewire_auto_mix: bool,
-        analyzer: &AnalysisWorker,
-    ) -> Result<Self> {
+        let target = target_name(name)?;
+        let rate = source_rate;
         if rate == 0 || source_layout.is_empty() {
             bail!("Invalid decoded sample rate or speaker layout");
         }
@@ -500,7 +240,7 @@ impl Output {
             error_send,
         )?;
         Ok(Self {
-            stream: Some(OutputStream::PipeWire { _stream: stream }),
+            stream: Some(stream),
             producer,
             shared,
             rate,
@@ -509,11 +249,8 @@ impl Output {
             submitted: 0,
         })
     }
-    pub(super) fn rate(&self) -> u32 {
-        self.rate
-    }
 
-    pub(super) fn errors(&self) -> &Receiver<cpal::Error> {
+    pub(super) fn errors(&self) -> &Receiver<OutputError> {
         &self.errors
     }
 
@@ -521,14 +258,6 @@ impl Output {
         self.shared
             .volume
             .store(volume.to_bits(), Ordering::Release);
-    }
-
-    pub(super) fn auto_mix_affects_output(&self) -> bool {
-        #[cfg(target_os = "linux")]
-        if matches!(self.stream, Some(OutputStream::PipeWire { .. })) {
-            return true;
-        }
-        false
     }
 
     pub(super) fn has_room(&self) -> bool {
@@ -573,7 +302,7 @@ impl Output {
         self.shared.heard.load(Ordering::Acquire) as f64 / self.rate as f64
     }
     pub(super) fn position(&self) -> f64 {
-        // Lost device buffers advance the source cursor, but are not listened time.
+        // The source cursor advances only as scheduled PCM becomes audible.
         self.shared.retired.load(Ordering::Acquire) as f64 / self.rate as f64
     }
     pub(super) fn pause(&self, paused: bool) {
@@ -597,17 +326,6 @@ impl Output {
         self.shared.paused.store(true, Ordering::Release);
         self.stream.take();
         self.heard()
-    }
-}
-fn report_stream_error(
-    error: cpal::Error,
-    shared: &OutputShared,
-    errors: &crossbeam_channel::Sender<cpal::Error>,
-) {
-    if error.kind() == cpal::ErrorKind::Xrun {
-        shared.xruns.fetch_add(1, Ordering::Release);
-    } else {
-        let _ = errors.try_send(error);
     }
 }
 
@@ -653,12 +371,7 @@ impl OutputCallback {
     // Fixed storage bounds callback memory independently of device buffer size.
     const BLOCK_FRAMES: usize = 256;
 
-    fn render_native(
-        &mut self,
-        data: &mut [f32],
-        timestamp: cpal::OutputStreamTimestamp,
-        routed: bool,
-    ) {
+    fn render_native(&mut self, data: &mut [f32], timestamp: OutputTimestamp, routed: bool) {
         if routed {
             self.render(data, timestamp);
         } else {
@@ -667,11 +380,7 @@ impl OutputCallback {
         }
     }
 
-    fn render<T: cpal::Sample + cpal::FromSample<f32>>(
-        &mut self,
-        data: &mut [T],
-        timestamp: cpal::OutputStreamTimestamp,
-    ) {
+    fn render(&mut self, data: &mut [f32], timestamp: OutputTimestamp) {
         self.clock.advance(timestamp, self.rate, &self.shared);
         let paused = self.shared.paused.load(Ordering::Acquire);
         if paused
@@ -708,7 +417,7 @@ impl OutputCallback {
             None
         };
         // Valid mapped samples are written once; only the silent tail is cleared.
-        data[count * self.channels..].fill(T::from_sample(0.0));
+        data[count * self.channels..].fill(0.0);
         for block in data[..count * self.channels].chunks_mut(Self::BLOCK_FRAMES * self.channels) {
             // Publish ring consumption once per block, including wrapped rings.
             // Scratch is fixed before stream start; every chunk contains whole frames.
@@ -744,8 +453,8 @@ impl OutputCallback {
             {
                 for (sample, source) in output.iter_mut().zip(&self.mapping) {
                     *sample = match source {
-                        Some(source) => T::from_sample((frame[*source] * volume).clamp(-1.0, 1.0)),
-                        None => T::from_sample(0.0),
+                        Some(source) => (frame[*source] * volume).clamp(-1.0, 1.0),
+                        None => 0.0,
                     };
                 }
             }
@@ -783,9 +492,9 @@ pub(super) fn test_backend(
         let _keep_analyzer_alive = &analyzer;
         callback.render(
             data,
-            cpal::OutputStreamTimestamp {
-                callback: cpal::StreamInstant::from_millis(millis),
-                playback: cpal::StreamInstant::from_millis(millis + 20),
+            OutputTimestamp {
+                callback: StreamInstant::from_millis(millis),
+                playback: StreamInstant::from_millis(millis + 20),
             },
         );
     })
@@ -796,6 +505,38 @@ mod tests {
     use super::*;
     use crate::analysis::AnalysisFrame;
     use parking_lot::RwLock;
+
+    #[test]
+    fn device_names_require_the_native_prefix_without_aliases() {
+        assert_eq!(target_name(None).unwrap(), None);
+        assert_eq!(target_name(Some("PipeWire: sink")).unwrap(), Some("sink"));
+        for name in ["default", "pipewire", "hw:0", "sink"] {
+            assert!(validate_device(Some(name)).is_err(), "{name}");
+        }
+    }
+
+    #[test]
+    fn monotonic_instants_saturate_future_spans_and_reject_overflow() {
+        let now = StreamInstant::from_nanos(10);
+        assert_eq!(
+            now.duration_since(StreamInstant::from_nanos(20)),
+            Duration::ZERO
+        );
+        assert_eq!(
+            now.duration_since(StreamInstant::from_nanos(3)),
+            Duration::from_nanos(7)
+        );
+        assert_eq!(
+            now.checked_add(Duration::from_nanos(2)),
+            Some(StreamInstant::from_nanos(12))
+        );
+        assert!(
+            StreamInstant::from_nanos(u64::MAX)
+                .checked_add(Duration::from_nanos(1))
+                .is_none()
+        );
+        assert!(now.checked_add(Duration::from_secs(u64::MAX)).is_none());
+    }
 
     #[test]
     fn block_render_preserves_wrapped_frames_mapping_and_analysis() {
@@ -844,34 +585,6 @@ mod tests {
         assert_eq!(
             callback.scratch.len(),
             OutputCallback::BLOCK_FRAMES * source.len()
-        );
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn device_discovery_keeps_the_working_backend() {
-        assert_eq!(
-            merge_devices(
-                Err(anyhow::anyhow!("CPAL failed")),
-                Ok(vec!["PipeWire: sink".into()])
-            )
-            .unwrap(),
-            ["PipeWire: sink"]
-        );
-        assert_eq!(
-            merge_devices(
-                Ok(vec!["CPAL sink".into()]),
-                Err(anyhow::anyhow!("PipeWire failed"))
-            )
-            .unwrap(),
-            ["CPAL sink"]
-        );
-        assert!(
-            merge_devices(
-                Err(anyhow::anyhow!("CPAL")),
-                Err(anyhow::anyhow!("PipeWire"))
-            )
-            .is_err()
         );
     }
 
@@ -970,16 +683,16 @@ mod tests {
         (output, callback, analyzer)
     }
 
-    fn timestamp(callback_ms: u64, playback_ms: u64) -> cpal::OutputStreamTimestamp {
-        cpal::OutputStreamTimestamp {
-            callback: cpal::StreamInstant::from_millis(callback_ms),
-            playback: cpal::StreamInstant::from_millis(playback_ms),
+    fn timestamp(callback_ms: u64, playback_ms: u64) -> OutputTimestamp {
+        OutputTimestamp {
+            callback: StreamInstant::from_millis(callback_ms),
+            playback: StreamInstant::from_millis(playback_ms),
         }
     }
-    fn timestamp_nanos(callback: u64, playback: u64) -> cpal::OutputStreamTimestamp {
-        cpal::OutputStreamTimestamp {
-            callback: cpal::StreamInstant::from_nanos(callback),
-            playback: cpal::StreamInstant::from_nanos(playback),
+    fn timestamp_nanos(callback: u64, playback: u64) -> OutputTimestamp {
+        OutputTimestamp {
+            callback: StreamInstant::from_nanos(callback),
+            playback: StreamInstant::from_nanos(playback),
         }
     }
 
@@ -1177,36 +890,6 @@ mod tests {
     }
 
     #[test]
-    fn xrun_recovers_without_counting_unconfirmed_audio_and_fatal_errors_survive() {
-        let (mut output, mut callback, _analyzer) = test_output(1000, false);
-        let (errors, received) = bounded(4);
-        output.push([[0.5, -0.5]; 8].as_flattened());
-        let mut data = [0.0_f32; 16];
-        callback.render(&mut data, timestamp(0, 20));
-        callback.render(&mut data, timestamp(22, 40));
-        report_stream_error(cpal::ErrorKind::Xrun.into(), &output.shared, &errors);
-        assert!(received.try_recv().is_err());
-        output.push([[0.25, -0.25]; 3].as_flattened());
-        // Recovery shortened the device queue: its new prediction precedes
-        // the previous callback's 40 ms playback timestamp.
-        callback.render(&mut data, timestamp(30, 30));
-        assert!(output.check_timing().is_ok());
-        assert_eq!(&data[..6], &[0.25, -0.25, 0.25, -0.25, 0.25, -0.25]);
-        assert_eq!(output.heard(), 0.002);
-        assert!(!output.drained());
-        callback.render(&mut data, timestamp(33, 53));
-        assert!(output.drained());
-        assert_eq!(output.heard(), 0.005);
-        for kind in [
-            cpal::ErrorKind::DeviceNotAvailable,
-            cpal::ErrorKind::BackendError,
-        ] {
-            report_stream_error(kind.into(), &output.shared, &errors);
-            assert_eq!(received.try_recv().unwrap().kind(), kind);
-        }
-    }
-
-    #[test]
     fn invalid_or_stalled_clock_reports_failure_instead_of_premature_drain() {
         let (mut output, mut callback, _analyzer) = test_output(1000, false);
         output.push([[0.5, -0.5]; 1].as_flattened());
@@ -1226,48 +909,6 @@ mod tests {
         assert_eq!(output.heard(), 0.0);
         assert!(!output.drained());
         assert_eq!(callback.consumer.occupied_len(), 2);
-    }
-
-    #[test]
-    fn resampling_preserves_duration_pitch_and_opposite_phase_stereo() {
-        let input: Vec<f32> = (0..11_025)
-            .flat_map(|index| {
-                let sample = (std::f32::consts::TAU * 440.0 * index as f32 / 44_100.0).sin() * 0.5;
-                [sample, -sample]
-            })
-            .collect();
-        let mut converter = Converter::new(44_100, 48_000, 2).unwrap();
-        let mut output = Vec::new();
-        for chunk in input.chunks(137 * 2) {
-            converter.push(chunk, &mut output).unwrap();
-        }
-        converter.finish(&mut output).unwrap();
-        assert_eq!(
-            output.len() / 2,
-            12_000,
-            "No padding or filter delay may change the audible duration"
-        );
-        let (frames, remainder) = output.as_chunks::<2>();
-        assert!(remainder.is_empty());
-        assert!(
-            frames
-                .iter()
-                .all(|frame| (frame[0] + frame[1]).abs() < 1e-6)
-        );
-        let power = |frequency: f32| {
-            let mut real = 0.0;
-            let mut imag = 0.0;
-            for (index, frame) in frames.iter().enumerate() {
-                let phase = std::f32::consts::TAU * frequency * index as f32 / 48_000.0;
-                real += frame[0] * phase.cos();
-                imag += frame[0] * phase.sin();
-            }
-            real * real + imag * imag
-        };
-        assert!(
-            power(440.0) > power(880.0) * 100.0,
-            "Resampling must not change pitch"
-        );
     }
 
     fn speaker_layouts() -> Vec<Vec<Channel>> {
@@ -1355,70 +996,6 @@ mod tests {
             assert!(output.drained());
             assert_eq!(output.heard(), 0.019);
             assert_eq!(output.position(), 0.019);
-        }
-    }
-
-    #[test]
-    fn resampling_keeps_channel_windows_isolated_at_every_supported_width() {
-        for source in speaker_layouts() {
-            let channels = source.len();
-            for (input_rate, output_rate) in [
-                (44_100, 48_000),
-                (48_000, 44_100),
-                (96_000, 48_000),
-                (48_000, 48_000),
-            ] {
-                let frame_count = channels * 1024;
-                let input: Vec<f32> = (0..frame_count)
-                    .flat_map(|frame| {
-                        (0..channels).map(move |channel| {
-                            if frame / 1024 == channel {
-                                (std::f32::consts::TAU * 300.0 * frame as f32 / input_rate as f32)
-                                    .sin()
-                                    * 0.5
-                            } else {
-                                0.0
-                            }
-                        })
-                    })
-                    .collect();
-                let mut converter = Converter::new(input_rate, output_rate, channels).unwrap();
-                let mut converted = Vec::new();
-                for packet in input.chunks(137 * channels) {
-                    converter.push(packet, &mut converted).unwrap();
-                }
-                converter.finish(&mut converted).unwrap();
-                assert_eq!(
-                    converted.len() / channels,
-                    (frame_count as f64 * output_rate as f64 / input_rate as f64).round() as usize
-                );
-                for speaker in 0..channels {
-                    let start = ((speaker * 1024 + 300) as f64 * output_rate as f64
-                        / input_rate as f64)
-                        .ceil() as usize;
-                    let end = ((speaker * 1024 + 724) as f64 * output_rate as f64
-                        / input_rate as f64)
-                        .floor() as usize;
-                    let mut energy = vec![0.0_f64; channels];
-                    for frame in converted[start * channels..end * channels].chunks_exact(channels)
-                    {
-                        for (sum, sample) in energy.iter_mut().zip(frame) {
-                            *sum += f64::from(*sample).powi(2);
-                        }
-                    }
-                    assert!(energy[speaker] > 1.0, "Lost speaker {:?}", source[speaker]);
-                    for (channel, sum) in energy.iter().enumerate() {
-                        if channel != speaker {
-                            assert!(
-                                *sum < 1e-10,
-                                "Crosstalk {:?} -> {:?}",
-                                source[speaker],
-                                source[channel]
-                            );
-                        }
-                    }
-                }
-            }
         }
     }
 

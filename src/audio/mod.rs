@@ -4,15 +4,18 @@
 //! Decoder internals and real-time output state remain in their respective modules.
 //!
 //! Pause is software-gated: the device continues receiving silence without
-//! consuming queued music. End-of-track waits for CPAL's stream clock to pass
+//! consuming queued music. End-of-track waits for PipeWire's stream clock to pass
 //! the final valid frame's predicted playback time, not merely an empty ring.
 //! Listened time is a conservative, callback-confirmed count; unconfirmed
-//! device buffers on stop or xrun recovery are not counted as heard. Accuracy
-//! at the physical output remains bounded by the backend's playback timestamps.
+//! device buffers on stop are not counted as heard. Accuracy at the physical
+//! output remains bounded by PipeWire's playback timestamps.
 //!
 //! Lifecycle events use bounded worker-thread backpressure; progress is best
 //! effort. Consumers must keep draining events while submitting commands.
 //! Shutdown cancels blocked event delivery without involving the output callback.
+
+#[cfg(not(target_os = "linux"))]
+compile_error!("Rivu requires Linux and native PipeWire audio output");
 
 mod detector;
 #[cfg(feature = "ffmpeg")]
@@ -42,7 +45,7 @@ mod ffmpeg {
             unreachable!("FFmpeg decoder cannot be opened without the ffmpeg feature")
         }
 
-        pub(super) fn next_frames(&mut self) -> Result<Option<(&[f32], f64)>> {
+        pub(super) fn next_frames(&mut self, _: &mut Vec<f32>) -> Result<Option<f64>> {
             bail!("FFmpeg extension is not compiled; rebuild with --features ffmpeg")
         }
 

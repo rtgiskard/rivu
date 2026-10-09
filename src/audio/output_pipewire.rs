@@ -1,8 +1,7 @@
 //! Native PipeWire streams with a fixed target and explicit speaker positions.
-//! CPAL's ALSA handle cannot call set_chmap; probing a separate handle does not
-//! change the stream it opens. In particular ALSA's default 7ch map is UNKNOWN.
+//! The selected sink and its strict speaker routes are never silently replaced.
 
-use super::{Channel, OutputCallback, layout};
+use super::{Channel, OutputCallback, OutputError, OutputTimestamp, StreamInstant, layout};
 use ::pipewire::{self as pw, properties::properties, spa};
 use anyhow::{Context, Result, bail};
 use std::{
@@ -65,7 +64,6 @@ struct Connection {
     _listener: pw::registry::Listener,
     _proxies: Rc<RefCell<BTreeMap<u32, BoundProxy>>>,
     mainloop: pw::main_loop::MainLoopRc,
-    _context: pw::context::ContextRc,
     core: pw::core::CoreRc,
     _registry: pw::registry::RegistryRc,
     inventory: Rc<RefCell<Inventory>>,
@@ -152,7 +150,9 @@ impl Connection {
                                     && let Some(positions) = props.get("audio.position")
                                 {
                                     let mut state = state.borrow_mut();
-                                    if let Some(sink) = state.sinks.get_mut(&id) {
+                                    if let Some(sink) = state.sinks.get_mut(&id)
+                                        && sink.positions != positions
+                                    {
                                         sink.positions = positions.to_owned();
                                         state.changed();
                                     }
@@ -177,6 +177,9 @@ impl Connection {
                         let listener = metadata
                             .add_listener_local()
                             .property(move |subject, key, _, value| {
+                                if subject == 0 && key.is_none() {
+                                    state.borrow_mut().default = None;
+                                }
                                 if subject == 0 && key == Some("default.audio.sink") {
                                     state.borrow_mut().default = value
                                         .and_then(|value| {
@@ -220,7 +223,6 @@ impl Connection {
             .register();
         let connection = Self {
             mainloop,
-            _context: context,
             core,
             _registry: registry,
             _listener: listener,
@@ -253,18 +255,20 @@ impl Connection {
             })
             .register();
         let deadline = Instant::now() + TIMEOUT;
-        while !done.get() {
+        loop {
             if let Some(message) = error.borrow_mut().take() {
                 bail!("PipeWire: {message}");
+            }
+            if done.get() {
+                return Ok(());
             }
             if Instant::now() >= deadline {
                 bail!("Timed out querying PipeWire devices");
             }
-            self.mainloop
-                .loop_()
-                .iterate(pw::loop_::Timeout::Finite(Duration::from_millis(10)));
+            self.mainloop.loop_().iterate(pw::loop_::Timeout::Finite(
+                deadline.saturating_duration_since(Instant::now()),
+            ));
         }
-        Ok(())
     }
 
     fn target(&self, name: Option<&str>) -> Result<Sink> {
@@ -298,12 +302,14 @@ pub(super) fn validate(name: Option<&str>) -> Result<()> {
 
 pub(super) struct NativeStream {
     stop: Arc<AtomicBool>,
+    wake: pw::channel::Sender<()>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl Drop for NativeStream {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
+        let _ = self.wake.send(());
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -316,12 +322,13 @@ impl NativeStream {
         source_layout: &[Channel],
         auto_mix: bool,
         callback: OutputCallback,
-        errors: crossbeam_channel::Sender<cpal::Error>,
+        errors: crossbeam_channel::Sender<OutputError>,
     ) -> Result<Self> {
         let name = name.map(str::to_owned);
         let source_layout = source_layout.to_vec();
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
+        let (wake, receiver) = pw::channel::channel();
         let (ready, receive) = crossbeam_channel::bounded(1);
         let thread = std::thread::Builder::new()
             .name("rivu-pipewire".into())
@@ -333,17 +340,16 @@ impl NativeStream {
                     callback,
                     &stopping,
                     &ready,
+                    receiver,
                 ) {
                     let message = format!("{error:#}");
                     let _ = ready.try_send(Err(message.clone()));
-                    let _ = errors.try_send(cpal::Error::with_message(
-                        cpal::ErrorKind::BackendError,
-                        message,
-                    ));
+                    let _ = errors.try_send(OutputError(message));
                 }
             })?;
         let stream = Self {
             stop,
+            wake,
             thread: Some(thread),
         };
         receive
@@ -361,8 +367,10 @@ fn run(
     mut callback: OutputCallback,
     stop: &AtomicBool,
     ready: &crossbeam_channel::Sender<std::result::Result<(), String>>,
+    wake: pw::channel::Receiver<()>,
 ) -> Result<()> {
     let connection = Connection::new()?;
+    let _wake = wake.attach(connection.mainloop.loop_(), |_| {});
     let target = connection.target(name)?;
     let speakers = parse_positions(&target.positions).with_context(|| {
         format!(
@@ -372,7 +380,7 @@ fn run(
     })?;
     let (stream_layout, mapping, mono) = if auto_mix {
         (
-            source_layout.to_vec(),
+            source_layout,
             (0..source_layout.len()).map(Some).collect(),
             false,
         )
@@ -380,7 +388,7 @@ fn run(
         let mapping = layout::mapping(source_layout, &speakers)
             .with_context(|| format!("PipeWire sink {} cannot preserve this track", target.name))?;
         (
-            speakers.clone(),
+            speakers.as_slice(),
             mapping,
             speakers == [Channel::FrontCenter] && target.positions.contains("MONO"),
         )
@@ -416,7 +424,7 @@ fn run(
     info.set_rate(rate);
     info.set_channels(stream_layout.len() as u32);
     let mut positions = [0; spa::param::audio::MAX_CHANNELS];
-    for (position, speaker) in positions.iter_mut().zip(&stream_layout) {
+    for (position, speaker) in positions.iter_mut().zip(stream_layout) {
         *position = spa_position(*speaker);
     }
     if mono {
@@ -431,7 +439,6 @@ fn run(
     let rejected = format_error.clone();
     let route_ok = connection.inventory.borrow().route_confirmed.clone();
     let routed = route_ok.clone();
-    let expected_ports = Rc::new(names);
     let _listener = stream
         .add_local_listener_with_user_data(callback)
         .param_changed(move |_, _, id, pod| {
@@ -474,7 +481,7 @@ fn run(
     .into_inner();
     stream.connect(
         spa::utils::Direction::Output,
-        Some(target.id),
+        None,
         pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
         &mut [spa::pod::Pod::from_bytes(&bytes).context("Invalid PipeWire format pod")?],
     )?;
@@ -491,21 +498,20 @@ fn run(
         })
         .register();
     while !stop.load(Ordering::Acquire) {
-        connection
-            .mainloop
-            .loop_()
-            .iterate(pw::loop_::Timeout::Finite(Duration::from_millis(10)));
+        connection.mainloop.loop_().iterate(if started {
+            pw::loop_::Timeout::Infinite
+        } else {
+            pw::loop_::Timeout::Finite(deadline.saturating_duration_since(Instant::now()))
+        });
+        if stop.load(Ordering::Acquire) {
+            break;
+        }
         {
             let graph = connection.inventory.borrow();
             if auto_mix {
                 route_ok.set(true);
             } else if observed_revision != Some(graph.revision) {
-                route_ok.set(route_matches(
-                    &graph,
-                    stream.node_id(),
-                    target.id,
-                    &expected_ports,
-                ));
+                route_ok.set(route_matches(&graph, stream.node_id(), target.id, &names));
                 observed_revision = Some(graph.revision);
             }
         }
@@ -550,40 +556,59 @@ fn run(
 
 // SAFETY: invoked only by the owning PipeWire loop while the stream is alive.
 // Mapped SPA buffers are checked for shape/alignment before making an f32 slice;
-// each dequeued buffer is returned exactly once, including all failure paths.
+// each dequeued buffer is queued exactly once, empty on failure.
 unsafe fn process(stream: &pw::stream::Stream, callback: &mut OutputCallback, routed: bool) {
     unsafe {
-        let raw = stream.as_raw_ptr();
-        let buffer = pw::sys::pw_stream_dequeue_buffer(raw);
+        // Buffer has no size setter in 0.10.1; keep raw access so queued time
+        // remains measured in frames rather than bytes or channel samples.
+        let buffer = stream.dequeue_raw_buffer();
         if buffer.is_null() {
             return;
         }
-        let result = render_buffer(raw, buffer, callback, routed);
+        let result = render_buffer(stream, buffer, callback, routed);
         if !result {
             callback.shared.fail_timing(3);
         }
-        pw::sys::pw_stream_queue_buffer(raw, buffer);
+        stream.queue_raw_buffer(buffer);
+    }
+}
+
+// SAFETY: buffer and its SPA data/chunks belong to a dequeued, mapped buffer.
+// Empty every chunk before rejecting the shape: pw_buffer.size only accounts
+// for queued time and does not stop stale SPA chunks from reaching the graph.
+unsafe fn buffer_data(buffer: &mut pw::sys::pw_buffer) -> Option<&mut spa::sys::spa_data> {
+    unsafe {
+        buffer.size = 0;
+        let spa_buffer = buffer.buffer.as_mut()?;
+        if spa_buffer.datas.is_null() {
+            return None;
+        }
+        let datas = std::slice::from_raw_parts_mut(spa_buffer.datas, spa_buffer.n_datas as usize);
+        for data in datas.iter_mut() {
+            if let Some(chunk) = data.chunk.as_mut() {
+                chunk.offset = 0;
+                chunk.size = 0;
+                chunk.stride = 0;
+                chunk.flags = 0;
+            }
+        }
+        match datas {
+            [data] if !data.chunk.is_null() => Some(data),
+            _ => None,
+        }
     }
 }
 
 unsafe fn render_buffer(
-    stream: *mut pw::sys::pw_stream,
+    stream: &pw::stream::Stream,
     buffer: *mut pw::sys::pw_buffer,
     callback: &mut OutputCallback,
     routed: bool,
 ) -> bool {
     unsafe {
-        (*buffer).size = 0;
-        let spa_buffer = (*buffer).buffer;
-        if spa_buffer.is_null() || (*spa_buffer).n_datas != 1 || (*spa_buffer).datas.is_null() {
+        let Some(data) = buffer_data(&mut *buffer) else {
             return false;
-        }
-        let data = &mut *(*spa_buffer).datas;
-        if data.chunk.is_null() {
-            return false;
-        }
-        (*data.chunk).offset = 0;
-        (*data.chunk).size = 0;
+        };
         let stride = callback.channels * std::mem::size_of::<f32>();
         if data.data.is_null() || !(data.data as usize).is_multiple_of(std::mem::align_of::<f32>())
         {
@@ -598,14 +623,12 @@ unsafe fn render_buffer(
         };
         let samples =
             std::slice::from_raw_parts_mut(data.data.cast::<f32>(), frames * callback.channels);
-        let mut time = std::mem::zeroed::<pw::sys::pw_time>();
-        if pw::sys::pw_stream_get_time_n(stream, &mut time, std::mem::size_of::<pw::sys::pw_time>())
-            < 0
-        {
+        let Ok(time) = stream.time() else {
             return false;
-        }
-        let now = pw::sys::pw_stream_get_nsec(stream);
-        let Some(timestamp) = output_timestamp(&time, callback.rate, now) else {
+        };
+        // 0.10.1 exposes Time safely, but get_nsec still has no safe wrapper.
+        let now = pw::sys::pw_stream_get_nsec(stream.as_raw_ptr());
+        let Some(timestamp) = output_timestamp(time.as_raw(), callback.rate, now) else {
             return false;
         };
         callback.render_native(samples, timestamp, routed);
@@ -616,26 +639,22 @@ unsafe fn render_buffer(
     }
 }
 
-fn output_timestamp(
-    time: &pw::sys::pw_time,
-    rate: u32,
-    now: u64,
-) -> Option<cpal::OutputStreamTimestamp> {
+fn output_timestamp(time: &pw::sys::pw_time, rate: u32, now: u64) -> Option<OutputTimestamp> {
     if time.now < 0 || time.rate.num == 0 || time.rate.denom == 0 || rate == 0 {
         return None;
     }
     let elapsed = now.checked_sub(time.now as u64)?;
     // Graph delay belongs to the snapshot origin; only the callback clock is
     // extrapolated. Advancing both origins would count loop dispatch latency as
-    // extra device latency. Queue/converter values are current stream frames.
+    // extra device latency. Queued/buffered values are current stream frames.
     let graph_delay = time.delay.max(0) as u128 * u128::from(time.rate.num) * 1_000_000_000
         / u128::from(time.rate.denom);
     let delay = graph_delay.saturating_sub(u128::from(elapsed))
         + (u128::from(time.queued) + u128::from(time.buffered)) * 1_000_000_000 / u128::from(rate);
     let playback = now.checked_add(u64::try_from(delay).ok()?)?;
-    Some(cpal::OutputStreamTimestamp {
-        callback: cpal::StreamInstant::from_nanos(now),
-        playback: cpal::StreamInstant::from_nanos(playback),
+    Some(OutputTimestamp {
+        callback: StreamInstant::from_nanos(now),
+        playback: StreamInstant::from_nanos(playback),
     })
 }
 
@@ -762,6 +781,71 @@ fn spa_position(channel: Channel) -> u32 {
 mod tests {
     use super::*;
     use Channel::*;
+
+    #[test]
+    fn native_stream_drop_wakes_and_joins_its_owner_loop() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (wake, receiver) = pw::channel::channel();
+        let (ready, started) = crossbeam_channel::bounded(1);
+        let (finished, received) = crossbeam_channel::bounded(1);
+        let thread = std::thread::spawn(move || {
+            pw::init();
+            let mainloop = pw::main_loop::MainLoopRc::new(None).unwrap();
+            let woken = Rc::new(Cell::new(false));
+            let notified = woken.clone();
+            let _receiver = receiver.attach(mainloop.loop_(), move |_| notified.set(true));
+            ready.send(()).unwrap();
+            // Other loop sources may dispatch first. Bound the whole wait,
+            // rather than assuming that one iteration receives our message.
+            let deadline = Instant::now() + TIMEOUT;
+            while !woken.get() && Instant::now() < deadline {
+                mainloop.loop_().iterate(pw::loop_::Timeout::Finite(
+                    deadline.saturating_duration_since(Instant::now()),
+                ));
+            }
+            finished.send(woken.get()).unwrap();
+        });
+        started.recv_timeout(TIMEOUT).unwrap();
+        drop(NativeStream {
+            stop: stop.clone(),
+            thread: Some(thread),
+            wake,
+        });
+        assert!(stop.load(Ordering::Acquire));
+        assert_eq!(received.try_recv(), Ok(true));
+    }
+
+    #[test]
+    fn rejected_multiplane_buffer_cannot_replay_stale_chunks() {
+        let mut chunks = [spa::sys::spa_chunk {
+            offset: 8,
+            size: 16,
+            stride: 4,
+            flags: spa::sys::SPA_CHUNK_FLAG_EMPTY as i32,
+        }; 2];
+        let mut datas: [spa::sys::spa_data; 2] = unsafe { std::mem::zeroed() };
+        for (data, chunk) in datas.iter_mut().zip(&mut chunks) {
+            data.chunk = chunk;
+        }
+        let mut spa_buffer: spa::sys::spa_buffer = unsafe { std::mem::zeroed() };
+        spa_buffer.n_datas = 2;
+        spa_buffer.datas = datas.as_mut_ptr();
+        let mut buffer: pw::sys::pw_buffer = unsafe { std::mem::zeroed() };
+        buffer.buffer = &mut spa_buffer;
+        buffer.size = 4;
+
+        assert!(unsafe { buffer_data(&mut buffer) }.is_none());
+        assert_eq!(buffer.size, 0);
+        assert!(chunks.iter().all(|chunk| chunk.size == 0));
+
+        // A valid reused buffer must not retain EMPTY/CORRUPTED flags either.
+        spa_buffer.n_datas = 1;
+        buffer.buffer = &mut spa_buffer;
+        chunks[0].flags =
+            (spa::sys::SPA_CHUNK_FLAG_EMPTY | spa::sys::SPA_CHUNK_FLAG_CORRUPTED) as i32;
+        assert!(unsafe { buffer_data(&mut buffer) }.is_some());
+        assert_eq!(chunks[0].flags, 0);
+    }
 
     #[test]
     fn explicit_sink_positions_preserve_rear_center_and_reject_unknowns() {

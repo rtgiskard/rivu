@@ -549,7 +549,7 @@ mod tests {
     use crate::library::{MediaInfo, ScanRecord};
 
     // An idle real audio worker handles stop/snapshot, but these tests never load
-    // audio. Missing-file errors expose the selected entry without opening CPAL.
+    // audio. Missing-file errors expose the selected entry without opening output.
     fn fixture() -> (tempfile::TempDir, Core) {
         fixture_with_duration(Some(10.0))
     }

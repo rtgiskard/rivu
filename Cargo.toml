@@ -6,14 +6,13 @@ description = "A lightweight, local-first Linux music player"
 
 [features]
 default = []
-ffmpeg = ["dep:bindgen"]
+ffmpeg = ["dep:bindgen", "dep:libloading"]
 
 [dependencies]
 anyhow = "1"
 blake3 = "1"
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-cpal = "0.18.2"
 bytes = "1"
 crossbeam-channel = "0.5"
 crossterm = "0.29"
@@ -25,13 +24,12 @@ futures = "0.3"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = "0.3"
-libloading = "0.9"
+libloading = { version = "0.9", optional = true }
 opus = "0.4"
 parking_lot = "0.12"
 rand = "0.10.3"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "crossterm_0_29", "std"] }
 ringbuf = "0.5"
-rubato = { version = "5.0.1", default-features = false }
 rusqlite = { version = "0.40.2", features = ["bundled", "functions"] }
 rustfft = "6"
 serde = { version = "1", features = ["derive", "rc"] }
@@ -48,12 +46,12 @@ unicode-segmentation = "1.13.3"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-alsa = "0.11"
 pipewire = { version = "0.10.1", features = ["v1_2_0"] }
 fontconfig-sys = { package = "yeslogic-fontconfig-sys", version = "6" }
 
 [build-dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Share libspa-sys's generator version instead of compiling two bindgen families.
 bindgen = { version = "0.72.1", default-features = false, features = ["runtime"], optional = true }
 pkg-config = "0.3"
 

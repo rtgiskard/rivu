@@ -2,12 +2,12 @@
 
 use super::{
     MediaInfo, PlaybackRange, WaveformFrame,
-    output::{Converter, Output},
+    output::{Output, OutputError},
     source::Source,
     waveform::{WaveformAccumulator, WaveformCoverage},
 };
 use crate::analysis::AnalysisWorker;
-use anyhow::Result;
+use anyhow::{Result, bail};
 use crossbeam_channel::Receiver;
 use parking_lot::RwLock;
 use std::{path::PathBuf, sync::Arc};
@@ -31,7 +31,6 @@ pub(super) struct PlaybackOptions {
 pub(super) struct Playback {
     source: Source,
     output: Output,
-    converter: Converter,
     pending: Vec<f32>,
     offset_frames: usize,
     generation: u64,
@@ -79,7 +78,6 @@ impl Playback {
             pipewire_auto_mix,
             analyzer,
         )?;
-        let converter = Converter::new(source.info().sample_rate, output.rate(), channels)?;
         let weights = super::output::analysis_weights(source.layout());
         let mut waveform_accumulator = {
             let mut waveform = waveform.write();
@@ -95,7 +93,6 @@ impl Playback {
         Ok(Self {
             source,
             output,
-            converter,
             pending: Vec::with_capacity(PENDING_BUFFER_CAPACITY * channels),
             offset_frames: 0,
             generation,
@@ -108,7 +105,7 @@ impl Playback {
             waveform_coverage: WaveformCoverage::new(start),
         })
     }
-    // Rebuild only device/resampler state: closing first discards queued PCM,
+    // Rebuild only device state: closing first discards queued PCM,
     // device-clock spans and the old analysis epoch before the source seeks.
     pub(super) fn restart_output(
         &mut self,
@@ -144,13 +141,7 @@ impl Playback {
         let heard = self.prior_heard + self.output.close();
         self.source.seek(position)?;
         let output = create(&self.source, self.paused)?;
-        let converter = Converter::new(
-            self.source.info().sample_rate,
-            output.rate(),
-            self.source.layout().len(),
-        )?;
         self.output = output;
-        self.converter = converter;
         self.pending.clear();
         self.offset_frames = 0;
         self.base_position = position;
@@ -158,10 +149,6 @@ impl Playback {
         self.eof = false;
         self.waveform_coverage = WaveformCoverage::new(position);
         Ok(())
-    }
-
-    pub(super) fn auto_mix_affects_output(&self) -> bool {
-        self.output.auto_mix_affects_output()
     }
 
     pub(super) fn generation(&self) -> u64 {
@@ -189,7 +176,7 @@ impl Playback {
         self.output.set_volume(volume);
     }
 
-    pub(super) fn errors(&self) -> &Receiver<cpal::Error> {
+    pub(super) fn errors(&self) -> &Receiver<OutputError> {
         self.output.errors()
     }
 
@@ -234,15 +221,21 @@ impl Playback {
             self.pending.clear();
             self.offset_frames = 0;
             if let Some((frames, start_seconds)) = self.source.next_frames()? {
+                if !frames.len().is_multiple_of(channels) {
+                    bail!("Decoded audio ends in an incomplete interleaved frame");
+                }
                 self.waveform_coverage
                     .record(start_seconds, frames.len() / channels, sample_rate);
                 self.waveform_accumulator
                     .push(start_seconds, frames, sample_rate, channels);
                 self.waveform_accumulator
                     .publish(&mut self.waveform.write());
-                self.converter.push(frames, &mut self.pending)?;
+                // Submit decoded PCM directly; retain only the packet tail that
+                // did not fit in the bounded output ring. At most one decoded
+                // packet is pending, and its allocation is reused on refill.
+                let count = self.output.push(frames);
+                self.pending.extend_from_slice(&frames[count * channels..]);
             } else {
-                self.converter.finish(&mut self.pending)?;
                 self.waveform_accumulator.finish(&self.waveform_coverage);
                 self.waveform_accumulator
                     .publish(&mut self.waveform.write());
@@ -285,26 +278,21 @@ mod tests {
         file
     }
 
-    #[test]
-    fn repeated_paused_cue_seeks_discard_old_pcm_and_preserve_exact_position() {
-        let file = pcm();
-        let range = Some(PlaybackRange {
-            start_seconds: 0.25,
-            end_seconds: Some(1.75),
-        });
-        let mut source = Source::open(file.path(), 64 * 1024, false).unwrap();
-        source.restrict(range.unwrap()).unwrap();
+    fn test_playback(
+        path: &std::path::Path,
+        range: PlaybackRange,
+    ) -> (Playback, impl FnMut(&mut [f32], u64) + use<>) {
+        let mut source = Source::open(path, 64 * 1024, false).unwrap();
+        source.restrict(range).unwrap();
         let waveform = Arc::new(RwLock::new(WaveformFrame::default()));
         waveform
             .write()
-            .select(file.path(), range, source.info().duration, 8_000);
-        let (output, mut old_render) =
-            super::super::output::test_backend(8_000, false, source.layout());
+            .select(path, Some(range), source.info().duration, 8_000);
+        let (output, render) = super::super::output::test_backend(8_000, false, source.layout());
         let waveform_accumulator = WaveformAccumulator::new(waveform.read().clone());
-        let mut playback = Playback {
+        let playback = Playback {
             source,
             output,
-            converter: Converter::new(8_000, 8_000, 1).unwrap(),
             pending: Vec::new(),
             offset_frames: 0,
             generation: 1,
@@ -316,9 +304,51 @@ mod tests {
             waveform_accumulator,
             waveform_coverage: WaveformCoverage::new(0.0),
         };
+        (playback, render)
+    }
+
+    #[test]
+    fn decoded_pcm_refill_preserves_cue_samples_and_waits_for_audible_tail() {
+        let file = pcm();
+        let (mut playback, mut render) = test_playback(
+            file.path(),
+            PlaybackRange {
+                start_seconds: 0.25,
+                end_seconds: Some(1.75),
+            },
+        );
+        let mut data = [0.0; 160];
+        for block in 0..75 {
+            playback.fill().unwrap();
+            render(&mut data, block * 20);
+            for (offset, sample) in data.iter().enumerate() {
+                assert_eq!(
+                    *sample,
+                    (2000 + block as usize * 160 + offset) as f32 / 32768.0
+                );
+            }
+        }
         playback.fill().unwrap();
-        assert!(playback.waveform.read().peaks.iter().any(Option::is_some));
-        assert!(playback.waveform.read().rms_counts.iter().sum::<u64>() > 0);
+        assert!(playback.eof);
+        assert!(!playback.finished());
+        render(&mut data, 1500);
+        assert!(data.iter().all(|sample| *sample == 0.0));
+        assert!(!playback.finished());
+        render(&mut data, 1520);
+        assert!(playback.finished());
+        assert_eq!(playback.heard(), 1.5);
+        assert_eq!(playback.position(), 1.5);
+    }
+
+    #[test]
+    fn repeated_paused_cue_seeks_discard_old_pcm_and_preserve_exact_position() {
+        let file = pcm();
+        let range = PlaybackRange {
+            start_seconds: 0.25,
+            end_seconds: Some(1.75),
+        };
+        let (mut playback, mut old_render) = test_playback(file.path(), range);
+        playback.fill().unwrap();
         // A complete manually installed waveform must survive later live PCM.
         playback.waveform.write().finish_scan(1.5);
         let installed = playback.waveform.read().clone();

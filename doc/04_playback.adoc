@@ -22,30 +22,27 @@ statistics use confirmed heard time; see link:02_library.adoc[Library].
 Seek scheduling and pause handling: link:../src/audio/worker.rs[audio worker].
 Output timing: link:../src/audio/output.rs[output].
 
-Seeking reuses the existing source and decoder while rebuilding output and
-resampler state. Closing the old output first discards queued PCM and clock
-spans, settles confirmed heard time, and invalidates its analysis epoch. Pending
-decoded output is cleared after the source seek. Consecutive seeks are coalesced
-in a bounded batch; a non-seek command remains an ordering barrier.
+Seeking reuses the source and decoder while rebuilding output state, preventing
+old queued audio from crossing the seek boundary. Seek coalescing preserves
+ordering relative to other playback commands.
 
-Refill wakeups use buffered PCM headroom rather than a fixed polling interval.
-The callback sends a coalesced notification at low occupancy or when the final
-device-clock tail settles. Active playback retains the 100 ms progress deadline;
-stable paused playback waits only for commands, errors, or output notifications.
-PipeWire route checks stay outside the real-time process callback. Output timing
-uses the stream's own clock to account for delayed snapshots; route validation
-remains strict.
-
-DTS probing scans bounded payload regions with one reusable overlap buffer.
-Only three contiguous structurally valid core frames count as a detection;
-neither metadata sync words nor adjacent independent RIFF data chunks are joined.
+Refill and paused playback are event-driven. Audible-position accounting uses
+the PipeWire stream clock rather than treating decoded or queued PCM as heard.
+Format probing is bounded and validates audio structure to avoid mistaking
+metadata for playable payload.
 
 == Output devices and speaker layouts
 
-`output_device` is an exact name from `rivu playback devices`. The list combines
-CPAL devices and native PipeWire sinks. Omit the setting for the default PipeWire
-sink, or use `PipeWire: <node.name>` for a named sink. A failed discovery backend
-does not hide devices returned by the other backend.
+`output_device` is an exact name from `rivu playback devices`, which lists native
+PipeWire sinks only. Omit the setting for the default PipeWire sink, or use
+`PipeWire: <node.name>` for a named sink. PipeWire must be running; there is no
+direct ALSA output or fallback to a different backend.
+
+Decoded PCM is submitted at the source rate. PipeWire owns device-rate
+conversion; Rivu does not keep a separate resampler or conversion queue.
+
+Each stream owns a dedicated event loop and stays bound to its selected sink.
+Invalid or disappearing routes fail explicitly instead of silently rerouting.
 
 Multichannel output preserves speaker identities. `pipewire_auto_mix` is enabled
 by default and permits PipeWire remixing; disable it to require a compatible
@@ -60,6 +57,9 @@ Native decoding is the default. Enable `ffmpeg_enabled` for additional formats,
 including audio in MKV/MP4. Missing or incompatible runtime libraries are
 reported through decoder status and playback errors. Disabling the extension
 stops an active FFmpeg-backed decoder without affecting native playback.
+
+Source owns the reusable decoded PCM buffer and applies seek and CUE boundaries;
+the FFmpeg decoder does not maintain a second PCM staging queue.
 
 Build prerequisites and ABI compatibility: link:../readme.adoc[README].
 Decoder selection: link:../src/audio/source.rs[source]. Runtime loading:

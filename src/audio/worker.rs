@@ -224,17 +224,9 @@ impl Worker {
                     if device_changed && let Err(error) = validate_device(device.as_deref()) {
                         self.fail(error);
                     } else {
-                        let restart = device_changed
-                            || (mix_changed
-                                && self
-                                    .playback
-                                    .as_ref()
-                                    .is_some_and(Playback::auto_mix_affects_output));
                         self.device = device;
                         self.pipewire_auto_mix = auto_mix;
-                        if restart {
-                            self.reopen(None);
-                        }
+                        self.reopen(None);
                     }
                 }
             }
