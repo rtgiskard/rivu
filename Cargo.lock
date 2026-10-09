@@ -5204,6 +5204,7 @@ dependencies = [
  "unicode-segmentation",
  "url",
  "walkdir",
+ "yeslogic-fontconfig-sys",
  "zbus",
 ]
 

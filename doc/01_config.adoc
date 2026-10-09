@@ -58,11 +58,11 @@ The bottom-right gear opens settings. Library roots are separated by semicolons;
 the output device is selected from the currently available devices in a dropdown.
 In an open dropdown, Up/Down moves the highlight with wraparound;
 PageUp/PageDown moves by the visible row count and clamps at the first or last
-option without scrolling the settings underneath. Enter or Space accepts the
-highlighted option, and Escape closes the dropdown.
+option without scrolling the settings underneath. Enter or Space accepts an
+option in non-editable dropdowns, and Escape closes the dropdown.
 General groups Library, Playback, Audio, Interface, Desktop integration, and
 Logging. Audio contains output selection, media read buffering, and decoder/remix
-switches; Interface contains the editable font family, font presets, scale,
+switches; Interface contains a single searchable font selector, scale,
 and Nerd Font symbols. The system tray switch takes effect after
 restarting the graphical host, not merely reopening its window. Media read
 buffering applies to future source opens, including full waveform scans; it does
@@ -102,7 +102,17 @@ preserved: Solid disables Spectrum count/width/gap controls, hidden peak markers
 disable peak motion controls, and Radial styles disable controls for absent bars
 or rings. Hover an inactive field for the reason; switch back to resume editing.
 
-`ui_font` accepts a font family; empty uses the platform font.
+Font: type to search installed families, or use the arrow to browse them and
+`serif`, `sans-serif`, and `monospace`. Enter or a click selects a choice; Space
+remains text. Custom family names are accepted.
+
+`ui_font`: empty/System default uses the platform UI font. Nonempty values use
+Fontconfig system and user rules (`~/.config/fontconfig/fonts.conf`) for family
+matching and fallback. Restart the GUI after changing Fontconfig rules.
+
+GPUI selects faces within each family and renders through cosmic-text/Swash;
+Fontconfig hinting, subpixel, and synthetic-bold settings do not apply.
+
 `ui_scale` accepts `0.75`–`2.0`.
 Omitted `nerd_symbols` follows installed Nerd Font detection; an explicit value
 overrides it. Omitted `output_device` uses the default output; a selected device

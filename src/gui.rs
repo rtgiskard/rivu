@@ -1,5 +1,6 @@
 mod artwork;
 mod components;
+mod fonts;
 mod input;
 mod layout;
 mod library;
@@ -546,7 +547,7 @@ pub(super) struct GuiApp {
     measured: Rc<RefCell<HashMap<Measured, Bounds<Pixels>>>>,
     analysis_sequence: u64,
     window_visible: bool,
-    ui_font: SharedString,
+    ui_font: Font,
     _subscriptions: Vec<Subscription>,
 }
 impl GuiApp {
@@ -786,11 +787,7 @@ impl GuiApp {
         for id in settings_panels {
             layout.remove(id);
         }
-        let ui_font = if state.system.config.ui_font.trim().is_empty() {
-            ".SystemUIFont".into()
-        } else {
-            state.system.config.ui_font.trim().to_owned().into()
-        };
+        let ui_font = fonts::resolve(&state.system.config.ui_font, cx);
         let mut inputs = HashMap::new();
         for (field, placeholder) in [
             (Field::Search, "Search title, artist or album"),
@@ -1762,6 +1759,9 @@ impl GuiApp {
                 self.seek_preview = None;
                 self.seek_queue_id = None;
             }
+            if self.state.system.config.ui_font != state.system.config.ui_font {
+                self.ui_font = fonts::resolve(&state.system.config.ui_font, cx);
+            }
             self.state = state;
             self.sync_metadata_default(cx);
             self.reconcile_playlist_selection();
@@ -2379,11 +2379,7 @@ impl Render for GuiApp {
             .bg(rgb(BG))
             .text_color(rgb(TEXT))
             .text_size(px(14. * self.state.system.config.ui_scale))
-            .font_family(if self.state.system.config.ui_font.trim().is_empty() {
-                self.ui_font.clone()
-            } else {
-                self.state.system.config.ui_font.clone().into()
-            })
+            .font(self.ui_font.clone())
             .track_focus(&self.layout_focus)
             .capture_key_down(cx.listener(|_, event: &KeyDownEvent, window, cx| {
                 let modifiers = event.keystroke.modifiers;
@@ -2410,6 +2406,9 @@ impl Render for GuiApp {
                     return;
                 }
                 if this.settings_dropdown_is_open() {
+                    if this.settings_font_input_focused(window, cx) {
+                        return;
+                    }
                     if key == "escape" {
                         this.close_settings_dropdown();
                         cx.notify();

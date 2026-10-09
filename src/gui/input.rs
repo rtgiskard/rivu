@@ -55,6 +55,7 @@ pub struct Input {
     focus_handle: FocusHandle,
     content: SharedString,
     placeholder: SharedString,
+    trailing_space: Pixels,
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
@@ -78,6 +79,7 @@ impl Input {
             focus_handle: cx.focus_handle(),
             content,
             placeholder: placeholder.into(),
+            trailing_space: px(7.),
             selected_range: end..end,
             selection_reversed: false,
             marked_range: None,
@@ -85,6 +87,12 @@ impl Input {
             last_bounds: None,
             is_selecting: false,
         }
+    }
+
+    /// Reserve room for an overlaid trailing control without overlapping text.
+    pub(super) fn with_trailing_space(mut self, space: Pixels) -> Self {
+        self.trailing_space = space;
+        self
     }
 
     /// Installs the key bindings used by every [`Input`] instance.
@@ -714,6 +722,7 @@ impl Render for Input {
                     .w_full()
                     .overflow_hidden()
                     .p(px(7.))
+                    .pr(self.trailing_space)
                     .child(InputElement { input: cx.entity() }),
             )
     }

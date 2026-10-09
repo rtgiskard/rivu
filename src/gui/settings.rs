@@ -2,8 +2,9 @@ use super::{
     BORDER, ButtonTooltip, DropdownItem, DropdownState, ERROR, GuiApp, Measured,
     POPOVER_MAX_HEIGHT, StatusKind, UI_INSET, active_control, button, caption, column,
     components::DROPDOWN_ROW_REMS, copyable_message, dropdown_container, dropdown_row,
-    dropdown_trigger, form_field, icon_button, input::Input, row, section_group, status_message,
-    toggle_button, two_column,
+    dropdown_trigger, form_field, icon_button,
+    input::{Input, InputEvent},
+    row, section_group, status_message, toggle_button, two_column,
 };
 use crate::{
     config::{
@@ -19,7 +20,8 @@ use std::{collections::HashMap, path::PathBuf, str::FromStr};
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettingChoice {
     Device(usize),
-    Font(&'static str),
+    Font(usize),
+    CustomFont,
     SpectrumStyle(SpectrumStyle),
     Fft(u32),
     RadialSpectrumStyle(RadialSpectrumStyle),
@@ -31,8 +33,7 @@ enum SettingChoice {
 impl SettingChoice {
     fn label(self) -> String {
         match self {
-            Self::Device(_) => String::new(),
-            Self::Font(value) => value.to_owned(),
+            Self::Device(_) | Self::Font(_) | Self::CustomFont => String::new(),
             Self::SpectrumStyle(value) => spectrum_style_label(value).to_owned(),
             Self::RadialSpectrumStyle(value) => radial_spectrum_style_label(value).to_owned(),
             Self::Palette(value) => visualization_palette_label(value).to_owned(),
@@ -232,12 +233,36 @@ enum VisualPage {
     Waveform,
 }
 
+struct FontOption {
+    family: String,
+    label: String,
+    search: String,
+}
+
+impl FontOption {
+    fn new(family: String) -> Self {
+        let label = if family.is_empty() {
+            "System default".to_owned()
+        } else {
+            family.clone()
+        };
+        let search = label.to_lowercase();
+        Self {
+            family,
+            label,
+            search,
+        }
+    }
+}
+
 /// Unsaved preferences stay independent from live playback snapshots.
 pub(super) struct Settings {
     draft: Config,
     inputs: HashMap<Field, Entity<Input>>,
     initialized: bool,
     dropdown: DropdownState<SettingChoice>,
+    font_options: Vec<FontOption>,
+    font_value: String,
     device_scroll: UniformListScrollHandle,
     dropdown_anchor: Measured,
     applying: bool,
@@ -254,6 +279,8 @@ impl Settings {
             inputs: HashMap::new(),
             initialized: false,
             dropdown: DropdownState::default(),
+            font_options: Vec::new(),
+            font_value: config.ui_font.clone(),
             device_scroll: UniformListScrollHandle::new(),
             dropdown_anchor: Measured::Device,
             applying: false,
@@ -264,7 +291,7 @@ impl Settings {
         }
     }
 
-    pub(super) fn initialize(&mut self, cx: &mut App) {
+    fn initialize(&mut self, cx: &mut App) {
         if self.initialized {
             return;
         }
@@ -311,10 +338,57 @@ impl Settings {
             Field::WaveformPeakGamma,
         ]
         .into_iter()
-        .map(|field| (field, cx.new(|cx| Input::new("", field.label(), cx))))
+        .map(|field| {
+            let input = cx.new(|cx| {
+                if field == Field::Font {
+                    Input::new("", "System default — search fonts", cx).with_trailing_space(px(28.))
+                } else {
+                    Input::new("", field.label(), cx)
+                }
+            });
+            (field, input)
+        })
         .collect();
+        let generic = ["", "sans-serif", "serif", "monospace"];
+        self.font_options = generic
+            .iter()
+            .map(|family| FontOption::new((*family).to_owned()))
+            .collect();
+        self.font_options.extend(
+            cx.text_system()
+                .all_font_names()
+                .into_iter()
+                .filter(|family| !generic.contains(&family.as_str()))
+                .map(FontOption::new),
+        );
         self.initialized = true;
         self.fill(cx);
+    }
+
+    fn font_items(&self, query: &str) -> Vec<DropdownItem<SettingChoice>> {
+        let query = query.trim();
+        let search = query.to_lowercase();
+        let mut items: Vec<_> = self
+            .font_options
+            .iter()
+            .enumerate()
+            .filter(|(_, option)| option.search.contains(&search))
+            .map(|(index, option)| {
+                DropdownItem::new(SettingChoice::Font(index), option.label.clone())
+            })
+            .collect();
+        if !query.is_empty()
+            && !self
+                .font_options
+                .iter()
+                .any(|option| option.family.eq_ignore_ascii_case(query))
+        {
+            items.push(DropdownItem::new(
+                SettingChoice::CustomFont,
+                format!("Use \"{query}\""),
+            ));
+        }
+        items
     }
 
     fn field(&self, field: Field) -> Div {
@@ -445,6 +519,7 @@ impl Settings {
             self.draft.media_read_buffer_mb.to_string(),
             cx,
         );
+        self.font_value = self.draft.ui_font.clone();
         self.set_value(Field::Font, self.draft.ui_font.clone(), cx);
         self.set_value(Field::Scale, self.draft.ui_scale.to_string(), cx);
         self.set_value(Field::Fps, self.draft.analysis_fps.to_string(), cx);
@@ -696,9 +771,138 @@ impl Settings {
 }
 
 impl GuiApp {
+    fn initialize_settings(&mut self, cx: &mut Context<Self>) {
+        if self.settings.initialized {
+            return;
+        }
+        self.settings.initialize(cx);
+        self._subscriptions.push(cx.subscribe(
+            &self.settings.inputs[&Field::Font],
+            |this, _, event, cx| {
+                if matches!(event, InputEvent::Submit) {
+                    if this.settings.dropdown.is_open()
+                        && this.settings.dropdown_anchor == Measured::SettingsFont
+                        && let Some(index) = this.settings.dropdown.selected_index()
+                    {
+                        this.choose_device(index, cx);
+                    }
+                    return;
+                }
+                let value = this.settings.value(Field::Font, cx);
+                if value == this.settings.font_value {
+                    return;
+                }
+                this.settings.font_value = value;
+                if this.settings_open {
+                    this.open_font_dropdown(true, cx);
+                    cx.notify();
+                }
+            },
+        ));
+    }
+
+    fn open_font_dropdown(&mut self, filtered: bool, cx: &App) {
+        let value = self.settings.value(Field::Font, cx);
+        let items = self.settings.font_items(if filtered { &value } else { "" });
+        let selected = items
+            .iter()
+            .position(|item| match item.value {
+                SettingChoice::Font(index) => self.settings.font_options[index]
+                    .family
+                    .eq_ignore_ascii_case(value.trim()),
+                _ => false,
+            })
+            .unwrap_or(0);
+        self.open_setting_dropdown(items, selected);
+    }
+
+    pub(super) fn settings_font_input_focused(&self, window: &Window, cx: &App) -> bool {
+        self.settings.dropdown_anchor == Measured::SettingsFont
+            && self.settings.inputs[&Field::Font].read(cx).is_focused(window)
+    }
+
+    fn font_control(&self, cx: &mut Context<Self>) -> Div {
+        let input = self.settings.inputs[&Field::Font].clone();
+        let control = div()
+            .id("settings-font")
+            .relative()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if !this.settings.dropdown.is_open()
+                        || this.settings.dropdown_anchor != Measured::SettingsFont
+                    {
+                        this.open_font_dropdown(false, cx);
+                        cx.notify();
+                    }
+                }),
+            )
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                let modifiers = event.keystroke.modifiers;
+                if modifiers.control
+                    || modifiers.platform
+                    || modifiers.alt
+                    || modifiers.shift
+                    || modifiers.function
+                {
+                    return;
+                }
+                let key = event.keystroke.key.as_str();
+                let open = this.settings.dropdown.is_open()
+                    && this.settings.dropdown_anchor == Measured::SettingsFont;
+                if !open {
+                    if matches!(key, "up" | "down") {
+                        this.open_font_dropdown(false, cx);
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                } else if key == "escape" {
+                    this.settings.dropdown.close();
+                    cx.stop_propagation();
+                    cx.notify();
+                } else if matches!(key, "up" | "down" | "pageup" | "pagedown") {
+                    this.settings_dropdown_key(key, window, cx);
+                }
+            }))
+            .child(input)
+            .child(
+                div()
+                    .id("settings-font-arrow")
+                    .absolute()
+                    .right(px(1.))
+                    .top(px(1.))
+                    .w(px(27.))
+                    .h(px(34.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .child("▾")
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            if this.settings.dropdown.is_open()
+                                && this.settings.dropdown_anchor == Measured::SettingsFont
+                            {
+                                this.settings.dropdown.close();
+                            } else {
+                                this.open_font_dropdown(false, cx);
+                            }
+                            this.settings.inputs[&Field::Font]
+                                .focus_handle(cx)
+                                .focus(window, cx);
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    ),
+            )
+            .child(self.measurement(Measured::SettingsFont));
+        form_field(Field::Font.label(), control)
+    }
+
     pub(super) fn load_settings(&mut self, cx: &mut Context<Self>) {
         let config = self.handle.config_snapshot();
-        self.settings.initialize(cx);
+        self.initialize_settings(cx);
         self.settings.dropdown.close();
         self.settings.reset(&config, cx);
         cx.notify();
@@ -744,6 +948,14 @@ impl GuiApp {
         cx.notify();
     }
 
+    fn select_font(&mut self, value: String, cx: &mut Context<Self>) {
+        // set_text emits Changed too; remember explicit writes so selecting or
+        // resetting a value does not reopen the autocomplete popup.
+        self.settings.font_value = value.clone();
+        self.settings.draft.ui_font = value.clone();
+        self.settings.inputs[&Field::Font].update(cx, |input, cx| input.set_text(value, cx));
+    }
+
     fn choose_device(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some((_, item)) = self.settings.dropdown.filtered_item(index) else {
             return;
@@ -758,11 +970,13 @@ impl GuiApp {
                     return;
                 }
             }
-            SettingChoice::Font(value) => {
-                self.settings.draft.ui_font = value.to_owned();
-                self.settings.inputs[&Field::Font].update(cx, |input, cx| {
-                    input.set_text(value, cx);
-                });
+            SettingChoice::Font(index) => {
+                let value = self.settings.font_options[index].family.clone();
+                self.select_font(value, cx);
+            }
+            SettingChoice::CustomFont => {
+                let value = self.settings.value(Field::Font, cx).trim().to_owned();
+                self.select_font(value, cx);
             }
             SettingChoice::SpectrumStyle(value) => self.settings.draft.spectrum_style = value,
             SettingChoice::RadialSpectrumStyle(value) => {
@@ -781,7 +995,7 @@ impl GuiApp {
     fn open_setting_dropdown(&mut self, items: Vec<DropdownItem<SettingChoice>>, selected: usize) {
         if let Some(item) = items.first() {
             self.settings.dropdown_anchor = match item.value {
-                SettingChoice::Font(_) => Measured::SettingsFont,
+                SettingChoice::Font(_) | SettingChoice::CustomFont => Measured::SettingsFont,
                 SettingChoice::SpectrumStyle(_) => Measured::SettingsStyle,
                 SettingChoice::Fft(_) => Measured::SettingsFft,
                 SettingChoice::LogLevel(_) => Measured::SettingsLogLevel,
@@ -937,27 +1151,6 @@ impl GuiApp {
             draft.ffmpeg_enabled,
             draft.pipewire_auto_mix,
         );
-        let font_dropdown = dropdown_button("settings-font", "Font presets", cx, |this, _, cx| {
-            let values = ["", "sans-serif", "serif", "monospace"];
-            let font = this.settings.inputs[&Field::Font].read(cx).text().trim();
-            let selected = values.iter().position(|value| *value == font).unwrap_or(0);
-            this.open_setting_dropdown(
-                values
-                    .into_iter()
-                    .map(|value| {
-                        DropdownItem::new(
-                            SettingChoice::Font(value),
-                            if value.is_empty() {
-                                "system".to_owned()
-                            } else {
-                                value.to_owned()
-                            },
-                        )
-                    })
-                    .collect(),
-                selected,
-            );
-        });
         let log_level_dropdown = dropdown_button(
             "settings-log-level",
             SettingChoice::LogLevel(draft.log_level).label(),
@@ -1127,20 +1320,7 @@ impl GuiApp {
             "Interface",
             column()
                 .gap_2()
-                .child(
-                    row()
-                        .items_end()
-                        .flex_wrap()
-                        .gap_3()
-                        .child(self.settings.field(Field::Font).flex_1().min_w(px(260.)))
-                        .child(
-                            font_dropdown
-                                .min_w(px(140.))
-                                .w_auto()
-                                .relative()
-                                .child(self.measurement(Measured::SettingsFont)),
-                        ),
-                )
+                .child(row().child(self.font_control(cx).flex_1().min_w(px(260.))))
                 .child(self.settings.single(Field::Scale))
                 .child(row().child(visual_switch(
                     "settings-nerd-symbols",
@@ -1373,7 +1553,7 @@ impl GuiApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.settings.initialize(cx);
+        self.initialize_settings(cx);
         let category = row()
             .flex_wrap()
             .flex_shrink_0()
@@ -1533,7 +1713,12 @@ impl GuiApp {
                             .snap_to_window()
                             .child(
                                 dropdown_container("settings-dropdown", bounds.size.width)
-                                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                    .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                                        if this.settings.dropdown_anchor == Measured::SettingsFont
+                                            && this.measured.borrow().get(&Measured::SettingsFont)
+                                                .is_some_and(|bounds| bounds.contains(&event.position)) {
+                                            return;
+                                        }
                                         this.settings.dropdown.close();
                                         cx.stop_propagation();
                                         cx.notify();
