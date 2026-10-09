@@ -1320,6 +1320,17 @@ impl GuiApp {
             "Interface",
             column()
                 .gap_2()
+                .child(row().child(visual_switch(
+                    "settings-still-mode",
+                    "≈",
+                    "Still Mode",
+                    draft.still_mode,
+                    cx,
+                    |draft| draft.still_mode = !draft.still_mode,
+                )))
+                .child(caption(
+                    "Stop visualizations and their processing. Playback and interface effects stay unchanged.",
+                ))
                 .child(row().child(self.font_control(cx).flex_1().min_w(px(260.))))
                 .child(self.settings.single(Field::Scale))
                 .child(row().child(visual_switch(

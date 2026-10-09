@@ -26,6 +26,7 @@ pub(super) struct PlaybackOptions {
     pub(super) media_read_buffer_len: usize,
     pub(super) ffmpeg_enabled: bool,
     pub(super) pipewire_auto_mix: bool,
+    pub(super) still_mode: bool,
 }
 
 pub(super) struct Playback {
@@ -41,6 +42,7 @@ pub(super) struct Playback {
     waveform: Arc<RwLock<WaveformFrame>>,
     waveform_accumulator: WaveformAccumulator,
     waveform_coverage: WaveformCoverage,
+    still_mode: bool,
 }
 impl Playback {
     pub(super) fn new(
@@ -60,6 +62,7 @@ impl Playback {
             media_read_buffer_len,
             ffmpeg_enabled,
             pipewire_auto_mix,
+            still_mode,
         } = options;
         let mut source = Source::open(&path, media_read_buffer_len, ffmpeg_enabled)?;
         if let Some(range) = range {
@@ -103,6 +106,7 @@ impl Playback {
             waveform,
             waveform_accumulator,
             waveform_coverage: WaveformCoverage::new(start),
+            still_mode,
         })
     }
     // Rebuild only device state: closing first discards queued PCM,
@@ -176,6 +180,10 @@ impl Playback {
         self.output.set_volume(volume);
     }
 
+    pub(super) fn set_still_mode(&mut self, enabled: bool) {
+        self.still_mode = enabled;
+    }
+
     pub(super) fn errors(&self) -> &Receiver<OutputError> {
         self.output.errors()
     }
@@ -224,21 +232,32 @@ impl Playback {
                 if !frames.len().is_multiple_of(channels) {
                     bail!("Decoded audio ends in an incomplete interleaved frame");
                 }
-                self.waveform_coverage
-                    .record(start_seconds, frames.len() / channels, sample_rate);
-                self.waveform_accumulator
-                    .push(start_seconds, frames, sample_rate, channels);
-                self.waveform_accumulator
-                    .publish(&mut self.waveform.write());
+                if self.still_mode {
+                    if !frames.is_empty() {
+                        self.waveform_coverage.skip();
+                    }
+                } else {
+                    self.waveform_coverage.record(
+                        start_seconds,
+                        frames.len() / channels,
+                        sample_rate,
+                    );
+                    self.waveform_accumulator
+                        .push(start_seconds, frames, sample_rate, channels);
+                    self.waveform_accumulator
+                        .publish(&mut self.waveform.write());
+                }
                 // Submit decoded PCM directly; retain only the packet tail that
                 // did not fit in the bounded output ring. At most one decoded
                 // packet is pending, and its allocation is reused on refill.
                 let count = self.output.push(frames);
                 self.pending.extend_from_slice(&frames[count * channels..]);
             } else {
-                self.waveform_accumulator.finish(&self.waveform_coverage);
-                self.waveform_accumulator
-                    .publish(&mut self.waveform.write());
+                if !self.still_mode {
+                    self.waveform_accumulator.finish(&self.waveform_coverage);
+                    self.waveform_accumulator
+                        .publish(&mut self.waveform.write());
+                }
                 self.eof = true;
             }
         }
@@ -303,8 +322,101 @@ mod tests {
             waveform,
             waveform_accumulator,
             waveform_coverage: WaveformCoverage::new(0.0),
+            still_mode: false,
         };
         (playback, render)
+    }
+    #[test]
+    fn still_mode_preserves_pcm_and_never_completes_an_interrupted_envelope() {
+        let file = pcm();
+        for resume_before_eof in [false, true] {
+            let (mut playback, mut render) = test_playback(
+                file.path(),
+                PlaybackRange {
+                    start_seconds: 0.0,
+                    end_seconds: Some(2.0),
+                },
+            );
+            playback.fill().unwrap();
+            let initial = playback.waveform.read().clone();
+            assert!(!initial.complete);
+            playback.set_still_mode(true);
+            let mut data = [0.0; 160];
+            for block in 0..100 {
+                if resume_before_eof && block == 30 {
+                    let suspended = playback.waveform.read();
+                    assert_eq!(suspended.revision, initial.revision);
+                    assert_eq!(suspended.rms_counts, initial.rms_counts);
+                    drop(suspended);
+                    playback.set_still_mode(false);
+                }
+                playback.fill().unwrap();
+                render(&mut data, block * 20);
+                for (offset, sample) in data.iter().enumerate() {
+                    assert_eq!(*sample, (block as usize * 160 + offset) as f32 / 32768.0);
+                }
+            }
+            playback.fill().unwrap();
+            assert!(playback.eof);
+            let interrupted = playback.waveform.read().clone();
+            assert!(!interrupted.complete);
+            if resume_before_eof {
+                assert!(interrupted.revision > initial.revision);
+                assert_ne!(interrupted.rms_counts, initial.rms_counts);
+            } else {
+                assert_eq!(interrupted.revision, initial.revision);
+                assert_eq!(interrupted.rms_counts, initial.rms_counts);
+                playback.set_still_mode(false);
+                playback.fill().unwrap();
+                assert!(!playback.waveform.read().complete);
+            }
+        }
+    }
+
+    #[test]
+    fn still_mode_output_restarts_keep_gaps_but_a_fresh_scan_recovers() {
+        let file = pcm();
+        let (mut playback, _) = test_playback(
+            file.path(),
+            PlaybackRange {
+                start_seconds: 0.0,
+                end_seconds: Some(2.0),
+            },
+        );
+        playback.fill().unwrap();
+        playback.set_still_mode(true);
+        for target in [None, Some(0.0), Some(0.5)] {
+            let initial_revision = playback.waveform.read().revision;
+            let (output, mut render) =
+                super::super::output::test_backend(8_000, false, playback.source.layout());
+            playback
+                .restart_output_with(target, |_, _| Ok(output))
+                .unwrap();
+            playback.fill().unwrap();
+            assert_eq!(playback.waveform.read().revision, initial_revision);
+            playback.set_still_mode(false);
+            let mut data = [0.0; 160];
+            for block in 0..110 {
+                playback.fill().unwrap();
+                render(&mut data, block * 20);
+            }
+            assert!(playback.eof);
+            assert!(!playback.waveform.read().complete);
+            playback.set_still_mode(true);
+        }
+        playback.set_still_mode(false);
+        let (output, mut render) =
+            super::super::output::test_backend(8_000, false, playback.source.layout());
+        playback
+            .restart_output_with(Some(0.0), |_, _| Ok(output))
+            .unwrap();
+        let mut data = [0.0; 160];
+        for block in 0..110 {
+            playback.fill().unwrap();
+            render(&mut data, block * 20);
+        }
+        assert!(playback.eof);
+        assert!(playback.waveform.read().complete);
     }
 
     #[test]

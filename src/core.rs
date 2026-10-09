@@ -358,6 +358,10 @@ impl Runtime {
                 let _ = core
                     .engine
                     .commands
+                    .send(AudioCommand::StillMode(core.state.system.config.still_mode));
+                let _ = core
+                    .engine
+                    .commands
                     .send(AudioCommand::Volume(core.state.playback.volume));
                 let _ = core.engine.commands.send(AudioCommand::FfmpegEnabled(
                     core.state.system.config.ffmpeg_enabled,

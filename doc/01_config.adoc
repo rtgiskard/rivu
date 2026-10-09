@@ -12,6 +12,7 @@ page_size = 64
 media_read_buffer_mb = 2
 ffmpeg_enabled = false
 pipewire_auto_mix = true
+still_mode = false
 tray_enabled = true
 mpris_enabled = true
 log_level = "warning"
@@ -62,6 +63,8 @@ option in non-editable dropdowns, and Escape closes the dropdown.
 The system tray switch takes effect after restarting the graphical host, not
 merely reopening its window. Media read buffering applies to future source opens,
 including full waveform scans; it does not reopen the current track.
+Still Mode is under General → Interface and takes effect when settings are
+applied, without restarting playback. It is also persisted as `still_mode`.
 
 Visualizations is grouped by view, with shared controls in Common:
 
@@ -152,8 +155,9 @@ override equal to the current resolved value leaves the display unchanged.
 
 == Visualizations
 
-Live FFT analysis runs during playback only when the application window is
-visible and a Spectrum, Spectrogram, or Radial Spectrum panel is visible.
+Live FFT analysis runs during playback only when Still Mode is off, the
+application window is visible, and a Spectrum, Spectrogram, or Radial Spectrum
+panel is visible.
 `analysis_fps` accepts `5`–`60`; all views use `visual_background`.
 `visual_palette` accepts `tokyo_night` or `deadbeef` (default `deadbeef`) and is
 shared by Spectrum, Spectrogram, and Waveform. Defaults and accepted ranges are
@@ -162,6 +166,25 @@ in link:../src/config.rs[`Config`].
 results but rebuilds derived graphics on repaint. It does not affect Radial
 Spectrum. See link:22_cache.adoc[Visualization Cache] for scope and trade-offs,
 and link:23_visuals.adoc[Visualization Rendering Design] for rendering choices.
+
+=== Still Mode
+
+`still_mode` defaults to `false`. Enabling it replaces all four visualization
+views with a static status, stops analysis sampling and FFT work, and removes
+the GUI's analysis-rate refresh timer. Progressive waveform statistics stop;
+any running full-waveform request is cancelled, and new requests are unavailable.
+Display caches and Spectrogram history are released through their normal image
+lifecycle. Small bounded analysis buffers and base waveform data remain retained.
+
+Playback, seeking through the playback slider, ordinary interface effects,
+library operations, covers, IPC, MPRIS, and the tray are unchanged. Layout and
+visualization settings are preserved, including `visualization_cache`.
+
+Disabling Still Mode resumes the visible views from newly published analysis
+without reopening audio output or the decoder. Spectrogram history starts fresh.
+Skipped waveform intervals are not filled retrospectively, and an interrupted
+traversal is not marked complete. Cancelled full-waveform requests do not restart
+automatically; request one explicitly after leaving the mode if needed.
 
 === Waveform
 

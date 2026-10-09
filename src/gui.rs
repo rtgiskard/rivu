@@ -805,7 +805,9 @@ impl GuiApp {
         subscriptions.push(cx.observe(&waveform, |_, _, cx| cx.notify()));
         subscriptions.push(cx.subscribe(&waveform, |this, _, event, cx| match event {
             waveform::WaveformEvent::Preview(seconds) => {
-                if !this.state.system.config.waveform_seek_enabled {
+                if this.state.system.config.still_mode
+                    || !this.state.system.config.waveform_seek_enabled
+                {
                     return;
                 }
                 this.waveform_preview_active = true;
@@ -815,7 +817,8 @@ impl GuiApp {
             waveform::WaveformEvent::Seek(seconds) => {
                 this.waveform_preview_active = false;
                 this.seek_preview = None;
-                if this.state.system.config.waveform_seek_enabled
+                if !this.state.system.config.still_mode
+                    && this.state.system.config.waveform_seek_enabled
                     && this.state.current_track().is_some()
                 {
                     this.send(Command::Seek { seconds: *seconds }, cx);
@@ -1756,6 +1759,8 @@ impl GuiApp {
             }
             let waveform_seek_disabled = self.state.system.config.waveform_seek_enabled
                 && !state.system.config.waveform_seek_enabled;
+            let still_mode_changed =
+                self.state.system.config.still_mode != state.system.config.still_mode;
             if !matches!(self.dragging, Some(Dragging::Seek(_)))
                 && !self.waveform_preview_active
                 && self.seek_queue_id != state.queue.current_id
@@ -1769,6 +1774,14 @@ impl GuiApp {
             self.state = state;
             self.sync_metadata_default(cx);
             self.reconcile_playlist_selection();
+            if still_mode_changed {
+                self.waveform_preview_active = false;
+                self.seek_preview = None;
+                // Resuming must wait for a new publication, not redraw pre-mode audio.
+                self.analysis_staging = crate::analysis::AnalysisFrame::default();
+                self.analysis_sequence = self.handle.analysis.read().sequence;
+                self.analysis_needs_refresh = false;
+            }
             if waveform_seek_disabled {
                 self.waveform_preview_active = false;
                 self.seek_preview = None;
@@ -1830,7 +1843,9 @@ impl GuiApp {
         if self.analysis_worker_enabled {
             let received = {
                 let frame = self.handle.analysis.read();
-                if frame.sequence != self.analysis_sequence || self.analysis_needs_refresh {
+                if frame.sequence != self.analysis_sequence
+                    || (self.analysis_needs_refresh && self.analysis_staging.settings.is_some())
+                {
                     self.analysis_staging
                         .frequencies_hz
                         .clone_from(&frame.frequencies_hz);
@@ -1862,7 +1877,13 @@ impl GuiApp {
         }
     }
     fn sync_analysis(&mut self, cx: &mut Context<Self>) {
-        let active_panels = self.layout.active_panels();
+        let enabled = !self.state.system.config.still_mode;
+        self.visuals.set_enabled(enabled);
+        let active_panels = if enabled {
+            self.layout.active_panels()
+        } else {
+            Vec::new()
+        };
         let spectrogram_panel_ids = active_panels
             .iter()
             .filter(|panel| panel.kind == "spectrogram")
@@ -1911,14 +1932,26 @@ impl GuiApp {
     }
 
     fn sync_waveform(&mut self, cx: &mut Context<Self>) {
-        let panels = self.layout.active_panels();
+        let enabled = !self.state.system.config.still_mode;
+        let panels = if enabled {
+            self.layout.active_panels()
+        } else {
+            Vec::new()
+        };
         let track = self.state.current_track().or(self.full_track.as_ref());
         self.waveform.update(cx, |waveform, cx| {
+            waveform.set_enabled(enabled);
+            if !enabled {
+                return;
+            }
             waveform.retain_panels(&panels);
             waveform.sync(track, cx);
         });
     }
     fn load_full_waveform(&mut self, cx: &mut Context<Self>) {
+        if self.state.system.config.still_mode {
+            return;
+        }
         let track = self.state.current_track().or(self.full_track.as_ref());
         self.waveform.update(cx, |waveform, cx| {
             waveform.load_full(track, &self.state.system.config, cx);
@@ -2184,6 +2217,21 @@ impl GuiApp {
                     .iter()
                     .find(|panel| panel.id == active)
                     .map(|panel| {
+                        if self.state.system.config.still_mode
+                            && matches!(
+                                panel.kind.as_str(),
+                                "spectrum" | "spectrogram" | "audio_visualizer" | "waveform"
+                            )
+                        {
+                            return div()
+                                .size_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_color(rgb(MUTED))
+                                .child("Visualizations paused · Still Mode")
+                                .into_any_element();
+                        }
                         panel_spec(&panel.kind)
                             .map(|spec| (spec.render)(self, panel.id, window, cx))
                             .unwrap_or_else(|| {
@@ -2830,7 +2878,7 @@ impl Render for GuiApp {
             );
             match state.page {
                 PanelMenuPage::Main => {
-                    if is_waveform {
+                    if is_waveform && !self.state.system.config.still_mode {
                         menu = menu.child(menu_item(
                             "load-full-waveform",
                             "Load full waveform now",

@@ -2,7 +2,8 @@
 //!
 //! The audio worker owns the bounded peak bins. Unknown intervals remain blank.
 //! Only an explicit full-preview request opens a separate decoder; hiding and
-//! metadata/display changes never cancel or restart it.
+//! metadata/display changes never cancel or restart it. Still Mode cancels that
+//! request and releases display caches without discarding buffered peak bins.
 
 use std::{
     cell::RefCell,
@@ -495,6 +496,7 @@ pub(super) enum WaveformEvent {
 impl EventEmitter<WaveformEvent> for Waveform {}
 
 pub(super) struct Waveform {
+    enabled: bool,
     shared: Arc<RwLock<WaveformFrame>>,
     source: Option<Rc<Source>>,
     revision: Option<u64>,
@@ -515,6 +517,7 @@ impl Waveform {
 
     pub(super) fn new(shared: Arc<RwLock<WaveformFrame>>) -> Self {
         Self {
+            enabled: true,
             shared,
             source: None,
             revision: None,
@@ -527,6 +530,27 @@ impl Waveform {
             seek_enabled: true,
             visualization_cache: true,
         }
+    }
+
+    /// Suspend display work and cancel explicit scans, retaining source identity
+    /// and shared peak bins so ordinary sync can resume without a decoder scan.
+    pub(super) fn set_enabled(&mut self, enabled: bool) {
+        if self.enabled == enabled {
+            return;
+        }
+        self.enabled = enabled;
+        if enabled {
+            return;
+        }
+        self.cancel_full();
+        let mut plot = self.plot.borrow_mut();
+        plot.retain_panels(|_| false);
+        plot.columns = HashMap::new();
+        plot.paint_tiles = Vec::new();
+        let mut scratch = std::mem::take(&mut plot.retire_scratch);
+        plot.retired.append(&mut scratch);
+        *self.interaction.borrow_mut() = WaveformInteraction::default();
+        self.dragging = false;
     }
 
     pub(super) fn set_seek_enabled(&mut self, enabled: bool) {
@@ -549,6 +573,9 @@ impl Waveform {
     /// The caller chooses the playing track, or the selected track before play.
     /// Metadata, display settings and visibility do not change source identity.
     pub(super) fn sync(&mut self, track: Option<&Track>, cx: &mut Context<Self>) {
+        if !self.enabled {
+            return;
+        }
         let source_changed = match (&self.source, track) {
             (Some(source), Some(track)) => {
                 source.path != track.path || source.range != track_range(track)
@@ -579,6 +606,9 @@ impl Waveform {
         config: &Config,
         cx: &mut Context<Self>,
     ) {
+        if !self.enabled || config.still_mode {
+            return;
+        }
         self.sync(track, cx);
         let Some(source) = self.source.as_ref() else {
             return;
@@ -1344,6 +1374,76 @@ mod tests {
         let mut waveform = Waveform::new(Arc::new(RwLock::new(data)));
         waveform.source = source;
         waveform
+    }
+
+    #[test]
+    fn disabling_cancels_full_scan_and_retires_display_without_losing_base_data() {
+        let data = frame(vec![Some(0.25), None]);
+        let mut waveform = preview(data);
+        waveform.revision = Some(1);
+        let source = Rc::clone(waveform.source.as_ref().unwrap());
+        let (generation, cancelled) = waveform.start_full();
+        let palette = super::super::visuals::active_palette_lut(
+            crate::config::VisualizationPalette::Deadbeef,
+        );
+        let cached = {
+            let mut plot = waveform.plot.borrow_mut();
+            plot.columns(1, 100, &waveform.shared.read());
+            plot.update_tiles(
+                1,
+                LayerKey {
+                    source: Rc::clone(&source),
+                    width: 101,
+                    height: 40,
+                    rms_gain: 1.0_f32.to_bits(),
+                    peak_gain: 1.0_f32.to_bits(),
+                    peak_gamma: 1.0_f32.to_bits(),
+                    palette: crate::config::VisualizationPalette::Deadbeef,
+                },
+                true,
+                &palette,
+            );
+            Arc::downgrade(&plot.columns[&1].tiles[0].image)
+        };
+        let image =
+            WaveformPlot::build_tile(&[(Some(0.2), Some(0.3), None, None)], 0, 1, 1, 10, &palette);
+        let pending = Arc::downgrade(&image);
+        waveform.plot.borrow_mut().pending_images.push(image);
+        waveform.dragging = true;
+        {
+            let mut interaction = waveform.interaction.borrow_mut();
+            interaction
+                .panels
+                .insert(1, (Bounds::default(), Some(10.0)));
+            interaction.active_panel = Some(1);
+        }
+        waveform.set_enabled(false);
+        waveform.set_enabled(false);
+        assert!(cancelled.load(Ordering::Relaxed));
+        assert!(waveform.manual.is_none());
+        assert!(!waveform.dragging);
+        assert!(waveform.interaction.borrow().panels.is_empty());
+        assert!(waveform.interaction.borrow().active_panel.is_none());
+        assert_eq!(waveform.revision, Some(1));
+        assert!(Rc::ptr_eq(waveform.source.as_ref().unwrap(), &source));
+        assert_eq!(waveform.shared.read().peaks, vec![Some(0.25), None]);
+        assert_eq!(waveform.shared.read().revision, 1);
+        {
+            let mut plot = waveform.plot.borrow_mut();
+            assert_eq!(plot.columns.capacity(), 0);
+            assert_eq!(plot.paint_tiles.capacity(), 0);
+            assert!(cached.upgrade().is_some());
+            plot.release_images(drop);
+            assert!(cached.upgrade().is_none());
+            assert!(pending.upgrade().is_some());
+            plot.release_images(drop);
+            assert!(pending.upgrade().is_none());
+        }
+        waveform.set_enabled(true);
+        assert!(waveform.manual.is_none());
+        assert!(!waveform.finish_full(generation, Ok(frame(vec![Some(1.0), Some(1.0)]))));
+        assert_eq!(waveform.shared.read().peaks, vec![Some(0.25), None]);
+        assert!(!waveform.shared.read().complete);
     }
 
     #[test]

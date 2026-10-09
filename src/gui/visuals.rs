@@ -172,6 +172,7 @@ struct SpectrumGeometry {
 }
 
 struct VisualData {
+    enabled: bool,
     spectrogram_panel_sizes: HashMap<u64, (usize, usize)>,
     spectrogram_panel_height: usize,
     frequencies: Vec<f32>,
@@ -250,6 +251,7 @@ impl Visuals {
         // History is initialized by configure when an analysis panel becomes visible.
         Self {
             data: Rc::new(RefCell::new(VisualData {
+                enabled: true,
                 frequencies: Vec::new(),
                 sample_rate: 0,
                 frequency_labels: ["8 Hz".into(), "11 kHz".into()],
@@ -317,6 +319,45 @@ impl Visuals {
             })),
         }
     }
+
+    /// Suspend analysis views without changing their settings. Image release
+    /// still runs at frame boundaries, including while no views are rendered.
+    pub(super) fn set_enabled(&mut self, enabled: bool) {
+        let mut data = self.data.borrow_mut();
+        if data.enabled == enabled {
+            return;
+        }
+        data.enabled = enabled;
+        if enabled {
+            return;
+        }
+        data.clear_history();
+        data.columns = Vec::new();
+        data.history_columns = 0;
+        data.spectrogram_panel_sizes = HashMap::new();
+        data.spectrogram_panel_height = 0;
+        data.frequencies = Vec::new();
+        data.sample_rate = 0;
+        data.latest_levels = Vec::new();
+        data.peaks = Vec::new();
+        data.peak_deadlines = Vec::new();
+        data.bar_levels = Vec::new();
+        data.bar_deadlines = Vec::new();
+        data.smoothed_levels = Vec::new();
+        data.spectrum_bins = Vec::new();
+        data.spectrum_bins_generation = 0;
+        data.spectrum_points = Vec::new();
+        data.spectrum_geometry = HashMap::new();
+        data.heat_samples = Vec::new();
+        data.envelope_initialized = false;
+        data.last_update = None;
+        data.source_generation = None;
+        data.stream_generation = data.stream_generation.wrapping_add(1);
+        data.spectrum_geometry_revision = data.spectrum_geometry_revision.wrapping_add(1);
+        data.top_db = 0.0;
+        data.refresh_db_labels();
+    }
+
     pub(super) fn configure(&mut self, config: &Config) -> bool {
         let mut data = self.data.borrow_mut();
         let spectrum_db_range = config.spectrum_db_range();
@@ -325,7 +366,9 @@ impl Visuals {
             history_column_count(config.spectrogram_history_seconds, config.analysis_fps);
         let palette_changed = data.palette_lut.palette != config.visual_palette;
         let cache_changed = data.visualization_cache != config.visualization_cache;
-        let changed = palette_changed
+        let history_missing = data.enabled && data.history_columns == 0;
+        let changed = history_missing
+            || palette_changed
             || data.visual_background != config.visual_background.rgb()
             || data.spectrum_db_range != spectrum_db_range
             || data.spectrogram_db_range != spectrogram_db_range
@@ -355,8 +398,8 @@ impl Visuals {
         if !changed {
             return false;
         }
-        let history_changed = data.spectrogram_history_seconds
-            != config.spectrogram_history_seconds
+        let history_changed = history_missing
+            || data.spectrogram_history_seconds != config.spectrogram_history_seconds
             || data.analysis_fps != config.analysis_fps
             || data.configured_history_columns != configured_history_columns;
         let analysis_changed = data.spectrum_fft_size != config.spectrum_fft_size
@@ -402,7 +445,7 @@ impl Visuals {
         data.history_limit_seconds = config.spectrogram_history_seconds as f64;
         data.analysis_fps = config.analysis_fps;
         data.configured_history_columns = configured_history_columns;
-        if history_changed {
+        if data.enabled && history_changed {
             data.resize_history(configured_history_columns);
         }
         if analysis_changed {
@@ -426,6 +469,9 @@ impl Visuals {
 
     pub(super) fn update(&mut self, frame: &AnalysisFrame) {
         let mut data = self.data.borrow_mut();
+        if !data.enabled {
+            return;
+        }
         if !frame.settings.is_some_and(|settings| {
             settings.fft_size == data.spectrum_fft_size && settings.window == data.spectrum_window
         }) {
@@ -675,6 +721,9 @@ impl Visuals {
 
 impl VisualData {
     fn finish_prepaint(&mut self) {
+        if !self.enabled {
+            return;
+        }
         let Some(width) = self
             .spectrogram_panel_sizes
             .values()
@@ -1976,6 +2025,76 @@ mod tests {
             .data
             .borrow_mut()
             .release_images(|_| panic!("released before complete frame"));
+        assert!(pending.upgrade().is_some());
+        visuals.data.borrow_mut().release_images(|_| Ok(()));
+        assert!(pending.upgrade().is_none());
+    }
+
+    #[test]
+    fn disabled_views_drop_history_and_rebuild_only_after_enabling() {
+        for config in [
+            Config::default(),
+            Config {
+                analysis_fps: 5,
+                spectrogram_history_seconds: 120,
+                ..Config::default()
+            },
+        ] {
+            let mut visuals = configured_visuals();
+            visuals.update(&frame(1.0, -10.0));
+            visuals.set_enabled(false);
+            visuals.configure(&config);
+            visuals.update(&frame(2.0, -20.0));
+            visuals.finish_prepaint();
+            {
+                let data = visuals.data.borrow();
+                assert_eq!(data.columns.capacity(), 0);
+                assert_eq!(data.history_columns, 0);
+                assert_eq!(data.len, 0);
+                assert!(data.latest_sample_time.is_none());
+                assert!(!data.envelope_initialized);
+                assert_eq!(data.latest_levels.capacity(), 0);
+                assert_eq!(data.peaks.capacity(), 0);
+            }
+            visuals.set_enabled(true);
+            assert!(visuals.configure(&config));
+            let mut fresh = frame(3.0, -60.0);
+            fresh.generation = 2;
+            visuals.update(&fresh);
+            let data = visuals.data.borrow();
+            assert_eq!(data.len, 1);
+            assert_eq!(data.latest_sample_time, Some(fresh.sample_time));
+            assert_eq!(data.peaks, vec![-60.0; 4]);
+            assert_eq!(data.bar_levels, vec![-60.0; 4]);
+            assert_eq!(data.smoothed_levels, vec![-60.0; 4]);
+        }
+    }
+
+    #[test]
+    fn disabling_retires_cached_images_without_shortening_pending_lifetime() {
+        let mut visuals = configured_visuals();
+        visuals.update(&frame(1.0, -30.0));
+        let image = Arc::new(RenderImage::new([image::Frame::new(
+            image::RgbaImage::new(1, 1),
+        )]));
+        let cached = Arc::downgrade(&image);
+        visuals.data.borrow_mut().columns[0].image = Some(image);
+        let image = Arc::new(RenderImage::new([image::Frame::new(
+            image::RgbaImage::new(1, 1),
+        )]));
+        let pending = Arc::downgrade(&image);
+        visuals.data.borrow_mut().pending_images.push(image);
+        visuals.set_enabled(false);
+        visuals.set_enabled(false);
+        assert!(cached.upgrade().is_some());
+        assert!(pending.upgrade().is_some());
+        let mut released = 0;
+        visuals.data.borrow_mut().release_images(|_| {
+            released += 1;
+            Ok(())
+        });
+        assert_eq!(released, 1);
+        assert!(cached.upgrade().is_none());
         assert!(pending.upgrade().is_some());
         visuals.data.borrow_mut().release_images(|_| Ok(()));
         assert!(pending.upgrade().is_none());

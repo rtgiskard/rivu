@@ -345,6 +345,7 @@ impl Core {
                 };
                 crate::logging::reconfigure(&config)?;
                 config.save(&self.state.system.config_path)?;
+                self.audio(AudioCommand::StillMode(config.still_mode))?;
                 self.audio(AudioCommand::MediaReadBuffer(config.media_read_buffer_mb))?;
                 self.audio(AudioCommand::Volume(config.volume))?;
                 self.audio(AudioCommand::AnalysisSettings((&config).into()))?;

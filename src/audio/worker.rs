@@ -62,6 +62,7 @@ pub(super) struct Worker {
     volume: f32,
     media_read_buffer_len: usize,
     wanted_analysis: bool,
+    still_mode: bool,
     ffmpeg_enabled: bool,
     pipewire_auto_mix: bool,
     last_snapshot: (u64, f64),
@@ -91,6 +92,7 @@ impl Worker {
             volume: 0.7,
             media_read_buffer_len,
             wanted_analysis: false,
+            still_mode: false,
             ffmpeg_enabled: false,
             pipewire_auto_mix: true,
             last_snapshot: (0, 0.0),
@@ -111,6 +113,7 @@ impl Worker {
     fn refresh_analysis(&self) {
         self.analyzer.set_enabled(
             self.wanted_analysis
+                && !self.still_mode
                 && self
                     .playback
                     .as_ref()
@@ -138,6 +141,7 @@ impl Worker {
             media_read_buffer_len: self.media_read_buffer_len,
             ffmpeg_enabled: self.ffmpeg_enabled,
             pipewire_auto_mix: self.pipewire_auto_mix,
+            still_mode: self.still_mode,
         }
     }
     fn command(&mut self, command: AudioCommand) -> bool {
@@ -156,6 +160,13 @@ impl Worker {
             }
             AudioCommand::Analysis(enabled) => {
                 self.wanted_analysis = enabled;
+                self.refresh_analysis();
+            }
+            AudioCommand::StillMode(enabled) => {
+                self.still_mode = enabled;
+                if let Some(playback) = self.playback.as_mut() {
+                    playback.set_still_mode(enabled);
+                }
                 self.refresh_analysis();
             }
             AudioCommand::AnalysisSettings(settings) => {
@@ -400,6 +411,7 @@ mod tests {
                 auto_mix: false,
             },
             AudioCommand::Analysis(false),
+            AudioCommand::StillMode(true),
             AudioCommand::MediaReadBuffer(2),
             AudioCommand::FfmpegEnabled(false),
             AudioCommand::AnalysisSettings(crate::analysis::AnalysisSettings::from(

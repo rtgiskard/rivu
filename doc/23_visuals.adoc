@@ -30,11 +30,25 @@ Work and queued input are bounded, and GUI analysis demand follows visible
 views. The priority is reliable playback and coherent displays, not collecting
 every analysis frame regardless of whether it can be consumed.
 
+Still Mode overrides visualization demand at both the GUI and audio-worker
+boundaries. The worker ignores effective analysis enablement while the mode is
+active, skips the output tap, and parks the analysis thread without reopening
+playback. On resumption the GUI waits for a new publication rather than reusing
+the last pre-mode frame.
+
 == Waveform
 
 Playback builds a progressive waveform, while a completed full-track scan takes
 precedence over an in-flight progressive update. This keeps the displayed
 preview from regressing after a complete result becomes available.
+
+Still Mode also gates progressive waveform accumulation and publication,
+independently of FFT analysis. Skipping nonempty PCM invalidates the current
+traversal's coverage, so EOF cannot claim that a partial envelope is complete.
+Existing bins remain reusable and later PCM can still add new bins; there is no
+automatic backfill. A fresh uninterrupted traversal from zero can complete it.
+Explicit full-waveform scans use their existing cancellation/generation boundary
+on mode entry, preventing a late result from installing after cancellation.
 
 RMS fills extend above and below the centerline for the respective stereo
 channels. Each display column has its own gradient endpoint, preserving color

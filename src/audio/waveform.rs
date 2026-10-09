@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 const MAX_BINS: usize = 1600;
 const INITIAL_UNKNOWN_SPAN: f64 = 60.0;
 
-/// Coverage of one uninterrupted decoder lifetime. Previously cached bins do
-/// not prove a seek-skipped interval was read during this lifetime.
+/// Coverage of one decoder traversal. Cached bins do not prove that seek-skipped
+/// intervals or PCM omitted in Still Mode were accumulated during this traversal.
 pub(super) struct WaveformCoverage {
     continuous: bool,
     end_seconds: f64,
@@ -33,6 +33,11 @@ impl WaveformCoverage {
         self.end_seconds = self
             .end_seconds
             .max(((start_seconds * rate).round() + frames as f64) / rate);
+    }
+
+    /// PCM omitted from the envelope cannot be recovered by later packets.
+    pub(super) fn skip(&mut self) {
+        self.continuous = false;
     }
 
     pub(super) fn finish(&self, frame: &mut WaveformFrame) {

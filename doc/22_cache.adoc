@@ -18,6 +18,14 @@ the same meaning. Re-enabling it requires an initial rebuild before reuse
 resumes. Temporary images still remain alive long enough for their submitted
 scene to render safely.
 
+Still Mode is separate from this cache policy. It stops visualization work and
+drops retained display columns, geometry, and Spectrogram history, while keeping
+the configured cache preference and bounded base waveform/analysis storage.
+Submitted images still pass through the existing frame-boundary retirement path;
+the root release hook continues running even when all visualization views are
+replaced by static status messages. Leaving the mode rebuilds display resources
+on demand rather than restoring old Spectrogram history.
+
 == Reuse and invalidation
 
 === Waveform
