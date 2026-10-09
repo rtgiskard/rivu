@@ -26,15 +26,12 @@ Depth exclusions and truncated diagnostics protect affected existing records
 from being marked missing. Other read, traversal, or sheet errors may still mark
 tracks missing; successfully read tracks are saved. Inspect diagnostics and
 rescan before cleaning missing records.
-Scan handling: link:../src/core/catalog.rs[core scan],
-link:../src/library.rs[scanner], and link:../src/store.rs[reconciliation].
 
 Scanning runs asynchronously without stopping playback. The desktop UI does not
 scan configured roots during startup; trigger scans from the Library controls or
 use `rivu library scan PATH...`. Progress covers discovery, metadata reading,
 saving, and completion or failure. `--wait` waits for completion; `--force`
-rereads unchanged audio metadata. Matching IDs and user data are preserved;
-CUE sheets are always reread. Identity handling is in link:../src/store.rs[the store].
+rereads unchanged audio metadata; CUE sheets are always reread.
 
 [source,sh]
 ----
@@ -51,7 +48,6 @@ may still leave their whole audio sources eligible for import. Explicitly
 scanning a source imports it as a whole track.
 
 Supported formats and playlist exchange: link:03_playlist.adoc#_cue_import[CUE import].
-Scan and identity handling: link:../src/library.rs[CUE scanning].
 
 == Metadata and favorites
 
@@ -79,27 +75,21 @@ rivu library clean-missing
 
 == Desktop selection and directory tree
 
-Hover a track to access its favorite toggle. Toggling a favorite does not change
-the selection or start playback.
-Directory rescan and track favorite actions share borderless, transparent icon
-buttons with hover feedback; a favorited track keeps its accent-colored star.
+Hover a track to access its favorite toggle; favorited tracks have an accented
+star. Toggling a favorite does not change the selection or start playback.
 
 Click selects one row; Ctrl/Command-click toggles it. Shift-click selects the
 inclusive range from the original anchor, and Ctrl/Command-Shift-click adds that
-range. Changing the endpoint keeps the original anchor. Range selection fetches
-missing batches, so evicted or unloaded rows are included, not silently skipped.
-While it is loading, selection actions and dragging are disabled; stale results
-cannot replace a newer selection. Batch track actions use stable track-ID order,
-matching library drag ordering.
+range. Changing the endpoint keeps the original anchor. Range selection includes
+unloaded rows; selection actions and dragging are disabled while it loads.
+Batch track actions and library dragging use stable track-ID order.
 
 Configured roots are shown in configuration order, including empty roots, and
 identified by their paths. Click a directory row to expand or collapse it.
 Overlapping roots expand independently: closing an enclosing root does not close
 the same directory shown as another root.
-The default hierarchy connectors leave a small gap before file/folder icons;
-they do not reserve an extra arrow column. `library_tree_lines = false` replaces
-the connectors with disclosure arrows. Both styles use the same interactions.
-
+`library_tree_lines = false` replaces the default hierarchy connectors with
+disclosure arrows; both styles use the same interactions.
 
 == Paged views
 
@@ -110,9 +100,7 @@ further visible ranges on scrolling, including configured roots. Unloaded rows
 keep their height and position; failed loads expose an explicit retry instead
 of retrying indefinitely while the view is stationary. Scrolling back reloads
 evicted rows without clearing selections or metadata drafts.
-Collapsing a directory releases its subtree payloads but preserves descendant
-expansion choices and logical geometry for reopening. After a revision, stale
-ancestor anchors are revalidated before their directory identities are shown.
+Collapsing a directory preserves descendant expansion choices for reopening.
 
 In the GUI, unmodified `PageUp` / `PageDown` scroll one viewport height without
 changing selected rows. They target the last-clicked visible scroll viewport;
@@ -124,37 +112,22 @@ Hidden or closed views cannot remain keyboard targets. Settings captures these
 keys for its current page; text inputs retain editing behavior, and About or an
 open menu prevents background paging. Settings dropdowns handle their own keys.
 
-`page_size` controls internal query batch size, not the visible viewport or total
-results. Each query reports the filtered total and at most `256` rows;
-`limit = 0` is a count-only read. Responses contain the requested projection and
-its data revisions, never queue, configuration, or other client state.
-GUI flat lists retain at most the larger of eight batches or visible batches
-plus three (selection and neighboring prefetch); trees share a cache of sixteen
-batches or viewport demand, whichever is larger. Sparse tree geometry retains
-expansion identities and selected positions, not a materialized row per result.
-The TUI retains at most `ceil(viewport rows / batch size) + 3` batches per list.
-PageUp/PageDown scroll one screen, independent of query batch size; returning
-from a directory or playlist detail restores the parent selection and viewport.
-The TUI permits one active query and coalesces navigation changes into the most
-recent pending query. Superseded results are discarded without abandoning
-server work; exiting the TUI interrupts a stalled client wait.
+`page_size` controls query batch size, not the visible viewport or total results.
+GUI/TUI retain bounded working sets rather than loading the entire result.
+In the TUI, PageUp/PageDown scroll one screen; returning from a directory or
+playlist detail restores the parent selection and viewport. Rapid navigation
+uses the latest requested view, and exiting interrupts a stalled client wait.
 
-CLI listings and playlist export use bounded batches without querying pagination
-totals. Continuations follow track/playlist IDs or playlist `(position, id)`
-order instead of increasingly deep offsets. Batch `limit` accepts `1`–`256`;
-zero and values above `256` are rejected. `page_size` remains the configurable
-GUI/TUI query batch size and is independent of CLI batch size. Separate requests are
-not a database snapshot: CLI listings reject continuations when relevant library
-or playlist revisions change.
+CLI listings and playlist export also read bounded batches, independently of
+`page_size`. Separate requests are not a database snapshot: CLI listings reject
+continuations when relevant library or playlist data changes.
 Listings stream directly to stdout. If a later batch detects a revision change,
 the command stops, prints a `Listing incomplete` notice on stderr, and exits
 successfully; already emitted text may be incomplete (and JSON may be invalid),
 so callers should discard it and retry. GUI/TUI discard stale query results and
 refetch them; click a failed GUI row's retry action, or press `R` in the TUI.
 
-Query, cache, and state contracts:
-link:../src/store.rs[store], link:../src/response.rs[responses], and
-link:../src/model.rs[model].
+Query limits, revisions, and batch contracts: link:21_ipc.adoc[IPC].
 
 == Play counts and recent tracks
 
@@ -170,8 +143,6 @@ A successful playback start creates or updates one recent entry per track,
 ordered newest first. Paused time and failed loads do not advance activity.
 History records the last playback activity, not necessarily a counted play;
 it is not a per-play log. Timestamps are Unix seconds in JSON.
-Counting and activity persistence: link:../src/core/playback.rs[playback lifecycle]
-and link:../src/core/persistence.rs[persistence].
 
 `rivu library history --limit N` prints up to N retained rows in human mode.
 With `--json`, it returns the full status response and ignores `--limit`;
@@ -195,4 +166,3 @@ rivu library optimize
 Optimization is rejected while playback or scanning is active. It reports
 database and WAL sizes before and after maintenance; failures are returned as
 errors.
-Schema and maintenance: link:../src/store.rs[SQLite store].

@@ -2,203 +2,98 @@
 
 == Goals
 
-Visualization primitives must match their geometry:
+Rendering preserves the meaning of the signal: RMS is a continuous energy
+area, Peak is a discrete transient marker, and Spectrogram is chronological
+frequency history. Palette choices and cache policy must not alter the
+underlying audio data.
 
-* RMS is continuous energy area, with color and gradient defined per column.
-* Peak is a transient marker, rendered as a lightweight solid point or short line.
-* Cached data and cached geometry must have explicit, independent invalidation rules.
+This document explains rendering choices and their tradeoffs. User controls,
+defaults, and display behavior are documented in
+link:01_config.adoc[Configuration and layout]. Cache ownership, invalidation,
+and resource lifetime are covered by link:22_cache.adoc[Visualization Cache].
 
-== Analysis
+== Analysis boundary
 
-The analysis worker retains a rolling stereo window and reuses its FFT plan and
-working buffers. Window preparation traverses the two chronological slices of
-the circular buffer without per-sample modulo arithmetic. One complex FFT packs
-the left and right real signals. The combined power is computed directly from
-the paired bin magnitudes, preserving opposite-phase stereo without reconstructing
-the separate channel spectra. Nyquist retains its single-sided normalization.
+Visualization analysis is separate from audio output and observes samples
+before output volume gain. It combines stereo energy without cancelling
+opposite-phase channels. Analysis backpressure never blocks playback: dropped
+samples instead mark a discontinuity.
 
-Published frames carry the actual FFT settings and a discontinuity generation.
-Stream resets, analysis restarts, dropped tap frames, and FFT/window changes
-start a fresh generation. Views reject frames produced with stale FFT settings,
-reset envelopes on generation changes, and never pool history across a signal
-break. Same-frequency historical buckets remain available. Sample time measures
-accepted audio, not wall time or the track seek position. The worker drains a
-bounded queued prefix using a reusable 1024-frame input buffer.
+Stream resets, analysis restarts, dropped samples, and FFT/window changes break
+signal continuity. Views reject frames from stale analysis settings and reset
+their envelopes at a break rather than smoothing across unrelated audio.
+Spectrogram does not pool new samples across that break; compatible historical
+frequency buckets can remain visible. Its sample time follows accepted audio,
+not wall time or the track's seek position.
 
-The output callback publishes analysis samples in bounded 256-frame blocks,
-before output volume gain. Tap backpressure never blocks audio output; the next
-accepted block marks any dropped prefix as a discontinuity. GUI snapshot staging
-reuses buffers and follows visible-view demand rather than cloning both shared
-analysis and waveform frames every update.
+Work and queued input are bounded, and GUI analysis demand follows visible
+views. The priority is reliable playback and coherent displays, not collecting
+every analysis frame regardless of whether it can be consumed.
 
 == Waveform
 
-Playback computes PCM statistics and unknown-duration timeline compaction in its
-owned accumulator, outside the shared waveform write lock. Publication copies
-only the dirty bin interval and metadata. No dirty interval is represented by
-`None`; timeline compaction marks every bin dirty. An independently installed
-complete waveform scan takes precedence over in-flight playback publication.
+Playback builds a progressive waveform, while a completed full-track scan takes
+precedence over an in-flight progressive update. This keeps the displayed
+preview from regressing after a complete result becomes available.
 
-=== RMS
+RMS fills extend above and below the centerline for the respective stereo
+channels. Each display column has its own gradient endpoint, preserving color
+differences between adjacent columns with different energy. The gradient starts
+at the palette minimum on the centerline and brightens toward that column's RMS
+edge. Nonlinear color compression keeps warm colors as high-energy accents while
+preserving access to the full palette range. It is a visual choice, not an
+amplitude or renderer limit.
+Peak is a thin, solid marker at the channel's peak level. Color compression
+does not change the height represented by the amplitude mapping.
 
-Each visible RMS column is a filled Quad with its own gradient:
-
-[source,text]
-----
-RMS column
-  -> RMS height
-  -> low LUT color to lut(RMS) LinearGradient
-  -> one rectangular Quad
-----
-
-The upper channel runs from the center line upward; the lower channel runs from the center line downward. Each gradient starts at the palette minimum on the centerline, keeping the center dark, and brightens toward that column's RMS edge. Nonlinear color compression keeps warm colors as high-energy accents while preserving access to the full palette range. It is a visual choice, not an amplitude or renderer limit, and does not change RMS geometry height.
-
-The previous implementation combined all RMS columns into one Path, then painted it through a multi-stop gradient split into masked bands. Each palette interval used a cloned or retained Path and a `ContentMask` covering that interval. This minimized draw submissions, but it produced a global vertical gradient: columns at the same height received the same color, so adjacent columns with different RMS values had weak color separation. It also incurred Path cloning and repeated masked gradient submissions.
-
-A single GPUI LinearGradient cannot assign a different endpoint color to each column inside one Path. The exact `lut(RMS)` behavior therefore uses one Quad and one LinearGradient per RMS column. This removes per-column PathBuilder and tessellation while making the scene submission count proportional to visible columns.
-
-=== Peak
-
-Waveform Peak is a solid 1px-high Quad:
-
-[source,text]
-----
-Peak level
-  -> LUT mapping
-  -> solid color
-  -> one thin Quad
-----
-
-Upper and lower channels use their respective Peak positions. Nonlinear color compression preserves access to the full palette range without changing Peak geometry height. Peak does not use the old global multi-stop gradient or mask path.
+A single shared vertical gradient would be cheaper to batch, but would assign
+the same color to equal heights across columns and weaken those differences.
+The design keeps per-column color fidelity without quantizing the palette.
+Static RMS and Peak layers are cached as image tiles, while the playback cursor
+and glow remain dynamic. This trades image memory and rebuild work on changes
+for less repeated rendering of an otherwise unchanged waveform.
 
 == Spectrum
+
+Spectrum uses batched body geometry with a shared spatial gradient. This suits
+continuous curves and filled areas as well as styles composed of many bars,
+outlines, or LED segments. In dense styles, separate submissions for every
+primitive would add overhead without improving the intended color mapping.
 
 Body gradients and Peak colors use the full palette domain without skipping or
 remapping its low end, including DeaDBeeF's black floor. Waveform uses the same
 palette domain but compresses its color endpoints as described above.
 
-=== Body styles
+Peak markers are discrete, solid-colored markers drawn separately from the
+body. They are not connected into a curve, and the body cache does not own their
+geometry. This preserves their transient-marker meaning while keeping body
+reuse separate from Peak rendering.
 
-Spectrum body remains a batched and cached Path because the body is continuous or contains many small segments:
+Batching does not make dense styles free: more bars or LED segments still
+increase geometry work, and the shared gradient requires renderer submissions
+for its palette intervals. The choice favors batching where the visual model
+allows it, rather than forcing Waveform and Spectrum through one strategy.
 
-[cols="1,2"]
-|===
-|Style |Rendering strategy
+== Spectrogram
 
-|`Line`
-|Cached continuous Path with the global gradient.
+Spectrogram maps retained frequency history to colored image columns. Stable
+history is a natural reuse boundary: newly accepted audio changes recent
+columns without requiring the entire visible history to be rebuilt. Display
+mapping can recolor retained frequency data without re-running audio analysis.
 
-|`Solid`
-|Cached continuous filled Path with the global gradient.
+History width and image resolution bound retained resources. Increasing display
+resolution does not create additional FFT information. Multiple panels share
+history rather than maintaining competing copies; the cache document describes
+capacity changes and image retirement.
 
-|`Bars`
-|All bar rectangles are combined into one Path.
+== Evaluating tradeoffs
 
-|`Outline`
-|All outline segments are combined into one Path.
+The design moves work between aggregation, geometry construction, image
+generation, retained memory, and scene submission. A cache hit or a lower
+submission count alone is not evidence of an overall speedup.
 
-|`Led`
-|All LED segments are combined into one Path; one Quad per segment would add substantial submissions.
-|===
-
-The old multi-stop gradient implementation is appropriate for these body styles: the body has a shared spatial color field, and batching avoids one draw submission per bar or segment. Its cost is the gradient interval masks and Path reuse/clone operations when the body is painted.
-
-=== Peak
-
-Spectrum Peak is drawn independently as a solid 1px-high marker Quad:
-
-[source,text]
-----
-Peak dB fraction
-  -> palette LUT
-  -> solid color
-  -> 1px marker Quad
-----
-
-Peak is not stored in the body geometry cache. A body cache hit reuses the body Path while current Peak values are painted separately. This prevents Peak changes from rebuilding the body geometry.
-
-== Cache ownership
-
-* Waveform retains the compact per-column `values` cache. It skips raw-data binning and RMS/Peak aggregation when the frame revision, width, and mapping are unchanged.
-* Static waveform layers are per-panel 32-pixel `RenderImage` tiles. A changed frame reuses tiles whose pooled-value fingerprints remain unchanged.
-* The layer key contains source identity, plot dimensions, RMS gain, Peak gain/gamma, and palette; a mapping or source change invalidates the relevant derived data.
-* Every tile includes all pooled columns intersecting its pixel interval, including fractional-width fringes. Playback cursor and glow remain dynamic and never invalidate the static layer.
-* A cache hit bypasses both bin pooling and tile fingerprint traversal; drawing reuses scratch storage for retained image handles.
-* Cache-disabled images remain alive for their submitting scene but are not retained as reusable tiles.
-* Shared Spectrogram history uses the maximum demand of visible Spectrogram panels, independent of paint order. Resizing keeps the newest chronological columns and retires only discarded images.
-* Hidden or removed panels and replaced images transfer resources to window-level retirement; release does not depend on that panel being painted again. Window closure drains its retained image resources.
-* Spectrum caches body Path geometry using its existing key: size, range, style, bar count, spacing, interpolation, and data revision.
-* Spectrum Peak is outside body geometry and does not invalidate the body cache.
-
-The two Waveform caches have separate responsibilities:
-
-[source,text]
-----
-values cache:  raw waveform data -> per-column RMS/Peak values
-layer cache:   per-column values -> static BGRA RenderImage tiles
-dynamic part:  cached tiles + current playback cursor
-----
-
-== Performance trade-off
-
-[cols="1,2,2"]
-|===
-|Region |Previous implementation |Current design
-
-|Waveform RMS
-|Few submissions, but multi-stop gradient masks, Path reuse/cloning, and RMS Path tessellation.
-|Layer miss rasterizes changed tiles; layer hit submits retained tile images.
-
-|Waveform Peak
-|Peak Path with the global gradient and mask.
-|Included in the static layer; no per-frame Peak Quad submissions on a layer hit.
-
-|Spectrum body
-|Cached Path with the global gradient and multi-stop mask behavior.
-|Same batched cached Path strategy.
-
-|Spectrum Peak
-|Peak Path with the global gradient.
-|One solid 1px marker Quad per visible Peak.
-|===
-
-No eight-color quantization is used. Quantization would reduce submissions but change the exact `lut(RMS)` and `lut(Peak)` colors.
-
-The design moves cost rather than guaranteeing a total CPU reduction: static tile images remove repeated scene-time RMS/Peak Quad submissions, while misses rasterize changed tiles and hits still submit each retained image. Spectrum body remains batched because `Bars`, `Outline`, and `Led` can contain many primitives.
-
-== Validation
-
-Performance comparisons must use identical panel dimensions, data frames, column/bar counts, palette, and repaint count. Measure:
-
-* first-draw CPU time;
-* cache-hit repaint CPU time;
-* Path and Quad submission counts;
-* tessellation count and time;
-* vertex count and temporary allocation.
-
-Important workloads are a roughly 1200-column Waveform and a high-density Spectrum `Led` style. Submission counts alone are insufficient; the actual GPUI render path must be measured before claiming an overall speedup.
-
-=== Observed result
-
-Measured CPU usage on the same workload:
-
-[cols="1,1"]
-|===
-|Rendering state |CPU usage
-
-|Before Peak Quad and per-column RMS rendering
-|`3%–4%`
-
-|Quad rendering, cache disabled
-|`1.4%–2.0%`
-
-|Waveform layer cache hit
-|`0.8%–1.0%`
-|===
-
-The Quad renderer reduced CPU usage by approximately `1.0–2.6` percentage points relative to the old renderer. A layer-cache hit reduced it by a further `0.4–1.2` percentage points relative to uncached Quad rendering.
-
-These values apply only to the measured workload; panel dimensions, data, refresh rate, and display configuration were not generalized.
-
-These earlier renderer measurements predate the 32-pixel tiled cache and the
-audio-pipeline optimizations; they are not a before/after benchmark of that work.
+Compare equivalent data, panel dimensions, display settings, and repaint rates.
+Include first draws, stable repaints, changing data, and dense Spectrum styles;
+measure the actual renderer as well as CPU and memory use. Renderer-level
+changes should be justified by those workloads rather than historical CPU
+percentages from a different implementation.

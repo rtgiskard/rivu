@@ -21,8 +21,6 @@ rivu playlist play PLAYLIST_ID
 Playlist storage is not capped by `queue_limit`. Playing one replaces the queue
 and requires a non-empty playlist that fits the limit; oversized loads leave
 the existing queue unchanged. See link:04_playback.adoc#_queue[Playback queue].
-Management: link:../src/core/playlists.rs[playlist commands] and
-link:../src/store.rs[playlist storage].
 
 == Desktop UI
 
@@ -31,11 +29,9 @@ icon; the playlist name is generated from the current date and time.
 
 Playlist catalogs, entries, and the Queue panel's playlist-destination menu
 load rows automatically while scrolling. Entry numbering and move actions use
-absolute playlist positions across query boundaries. Scrolling a catalog away
-from the selected playlist preserves its name and selected entry; query cache
-eviction is not a selection change.
-After a data revision, cached selection positions are discarded and restored
-from matching IDs in fresh rows; obsolete positions do not trigger prefetch.
+absolute playlist positions. Scrolling away from the selected playlist preserves
+its name and selected entry. See link:02_library.adoc#_paged_views[Library] for
+scrolling and query failure behavior.
 
 == Import and export
 
@@ -68,8 +64,6 @@ finite positive duration; data tracks are unsupported.
 
 CUE library identities and directory scanning: link:02_library.adoc#_cue_library_tracks[Library].
 Subtrack playback: link:04_playback.adoc#_transport_and_timing[Playback].
-Sheet syntax and boundary validation: link:../src/cue.rs[CUE parser] and
-link:../src/library.rs[CUE scanning].
 
 === CUE export restrictions
 
@@ -77,5 +71,3 @@ A complete, contiguous, correctly ordered sheet run exports as one CUE path.
 Standard M3U cannot select individual subtracks: partial or reordered runs fail
 and leave the existing destination untouched. Such selections remain valid inside
 Rivu. Rescan externally edited sheets before exporting.
-
-Exchange implementation: link:../src/library.rs[playlist import/export] and link:../src/main.rs[CLI paths and wait].

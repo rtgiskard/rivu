@@ -1,257 +1,94 @@
 = Visualization Cache
 
-== Scope
+== Scope and contract
 
-Rivu exposes one `visualization_cache` setting under Visualizations / Common.
-It defaults to `true` and controls reusable caches owned by visualization
-controls. The setting changes rendering cost only; it does not change audio
-analysis, waveform samples, spectrum levels, frequency interpolation, palette
-mapping, or playback state.
+`visualization_cache` defaults to `true` and trades retained graphics memory for
+less repeated rendering work. It does not change audio analysis, waveform
+samples, spectrum levels, palette mapping, or playback state. Settings and
+display controls are documented in link:01_config.adoc[Configuration and layout];
+rendering choices are explained in link:23_visuals.adoc[Visualization Rendering Design].
 
-The current scope is:
+The cache covers Waveform display columns and static images, Spectrum body
+geometry, and Spectrogram history images. Radial Spectrum currently has no
+reusable rendering cache, so the setting has no effect on that control.
 
-* Waveform: pooled display columns and four tessellated RMS/Peak paths per
-  active panel.
-* Spectrum: body and Peak paths per Spectrum panel.
-* Spectrogram: one-pixel-wide `RenderImage` per retained history column, plus
-  derived heat samples used to generate those images.
-* Radial Spectrum: no cache is currently implemented, so the setting has no
-  effect on that control.
+Disabling the cache bypasses reusable graphics, not the underlying audio data
+or Spectrogram history. Peak hold, smoothing, and display calculations retain
+the same meaning. Re-enabling it requires an initial rebuild before reuse
+resumes. Temporary images still remain alive long enough for their submitted
+scene to render safely.
 
-== Expected cache hit behavior
-
-=== Waveform
-
-Waveform pools source bins into a reusable per-column values buffer, keyed by
-frame revision, width, and display mapping. Its static images are 32-pixel tiles,
-keyed by source, dimensions, palette, gains, and pooled-value fingerprints.
-Revision changes recompute pooled values, but only changed tiles are rasterized.
-An unchanged revision and mapping skips fingerprinting as well as bin pooling.
-
-Each tile covers every intersecting pooled column, including columns straddling
-fractional pixel boundaries. Plot origin and playback cursor movement do not
-invalidate the static images. Resizing, changing mapping, or selecting another
-source invalidates the affected cached data. Cache cost depends on the number of
-changed tiles, not just the ratio of analysis frames to UI repaints.
-
-=== Spectrum
-
-Spectrum geometry is keyed by panel position and size, frequency range, style,
-bar layout, interpolation, peak state, dB mapping, and analysis revision.
-Every non-empty analysis frame advances the revision, so active playback
-rebuilds once per analysis frame. Repaints between analysis frames can reuse
-the paths.
-
-With a 20 FPS analysis rate and a 60 FPS UI repaint rate, the idealized ratio
-is approximately:
-
-[source,text]
-----
-cache hits: 40 / 60 = 67%
-path rebuilds: 20 / second instead of 60 / second
-----
-
-This is most useful when the UI repaints more often than analysis publishes,
-and when Spectrum is paused. During a stable paused frame, the hit ratio is
-close to 100% until a size, position, style, or display-range change occurs.
-
-=== Spectrogram
-
-Spectrogram history columns retain their own `RenderImage`. A column can be
-reused while its levels, image height, stream generation, palette, dB range,
-and interpolation inputs remain valid. During continuous playback, new or
-max-pooled columns change while older history columns remain reusable.
-
-All visible Spectrogram panels share one history. The GUI chooses the maximum
-requested column count once per update, so narrow and wide panels cannot
-alternately shrink and expand it during painting. A capacity change preserves
-the newest chronological columns and their images.
-
-For example, with 1200 retained columns and one changed column per update, the
-stable-column ratio is approximately:
-
-[source,text]
-----
-(1200 - 1) / 1200 = 99.9%
-----
-
-This does not remove the cost of submitting every visible image with
-`paint_image`; it removes repeated RGBA image construction and image upload
-work for unchanged columns.
-
-Palette, dB-range, interpolation, source-frequency, image-height, and stream
-changes invalidate affected images. These changes intentionally trade one
-rebuild for correct colors, rows, and frequency placement.
-
-== CPU impact
-
-The caches avoid the most expensive repeated work in the affected controls:
-
-[source,text]
-----
-Waveform:   columns -> PathBuilder -> tessellation
-Spectrum:   bars/peaks -> PathBuilder -> tessellation
-Spectrogram: levels -> heat samples -> RgbaImage -> RenderImage
-----
-
-They do not eliminate:
-
-* palette-segment scene submissions;
-* GPUI `Path` ownership copies required by the current `paint_path` API;
-* per-frame Spectrum level evaluation when analysis data changes;
-* per-column Spectrogram `paint_image` submissions;
-* Radial Spectrum path construction.
-
-`gpui::Path` owns a vertex `Vec`, so cloning a cached path still copies its
-vertices. Eliminating that copy requires a GPUI shared-immutable-vertex paint
-API; it is outside this application-level cache and is intentionally deferred.
-
-A manual runtime comparison observed roughly half the CPU usage with the cache
-enabled in the tested visualization workload. The exact result depends on
-panel count, style, analysis rate, repaint frequency, and window dimensions;
-that observation is not a universal benchmark.
-
-== Memory cost
+== Reuse and invalidation
 
 === Waveform
 
-A previous 1200-column geometry workload produced approximately 36,000 path
-vertices. With the current GPUI vertex layout estimated at about 32 bytes per
-vertex, the vertex payload is approximately:
-
-[source,text]
-----
-36,000 * 32 bytes ~= 1.1 MiB
-----
-
-The practical retained amount is approximately 1--2 MiB per active Waveform
-panel after accounting for vector capacity, Path metadata, scene objects, and
-renderer resources. Multiple active panels scale approximately linearly.
+Waveform separates display-column aggregation from static image caching.
+Unchanged data and display mapping reuse the columns; incremental waveform
+updates rebuild only affected image tiles. Playback cursor movement does not
+invalidate the static waveform. Source, dimensions, amplitude mapping, and
+palette changes rebuild the affected derived data.
 
 === Spectrum
 
-Spectrum retains one body and one Peak path per Spectrum panel. Memory depends
-strongly on style and bar count:
-
-* Line and Solid usually produce smaller paths;
-* Bars and Outline produce more vertices;
-* LED grows with the number of visible segments and can approach the GPUI
-  vertex limit at high slot counts.
+Spectrum retains body geometry per panel. Repaints between analysis updates can
+reuse it, including while paused. New analysis data or changes to panel geometry
+and display mapping require a rebuild. Peak markers are drawn separately from
+the cached body. The benefit depends on how often the UI repaints without new
+analysis data, not on a fixed expected hit rate.
 
 === Spectrogram
 
-Raw RGBA payload is approximately:
+Spectrogram retains images for unchanged history columns. New audio updates the
+recent columns while older columns remain reusable. Palette, display range,
+frequency mapping, and image-size changes rebuild affected images so retained
+history is shown with the current settings.
 
-[source,text]
-----
-retained columns * image height * 4 bytes
-----
+Visible Spectrogram panels share one bounded history sized for the largest
+requested column count. Narrow and wide panels therefore do not compete to
+resize it during painting. Capacity changes preserve the newest chronological
+columns. Recoloring history does not discard its underlying frequency data.
 
-For 1200 columns at 300 rows:
+== Resource boundaries
 
-[source,text]
-----
-1200 * 300 * 4 bytes ~= 1.37 MiB
-----
+Caches are local to active panels or bounded Spectrogram history, not an
+unbounded record of earlier render states. Waveform image memory grows with
+panel dimensions and panel count. Spectrum geometry cost depends on style and
+bar density; dense LED layouts contain substantially more geometry than simple
+curves. Spectrogram image memory grows with retained history width and image
+height, in addition to the frequency data needed to preserve that history.
 
-Actual CPU/GPU usage is higher because it also includes `RenderImage`, Arc,
-sprite-atlas, scene, and deferred-retirement overhead. Spectrogram therefore
-has the highest retained image cost, but also the highest reuse potential for
-stable history.
-
-When cache settings or image inputs change, old atlas images are retired and
-released through the Window image-drop path. Hidden and removed panels hand
-their images to window-level retirement even if they are never painted again;
-window closure drains remaining retained resources. Cache-disabled images are
-kept alive until their submitting scene is replaced, then released normally.
-
-== Cache switch behavior
-
-With `visualization_cache = true`:
-
-* reusable geometry and images may be retained and reused;
-* unchanged Spectrum/Waveform geometry is reused;
-* unchanged Spectrogram columns are reused.
-
-With `visualization_cache = false`:
-
-* cached Spectrum and Waveform geometry is bypassed;
-* Spectrogram columns are rebuilt instead of retained;
-* temporary Spectrogram images are submitted and deferred for atlas release;
-* audio data, history, peak hold, smoothing, and display calculations remain
-  semantically unchanged.
-
-Turning the cache off reduces retained memory but increases allocations,
-Path construction, image construction, and CPU usage. Turning it back on
-causes a one-time rebuild before normal reuse resumes.
-
-== Reliability and invalidation rules
-
-Cache keys and invalidation must include geometry-affecting state, not palette
-or cache policy itself. Current important invalidation inputs include:
-
-* panel origin and dimensions;
-* source or analysis revision;
-* frequency range and stream generation;
-* style, bar layout, interpolation, peak state, and dB mapping;
-* Spectrogram image height and heat-sample generation;
-* palette, color-range, and interpolation changes for Spectrogram images.
-
-The cache policy is a control-flow decision, not a geometry property. It should
-not be added as another field to each geometry key. A policy transition should
-clear the relevant retained cache and then choose the cached or uncached
-ownership path.
-
-Raw waveform data, spectrum history, and playback state are not cache entries.
-They must not be discarded merely because the visualization cache is disabled.
+These are CPU and renderer resources: image payload alone does not describe
+total process or GPU memory. Removed panel entries are pruned. Replaced images
+and images from hidden or removed panels are retired through the window
+lifecycle, without requiring those panels to paint again. Window closure
+releases the remaining retained images.
 
 == Design tradeoffs
 
-The current application-level cache is intentionally bounded and local:
+Caching avoids repeated aggregation, geometry construction, and image creation,
+but does not eliminate scene submission or rendering. Cached Spectrum paths
+still incur ownership copies under GPUI's current painting API; Spectrogram
+still submits its visible images. Disabling reuse reduces retained graphics
+memory at the cost of rebuilding that work.
 
-* Waveform geometry is owned by its panel entry;
-* Spectrum geometry is owned by its panel ID;
-* Spectrogram images are owned by bounded history columns;
-* removed panel entries are pruned;
-* GPUI image resources are released through the Window lifecycle.
-
-The main remaining efficiency limit is GPUI's owned `Path` API: cached paths
-still need ownership copies for gradient submissions. Changing that boundary
-would affect the renderer and should be measured separately rather than
-introducing a second application-level geometry representation.
-
-The conservative optimization order is:
-
-. Keep the current bounded caches and measure real workloads.
-. Keep cache-toggle invalidation and image retirement simple and explicit.
-. Avoid adding more geometry-key fields unless a real stale-render case is
-  reproduced.
-. Defer shared GPUI vertices or a single combined Spectrogram texture until
-  profiling shows that image submission or Path copying dominates.
+Correct invalidation takes precedence over reuse: source or display changes
+must not leave stale graphics, and cache-policy changes must not erase analysis
+or playback state. The design favors bounded application-level caches over a
+second geometry representation or a renderer fork. Shared renderer geometry or
+a combined Spectrogram texture would change that boundary and should be justified
+by profiling real workloads, not assumed hit rates or submission counts alone.
 
 == Font data and glyphs
 
-Font caches are independent of `visualization_cache`; that switch does not
-control text rendering or font retention.
+Font retention is independent of `visualization_cache`. Primary-font selection
+and fallback behavior are described in link:01_config.adoc[Configuration and layout].
+Rivu uses the native GPUI/cosmic-text fallback rather than eagerly loading an
+explicit application fallback list. This avoids a local font-backend fork, but
+does not enforce Fontconfig ordering beyond the primary family.
 
-For a nonempty `ui_font`, Rivu uses `FcFontMatch` to select the primary family.
-It does not pass an explicit fallback list to GPUI: the backend eagerly loads
-families in such a list, even when no displayed text needs them. Missing glyphs
-instead use the unmodified GPUI/cosmic-text fallback and shaping implementation.
-
-This trades strict Fontconfig fallback ordering for a small application-level
-fix with no local font-backend forks. System and user rules still select the
-primary family; they do not dictate the backend's subsequent fallback order.
-
-The backend owns face, shaping, glyph and atlas caches. It may load multiple
-faces of a selected family or retain fonts considered during fallback; Rivu
-does not guarantee that only final glyph-producing faces remain cached, nor
-does it add an eviction policy. Switching fonts may leave earlier data resident.
-Font-file mappings share kernel file pages, while parsed font and glyph data
-also consume process memory.
-
-For memory comparisons, use fresh GUI processes with the same build,
-configuration and visible text. Record RSS and retained font-file mappings,
-then introduce additional scripts and repeat the same text. Font discovery
-is not equivalent to retained font data; total RSS also includes graphics
-drivers, executable pages and other application caches.
+The backend owns font, shaping, glyph, and atlas caches. It may retain multiple
+faces or fonts considered during fallback, not only those that supplied visible
+glyphs. Rivu adds no font eviction policy, so switching fonts may leave earlier
+data resident. Font-file mappings share kernel file pages; parsed font and glyph
+data also consume process memory. Font discovery alone is not a measure of
+retained memory, and total process memory includes unrelated renderer resources.

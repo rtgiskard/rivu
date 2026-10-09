@@ -77,12 +77,9 @@ Visualizations is grouped by view, with shared controls in Common:
 * Rendering: `visualization_cache` reuses derived graphics in Spectrum,
   Spectrogram, and Waveform; it is separate from media read buffering.
 
-Spectrum, Spectrogram, and Radial Spectrum each expose a range override in their
-own tab. Empty inherits Common, with the current Common default shown in the
-hint. Entering a number makes that view independent; clearing the input restores
-inheritance. Apply saves the Common default and all overrides together, including
-fields on other tabs. Reopening or discarding settings restores an empty input
-for inherited ranges and the saved number for explicit overrides.
+Each frequency view has a range override; leave it empty to inherit Common,
+or clear an explicit value to restore inheritance. See
+<<_visualization_db_ranges,Visualization dB ranges>> for the configuration contract.
 
 Style-dependent fields preserve their values while inactive. Hover an inactive
 field for the reason; switch back to a compatible style to resume editing.
@@ -93,10 +90,8 @@ remains text. Custom family names are accepted.
 
 `ui_font`: empty/System default uses the platform UI font. Nonempty values use
 Fontconfig system and user rules (`~/.config/fontconfig/fonts.conf`) to select
-the primary family. Missing glyphs use GPUI/cosmic-text's native fallback,
-which does not guarantee Fontconfig's custom fallback order. Rivu does not
-pass the full Fontconfig candidate list to GPUI, avoiding eager loading of
-unused fallback families. Restart the GUI after changing Fontconfig rules.
+the primary family. Missing glyphs use native fallback, which does not guarantee
+Fontconfig's custom fallback order. Restart the GUI after changing Fontconfig rules.
 
 GPUI selects faces within each family and renders through cosmic-text/Swash;
 Fontconfig hinting, subpixel, and synthetic-bold settings do not apply.
@@ -115,7 +110,6 @@ Apply validates and saves all pages together; navigation preserves the draft.
 Discard drops unapplied changes. Saving library roots does not scan or enqueue
 tracks; use `Scan paths` in Library. Display-only changes do not reopen audio.
 Hover an error to read its complete message, or click its copy icon to copy it.
-Settings controls are implemented in link:../src/gui/settings.rs[settings].
 
 See link:../readme.adoc[README] for application lifecycle and host behavior.
 
@@ -131,8 +125,6 @@ panel. Playback and tab selection remain available while locked.
 Errors and scan progress appear in the footer. Click a message or its copy icon
 to copy the complete text.
 
-Layout behavior and persistence: link:../src/gui/layout.rs[desktop layout].
-
 == Visualization dB ranges
 
 `visualization_db_range` defaults to `70` dB. The optional `spectrum_db_range`,
@@ -143,8 +135,7 @@ current value; changing Common later affects only views without overrides.
 
 In TOML, omit a view's override key to inherit Common. Do not write an empty
 string or a blank assignment: overrides are numeric when present. Saving an
-inherited range omits that override key. Existing explicit range values remain
-explicit overrides.
+inherited range omits that override key.
 
 [source,toml]
 ----
@@ -155,12 +146,9 @@ radial_spectrum_db_range = 100.0
 ----
 
 These ranges affect display mapping only, not FFT analysis, decoded audio,
-playback volume, or Waveform's RMS/Peak gains. Changing a resolved range rebuilds
-affected derived display caches: Spectrum updates its display geometry,
-Spectrogram recolors retained frequency history without discarding it, and Radial
-Spectrum resets its normalized/smoothed display data without resetting shared
-FFT analysis. Changing an unused Common default or choosing an override equal to
-the current resolved value does not change the display mapping.
+playback volume, or Waveform's RMS/Peak gains. Spectrogram recolors retained
+history without discarding it. Changing an unused Common default or setting an
+override equal to the current resolved value leaves the display unchanged.
 
 == Visualizations
 
@@ -170,26 +158,10 @@ visible and a Spectrum, Spectrogram, or Radial Spectrum panel is visible.
 `visual_palette` accepts `tokyo_night` or `deadbeef` (default `deadbeef`) and is
 shared by Spectrum, Spectrogram, and Waveform. Defaults and accepted ranges are
 in link:../src/config.rs[`Config`].
-`visualization_cache` defaults to `true` and controls reusable caches owned by
-visualization controls. Disabling it preserves the same rendering calculations
-but rebuilds visualization geometry on each repaint, increasing CPU use.
-
-Spectrum and Waveform use GPU gradients assembled from the selected palette's
-intermediate color stops. Spectrogram continues to use the full palette.
-
-=== GPUI rendering background
-
-The visualization path has three distinct stages. `PathBuilder::build` creates
-and tessellates the geometry on the CPU. `Window::paint_path` then records the
-already-built Path as a primitive in GPUI's scene. The GPU renderer rasterizes
-the resulting triangles and evaluates gradient colors and content masks while
-rendering.
-
-Palette-stop segmentation therefore adds scene items, masks, and paint
-submissions, but does not rebuild the same Path geometry for every interval.
-The number of `paint_path` calls is not the hardware draw-call count; CPU
-tessellation time, scene recording time, and GPU execution time must be measured
-separately when evaluating a rendering optimization.
+`visualization_cache` defaults to `true`; disabling it preserves the displayed
+results but rebuilds derived graphics on repaint. It does not affect Radial
+Spectrum. See link:22_cache.adoc[Visualization Cache] for scope and trade-offs,
+and link:23_visuals.adoc[Visualization Rendering Design] for rendering choices.
 
 === Waveform
 
@@ -204,24 +176,16 @@ the Waveform settings page or its panel right-click menu to prevent accidental
 seeks. Disabling it cancels any active waveform drag and preview; the playback
 slider remains available.
 
-Each channel uses an independent center-to-edge gradient assembled from the
-palette stops. Stop positions, including the Deadbeef low-end floor mapping,
-map to the corresponding center-to-edge height; RMS and Peak retain separate
-high-end palette limits. RMS uses the monotonic height mapping
-`clamp(normalized_amplitude * waveform_rms_gain, 0, 1)^0.86`, gently lifting low
-levels. Peak uses its own `waveform_peak_gain` and `waveform_peak_gamma` in the
-same formula (default gamma `1.1`). The RMS fill retains a minimum 1px height for
-known data, including silence; the Peak line
-uses the mapped level directly. Unknown intervals remain blank. Adjacent stop
-intervals share their boundary color.
+RMS uses a center-to-edge palette gradient; Peak uses the palette color at its
+level. Known silence remains visible as a minimum-height RMS fill; unknown
+intervals stay blank.
 
 `waveform_labels`, `waveform_cursor_color`, and `waveform_glow` control labels,
-cursor, and glow. The Amplitude display group exposes RMS gain (`0`–`3`), Peak
-gain (`0`–`2`), and Peak gamma (`0.25`–`3`). Gamma above `1` reduces low peaks;
-below `1` lifts them. These controls affect rendering only, not playback volume
-or decoded preview data. Preview and interaction:
-link:../src/gui/waveform.rs[Waveform]; peak collection:
-link:../src/audio/waveform.rs[audio waveform].
+cursor, and glow. The Amplitude display group exposes `waveform_rms_gain`
+(`0`–`3`, default `1.6`), `waveform_peak_gain` (`0`–`2`, default `0.75`), and
+`waveform_peak_gamma` (`0.25`–`3`, default `1.1`). Gamma above `1` reduces low
+peaks; below `1` lifts them. These controls affect rendering only, not playback
+volume or decoded preview data.
 
 === Spectrum and Spectrogram
 
@@ -230,53 +194,10 @@ Spectrum shows current frequency energy. `spectrum_style` accepts `bars`,
 FFT resolution/window, band density, spacing, peak hold, release motion, and labels.
 Motion freezes while paused.
 
-`spectrum_interpolate` controls frequency-slot data interpolation and whether
-`solid` uses a continuous or stepped boundary. `line` always connects valid
-body points continuously, regardless of this setting; empty body slots are
-skipped rather than drawn at the floor. In `line` style, the body is a
-continuous 2px curve and Peak is a discrete 1px-high filled marker spanning
-the visible frequency slot. Other styles retain 1px-high filled Peak markers;
-`solid` uses 1px-wide markers. Body and Peak use separate Paths, each submitted
-through the same palette-stop gradient sequence. Each palette interval is
-rendered with its own masked paint so authored stop positions remain visible;
-this repeats scene submissions for each interval.
-
-==== Spectrum rendering strategies
-
-[%header,cols="1,1,1,2"]
-|===
-|Style |Body geometry |Peak geometry |Path ownership and trade-off
-
-|`bars`
-|Filled rectangle per frequency slot
-|Filled marker, slot width × 1px
-|Body and Peak use the same fill Path and are tessellated together. Lowest structural overhead for discrete bars.
-
-|`outline`
-|Filled edge rectangles forming the outline
-|Filled marker, slot width × 1px
-|Body and Peak share the fill Path. More rectangles than `bars` to preserve the outline shape.
-
-|`led`
-|Filled LED rectangles with gaps
-|Filled marker, slot width × 1px
-|Body and Peak share the fill Path. Geometry grows with the number of LED segments; dense configurations are the most tessellation-heavy.
-
-|`line`
-|Continuous 2px stroke through body points
-|Independent filled marker, slot width × 1px
-|Body uses a stroke builder and Peak uses a fill builder. They are tessellated separately, then their vertices are merged for one gradient submission; Peak points are never connected.
-
-|`solid`
-|Closed filled contour to the plot baseline
-|Filled 1px × 1px marker
-|Body and Peak share the fill Path. Interpolation controls whether the contour boundary is continuous or stepped.
-|===
-
-All styles use the same palette-stop gradient sequence. Each interval is
-masked to its authored vertical range; the mask preserves stop placement while
-the Path geometry remains reusable. `stroke` is used only where a continuous
-line is semantically required; discrete Peak values use filled markers.
+`spectrum_interpolate` controls frequency interpolation and whether `solid` has a
+continuous or stepped boundary. `line` always connects valid body points
+continuously and skips empty slots rather than drawing them at the floor.
+Peak indicators remain discrete in every style.
 
 Spectrogram shows recent frequency history; `spectrogram_*` settings control its
 history duration, color range, labels, interpolation, and the `0.4`–`1.4`
@@ -291,9 +212,6 @@ Both views use a logarithmic frequency axis and share `spectrum_fft_size` and
 `spectrogram_db_range` overrides inherit `visualization_db_range` when omitted;
 see <<_visualization_db_ranges,Visualization dB ranges>>.
 
-Analysis: link:../src/analysis.rs[shared FFT]. Band projection, history, palettes,
-and rendering: link:../src/gui/visuals.rs[visualizations].
-
 === Radial Spectrum
 
 `radial_spectrum_style` accepts `bars`, `rings`, or `bars_rings`. The remaining
@@ -302,11 +220,9 @@ opacity/Bloom, inner diameter, idle fade, and two endpoint colors. Its independe
 `radial_spectrum_db_range` override inherits `visualization_db_range` when omitted.
 It shares the Spectrum analyzer but has no absolute frequency labels.
 
-Implementation: link:../src/gui/radial_spectrum.rs[Radial Spectrum]. The presentation
-model is based on Noctalia Shell v5's
+The presentation model is based on Noctalia Shell v5's
 https://github.com/noctalia-dev/noctalia-shell/blob/e56a9db5/Widgets/AudioSpectrum/NMirroredSpectrum.qml[`NMirroredSpectrum.qml`],
 not a pixel-identical port.
-
 
 == Visual assets
 
