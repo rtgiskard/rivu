@@ -11,7 +11,7 @@ use anyhow::Result;
 use crossbeam_channel::Receiver;
 use parking_lot::RwLock;
 use std::{
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Arc,
 };
 
@@ -112,17 +112,54 @@ impl Playback {
             waveform_coverage: WaveformCoverage::new(start),
         })
     }
+    // Rebuild only device/resampler state: closing first discards queued PCM,
+    // device-clock spans and the old analysis epoch before the source seeks.
+    pub(super) fn restart_output(
+        &mut self,
+        target: Option<f64>,
+        device: Option<&str>,
+        volume: f32,
+        auto_mix: bool,
+        analyzer: &AnalysisWorker,
+    ) -> Result<()> {
+        self.restart_output_with(target, |source, paused| Output::new(
+            device, source.info().sample_rate, source.layout(),
+            volume, paused, auto_mix, analyzer,
+        ))
+    }
+
+    fn restart_output_with(
+        &mut self,
+        target: Option<f64>,
+        create: impl FnOnce(&Source, bool) -> Result<Output>,
+    ) -> Result<()> {
+        let position = target.unwrap_or_else(|| self.position()).max(0.0);
+        let position = self.info().duration.map_or(position, |end| position.min(end));
+        let heard = self.prior_heard + self.output.close();
+        self.source.seek(position)?;
+        let output = create(&self.source, self.paused)?;
+        let converter = Converter::new(
+            self.source.info().sample_rate, output.rate(), self.source.layout().len(),
+        )?;
+        self.output = output;
+        self.converter = converter;
+        self.pending.clear();
+        self.offset_frames = 0;
+        self.base_position = position;
+        self.prior_heard = heard;
+        self.eof = false;
+        self.waveform_coverage = WaveformCoverage::new(position);
+        Ok(())
+    }
+
+    pub(super) fn auto_mix_affects_output(&self) -> bool {
+        self.output.auto_mix_affects_output()
+    }
+
     pub(super) fn generation(&self) -> u64 {
         self.generation
     }
 
-    pub(super) fn path(&self) -> &Path {
-        &self.path
-    }
-
-    pub(super) fn range(&self) -> Option<PlaybackRange> {
-        self.range
-    }
 
     pub(super) fn info(&self) -> &MediaInfo {
         self.source.info()
@@ -211,5 +248,70 @@ impl Playback {
     }
     pub(super) fn close(&mut self) -> f64 {
         self.prior_heard + self.output.close()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn pcm() -> tempfile::NamedTempFile {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let rate = 8_000_u32;
+        let bytes = rate * 2 * 2;
+        file.write_all(b"RIFF").unwrap();
+        file.write_all(&(36 + bytes).to_le_bytes()).unwrap();
+        file.write_all(b"WAVEfmt \x10\0\0\0\x01\0\x01\0").unwrap();
+        file.write_all(&rate.to_le_bytes()).unwrap();
+        file.write_all(&(rate * 2).to_le_bytes()).unwrap();
+        file.write_all(b"\x02\0\x10\0data").unwrap();
+        file.write_all(&bytes.to_le_bytes()).unwrap();
+        for index in 0..rate * 2 {
+            file.write_all(&((index % 16000) as i16).to_le_bytes()).unwrap();
+        }
+        file
+    }
+
+    #[test]
+    fn repeated_paused_cue_seeks_discard_old_pcm_and_preserve_exact_position() {
+        let file = pcm();
+        let range = Some(PlaybackRange { start_seconds: 0.25, end_seconds: Some(1.75) });
+        let mut source = Source::open(file.path(), 64 * 1024, false).unwrap();
+        source.restrict(range.unwrap()).unwrap();
+        let waveform = Arc::new(RwLock::new(WaveformFrame::default()));
+        waveform.write().select(file.path(), range, source.info().duration, 8_000);
+        let (output, mut old_render) = super::super::output::test_backend(8_000, false, source.layout());
+        let mut playback = Playback {
+            source, output, converter: Converter::new(8_000, 8_000, 1).unwrap(),
+            pending: Vec::new(), offset_frames: 0, generation: 1,
+            path: file.path().to_owned(), range, base_position: 0.0, prior_heard: 0.0,
+            eof: false, paused: false, waveform, waveform_coverage: WaveformCoverage::new(0.0),
+        };
+        playback.fill().unwrap();
+        playback.pause(true);
+        for target in [0.75, 0.125, 1.0, 0.0] {
+            let (output, mut render) = super::super::output::test_backend(8_000, true, playback.source.layout());
+            playback.restart_output_with(Some(target), |_, paused| {
+                assert!(paused);
+                Ok(output)
+            }).unwrap();
+            assert_eq!(playback.position(), target);
+            assert_eq!(playback.heard(), 0.0);
+            let mut data = [1.0; 64];
+            old_render(&mut data, 0);
+            assert_eq!(data, [0.0; 64]);
+            playback.fill().unwrap();
+            render(&mut data, 0);
+            assert_eq!(data, [0.0; 64]);
+            playback.pause(false);
+            playback.fill().unwrap();
+            render(&mut data, 1);
+            let first = ((target + 0.25) * 8_000.0).round() as usize;
+            for (offset, sample) in data.iter().enumerate() {
+                assert_eq!(*sample, (first + offset) as f32 / 32768.0);
+            }
+            playback.pause(true);
+        }
     }
 }

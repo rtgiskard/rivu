@@ -521,6 +521,14 @@ impl Output {
             .store(volume.to_bits(), Ordering::Release);
     }
 
+    pub(super) fn auto_mix_affects_output(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if matches!(self.stream, Some(OutputStream::PipeWire { .. })) {
+            return true;
+        }
+        false
+    }
+
     pub(super) fn has_room(&self) -> bool {
         self.producer.vacant_len() >= self.source_channels
     }
@@ -727,6 +735,22 @@ impl OutputCallback {
 }
 
 #[cfg(test)]
+pub(super) fn test_backend(
+    rate: u32, paused: bool, layout: &[Channel],
+) -> (Output, impl FnMut(&mut [f32], u64) + use<>) {
+    let (output, mut callback, analyzer) = tests::test_output_layout(
+        rate, paused, layout, layout, (rate / 4) as usize * layout.len(),
+    );
+    (output, move |data, millis| {
+        let _keep_analyzer_alive = &analyzer;
+        callback.render(data, cpal::OutputStreamTimestamp {
+            callback: cpal::StreamInstant::from_millis(millis),
+            playback: cpal::StreamInstant::from_millis(millis + 20),
+        });
+    })
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::analysis::AnalysisFrame;
@@ -862,7 +886,7 @@ mod tests {
         test_output_layout(rate, paused, &stereo, &stereo, 128)
     }
 
-    fn test_output_layout(
+    pub(super) fn test_output_layout(
         rate: u32,
         paused: bool,
         source: &[Channel],

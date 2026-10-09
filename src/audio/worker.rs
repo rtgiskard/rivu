@@ -219,13 +219,16 @@ impl Worker {
             AudioCommand::Seek(seconds) => self.reopen(Some(seconds)),
             AudioCommand::OutputSettings { device, auto_mix } => {
                 let device_changed = self.device != device;
-                if device_changed || self.pipewire_auto_mix != auto_mix {
+                let mix_changed = self.pipewire_auto_mix != auto_mix;
+                if device_changed || mix_changed {
                     if device_changed && let Err(error) = validate_device(device.as_deref()) {
                         self.fail(error);
                     } else {
+                        let restart = device_changed || (mix_changed && self.playback.as_ref()
+                            .is_some_and(Playback::auto_mix_affects_output));
                         self.device = device;
                         self.pipewire_auto_mix = auto_mix;
-                        self.reopen(None);
+                        if restart { self.reopen(None); }
                     }
                 }
             }
@@ -233,31 +236,12 @@ impl Worker {
         true
     }
     fn reopen(&mut self, target: Option<f64>) {
-        if let Some(mut old) = self.playback.take() {
-            let position = target.unwrap_or_else(|| old.position());
-            let heard = old.close();
-            let generation = old.generation();
-            match Playback::new(
-                self.playback_options(
-                    old.path().to_owned(),
-                    old.range(),
-                    generation,
-                    position,
-                    old.paused(),
-                    heard,
-                ),
-                &self.analyzer,
-                self.waveform.clone(),
-            ) {
-                Ok(playback) => self.playback = Some(playback),
-                Err(error) => {
-                    self.last_snapshot = (generation, heard);
-                    self.event(AudioEvent::Failed {
-                        generation,
-                        message: format!("{error:#}"),
-                    });
-                }
-            }
+        if let Some(playback) = self.playback.as_mut() {
+            let result = playback.restart_output(
+                target, self.device.as_deref(), self.volume,
+                self.pipewire_auto_mix, &self.analyzer,
+            );
+            if let Err(error) = result { self.fail(error); }
             self.refresh_analysis();
         }
     }
