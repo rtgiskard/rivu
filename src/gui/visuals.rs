@@ -171,7 +171,8 @@ struct SpectrumGeometry {
 }
 
 struct VisualData {
-    spectrogram_panel_heights: HashMap<u64, usize>,
+    spectrogram_panel_sizes: HashMap<u64, (usize, usize)>,
+    spectrogram_panel_height: usize,
     frequencies: Vec<f32>,
     sample_rate: u32,
     frequency_labels: [SharedString; 2],
@@ -233,6 +234,7 @@ struct VisualData {
     error: Option<String>,
 }
 
+#[derive(Clone)]
 pub(super) struct Visuals {
     // GPUI prepaint/paint closures are 'static. Share the UI-thread state rather
     // than copying the full history into each panel's render closure.
@@ -252,7 +254,8 @@ impl Visuals {
                 spectrum_bins: Vec::new(),
                 spectrum_bins_generation: 0,
                 heat_samples: Vec::new(),
-                spectrogram_panel_heights: HashMap::new(),
+                spectrogram_panel_sizes: HashMap::new(),
+                spectrogram_panel_height: 0,
                 spectrogram_image_height: 0,
                 columns: Vec::new(),
                 latest_levels: Vec::new(),
@@ -504,7 +507,7 @@ impl Visuals {
     }
     pub(super) fn retain_spectrogram_panels(&mut self, panel_ids: &[u64]) {
         let mut data = self.data.borrow_mut();
-        data.spectrogram_panel_heights
+        data.spectrogram_panel_sizes
             .retain(|panel_id, _| panel_ids.contains(panel_id));
         if panel_ids.is_empty() {
             data.invalidate_images();
@@ -516,6 +519,16 @@ impl Visuals {
             .borrow_mut()
             .spectrum_geometry
             .retain(|panel_id, _| panel_ids.contains(panel_id));
+    }
+
+    pub(super) fn begin_frame(&self) {
+        self.data.borrow_mut().spectrogram_panel_sizes.clear();
+    }
+
+    // The root's first paint runs after every panel's prepaint. Size shared
+    // history once here, never while individual panels are painting it.
+    pub(super) fn finish_prepaint(&self) {
+        self.data.borrow_mut().finish_prepaint();
     }
 
     fn view(&self, panel_id: u64, mode: VisualMode) -> AnyElement {
@@ -556,12 +569,16 @@ impl Visuals {
                 canvas(
                     move |bounds, _, _| {
                         if mode == VisualMode::Spectrogram {
-                            let height = ((bounds.size.height - px(12.0)).max(px(1.0)) / px(1.0))
-                                .ceil() as usize;
-                            prepaint_data
-                                .borrow_mut()
-                                .spectrogram_panel_heights
-                                .insert(panel_id, height.max(1));
+                            let mut data = prepaint_data.borrow_mut();
+                            let margin = axis_label_margin(
+                                data.spectrogram_show_labels,
+                                &data.frequency_labels,
+                            );
+                            let width = ((bounds.size.width - px(margin + 8.0)) / px(1.0))
+                                .ceil().max(2.0) as usize;
+                            let height = ((bounds.size.height - px(12.0)) / px(1.0))
+                                .ceil().max(1.0) as usize;
+                            data.spectrogram_panel_sizes.insert(panel_id, (width, height));
                         }
                     },
                     move |bounds, _, window, cx| {
@@ -612,6 +629,21 @@ impl Visuals {
 }
 
 impl VisualData {
+    fn finish_prepaint(&mut self) {
+        let Some(width) = self.spectrogram_panel_sizes.values().map(|size| size.0).max() else {
+            // Hidden history keeps its last capacity and continues accumulating.
+            return;
+        };
+        self.spectrogram_panel_height = self.spectrogram_panel_sizes
+            .values().map(|size| size.1).max().unwrap_or(1);
+        let columns = history_columns_for_width(
+            self.spectrogram_history_seconds, self.analysis_fps, width,
+        );
+        self.resize_history(columns);
+        self.history_limit_seconds = (columns as f64 / self.analysis_fps.max(1) as f64)
+            .min(self.spectrogram_history_seconds as f64);
+    }
+
     fn display_level(&self, index: usize) -> f32 {
         let level = finite_level(self.bar_levels[index]);
         if self.spectrum_bar_gravity == 0.0 {
@@ -1195,28 +1227,11 @@ impl VisualData {
         let Some((first, last, low, high)) = self.visible_range() else {
             return Ok(());
         };
-        let plot_width = (plot.size.width / px(1.0)).ceil().max(2.0) as usize;
-        let history_columns = history_columns_for_width(
-            self.spectrogram_history_seconds,
-            self.analysis_fps,
-            plot_width,
-        );
-        self.resize_history(history_columns);
-        self.history_limit_seconds = (self.history_columns as f64
-            / self.analysis_fps.max(1) as f64)
-            .min(self.spectrogram_history_seconds as f64);
         let history = self.history_window(latest_time);
         let start_time = latest_time.saturating_sub(history);
-        let fallback_height = (plot.size.height / px(1.0)).ceil() as usize;
-        let max_panel_height = self
-            .spectrogram_panel_heights
-            .values()
-            .copied()
-            .max()
-            .unwrap_or(fallback_height);
         let source_rows = last.saturating_sub(first) + 1;
         let height = spectrogram_source_height(
-            max_panel_height,
+            self.spectrogram_panel_height,
             source_rows,
             self.spectrogram_interpolation_points,
             self.spectrogram_sampling_points_scale,
@@ -2057,6 +2072,30 @@ mod tests {
         assert_eq!(history_columns_for_width(30, 20, 400), 400);
         assert_eq!(history_columns_for_width(30, 20, 800), 600);
         assert_eq!(history_columns_for_width(5, 20, 800), 100);
+    }
+
+    #[test]
+    fn multiple_panel_sizes_preserve_wide_history_across_frames_and_hiding() {
+        let mut visuals = configured_visuals();
+        for time in 1..=10 {
+            visuals.update(&frame(time as f64, -30.0));
+        }
+        let history_times = || visuals.data.borrow().columns.iter()
+            .filter_map(|column| column.sample_time).collect::<Vec<_>>();
+        let original = history_times();
+        for sizes in [[(1, (400, 100)), (2, (3, 700))],
+                      [(2, (3, 700)), (1, (400, 100))]] {
+            visuals.begin_frame();
+            visuals.data.borrow_mut().spectrogram_panel_sizes.extend(sizes);
+            visuals.finish_prepaint();
+            assert_eq!(visuals.data.borrow().history_columns, 400);
+            assert_eq!(visuals.data.borrow().spectrogram_panel_height, 700);
+            assert_eq!(history_times(), original);
+        }
+        visuals.begin_frame();
+        visuals.finish_prepaint();
+        assert_eq!(visuals.data.borrow().history_columns, 400);
+        assert_eq!(history_times(), original);
     }
 
     #[test]

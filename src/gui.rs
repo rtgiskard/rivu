@@ -2356,6 +2356,8 @@ impl Render for GuiApp {
         ));
         window.set_rem_size(px(16. * self.state.system.config.ui_scale));
         self.scroll_views.begin_frame();
+        self.visuals.begin_frame();
+        let paint_visuals = self.visuals.clone();
         let root = self.layout.root.take();
         let layout_view = root
             .as_ref()
@@ -2556,6 +2558,10 @@ impl Render for GuiApp {
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| this.finish_drag(cx)),
             )
+            .child(canvas(
+                |_, _, _| (),
+                move |_, _, _, _| paint_visuals.finish_prepaint(),
+            ).absolute().size_full())
             .child(
                 div()
                     .flex_1()
