@@ -13,6 +13,13 @@ fn main() {
     println!("cargo:rerun-if-env-changed=RIVU_GIT_VERSION");
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
 
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+        pkg_config::Config::new()
+            .atleast_version("1.2")
+            .probe("libpipewire-0.3")
+            .expect("PipeWire 1.2 or newer development files required");
+    }
+
     let version = env::var("RIVU_GIT_VERSION")
         .ok()
         .map(|version| version.trim().to_owned())

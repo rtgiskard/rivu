@@ -260,7 +260,9 @@ impl Connection {
             if Instant::now() >= deadline {
                 bail!("Timed out querying PipeWire devices");
             }
-            self.mainloop.loop_().iterate(Duration::from_millis(10));
+            self.mainloop
+                .loop_()
+                .iterate(pw::loop_::Timeout::Finite(Duration::from_millis(10)));
         }
         Ok(())
     }
@@ -492,7 +494,7 @@ fn run(
         connection
             .mainloop
             .loop_()
-            .iterate(Duration::from_millis(10));
+            .iterate(pw::loop_::Timeout::Finite(Duration::from_millis(10)));
         {
             let graph = connection.inventory.borrow();
             if auto_mix {
@@ -602,9 +604,8 @@ unsafe fn render_buffer(
         {
             return false;
         }
-        let Some(timestamp) =
-            monotonic_nsec().and_then(|now| output_timestamp(&time, callback.rate, now))
-        else {
+        let now = pw::sys::pw_stream_get_nsec(stream);
+        let Some(timestamp) = output_timestamp(&time, callback.rate, now) else {
             return false;
         };
         callback.render_native(samples, timestamp, routed);
@@ -613,20 +614,6 @@ unsafe fn render_buffer(
         (*buffer).size = frames as u64;
         true
     }
-}
-
-fn monotonic_nsec() -> Option<u64> {
-    let mut time = std::mem::MaybeUninit::<libc::timespec>::uninit();
-    // pw_time.now uses CLOCK_MONOTONIC (including PipeWire 0.3.65). This avoids
-    // requiring pw_stream_get_nsec, which was introduced only in PipeWire 1.1.
-    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, time.as_mut_ptr()) } != 0 {
-        return None;
-    }
-    let time = unsafe { time.assume_init() };
-    u64::try_from(time.tv_sec)
-        .ok()?
-        .checked_mul(1_000_000_000)?
-        .checked_add(u64::try_from(time.tv_nsec).ok()?)
 }
 
 fn output_timestamp(

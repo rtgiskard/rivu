@@ -6,7 +6,7 @@ description = "A lightweight, local-first Linux music player"
 
 [features]
 default = []
-ffmpeg = ["dep:bindgen", "dep:pkg-config"]
+ffmpeg = ["dep:bindgen"]
 
 [dependencies]
 anyhow = "1"
@@ -49,14 +49,13 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 alsa = "0.11"
-libc = "0.2"
-pipewire = { version = "0.9", features = ["v0_3_65"] }
+pipewire = { version = "0.10.1", features = ["v1_2_0"] }
 fontconfig-sys = { package = "yeslogic-fontconfig-sys", version = "6" }
 
 [build-dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 bindgen = { version = "=0.72.1", optional = true }
-pkg-config = { version = "0.3", optional = true }
+pkg-config = "0.3"
 
 [profile.release]
 lto = "thin"

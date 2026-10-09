@@ -32,9 +32,9 @@ Refill wakeups use buffered PCM headroom rather than a fixed polling interval.
 The callback sends a coalesced notification at low occupancy or when the final
 device-clock tail settles. Active playback retains the 100 ms progress deadline;
 stable paused playback waits only for commands, errors, or output notifications.
-PipeWire route checks stay outside the real-time process callback. Delayed clock
-snapshots are advanced with the compatible monotonic clock before output timing
-is evaluated; route validation itself remains strict.
+PipeWire route checks stay outside the real-time process callback. Output timing
+uses the stream's own clock to account for delayed snapshots; route validation
+remains strict.
 
 DTS probing scans bounded payload regions with one reusable overlap buffer.
 Only three contiguous structurally valid core frames count as a detection;
