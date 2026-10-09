@@ -602,7 +602,9 @@ unsafe fn render_buffer(
         {
             return false;
         }
-        let Some(timestamp) = monotonic_nsec().and_then(|now| output_timestamp(&time, callback.rate, now)) else {
+        let Some(timestamp) =
+            monotonic_nsec().and_then(|now| output_timestamp(&time, callback.rate, now))
+        else {
             return false;
         };
         callback.render_native(samples, timestamp, routed);
@@ -621,11 +623,17 @@ fn monotonic_nsec() -> Option<u64> {
         return None;
     }
     let time = unsafe { time.assume_init() };
-    u64::try_from(time.tv_sec).ok()?.checked_mul(1_000_000_000)?
+    u64::try_from(time.tv_sec)
+        .ok()?
+        .checked_mul(1_000_000_000)?
         .checked_add(u64::try_from(time.tv_nsec).ok()?)
 }
 
-fn output_timestamp(time: &pw::sys::pw_time, rate: u32, now: u64) -> Option<cpal::OutputStreamTimestamp> {
+fn output_timestamp(
+    time: &pw::sys::pw_time,
+    rate: u32,
+    now: u64,
+) -> Option<cpal::OutputStreamTimestamp> {
     if time.now < 0 || time.rate.num == 0 || time.rate.denom == 0 || rate == 0 {
         return None;
     }
@@ -852,10 +860,19 @@ mod tests {
         );
         let later = output_timestamp(&time, 48_000, 2_004_000_000).unwrap();
         assert_eq!(later.playback, timestamp.playback);
-        assert_eq!(later.callback.duration_since(timestamp.callback), Duration::from_millis(4));
-        assert_eq!(later.playback.duration_since(later.callback), Duration::from_micros(6_500));
+        assert_eq!(
+            later.callback.duration_since(timestamp.callback),
+            Duration::from_millis(4)
+        );
+        assert_eq!(
+            later.playback.duration_since(later.callback),
+            Duration::from_micros(6_500)
+        );
         let stale = output_timestamp(&time, 48_000, 2_020_000_000).unwrap();
-        assert_eq!(stale.playback.duration_since(stale.callback), Duration::from_micros(500));
+        assert_eq!(
+            stale.playback.duration_since(stale.callback),
+            Duration::from_micros(500)
+        );
         assert!(output_timestamp(&time, 48_000, 1_999_999_999).is_none());
         assert!(output_timestamp(&time, 48_000, u64::MAX).is_none());
         time.delay = -480;

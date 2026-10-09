@@ -1831,8 +1831,12 @@ impl GuiApp {
             let received = {
                 let frame = self.handle.analysis.read();
                 if frame.sequence != self.analysis_sequence || self.analysis_needs_refresh {
-                    self.analysis_staging.frequencies_hz.clone_from(&frame.frequencies_hz);
-                    self.analysis_staging.spectrum_db.clone_from(&frame.spectrum_db);
+                    self.analysis_staging
+                        .frequencies_hz
+                        .clone_from(&frame.frequencies_hz);
+                    self.analysis_staging
+                        .spectrum_db
+                        .clone_from(&frame.spectrum_db);
                     self.analysis_staging.sequence = frame.sequence;
                     self.analysis_staging.sample_rate = frame.sample_rate;
                     self.analysis_staging.sample_time = frame.sample_time;
@@ -1872,10 +1876,15 @@ impl GuiApp {
         self.visuals
             .retain_spectrogram_panels(&spectrogram_panel_ids);
         self.visuals.retain_spectrum_panels(&spectrum_panel_ids);
-        let spectrum_restored = self.visuals
+        let spectrum_restored = self
+            .visuals
             .set_spectrum_visible(self.window_visible && !spectrum_panel_ids.is_empty());
-        let radial_restored = self.radial_spectrum.set_visible(self.window_visible
-            && active_panels.iter().any(|panel| panel.kind == "audio_visualizer"));
+        let radial_restored = self.radial_spectrum.set_visible(
+            self.window_visible
+                && active_panels
+                    .iter()
+                    .any(|panel| panel.kind == "audio_visualizer"),
+        );
         let analysis_visible = self.window_visible
             && active_panels.iter().any(|panel| {
                 matches!(
@@ -1886,8 +1895,8 @@ impl GuiApp {
         if analysis_visible {
             let spectrum_changed = self.visuals.configure(&self.state.system.config);
             let radial_changed = self.radial_spectrum.configure(&self.state.system.config);
-            self.analysis_needs_refresh |= spectrum_restored || radial_restored
-                || spectrum_changed || radial_changed;
+            self.analysis_needs_refresh |=
+                spectrum_restored || radial_restored || spectrum_changed || radial_changed;
         }
         if analysis_visible != self.analysis_worker_enabled {
             self.analysis_worker_enabled = analysis_visible;
@@ -2586,14 +2595,18 @@ impl Render for GuiApp {
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| this.finish_drag(cx)),
             )
-            .child(canvas(
-                |_, _, _| (),
-                move |_, _, window, _| {
-                    paint_visuals.release_retired(window);
-                    paint_waveform.release_retired(window);
-                    paint_visuals.finish_prepaint();
-                },
-            ).absolute().size_full())
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |_, _, window, _| {
+                        paint_visuals.release_retired(window);
+                        paint_waveform.release_retired(window);
+                        paint_visuals.finish_prepaint();
+                    },
+                )
+                .absolute()
+                .size_full(),
+            )
             .child(
                 div()
                     .flex_1()

@@ -537,14 +537,17 @@ impl Output {
 
     pub(super) fn refill_delay(&self, eof: bool) -> Duration {
         let frames = if eof {
-            self.submitted.saturating_sub(self.shared.retired.load(Ordering::Acquire))
+            self.submitted
+                .saturating_sub(self.shared.retired.load(Ordering::Acquire))
         } else {
             (self.producer.occupied_len() / self.source_channels) as u64 / 2
         };
         // Keep half the buffered PCM as decode/scheduling headroom. End-of-track
         // tails retain a 10ms clock fallback, not an empty-ring refill busy loop.
-        Duration::from_secs_f64(frames as f64 / self.rate as f64)
-            .clamp(Duration::from_millis(if eof { 10 } else { 1 }), Duration::from_millis(100))
+        Duration::from_secs_f64(frames as f64 / self.rate as f64).clamp(
+            Duration::from_millis(if eof { 10 } else { 1 }),
+            Duration::from_millis(100),
+        )
     }
 
     // Return complete frames consumed; never publish a partial interleaved frame.
@@ -716,16 +719,22 @@ impl OutputCallback {
             if analyze {
                 let gap = self.tap_gap;
                 let weights = &self.analysis_weights;
-                let accepted = self.tap.push_iter(
-                    scratch.chunks_exact(source_channels).enumerate().map(|(index, frame)| {
-                        let mut samples = [0.0; 2];
-                        for (sample, weights) in frame.iter().zip(weights) {
-                            samples[0] += sample * weights[0];
-                            samples[1] += sample * weights[1];
-                        }
-                        TapFrame { samples, epoch, gap: gap && index == 0 }
-                    }),
-                );
+                let accepted =
+                    self.tap
+                        .push_iter(scratch.chunks_exact(source_channels).enumerate().map(
+                            |(index, frame)| {
+                                let mut samples = [0.0; 2];
+                                for (sample, weights) in frame.iter().zip(weights) {
+                                    samples[0] += sample * weights[0];
+                                    samples[1] += sample * weights[1];
+                                }
+                                TapFrame {
+                                    samples,
+                                    epoch,
+                                    gap: gap && index == 0,
+                                }
+                            },
+                        ));
                 // A partial block leaves a discontinuity for the next accepted frame.
                 self.tap_gap = accepted < samples / source_channels;
             }
@@ -741,7 +750,8 @@ impl OutputCallback {
                 }
             }
         }
-        if count > 0 && self.consumer.occupied_len() <= self.consumer.capacity().get() / 4
+        if count > 0
+            && self.consumer.occupied_len() <= self.consumer.capacity().get() / 4
             && self.shared.refill_armed.swap(false, Ordering::AcqRel)
         {
             let _ = self.shared.wakeup.try_send(());
@@ -758,17 +768,26 @@ impl OutputCallback {
 
 #[cfg(test)]
 pub(super) fn test_backend(
-    rate: u32, paused: bool, layout: &[Channel],
+    rate: u32,
+    paused: bool,
+    layout: &[Channel],
 ) -> (Output, impl FnMut(&mut [f32], u64) + use<>) {
     let (output, mut callback, analyzer) = tests::test_output_layout(
-        rate, paused, layout, layout, (rate / 4) as usize * layout.len(),
+        rate,
+        paused,
+        layout,
+        layout,
+        (rate / 4) as usize * layout.len(),
     );
     (output, move |data, millis| {
         let _keep_analyzer_alive = &analyzer;
-        callback.render(data, cpal::OutputStreamTimestamp {
-            callback: cpal::StreamInstant::from_millis(millis),
-            playback: cpal::StreamInstant::from_millis(millis + 20),
-        });
+        callback.render(
+            data,
+            cpal::OutputStreamTimestamp {
+                callback: cpal::StreamInstant::from_millis(millis),
+                playback: cpal::StreamInstant::from_millis(millis + 20),
+            },
+        );
     })
 }
 
@@ -882,8 +901,14 @@ mod tests {
         let (mut output, mut callback, _analyzer) =
             test_output_layout(192_000, false, &stereo, &stereo, frames * 2);
         let (mut tap, mut samples) = HeapRb::new(4).split();
-        tap.push_iter((0..3).map(|_| TapFrame { samples: [0.0; 2], epoch: 0, gap: false }));
-        for _ in 0..3 { samples.try_pop().unwrap(); }
+        tap.push_iter((0..3).map(|_| TapFrame {
+            samples: [0.0; 2],
+            epoch: 0,
+            gap: false,
+        }));
+        for _ in 0..3 {
+            samples.try_pop().unwrap();
+        }
         callback.tap = tap;
         callback.control.enabled.store(true, Ordering::Release);
         callback.control.epoch.store(17, Ordering::Release);
@@ -1059,7 +1084,10 @@ mod tests {
                 let occupied = output.producer.occupied_len() / 2;
                 assert!(delay <= Duration::from_secs_f64(occupied as f64 / rate as f64 / 2.0));
                 assert_eq!(delay, Duration::from_millis(100));
-                callback.render(&mut data, timestamp(elapsed.as_millis() as u64, elapsed.as_millis() as u64 + 20));
+                callback.render(
+                    &mut data,
+                    timestamp(elapsed.as_millis() as u64, elapsed.as_millis() as u64 + 20),
+                );
                 assert!(data.iter().all(|sample| *sample == 0.25));
                 assert!(output.notifications().try_recv().is_err());
                 elapsed += delay;

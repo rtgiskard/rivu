@@ -168,7 +168,8 @@ impl WaveformAccumulator {
     }
 
     pub(super) fn push(&mut self, start: f64, samples: &[f32], rate: u32, channels: usize) {
-        self.frame.push_bins(start, samples, rate, channels, &mut self.dirty);
+        self.frame
+            .push_bins(start, samples, rate, channels, &mut self.dirty);
     }
 
     pub(super) fn finish(&mut self, coverage: &WaveformCoverage) {
@@ -179,8 +180,10 @@ impl WaveformAccumulator {
     /// bins are copied (all bins only after timeline doubling); no PCM is read.
     /// A manually installed complete scan always wins over in-flight playback.
     pub(super) fn publish(&mut self, shared: &mut WaveformFrame) {
-        if shared.path != self.frame.path || shared.range != self.frame.range
-            || shared.revision != self.published_revision || shared.complete
+        if shared.path != self.frame.path
+            || shared.range != self.frame.range
+            || shared.revision != self.published_revision
+            || shared.complete
         {
             self.frame.complete = true;
             self.dirty = None;
@@ -195,15 +198,26 @@ impl WaveformAccumulator {
                 shared.$field.truncate(self.frame.$field.len());
             )+ };
         }
-        publish_bins!(peaks, rms, rms_counts, left_peaks, right_peaks, left_rms, right_rms,
-            left_rms_counts, right_rms_counts);
+        publish_bins!(
+            peaks,
+            rms,
+            rms_counts,
+            left_peaks,
+            right_peaks,
+            left_rms,
+            right_rms,
+            left_rms_counts,
+            right_rms_counts
+        );
         shared.complete = self.frame.complete;
         shared.duration = self.frame.duration;
         shared.span_seconds = self.frame.span_seconds;
         shared.max_peak = self.frame.max_peak;
         shared.last_push_start = self.frame.last_push_start;
         if shared.channel_weights != self.frame.channel_weights {
-            shared.channel_weights.clone_from(&self.frame.channel_weights);
+            shared
+                .channel_weights
+                .clone_from(&self.frame.channel_weights);
         }
         shared.revision = self.frame.revision;
         self.published_revision = shared.revision;
@@ -562,7 +576,6 @@ mod tests {
         accumulator.publish(&mut shared);
         assert_same_bins(&shared, &expected);
     }
-
 
     fn frame(duration: Option<f64>, rate: u32) -> WaveformFrame {
         let mut frame = WaveformFrame::default();

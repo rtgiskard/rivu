@@ -145,11 +145,13 @@ impl RadialSpectrum {
             return;
         }
         let mut data = self.data.borrow_mut();
-        if !data.visible || frame.spectrum_db.len() != frame.frequencies_hz.len()
+        if !data.visible
+            || frame.spectrum_db.len() != frame.frequencies_hz.len()
             || !frame.settings.is_some_and(|settings| {
                 settings.fft_size == data.expected_settings.fft_size
                     && settings.window == data.expected_settings.window
-            }) {
+            })
+        {
             return;
         }
         if data.source_generation != Some(frame.generation) {
@@ -626,8 +628,16 @@ mod tests {
 
     #[test]
     fn radial_rejects_stale_fft_and_window_configuration() {
-        for config in [Config { spectrum_fft_size: 16384, ..Config::default() },
-                       Config { spectrum_window: crate::config::SpectrumWindow::Hann, ..Config::default() }] {
+        for config in [
+            Config {
+                spectrum_fft_size: 16384,
+                ..Config::default()
+            },
+            Config {
+                spectrum_window: crate::config::SpectrumWindow::Hann,
+                ..Config::default()
+            },
+        ] {
             let mut radial = RadialSpectrum::new();
             radial.update(&frame());
             radial.configure(&config);

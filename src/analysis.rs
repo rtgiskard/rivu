@@ -1,6 +1,9 @@
 use crate::config::{Config, SpectrumWindow};
 use parking_lot::RwLock;
-use ringbuf::{HeapCons, HeapProd, HeapRb, traits::{Consumer, Observer}};
+use ringbuf::{
+    HeapCons, HeapProd, HeapRb,
+    traits::{Consumer, Observer},
+};
 use rustfft::{Fft, FftPlanner, num_complex::Complex32};
 use std::{
     sync::{
@@ -421,11 +424,15 @@ mod tests {
             let epoch = worker.control.epoch.load(Ordering::Acquire);
             let value = (transition + 1) as f32 * 0.125;
             for index in 0..512 {
-                assert!(producer.try_push(TapFrame {
-                    samples: [value, -value],
-                    epoch,
-                    gap: transition == 3 && index == 0,
-                }).is_ok());
+                assert!(
+                    producer
+                        .try_push(TapFrame {
+                            samples: [value, -value],
+                            epoch,
+                            gap: transition == 3 && index == 0,
+                        })
+                        .is_ok()
+                );
             }
             let deadline = Instant::now() + Duration::from_secs(2);
             let current = loop {

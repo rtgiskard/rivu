@@ -10,10 +10,7 @@ use crate::analysis::AnalysisWorker;
 use anyhow::Result;
 use crossbeam_channel::Receiver;
 use parking_lot::RwLock;
-use std::{
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{path::PathBuf, sync::Arc};
 
 const PENDING_BUFFER_CAPACITY: usize = 16_384;
 
@@ -121,10 +118,17 @@ impl Playback {
         auto_mix: bool,
         analyzer: &AnalysisWorker,
     ) -> Result<()> {
-        self.restart_output_with(target, |source, paused| Output::new(
-            device, source.info().sample_rate, source.layout(),
-            volume, paused, auto_mix, analyzer,
-        ))
+        self.restart_output_with(target, |source, paused| {
+            Output::new(
+                device,
+                source.info().sample_rate,
+                source.layout(),
+                volume,
+                paused,
+                auto_mix,
+                analyzer,
+            )
+        })
     }
 
     fn restart_output_with(
@@ -133,12 +137,17 @@ impl Playback {
         create: impl FnOnce(&Source, bool) -> Result<Output>,
     ) -> Result<()> {
         let position = target.unwrap_or_else(|| self.position()).max(0.0);
-        let position = self.info().duration.map_or(position, |end| position.min(end));
+        let position = self
+            .info()
+            .duration
+            .map_or(position, |end| position.min(end));
         let heard = self.prior_heard + self.output.close();
         self.source.seek(position)?;
         let output = create(&self.source, self.paused)?;
         let converter = Converter::new(
-            self.source.info().sample_rate, output.rate(), self.source.layout().len(),
+            self.source.info().sample_rate,
+            output.rate(),
+            self.source.layout().len(),
         )?;
         self.output = output;
         self.converter = converter;
@@ -158,7 +167,6 @@ impl Playback {
     pub(super) fn generation(&self) -> u64 {
         self.generation
     }
-
 
     pub(super) fn info(&self) -> &MediaInfo {
         self.source.info()
@@ -228,13 +236,16 @@ impl Playback {
             if let Some((frames, start_seconds)) = self.source.next_frames()? {
                 self.waveform_coverage
                     .record(start_seconds, frames.len() / channels, sample_rate);
-                self.waveform_accumulator.push(start_seconds, frames, sample_rate, channels);
-                self.waveform_accumulator.publish(&mut self.waveform.write());
+                self.waveform_accumulator
+                    .push(start_seconds, frames, sample_rate, channels);
+                self.waveform_accumulator
+                    .publish(&mut self.waveform.write());
                 self.converter.push(frames, &mut self.pending)?;
             } else {
                 self.converter.finish(&mut self.pending)?;
                 self.waveform_accumulator.finish(&self.waveform_coverage);
-                self.waveform_accumulator.publish(&mut self.waveform.write());
+                self.waveform_accumulator
+                    .publish(&mut self.waveform.write());
                 self.eof = true;
             }
         }
@@ -268,7 +279,8 @@ mod tests {
         file.write_all(b"\x02\0\x10\0data").unwrap();
         file.write_all(&bytes.to_le_bytes()).unwrap();
         for index in 0..rate * 2 {
-            file.write_all(&((index % 16000) as i16).to_le_bytes()).unwrap();
+            file.write_all(&((index % 16000) as i16).to_le_bytes())
+                .unwrap();
         }
         file
     }
@@ -276,18 +288,32 @@ mod tests {
     #[test]
     fn repeated_paused_cue_seeks_discard_old_pcm_and_preserve_exact_position() {
         let file = pcm();
-        let range = Some(PlaybackRange { start_seconds: 0.25, end_seconds: Some(1.75) });
+        let range = Some(PlaybackRange {
+            start_seconds: 0.25,
+            end_seconds: Some(1.75),
+        });
         let mut source = Source::open(file.path(), 64 * 1024, false).unwrap();
         source.restrict(range.unwrap()).unwrap();
         let waveform = Arc::new(RwLock::new(WaveformFrame::default()));
-        waveform.write().select(file.path(), range, source.info().duration, 8_000);
-        let (output, mut old_render) = super::super::output::test_backend(8_000, false, source.layout());
+        waveform
+            .write()
+            .select(file.path(), range, source.info().duration, 8_000);
+        let (output, mut old_render) =
+            super::super::output::test_backend(8_000, false, source.layout());
         let waveform_accumulator = WaveformAccumulator::new(waveform.read().clone());
         let mut playback = Playback {
-            source, output, converter: Converter::new(8_000, 8_000, 1).unwrap(),
-            pending: Vec::new(), offset_frames: 0, generation: 1,
-            base_position: 0.0, prior_heard: 0.0,
-            eof: false, paused: false, waveform, waveform_accumulator,
+            source,
+            output,
+            converter: Converter::new(8_000, 8_000, 1).unwrap(),
+            pending: Vec::new(),
+            offset_frames: 0,
+            generation: 1,
+            base_position: 0.0,
+            prior_heard: 0.0,
+            eof: false,
+            paused: false,
+            waveform,
+            waveform_accumulator,
             waveform_coverage: WaveformCoverage::new(0.0),
         };
         playback.fill().unwrap();
@@ -298,11 +324,14 @@ mod tests {
         let installed = playback.waveform.read().clone();
         playback.pause(true);
         for target in [0.75, 0.125, 1.0, 0.0] {
-            let (output, mut render) = super::super::output::test_backend(8_000, true, playback.source.layout());
-            playback.restart_output_with(Some(target), |_, paused| {
-                assert!(paused);
-                Ok(output)
-            }).unwrap();
+            let (output, mut render) =
+                super::super::output::test_backend(8_000, true, playback.source.layout());
+            playback
+                .restart_output_with(Some(target), |_, paused| {
+                    assert!(paused);
+                    Ok(output)
+                })
+                .unwrap();
             assert_eq!(playback.position(), target);
             assert_eq!(playback.heard(), 0.0);
             let mut data = [1.0; 64];

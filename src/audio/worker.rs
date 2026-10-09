@@ -224,11 +224,17 @@ impl Worker {
                     if device_changed && let Err(error) = validate_device(device.as_deref()) {
                         self.fail(error);
                     } else {
-                        let restart = device_changed || (mix_changed && self.playback.as_ref()
-                            .is_some_and(Playback::auto_mix_affects_output));
+                        let restart = device_changed
+                            || (mix_changed
+                                && self
+                                    .playback
+                                    .as_ref()
+                                    .is_some_and(Playback::auto_mix_affects_output));
                         self.device = device;
                         self.pipewire_auto_mix = auto_mix;
-                        if restart { self.reopen(None); }
+                        if restart {
+                            self.reopen(None);
+                        }
                     }
                 }
             }
@@ -238,10 +244,15 @@ impl Worker {
     fn reopen(&mut self, target: Option<f64>) {
         if let Some(playback) = self.playback.as_mut() {
             let result = playback.restart_output(
-                target, self.device.as_deref(), self.volume,
-                self.pipewire_auto_mix, &self.analyzer,
+                target,
+                self.device.as_deref(),
+                self.volume,
+                self.pipewire_auto_mix,
+                &self.analyzer,
             );
-            if let Err(error) = result { self.fail(error); }
+            if let Err(error) = result {
+                self.fail(error);
+            }
             self.refresh_analysis();
         }
     }
@@ -321,9 +332,9 @@ impl Worker {
             let notifications = playback.notifications().clone();
             // Pause waits for commands, errors or the final device-clock tail.
             // Stable paused playback never schedules a status/GUI polling tick.
-            let deadline = playback.refill_delay().min(
-                Duration::from_millis(100).saturating_sub(self.progress.elapsed()),
-            );
+            let deadline = playback
+                .refill_delay()
+                .min(Duration::from_millis(100).saturating_sub(self.progress.elapsed()));
             let command = if playback.paused() {
                 select! {
                     recv(self.shutdown) -> _ => break,

@@ -45,7 +45,12 @@ pub(super) fn scan(path: &Path) -> Result<Option<Detection>> {
     scan_region(&mut file, 0, length, &mut window)
 }
 
-fn scan_region(file: &mut File, offset: u64, length: u64, window: &mut [u8]) -> Result<Option<Detection>> {
+fn scan_region(
+    file: &mut File,
+    offset: u64,
+    length: u64,
+    window: &mut [u8],
+) -> Result<Option<Detection>> {
     let limit = length.min(MAX_SCAN as u64);
     let mut position = 0u64;
     // Chunk reads and retained overlap share bounded storage. Each region starts
@@ -281,17 +286,36 @@ mod tests {
         file.write_all(&frames).unwrap();
         let mut window = vec![0; SCAN_WINDOW];
         let length = (prefix + frames.len()) as u64;
-        assert!(scan_region(&mut file, 0, length, &mut window).unwrap().is_some());
-        assert!(scan_region(&mut file, 0, length - 1, &mut window).unwrap().is_none());
-        assert!(scan_region(&mut file, prefix as u64, 192, &mut window).unwrap().is_none());
-        assert!(scan_region(&mut file, (prefix + 192) as u64, 96, &mut window).unwrap().is_none());
+        assert!(
+            scan_region(&mut file, 0, length, &mut window)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            scan_region(&mut file, 0, length - 1, &mut window)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            scan_region(&mut file, prefix as u64, 192, &mut window)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            scan_region(&mut file, (prefix + 192) as u64, 96, &mut window)
+                .unwrap()
+                .is_none()
+        );
         file.set_len(0).unwrap();
         file.rewind().unwrap();
         file.write_all(&vec![0; MAX_SCAN - 96]).unwrap();
         file.write_all(&frames).unwrap();
-        assert!(scan_region(&mut file, 0, (MAX_SCAN + 192) as u64, &mut window).unwrap().is_none());
+        assert!(
+            scan_region(&mut file, 0, (MAX_SCAN + 192) as u64, &mut window)
+                .unwrap()
+                .is_none()
+        );
     }
-
 
     fn set_bits(bytes: &mut [u8], start: usize, count: usize, value: u32) {
         for n in 0..count {
