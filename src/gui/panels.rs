@@ -222,10 +222,12 @@ impl GuiApp {
                     .w(px(34.))
                     .flex_shrink_0(),
             );
+        let scroll = self.scroll_views.content(("transport", panel_id));
         div()
             .id(("transport-panel", panel_id))
             .size_full()
             .overflow_y_scroll()
+            .track_scroll(&scroll)
             .child(
                 row()
                     .items_center()
@@ -603,11 +605,15 @@ impl GuiApp {
             panel = panel.child(self.library_scan_status());
         }
         if self.library_tree_active {
+            self.scroll_views
+                .register_list(("library-tree", panel_id), &self.directory_tree.scroll);
             panel
                 .child(self.library_directory_list(panel_id, cx))
                 .into_any_element()
         } else {
             let rows = self.library_buffer.rows.len();
+            self.scroll_views
+                .register_list(("library-flat", panel_id), &self.library_buffer.scroll);
             panel
                 .child(list_viewport(
                     uniform_list(
@@ -900,6 +906,7 @@ impl GuiApp {
                 }
             }
         }
+        let scroll = self.scroll_views.list(("queue", panel_id));
         panel_surface(("queue-panel", panel_id))
             .on_drop(cx.listener(|this, drag: &LibraryDrag, window, cx| {
                 window.prevent_default();
@@ -1004,7 +1011,8 @@ impl GuiApp {
                 .drag_over::<LibraryDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
                 .h_full()
                 .min_h_0()
-                .w_full(),
+                .w_full()
+                .track_scroll(&scroll),
             ))
             .into_any_element()
     }
@@ -1057,6 +1065,8 @@ impl GuiApp {
         } else {
             0
         };
+        self.scroll_views
+            .register_list(("playlist-catalog", panel_id), &self.playlist_buffer.scroll);
         let mut panel = panel_surface(("playlists-panel", panel_id))
             .on_drop(cx.listener(|this, drag: &LibraryDrag, window, cx| {
                 window.prevent_default();
@@ -1161,6 +1171,10 @@ impl GuiApp {
                 .track_scroll(&self.playlist_buffer.scroll),
             ));
         if let Some(id) = playlist_id {
+            self.scroll_views.register_list(
+                ("playlist-entries", panel_id),
+                &self.playlist_entries.scroll,
+            );
             panel = panel
                 .child(caption(format!("{} · {entry_count} tracks", selected_name)).truncate())
                 .child(
@@ -1368,6 +1382,7 @@ impl GuiApp {
                 .strip_prefix("Last played · ")
                 .unwrap_or(&last_played)
                 .to_owned();
+            let scroll = self.scroll_views.content(("metadata", panel_id));
             let details = div()
                 .id(("metadata-details", panel_id))
                 .flex()
@@ -1375,166 +1390,175 @@ impl GuiApp {
                 .flex_1()
                 .min_h_0()
                 .overflow_y_scroll()
-                .p(px(UI_INSET))
-                .gap_3()
+                .track_scroll(&scroll)
                 .child(
-                    row()
-                        .justify_between()
-                        .items_center()
-                        .child(
-                            caption(format!("Track #{id}"))
-                                .text_lg()
-                                .text_color(rgb(TEXT)),
-                        )
-                        .child(icon_button(
-                            ("metadata-favorite", panel_id),
-                            if favorite { "󰓎" } else { "󰓐" },
-                            if favorite {
-                                "Remove from favorites"
-                            } else {
-                                "Add to favorites"
-                            },
-                            cx,
-                            move |this, _, cx| {
-                                this.send(
-                                    Command::SetFavorite {
-                                        track_ids: vec![id],
-                                        favorite: !favorite,
-                                    },
-                                    cx,
-                                );
-                            },
-                        )),
-                )
-                .child(metadata_group(
-                    "File",
-                    metadata_row(
-                        metadata_pair("File path", file_path),
-                        metadata_pair(
-                            "Availability",
-                            if track.missing {
-                                "Missing"
-                            } else {
-                                "Available"
-                            },
-                        ),
-                    ),
-                ))
-                .child(metadata_group(
-                    "Metadata",
                     column()
-                        .gap_1()
-                        .child(metadata_row(
-                            metadata_pair(
-                                "Codec",
-                                if track.codec.is_empty() {
-                                    "—".to_owned()
-                                } else {
-                                    track.codec.clone()
-                                },
-                            ),
-                            metadata_pair(
-                                "Sample rate",
-                                if track.sample_rate == 0 {
-                                    "—".to_owned()
-                                } else {
-                                    format!("{} Hz", track.sample_rate)
-                                },
-                            ),
-                        ))
-                        .child(metadata_row(
-                            metadata_pair(
-                                "Channels",
-                                if track.channels == 0 {
-                                    "—".to_owned()
-                                } else {
-                                    track.channels.to_string()
-                                },
-                            ),
-                            metadata_pair(
-                                "Duration",
-                                track.duration.map_or("—".into(), format_time),
-                            ),
-                        ))
-                        .child(metadata_row(
-                            metadata_pair(
-                                "Bitrate",
-                                track.bitrate_bps.map_or("—".into(), |value| {
-                                    format!("{:.1} kbps", value as f64 / 1000.0)
-                                }),
-                            ),
-                            metadata_pair(
-                                "Bits/sample",
-                                track
-                                    .bits_per_sample
-                                    .map_or("—".into(), |value| value.to_string()),
-                            ),
-                        )),
-                ))
-                .child(metadata_group(
-                    "Tags",
-                    column()
-                        .gap_2()
-                        .child(metadata_row(
-                            self.panel_field(Field::Title, "Title"),
-                            self.panel_field(Field::Artist, "Artist"),
-                        ))
-                        .child(metadata_row(
-                            self.panel_field(Field::Album, "Album"),
-                            metadata_pair(
-                                "Disc",
-                                track
-                                    .disc_number
-                                    .map_or("—".into(), |value| value.to_string()),
-                            ),
-                        ))
-                        .child(metadata_row(
-                            metadata_pair(
-                                "Track",
-                                track
-                                    .track_number
-                                    .map_or("—".into(), |value| value.to_string()),
-                            ),
-                            metadata_pair("Release", track.release_date.as_deref().unwrap_or("—")),
-                        ))
-                        .child(metadata_row(
-                            metadata_pair("Play count", track.play_count.to_string()),
-                            metadata_pair("Last played", last_played),
-                        ))
-                        .when_some(self.artwork_manager.uri_for(track), |tags, uri| {
-                            tags.child(artwork_preview(uri))
-                        })
+                        .flex_shrink_0()
+                        .p(px(UI_INSET))
+                        .gap_3()
                         .child(
                             row()
-                                .justify_end()
-                                .gap_2()
+                                .justify_between()
+                                .items_center()
                                 .child(
-                                    icon_button(
-                                        ("metadata-save", panel_id),
-                                        "󰆓",
-                                        "Save metadata",
-                                        cx,
-                                        move |this, _, cx| {
-                                            if metadata_dirty {
-                                                this.send(
-                                                    Command::EditTrack {
-                                                        track_id: id,
-                                                        title: this.value(Field::Title, cx),
-                                                        artist: this.value(Field::Artist, cx),
-                                                        album: this.value(Field::Album, cx),
-                                                    },
-                                                    cx,
-                                                );
-                                            }
-                                        },
-                                    )
-                                    .when(!metadata_dirty, |view| {
-                                        view.opacity(0.4).cursor_default()
-                                    }),
+                                    caption(format!("Track #{id}"))
+                                        .text_lg()
+                                        .text_color(rgb(TEXT)),
                                 )
-                                .child(caption("Media files are never modified.")),
-                        ),
-                ));
+                                .child(icon_button(
+                                    ("metadata-favorite", panel_id),
+                                    if favorite { "󰓎" } else { "󰓐" },
+                                    if favorite {
+                                        "Remove from favorites"
+                                    } else {
+                                        "Add to favorites"
+                                    },
+                                    cx,
+                                    move |this, _, cx| {
+                                        this.send(
+                                            Command::SetFavorite {
+                                                track_ids: vec![id],
+                                                favorite: !favorite,
+                                            },
+                                            cx,
+                                        );
+                                    },
+                                )),
+                        )
+                        .child(metadata_group(
+                            "File",
+                            metadata_row(
+                                metadata_pair("File path", file_path),
+                                metadata_pair(
+                                    "Availability",
+                                    if track.missing {
+                                        "Missing"
+                                    } else {
+                                        "Available"
+                                    },
+                                ),
+                            ),
+                        ))
+                        .child(metadata_group(
+                            "Metadata",
+                            column()
+                                .gap_1()
+                                .child(metadata_row(
+                                    metadata_pair(
+                                        "Codec",
+                                        if track.codec.is_empty() {
+                                            "—".to_owned()
+                                        } else {
+                                            track.codec.clone()
+                                        },
+                                    ),
+                                    metadata_pair(
+                                        "Sample rate",
+                                        if track.sample_rate == 0 {
+                                            "—".to_owned()
+                                        } else {
+                                            format!("{} Hz", track.sample_rate)
+                                        },
+                                    ),
+                                ))
+                                .child(metadata_row(
+                                    metadata_pair(
+                                        "Channels",
+                                        if track.channels == 0 {
+                                            "—".to_owned()
+                                        } else {
+                                            track.channels.to_string()
+                                        },
+                                    ),
+                                    metadata_pair(
+                                        "Duration",
+                                        track.duration.map_or("—".into(), format_time),
+                                    ),
+                                ))
+                                .child(metadata_row(
+                                    metadata_pair(
+                                        "Bitrate",
+                                        track.bitrate_bps.map_or("—".into(), |value| {
+                                            format!("{:.1} kbps", value as f64 / 1000.0)
+                                        }),
+                                    ),
+                                    metadata_pair(
+                                        "Bits/sample",
+                                        track
+                                            .bits_per_sample
+                                            .map_or("—".into(), |value| value.to_string()),
+                                    ),
+                                )),
+                        ))
+                        .child(metadata_group(
+                            "Tags",
+                            column()
+                                .gap_2()
+                                .child(metadata_row(
+                                    self.panel_field(Field::Title, "Title"),
+                                    self.panel_field(Field::Artist, "Artist"),
+                                ))
+                                .child(metadata_row(
+                                    self.panel_field(Field::Album, "Album"),
+                                    metadata_pair(
+                                        "Disc",
+                                        track
+                                            .disc_number
+                                            .map_or("—".into(), |value| value.to_string()),
+                                    ),
+                                ))
+                                .child(metadata_row(
+                                    metadata_pair(
+                                        "Track",
+                                        track
+                                            .track_number
+                                            .map_or("—".into(), |value| value.to_string()),
+                                    ),
+                                    metadata_pair(
+                                        "Release",
+                                        track.release_date.as_deref().unwrap_or("—"),
+                                    ),
+                                ))
+                                .child(metadata_row(
+                                    metadata_pair("Play count", track.play_count.to_string()),
+                                    metadata_pair("Last played", last_played),
+                                ))
+                                .when_some(self.artwork_manager.uri_for(track), |tags, uri| {
+                                    tags.child(artwork_preview(uri))
+                                })
+                                .child(
+                                    row()
+                                        .justify_end()
+                                        .gap_2()
+                                        .child(
+                                            icon_button(
+                                                ("metadata-save", panel_id),
+                                                "󰆓",
+                                                "Save metadata",
+                                                cx,
+                                                move |this, _, cx| {
+                                                    if metadata_dirty {
+                                                        this.send(
+                                                            Command::EditTrack {
+                                                                track_id: id,
+                                                                title: this.value(Field::Title, cx),
+                                                                artist: this
+                                                                    .value(Field::Artist, cx),
+                                                                album: this.value(Field::Album, cx),
+                                                            },
+                                                            cx,
+                                                        );
+                                                    }
+                                                },
+                                            )
+                                            .when(!metadata_dirty, |view| {
+                                                view.opacity(0.4).cursor_default()
+                                            }),
+                                        )
+                                        .child(caption("Media files are never modified.")),
+                                ),
+                        )),
+                );
             panel = panel.child(details);
         } else {
             panel = panel.child(column().flex_1().p(px(UI_INSET)).gap_2().child(empty_state(
@@ -1622,6 +1646,7 @@ impl GuiApp {
                 Some(px(148.)),
                 cx,
             ));
+        let scroll = self.scroll_views.list(("history", panel_id));
         panel_surface(("history-panel", panel_id))
             .child(panel_header(
                 "Recent tracks",
@@ -1698,7 +1723,8 @@ impl GuiApp {
                     .h_full()
                     .flex_1()
                     .min_h_0()
-                    .w_full(),
+                    .w_full()
+                    .track_scroll(&scroll),
                 ),
             ))
             .into_any_element()

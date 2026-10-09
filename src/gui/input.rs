@@ -712,6 +712,7 @@ impl Render for Input {
                 div()
                     .h(px(34.))
                     .w_full()
+                    .overflow_hidden()
                     .p(px(7.))
                     .child(InputElement { input: cx.entity() }),
             )

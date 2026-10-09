@@ -56,6 +56,10 @@ link:../src/config.rs[`Config`]; log handling is in link:../src/logging.rs[loggi
 
 The bottom-right gear opens settings. Library roots are separated by semicolons;
 the output device is selected from the currently available devices in a dropdown.
+In an open dropdown, Up/Down moves the highlight with wraparound;
+PageUp/PageDown moves by the visible row count and clamps at the first or last
+option without scrolling the settings underneath. Enter or Space accepts the
+highlighted option, and Escape closes the dropdown.
 General groups Library, Playback, Audio, Interface, Desktop integration, and
 Logging. Audio contains output selection, media read buffering, and decoder/remix
 switches; Interface contains the editable font family, font presets, scale,

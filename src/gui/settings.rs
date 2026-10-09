@@ -808,10 +808,37 @@ impl GuiApp {
         self.settings.dropdown.close();
     }
 
-    pub(super) fn settings_dropdown_key(&mut self, key: &str, cx: &mut Context<Self>) {
+    pub(super) fn settings_dropdown_key(
+        &mut self,
+        key: &str,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
         match key {
             "up" => self.settings.dropdown.move_previous(),
             "down" => self.settings.dropdown.move_next(),
+            "pageup" | "pagedown" => {
+                if let Some(index) = self.settings.dropdown.selected_index() {
+                    let viewport_height = self
+                        .settings
+                        .device_scroll
+                        .0
+                        .borrow()
+                        .base_handle
+                        .bounds()
+                        .size
+                        .height;
+                    let row_height = DROPDOWN_ROW_REMS * f32::from(window.rem_size());
+                    let visible_rows =
+                        ((f32::from(viewport_height) / row_height).floor() as usize).max(1);
+                    let next = if key == "pagedown" {
+                        index.saturating_add(visible_rows)
+                    } else {
+                        index.saturating_sub(visible_rows)
+                    };
+                    self.settings.dropdown.select_index(next);
+                }
+            }
             "enter" | "space" => {
                 if let Some(index) = self.settings.dropdown.selected_index() {
                     self.choose_device(index, cx);
@@ -1392,6 +1419,7 @@ impl GuiApp {
                 self.visual_settings(cx)
             }
         };
+        let scroll = self.scroll_views.content((page_id, panel_id));
         panel = panel.child(
             div()
                 .id(page_id)
@@ -1400,6 +1428,7 @@ impl GuiApp {
                 .flex_1()
                 .min_h_0()
                 .overflow_y_scroll()
+                .track_scroll(&scroll)
                 .child(content.flex_shrink_0().p(gpui::px(UI_INSET))),
         );
         let feedback = if self.settings.applying {
@@ -1506,6 +1535,7 @@ impl GuiApp {
                                 dropdown_container("settings-dropdown", bounds.size.width)
                                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                                         this.settings.dropdown.close();
+                                        cx.stop_propagation();
                                         cx.notify();
                                     }))
                                     .child(choices),

@@ -99,6 +99,8 @@ an enclosing root does not close the same directory shown as another root.
 Directory disclosure markers are unboxed; clicking the directory row expands or
 collapses it. Rows omit redundant Folder labels but retain loading, empty, and
 unavailable status.
+Track details retain their natural content height in short panels; scrolling
+reveals lower fields instead of compressing and overlapping groups.
 
 
 == Paged views
@@ -113,6 +115,16 @@ evicted rows without clearing selections or metadata drafts.
 Collapsing a directory releases its subtree payloads but preserves descendant
 expansion choices and logical geometry for reopening. After a revision, stale
 ancestor anchors are revalidated before their directory identities are shown.
+
+In the GUI, unmodified `PageUp` / `PageDown` scroll one viewport height without
+changing selected rows. They target the last-clicked visible scroll viewport;
+after clicking elsewhere, the viewport under the pointer is used instead.
+This applies to flat Library and its directory tree, Queue, the playlist catalog
+and entries, history, metadata, and overflowing Playback content. Scrolling
+clamps at either end and loads newly visible library/playlist rows normally.
+Hidden or closed views cannot remain keyboard targets. Settings captures these
+keys for its current page; text inputs retain editing behavior, and About or an
+open menu prevents background paging. Settings dropdowns handle their own keys.
 
 `page_size` controls internal query batch size, not the visible viewport or total
 results. Each query reports the filtered total and at most `256` rows;

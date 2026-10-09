@@ -6,6 +6,7 @@ mod library;
 mod paged;
 mod panels;
 mod radial_spectrum;
+mod scrolling;
 mod settings;
 mod visuals;
 mod waveform;
@@ -492,6 +493,7 @@ pub(super) struct GuiApp {
     selected_queue: SelectionModel<u64>,
     list_focus: Option<ListFocus>,
     layout_focus: FocusHandle,
+    scroll_views: scrolling::ScrollViews,
 
     selected_playlist: Option<i64>,
     selected_entry: Option<i64>,
@@ -877,6 +879,7 @@ impl GuiApp {
             selected_entry: None,
             list_focus: None,
             layout_focus: cx.focus_handle(),
+            scroll_views: scrolling::ScrollViews::default(),
             metadata_track: None,
             full_track: None,
             error,
@@ -2352,6 +2355,7 @@ impl Render for GuiApp {
             self.state.system.config.nerd_symbols,
         ));
         window.set_rem_size(px(16. * self.state.system.config.ui_scale));
+        self.scroll_views.begin_frame();
         let root = self.layout.root.take();
         let layout_view = root
             .as_ref()
@@ -2410,12 +2414,30 @@ impl Render for GuiApp {
                         this.close_settings_dropdown();
                         cx.notify();
                     } else {
-                        this.settings_dropdown_key(key, cx);
+                        this.settings_dropdown_key(key, window, cx);
                     }
                     cx.stop_propagation();
                     return;
                 }
                 if this.settings_open {
+                    let modifiers = event.keystroke.modifiers;
+                    if matches!(key, "pageup" | "pagedown")
+                        && !modifiers.control
+                        && !modifiers.platform
+                        && !modifiers.alt
+                        && !modifiers.shift
+                        && !modifiers.function
+                        && this.settings_focus.is_focused(window)
+                    {
+                        if this
+                            .scroll_views
+                            .page(key == "pagedown", window.mouse_position(), true)
+                        {
+                            cx.notify();
+                        }
+                        cx.stop_propagation();
+                        return;
+                    }
                     if key == "escape" {
                         this.settings_open = false;
                         this.focus_layout(window, cx);
@@ -2484,6 +2506,14 @@ impl Render for GuiApp {
                             this.navigate_list(focus, key == "down", cx);
                         }
                     }
+                    "pageup" | "pagedown" => {
+                        if this
+                            .scroll_views
+                            .page(key == "pagedown", window.mouse_position(), false)
+                        {
+                            cx.notify();
+                        }
+                    }
                     "left" | "right" | "space" | " "
                         if this.library_tree_active
                             && this.active_list_focus() == Some(ListFocus::Library) =>
@@ -2507,6 +2537,14 @@ impl Render for GuiApp {
                     }
                 }
                 cx.stop_propagation();
+            }))
+            .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _, _| {
+                let modal = this.settings_open
+                    || this.about_open
+                    || this.app_menu_open
+                    || this.panel_menu.is_some()
+                    || this.catalog_open;
+                this.scroll_views.click(event.position, modal);
             }))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                 this.drag_position(event.position, cx)
@@ -2629,6 +2667,7 @@ impl Render for GuiApp {
             app = app.child(
                 column()
                     .id("app-menu-popup")
+                    .occlude()
                     .absolute()
                     .bottom(rems(3.0))
                     .right(gpui::px(UI_INSET))
@@ -2641,6 +2680,7 @@ impl Render for GuiApp {
                     .rounded_md()
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.app_menu_open = false;
+                        cx.stop_propagation();
                         cx.notify();
                     }))
                     .child(menu_item(
@@ -2698,6 +2738,7 @@ impl Render for GuiApp {
                     .occlude()
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.catalog_open = false;
+                        cx.stop_propagation();
                         cx.notify();
                     }))
                     .absolute()
@@ -2733,6 +2774,7 @@ impl Render for GuiApp {
             let mut menu = context_menu_container("panel-context-menu").on_mouse_down_out(
                 cx.listener(|this, _, _, cx| {
                     this.panel_menu = None;
+                    cx.stop_propagation();
                     cx.notify();
                 }),
             );
@@ -3174,6 +3216,7 @@ impl Render for GuiApp {
                     ),
             );
         }
+        self.scroll_views.finish_frame();
         app
     }
 }

@@ -50,6 +50,8 @@ Dropdown state wraps keyboard navigation, clamps out-of-range selection, and
 does not open an empty popover. Settings triggers own focus and repaint after
 opening; the popup uses the same rem-based row height as its rendered options
 and reveals the selected option when opened.
+Menus and dropdowns block clicks through their surfaces. Clicking outside
+dismisses the popup and consumes that click without activating the control below.
 
 About opens as an overlay inside the main window, with the Rivu logo on the left
 and left-aligned application/version details on the right. It shows only the
@@ -57,6 +59,14 @@ Git build identifier, without the package-version wrapper used by `rivu -V`.
 The embedded Unix build timestamp is converted
 to the local timezone for display, including its UTC offset. The top-right ×,
 Escape, or an outside click closes the overlay.
+
+=== Planned shared controls
+
+Scrollbars are a pending shared-component requirement, not a Library-only widget.
+Lists, trees, and other scrollable panels should share thumb dragging, track
+clicking, hover treatment, and UI-scale behavior. For virtualized views, thumb
+position and size must reflect the logical content and viewport without loading
+all rows or resetting selection as query batches arrive.
 
 == Build and install
 
