@@ -679,7 +679,8 @@ impl OutputCallback {
         } else {
             None
         };
-        data.fill(T::from_sample(0.0));
+        // Valid mapped samples are written once; only the silent tail is cleared.
+        data[count * self.channels..].fill(T::from_sample(0.0));
         for block in data[..count * self.channels].chunks_mut(Self::BLOCK_FRAMES * self.channels) {
             // Publish ring consumption once per block, including wrapped rings.
             // Scratch is fixed before stream start; every chunk contains whole frames.
@@ -687,29 +688,31 @@ impl OutputCallback {
             let scratch = &mut self.scratch[..samples];
             let consumed = self.consumer.pop_slice(scratch);
             debug_assert_eq!(consumed, samples);
+            if analyze {
+                let gap = self.tap_gap;
+                let weights = &self.analysis_weights;
+                let accepted = self.tap.push_iter(
+                    scratch.chunks_exact(source_channels).enumerate().map(|(index, frame)| {
+                        let mut samples = [0.0; 2];
+                        for (sample, weights) in frame.iter().zip(weights) {
+                            samples[0] += sample * weights[0];
+                            samples[1] += sample * weights[1];
+                        }
+                        TapFrame { samples, epoch, gap: gap && index == 0 }
+                    }),
+                );
+                // A partial block leaves a discontinuity for the next accepted frame.
+                self.tap_gap = accepted < samples / source_channels;
+            }
             for (output, frame) in block
                 .chunks_exact_mut(self.channels)
                 .zip(scratch.chunks_exact(source_channels))
             {
-                if analyze {
-                    let mut samples = [0.0; 2];
-                    for (sample, weights) in frame.iter().zip(&self.analysis_weights) {
-                        samples[0] += sample * weights[0];
-                        samples[1] += sample * weights[1];
-                    }
-                    self.tap_gap = self
-                        .tap
-                        .try_push(TapFrame {
-                            samples,
-                            epoch,
-                            gap: self.tap_gap,
-                        })
-                        .is_err();
-                }
                 for (sample, source) in output.iter_mut().zip(&self.mapping) {
-                    if let Some(source) = source {
-                        *sample = T::from_sample((frame[*source] * volume).clamp(-1.0, 1.0));
-                    }
+                    *sample = match source {
+                        Some(source) => T::from_sample((frame[*source] * volume).clamp(-1.0, 1.0)),
+                        None => T::from_sample(0.0),
+                    };
                 }
             }
         }
@@ -824,6 +827,34 @@ mod tests {
         output.push(&[0.0; 2]);
         callback.render(&mut [0.0_f32; 2], timestamp(2, 22));
         assert!(!samples.try_pop().unwrap().gap);
+    }
+
+    #[test]
+    fn tap_partial_blocks_preserve_epoch_and_wrapped_gap() {
+        let stereo = [Channel::FrontLeft, Channel::FrontRight];
+        let frames = OutputCallback::BLOCK_FRAMES + 3;
+        let (mut output, mut callback, _analyzer) =
+            test_output_layout(192_000, false, &stereo, &stereo, frames * 2);
+        let (mut tap, mut samples) = HeapRb::new(4).split();
+        tap.push_iter((0..3).map(|_| TapFrame { samples: [0.0; 2], epoch: 0, gap: false }));
+        for _ in 0..3 { samples.try_pop().unwrap(); }
+        callback.tap = tap;
+        callback.control.enabled.store(true, Ordering::Release);
+        callback.control.epoch.store(17, Ordering::Release);
+        output.push(&vec![0.5; frames * 2]);
+        callback.render(&mut vec![0.0_f32; frames * 2], timestamp(0, 20));
+        for _ in 0..4 {
+            let frame = samples.try_pop().unwrap();
+            assert_eq!(frame.samples, [0.5; 2]);
+            assert_eq!(frame.epoch, 17);
+            assert!(!frame.gap);
+        }
+        assert!(callback.tap_gap);
+        output.push(&[0.25; 4]);
+        callback.render(&mut [0.0_f32; 4], timestamp(1, 21));
+        assert!(samples.try_pop().unwrap().gap);
+        assert!(!samples.try_pop().unwrap().gap);
+        assert!(!callback.tap_gap);
     }
 
     fn test_output(rate: u32, paused: bool) -> (Output, OutputCallback, AnalysisWorker) {
