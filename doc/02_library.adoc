@@ -148,7 +148,7 @@ callers must limit the returned history themselves.
 Stop the core before removing `library.db` and its `-wal`/`-shm` sidecars, then scan
 the music files again. This resets playlists, saved queue, favorites, metadata
 overrides, and playback statistics; audio files, `config.toml`, and
-`workspace.json` are independent.
+`layout.json` are independent.
 
 To reclaim database/WAL space and refresh SQLite query statistics, ensure
 playback is stopped and no scan is active, then run:

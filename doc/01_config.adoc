@@ -1,4 +1,4 @@
-= Configuration and workspace
+= Configuration and layout
 
 Rivu reads `~/.config/rivu/config.toml` by default; path overrides are described in
 link:../readme.adoc[the README]. Omitted fields use defaults. A minimal example:
@@ -114,19 +114,19 @@ Settings controls are implemented in link:../src/gui/settings.rs[settings].
 
 See link:../readme.adoc[README] for application lifecycle and host behavior.
 
-== Workspace
+== Layout
 
-The desktop workspace is persisted as `workspace.json` in the data directory,
+The desktop layout is persisted as `layout.json` in the data directory,
 including panel layout, split ratios, tab order, tab-bar visibility, and the
-workspace lock. While unlocked, panels can be added, removed, moved, resized,
+layout lock. While unlocked, panels can be added, removed, moved, resized,
 and reordered. Right-click a panel to toggle its tab bar; right-click the
-bottom-right workspace button to toggle the lock, or left-click it to add a
+bottom-right layout button to toggle the lock, or left-click it to add a
 panel. Playback and tab selection remain available while locked.
 
 Errors and scan progress appear in the footer. Click a message or its copy icon
 to copy the complete text.
 
-Layout behavior and persistence: link:../src/gui/layout.rs[workspace layout].
+Layout behavior and persistence: link:../src/gui/layout.rs[desktop layout].
 
 == Visualization dB ranges
 

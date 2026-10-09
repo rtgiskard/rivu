@@ -1,11 +1,11 @@
-//! Workspace docking, independent of the windowing toolkit.
+//! Layout docking, independent of the windowing toolkit.
 //!
 //! Node and panel IDs share one monotonically allocated namespace. Every public
 //! transition preserves a normalized tree: tabs are nonempty, each split has
 //! two children, and each active ID belongs to its tab group. The caller chooses
-//! the persistence path (the desktop uses `workspace.json`).
-//! Legacy ID workspaces without a version gain a docked Playback panel above
-//! their unchanged tree. New workspaces preserve deliberate panel removal.
+//! the persistence path (the desktop uses `layout.json`).
+//! Legacy ID layouts without a version gain a docked Playback panel above
+//! their unchanged tree. New layouts preserve deliberate panel removal.
 //! Persistence stores only split/tab structure, panel kinds and group-local
 //! active indices (zero is omitted). Runtime IDs are rebuilt in traversal order.
 
@@ -68,7 +68,7 @@ pub struct Layout {
 
 // The reader alone understands legacy IDs. Runtime docking types deliberately
 // have no serde implementation, so persistence cannot accidentally expose IDs.
-mod workspace {
+mod persistence {
     use super::*;
     use serde::ser::SerializeSeq;
 
@@ -217,15 +217,15 @@ mod workspace {
         let id = *next_id;
         *next_id = id
             .checked_add(1)
-            .ok_or_else(|| anyhow!("workspace ID space exhausted"))?;
+            .ok_or_else(|| anyhow!("layout ID space exhausted"))?;
         Ok(id)
     }
 
     fn read_id(id: Option<u64>, next_id: &mut u64, legacy: bool) -> Result<u64> {
         if legacy {
-            id.ok_or_else(|| anyhow!("legacy workspace is missing an ID"))
+            id.ok_or_else(|| anyhow!("legacy layout is missing an ID"))
         } else if id.is_some() {
-            Err(anyhow!("workspace IDs require the legacy next_id field"))
+            Err(anyhow!("layout IDs require the legacy next_id field"))
         } else {
             allocate(next_id)
         }
@@ -542,7 +542,7 @@ impl Default for Layout {
         };
         layout
             .add_transport()
-            .expect("default workspace has spare IDs");
+            .expect("default layout has spare IDs");
         layout
     }
 }
@@ -553,7 +553,7 @@ impl Layout {
         let count = if self.root.is_some() { 3 } else { 2 };
         let next_id = id
             .checked_add(count)
-            .ok_or_else(|| anyhow!("workspace ID space exhausted"))?;
+            .ok_or_else(|| anyhow!("layout ID space exhausted"))?;
         let transport = Node::Tabs {
             id: id + 1,
             panels: vec![Panel {
@@ -589,14 +589,12 @@ impl Layout {
 
     fn allocate_ids(&mut self, count: u64) -> u64 {
         let first = self.next_id;
-        self.next_id = first
-            .checked_add(count)
-            .expect("workspace ID space exhausted");
+        self.next_id = first.checked_add(count).expect("layout ID space exhausted");
         first
     }
 
     /// Add a fresh instance and activate it. A split target selects its first
-    /// tabs; a missing target selects the workspace's first tabs. Empty layouts
+    /// tabs; a missing target selects the layout's first tabs. Empty layouts
     /// receive a new root group. Kinds are opaque catalog keys, not an enum.
     pub fn add(&mut self, kind: &str, target: Option<u64>) -> u64 {
         let count = if self.root.is_some() { 1 } else { 2 };
@@ -700,7 +698,7 @@ impl Layout {
             *active = panel_id;
         } else {
             // Allocate before taking the root, so even exhausted IDs cannot
-            // leave the workspace with its source removed.
+            // leave the layout with its source removed.
             let tabs_id = self.allocate_ids(2);
             let split_id = tabs_id + 1;
             let mut root = self.root.take().expect("source was checked");
@@ -819,13 +817,13 @@ impl Layout {
             ids: &mut HashSet<u64>,
         ) -> std::result::Result<(), String> {
             if id == 0 {
-                return Err("workspace IDs must be nonzero".into());
+                return Err("layout IDs must be nonzero".into());
             }
             if id >= next_id {
                 return Err(format!("ID {id} is not below next_id {next_id}"));
             }
             if !ids.insert(id) {
-                return Err(format!("duplicate workspace ID {id}"));
+                return Err(format!("duplicate layout ID {id}"));
             }
             Ok(())
         }
@@ -876,17 +874,17 @@ impl Layout {
 
     pub fn load(path: &Path) -> Result<Self> {
         let file =
-            File::open(path).with_context(|| format!("opening workspace {}", path.display()))?;
-        let input: workspace::Input = serde_json::from_reader(BufReader::new(file))
-            .with_context(|| format!("decoding workspace {}", path.display()))?;
+            File::open(path).with_context(|| format!("opening layout {}", path.display()))?;
+        let input: persistence::Input = serde_json::from_reader(BufReader::new(file))
+            .with_context(|| format!("decoding layout {}", path.display()))?;
         let layout = input
             .into_layout()
-            .with_context(|| format!("invalid workspace {}", path.display()))?;
+            .with_context(|| format!("invalid layout {}", path.display()))?;
         Ok(layout)
     }
 
     /// Validate, write a unique sibling temporary file, and atomically replace
-    /// the destination. A failed write never replaces the previous workspace.
+    /// the destination. A failed write never replaces the previous layout.
     pub fn save(&self, path: &Path) -> Result<()> {
         self.validate().map_err(|error| anyhow!(error))?;
         let parent = path
@@ -895,9 +893,9 @@ impl Layout {
             .unwrap_or_else(|| Path::new("."));
         let name = path
             .file_name()
-            .ok_or_else(|| anyhow!("workspace path has no filename"))?;
+            .ok_or_else(|| anyhow!("layout path has no filename"))?;
         fs::create_dir_all(parent)
-            .with_context(|| format!("creating workspace directory {}", parent.display()))?;
+            .with_context(|| format!("creating layout directory {}", parent.display()))?;
         static TEMP_ID: AtomicU64 = AtomicU64::new(1);
         let (temporary, file) = loop {
             let mut temporary_name = name.to_os_string();
@@ -914,18 +912,18 @@ impl Layout {
             {
                 Ok(file) => break (temporary, file),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(error).context("creating temporary workspace"),
+                Err(error) => return Err(error).context("creating temporary layout"),
             }
         };
         let result = (|| -> Result<()> {
             let mut writer = BufWriter::new(file);
-            serde_json::to_writer_pretty(&mut writer, &workspace::View::from(self))
-                .context("encoding workspace")?;
+            serde_json::to_writer_pretty(&mut writer, &persistence::View::from(self))
+                .context("encoding layout")?;
             writer.write_all(b"\n")?;
-            writer.flush().context("flushing workspace")?;
+            writer.flush().context("flushing layout")?;
             drop(writer);
             fs::rename(&temporary, path)
-                .with_context(|| format!("replacing workspace {}", path.display()))?;
+                .with_context(|| format!("replacing layout {}", path.display()))?;
             Ok(())
         })();
         if result.is_err() {
@@ -956,11 +954,11 @@ mod tests {
     }
 
     fn encoded(layout: &Layout) -> serde_json::Value {
-        serde_json::to_value(workspace::View::from(layout)).unwrap()
+        serde_json::to_value(persistence::View::from(layout)).unwrap()
     }
 
     fn decoded(value: serde_json::Value) -> Result<Layout> {
-        serde_json::from_value::<workspace::Input>(value)?.into_layout()
+        serde_json::from_value::<persistence::Input>(value)?.into_layout()
     }
 
     fn assert_same_layout(actual: &Layout, expected: &Layout) {
@@ -1005,7 +1003,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_uses_local_indices_and_allocates_preorder_ids() {
+    fn layout_uses_local_indices_and_allocates_preorder_ids() {
         let value = serde_json::json!({
             "root": {"Split": {
                 "axis": "Horizontal", "ratio": 0.5,
@@ -1066,7 +1064,7 @@ mod tests {
     }
 
     #[test]
-    fn new_versionless_and_empty_workspaces_preserve_their_structure() {
+    fn new_versionless_and_empty_layouts_preserve_their_structure() {
         let layout = decoded(serde_json::json!({
             "root": {"Tabs": {"panels": [{"kind": "queue"}, {"kind": "history"}]}}
         }))
@@ -1081,7 +1079,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_rejects_invalid_indices_and_structure() {
+    fn layout_rejects_invalid_indices_and_structure() {
         let value = serde_json::json!({
             "root": {"Tabs": {"panels": [{"kind": "library"}, {"kind": "queue"}]}}
         });
@@ -1237,7 +1235,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_lock_defaults_off_and_roundtrips_without_blocking_tab_selection() {
+    fn layout_lock_defaults_off_and_roundtrips_without_blocking_tab_selection() {
         let mut layout = Layout::default();
         assert!(!layout.locked);
         assert!(encoded(&layout).get("locked").is_none());
@@ -1295,7 +1293,7 @@ mod tests {
             ..
         }) = &migrated.root
         else {
-            panic!("migration must wrap the existing workspace");
+            panic!("migration must wrap the existing layout");
         };
         assert_eq!(*axis, Axis::Vertical);
         let original_subtree = Layout {
@@ -1317,7 +1315,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_legacy_workspace_migrates_and_id_exhaustion_is_non_destructive() {
+    fn empty_legacy_layout_migrates_and_id_exhaustion_is_non_destructive() {
         let empty = decoded(serde_json::json!({"root": null, "next_id": 1})).unwrap();
         empty.validate().unwrap();
         assert_eq!(empty.panels().len(), 1);
@@ -1334,7 +1332,7 @@ mod tests {
     }
 
     #[test]
-    fn remove_collapses_splits_and_can_repopulate_empty_workspace() {
+    fn remove_collapses_splits_and_can_repopulate_empty_layout() {
         let mut layout = Layout::default();
         layout.validate().unwrap();
         let original_ids = ids(&layout);
@@ -1551,7 +1549,7 @@ mod tests {
             TEST_ID.fetch_add(1, Ordering::Relaxed),
         ));
         fs::create_dir(&directory).unwrap();
-        let path = directory.join("workspace.json");
+        let path = directory.join("layout.json");
         let mut layout = Layout::default();
         layout.save(&path).unwrap();
         let custom = layout.add("history", Some(2));

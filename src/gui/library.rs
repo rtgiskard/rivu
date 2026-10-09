@@ -435,7 +435,7 @@ impl GuiApp {
                             .on_click(cx.listener(
                                 move |this, event: &gpui::ClickEvent, window, cx| {
                                     this.directory_tree.cancel_navigation();
-                                    this.focus_workspace(window, cx);
+                                    this.focus_layout(window, cx);
                                     this.list_focus = Some(ListFocus::Library);
                                     match id.clone() {
                                         LibraryNode::Track(id) => {

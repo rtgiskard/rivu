@@ -606,7 +606,7 @@ impl GuiApp {
                                     )
                                     .on_click(cx.listener(
                                         move |this, event: &gpui::ClickEvent, window, cx| {
-                                            this.focus_workspace(window, cx);
+                                            this.focus_layout(window, cx);
                                             this.list_focus = Some(ListFocus::Library);
                                             this.select_track(
                                                 id,
@@ -909,7 +909,7 @@ impl GuiApp {
                                     .on_mouse_down(
                                         gpui::MouseButton::Right,
                                         cx.listener(move |this, _, window, cx| {
-                                            this.focus_workspace(window, cx);
+                                            this.focus_layout(window, cx);
                                             this.list_focus = Some(ListFocus::Queue);
                                             if !this.selected_queue.contains(&id) {
                                                 this.selected_queue.clear();
@@ -921,7 +921,7 @@ impl GuiApp {
                                     )
                                     .on_click(cx.listener(
                                         move |this, event: &gpui::ClickEvent, window, cx| {
-                                            this.focus_workspace(window, cx);
+                                            this.focus_layout(window, cx);
                                             this.list_focus = Some(ListFocus::Queue);
                                             let modifiers = event.modifiers();
                                             this.select_queue_entry(
@@ -1269,7 +1269,7 @@ impl GuiApp {
                                     ))
                                     .on_click(cx.listener(
                                         move |this, event: &gpui::ClickEvent, window, cx| {
-                                            this.focus_workspace(window, cx);
+                                            this.focus_layout(window, cx);
                                             this.selected_entry = Some(id);
                                             this.playlist_entries.rows.pin(Some(index));
                                             this.update_metadata_track(track_id, cx);

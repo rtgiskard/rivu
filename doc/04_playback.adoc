@@ -72,7 +72,7 @@ The queue toolbar plays, removes, and moves a single selected row. Dragging a
 row onto another row moves it; a multi-selection can be dragged as a group.
 Dragging library tracks or directories onto Queue appends the resolved tracks.
 Removing the current occurrence stops playback; removing other occurrences does
-not. Queue controls remain available while the workspace is locked.
+not. Queue controls remain available while the layout is locked.
 
 == Terminal client
 

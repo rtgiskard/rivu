@@ -491,7 +491,7 @@ pub(super) struct GuiApp {
     selected: HashSet<i64>,
     selected_queue: SelectionModel<u64>,
     list_focus: Option<ListFocus>,
-    workspace_focus: FocusHandle,
+    layout_focus: FocusHandle,
 
     selected_playlist: Option<i64>,
     selected_entry: Option<i64>,
@@ -557,8 +557,8 @@ impl GuiApp {
             .any(|input| input.read(cx).is_focused(window))
     }
 
-    fn focus_workspace(&self, window: &mut Window, cx: &mut Context<Self>) {
-        self.workspace_focus.focus(window, cx);
+    fn focus_layout(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.layout_focus.focus(window, cx);
     }
 
     fn activate_library(
@@ -584,7 +584,7 @@ impl GuiApp {
             self.persist_layout(cx);
         } else if self.layout.locked {
             self.error = Some(
-                "Library panel is not in this locked workspace; unlock it to add Library.".into(),
+                "Library panel is not in this locked layout; unlock it to add Library.".into(),
             );
             cx.notify();
         } else {
@@ -763,7 +763,7 @@ impl GuiApp {
                 Ok(layout) => (layout, None),
                 Err(error) => (
                     Layout::default(),
-                    Some(format!("Could not load workspace: {error:#}")),
+                    Some(format!("Could not load layout: {error:#}")),
                 ),
             }
         } else {
@@ -871,7 +871,7 @@ impl GuiApp {
             selected_playlist: None,
             selected_entry: None,
             list_focus: None,
-            workspace_focus: cx.focus_handle(),
+            layout_focus: cx.focus_handle(),
             metadata_track: None,
             full_track: None,
             error,
@@ -934,7 +934,7 @@ impl GuiApp {
         // Initialization may have completed before the wakeup callback was
         // installed. Reconcile once so the first frame never keeps the empty snapshot.
         app.refresh(cx);
-        app.workspace_focus.focus(window, cx);
+        app.layout_focus.focus(window, cx);
         app
     }
     fn send(&mut self, command: Command, cx: &mut Context<Self>) {
@@ -1886,7 +1886,7 @@ impl GuiApp {
     fn persist_layout(&mut self, cx: &mut Context<Self>) {
         self.prune_measured();
         if let Err(error) = self.layout.save(&self.layout_path) {
-            self.error = Some(format!("Saving workspace: {error:#}"));
+            self.error = Some(format!("Saving layout: {error:#}"));
         }
         self.sync_analysis(cx);
         cx.notify();
@@ -2324,7 +2324,7 @@ impl Render for GuiApp {
         ));
         window.set_rem_size(px(16. * self.state.system.config.ui_scale));
         let root = self.layout.root.take();
-        let workspace = root
+        let layout_view = root
             .as_ref()
             .map(|root| self.render_node(root, window, cx))
             .unwrap_or_else(|| {
@@ -2334,7 +2334,7 @@ impl Render for GuiApp {
                     .items_center()
                     .justify_center()
                     .text_color(rgb(MUTED))
-                    .child("Add a panel to build your workspace")
+                    .child("Add a panel to build your layout")
                     .into_any_element()
             });
         self.layout.root = root;
@@ -2351,7 +2351,7 @@ impl Render for GuiApp {
             } else {
                 self.state.system.config.ui_font.clone().into()
             })
-            .track_focus(&self.workspace_focus)
+            .track_focus(&self.layout_focus)
             .capture_key_down(cx.listener(|_, event: &KeyDownEvent, window, cx| {
                 let modifiers = event.keystroke.modifiers;
                 if event.keystroke.key == "f4"
@@ -2370,7 +2370,7 @@ impl Render for GuiApp {
                 if this.about_open {
                     if key == "escape" {
                         this.about_open = false;
-                        this.focus_workspace(window, cx);
+                        this.focus_layout(window, cx);
                         cx.notify();
                     }
                     cx.stop_propagation();
@@ -2389,7 +2389,7 @@ impl Render for GuiApp {
                 if this.settings_open {
                     if key == "escape" {
                         this.settings_open = false;
-                        this.focus_workspace(window, cx);
+                        this.focus_layout(window, cx);
                         cx.notify();
                         cx.stop_propagation();
                     }
@@ -2410,7 +2410,7 @@ impl Render for GuiApp {
                 }
                 if this.input_focused(window, cx) {
                     if key == "escape" {
-                        this.focus_workspace(window, cx);
+                        this.focus_layout(window, cx);
                         cx.stop_propagation();
                     }
                     return;
@@ -2426,7 +2426,7 @@ impl Render for GuiApp {
                 }
                 match key {
                     "escape" => {
-                        this.focus_workspace(window, cx);
+                        this.focus_layout(window, cx);
                         this.selected.clear();
                         this.selected_queue.clear();
                         this.selected_queue.clear_anchor();
@@ -2490,7 +2490,7 @@ impl Render for GuiApp {
                     .min_h_0()
                     .min_w_0()
                     .p(gpui::px(UI_INSET))
-                    .child(workspace),
+                    .child(layout_view),
             );
 
         let error = self
@@ -2546,12 +2546,12 @@ impl Render for GuiApp {
         footer = footer
             .child(
                 icon_button(
-                    "workspace",
+                    "layout",
                     if self.layout.locked { "󰌾" } else { "⊞" },
                     if self.layout.locked {
-                        "Workspace locked\nRight-click to unlock"
+                        "Layout locked\nRight-click to unlock"
                     } else {
-                        "Left-click: add panel\nRight-click: lock workspace"
+                        "Left-click: add panel\nRight-click: lock layout"
                     },
                     cx,
                     |this, _, cx| {
@@ -2801,7 +2801,7 @@ impl Render for GuiApp {
                                     .py_1()
                                     .text_sm()
                                     .text_color(rgb(MUTED))
-                                    .child("Workspace is locked"),
+                                    .child("Layout is locked"),
                             )
                         })
                         .when(!self.layout.locked, |view| {
@@ -3100,7 +3100,7 @@ impl Render for GuiApp {
                             .rounded_md()
                             .on_mouse_down_out(cx.listener(|this, _, window, cx| {
                                 this.about_open = false;
-                                this.focus_workspace(window, cx);
+                                this.focus_layout(window, cx);
                                 cx.stop_propagation();
                                 cx.notify();
                             }))
@@ -3128,7 +3128,7 @@ impl Render for GuiApp {
                                     cx,
                                     |this, window, cx| {
                                         this.about_open = false;
-                                        this.focus_workspace(window, cx);
+                                        this.focus_layout(window, cx);
                                         cx.notify();
                                     },
                                 )

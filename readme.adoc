@@ -13,7 +13,7 @@ CLI, and TUI are different clients of that core.
 * PipeWire/ALSA playback, multichannel routing, seek, volume, shuffle, and repeat
 * Optional FFmpeg decoding for additional formats, including audio in MKV/MP4
 * Desktop GUI, CLI, TUI, and headless mode; optional MPRIS and StatusNotifier tray
-* Persistent, editable desktop workspace with configurable appearance and layout
+* Persistent, editable desktop layout with configurable appearance
 * Waveform, Spectrum, Spectrogram, and Radial Spectrum visualizations
 * Generated desktop artwork and embedded-cover support for MPRIS; no network
   media or cover fetching
@@ -220,7 +220,7 @@ typical Linux installation: `~/.local/share/rivu`) and
 `--config` is not also supplied, the config becomes `DIR/config.toml`.
 
 The data directory contains `library.db` (library and playback state),
-`rivu.sock` (the local IPC endpoint), `workspace.json` (desktop layout), and
+`rivu.sock` (the local IPC endpoint), `layout.json` (desktop layout), and
 the `artwork/` cache. When file logging is enabled, weekly logs are stored in
 `logs/` and old files are retained according to `log_retention_weeks`. Stop the
 core before operating on `library.db`; see link:doc/02_library.adoc[Library] for
@@ -229,7 +229,7 @@ database maintenance and reset behavior.
 
 == Documentation
 
-. link:doc/01_config.adoc[Configuration, workspace, and visualizations]
+. link:doc/01_config.adoc[Configuration, layout, and visualizations]
 . link:doc/02_library.adoc[Library, metadata, history, and database maintenance]
 . link:doc/03_playlist.adoc[Playlists, M3U/M3U8 exchange, and CUE import]
 . link:doc/04_playback.adoc[Playback, audio output, queue, TUI, and desktop integration]

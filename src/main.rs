@@ -579,7 +579,7 @@ fn start(
         })?;
     }
     let interface_result = if desktop {
-        gui::run(runtime.handle.clone(), data_dir.join("workspace.json"))
+        gui::run(runtime.handle.clone(), data_dir.join("layout.json"))
     } else {
         println!("Rivu core ready. Data: {}", data_dir.display());
         Ok(())
