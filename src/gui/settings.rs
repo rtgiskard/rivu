@@ -1,5 +1,5 @@
 use super::{
-    ACCENT, BORDER, ButtonTooltip, DropdownItem, DropdownState, ERROR, GuiApp, HIGHLIGHT, Measured,
+    BORDER, ButtonTooltip, DropdownItem, DropdownState, ERROR, GuiApp, Measured,
     POPOVER_MAX_HEIGHT, StatusKind, UI_INSET, active_control, button, caption, column,
     components::DROPDOWN_ROW_REMS, copyable_message, dropdown_container, dropdown_row,
     dropdown_trigger, form_field, icon_button, input::Input, row, section_group, status_message,
@@ -162,10 +162,6 @@ fn visual_switch(
     toggle_button(id, icon, label, enabled, cx, move |this, _| {
         toggle(&mut this.settings.draft);
     })
-    .w_auto()
-    .px_3()
-    .gap_2()
-    .child(label)
 }
 
 fn settings_group(title: &'static str, content: impl IntoElement) -> Div {
@@ -326,6 +322,38 @@ impl Settings {
             self.field(first).min_w(px(180.)),
             self.field(second).min_w(px(180.)),
         )
+    }
+
+    fn single(&self, field: Field) -> Div {
+        row().child(self.field(field).w(relative(0.5)).min_w(px(180.)).pr_2())
+    }
+
+    fn field_state(&self, field: Field, enabled: bool, reason: &'static str, cx: &App) -> Div {
+        if enabled {
+            return self.field(field).min_w(px(180.));
+        }
+        // Keep the draft value, but unmount the editor so disabled fields cannot take focus or edits.
+        let control = div()
+            .id(("inactive-setting", field as usize))
+            .h(px(36.))
+            .p(px(7.))
+            .line_height(px(20.))
+            .text_size(px(14.))
+            .bg(rgb(super::PANEL))
+            .border_1()
+            .border_color(rgb(BORDER))
+            .rounded(px(5.))
+            .cursor_default()
+            .child(self.value(field, cx))
+            .tooltip(move |_, cx| {
+                cx.new(|_| ButtonTooltip {
+                    text: reason.into(),
+                })
+                .into()
+            });
+        form_field(field.label(), control)
+            .min_w(px(180.))
+            .opacity(0.45)
     }
 
     fn value(&self, field: Field, cx: &App) -> String {
@@ -931,25 +959,8 @@ impl GuiApp {
             "Playback",
             column()
                 .gap_2()
-                .child(
-                    row()
-                        .items_start()
-                        .flex_wrap()
-                        .gap_3()
-                        .child(self.settings.field(Field::Volume).flex_1().min_w(px(180.)))
-                        .child(
-                            self.settings
-                                .field(Field::PlayCountThreshold)
-                                .flex_1()
-                                .min_w(px(240.)),
-                        )
-                        .child(
-                            self.settings
-                                .field(Field::QueueLimit)
-                                .flex_1()
-                                .min_w(px(180.)),
-                        ),
-                )
+                .child(self.settings.pair(Field::Volume, Field::PlayCountThreshold))
+                .child(self.settings.single(Field::QueueLimit))
                 .child(
                     row()
                         .flex_wrap()
@@ -962,7 +973,7 @@ impl GuiApp {
                             cx,
                             |draft| draft.shuffle = !draft.shuffle,
                         ))
-                        .child(
+                        .child(active_control(
                             icon_button(
                                 "settings-repeat",
                                 if repeat == RepeatMode::One {
@@ -970,7 +981,11 @@ impl GuiApp {
                                 } else {
                                     "󰑖"
                                 },
-                                "Cycle repeat mode: off, all, one",
+                                match repeat {
+                                    RepeatMode::Off => "Repeat: Off; click for All",
+                                    RepeatMode::All => "Repeat: All; click for One",
+                                    RepeatMode::One => "Repeat: One; click for Off",
+                                },
                                 cx,
                                 |this, _, cx| {
                                     this.settings.draft.repeat = match this.settings.draft.repeat {
@@ -980,20 +995,9 @@ impl GuiApp {
                                     };
                                     cx.notify();
                                 },
-                            )
-                            .w_auto()
-                            .px_3()
-                            .gap_2()
-                            .text_size(rems(1.))
-                            .child(match repeat {
-                                RepeatMode::Off => "Repeat: Off",
-                                RepeatMode::All => "Repeat: All",
-                                RepeatMode::One => "Repeat: One",
-                            })
-                            .when(repeat != RepeatMode::Off, |view| {
-                                view.bg(rgb(HIGHLIGHT)).text_color(rgb(ACCENT))
-                            }),
-                        ),
+                            ),
+                            repeat != RepeatMode::Off,
+                        )),
                 ),
         );
         let audio = settings_group(
@@ -1017,21 +1021,20 @@ impl GuiApp {
                     row()
                         .flex_wrap()
                         .gap_2()
-                        .child(
+                        .child(active_control(
                             icon_button(
                                 "settings-ffmpeg",
                                 "\u{f384}",
-                                ffmpeg_hint(&self.state.system.ffmpeg_status),
+                                format!("FFmpeg decoding: {}\n{}", if ffmpeg { "On" } else { "Off" }, ffmpeg_hint(&self.state.system.ffmpeg_status)),
                                 cx,
                                 |this, _, cx| {
                                     this.settings.draft.ffmpeg_enabled = !this.settings.draft.ffmpeg_enabled;
                                     cx.notify();
                                 },
                             )
-                            .w_auto().px_3().gap_2()
-                            .child("FFmpeg decoding")
-                            .when(ffmpeg, |view| view.bg(rgb(HIGHLIGHT)).text_color(rgb(ACCENT))),
-                        )
+                            .text_size(rems(1.)),
+                            ffmpeg,
+                        ))
                         .child(visual_switch(
                             "settings-pipewire-auto-mix",
                             "󱀞",
@@ -1041,7 +1044,7 @@ impl GuiApp {
                             |draft| draft.pipewire_auto_mix = !draft.pipewire_auto_mix,
                         )),
                 )
-                .child(caption("Read buffering applies when media is opened, including full waveform scans; it does not reopen the current track.")),
+                .child(caption("Read buffer changes apply when media is next opened, not to the current track.")),
         );
         let interface = settings_group(
             "Interface",
@@ -1085,35 +1088,42 @@ impl GuiApp {
         );
         let desktop = settings_group(
             "Desktop integration",
-            row()
-                .flex_wrap()
+            column()
                 .gap_2()
                 .child(
-                    icon_button(
-                        "settings-mpris",
-                        "󰐹",
-                        format!("Media controls (MPRIS)\n{}", self.state.system.mpris_status),
-                        cx,
-                        |this, _, cx| {
-                            this.settings.draft.mpris_enabled = !this.settings.draft.mpris_enabled;
-                            cx.notify();
-                        },
-                    )
-                    .w_auto()
-                    .px_3()
-                    .gap_2()
-                    .child("Media controls (MPRIS)")
-                    .when(mpris, |view| {
-                        view.bg(rgb(HIGHLIGHT)).text_color(rgb(ACCENT))
-                    }),
+                    row()
+                        .flex_wrap()
+                        .gap_2()
+                        .child(active_control(
+                            icon_button(
+                                "settings-mpris",
+                                "󰐹",
+                                format!(
+                                    "Media controls (MPRIS): {}\n{}",
+                                    if mpris { "On" } else { "Off" },
+                                    self.state.system.mpris_status
+                                ),
+                                cx,
+                                |this, _, cx| {
+                                    this.settings.draft.mpris_enabled =
+                                        !this.settings.draft.mpris_enabled;
+                                    cx.notify();
+                                },
+                            )
+                            .text_size(rems(1.)),
+                            mpris,
+                        ))
+                        .child(visual_switch(
+                            "settings-tray",
+                            "▣",
+                            "System tray (restart required)",
+                            tray,
+                            cx,
+                            |draft| draft.tray_enabled = !draft.tray_enabled,
+                        )),
                 )
-                .child(visual_switch(
-                    "settings-tray",
-                    "▣",
-                    "System tray (restart required)",
-                    tray,
-                    cx,
-                    |draft| draft.tray_enabled = !draft.tray_enabled,
+                .child(caption(
+                    "System tray changes require restarting the graphical host.",
                 )),
         );
 
@@ -1195,17 +1205,18 @@ impl GuiApp {
                 column().gap_3()
                     .child(settings_group("Appearance", column().gap_2()
                         .child(two_column(settings.field(Field::Background).min_w(px(180.)), form_field("Color scheme", palette).min_w(px(180.))))
-                        .child(caption("Background applies to all views. The color scheme applies to Spectrum, Spectrogram, and Waveform; Radial Spectrum has its own colors."))))
+                        .child(caption("Background: all views. Color scheme: Spectrum, Spectrogram, and Waveform."))))
                     .child(settings_group("Frequency analysis", column().gap_2()
                         .child(two_column(form_field("FFT size", fft).min_w(px(180.)), form_field("FFT window", window).min_w(px(180.))))
                         .child(settings.pair(Field::Fps, Field::SpectrumDb))
-                        .child(caption("FFT and analysis rate are shared by Spectrum, Spectrogram, and Radial Spectrum, not Waveform. FFT size defaults to 8192; changing FFT size or window clears Spectrogram history."))
-                        .child(caption("The dB range is shared by Spectrum and Radial Spectrum. Spectrogram has its own color range."))))
+                        .child(caption("FFT and rate: Spectrum, Spectrogram, and Radial Spectrum. FFT size or window changes clear Spectrogram history."))
+                        .child(caption("The dB range excludes Spectrogram, which has its own color range."))))
                     .child(settings_group("Rendering", column().gap_2()
                         .child(row().child(visual_switch("visual-cache", "▤", "Reuse rendering caches", draft.visualization_cache, cx, |draft| draft.visualization_cache = !draft.visualization_cache)))
-                        .child(caption("Caches reduce repeated rendering work in Spectrum, Spectrogram, and Waveform at a memory cost. This does not control media buffering."))))
+                        .child(caption("Reuse graphics in Spectrum, Spectrogram, and Waveform: less CPU work, more memory."))))
             }
             VisualPage::Spectrum => {
+                let solid = draft.spectrum_style == SpectrumStyle::Solid;
                 let style = dropdown_button("spectrum-style", spectrum_style_label(draft.spectrum_style), cx, |this, _, _| {
                     let values = [SpectrumStyle::Bars, SpectrumStyle::Outline, SpectrumStyle::Led, SpectrumStyle::Line, SpectrumStyle::Solid];
                     let selected = values.iter().position(|value| *value == this.settings.draft.spectrum_style).unwrap_or(0);
@@ -1213,31 +1224,39 @@ impl GuiApp {
                 }).relative().child(self.measurement(Measured::SettingsStyle));
                 column().gap_3()
                     .child(settings_group("Shape & detail", column().gap_2()
-                        .child(two_column(form_field("Style", style).min_w(px(180.)), settings.field(Field::SpectrumBars).min_w(px(180.))))
-                        .child(settings.pair(Field::SpectrumBarWidth, Field::SpectrumGap))
+                        .child(two_column(form_field("Style", style).min_w(px(180.)), settings.field_state(Field::SpectrumBars, !solid, "Solid uses pixel density, not a requested bar count", cx)))
+                        .child(two_column(
+                            settings.field_state(Field::SpectrumBarWidth, !solid, "Solid uses pixel density, not auto bar width", cx),
+                            settings.field_state(Field::SpectrumGap, !solid, "Solid has no bar gaps", cx),
+                        ))
                         .child(row().flex_wrap().gap_2()
                             .child(visual_switch("spectrum-interpolate", "≈", "Frequency interpolation", draft.spectrum_interpolate, cx, |draft| draft.spectrum_interpolate = !draft.spectrum_interpolate))
                             .child(visual_switch("spectrum-grid", "#", "Faint grid", draft.spectrum_grid, cx, |draft| draft.spectrum_grid = !draft.spectrum_grid))
                             .child(visual_switch("spectrum-labels", "T", "Labels", draft.spectrum_labels, cx, |draft| draft.spectrum_labels = !draft.spectrum_labels)))
-                        .child(caption("Auto count uses bar width plus gap, up to 512 slots. Solid uses pixel density instead of the requested count. Shared FFT and dB range are in Common."))))
+                        .child(caption("Auto count uses width + gap. Solid uses pixel density. FFT and dB range: Common."))))
                     .child(settings_group("Body motion", column().gap_2()
                         .child(settings.pair(Field::SpectrumBarHold, Field::SpectrumBarGravity))
-                        .child(settings.field(Field::SpectrumSmoothing))
-                        .child(caption("Attacks stay immediate. Gravity accelerates falling levels; 0 snaps to the signal after hold, bypassing release smoothing."))))
+                        .child(settings.single(Field::SpectrumSmoothing))
+                        .child(caption("Gravity 0 snaps after hold, bypassing smoothing. Attacks stay immediate."))))
                     .child(settings_group("Peak markers", column().gap_2()
                         .child(row().child(visual_switch("spectrum-peaks", "∧", "Show peaks", draft.spectrum_peaks, cx, |draft| draft.spectrum_peaks = !draft.spectrum_peaks)))
-                        .child(settings.pair(Field::SpectrumHold, Field::SpectrumGravity))))
+                        .child(two_column(
+                            settings.field_state(Field::SpectrumHold, draft.spectrum_peaks, "Enable peak markers to edit peak hold", cx),
+                            settings.field_state(Field::SpectrumGravity, draft.spectrum_peaks, "Enable peak markers to edit peak gravity", cx),
+                        ))))
             }
             VisualPage::Spectrogram => column().gap_3()
                 .child(settings_group("Color & history", column().gap_2()
                     .child(settings.pair(Field::SpectrogramDb, Field::SpectrogramHistory))
                     .child(row().child(visual_switch("spectrogram-labels", "T", "Labels", draft.spectrogram_labels, cx, |draft| draft.spectrogram_labels = !draft.spectrogram_labels)))
-                    .child(caption("History is also limited by panel width and analysis rate. FFT, analysis rate, and color scheme are in Common."))))
+                    .child(caption("History is limited by width and analysis rate. Shared analysis and colors: Common."))))
                 .child(settings_group("Frequency sampling", column().gap_2()
                     .child(settings.pair(Field::SpectrogramSamplingPointsScale, Field::SpectrogramInterpolationPoints))
                     .child(row().child(visual_switch("spectrogram-interpolate", "≈", "Frequency interpolation", draft.spectrogram_interpolate, cx, |draft| draft.spectrogram_interpolate = !draft.spectrogram_interpolate)))
-                    .child(caption("The tallest visible panel sets the shared source row count. The row limit applies with or without interpolation; it is not the FFT size and does not add measured frequency detail.")))),
+                    .child(caption("Row limit applies with or without interpolation; it does not add FFT detail. Source rows follow the tallest visible panel.")))),
             VisualPage::AudioVisualizer => {
+                let bars = draft.radial_spectrum_style != RadialSpectrumStyle::Rings;
+                let rings = draft.radial_spectrum_style != RadialSpectrumStyle::Bars;
                 let style = dropdown_button("audio-visualizer-style", radial_spectrum_style_label(draft.radial_spectrum_style), cx, |this, _, _| {
                     let values = [RadialSpectrumStyle::Bars, RadialSpectrumStyle::Rings, RadialSpectrumStyle::BarsRings];
                     let selected = values.iter().position(|value| *value == this.settings.draft.radial_spectrum_style).unwrap_or(0);
@@ -1248,24 +1267,30 @@ impl GuiApp {
                         .child(two_column(form_field("Style", style).min_w(px(180.)), settings.field(Field::RadialSpectrumInnerDiameter).min_w(px(180.))))
                         .child(settings.pair(Field::RadialSpectrumSensitivity, Field::RadialSpectrumRotationSpeed))
                         .child(row().child(visual_switch("audio-visualizer-fade-idle", "◌", "Fade when not playing", draft.radial_spectrum_fade_when_idle, cx, |draft| draft.radial_spectrum_fade_when_idle = !draft.radial_spectrum_fade_when_idle)))
-                        .child(caption("Noctalia Fancy / Radial Spectrum shares FFT, analysis rate, background, and Spectrum dB range from Common. Inner diameter is relative to panel size."))))
+                        .child(caption("Noctalia Fancy. Shared analysis and background: Common. Inner diameter is relative to panel size."))))
                     .child(settings_group("Bars & rings", column().gap_2()
-                        .child(settings.pair(Field::RadialSpectrumBarWidth, Field::RadialSpectrumBarGlowLayers))
-                        .child(settings.pair(Field::RadialSpectrumRingOpacity, Field::RadialSpectrumBloomIntensity))
-                        .child(caption("Bar width and glow layers apply to Bars; ring opacity applies to Rings. Bloom affects both, and must be above zero for bar glow."))))
+                        .child(two_column(
+                            settings.field_state(Field::RadialSpectrumBarWidth, bars, "Select Bars or Bars + Rings to edit bar width", cx),
+                            settings.field_state(Field::RadialSpectrumBarGlowLayers, bars, "Select Bars or Bars + Rings to edit bar glow", cx),
+                        ))
+                        .child(two_column(
+                            settings.field_state(Field::RadialSpectrumRingOpacity, rings, "Select Rings or Bars + Rings to edit ring opacity", cx),
+                            settings.field(Field::RadialSpectrumBloomIntensity).min_w(px(180.)),
+                        ))
+                        .child(caption("Bloom affects bars and rings; bar glow requires bloom above zero."))))
                     .child(settings_group("Colors", column().gap_2()
                         .child(settings.pair(Field::RadialSpectrumPrimaryColor, Field::RadialSpectrumSecondaryColor))
-                        .child(caption("These colors are independent of the shared color scheme."))))
+                        .child(caption("Independent of the shared color scheme."))))
             }
             VisualPage::Waveform => column().gap_3()
                 .child(settings_group("Appearance", column().gap_2()
                     .child(settings.pair(Field::CursorColor, Field::Glow))
                     .child(row().child(visual_switch("waveform-labels", "T", "Labels", draft.waveform_labels, cx, |draft| draft.waveform_labels = !draft.waveform_labels)))
-                    .child(caption("Background, color scheme, and rendering caches are in Common. The waterline stays still while paused."))))
+                    .child(caption("Shared appearance: Common. The waterline stays still while paused."))))
                 .child(settings_group("Amplitude display", column().gap_2()
                     .child(settings.pair(Field::WaveformRmsGain, Field::WaveformPeakGain))
-                    .child(settings.field(Field::WaveformPeakGamma))
-                    .child(caption("Display only: these controls do not change playback volume or decode the track again. Peak gamma above 1 reduces low peaks; below 1 lifts them.")))),
+                    .child(settings.single(Field::WaveformPeakGamma))
+                    .child(caption("Display only, not playback volume. Gamma > 1 reduces low peaks; < 1 lifts them.")))),
         }
     }
 
@@ -1357,7 +1382,6 @@ impl GuiApp {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .max_w(gpui::relative(0.7))
                         .overflow_hidden()
                         .text_sm()
                         .child(feedback),

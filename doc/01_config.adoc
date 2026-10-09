@@ -78,8 +78,15 @@ Visualizations is grouped by view, with shared controls in Common:
 Spectrum separates shape/detail, body motion, and peak markers. Spectrogram
 separates color/history from frequency sampling. Radial Spectrum separates
 shape/motion, bars/rings effects, and colors. Waveform separates appearance from
-amplitude display. Toggle labels are visible; related fields share a row when
-space permits and wrap on narrower panels.
+amplitude display. Buttons remain icon-first; hover reveals toggle names and
+On/Off state, repeat mode, and runtime status where available. Related fields
+share a row when space permits and wrap on narrower panels; standalone numeric
+fields keep the same half-row width instead of stretching across the panel.
+
+Inactive style-dependent fields stay in place, dimmed, with their values
+preserved: Solid disables Spectrum count/width/gap controls, hidden peak markers
+disable peak motion controls, and Radial styles disable controls for absent bars
+or rings. Hover an inactive field for the reason; switch back to resume editing.
 
 `ui_font` accepts a font family; empty uses the platform font.
 `ui_scale` accepts `0.75`–`2.0`.
@@ -90,6 +97,9 @@ must be available.
 Apply validates and saves all pages together; navigation preserves the draft.
 Discard drops unapplied changes. Saving library roots does not scan or enqueue
 tracks; use `Scan paths` in Library. Display-only changes do not reopen audio.
+The fixed footer retains icon Apply/Discard actions. Errors show a truncated
+message with a copy icon; hover reveals the complete message and clicking copies
+it without truncation.
 Settings controls are implemented in link:../src/gui/settings.rs[settings].
 
 See link:../readme.adoc[README] for application lifecycle and host behavior.
