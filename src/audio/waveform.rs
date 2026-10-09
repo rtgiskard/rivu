@@ -146,6 +146,70 @@ fn update_bin(
     changed
 }
 
+/// Playback-owned statistics. PCM traversal and timeline compaction happen here,
+/// never under the GUI's shared-frame write lock.
+pub(super) struct WaveformAccumulator {
+    frame: WaveformFrame,
+    published_revision: u64,
+    dirty: Option<std::ops::Range<usize>>,
+}
+
+impl WaveformAccumulator {
+    pub(super) fn new(frame: WaveformFrame) -> Self {
+        Self {
+            published_revision: frame.revision,
+            frame,
+            dirty: None,
+        }
+    }
+
+    pub(super) fn set_channel_weights(&mut self, weights: &[[f32; 2]]) {
+        self.frame.set_channel_weights(weights);
+    }
+
+    pub(super) fn push(&mut self, start: f64, samples: &[f32], rate: u32, channels: usize) {
+        self.frame.push_bins(start, samples, rate, channels, &mut self.dirty);
+    }
+
+    pub(super) fn finish(&mut self, coverage: &WaveformCoverage) {
+        coverage.finish(&mut self.frame);
+    }
+
+    /// The only operation requiring the shared write lock. At most MAX_BINS
+    /// bins are copied (all bins only after timeline doubling); no PCM is read.
+    /// A manually installed complete scan always wins over in-flight playback.
+    pub(super) fn publish(&mut self, shared: &mut WaveformFrame) {
+        if shared.path != self.frame.path || shared.range != self.frame.range
+            || shared.revision != self.published_revision || shared.complete
+        {
+            self.frame.complete = true;
+            self.dirty = None;
+            return;
+        }
+        let dirty = self.dirty.take().unwrap_or(0..0);
+        let end = dirty.end.min(self.frame.peaks.len());
+        let start = dirty.start.min(end);
+        macro_rules! publish_bins {
+            ($($field:ident),+ $(,)?) => { $(
+                shared.$field[start..end].copy_from_slice(&self.frame.$field[start..end]);
+                shared.$field.truncate(self.frame.$field.len());
+            )+ };
+        }
+        publish_bins!(peaks, rms, rms_counts, left_peaks, right_peaks, left_rms, right_rms,
+            left_rms_counts, right_rms_counts);
+        shared.complete = self.frame.complete;
+        shared.duration = self.frame.duration;
+        shared.span_seconds = self.frame.span_seconds;
+        shared.max_peak = self.frame.max_peak;
+        shared.last_push_start = self.frame.last_push_start;
+        if shared.channel_weights != self.frame.channel_weights {
+            shared.channel_weights.clone_from(&self.frame.channel_weights);
+        }
+        shared.revision = self.frame.revision;
+        self.published_revision = shared.revision;
+    }
+}
+
 impl WaveformFrame {
     pub fn matches(&self, path: &Path, range: Option<PlaybackRange>) -> bool {
         self.path.as_deref() == Some(path) && self.range == range
@@ -240,6 +304,17 @@ impl WaveformFrame {
         sample_rate: u32,
         channels: usize,
     ) {
+        self.push_bins(start_seconds, samples, sample_rate, channels, &mut None);
+    }
+
+    fn push_bins(
+        &mut self,
+        start_seconds: f64,
+        samples: &[f32],
+        sample_rate: u32,
+        channels: usize,
+        dirty: &mut Option<std::ops::Range<usize>>,
+    ) {
         if self.complete
             || !start_seconds.is_finite()
             || sample_rate == 0
@@ -292,6 +367,7 @@ impl WaveformFrame {
                 self.right_rms_counts[MAX_BINS / 2..].fill(0);
                 self.span_seconds *= 2.0;
                 changed = true;
+                *dirty = Some(0..self.peaks.len());
             }
         }
         let total_frames = (self.span_seconds * rate).round().max(1.0) as u64;
@@ -311,6 +387,9 @@ impl WaveformFrame {
                 break;
             }
             let bin = (u128::from(frame) * bins / u128::from(total_frames)) as usize;
+            let dirty = dirty.get_or_insert(bin..bin + 1);
+            dirty.start = dirty.start.min(bin);
+            dirty.end = dirty.end.max(bin + 1);
             let boundary = ((bin as u128 + 1) * u128::from(total_frames)).div_ceil(bins) as u64;
             let take = (boundary - frame).min((count - offset) as u64) as usize;
             let mut combined_peak = 0.0_f32;
@@ -417,6 +496,73 @@ impl WaveformFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn assert_same_bins(actual: &WaveformFrame, expected: &WaveformFrame) {
+        assert_eq!(actual.peaks, expected.peaks);
+        assert_eq!(actual.rms, expected.rms);
+        assert_eq!(actual.rms_counts, expected.rms_counts);
+        assert_eq!(actual.left_peaks, expected.left_peaks);
+        assert_eq!(actual.right_peaks, expected.right_peaks);
+        assert_eq!(actual.left_rms, expected.left_rms);
+        assert_eq!(actual.right_rms, expected.right_rms);
+        assert_eq!(actual.left_rms_counts, expected.left_rms_counts);
+        assert_eq!(actual.right_rms_counts, expected.right_rms_counts);
+        assert_eq!(actual.revision, expected.revision);
+        assert_eq!(actual.complete, expected.complete);
+        assert_eq!(actual.duration, expected.duration);
+        assert_eq!(actual.span_seconds, expected.span_seconds);
+        assert_eq!(actual.max_peak, expected.max_peak);
+        assert_eq!(actual.last_push_start, expected.last_push_start);
+    }
+
+    #[test]
+    fn local_accumulation_publishes_counts_doubling_seek_and_finish_exactly() {
+        for duration in [None, Some(240.0)] {
+            let mut shared = frame(duration, 100);
+            let mut expected = shared.clone();
+            let mut accumulator = WaveformAccumulator::new(shared.clone());
+            accumulator.set_channel_weights(&[[0.8, 0.2], [0.1, 0.9]]);
+            expected.set_channel_weights(&[[0.8, 0.2], [0.1, 0.9]]);
+            for start in [0.0, 0.01, 59.99, 61.0, 121.0, 0.02] {
+                let samples = [0.2, -0.5, 0.8, 0.1];
+                accumulator.push(start, &samples, 100, 2);
+                expected.push(start, &samples, 100, 2);
+                accumulator.publish(&mut shared);
+                assert_same_bins(&shared, &expected);
+            }
+            shared.select(Path::new("track.wav"), None, duration, 100);
+            let mut reopened = WaveformAccumulator::new(shared.clone());
+            reopened.push(20.0, &[0.7, 0.3], 100, 2);
+            expected.push(20.0, &[0.7, 0.3], 100, 2);
+            reopened.publish(&mut shared);
+            assert_same_bins(&shared, &expected);
+            let mut coverage = WaveformCoverage::new(0.0);
+            coverage.record(0.0, 12300, 100);
+            reopened.finish(&coverage);
+            coverage.finish(&mut expected);
+            reopened.publish(&mut shared);
+            assert_same_bins(&shared, &expected);
+        }
+    }
+
+    #[test]
+    fn local_publication_preserves_manual_completion_and_source_switch() {
+        let mut shared = frame(Some(4.0), 1);
+        let mut accumulator = WaveformAccumulator::new(shared.clone());
+        accumulator.push(0.0, &[2.0], 1, 1);
+        let mut manual = frame(Some(4.0), 1);
+        manual.push(0.0, &[0.25, 0.5, 0.75, 1.0], 1, 1);
+        shared.install_full(manual);
+        let expected = shared.clone();
+        accumulator.publish(&mut shared);
+        accumulator.push(1.0, &[3.0], 1, 1);
+        accumulator.publish(&mut shared);
+        assert_same_bins(&shared, &expected);
+        shared.select(Path::new("other.wav"), None, Some(4.0), 1);
+        let expected = shared.clone();
+        accumulator.publish(&mut shared);
+        assert_same_bins(&shared, &expected);
+    }
+
 
     fn frame(duration: Option<f64>, rate: u32) -> WaveformFrame {
         let mut frame = WaveformFrame::default();

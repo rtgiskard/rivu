@@ -4,7 +4,7 @@ use super::{
     MediaInfo, PlaybackRange, WaveformFrame,
     output::{Converter, Output},
     source::Source,
-    waveform::WaveformCoverage,
+    waveform::{WaveformAccumulator, WaveformCoverage},
 };
 use crate::analysis::AnalysisWorker;
 use anyhow::Result;
@@ -38,13 +38,12 @@ pub(super) struct Playback {
     pending: Vec<f32>,
     offset_frames: usize,
     generation: u64,
-    path: PathBuf,
-    range: Option<PlaybackRange>,
     base_position: f64,
     prior_heard: f64,
     eof: bool,
     paused: bool,
     waveform: Arc<RwLock<WaveformFrame>>,
+    waveform_accumulator: WaveformAccumulator,
     waveform_coverage: WaveformCoverage,
 }
 impl Playback {
@@ -84,7 +83,8 @@ impl Playback {
             analyzer,
         )?;
         let converter = Converter::new(source.info().sample_rate, output.rate(), channels)?;
-        {
+        let weights = super::output::analysis_weights(source.layout());
+        let mut waveform_accumulator = {
             let mut waveform = waveform.write();
             waveform.select(
                 &path,
@@ -92,9 +92,9 @@ impl Playback {
                 source.info().duration,
                 source.info().sample_rate,
             );
-            let weights = super::output::analysis_weights(source.layout());
-            waveform.set_channel_weights(&weights);
-        }
+            WaveformAccumulator::new(waveform.clone())
+        };
+        waveform_accumulator.set_channel_weights(&weights);
         Ok(Self {
             source,
             output,
@@ -102,13 +102,12 @@ impl Playback {
             pending: Vec::with_capacity(PENDING_BUFFER_CAPACITY * channels),
             offset_frames: 0,
             generation,
-            path,
-            range,
             base_position: start,
             prior_heard,
             eof: false,
             paused,
             waveform,
+            waveform_accumulator,
             waveform_coverage: WaveformCoverage::new(start),
         })
     }
@@ -225,16 +224,13 @@ impl Playback {
             if let Some((frames, start_seconds)) = self.source.next_frames()? {
                 self.waveform_coverage
                     .record(start_seconds, frames.len() / channels, sample_rate);
-                self.waveform
-                    .write()
-                    .push(start_seconds, frames, sample_rate, channels);
+                self.waveform_accumulator.push(start_seconds, frames, sample_rate, channels);
+                self.waveform_accumulator.publish(&mut self.waveform.write());
                 self.converter.push(frames, &mut self.pending)?;
             } else {
                 self.converter.finish(&mut self.pending)?;
-                let mut waveform = self.waveform.write();
-                if waveform.matches(&self.path, self.range) {
-                    self.waveform_coverage.finish(&mut waveform);
-                }
+                self.waveform_accumulator.finish(&self.waveform_coverage);
+                self.waveform_accumulator.publish(&mut self.waveform.write());
                 self.eof = true;
             }
         }
@@ -282,13 +278,20 @@ mod tests {
         let waveform = Arc::new(RwLock::new(WaveformFrame::default()));
         waveform.write().select(file.path(), range, source.info().duration, 8_000);
         let (output, mut old_render) = super::super::output::test_backend(8_000, false, source.layout());
+        let waveform_accumulator = WaveformAccumulator::new(waveform.read().clone());
         let mut playback = Playback {
             source, output, converter: Converter::new(8_000, 8_000, 1).unwrap(),
             pending: Vec::new(), offset_frames: 0, generation: 1,
-            path: file.path().to_owned(), range, base_position: 0.0, prior_heard: 0.0,
-            eof: false, paused: false, waveform, waveform_coverage: WaveformCoverage::new(0.0),
+            base_position: 0.0, prior_heard: 0.0,
+            eof: false, paused: false, waveform, waveform_accumulator,
+            waveform_coverage: WaveformCoverage::new(0.0),
         };
         playback.fill().unwrap();
+        assert!(playback.waveform.read().peaks.iter().any(Option::is_some));
+        assert!(playback.waveform.read().rms_counts.iter().sum::<u64>() > 0);
+        // A complete manually installed waveform must survive later live PCM.
+        playback.waveform.write().finish_scan(1.5);
+        let installed = playback.waveform.read().clone();
         playback.pause(true);
         for target in [0.75, 0.125, 1.0, 0.0] {
             let (output, mut render) = super::super::output::test_backend(8_000, true, playback.source.layout());
@@ -313,5 +316,8 @@ mod tests {
             }
             playback.pause(true);
         }
+        assert!(playback.waveform.read().complete);
+        assert_eq!(playback.waveform.read().peaks, installed.peaks);
+        assert_eq!(playback.waveform.read().rms_counts, installed.rms_counts);
     }
 }
