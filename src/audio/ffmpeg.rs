@@ -136,7 +136,7 @@ unsafe fn symbol<T: Copy>(library: &Library, name: &[u8]) -> Result<T> {
 }
 fn load_library(names: &[&str], component: &str) -> Result<Library> {
     let mut errors = Vec::new();
-    for name in names {
+    for &name in names {
         // SAFETY: Loading a named shared object is the sole unsafe operation here;
         // symbols are checked below before they are called.
         match unsafe { Library::new(name) } {

@@ -18,14 +18,14 @@ bytes = "1"
 crossbeam-channel = "0.5"
 crossterm = "0.29"
 directories = "6"
-gpui = { git = "https://github.com/zed-industries/zed", rev = "a84689073d296dfd39987bc7dd478e43ef76d83a", default-features = false }
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "a84689073d296dfd39987bc7dd478e43ef76d83a", default-features = false, features = ["wayland"] }
+gpui = { git = "https://github.com/zed-industries/zed", rev = "df48a139ce9c292738b523252c12f044697e673f", default-features = false }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "df48a139ce9c292738b523252c12f044697e673f", default-features = false, features = ["wayland"] }
 ashpd = { version = "0.13.13", default-features = false, features = ["async-io", "file_chooser"] }
 futures = "0.3"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = "0.3"
-libloading = "0.8"
+libloading = "0.9"
 opus = "0.4"
 parking_lot = "0.12"
 rand = "0.10.3"
@@ -40,7 +40,7 @@ bincode = { version = "2", features = ["serde"] }
 symphonia = { version = "0.6.1", features = ["all"] }
 tokio = { version = "1", default-features = false, features = ["rt", "net", "io-util", "sync", "time", "macros"] }
 walkdir = "2"
-toml = "1.1.6"
+toml = "1.1.8"
 tempfile = "3.27"
 zbus = "5.19"
 url = "2"
@@ -54,7 +54,7 @@ fontconfig-sys = { package = "yeslogic-fontconfig-sys", version = "6" }
 
 [build-dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-bindgen = { version = "=0.72.1", optional = true }
+bindgen = { version = "0.72.1", default-features = false, features = ["runtime"], optional = true }
 pkg-config = "0.3"
 
 [profile.release]
