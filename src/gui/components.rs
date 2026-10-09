@@ -423,25 +423,14 @@ pub(crate) fn drag_preview(label: impl Into<SharedString>) -> Div {
         .child(label.into())
 }
 
-pub(crate) fn tree_row(
-    id: impl Into<ElementId>,
-    depth: usize,
-    selected: bool,
-    expanded: bool,
-    has_children: bool,
-) -> Stateful<Div> {
-    let disclosure = if has_children {
-        if expanded { "▼" } else { "▶" }
-    } else {
-        " "
-    };
+pub(crate) fn tree_row(id: impl Into<ElementId>, depth: usize, selected: bool) -> Stateful<Div> {
     div()
         .id(id)
         .w_full()
         .h(gpui::rems(1.75))
         .px_2()
         .pr_2()
-        .pl(gpui::px(8. + depth as f32 * 16.))
+        .pl(gpui::rems(0.5 + depth as f32 * 1.25))
         .min_w_0()
         .flex()
         .items_center()
@@ -450,7 +439,6 @@ pub(crate) fn tree_row(
         .cursor_pointer()
         .bg(rgb(if selected { HIGHLIGHT } else { PANEL }))
         .hover(|style| style.bg(rgb(HIGHLIGHT)))
-        .child(div().w(gpui::px(14.)).text_xs().child(disclosure))
 }
 
 /// Standard compact option row used by anchored dropdowns.

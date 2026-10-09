@@ -927,7 +927,7 @@ impl GuiApp {
         };
         app.sync_metadata_default(cx);
         app.request_library_page(0, cx);
-        app.request_directory_page(PathBuf::new(), 0, cx);
+        app.request_directory_page(library::TreeBranch::default(), 0, cx);
         app.request_playlist_summaries(0, cx);
         app.request_ranking(0, cx);
         app.sync_analysis(cx);
@@ -1297,13 +1297,19 @@ impl GuiApp {
         );
     }
 
-    fn request_directory_page(&mut self, path: PathBuf, offset: usize, cx: &mut Context<Self>) {
+    fn request_directory_page(
+        &mut self,
+        branch: library::TreeBranch,
+        offset: usize,
+        cx: &mut Context<Self>,
+    ) {
         let page_size = self.view_page_size();
         self.directory_tree.configure_page_size(page_size);
         let offset = offset / page_size * page_size;
         let generation = self.next_view_generation();
-        self.directory_tree.begin(path.clone(), offset, generation);
-        if path.as_os_str().is_empty() {
+        self.directory_tree
+            .begin(branch.clone(), offset, generation);
+        if branch.is_forest() {
             let roots = &self.state.system.config.library_roots;
             let page = crate::model::Page::<crate::model::DirectoryRow> {
                 total: roots.len(),
@@ -1314,13 +1320,13 @@ impl GuiApp {
                     .map(|path| crate::model::DirectoryRow::Directory { path: path.clone() })
                     .collect(),
             };
-            self.directory_tree.accept(&path, generation, page);
+            self.directory_tree.accept(&branch, generation, page);
             cx.notify();
             return;
         }
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
-            let request_path = path.clone();
+            let request_path = branch.path().to_path_buf();
             let response = cx
                 .background_executor()
                 .spawn(async move {
@@ -1332,24 +1338,24 @@ impl GuiApp {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if !this.directory_tree.request_pending(&path, generation) {
+                if !this.directory_tree.request_pending(&branch, generation) {
                     return;
                 }
                 let result = match response.result {
                     Ok(result) => result,
                     Err(error) => {
-                        this.directory_tree.fail(&path, generation);
+                        this.directory_tree.fail(&branch, generation);
                         this.error = Some(error.to_string());
                         cx.notify();
                         return;
                     }
                 };
                 if response.revisions.structure != this.state.library.structure_revision {
-                    this.request_directory_page(path, offset, cx);
+                    this.request_directory_page(branch, offset, cx);
                     return;
                 }
                 if let ViewResponse::DirectoryPage(page) = result {
-                    this.directory_tree.accept(&path, generation, page);
+                    this.directory_tree.accept(&branch, generation, page);
                 }
                 cx.notify();
             });
@@ -1512,8 +1518,12 @@ impl GuiApp {
     fn toggle_library_view(&mut self, cx: &mut Context<Self>) {
         self.library_tree_active = !self.library_tree_active;
         if self.library_tree_active {
-            if self.directory_tree.generation(Path::new("")).is_none() {
-                self.request_directory_page(PathBuf::new(), 0, cx);
+            if self
+                .directory_tree
+                .generation(&library::TreeBranch::default())
+                .is_none()
+            {
+                self.request_directory_page(library::TreeBranch::default(), 0, cx);
             }
         }
         cx.notify();
@@ -1594,6 +1604,8 @@ impl GuiApp {
             self.library_selected_nodes.clear();
             self.selected.insert(id);
         }
+        self.directory_tree
+            .remember_selection(&self.library_selected_nodes, &self.selected);
         if !self.library_tree_active
             && let Some(index) = self.library_buffer.rows.position(|row| row.id == id)
         {
@@ -1698,7 +1710,7 @@ impl GuiApp {
         self.directory_tree
             .configure_page_size(self.view_page_size());
         self.directory_tree.invalidate();
-        self.request_directory_page(PathBuf::new(), 0, cx);
+        self.request_directory_page(library::TreeBranch::default(), 0, cx);
         self.request_playlist_summaries(self.playlist_buffer.rows.visible().start, cx);
         if let Some(id) = self.playlist_entries.playlist_id {
             self.request_playlist_entries(id, self.playlist_entries.rows.visible().start, cx);
@@ -1743,7 +1755,7 @@ impl GuiApp {
                 self.directory_tree.clear();
                 self.library_selected_nodes.clear();
                 if !page_size_changed {
-                    self.request_directory_page(PathBuf::new(), 0, cx);
+                    self.request_directory_page(library::TreeBranch::default(), 0, cx);
                 }
             }
             if page_size_changed {
@@ -1766,7 +1778,7 @@ impl GuiApp {
                     self.request_library_page(self.library_buffer.rows.visible().start, cx);
                     self.request_ranking(self.ranking_offset, cx);
                     self.directory_tree.invalidate();
-                    self.request_directory_page(PathBuf::new(), 0, cx);
+                    self.request_directory_page(library::TreeBranch::default(), 0, cx);
                 }
                 if let Some(id) = self.metadata_track {
                     self.request_track(id, cx);

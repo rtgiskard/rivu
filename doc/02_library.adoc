@@ -77,6 +77,16 @@ rivu library edit 12 --title "New title" --artist "Artist" --album "Album"
 rivu library clean-missing
 ----
 
+== Desktop directory tree
+
+Configured roots are shown in configuration order, including empty roots. Root
+labels use their paths to distinguish equal basenames. Child indentation follows
+visible depth. Overlapping roots have independent expansion occurrences: closing
+an enclosing root does not close the same directory shown as another root.
+Directory disclosure markers are unboxed; clicking the directory row expands or
+collapses it. Rows omit redundant Folder labels but retain loading, empty, and
+unavailable status.
+
 == Paged views
 
 GUI/TUI library and playlist views scroll continuously: visible rows trigger

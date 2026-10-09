@@ -6,7 +6,7 @@ use gpui::{AnyElement, Context, Render, Window, div, prelude::*, px, uniform_lis
 use std::{path::Path, sync::Arc};
 
 use tree::TreeItem;
-pub(super) use tree::{BranchStatus, DirectoryTree};
+pub(super) use tree::{BranchStatus, DirectoryTree, TreeBranch};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) enum LibraryNode {
@@ -122,33 +122,41 @@ impl GuiApp {
             .scroll_to_item(index, gpui::ScrollStrategy::Nearest);
         let Some(TreeItem::Entry(visible)) = self.directory_tree.item(index) else {
             self.directory_tree.defer_selection(index);
-            for (path, offset) in self.directory_tree.requests_for_range(index..index + 1) {
-                self.request_directory_page(path, offset, cx);
+            for (branch, offset) in self.directory_tree.requests_for_range(index..index + 1) {
+                self.request_directory_page(branch, offset, cx);
             }
             cx.notify();
             return;
         };
         self.directory_tree.cancel_navigation();
-        match visible.row {
-            DirectoryRow::Directory { path } => {
-                self.select_library_directory(Arc::from(path), false, cx)
-            }
-            DirectoryRow::Track(track) => self.select_track(track.id, false, cx),
+        let node = match visible.row {
+            DirectoryRow::Directory { path } => LibraryNode::Directory(Arc::from(path)),
+            DirectoryRow::Track(track) => LibraryNode::Track(track.id),
+        };
+        match &node {
+            LibraryNode::Directory(path) => self.select_library_directory(path.clone(), false, cx),
+            LibraryNode::Track(id) => self.select_track(*id, false, cx),
         }
+        self.directory_tree.focus_selection(&node, index);
         self.remember_tree_selection();
     }
 
-    fn set_directory_expanded(&mut self, path: &Path, expanded: bool, cx: &mut Context<Self>) {
+    fn set_directory_expanded(
+        &mut self,
+        branch: &TreeBranch,
+        expanded: bool,
+        cx: &mut Context<Self>,
+    ) {
         if expanded {
-            self.directory_tree.expand(path);
+            self.directory_tree.expand(branch);
             if matches!(
-                self.directory_tree.status(path),
+                self.directory_tree.status(branch),
                 BranchStatus::Unloaded | BranchStatus::Error
             ) {
-                self.request_directory_page(path.to_path_buf(), 0, cx);
+                self.request_directory_page(branch.clone(), 0, cx);
             }
         } else {
-            self.directory_tree.collapse(path);
+            self.directory_tree.collapse(branch);
         }
         cx.notify();
     }
@@ -175,8 +183,9 @@ impl GuiApp {
             return;
         };
         match visible.row {
-            DirectoryRow::Directory { path } => {
-                self.set_directory_expanded(&path, !self.directory_tree.expanded(&path), cx);
+            DirectoryRow::Directory { .. } => {
+                let branch = visible.branch.expect("directory has an occurrence");
+                self.set_directory_expanded(&branch, !self.directory_tree.expanded(&branch), cx);
             }
             DirectoryRow::Track(track) => self.send(Command::Play { track_id: track.id }, cx),
         }
@@ -192,20 +201,18 @@ impl GuiApp {
         let depth = visible.depth;
         match key {
             "left" => {
-                if let DirectoryRow::Directory { path } = &visible.row
-                    && visible.expanded
+                if visible.expanded
+                    && let Some(branch) = &visible.branch
                 {
-                    let path = path.clone();
-                    self.set_directory_expanded(&path, false, cx);
+                    self.set_directory_expanded(branch, false, cx);
                 } else if let Some(parent) = self.directory_tree.parent_index(index) {
                     self.select_tree_row(parent, cx);
                 }
             }
             "right" => {
-                if let DirectoryRow::Directory { path } = &visible.row {
+                if let Some(branch) = &visible.branch {
                     if !visible.expanded {
-                        let path = path.clone();
-                        self.set_directory_expanded(&path, true, cx);
+                        self.set_directory_expanded(branch, true, cx);
                     } else if matches!(&self.directory_tree.item(index + 1),
                         Some(TreeItem::Entry(next)) if next.depth > depth)
                         || matches!(&self.directory_tree.item(index + 1),
@@ -216,9 +223,8 @@ impl GuiApp {
                 }
             }
             "space" | " " => {
-                if let DirectoryRow::Directory { path } = &visible.row {
-                    let path = path.clone();
-                    self.set_directory_expanded(&path, !self.directory_tree.expanded(&path), cx);
+                if let Some(branch) = &visible.branch {
+                    self.set_directory_expanded(branch, !self.directory_tree.expanded(branch), cx);
                 }
             }
             _ => {}
@@ -249,7 +255,7 @@ impl GuiApp {
                             let visible = match item {
                                 TreeItem::Entry(visible) => visible,
                                 TreeItem::Placeholder {
-                                    path,
+                                    branch,
                                     offset,
                                     depth,
                                     status,
@@ -259,10 +265,9 @@ impl GuiApp {
                                         gpui::ElementId::named_usize("library-loading", index),
                                         depth,
                                         false,
-                                        false,
-                                        false,
                                     )
                                     .h(px(32.0 * ui_scale.max(0.5)))
+                                    .child(div().w(gpui::rems(1.)).flex_shrink_0())
                                     .child(
                                         div().text_color(gpui::rgb(super::MUTED)).child(
                                             if failed { "Unavailable" } else { "Loading…" },
@@ -275,9 +280,9 @@ impl GuiApp {
                                             "Retry loading folder",
                                             cx,
                                             move |this, _, cx| {
-                                                this.directory_tree.retry(&path);
+                                                this.directory_tree.retry(&branch);
                                                 this.request_directory_page(
-                                                    path.clone(),
+                                                    branch.clone(),
                                                     offset,
                                                     cx,
                                                 );
@@ -290,16 +295,19 @@ impl GuiApp {
                             let entry = &visible.row;
                             let (node, title, detail, path) = match entry {
                                 DirectoryRow::Directory { path } => {
-                                    let title = path.file_name().map_or_else(
-                                        || path.display().to_string(),
-                                        |name| name.to_string_lossy().into_owned(),
-                                    );
+                                    let title = if visible.depth == 0 {
+                                        path.display().to_string()
+                                    } else {
+                                        path.file_name().map_or_else(
+                                            || path.display().to_string(),
+                                            |name| name.to_string_lossy().into_owned(),
+                                        )
+                                    };
                                     let detail = match visible.status {
                                         BranchStatus::Loading => "Loading…".to_owned(),
                                         BranchStatus::Empty => "Empty".to_owned(),
                                         BranchStatus::Error => "Unavailable".to_owned(),
-                                        BranchStatus::Unloaded => "Folder".to_owned(),
-                                        BranchStatus::Ready => String::new(),
+                                        BranchStatus::Unloaded | BranchStatus::Ready => String::new(),
                                     };
                                     (
                                         LibraryNode::Directory(Arc::from(path.as_path())),
@@ -344,7 +352,6 @@ impl GuiApp {
                             } else {
                                 vec![id.clone()]
                             };
-                            let disclosure_path = path.clone();
                             let scan = path.clone().filter(|_| selected).map(|scan_path| {
                                 let hint = format!("Rescan {}", scan_path.display());
                                 icon_button(
@@ -364,45 +371,22 @@ impl GuiApp {
                                 )
                             });
                             let disclosure = if path.is_some() && visible.has_children {
-                                let icon = if visible.expanded {
-                                    "\u{f0140}"
-                                } else {
-                                    "\u{f0142}"
-                                };
-                                let disclosure_path =
-                                    disclosure_path.clone().expect("path checked");
-                                Some(icon_button(
-                                    gpui::ElementId::named_usize("library-disclosure", index),
-                                    icon,
-                                    if visible.expanded {
-                                        "Collapse folder"
-                                    } else {
-                                        "Expand folder"
-                                    },
-                                    cx,
-                                    move |this, _, cx| {
-                                        this.set_directory_expanded(
-                                            &disclosure_path,
-                                            !this.directory_tree.expanded(&disclosure_path),
-                                            cx,
-                                        );
-                                    },
-                                ))
+                                if visible.expanded { "▾" } else { "▸" }
                             } else {
-                                None
+                                ""
                             };
                             let row_view = super::tree_row(
                                 gpui::ElementId::named_usize("library-node", index),
                                 visible.depth,
                                 selected,
-                                false,
-                                false,
                             )
                             .h(px(32.0 * ui_scale.max(0.5)))
                             .child(
-                                disclosure
-                                    .map(IntoElement::into_any_element)
-                                    .unwrap_or_else(|| div().w(gpui::px(14.)).into_any_element()),
+                                div()
+                                    .w(gpui::rems(1.))
+                                    .flex_shrink_0()
+                                    .text_color(gpui::rgb(super::MUTED))
+                                    .child(disclosure),
                             )
                             .child(div().flex_shrink_0().text_sm().child(
                                 match (path.is_some(), nerd_symbols) {
@@ -456,14 +440,19 @@ impl GuiApp {
                                                 || modifiers.shift;
                                             this.select_library_directory(path.clone(), multi, cx);
                                             if !multi {
+                                                let branch = visible
+                                                    .branch
+                                                    .as_ref()
+                                                    .expect("directory occurrence");
                                                 this.set_directory_expanded(
-                                                    path.as_ref(),
-                                                    !this.directory_tree.expanded(path.as_ref()),
+                                                    branch,
+                                                    !this.directory_tree.expanded(branch),
                                                     cx,
                                                 );
                                             }
                                         }
                                     }
+                                    this.directory_tree.focus_selection(&id, index);
                                     this.remember_tree_selection();
                                 },
                             ));
