@@ -431,7 +431,7 @@ impl GuiApp {
         favorite: bool,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<Div> {
-        icon_button(
+        super::components::quiet_icon_button(icon_button(
             id,
             if favorite { "󰓎" } else { "󰓐" },
             if favorite {
@@ -449,7 +449,7 @@ impl GuiApp {
                     cx,
                 );
             },
-        )
+        ))
         .text_color(rgb(if favorite { ACCENT } else { MUTED }))
         .opacity(0.)
         .group_hover("library-track-row", |style| style.opacity(1.))

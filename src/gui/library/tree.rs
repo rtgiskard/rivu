@@ -501,6 +501,27 @@ impl DirectoryTree {
             .filter(|segment| index >= segment.start)
     }
 
+    /// Logical sibling counts survive eviction of viewport payload pages.
+    pub(super) fn visit_guides(&self, index: usize, mut visit: impl FnMut(usize, bool, bool)) {
+        let Some(segment) = self.segment(index) else {
+            return;
+        };
+        let mut key = &segment.branch;
+        let mut offset = segment.offset + index - segment.start;
+        for depth in (1..=segment.depth).rev() {
+            let Some(branch) = self.branches.get(key) else {
+                break;
+            };
+            let continues = offset + 1 < branch.total.unwrap_or(1);
+            visit(depth - 1, continues, depth == segment.depth);
+            let Some((parent, position)) = &branch.parent else {
+                break;
+            };
+            key = parent;
+            offset = *position;
+        }
+    }
+
     fn visit_stale_ancestors(&self, key: &TreeBranch, mut visit: impl FnMut(&TreeBranch, usize)) {
         let mut child = key;
         for _ in 0..self.branches.len() {
@@ -896,6 +917,31 @@ mod tests {
     ) {
         tree.begin(key.clone(), offset, generation);
         assert!(tree.accept(key, generation, page(paths, total)));
+    }
+
+    #[test]
+    fn guides_preserve_sibling_continuations_without_payloads() {
+        let mut tree = DirectoryTree::default();
+        accept(&mut tree, &branch(""), 0, 1, &["/a"], 1);
+        tree.expand(&branch("/a"));
+        accept(&mut tree, &branch("/a"), 0, 2, &["/a/first", "/a/last"], 2);
+        tree.expand(&branch("/a/first"));
+        accept(&mut tree, &branch("/a/first"), 0, 3, &["/a/first/leaf"], 1);
+        tree.expand(&branch("/a/last"));
+        accept(&mut tree, &branch("/a/last"), 0, 4, &["/a/last/leaf"], 1);
+        tree.pages.clear();
+        let guides = |index| {
+            let mut result = Vec::new();
+            tree.visit_guides(index, |column, continues, current| {
+                result.push((column, continues, current));
+            });
+            result
+        };
+        assert_eq!(guides(0), vec![]);
+        assert_eq!(guides(1), vec![(0, true, true)]);
+        assert_eq!(guides(2), vec![(1, false, true), (0, true, false)]);
+        assert_eq!(guides(3), vec![(0, false, true)]);
+        assert_eq!(guides(4), vec![(1, false, true), (0, false, false)]);
     }
 
     #[test]

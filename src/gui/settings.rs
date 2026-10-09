@@ -1329,6 +1329,14 @@ impl GuiApp {
                     draft.nerd_symbols,
                     cx,
                     |draft| draft.nerd_symbols = !draft.nerd_symbols,
+                )))
+                .child(row().child(visual_switch(
+                    "settings-library-tree-lines",
+                    "├",
+                    "Tree lines (off: arrows)",
+                    draft.library_tree_lines,
+                    cx,
+                    |draft| draft.library_tree_lines = !draft.library_tree_lines,
                 ))),
         );
         let desktop = settings_group(

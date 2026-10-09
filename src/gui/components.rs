@@ -241,6 +241,14 @@ pub(crate) fn icon_button(
         .tooltip(move |_, cx| cx.new(|_| ButtonTooltip { text: hint.clone() }).into())
 }
 
+/// Low-emphasis inline action; preserve the shared icon hit area and tooltip.
+pub(crate) fn quiet_icon_button(control: Stateful<Div>) -> Stateful<Div> {
+    control
+        .border_0()
+        .bg(rgb(PANEL).alpha(0.0))
+        .text_color(rgb(super::MUTED))
+}
+
 /// Compact toggle button used by visual and system settings.
 pub(crate) fn toggle_button(
     id: impl Into<ElementId>,

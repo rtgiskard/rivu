@@ -81,6 +81,8 @@ rivu library clean-missing
 
 Hover a track to access its favorite toggle. Toggling a favorite does not change
 the selection or start playback.
+Directory rescan and track favorite actions share borderless, transparent icon
+buttons with hover feedback; a favorited track keeps its accent-colored star.
 
 Click selects one row; Ctrl/Command-click toggles it. Shift-click selects the
 inclusive range from the original anchor, and Ctrl/Command-Shift-click adds that
@@ -94,6 +96,9 @@ Configured roots are shown in configuration order, including empty roots, and
 identified by their paths. Click a directory row to expand or collapse it.
 Overlapping roots expand independently: closing an enclosing root does not close
 the same directory shown as another root.
+The default hierarchy connectors leave a small gap before file/folder icons;
+they do not reserve an extra arrow column. `library_tree_lines = false` replaces
+the connectors with disclosure arrows. Both styles use the same interactions.
 
 
 == Paged views

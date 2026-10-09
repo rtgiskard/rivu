@@ -36,6 +36,36 @@ impl Render for LibraryDrag {
     }
 }
 
+fn tree_guides(tree: &DirectoryTree, index: usize) -> gpui::Div {
+    let mut guides = div().absolute().inset_0();
+    tree.visit_guides(index, |column, continues, current| {
+        let left = gpui::rems(1.0 + column as f32 * 1.25);
+        if continues || current {
+            guides = std::mem::replace(&mut guides, div()).child(
+                div()
+                    .absolute()
+                    .left(left)
+                    .top_0()
+                    .w(px(1.0))
+                    .h(gpui::relative(if continues { 1.0 } else { 0.5 }))
+                    .bg(gpui::rgb(super::MUTED).alpha(0.35)),
+            );
+        }
+        if current {
+            guides = std::mem::replace(&mut guides, div()).child(
+                div()
+                    .absolute()
+                    .left(left)
+                    .top(gpui::relative(0.5))
+                    .w(gpui::rems(0.5))
+                    .h(px(1.0))
+                    .bg(gpui::rgb(super::MUTED).alpha(0.35)),
+            );
+        }
+    });
+    guides
+}
+
 impl GuiApp {
     pub(super) fn library_drag_track_ids(&self, nodes: &[LibraryNode]) -> Vec<i64> {
         let mut ids = nodes
@@ -224,6 +254,7 @@ impl GuiApp {
     ) -> AnyElement {
         let row_count = self.directory_tree.row_count();
         let ui_scale = self.state.system.config.ui_scale;
+        let tree_lines = self.state.system.config.library_tree_lines;
         let nerd_symbols = cx
             .try_global::<super::components::NerdSymbols>()
             .is_none_or(|settings| settings.0);
@@ -251,7 +282,13 @@ impl GuiApp {
                                         false,
                                     )
                                     .h(px(32.0 * ui_scale.max(0.5)))
-                                    .child(div().w(gpui::rems(1.)).flex_shrink_0())
+                                    .relative()
+                                    .when(tree_lines, |view| {
+                                        view.child(tree_guides(&this.directory_tree, index))
+                                    })
+                                    .when(!tree_lines, |view| {
+                                        view.child(div().w(gpui::rems(1.)).flex_shrink_0())
+                                    })
                                     .child(
                                         div().text_color(gpui::rgb(super::MUTED)).child(
                                             if failed { "Unavailable" } else { "Loading…" },
@@ -338,7 +375,7 @@ impl GuiApp {
                             };
                             let scan = path.clone().filter(|_| selected).map(|scan_path| {
                                 let hint = format!("Rescan {}", scan_path.display());
-                                icon_button(
+                                super::components::quiet_icon_button(icon_button(
                                     gpui::ElementId::named_usize("library-scan", index),
                                     "󰑐",
                                     hint,
@@ -352,7 +389,7 @@ impl GuiApp {
                                             cx,
                                         );
                                     },
-                                )
+                                ))
                             });
                             let disclosure = if path.is_some() && visible.has_children {
                                 if visible.expanded { "▾" } else { "▸" }
@@ -365,18 +402,24 @@ impl GuiApp {
                                 selected,
                             )
                             .h(px(32.0 * ui_scale.max(0.5)))
-                            .child(
-                                div()
-                                    .w(gpui::rems(1.))
-                                    .flex_shrink_0()
-                                    .text_color(gpui::rgb(super::MUTED))
-                                    .child(disclosure),
-                            )
+                            .relative()
+                            .when(tree_lines, |view| {
+                                view.child(tree_guides(&this.directory_tree, index))
+                            })
+                            .when(!tree_lines, |view| {
+                                view.child(
+                                    div()
+                                        .w(gpui::rems(1.))
+                                        .flex_shrink_0()
+                                        .text_color(gpui::rgb(super::MUTED))
+                                        .child(disclosure),
+                                )
+                            })
                             .child(div().flex_shrink_0().text_sm().child(
                                 match (path.is_some(), nerd_symbols) {
                                     (true, true) => "󰉋",
                                     (false, true) => "󰈙",
-                                    (true, false) => "▸",
+                                    (true, false) => "▣",
                                     (false, false) => "♪",
                                 },
                             ))

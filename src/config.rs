@@ -154,6 +154,7 @@ pub struct Config {
     /// UI font family; empty selects the platform UI font.
     pub ui_font: String,
     pub ui_scale: f32,
+    pub library_tree_lines: bool,
     pub analysis_fps: u32,
     pub visual_background: RgbColor,
     pub visual_palette: VisualizationPalette,
@@ -236,6 +237,7 @@ impl Default for Config {
             page_size: DEFAULT_PAGE_SIZE,
             ui_font: String::new(),
             ui_scale: 1.0,
+            library_tree_lines: true,
             analysis_fps: 20,
             visual_background: RgbColor(0x08090c),
             visual_palette: VisualizationPalette::Deadbeef,
@@ -645,6 +647,7 @@ mod tests {
             queue_limit: 128,
             ui_font: "sans-serif".to_owned(),
             ui_scale: 1.5,
+            library_tree_lines: false,
             analysis_fps: 30,
             visualization_db_range: 90.0,
             spectrum_db_range: Some(80.0),

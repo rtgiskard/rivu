@@ -76,9 +76,9 @@ not serialized directly because their in-process serde representation is not a
 stable binary contract. Collection lengths and optional fields are encoded in
 the message body.
 
-`WireConfig` encodes the Common `visualization_db_range` and optional per-view
-`spectrum_db_range`, `spectrogram_db_range`, and `radial_spectrum_db_range`
-overrides, together with `waveform_seek_enabled`. Missing
+`WireConfig` includes `library_tree_lines`, the Common `visualization_db_range`,
+optional per-view `spectrum_db_range`, `spectrogram_db_range`, and
+`radial_spectrum_db_range` overrides, and `waveform_seek_enabled`. Missing
 overrides inherit Common; explicit overrides remain explicit even when equal
 to Common.
 
