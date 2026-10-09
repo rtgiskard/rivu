@@ -47,6 +47,7 @@ struct VisualizerData {
     secondary_color: u32,
     db_range: f32,
     values: Vec<f32>,
+    visible: bool,
     displayed: Vec<f32>,
     last_sample_time: Option<Duration>,
     time: f32,
@@ -70,6 +71,7 @@ impl RadialSpectrum {
                 secondary_color: 0xbb9af7,
                 db_range: 70.0,
                 values: Vec::with_capacity(FANCY_BANDS),
+                visible: true,
                 displayed: Vec::with_capacity(FANCY_BANDS),
                 last_sample_time: None,
                 time: 0.0,
@@ -116,11 +118,25 @@ impl RadialSpectrum {
         data.time = 0.0;
     }
 
+    pub(super) fn set_visible(&self, visible: bool) {
+        let mut data = self.data.borrow_mut();
+        if data.visible != visible {
+            data.visible = visible;
+            data.displayed.clear();
+            data.values.clear();
+            data.last_sample_time = None;
+            data.fade_started = None;
+        }
+    }
+
     pub(super) fn update(&mut self, frame: &AnalysisFrame) {
         if frame.spectrum_db.is_empty() || frame.frequencies_hz.is_empty() {
             return;
         }
         let mut data = self.data.borrow_mut();
+        if !data.visible {
+            return;
+        }
         let count = FANCY_BANDS.min(frame.spectrum_db.len()).max(1);
         let low = 20.0_f32.max(*frame.frequencies_hz.first().unwrap_or(&20.0));
         let high = 20_000.0_f32
@@ -571,6 +587,20 @@ mod tests {
             spectrum_db: vec![-35.0; 4],
             ..AnalysisFrame::default()
         }
+    }
+
+    #[test]
+    fn hidden_radial_resumes_directly_from_latest_frame() {
+        let mut radial = RadialSpectrum::new();
+        radial.update(&frame());
+        radial.set_visible(false);
+        radial.update(&frame());
+        assert!(radial.data.borrow().displayed.is_empty());
+        radial.set_visible(true);
+        let mut latest = frame();
+        latest.spectrum_db.fill(-70.0);
+        radial.update(&latest);
+        assert_eq!(radial.data.borrow().displayed, vec![0.0; 4]);
     }
 
     #[test]

@@ -190,6 +190,8 @@ struct VisualData {
     bar_levels: Vec<f32>,
     bar_deadlines: Vec<Duration>,
     smoothed_levels: Vec<f32>,
+    spectrum_visible: bool,
+    envelope_initialized: bool,
     spectrum_points: Vec<Point<Pixels>>,
     spectrum_geometry: HashMap<u64, SpectrumGeometry>,
     spectrum_geometry_revision: u64,
@@ -264,6 +266,8 @@ impl Visuals {
                 bar_levels: Vec::new(),
                 bar_deadlines: Vec::new(),
                 smoothed_levels: Vec::new(),
+                spectrum_visible: true,
+                envelope_initialized: false,
                 spectrum_points: Vec::new(),
                 spectrum_geometry: HashMap::new(),
                 spectrum_geometry_revision: 0,
@@ -427,6 +431,7 @@ impl Visuals {
             data.invalidate_images();
             data.stream_generation = data.stream_generation.wrapping_add(1);
             data.latest_levels.clear();
+            data.envelope_initialized = false;
             data.frequencies.clone_from(&frame.frequencies_hz);
             data.top_db = 0.0;
             data.last_update = None;
@@ -437,12 +442,19 @@ impl Visuals {
             return;
         }
         let now = frame.sample_time;
-        if data.last_update.is_some_and(|last| now < last) {
+        if data.latest_sample_time.is_some_and(|last| now < last) {
             data.clear_history();
             data.last_update = None;
+            data.envelope_initialized = false;
+        }
+        data.latest_levels.clone_from(&frame.spectrum_db);
+        data.push_history(frame.sample_time, &frame.spectrum_db);
+        data.latest_sample_time = Some(frame.sample_time);
+        if !data.spectrum_visible {
+            return;
         }
         let last = data.last_update.replace(now).unwrap_or(now);
-        if data.latest_levels.is_empty() || data.peaks.len() != frame.spectrum_db.len() {
+        if !data.envelope_initialized || data.peaks.len() != frame.spectrum_db.len() {
             data.peaks.clone_from(&frame.spectrum_db);
             data.bar_levels.clone_from(&frame.spectrum_db);
             data.smoothed_levels.clone_from(&frame.spectrum_db);
@@ -454,10 +466,9 @@ impl Visuals {
             data.bar_deadlines.clear();
             data.bar_deadlines
                 .resize(frame.spectrum_db.len(), bar_deadline);
+            data.envelope_initialized = true;
         }
-        data.latest_levels.clone_from(&frame.spectrum_db);
         data.spectrum_geometry_revision = data.spectrum_geometry_revision.wrapping_add(1);
-        data.push_history(frame.sample_time, &frame.spectrum_db);
         let decay = smoothing_decay(now.saturating_sub(last), data.spectrum_smoothing_ms);
         for index in 0..data.peaks.len() {
             let value = finite_level(frame.spectrum_db[index]);
@@ -495,7 +506,6 @@ impl Visuals {
             data.top_db = top_db;
             data.refresh_db_labels();
         }
-        data.latest_sample_time = Some(frame.sample_time);
     }
 
     pub(super) fn spectrum(&self, panel_id: u64) -> AnyElement {
@@ -511,6 +521,15 @@ impl Visuals {
             .retain(|panel_id, _| panel_ids.contains(panel_id));
         if panel_ids.is_empty() {
             data.invalidate_images();
+        }
+    }
+
+    pub(super) fn set_spectrum_visible(&self, visible: bool) {
+        let mut data = self.data.borrow_mut();
+        if data.spectrum_visible != visible {
+            data.spectrum_visible = visible;
+            data.envelope_initialized = false;
+            data.last_update = None;
         }
     }
 
@@ -1827,6 +1846,27 @@ mod tests {
         let mut visuals = Visuals::new();
         visuals.configure(&Config::default());
         visuals
+    }
+
+    #[test]
+    fn hidden_spectrum_preserves_history_and_resumes_with_latest_levels() {
+        let mut visuals = configured_visuals();
+        visuals.update(&frame(1.0, -10.0));
+        visuals.set_spectrum_visible(false);
+        visuals.update(&frame(1.1, -60.0));
+        {
+            let data = visuals.data.borrow();
+            assert_eq!(data.peaks, vec![-10.0; 4]);
+            assert_eq!(data.latest_levels, vec![-60.0; 4]);
+            assert_eq!(data.len, 2);
+        }
+        visuals.set_spectrum_visible(true);
+        visuals.update(&frame(1.1, -60.0));
+        let data = visuals.data.borrow();
+        assert_eq!(data.peaks, vec![-60.0; 4]);
+        assert_eq!(data.bar_levels, vec![-60.0; 4]);
+        assert_eq!(data.smoothed_levels, vec![-60.0; 4]);
+        assert_eq!(data.len, 2);
     }
 
     #[test]

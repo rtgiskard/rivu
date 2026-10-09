@@ -546,6 +546,8 @@ pub(super) struct GuiApp {
     analysis_worker_enabled: bool,
     measured: Rc<RefCell<HashMap<Measured, Bounds<Pixels>>>>,
     analysis_sequence: u64,
+    analysis_staging: crate::analysis::AnalysisFrame,
+    analysis_needs_refresh: bool,
     window_visible: bool,
     ui_font: Font,
     _subscriptions: Vec<Subscription>,
@@ -924,6 +926,8 @@ impl GuiApp {
             analysis_worker_enabled: false,
             measured: Rc::new(RefCell::new(HashMap::new())),
             analysis_sequence: 0,
+            analysis_staging: crate::analysis::AnalysisFrame::default(),
+            analysis_needs_refresh: false,
             window_visible: true,
             seek_preview: None,
             waveform_preview_active: false,
@@ -1824,11 +1828,26 @@ impl GuiApp {
             self.sync_analysis(cx);
         }
         if self.analysis_worker_enabled {
-            let frame = self.handle.analysis.read();
-            if frame.sequence != self.analysis_sequence {
-                self.analysis_sequence = frame.sequence;
-                self.visuals.update(&frame);
-                self.radial_spectrum.update(&frame);
+            let received = {
+                let frame = self.handle.analysis.read();
+                if frame.sequence != self.analysis_sequence || self.analysis_needs_refresh {
+                    self.analysis_staging.frequencies_hz.clone_from(&frame.frequencies_hz);
+                    self.analysis_staging.spectrum_db.clone_from(&frame.spectrum_db);
+                    self.analysis_staging.sequence = frame.sequence;
+                    self.analysis_staging.sample_rate = frame.sample_rate;
+                    self.analysis_staging.sample_time = frame.sample_time;
+                    self.analysis_staging.rms_left = frame.rms_left;
+                    self.analysis_staging.rms_right = frame.rms_right;
+                    self.analysis_sequence = frame.sequence;
+                    true
+                } else {
+                    false
+                }
+            };
+            if received {
+                self.analysis_needs_refresh = false;
+                self.visuals.update(&self.analysis_staging);
+                self.radial_spectrum.update(&self.analysis_staging);
                 changed = true;
             }
         }
@@ -1851,6 +1870,9 @@ impl GuiApp {
         self.visuals
             .retain_spectrogram_panels(&spectrogram_panel_ids);
         self.visuals.retain_spectrum_panels(&spectrum_panel_ids);
+        self.visuals.set_spectrum_visible(self.window_visible && !spectrum_panel_ids.is_empty());
+        self.radial_spectrum.set_visible(self.window_visible
+            && active_panels.iter().any(|panel| panel.kind == "audio_visualizer"));
         let analysis_visible = self.window_visible
             && active_panels.iter().any(|panel| {
                 matches!(
@@ -1861,6 +1883,7 @@ impl GuiApp {
         if analysis_visible {
             self.visuals.configure(&self.state.system.config);
             self.radial_spectrum.configure(&self.state.system.config);
+            self.analysis_needs_refresh = true;
         }
         if analysis_visible != self.analysis_worker_enabled {
             self.analysis_worker_enabled = analysis_visible;
