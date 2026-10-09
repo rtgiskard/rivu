@@ -20,9 +20,23 @@ body
 The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
+Bodies use Postcard serialization without COBS framing. The four-byte frame
+length remains little-endian; body integers follow Postcard's encoding.
+
 Request bodies are limited to 64 KiB. Response bodies are limited to 16 MiB.
 The server accepts at most 16 concurrent clients. An unbound client must send a
 Hello request within one second.
+
+Frame limits bound encoded bytes, not decoded heap usage. Decoding must reject
+malicious lengths without disproportionate allocation or work; changes to the
+Wire schema must preserve that resource bound.
+
+An oversized frame prefix closes the connection before its body is consumed.
+Invalid headers or payloads within the frame limit receive an Error response
+and close that connection; other client sessions remain usable.
+
+The transport retains partial input across cancelled reads and keeps frames
+independent.
 
 == Session handshake
 
@@ -69,6 +83,18 @@ Clients initialize from a state read, watch for revision changes, then read only
 the invalidated sections. Notifications coalesce to the latest state. A server
 restart requires a fresh Hello and state read.
 
+== Query results and pagination
+
+Query responses contain the requested projection and its revisions, not a full
+client state or queue snapshot. Command acknowledgements likewise do not replace
+an explicit state read.
+
+Interactive pages return a total count and at most 256 rows; larger limits are
+clamped, and `limit = 0` returns the count without rows. Cursor batches require a
+limit from 1 through 256 and reject zero or larger values. Continuations are tied
+to the relevant data revision; clients must restart traversal when it changes.
+
+
 == Wire schemas
 
 Runtime `Config` and `SystemState` use explicit positional Wire schemas. They are
@@ -76,19 +102,10 @@ not serialized directly because their in-process serde representation is not a
 stable binary contract. Collection lengths and optional fields are encoded in
 the message body.
 
-`WireConfig` includes `library_tree_lines`, the Common `visualization_db_range`,
-optional per-view `spectrum_db_range`, `spectrogram_db_range`, and
-`radial_spectrum_db_range` overrides, and `waveform_seek_enabled`. Missing
-overrides inherit Common; explicit overrides remain explicit even when equal
-to Common.
-
 The codec and positional payload schema are not negotiated. Changes require
-coordinated client and server updates.
+coordinated client and server updates, preserving configuration semantics such
+as omitted overrides inheriting their common setting.
 
-== Implementation and tests
-
-* Protocol types and adapters: `src/ipc/protocol.rs`
-* Frame encoding and stream transport: `src/ipc/transport.rs`
-* Server lifecycle and request handling: `src/ipc/server.rs`
-* Client sessions and one-shot requests: `src/ipc/client.rs`
-* Protocol tests: `src/ipc/tests.rs`
+The source of truth for exact schemas and adapters is
+link:../src/ipc/protocol.rs[protocol.rs];
+link:../src/ipc/tests.rs[protocol tests] cover compatibility and transport bounds.

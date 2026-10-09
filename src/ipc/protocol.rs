@@ -701,7 +701,6 @@ pub(super) struct WireStateResponse {
     playback: Option<crate::response::PlaybackSnapshot>,
     queue: Option<crate::model::QueueState>,
     library: Option<crate::model::LibrarySnapshot>,
-    #[serde(with = "wire_system_option")]
     system: Option<WireSystemState>,
 }
 
@@ -946,21 +945,21 @@ pub(super) struct WireSystemState {
     shutting_down: bool,
 }
 
-impl From<&SystemState> for WireSystemState {
-    fn from(value: &SystemState) -> Self {
+impl From<SystemState> for WireSystemState {
+    fn from(value: SystemState) -> Self {
         Self {
             scanning: value.scanning,
-            scan_message: value.scan_message.clone(),
-            scan_progress: value.scan_progress.clone(),
-            last_error: value.last_error.clone(),
-            devices: value.devices.clone(),
-            selected_device: value.selected_device.clone(),
+            scan_message: value.scan_message,
+            scan_progress: value.scan_progress,
+            last_error: value.last_error,
+            devices: value.devices,
+            selected_device: value.selected_device,
             revision: value.revision,
             config: WireConfig::from(value.config.as_ref()),
-            config_path: value.config_path.clone(),
-            mpris_status: value.mpris_status.clone(),
-            ffmpeg_status: value.ffmpeg_status.clone(),
-            database_optimization: value.database_optimization.clone(),
+            config_path: value.config_path,
+            mpris_status: value.mpris_status,
+            ffmpeg_status: value.ffmpeg_status,
+            database_optimization: value.database_optimization,
             shutting_down: value.shutting_down,
         }
     }
@@ -986,32 +985,13 @@ impl From<WireSystemState> for SystemState {
     }
 }
 
-mod wire_system_option {
-    use super::WireSystemState;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    pub fn serialize<S>(value: &Option<WireSystemState>, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        value.serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<WireSystemState>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Option::<WireSystemState>::deserialize(deserializer)
-    }
-}
-
 pub(super) fn wire_state(response: StateResponse) -> WireStateResponse {
     WireStateResponse {
         revisions: response.revisions,
         playback: response.playback,
         queue: response.queue,
         library: response.library,
-        system: response.system.as_ref().map(WireSystemState::from),
+        system: response.system.map(WireSystemState::from),
     }
 }
 

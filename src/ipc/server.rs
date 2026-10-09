@@ -1,7 +1,7 @@
 use super::{
-    HELLO_TIMEOUT, HelloResponse, MAX_CLIENTS, MAX_REQUEST, PROTOCOL_VERSION, SessionState,
-    UNKNOWN_INSTANCE, WireRequest, WireResponse, decode_request_frame, read_frame, wire_state,
-    write_error_frame, write_frame_buffered,
+    HELLO_TIMEOUT, HelloResponse, MAX_CLIENTS, MAX_REQUEST, SessionState, UNKNOWN_INSTANCE,
+    WireRequest, WireResponse, decode_request_frame, read_frame, wire_state, write_error_frame,
+    write_frame_buffered,
 };
 use crate::core::AppHandle;
 use crate::{
@@ -258,8 +258,8 @@ async fn serve_connection(
                 }
             }
         };
-        let (version, request) = match decode_request_frame(&bytes) {
-            Ok(frame) => frame,
+        let request = match decode_request_frame(&bytes) {
+            Ok(request) => request,
             Err(error) => {
                 tracing::warn!(error = %error, "ipc_invalid_request");
                 write_error_frame(
@@ -271,20 +271,6 @@ async fn serve_connection(
                 return Ok(());
             }
         };
-        if version != PROTOCOL_VERSION {
-            tracing::warn!(
-                version,
-                expected = PROTOCOL_VERSION,
-                "ipc_unsupported_protocol_version"
-            );
-            write_error_frame(
-                &mut stream,
-                &mut write_buffer,
-                format!("Unsupported IPC protocol version {version}"),
-            )
-            .await?;
-            return Ok(());
-        }
         if !session.is_bound() && !matches!(request, WireRequest::Hello(_)) {
             tracing::warn!("ipc_hello_required");
             write_error_frame(
