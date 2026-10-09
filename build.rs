@@ -6,8 +6,12 @@ use std::path::PathBuf;
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=src");
+    println!("cargo:rerun-if-changed=Cargo.toml");
+    println!("cargo:rerun-if-changed=Cargo.lock");
     println!("cargo:rerun-if-env-changed=LIBCLANG_PATH");
     println!("cargo:rerun-if-env-changed=RIVU_GIT_VERSION");
+    println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
 
     let version = env::var("RIVU_GIT_VERSION")
         .ok()
@@ -16,10 +20,33 @@ fn main() {
         .unwrap_or_else(|| env::var("CARGO_PKG_VERSION").expect("Cargo sets CARGO_PKG_VERSION"));
     println!("cargo:rustc-env=RIVU_GIT_VERSION={version}");
 
+    println!("cargo:rustc-env=RIVU_BUILD_TIMESTAMP={}", build_time());
+
     #[cfg(feature = "ffmpeg")]
     if env::var_os("CARGO_FEATURE_FFMPEG").is_some() {
         generate_ffmpeg_bindings();
     }
+}
+
+fn build_time() -> i64 {
+    let timestamp = match env::var_os("SOURCE_DATE_EPOCH") {
+        Some(value) => {
+            let value = value
+                .to_str()
+                .expect("SOURCE_DATE_EPOCH must be a nonnegative integer Unix timestamp");
+            assert!(
+                !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()),
+                "SOURCE_DATE_EPOCH must be a nonnegative integer Unix timestamp"
+            );
+            let seconds = value
+                .parse::<i64>()
+                .expect("SOURCE_DATE_EPOCH is outside the supported timestamp range");
+            chrono::DateTime::<chrono::Utc>::from_timestamp(seconds, 0)
+                .expect("SOURCE_DATE_EPOCH is outside the supported timestamp range")
+        }
+        None => chrono::Utc::now(),
+    };
+    timestamp.timestamp()
 }
 
 #[cfg(feature = "ffmpeg")]

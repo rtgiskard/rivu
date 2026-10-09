@@ -51,6 +51,13 @@ does not open an empty popover. Settings triggers own focus and repaint after
 opening; the popup uses the same rem-based row height as its rendered options
 and reveals the selected option when opened.
 
+About opens as an overlay inside the main window, with the Rivu logo on the left
+and left-aligned application/version details on the right. It shows only the
+Git build identifier, without the package-version wrapper used by `rivu -V`.
+The embedded Unix build timestamp is converted
+to the local timezone for display, including its UTC offset. The top-right ×,
+Escape, or an outside click closes the overlay.
+
 == Build and install
 
 Rivu currently targets Linux; the desktop UI uses Wayland. On Arch Linux, install
@@ -90,6 +97,31 @@ Cross-compiling is not currently a supported build path.
 Compilation makes the extension available; `ffmpeg_enabled = true` enables it
 at runtime. See link:doc/04_playback.adoc[Playback] for runtime dependencies and
 decoding behavior.
+
+=== Build information
+
+About and `rivu -V` reuse the build-time `RIVU_GIT_VERSION`. `make build` supplies
+it with `git describe --long --tags --always --dirty`; no repository lookup runs
+at application startup. A nonempty, trimmed environment value overrides the
+package version; plain Cargo builds without that value use the package version.
+The build script embeds `RIVU_BUILD_TIMESTAMP` as integer Unix seconds; only
+the UI formats it as local date/time. No formatted date string is parsed back.
+Source changes refresh the build timestamp.
+
+For reproducible timestamps, set `SOURCE_DATE_EPOCH` to a nonnegative integer
+number of seconds since the Unix epoch. Invalid or unsupported values fail the
+build instead of silently falling back to the current time:
+
+[source,sh]
+----
+SOURCE_DATE_EPOCH=1767225600 cargo build --release
+----
+
+Source archives can provide `RIVU_GIT_VERSION` explicitly. Otherwise plain Cargo
+builds use the package version, and the Makefile reports `unknown` when Git is
+unavailable. The UTC timestamp is still embedded, using `SOURCE_DATE_EPOCH` when
+supplied.
+
 
 == Start and stop
 

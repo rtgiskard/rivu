@@ -364,29 +364,6 @@ impl Render for PanelDrag {
     }
 }
 
-struct AboutWindow;
-
-impl Render for AboutWindow {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        column()
-            .size_full()
-            .items_center()
-            .justify_center()
-            .gap_3()
-            .p(px(24.))
-            .bg(rgb(PANEL))
-            .text_color(rgb(TEXT))
-            .child(div().text_2xl().child("Rivu"))
-            .child(caption("A local-first music player"))
-            .child(caption(format!("Version {}", env!("CARGO_PKG_VERSION"))))
-            .child(caption("GPL-3.0-or-later"))
-            .child(
-                components::button_style("about-close", "Close")
-                    .on_click(cx.listener(|_, _, window, _| window.remove_window())),
-            )
-    }
-}
-
 #[derive(Clone, Copy)]
 pub(super) struct QueueDrag {
     pub(super) queue_id: u64,
@@ -550,6 +527,8 @@ pub(super) struct GuiApp {
     default_album: Entity<artwork::Artwork>,
     catalog_open: bool,
     settings_open: bool,
+    about_open: bool,
+    about_focus: FocusHandle,
     app_menu_open: bool,
     panel_menu: Option<PanelMenu>,
     playlist_delete_confirm: Option<i64>,
@@ -922,6 +901,8 @@ impl GuiApp {
             default_album: cx.new(|_| artwork::Artwork::new()),
             catalog_open: false,
             settings_open: false,
+            about_open: false,
+            about_focus: cx.focus_handle(),
             app_menu_open: false,
             panel_menu: None,
             playlist_delete_confirm: None,
@@ -2373,6 +2354,15 @@ impl Render for GuiApp {
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = event.keystroke.key.as_str();
+                if this.about_open {
+                    if key == "escape" {
+                        this.about_open = false;
+                        this.focus_workspace(window, cx);
+                        cx.notify();
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
                 if this.settings_dropdown_is_open() {
                     if key == "escape" {
                         this.close_settings_dropdown();
@@ -2582,19 +2572,10 @@ impl Render for GuiApp {
                 cx.notify();
             }));
         if self.app_menu_open {
-            let about = menu_item("app-about", "About", cx, |this, _, cx| {
+            let about = menu_item("app-about", "About", cx, |this, window, cx| {
                 this.app_menu_open = false;
-                let _ = cx.open_window(
-                    WindowOptions {
-                        titlebar: Some(TitlebarOptions {
-                            title: Some("About Rivu".into()),
-                            ..Default::default()
-                        }),
-                        window_min_size: Some(size(px(320.), px(260.))),
-                        ..Default::default()
-                    },
-                    |_, cx| cx.new(|_| AboutWindow),
-                );
+                this.about_open = true;
+                this.about_focus.focus(window, cx);
                 cx.notify();
             });
             app = app.child(
@@ -3025,6 +3006,108 @@ impl Render for GuiApp {
                                     .child(div().flex_1().text_lg().child("Settings")),
                             )
                             .child(settings),
+                    ),
+            );
+        }
+        if self.about_open {
+            static LOGO: std::sync::LazyLock<Arc<Image>> = std::sync::LazyLock::new(|| {
+                Arc::new(Image::from_bytes(
+                    ImageFormat::Png,
+                    crate::artwork::DEFAULT_IMAGE.to_vec(),
+                ))
+            });
+            let built = chrono::DateTime::<chrono::Utc>::from_timestamp(
+                env!("RIVU_BUILD_TIMESTAMP")
+                    .parse()
+                    .expect("build script emits Unix seconds"),
+                0,
+            )
+            .expect("build script validates timestamp range")
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M:%S %:z")
+            .to_string();
+            app = app.child(
+                div()
+                    .id("about-modal")
+                    .track_focus(&self.about_focus)
+                    .occlude()
+                    .absolute()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(rgb(0x000000).alpha(0.58))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_, _, _, cx| {
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|_, _, _, cx| {
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Middle,
+                        cx.listener(|_, _, _, cx| {
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .on_scroll_wheel(cx.listener(|_, _, _, cx| {
+                        cx.stop_propagation();
+                    }))
+                    .child(
+                        row()
+                            .id("about-card")
+                            .relative()
+                            .max_w(relative(0.9))
+                            .items_center()
+                            .gap_6()
+                            .p_6()
+                            .bg(rgb(PANEL))
+                            .border_1()
+                            .border_color(rgb(BORDER))
+                            .rounded_md()
+                            .on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                                this.about_open = false;
+                                this.focus_workspace(window, cx);
+                                cx.stop_propagation();
+                                cx.notify();
+                            }))
+                            .child(
+                                img(Arc::clone(&LOGO))
+                                    .w(rems(9.5))
+                                    .h(rems(9.5))
+                                    .flex_shrink_0(),
+                            )
+                            .child(
+                                column()
+                                    .items_start()
+                                    .gap_3()
+                                    .child(div().text_2xl().child("Rivu"))
+                                    .child(caption("A local-first music player"))
+                                    .child(caption(env!("RIVU_GIT_VERSION")))
+                                    .child(caption(format!("Built {built}")))
+                                    .child(caption("GPL-3.0-or-later")),
+                            )
+                            .child(
+                                icon_button(
+                                    "about-close",
+                                    "×",
+                                    "Close",
+                                    cx,
+                                    |this, window, cx| {
+                                        this.about_open = false;
+                                        this.focus_workspace(window, cx);
+                                        cx.notify();
+                                    },
+                                )
+                                .absolute()
+                                .top(px(8.))
+                                .right(px(8.)),
+                            ),
                     ),
             );
         }
