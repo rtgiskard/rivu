@@ -193,8 +193,15 @@ pub struct Config {
     /// Maximum logarithmic frequency rows generated for each cached column.
     pub spectrogram_interpolation_points: u32,
     pub waveform_labels: bool,
-    pub spectrum_db_range: f32,
-    pub spectrogram_db_range: f32,
+    pub waveform_seek_enabled: bool,
+    /// Default display span inherited by visualizations without an override.
+    pub visualization_db_range: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spectrum_db_range: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spectrogram_db_range: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub radial_spectrum_db_range: Option<f32>,
     /// Maximum continuous audio history shown by Spectrogram.
     pub spectrogram_history_seconds: u32,
     pub waveform_cursor_color: RgbColor,
@@ -264,8 +271,11 @@ impl Default for Config {
             spectrogram_sampling_points_scale: 0.5,
             spectrogram_interpolation_points: 1024,
             waveform_labels: true,
-            spectrum_db_range: 70.0,
-            spectrogram_db_range: 70.0,
+            waveform_seek_enabled: true,
+            visualization_db_range: 70.0,
+            spectrum_db_range: None,
+            spectrogram_db_range: None,
+            radial_spectrum_db_range: None,
             spectrogram_history_seconds: 20,
             waveform_cursor_color: RgbColor(0x73daca),
             waveform_glow: 1.0,
@@ -282,6 +292,21 @@ impl Default for Config {
 }
 
 impl Config {
+    pub fn spectrum_db_range(&self) -> f32 {
+        self.spectrum_db_range
+            .unwrap_or(self.visualization_db_range)
+    }
+
+    pub fn spectrogram_db_range(&self) -> f32 {
+        self.spectrogram_db_range
+            .unwrap_or(self.visualization_db_range)
+    }
+
+    pub fn radial_spectrum_db_range(&self) -> f32 {
+        self.radial_spectrum_db_range
+            .unwrap_or(self.visualization_db_range)
+    }
+
     /// Read settings without creating files or directories. Only a missing file
     /// selects defaults; unreadable, malformed, and invalid files are errors.
     pub fn load(path: &Path) -> Result<Self> {
@@ -383,13 +408,17 @@ impl Config {
             self.analysis_fps
         );
         for (name, range) in [
+            ("visualization_db_range", Some(self.visualization_db_range)),
             ("spectrum_db_range", self.spectrum_db_range),
             ("spectrogram_db_range", self.spectrogram_db_range),
+            ("radial_spectrum_db_range", self.radial_spectrum_db_range),
         ] {
-            ensure!(
-                range.is_finite() && (1.0..=160.0).contains(&range),
-                "{name} must be between 1 and 160 dB; got {range}"
-            );
+            if let Some(range) = range {
+                ensure!(
+                    range.is_finite() && (1.0..=160.0).contains(&range),
+                    "{name} must be finite and between 1 and 160 dB; got {range}"
+                );
+            }
         }
         ensure!(
             matches!(
@@ -617,7 +646,9 @@ mod tests {
             ui_font: "sans-serif".to_owned(),
             ui_scale: 1.5,
             analysis_fps: 30,
-            spectrum_db_range: 80.0,
+            visualization_db_range: 90.0,
+            spectrum_db_range: Some(80.0),
+            radial_spectrum_db_range: Some(60.0),
             media_read_buffer_mb: 8,
             nerd_symbols: true,
             ffmpeg_enabled: true,
@@ -654,9 +685,10 @@ mod tests {
             spectrogram_interpolate: false,
             spectrogram_interpolation_points: 1024,
             spectrogram_sampling_points_scale: 1.0,
-            spectrogram_db_range: 100.0,
+            spectrogram_db_range: Some(100.0),
             spectrogram_history_seconds: 20,
             waveform_labels: false,
+            waveform_seek_enabled: false,
             waveform_cursor_color: "#eeaa66".parse().unwrap(),
             waveform_glow: 0.0,
             waveform_rms_gain: 2.0,
@@ -762,8 +794,6 @@ mod tests {
             "spectrum_db_range = 0",
             "spectrum_db_range = 161",
             "spectrogram_db_range = inf",
-            "analysis_db_range = 0",
-            "analysis_db_range = inf",
             "spectrum_fft_size = 256",
             "spectrum_fft_size = 65536",
             "spectrum_fft_size = 1000",
@@ -882,36 +912,60 @@ mod tests {
     }
 
     #[test]
-    fn legacy_shared_range_migrates_without_overriding_explicit_ranges() {
+    fn visualization_ranges_inherit_and_preserve_explicit_overrides() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
+        let mut config = Config::default();
+        assert_eq!(config.visualization_db_range, 70.0);
+        config.visualization_db_range = 85.0;
+        assert_eq!(config.spectrum_db_range(), 85.0);
+        assert_eq!(config.spectrogram_db_range(), 85.0);
+        assert_eq!(config.radial_spectrum_db_range(), 85.0);
+        config.save(&path).unwrap();
+        let saved: toml::Table = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        for key in [
+            "spectrum_db_range",
+            "spectrogram_db_range",
+            "radial_spectrum_db_range",
+        ] {
+            assert!(!saved.contains_key(key));
+        }
+        assert_eq!(Config::load(&path).unwrap(), config);
+
         fs::write(
             &path,
-            "analysis_db_range = 85\nspectrogram_db_range = 110\n",
+            "visualization_db_range = 85\nspectrum_db_range = 70\nspectrogram_db_range = 110\nradial_spectrum_db_range = 85\n",
         )
         .unwrap();
-        let mut config = Config::load(&path).unwrap();
-        assert_eq!(
-            (config.spectrum_db_range, config.spectrogram_db_range),
-            (85.0, 110.0)
-        );
-        config.spectrum_db_range = 60.0;
+        config = Config::load(&path).unwrap();
+        assert_eq!(config.spectrum_db_range, Some(70.0));
+        assert_eq!(config.spectrogram_db_range, Some(110.0));
+        assert_eq!(config.radial_spectrum_db_range, Some(85.0));
+        config.visualization_db_range = 95.0;
+        assert_eq!(config.spectrum_db_range(), 70.0);
+        assert_eq!(config.spectrogram_db_range(), 110.0);
+        assert_eq!(config.radial_spectrum_db_range(), 85.0);
         config.save(&path).unwrap();
         assert_eq!(Config::load(&path).unwrap(), config);
-        let saved: toml::Table = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert!(!saved.contains_key("analysis_db_range"));
-        fs::write(&path, "analysis_db_range = 85\nspectrum_db_range = 60\n").unwrap();
-        config = Config::load(&path).unwrap();
-        assert_eq!(
-            (config.spectrum_db_range, config.spectrogram_db_range),
-            (60.0, 85.0)
-        );
-        fs::write(&path, "analysis_db_range = 55\n").unwrap();
-        config = Config::load(&path).unwrap();
-        assert_eq!(
-            (config.spectrum_db_range, config.spectrogram_db_range),
-            (55.0, 55.0)
-        );
+        config.spectrum_db_range = None;
+        assert_eq!(config.spectrum_db_range(), 95.0);
+    }
+
+    #[test]
+    fn visualization_ranges_reject_nonfinite_and_out_of_range_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        for key in [
+            "visualization_db_range",
+            "spectrum_db_range",
+            "spectrogram_db_range",
+            "radial_spectrum_db_range",
+        ] {
+            for value in ["nan", "inf", "-inf", "0", "0.99", "160.01", "161"] {
+                fs::write(&path, format!("{key} = {value}\n")).unwrap();
+                assert!(Config::load(&path).is_err(), "accepted {key} = {value}");
+            }
+        }
     }
 
     #[test]
@@ -952,8 +1006,10 @@ mod tests {
         let path = directory.path().join("config.toml");
         for high in [false, true] {
             let config = Config {
-                spectrum_db_range: if high { 160.0 } else { 1.0 },
-                spectrogram_db_range: if high { 1.0 } else { 160.0 },
+                visualization_db_range: if high { 160.0 } else { 1.0 },
+                spectrum_db_range: Some(if high { 160.0 } else { 1.0 }),
+                spectrogram_db_range: Some(if high { 1.0 } else { 160.0 }),
+                radial_spectrum_db_range: Some(if high { 160.0 } else { 1.0 }),
                 spectrum_gap: if high { 8.0 } else { 0.0 },
                 spectrum_peak_hold_ms: if high { 2000 } else { 0 },
                 spectrum_fft_size: if high { 32768 } else { 512 },
@@ -1031,7 +1087,7 @@ mod tests {
         ] {
             let config = Config {
                 spectrum_style,
-                spectrum_db_range: 55.0,
+                spectrum_db_range: Some(55.0),
                 ..Config::default()
             };
             config.save(&path).unwrap();

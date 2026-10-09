@@ -63,6 +63,7 @@ enum Field {
     Scale,
     Fps,
     Background,
+    VisualizationDb,
     RadialSpectrumSensitivity,
     RadialSpectrumRotationSpeed,
     RadialSpectrumBarWidth,
@@ -72,6 +73,7 @@ enum Field {
     RadialSpectrumInnerDiameter,
     RadialSpectrumPrimaryColor,
     RadialSpectrumSecondaryColor,
+    RadialSpectrumDb,
     SpectrumDb,
     SpectrumBarWidth,
     SpectrumBars,
@@ -105,6 +107,7 @@ impl Field {
             Self::Scale => "Interface scale (0.75–2)",
             Self::Fps => "Analysis rate (5–60 Hz)",
             Self::Background => "Background (#RRGGBB)",
+            Self::VisualizationDb => "Default dB range (1–160 dB)",
             Self::RadialSpectrumSensitivity => "Sensitivity (0–5)",
             Self::RadialSpectrumRotationSpeed => "Rotation speed (0–10)",
             Self::RadialSpectrumBarWidth => "Bar width (0–2)",
@@ -114,8 +117,10 @@ impl Field {
             Self::RadialSpectrumInnerDiameter => "Inner diameter (0–2)",
             Self::RadialSpectrumPrimaryColor => "Primary color (#RRGGBB)",
             Self::RadialSpectrumSecondaryColor => "Secondary color (#RRGGBB)",
-            Self::SpectrumDb => "Spectrum / Radial range (1–160 dB)",
-            Self::SpectrogramDb => "Color range (1–160 dB)",
+            Self::SpectrumDb | Self::RadialSpectrumDb => {
+                "dB range override (1–160 dB; empty = Common)"
+            }
+            Self::SpectrogramDb => "Color range override (1–160 dB; empty = Common)",
             Self::SpectrumBarWidth => "Auto bar width (1–20 px)",
             Self::SpectrumBars => "Bar count (0 = auto; 1–512)",
             Self::SpectrumGap => "Bar gap (0–8 px)",
@@ -275,6 +280,7 @@ impl Settings {
             Field::Scale,
             Field::Fps,
             Field::Background,
+            Field::VisualizationDb,
             Field::RadialSpectrumSensitivity,
             Field::RadialSpectrumRotationSpeed,
             Field::RadialSpectrumBarWidth,
@@ -284,6 +290,7 @@ impl Settings {
             Field::RadialSpectrumInnerDiameter,
             Field::RadialSpectrumPrimaryColor,
             Field::RadialSpectrumSecondaryColor,
+            Field::RadialSpectrumDb,
             Field::SpectrumDb,
             Field::SpectrumBarWidth,
             Field::SpectrumBars,
@@ -323,6 +330,17 @@ impl Settings {
 
     fn single(&self, field: Field) -> Div {
         row().child(self.field(field).w(relative(0.5)).min_w(px(180.)).pr_2())
+    }
+
+    fn db_range_hint(&self, cx: &App) -> Div {
+        let range = self
+            .number::<f32>(Field::VisualizationDb, cx)
+            .ok()
+            .filter(|range| range.is_finite() && (1.0..=160.0).contains(range))
+            .unwrap_or(self.draft.visualization_db_range);
+        caption(format!(
+            "Empty inherits Common: {range} dB. An explicit value overrides Common for this view."
+        ))
     }
 
     fn field_state(&self, field: Field, enabled: bool, reason: &'static str, cx: &App) -> Div {
@@ -365,6 +383,22 @@ impl Settings {
             .trim()
             .parse()
             .map_err(|error| anyhow::anyhow!("{}: {error}", field.label()))
+    }
+
+    fn optional_number<T: FromStr>(&self, field: Field, cx: &App) -> Result<Option<T>>
+    where
+        T::Err: std::fmt::Display,
+    {
+        let value = self.value(field, cx);
+        if value.trim().is_empty() {
+            Ok(None)
+        } else {
+            value
+                .trim()
+                .parse()
+                .map(Some)
+                .map_err(|error| anyhow::anyhow!("{}: {error}", field.label()))
+        }
     }
 
     fn set_value(&mut self, field: Field, value: impl Into<SharedString>, cx: &mut App) {
@@ -420,6 +454,11 @@ impl Settings {
             cx,
         );
         self.set_value(
+            Field::VisualizationDb,
+            self.draft.visualization_db_range.to_string(),
+            cx,
+        );
+        self.set_value(
             Field::RadialSpectrumSensitivity,
             self.draft.radial_spectrum_sensitivity.to_string(),
             cx,
@@ -465,8 +504,19 @@ impl Settings {
             cx,
         );
         self.set_value(
+            Field::RadialSpectrumDb,
+            self.draft
+                .radial_spectrum_db_range
+                .map(|range| range.to_string())
+                .unwrap_or_default(),
+            cx,
+        );
+        self.set_value(
             Field::SpectrumDb,
-            self.draft.spectrum_db_range.to_string(),
+            self.draft
+                .spectrum_db_range
+                .map(|range| range.to_string())
+                .unwrap_or_default(),
             cx,
         );
         self.set_value(Field::SpectrumGap, self.draft.spectrum_gap.to_string(), cx);
@@ -507,7 +557,10 @@ impl Settings {
         );
         self.set_value(
             Field::SpectrogramDb,
-            self.draft.spectrogram_db_range.to_string(),
+            self.draft
+                .spectrogram_db_range
+                .map(|range| range.to_string())
+                .unwrap_or_default(),
             cx,
         );
         self.set_value(
@@ -566,6 +619,7 @@ impl Settings {
         config.ui_font = self.value(Field::Font, cx).trim().to_owned();
         config.ui_scale = self.number(Field::Scale, cx)?;
         config.analysis_fps = self.number(Field::Fps, cx)?;
+        config.visualization_db_range = self.number(Field::VisualizationDb, cx)?;
         config.visual_background = self
             .value(Field::Background, cx)
             .trim()
@@ -592,7 +646,8 @@ impl Settings {
             .trim()
             .parse::<RgbColor>()
             .context("Radial Spectrum secondary color")?;
-        config.spectrum_db_range = self.number(Field::SpectrumDb, cx)?;
+        config.radial_spectrum_db_range = self.optional_number(Field::RadialSpectrumDb, cx)?;
+        config.spectrum_db_range = self.optional_number(Field::SpectrumDb, cx)?;
         config.spectrum_gap = self.number(Field::SpectrumGap, cx)?;
         config.spectrum_peak_hold_ms = self.number(Field::SpectrumHold, cx)?;
         config.spectrum_peak_gravity = self.number(Field::SpectrumGravity, cx)?;
@@ -601,7 +656,7 @@ impl Settings {
         config.spectrum_smoothing_ms = self.number(Field::SpectrumSmoothing, cx)?;
         config.spectrum_bar_width = self.number(Field::SpectrumBarWidth, cx)?;
         config.spectrum_bars = self.number(Field::SpectrumBars, cx)?;
-        config.spectrogram_db_range = self.number(Field::SpectrogramDb, cx)?;
+        config.spectrogram_db_range = self.optional_number(Field::SpectrogramDb, cx)?;
         config.spectrogram_history_seconds = self.number(Field::SpectrogramHistory, cx)?;
         config.spectrogram_sampling_points_scale =
             self.number(Field::SpectrogramSamplingPointsScale, cx)?;
@@ -1188,12 +1243,13 @@ impl GuiApp {
                 column().gap_3()
                     .child(settings_group("Appearance", column().gap_2()
                         .child(two_column(settings.field(Field::Background).min_w(px(180.)), form_field("Color scheme", palette).min_w(px(180.))))
-                        .child(caption("Background: all views. Color scheme: Spectrum, Spectrogram, and Waveform."))))
+                        .child(settings.single(Field::VisualizationDb))
+                        .child(caption("Background: all views. Color scheme: Spectrum, Spectrogram, and Waveform."))
+                        .child(caption("Default dB range: display span for Spectrum, Spectrogram, and Radial Spectrum unless overridden in that view. Not FFT analysis, playback volume, or Waveform gain."))))
                     .child(settings_group("Frequency analysis", column().gap_2()
                         .child(two_column(form_field("FFT size", fft).min_w(px(180.)), form_field("FFT window", window).min_w(px(180.))))
-                        .child(settings.pair(Field::Fps, Field::SpectrumDb))
-                        .child(caption("FFT and rate: Spectrum, Spectrogram, and Radial Spectrum. FFT size or window changes clear Spectrogram history."))
-                        .child(caption("The dB range excludes Spectrogram, which has its own color range."))))
+                        .child(settings.single(Field::Fps))
+                        .child(caption("FFT and rate: Spectrum, Spectrogram, and Radial Spectrum. FFT size or window changes clear Spectrogram history."))))
                     .child(settings_group("Rendering", column().gap_2()
                         .child(row().child(visual_switch("visual-cache", "▤", "Reuse rendering caches", draft.visualization_cache, cx, |draft| draft.visualization_cache = !draft.visualization_cache)))
                         .child(caption("Reuse graphics in Spectrum, Spectrogram, and Waveform: less CPU work, more memory."))))
@@ -1212,11 +1268,13 @@ impl GuiApp {
                             settings.field_state(Field::SpectrumBarWidth, !solid, "Solid uses pixel density, not auto bar width", cx),
                             settings.field_state(Field::SpectrumGap, !solid, "Solid has no bar gaps", cx),
                         ))
+                        .child(settings.single(Field::SpectrumDb))
+                        .child(settings.db_range_hint(cx))
                         .child(row().flex_wrap().gap_2()
                             .child(visual_switch("spectrum-interpolate", "≈", "Frequency interpolation", draft.spectrum_interpolate, cx, |draft| draft.spectrum_interpolate = !draft.spectrum_interpolate))
                             .child(visual_switch("spectrum-grid", "#", "Faint grid", draft.spectrum_grid, cx, |draft| draft.spectrum_grid = !draft.spectrum_grid))
                             .child(visual_switch("spectrum-labels", "T", "Labels", draft.spectrum_labels, cx, |draft| draft.spectrum_labels = !draft.spectrum_labels)))
-                        .child(caption("Auto count uses width + gap. Solid uses pixel density. FFT and dB range: Common."))))
+                        .child(caption("Auto count uses width + gap. Solid uses pixel density. Shared FFT: Common."))))
                     .child(settings_group("Body motion", column().gap_2()
                         .child(settings.pair(Field::SpectrumBarHold, Field::SpectrumBarGravity))
                         .child(settings.single(Field::SpectrumSmoothing))
@@ -1231,6 +1289,7 @@ impl GuiApp {
             VisualPage::Spectrogram => column().gap_3()
                 .child(settings_group("Color & history", column().gap_2()
                     .child(settings.pair(Field::SpectrogramDb, Field::SpectrogramHistory))
+                    .child(settings.db_range_hint(cx))
                     .child(row().child(visual_switch("spectrogram-labels", "T", "Labels", draft.spectrogram_labels, cx, |draft| draft.spectrogram_labels = !draft.spectrogram_labels)))
                     .child(caption("History is limited by width and analysis rate. Shared analysis and colors: Common."))))
                 .child(settings_group("Frequency sampling", column().gap_2()
@@ -1249,6 +1308,8 @@ impl GuiApp {
                     .child(settings_group("Shape & motion", column().gap_2()
                         .child(two_column(form_field("Style", style).min_w(px(180.)), settings.field(Field::RadialSpectrumInnerDiameter).min_w(px(180.))))
                         .child(settings.pair(Field::RadialSpectrumSensitivity, Field::RadialSpectrumRotationSpeed))
+                        .child(settings.single(Field::RadialSpectrumDb))
+                        .child(settings.db_range_hint(cx))
                         .child(row().child(visual_switch("audio-visualizer-fade-idle", "◌", "Fade when not playing", draft.radial_spectrum_fade_when_idle, cx, |draft| draft.radial_spectrum_fade_when_idle = !draft.radial_spectrum_fade_when_idle)))
                         .child(caption("Noctalia Fancy. Shared analysis and background: Common. Inner diameter is relative to panel size."))))
                     .child(settings_group("Bars & rings", column().gap_2()
@@ -1268,7 +1329,9 @@ impl GuiApp {
             VisualPage::Waveform => column().gap_3()
                 .child(settings_group("Appearance", column().gap_2()
                     .child(settings.pair(Field::CursorColor, Field::Glow))
-                    .child(row().child(visual_switch("waveform-labels", "T", "Labels", draft.waveform_labels, cx, |draft| draft.waveform_labels = !draft.waveform_labels)))
+                    .child(row()
+                        .child(visual_switch("waveform-labels", "T", "Labels", draft.waveform_labels, cx, |draft| draft.waveform_labels = !draft.waveform_labels))
+                        .child(visual_switch("waveform-seek", "󱀞", "Click and drag to seek", draft.waveform_seek_enabled, cx, |draft| draft.waveform_seek_enabled = !draft.waveform_seek_enabled)))
                     .child(caption("Shared appearance: Common. The waterline stays still while paused."))))
                 .child(settings_group("Amplitude display", column().gap_2()
                     .child(settings.pair(Field::WaveformRmsGain, Field::WaveformPeakGain))

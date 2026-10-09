@@ -309,14 +309,16 @@ impl Visuals {
     }
     pub(super) fn configure(&mut self, config: &Config) {
         let mut data = self.data.borrow_mut();
+        let spectrum_db_range = config.spectrum_db_range();
+        let spectrogram_db_range = config.spectrogram_db_range();
         let configured_history_columns =
             history_column_count(config.spectrogram_history_seconds, config.analysis_fps);
         let palette_changed = data.palette_lut.palette != config.visual_palette;
         let cache_changed = data.visualization_cache != config.visualization_cache;
         let changed = palette_changed
             || data.visual_background != config.visual_background.rgb()
-            || data.spectrum_db_range != config.spectrum_db_range
-            || data.spectrogram_db_range != config.spectrogram_db_range
+            || data.spectrum_db_range != spectrum_db_range
+            || data.spectrogram_db_range != spectrogram_db_range
             || data.spectrum_grid != config.spectrum_grid
             || data.spectrum_bars != config.spectrum_bars
             || data.spectrum_style != config.spectrum_style
@@ -351,7 +353,7 @@ impl Visuals {
             || data.spectrum_window != config.spectrum_window;
         let heat_changed = palette_changed
             || data.visual_background != config.visual_background.rgb()
-            || data.spectrogram_db_range != config.spectrogram_db_range
+            || data.spectrogram_db_range != spectrogram_db_range
             || data.spectrogram_interpolate != config.spectrogram_interpolate
             || data.spectrogram_interpolation_points != config.spectrogram_interpolation_points
             || data.spectrogram_sampling_points_scale != config.spectrogram_sampling_points_scale;
@@ -361,7 +363,7 @@ impl Visuals {
             Rc::clone(&data.palette_lut)
         };
         data.visual_background = config.visual_background.rgb();
-        data.spectrum_db_range = config.spectrum_db_range;
+        data.spectrum_db_range = spectrum_db_range;
         data.spectrum_bars = config.spectrum_bars;
         data.spectrum_style = config.spectrum_style;
         data.spectrum_gap = config.spectrum_gap;
@@ -381,7 +383,7 @@ impl Visuals {
         data.spectrum_fft_size = config.spectrum_fft_size;
         data.spectrum_window = config.spectrum_window;
         data.spectrum_grid = config.spectrum_grid;
-        data.spectrogram_db_range = config.spectrogram_db_range;
+        data.spectrogram_db_range = spectrogram_db_range;
         data.visualization_cache = config.visualization_cache;
         if cache_changed {
             data.clear_derived_caches();
@@ -1898,7 +1900,7 @@ mod tests {
             image::RgbaImage::new(1, 1),
         )]));
         visuals.data.borrow_mut().columns[0].image = Some(Arc::clone(&image));
-        config.spectrum_db_range = 40.0;
+        config.spectrum_db_range = Some(40.0);
         visuals.configure(&config);
         {
             let data = visuals.data.borrow();
@@ -1907,12 +1909,68 @@ mod tests {
             assert_eq!(data.spectrogram_db_range, 70.0);
             assert!(Arc::ptr_eq(data.columns[0].image.as_ref().unwrap(), &image));
         }
-        config.spectrogram_db_range = 100.0;
+        config.spectrogram_db_range = Some(100.0);
         visuals.configure(&config);
         let data = visuals.data.borrow();
         assert!(data.columns[0].image.is_none());
         assert_eq!(data.columns[0].levels, vec![-30.0; 4]);
         assert_eq!(data.len, 1);
+    }
+
+    #[test]
+    fn common_range_changes_only_inherited_views_without_clearing_history() {
+        for spectrum_override in [None, Some(70.0)] {
+            for spectrogram_override in [None, Some(70.0)] {
+                let mut config = Config {
+                    spectrum_db_range: spectrum_override,
+                    spectrogram_db_range: spectrogram_override,
+                    ..Config::default()
+                };
+                let mut visuals = Visuals::new();
+                visuals.configure(&config);
+                visuals.update(&frame(1.0, -30.0));
+                let image = visuals.data.borrow().build_spectrogram_image(&[-30.0], 1);
+                let revision = visuals.data.borrow().spectrum_geometry_revision;
+                visuals.data.borrow_mut().columns[0].image = Some(Arc::clone(&image));
+
+                config.visualization_db_range = 100.0;
+                visuals.configure(&config);
+                let data = visuals.data.borrow();
+                assert_eq!(data.spectrum_db_range, spectrum_override.unwrap_or(100.0));
+                assert_eq!(
+                    data.spectrogram_db_range,
+                    spectrogram_override.unwrap_or(100.0)
+                );
+                if spectrogram_override.is_some() {
+                    assert!(Arc::ptr_eq(data.columns[0].image.as_ref().unwrap(), &image));
+                } else {
+                    assert!(data.columns[0].image.is_none());
+                }
+                assert_eq!(data.len, 1);
+                assert_eq!(data.columns[0].levels, vec![-30.0; 4]);
+                assert_eq!(data.latest_levels, vec![-30.0; 4]);
+                assert_eq!(data.spectrum_geometry_revision, revision);
+                assert_eq!(data.latest_sample_time, Some(Duration::from_secs(1)));
+            }
+        }
+    }
+
+    #[test]
+    fn radial_range_override_does_not_invalidate_spectrum_or_spectrogram() {
+        let mut visuals = configured_visuals();
+        visuals.update(&frame(1.0, -30.0));
+        let image = visuals.data.borrow().build_spectrogram_image(&[-30.0], 1);
+        let revision = visuals.data.borrow().spectrum_geometry_revision;
+        visuals.data.borrow_mut().columns[0].image = Some(Arc::clone(&image));
+        visuals.configure(&Config {
+            radial_spectrum_db_range: Some(40.0),
+            ..Config::default()
+        });
+        let data = visuals.data.borrow();
+        assert!(Arc::ptr_eq(data.columns[0].image.as_ref().unwrap(), &image));
+        assert_eq!(data.spectrum_geometry_revision, revision);
+        assert_eq!(data.latest_levels, vec![-30.0; 4]);
+        assert_eq!(data.columns[0].levels, vec![-30.0; 4]);
     }
 
     #[test]
@@ -1922,7 +1980,7 @@ mod tests {
         visuals.configure(&initial);
 
         let mut range = initial.clone();
-        range.spectrum_db_range = 40.0;
+        range.spectrum_db_range = Some(40.0);
         visuals.configure(&range);
         {
             let data = visuals.data.borrow();

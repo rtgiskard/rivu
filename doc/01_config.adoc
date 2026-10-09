@@ -68,11 +68,13 @@ Visualizations is grouped by view, with shared controls in Common:
 
 * Appearance: background for all views; color scheme for Spectrum, Spectrogram,
   and Waveform. Radial Spectrum has independent primary and secondary colors.
+* Default dB range: `visualization_db_range` supplies the display span for Spectrum,
+  Spectrogram, and Radial Spectrum unless a view overrides it. It belongs to
+  Appearance, not frequency analysis, and does not affect Waveform gain or volume.
 * Frequency analysis: FFT size, window, and analysis rate for Spectrum,
   Spectrogram, and Radial Spectrum, not Waveform. FFT size defaults to `8192`;
   configuration keys remain `spectrum_fft_size` and `spectrum_window`. Changing
-  size or window clears Spectrogram history. The Spectrum / Radial range controls
-  `spectrum_db_range`; Spectrogram retains its independent color range.
+  size or window clears Spectrogram history.
 * Rendering: `visualization_cache` reuses derived graphics in Spectrum,
   Spectrogram, and Waveform; it is separate from media read buffering.
 
@@ -83,6 +85,13 @@ amplitude display. Buttons remain icon-first; hover reveals toggle names and
 On/Off state, repeat mode, and runtime status where available. Related fields
 share a row when space permits and wrap on narrower panels; standalone numeric
 fields keep the same half-row width instead of stretching across the panel.
+
+Spectrum, Spectrogram, and Radial Spectrum each expose a range override in their
+own tab. Empty inherits Common, with the current Common default shown in the
+hint. Entering a number makes that view independent; clearing the input restores
+inheritance. Apply saves the Common default and all overrides together, including
+fields on other tabs. Reopening or discarding settings restores an empty input
+for inherited ranges and the saved number for explicit overrides.
 
 Inactive style-dependent fields stay in place, dimmed, with their values
 preserved: Solid disables Spectrum count/width/gap controls, hidden peak markers
@@ -118,6 +127,35 @@ Errors and scan progress appear in the footer. Click a message or its copy icon
 to copy the complete text.
 
 Layout behavior and persistence: link:../src/gui/layout.rs[workspace layout].
+
+== Visualization dB ranges
+
+`visualization_db_range` defaults to `70` dB. The optional `spectrum_db_range`,
+`spectrogram_db_range`, and `radial_spectrum_db_range` override it only for their
+named view. Every supplied range must be finite and between `1` and `160` dB,
+inclusive. An explicit override remains an override even if it equals Common's
+current value; changing Common later affects only views without overrides.
+
+In TOML, omit a view's override key to inherit Common. Do not write an empty
+string or a blank assignment: overrides are numeric when present. Saving an
+inherited range omits that override key. Existing explicit range values remain
+explicit overrides.
+
+[source,toml]
+----
+visualization_db_range = 80.0
+spectrum_db_range = 60.0
+radial_spectrum_db_range = 100.0
+# spectrogram_db_range is omitted, so Spectrogram uses 80 dB
+----
+
+These ranges affect display mapping only, not FFT analysis, decoded audio,
+playback volume, or Waveform's RMS/Peak gains. Changing a resolved range rebuilds
+affected derived display caches: Spectrum updates its display geometry,
+Spectrogram recolors retained frequency history without discarding it, and Radial
+Spectrum resets its normalized/smoothed display data without resetting shared
+FFT analysis. Changing an unused Common default or choosing an override equal to
+the current resolved value does not change the display mapping.
 
 == Visualizations
 
@@ -156,6 +194,10 @@ line is peak amplitude. Unknown intervals remain blank. Playback builds the
 preview progressively; `Load full waveform now` requests the complete preview.
 Click or drag to seek the current track; a non-playing selection preview does
 not seek playback.
+`waveform_seek_enabled` defaults to `true`. Disable Click and drag to seek in
+the Waveform settings page or its panel right-click menu to prevent accidental
+seeks. Disabling it cancels any active waveform drag and preview; the playback
+slider remains available.
 
 Each channel uses an independent center-to-edge gradient assembled from the
 palette stops. Stop positions, including the Deadbeef low-end floor mapping,
@@ -240,8 +282,9 @@ it Maximum frequency rows. This rendering row limit applies with or without
 frequency interpolation; it is not the FFT size, and increasing it does not add
 measured frequency detail.
 Both views use a logarithmic frequency axis and share `spectrum_fft_size` and
-`spectrum_window`; `spectrum_db_range` and `spectrogram_db_range` are independent
-display spans.
+`spectrum_window`. Their independent `spectrum_db_range` and
+`spectrogram_db_range` overrides inherit `visualization_db_range` when omitted;
+see <<_visualization_db_ranges,Visualization dB ranges>>.
 
 Analysis: link:../src/analysis.rs[shared FFT]. Band projection, history, palettes,
 and rendering: link:../src/gui/visuals.rs[visualizations].
@@ -250,8 +293,9 @@ and rendering: link:../src/gui/visuals.rs[visualizations].
 
 `radial_spectrum_style` accepts `bars`, `rings`, or `bars_rings`. The remaining
 `radial_spectrum_*` settings control sensitivity, rotation, bar width/glow, ring
-opacity/Bloom, inner diameter, idle fade, and two endpoint colors. It shares the
-Spectrum analyzer but has no absolute frequency labels.
+opacity/Bloom, inner diameter, idle fade, and two endpoint colors. Its independent
+`radial_spectrum_db_range` override inherits `visualization_db_range` when omitted.
+It shares the Spectrum analyzer but has no absolute frequency labels.
 
 Implementation: link:../src/gui/radial_spectrum.rs[Radial Spectrum]. The presentation
 model is based on Noctalia Shell v5's

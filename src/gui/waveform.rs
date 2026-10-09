@@ -386,6 +386,7 @@ pub(super) struct Waveform {
     manual_error: Option<SharedString>,
     interaction: Rc<RefCell<WaveformInteraction>>,
     dragging: bool,
+    seek_enabled: bool,
     visualization_cache: bool,
 }
 
@@ -401,7 +402,16 @@ impl Waveform {
             manual_error: None,
             interaction: Rc::new(RefCell::new(WaveformInteraction::default())),
             dragging: false,
+            seek_enabled: true,
             visualization_cache: true,
+        }
+    }
+
+    pub(super) fn set_seek_enabled(&mut self, enabled: bool) {
+        self.seek_enabled = enabled;
+        if !enabled {
+            self.dragging = false;
+            self.interaction.borrow_mut().active_panel = None;
         }
     }
 
@@ -552,6 +562,9 @@ impl Waveform {
         preview: bool,
         cx: &mut Context<Self>,
     ) {
+        if !self.seek_enabled {
+            return;
+        }
         let interaction = self.interaction.borrow();
         let panel_id = panel_id.or(interaction.active_panel);
         let Some((bounds, Some(duration))) = panel_id.and_then(|id| interaction.panels.get(&id))
@@ -572,6 +585,9 @@ impl Waveform {
     }
 
     fn mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.seek_enabled {
+            return;
+        }
         let panel_id = self
             .interaction
             .borrow()
@@ -612,6 +628,7 @@ impl Waveform {
         config: &Config,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.set_seek_enabled(config.waveform_seek_enabled);
         let panel = div()
             .id(("waveform", panel_id))
             .relative()

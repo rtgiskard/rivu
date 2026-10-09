@@ -80,6 +80,7 @@ impl RadialSpectrum {
 
     pub(super) fn configure(&mut self, config: &Config) {
         let mut data = self.data.borrow_mut();
+        let db_range = config.radial_spectrum_db_range();
         let changed = data.background != config.visual_background.rgb()
             || data.style != config.radial_spectrum_style
             || data.sensitivity != config.radial_spectrum_sensitivity
@@ -92,7 +93,7 @@ impl RadialSpectrum {
             || data.fade_when_idle != config.radial_spectrum_fade_when_idle
             || data.primary_color != config.radial_spectrum_primary_color.rgb()
             || data.secondary_color != config.radial_spectrum_secondary_color.rgb()
-            || data.db_range != config.spectrum_db_range;
+            || data.db_range != db_range;
         if !changed {
             return;
         }
@@ -108,7 +109,7 @@ impl RadialSpectrum {
         data.fade_when_idle = config.radial_spectrum_fade_when_idle;
         data.primary_color = config.radial_spectrum_primary_color.rgb();
         data.secondary_color = config.radial_spectrum_secondary_color.rgb();
-        data.db_range = config.spectrum_db_range;
+        data.db_range = db_range;
         data.values.clear();
         data.displayed.clear();
         data.last_sample_time = None;
@@ -556,4 +557,81 @@ fn mix_color(first: u32, second: u32, fraction: f32) -> u32 {
         (a + (b - a) * t).round() as u32
     };
     (channel(16) << 16) | (channel(8) << 8) | channel(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame() -> AnalysisFrame {
+        AnalysisFrame {
+            sample_rate: 48_000,
+            sample_time: Duration::from_secs(1),
+            frequencies_hz: vec![20.0, 200.0, 2000.0, 20_000.0],
+            spectrum_db: vec![-35.0; 4],
+            ..AnalysisFrame::default()
+        }
+    }
+
+    #[test]
+    fn other_view_overrides_do_not_reset_radial_display() {
+        let mut radial = RadialSpectrum::new();
+        radial.update(&frame());
+        let mut config = Config::default();
+        config.spectrum_db_range = Some(40.0);
+        config.spectrogram_db_range = Some(100.0);
+        radial.configure(&config);
+        let data = radial.data.borrow();
+        assert_eq!(data.values, vec![0.5; 4]);
+        assert_eq!(data.displayed, vec![0.5; 4]);
+        assert_eq!(data.last_sample_time, Some(Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn common_range_changes_reset_only_inherited_radial_display() {
+        for range_override in [None, Some(70.0)] {
+            let mut radial = RadialSpectrum::new();
+            let mut config = Config {
+                radial_spectrum_db_range: range_override,
+                ..Config::default()
+            };
+            radial.configure(&config);
+            radial.update(&frame());
+            config.visualization_db_range = 100.0;
+            radial.configure(&config);
+            {
+                let data = radial.data.borrow();
+                if range_override.is_some() {
+                    assert_eq!(data.displayed, vec![0.5; 4]);
+                    assert_eq!(data.last_sample_time, Some(Duration::from_secs(1)));
+                } else {
+                    assert!(data.values.is_empty());
+                    assert!(data.displayed.is_empty());
+                    assert!(data.last_sample_time.is_none());
+                }
+            }
+            radial.update(&frame());
+            let data = radial.data.borrow();
+            let expected = if range_override.is_some() { 0.5 } else { 0.65 };
+            assert_eq!(data.values, vec![expected; 4]);
+            assert_eq!(data.displayed, vec![expected; 4]);
+        }
+    }
+
+    #[test]
+    fn radial_override_uses_its_own_range_and_reset() {
+        let mut radial = RadialSpectrum::new();
+        radial.update(&frame());
+        radial.configure(&Config {
+            visualization_db_range: 100.0,
+            spectrum_db_range: Some(40.0),
+            radial_spectrum_db_range: Some(50.0),
+            ..Config::default()
+        });
+        assert!(radial.data.borrow().displayed.is_empty());
+        radial.update(&frame());
+        let data = radial.data.borrow();
+        assert_eq!(data.values, vec![0.3; 4]);
+        assert_eq!(data.displayed, vec![0.3; 4]);
+    }
 }

@@ -799,6 +799,9 @@ impl GuiApp {
         subscriptions.push(cx.observe(&waveform, |_, _, cx| cx.notify()));
         subscriptions.push(cx.subscribe(&waveform, |this, _, event, cx| match event {
             waveform::WaveformEvent::Preview(seconds) => {
+                if !this.state.system.config.waveform_seek_enabled {
+                    return;
+                }
                 this.waveform_preview_active = true;
                 this.seek_preview = Some(*seconds);
                 cx.notify();
@@ -806,7 +809,9 @@ impl GuiApp {
             waveform::WaveformEvent::Seek(seconds) => {
                 this.waveform_preview_active = false;
                 this.seek_preview = None;
-                if this.state.current_track().is_some() {
+                if this.state.system.config.waveform_seek_enabled
+                    && this.state.current_track().is_some()
+                {
                     this.send(Command::Seek { seconds: *seconds }, cx);
                 }
             }
@@ -1716,6 +1721,8 @@ impl GuiApp {
                 self.state.system.config.library_roots != state.system.config.library_roots;
             let page_size_changed =
                 self.state.system.config.page_size != state.system.config.page_size;
+            let waveform_seek_disabled = self.state.system.config.waveform_seek_enabled
+                && !state.system.config.waveform_seek_enabled;
             if !matches!(self.dragging, Some(Dragging::Seek(_)))
                 && !self.waveform_preview_active
                 && self.seek_queue_id != state.queue.current_id
@@ -1726,6 +1733,12 @@ impl GuiApp {
             self.state = state;
             self.sync_metadata_default(cx);
             self.reconcile_playlist_selection();
+            if waveform_seek_disabled {
+                self.waveform_preview_active = false;
+                self.seek_preview = None;
+                self.waveform
+                    .update(cx, |waveform, _| waveform.set_seek_enabled(false));
+            }
             if roots_changed {
                 self.directory_tree.clear();
                 self.library_selected_nodes.clear();
@@ -2699,6 +2712,21 @@ impl Render for GuiApp {
                                 this.panel_menu = None;
                                 this.load_full_waveform(cx);
                                 cx.notify();
+                            },
+                        ));
+                        menu = menu.child(menu_item(
+                            "waveform-click-seek",
+                            if self.state.system.config.waveform_seek_enabled {
+                                "Click and drag to seek ✓"
+                            } else {
+                                "Click and drag to seek"
+                            },
+                            cx,
+                            |this, _, cx| {
+                                this.panel_menu = None;
+                                let mut config = this.handle.config_snapshot().as_ref().clone();
+                                config.waveform_seek_enabled = !config.waveform_seek_enabled;
+                                this.send(Command::Configure { config }, cx);
                             },
                         ));
                     }
