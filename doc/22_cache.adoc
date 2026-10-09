@@ -228,3 +228,30 @@ The conservative optimization order is:
   reproduced.
 . Defer shared GPUI vertices or a single combined Spectrogram texture until
   profiling shows that image submission or Path copying dominates.
+
+== Font data and glyphs
+
+Font caches are independent of `visualization_cache`; that switch does not
+control text rendering or font retention.
+
+For a nonempty `ui_font`, Rivu uses `FcFontMatch` to select the primary family.
+It does not pass an explicit fallback list to GPUI: the backend eagerly loads
+families in such a list, even when no displayed text needs them. Missing glyphs
+instead use the unmodified GPUI/cosmic-text fallback and shaping implementation.
+
+This trades strict Fontconfig fallback ordering for a small application-level
+fix with no local font-backend forks. System and user rules still select the
+primary family; they do not dictate the backend's subsequent fallback order.
+
+The backend owns face, shaping, glyph and atlas caches. It may load multiple
+faces of a selected family or retain fonts considered during fallback; Rivu
+does not guarantee that only final glyph-producing faces remain cached, nor
+does it add an eviction policy. Switching fonts may leave earlier data resident.
+Font-file mappings share kernel file pages, while parsed font and glyph data
+also consume process memory.
+
+For memory comparisons, use fresh GUI processes with the same build,
+configuration and visible text. Record RSS and retained font-file mappings,
+then introduce additional scripts and repeat the same text. Font discovery
+is not equivalent to retained font data; total RSS also includes graphics
+drivers, executable pages and other application caches.

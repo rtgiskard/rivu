@@ -1,4 +1,4 @@
-use gpui::{App, Font, FontFallbacks, font};
+use gpui::{App, Font, font};
 
 /// Resolve only at startup or when the saved setting changes, never while painting.
 pub(super) fn resolve(requested: &str, cx: &App) -> Font {
@@ -6,20 +6,14 @@ pub(super) fn resolve(requested: &str, cx: &App) -> Font {
     if requested.is_empty() {
         return font(".SystemUIFont");
     }
-    match system_families(requested) {
-        Ok(families) => {
-            // GPUI accepts family names, not file/face identities. Exclude names its
-            // database cannot load so one unavailable fallback cannot break the run.
-            let available = cx.text_system().all_font_names();
-            let mut families = families
-                .into_iter()
-                .filter(|family| available.iter().any(|name| name == family));
-            if let Some(primary) = families.next() {
-                let mut resolved = font(primary);
-                resolved.fallbacks = Some(FontFallbacks::from_fonts(families.collect()));
-                return resolved;
+    match system_family(requested) {
+        Ok(primary) => {
+            // Only select the primary family. Explicit fallback lists make GPUI
+            // eagerly load every candidate; leave missing glyphs to its backend.
+            if cx.text_system().all_font_names().contains(&primary) {
+                return font(primary);
             }
-            tracing::warn!(requested, "No Fontconfig candidates available in GPUI");
+            tracing::warn!(requested, primary, "Fontconfig family unavailable in GPUI");
         }
         Err(error) => tracing::warn!(requested, %error, "Cannot resolve system UI font"),
     }
@@ -27,7 +21,7 @@ pub(super) fn resolve(requested: &str, cx: &App) -> Font {
 }
 
 #[cfg(target_os = "linux")]
-fn system_families(requested: &str) -> anyhow::Result<Vec<String>> {
+fn system_family(requested: &str) -> anyhow::Result<String> {
     use anyhow::{Context, ensure};
     use fontconfig_sys::*;
     use std::{
@@ -49,17 +43,10 @@ fn system_families(requested: &str) -> anyhow::Result<Vec<String>> {
             unsafe { FcPatternDestroy(self.0) }
         }
     }
-    struct FontSet(*mut FcFontSet);
-    impl Drop for FontSet {
-        fn drop(&mut self) {
-            // SAFETY: FcFontSort transfers ownership of this set to the caller.
-            unsafe { FcFontSetDestroy(self.0) }
-        }
-    }
 
     let requested = CString::new(requested).context("Font family contains a NUL byte")?;
-    // SAFETY: all C objects are checked before use and owned by guards. Returned
-    // strings remain borrowed only until copied, while their font set is alive.
+    // SAFETY: all C objects are checked before use and owned by guards. The
+    // returned family is copied before its owning match pattern is destroyed.
     unsafe {
         let config = FcInitLoadConfigAndFonts();
         ensure!(!config.is_null(), "Cannot load Fontconfig configuration");
@@ -77,30 +64,20 @@ fn system_families(requested: &str) -> anyhow::Result<Vec<String>> {
         );
         FcDefaultSubstitute(pattern.0);
         let mut result = FcResultNoMatch;
-        // trim=true removes candidates that add no character coverage. We retain
-        // metadata only; GPUI loads faces through its existing font database.
-        let fonts = FcFontSort(config.0, pattern.0, 1, ptr::null_mut(), &mut result);
-        ensure!(!fonts.is_null(), "Fontconfig returned no font set");
-        let fonts = FontSet(fonts);
-        let mut families = Vec::new();
-        for index in 0..(*fonts.0).nfont as usize {
-            let face = *(*fonts.0).fonts.add(index);
-            let mut name = ptr::null_mut();
-            if FcPatternGetString(face, c"family".as_ptr(), 0, &mut name) == FcResultMatch
-                && !name.is_null()
-            {
-                let name = CStr::from_ptr(name.cast()).to_string_lossy().into_owned();
-                if !families.contains(&name) {
-                    families.push(name);
-                }
-            }
-        }
-        ensure!(!families.is_empty(), "Fontconfig returned no font families");
-        Ok(families)
+        let matched = FcFontMatch(config.0, pattern.0, &mut result);
+        ensure!(!matched.is_null(), "Fontconfig returned no matching font");
+        let matched = Pattern(matched);
+        let mut name = ptr::null_mut();
+        ensure!(
+            FcPatternGetString(matched.0, c"family".as_ptr(), 0, &mut name) == FcResultMatch
+                && !name.is_null(),
+            "Fontconfig returned no family name"
+        );
+        Ok(CStr::from_ptr(name.cast()).to_string_lossy().into_owned())
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-fn system_families(requested: &str) -> anyhow::Result<Vec<String>> {
-    Ok(vec![requested.to_owned()])
+fn system_family(requested: &str) -> anyhow::Result<String> {
+    Ok(requested.to_owned())
 }

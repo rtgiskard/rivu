@@ -92,8 +92,11 @@ Font: type to search installed families, or use the arrow to browse them and
 remains text. Custom family names are accepted.
 
 `ui_font`: empty/System default uses the platform UI font. Nonempty values use
-Fontconfig system and user rules (`~/.config/fontconfig/fonts.conf`) for family
-matching and fallback. Restart the GUI after changing Fontconfig rules.
+Fontconfig system and user rules (`~/.config/fontconfig/fonts.conf`) to select
+the primary family. Missing glyphs use GPUI/cosmic-text's native fallback,
+which does not guarantee Fontconfig's custom fallback order. Rivu does not
+pass the full Fontconfig candidate list to GPUI, avoiding eager loading of
+unused fallback families. Restart the GUI after changing Fontconfig rules.
 
 GPUI selects faces within each family and renders through cosmic-text/Swash;
 Fontconfig hinting, subpixel, and synthetic-bold settings do not apply.
