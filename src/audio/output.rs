@@ -203,6 +203,7 @@ struct OutputShared {
     pause_settled: AtomicBool,
     wakeup: crossbeam_channel::Sender<()>,
     notifications: Receiver<()>,
+    refill_armed: AtomicBool,
     heard: AtomicU64,
     retired: AtomicU64,
     xruns: AtomicU64,
@@ -217,6 +218,7 @@ impl OutputShared {
             pause_settled: AtomicBool::new(false),
             wakeup,
             notifications,
+            refill_armed: AtomicBool::new(false),
             heard: AtomicU64::new(0),
             retired: AtomicU64::new(0),
             xruns: AtomicU64::new(0),
@@ -533,6 +535,18 @@ impl Output {
         self.producer.vacant_len() >= self.source_channels
     }
 
+    pub(super) fn refill_delay(&self, eof: bool) -> Duration {
+        let frames = if eof {
+            self.submitted.saturating_sub(self.shared.retired.load(Ordering::Acquire))
+        } else {
+            (self.producer.occupied_len() / self.source_channels) as u64 / 2
+        };
+        // Keep half the buffered PCM as decode/scheduling headroom. End-of-track
+        // tails retain a 10ms clock fallback, not an empty-ring refill busy loop.
+        Duration::from_secs_f64(frames as f64 / self.rate as f64)
+            .clamp(Duration::from_millis(if eof { 10 } else { 1 }), Duration::from_millis(100))
+    }
+
     // Return complete frames consumed; never publish a partial interleaved frame.
     pub(super) fn push(&mut self, samples: &[f32]) -> usize {
         let frames = (samples.len() / self.source_channels)
@@ -542,6 +556,9 @@ impl Output {
             .push_slice(&samples[..frames * self.source_channels]);
         let frames = count / self.source_channels;
         self.submitted += frames as u64;
+        if self.producer.occupied_len() > self.producer.capacity().get() / 4 {
+            self.shared.refill_armed.store(true, Ordering::Release);
+        }
         frames
     }
 
@@ -723,6 +740,11 @@ impl OutputCallback {
                     };
                 }
             }
+        }
+        if count > 0 && self.consumer.occupied_len() <= self.consumer.capacity().get() / 4
+            && self.shared.refill_armed.swap(false, Ordering::AcqRel)
+        {
+            let _ = self.shared.wakeup.try_send(());
         }
         if let Some(start) = start {
             self.clock.pending.push_back(ScheduledFrames {
@@ -1018,6 +1040,52 @@ mod tests {
         callback.render(&mut data, timestamp(63, 83));
         assert_eq!(output.heard(), 0.005);
         assert!(output.drained());
+    }
+
+    #[test]
+    fn refill_deadlines_keep_pcm_headroom_with_ten_wakes_per_second() {
+        let stereo = [Channel::FrontLeft, Channel::FrontRight];
+        for rate in [48_000, 192_000] {
+            let capacity = rate as usize / 4 * 2;
+            let (mut output, mut callback, _analyzer) =
+                test_output_layout(rate, false, &stereo, &stereo, capacity);
+            let input = vec![0.25; capacity];
+            output.push(&input);
+            let mut data = vec![0.0_f32; rate as usize / 10 * 2];
+            let mut elapsed = Duration::ZERO;
+            let mut wakes = 0;
+            while elapsed < Duration::from_secs(1) {
+                let delay = output.refill_delay(false);
+                let occupied = output.producer.occupied_len() / 2;
+                assert!(delay <= Duration::from_secs_f64(occupied as f64 / rate as f64 / 2.0));
+                assert_eq!(delay, Duration::from_millis(100));
+                callback.render(&mut data, timestamp(elapsed.as_millis() as u64, elapsed.as_millis() as u64 + 20));
+                assert!(data.iter().all(|sample| *sample == 0.25));
+                assert!(output.notifications().try_recv().is_err());
+                elapsed += delay;
+                wakes += 1;
+                output.push(&input);
+            }
+            assert_eq!(wakes, 10); // Fixed 10ms polling required 100 timer wakes.
+        }
+    }
+
+    #[test]
+    fn low_water_notifies_once_until_refill_and_empty_tail_is_bounded() {
+        let (mut output, mut callback, _analyzer) = test_output(1000, false);
+        output.push(&[0.25; 128]);
+        callback.render(&mut [0.0_f32; 96], timestamp(0, 20));
+        assert_eq!(output.notifications().try_recv(), Ok(()));
+        assert_eq!(output.refill_delay(false), Duration::from_millis(8));
+        callback.render(&mut [0.0_f32; 32], timestamp(1, 21));
+        assert!(output.notifications().try_recv().is_err());
+        assert_eq!(output.refill_delay(false), Duration::from_millis(1));
+        assert!(output.refill_delay(true) >= Duration::from_millis(10));
+        output.push(&[0.5; 64]);
+        callback.render(&mut [0.0_f32; 34], timestamp(2, 22));
+        assert_eq!(output.notifications().try_recv(), Ok(()));
+        callback.render(&mut [0.0_f32; 100], timestamp(3, 23));
+        assert!(output.notifications().try_recv().is_err());
     }
 
     #[test]

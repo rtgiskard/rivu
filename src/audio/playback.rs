@@ -199,6 +199,10 @@ impl Playback {
             .duration
             .map_or(value, |duration| value.min(duration))
     }
+    pub(super) fn refill_delay(&self) -> std::time::Duration {
+        self.output.refill_delay(self.eof)
+    }
+
     pub(super) fn fill(&mut self) -> Result<()> {
         self.output.check_timing()?;
         if self.paused {

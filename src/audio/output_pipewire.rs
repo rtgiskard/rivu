@@ -43,6 +43,16 @@ struct Inventory {
     ports: BTreeMap<u32, String>,
     links: BTreeMap<u32, Route>,
     revision: u64,
+    // Registry mutations invalidate confirmation immediately, even if process
+    // is dispatched before the control loop next validates the new topology.
+    route_confirmed: Rc<Cell<bool>>,
+}
+
+impl Inventory {
+    fn changed(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+        self.route_confirmed.set(false);
+    }
 }
 
 // Drop listeners before their bound objects, including on global removal.
@@ -86,7 +96,7 @@ impl Connection {
                     if let Some(channel) = props.get("audio.channel") {
                         let mut state = state.borrow_mut();
                         state.ports.insert(global.id, channel.to_owned());
-                        state.revision += 1;
+                        state.changed();
                     }
                 } else if global.type_ == pw::types::ObjectType::Link {
                     let id = |key| props.get(key).and_then(|value| value.parse::<u32>().ok());
@@ -111,7 +121,7 @@ impl Connection {
                                 input_port,
                             },
                         );
-                        state.revision += 1;
+                        state.changed();
                     }
                 }
                 if global.type_ == pw::types::ObjectType::Node
@@ -132,16 +142,20 @@ impl Connection {
                             positions: props.get("audio.position").unwrap_or("").to_owned(),
                         },
                     );
+                    state.borrow_mut().changed();
                     if let Ok(node) = registry.bind::<pw::node::Node, _>(global) {
                         let state = state.clone();
                         let listener = node
                             .add_listener_local()
                             .info(move |info| {
                                 if let Some(props) = info.props()
-                                    && let Some(sink) = state.borrow_mut().sinks.get_mut(&id)
                                     && let Some(positions) = props.get("audio.position")
                                 {
-                                    sink.positions = positions.to_owned();
+                                    let mut state = state.borrow_mut();
+                                    if let Some(sink) = state.sinks.get_mut(&id) {
+                                        sink.positions = positions.to_owned();
+                                        state.changed();
+                                    }
                                 }
                             })
                             .register();
@@ -201,7 +215,7 @@ impl Connection {
                     state.default_metadata = None;
                     state.default = None;
                 }
-                state.revision += 1;
+                state.changed();
             })
             .register();
         let connection = Self {
@@ -413,13 +427,9 @@ fn run(
     let format_error = Rc::new(Cell::new(false));
     let processing = format_ok.clone();
     let rejected = format_error.clone();
-    let graph = connection.inventory.clone();
-    let route_ok = Rc::new(Cell::new(auto_mix));
+    let route_ok = connection.inventory.borrow().route_confirmed.clone();
     let routed = route_ok.clone();
     let expected_ports = Rc::new(names);
-    let processing_ports = expected_ports.clone();
-    let target_id = target.id;
-    let mut revision = None;
     let _listener = stream
         .add_local_listener_with_user_data(callback)
         .param_changed(move |_, _, id, pod| {
@@ -442,19 +452,9 @@ fn run(
         .process(move |stream, callback| {
             // Process runs on this dedicated loop, never on the UI/decoder thread.
             // All sample, mapping, analysis and clock storage was preallocated.
-            let graph = graph.borrow();
-            if !auto_mix && revision != Some(graph.revision) {
-                routed.set(route_matches(
-                    &graph,
-                    stream.node_id(),
-                    target_id,
-                    &processing_ports,
-                ));
-                revision = Some(graph.revision);
-            }
             if processing.get() {
                 unsafe {
-                    process(stream, callback, routed.get());
+                    process(stream, callback, auto_mix || routed.get());
                 }
             }
         })
@@ -495,7 +495,9 @@ fn run(
             .iterate(Duration::from_millis(10));
         {
             let graph = connection.inventory.borrow();
-            if !auto_mix && observed_revision != Some(graph.revision) {
+            if auto_mix {
+                route_ok.set(true);
+            } else if observed_revision != Some(graph.revision) {
                 route_ok.set(route_matches(
                     &graph,
                     stream.node_id(),
@@ -600,7 +602,7 @@ unsafe fn render_buffer(
         {
             return false;
         }
-        let Some(timestamp) = output_timestamp(&time, callback.rate) else {
+        let Some(timestamp) = monotonic_nsec().and_then(|now| output_timestamp(&time, callback.rate, now)) else {
             return false;
         };
         callback.render_native(samples, timestamp, routed);
@@ -611,15 +613,29 @@ unsafe fn render_buffer(
     }
 }
 
-fn output_timestamp(time: &pw::sys::pw_time, rate: u32) -> Option<cpal::OutputStreamTimestamp> {
+fn monotonic_nsec() -> Option<u64> {
+    let mut time = std::mem::MaybeUninit::<libc::timespec>::uninit();
+    // pw_time.now uses CLOCK_MONOTONIC (including PipeWire 0.3.65). This avoids
+    // requiring pw_stream_get_nsec, which was introduced only in PipeWire 1.1.
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, time.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let time = unsafe { time.assume_init() };
+    u64::try_from(time.tv_sec).ok()?.checked_mul(1_000_000_000)?
+        .checked_add(u64::try_from(time.tv_nsec).ok()?)
+}
+
+fn output_timestamp(time: &pw::sys::pw_time, rate: u32, now: u64) -> Option<cpal::OutputStreamTimestamp> {
     if time.now < 0 || time.rate.num == 0 || time.rate.denom == 0 || rate == 0 {
         return None;
     }
-    let now = time.now as u64;
-    // PipeWire delay uses graph-rate ticks; queued/buffered use stream frames,
-    // not samples or bytes. The pw_buffer.size we publish uses those same units.
-    let delay = time.delay.max(0) as u128 * u128::from(time.rate.num) * 1_000_000_000
-        / u128::from(time.rate.denom)
+    let elapsed = now.checked_sub(time.now as u64)?;
+    // Graph delay belongs to the snapshot origin; only the callback clock is
+    // extrapolated. Advancing both origins would count loop dispatch latency as
+    // extra device latency. Queue/converter values are current stream frames.
+    let graph_delay = time.delay.max(0) as u128 * u128::from(time.rate.num) * 1_000_000_000
+        / u128::from(time.rate.denom);
+    let delay = graph_delay.saturating_sub(u128::from(elapsed))
         + (u128::from(time.queued) + u128::from(time.buffered)) * 1_000_000_000 / u128::from(rate);
     let playback = now.checked_add(u64::try_from(delay).ok()?)?;
     Some(cpal::OutputStreamTimestamp {
@@ -807,7 +823,10 @@ mod tests {
             );
         }
         assert!(route_matches(&graph, 1, 2, &speakers));
+        graph.route_confirmed.set(true);
         graph.ports.insert(203, "FL".into());
+        graph.changed();
+        assert!(!graph.route_confirmed.get());
         assert!(!route_matches(&graph, 1, 2, &speakers));
         graph.ports.insert(203, "LFE".into());
         graph.links.get_mut(&4).unwrap().input_node = 3;
@@ -826,21 +845,29 @@ mod tests {
         time.delay = 480;
         time.queued = 8;
         time.buffered = 16;
-        let timestamp = output_timestamp(&time, 48_000).unwrap();
+        let timestamp = output_timestamp(&time, 48_000, 2_000_000_000).unwrap();
         assert_eq!(
             timestamp.playback.duration_since(timestamp.callback),
             Duration::from_micros(10_500)
         );
+        let later = output_timestamp(&time, 48_000, 2_004_000_000).unwrap();
+        assert_eq!(later.playback, timestamp.playback);
+        assert_eq!(later.callback.duration_since(timestamp.callback), Duration::from_millis(4));
+        assert_eq!(later.playback.duration_since(later.callback), Duration::from_micros(6_500));
+        let stale = output_timestamp(&time, 48_000, 2_020_000_000).unwrap();
+        assert_eq!(stale.playback.duration_since(stale.callback), Duration::from_micros(500));
+        assert!(output_timestamp(&time, 48_000, 1_999_999_999).is_none());
+        assert!(output_timestamp(&time, 48_000, u64::MAX).is_none());
         time.delay = -480;
-        let timestamp = output_timestamp(&time, 48_000).unwrap();
+        let timestamp = output_timestamp(&time, 48_000, 2_000_000_000).unwrap();
         assert_eq!(
             timestamp.playback.duration_since(timestamp.callback),
             Duration::from_micros(500)
         );
         time.rate.denom = 0;
-        assert!(output_timestamp(&time, 48_000).is_none());
+        assert!(output_timestamp(&time, 48_000, 2_000_000_000).is_none());
         time.rate.denom = 48_000;
         time.now = -1;
-        assert!(output_timestamp(&time, 48_000).is_none());
+        assert!(output_timestamp(&time, 48_000, 2_000_000_000).is_none());
     }
 }

@@ -5181,6 +5181,7 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "image",
+ "libc",
  "libloading",
  "opus",
  "parking_lot",

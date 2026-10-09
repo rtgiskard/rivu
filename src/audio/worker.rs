@@ -321,6 +321,9 @@ impl Worker {
             let notifications = playback.notifications().clone();
             // Pause waits for commands, errors or the final device-clock tail.
             // Stable paused playback never schedules a status/GUI polling tick.
+            let deadline = playback.refill_delay().min(
+                Duration::from_millis(100).saturating_sub(self.progress.elapsed()),
+            );
             let command = if playback.paused() {
                 select! {
                     recv(self.shutdown) -> _ => break,
@@ -340,7 +343,7 @@ impl Worker {
                         None
                     },
                     recv(notifications) -> _ => None,
-                    default(Duration::from_millis(10)) => None,
+                    default(deadline) => None,
                 }
             };
             if let Some(command) = command {
