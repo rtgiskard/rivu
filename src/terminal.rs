@@ -24,7 +24,7 @@ use ratatui::{
     widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph, Wrap},
 };
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     io::{self, Stdout},
     path::{Path, PathBuf},
     sync::{
@@ -289,29 +289,48 @@ struct QueryResult {
     view: ViewResponse,
 }
 
+struct QueryJob {
+    request: QueryRequest,
+    cancelled: Arc<AtomicBool>,
+}
+
 struct QueryWorker {
     sender: Option<Sender<()>>,
-    pending: Arc<Mutex<Option<QueryRequest>>>,
+    pending: Arc<Mutex<Option<QueryJob>>>,
     latest: Arc<Mutex<Option<(QueryRequest, Result<QueryResult, String>)>>>,
-    stopping: Arc<AtomicBool>,
-    cancel_notify: Arc<tokio::sync::Notify>,
+    cancellation: Option<Arc<AtomicBool>>,
+    shutdown: Arc<AtomicBool>,
+    shutdown_notify: Arc<tokio::sync::Notify>,
     worker: Option<JoinHandle<()>>,
 }
 
 impl QueryWorker {
-    fn request(&self, request: QueryRequest) {
-        *self.pending.lock() = Some(request);
+    fn request(&mut self, request: QueryRequest) {
+        self.cancel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        self.cancellation = Some(Arc::clone(&cancelled));
+        *self.pending.lock() = Some(QueryJob { request, cancelled });
         if let Some(sender) = &self.sender {
             let _ = sender.try_send(());
         }
+    }
+
+    fn cancel(&mut self) {
+        if let Some(cancelled) = self.cancellation.take() {
+            cancelled.store(true, Ordering::Release);
+        }
+        self.pending.lock().take();
     }
 }
 
 impl Drop for QueryWorker {
     fn drop(&mut self) {
-        self.stopping.store(true, Ordering::Release);
-        self.cancel_notify.notify_waiters();
-        self.pending.lock().take();
+        self.cancel();
+        // Replacement invalidates results, not the in-flight server query. Only
+        // shutdown aborts its socket wait; otherwise one active query drains
+        // before the most recent pending request is sent.
+        self.shutdown.store(true, Ordering::Release);
+        self.shutdown_notify.notify_waiters();
         self.sender.take();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -322,24 +341,24 @@ impl Drop for QueryWorker {
 fn spawn_query_worker(socket_path: &Path) -> QueryWorker {
     let socket_path = socket_path.to_owned();
     let (sender, receiver) = bounded(1);
-    let pending = Arc::new(Mutex::new(None::<QueryRequest>));
+    let pending = Arc::new(Mutex::new(None::<QueryJob>));
     let requests = Arc::clone(&pending);
     let latest = Arc::new(Mutex::new(None));
     let results = Arc::clone(&latest);
-    let stopping = Arc::new(AtomicBool::new(false));
-    let cancel_notify = Arc::new(tokio::sync::Notify::new());
-    let worker_stopping = Arc::clone(&stopping);
-    let worker_cancel = Arc::clone(&cancel_notify);
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_notify = Arc::new(tokio::sync::Notify::new());
+    let stopping = Arc::clone(&shutdown);
+    let stop_notify = Arc::clone(&shutdown_notify);
     let worker = std::thread::spawn(move || {
         while receiver.recv().is_ok() {
-            let Some(request) = requests.lock().take() else {
+            let Some(job) = requests.lock().take() else {
                 continue;
             };
             let result = ipc::query_with_cancel(
                 &socket_path,
-                &request.query(),
-                Arc::clone(&worker_stopping),
-                Arc::clone(&worker_cancel),
+                &job.request.query(),
+                Arc::clone(&stopping),
+                Arc::clone(&stop_notify),
             )
             .map_err(|error| format!("{error:#}"))
             .and_then(|response| {
@@ -349,15 +368,18 @@ fn spawn_query_worker(socket_path: &Path) -> QueryWorker {
                     view,
                 })
             });
-            *results.lock() = Some((request, result));
+            if !job.cancelled.load(Ordering::Acquire) {
+                *results.lock() = Some((job.request, result));
+            }
         }
     });
     QueryWorker {
         sender: Some(sender),
         pending,
         latest,
-        stopping,
-        cancel_notify,
+        cancellation: None,
+        shutdown,
+        shutdown_notify,
         worker: Some(worker),
     }
 }
@@ -366,7 +388,7 @@ fn run_loop(socket_path: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>
     let snapshot = request_state(socket_path)?;
     let updates = spawn_watcher(socket_path);
     let commands = spawn_command_worker(socket_path);
-    let queries = spawn_query_worker(socket_path);
+    let mut queries = spawn_query_worker(socket_path);
     let mut tui = TuiState::new(snapshot);
     let mut redraw = true;
     let mut immediate_redraw = true;
@@ -402,7 +424,10 @@ fn run_loop(socket_path: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>
                 queries.request(request.clone());
                 tui.ui.requested = Some(request);
             }
-            None => tui.ui.requested = None,
+            None => {
+                queries.cancel();
+                tui.ui.requested = None;
+            }
             _ => {}
         }
         if tui.ui.expire_message() {
@@ -534,7 +559,7 @@ enum View {
     Tree(LibraryTree),
     Playlists(PagedList<PlaylistSummary>),
     PlaylistDetail {
-        playlists: ListState,
+        playlists: (ListState, usize),
         detail: PlaylistDetail,
     },
 }
@@ -563,28 +588,23 @@ impl UiState {
     fn query_request(&self, state: &TuiSnapshot) -> Option<QueryRequest> {
         let limit = state.system.page_size as usize;
         let (kind, offset) = match &self.view {
-            View::Search(search)
-                if search.results.needs_page(limit) && search.ready(Instant::now()) =>
-            {
-                (
-                    QueryKind::Search(search.query.clone()),
-                    search.results.offset(limit),
-                )
+            View::Search(search) if search.ready(Instant::now()) => {
+                let offset = search.results.next_offset(limit)?;
+                (QueryKind::Search(search.query.clone()), offset)
             }
-            View::Tree(tree) if tree.entries.needs_page(limit) => (
-                if tree.directory.as_os_str().is_empty() {
+            View::Tree(tree) => {
+                let offset = tree.entries.next_offset(limit)?;
+                let kind = if tree.directory.as_os_str().is_empty() {
                     QueryKind::Roots(Arc::clone(&tree.roots))
                 } else {
                     QueryKind::Directory(tree.directory.clone())
-                },
-                tree.entries.offset(limit),
-            ),
-            View::Playlists(playlists) if playlists.needs_page(limit) => {
-                (QueryKind::Playlists, playlists.offset(limit))
+                };
+                (kind, offset)
             }
-            View::PlaylistDetail { detail, .. } if detail.entries.needs_page(limit) => (
+            View::Playlists(playlists) => (QueryKind::Playlists, playlists.next_offset(limit)?),
+            View::PlaylistDetail { detail, .. } => (
                 QueryKind::Playlist(detail.playlist_id),
-                detail.entries.offset(limit),
+                detail.entries.next_offset(limit)?,
             ),
             _ => return None,
         };
@@ -635,6 +655,7 @@ impl UiState {
             QueryKind::Search(_) => result.revisions.library == request.library_revision,
         };
         if !revision_matches {
+            self.requested = None;
             return false;
         }
         match (&mut self.view, result.view) {
@@ -879,7 +900,8 @@ impl UiState {
                 self.view = if close {
                     self.requested = None;
                     View::Playlists(PagedList {
-                        selection: playlists,
+                        selection: playlists.0,
+                        viewport_rows: playlists.1,
                         ..PagedList::default()
                     })
                 } else {
@@ -902,7 +924,7 @@ impl UiState {
                                     entries: PagedList::default(),
                                 };
                                 self.view = View::PlaylistDetail {
-                                    playlists: playlists.selection,
+                                    playlists: (playlists.selection, playlists.viewport_rows),
                                     detail,
                                 };
                                 self.requested = None;
@@ -967,29 +989,24 @@ impl UiState {
         command.map_or(KeyAction::Ignored, KeyAction::Command)
     }
 }
-const RETAINED_VIEW_PAGES: usize = 3;
-
-struct ViewPage<T> {
-    offset: usize,
-    items: Vec<T>,
-}
-
 struct PagedList<T> {
-    pages: VecDeque<ViewPage<T>>,
+    pages: HashMap<usize, Vec<T>>,
     total: usize,
     loaded: bool,
     fetch_size: usize,
     selection: ListState,
+    viewport_rows: usize,
 }
 
 impl<T> Default for PagedList<T> {
     fn default() -> Self {
         Self {
-            pages: VecDeque::new(),
+            pages: HashMap::new(),
             total: 0,
             loaded: false,
             fetch_size: 0,
             selection: ListState::default(),
+            viewport_rows: 1,
         }
     }
 }
@@ -1002,24 +1019,74 @@ impl<T> PagedList<T> {
         self.fetch_size = 0;
     }
 
-    fn offset(&self, fetch_size: usize) -> usize {
-        self.selection.selected().unwrap_or(0) / fetch_size * fetch_size
+    fn next_offset(&self, fetch_size: usize) -> Option<usize> {
+        let fetch_size = fetch_size.max(1);
+        let selected = self.selection.selected().unwrap_or(0) / fetch_size * fetch_size;
+        if !self.loaded || self.fetch_size != fetch_size {
+            return Some(selected);
+        }
+        if self.total == 0 {
+            return None;
+        }
+        let missing = |offset| !self.pages.contains_key(&offset);
+        if missing(selected) {
+            return Some(selected);
+        }
+        let first = self.selection.offset() / fetch_size * fetch_size;
+        let last = self.visible_end().saturating_sub(1) / fetch_size * fetch_size;
+        for offset in (first..=last).step_by(fetch_size) {
+            if missing(offset) {
+                return Some(offset);
+            }
+        }
+        // One neighboring batch on either side hides boundaries during ordinary scrolling.
+        let next = last.saturating_add(fetch_size);
+        if next < self.total && missing(next) {
+            return Some(next);
+        }
+        first
+            .checked_sub(fetch_size)
+            .filter(|offset| missing(*offset))
     }
 
-    fn needs_page(&self, fetch_size: usize) -> bool {
-        !self.loaded
-            || self.fetch_size != fetch_size
-            || !self
-                .pages
-                .iter()
-                .any(|page| page.offset == self.offset(fetch_size))
+    fn visible_end(&self) -> usize {
+        self.selection
+            .offset()
+            .saturating_add(self.viewport_rows)
+            .min(self.total)
+    }
+
+    fn set_viewport(&mut self, rows: usize) {
+        self.viewport_rows = rows.max(1);
+        let selected = self.selection.selected().unwrap_or(0);
+        let mut start = self.selection.offset();
+        if selected < start {
+            start = selected;
+        } else if selected >= start.saturating_add(self.viewport_rows) {
+            start = selected + 1 - self.viewport_rows;
+        }
+        if self.loaded {
+            start = start.min(self.total.saturating_sub(self.viewport_rows));
+        }
+        *self.selection.offset_mut() = start;
+        self.trim_pages();
+    }
+
+    fn trim_pages(&mut self) {
+        let fetch_size = self.fetch_size.max(1);
+        let first = (self.selection.offset() / fetch_size * fetch_size).saturating_sub(fetch_size);
+        let last = self.visible_end().saturating_sub(1) / fetch_size * fetch_size;
+        let last = last.saturating_add(fetch_size);
+        // At most ceil(viewport_rows / fetch_size) + 3 batches, independent of list length.
+        self.pages
+            .retain(|offset, _| (first..=last).contains(offset));
     }
 
     fn navigate(&mut self, key: KeyCode, page_size: usize) -> bool {
         if !self.loaded {
             return false;
         }
-        match key {
+        let changed = match key {
             KeyCode::Up | KeyCode::Down => {
                 move_selection(&mut self.selection, self.total, key == KeyCode::Down)
             }
@@ -1030,7 +1097,9 @@ impl<T> PagedList<T> {
                 key == KeyCode::PageDown,
             ),
             _ => false,
-        }
+        };
+        self.set_viewport(self.viewport_rows);
+        changed
     }
 
     fn insert(&mut self, offset: usize, fetch_size: usize, total: usize, items: Vec<T>) {
@@ -1038,40 +1107,23 @@ impl<T> PagedList<T> {
             self.clear();
         }
         self.fetch_size = fetch_size;
-        self.pages.retain(|page| page.offset != offset);
-        if self.pages.len() == RETAINED_VIEW_PAGES {
-            self.pages.pop_front();
-        }
-        self.pages.push_back(ViewPage { offset, items });
+        self.pages.insert(offset, items);
         self.total = total;
         self.loaded = true;
         let selected = self.selection.selected().unwrap_or(0);
         self.selection
             .select((total != 0).then(|| selected.min(total - 1)));
+        self.set_viewport(self.viewport_rows);
+    }
+
+    fn get(&self, index: usize) -> Option<&T> {
+        let fetch_size = self.fetch_size.max(1);
+        let offset = index / fetch_size * fetch_size;
+        self.pages.get(&offset)?.get(index - offset)
     }
 
     fn selected(&self) -> Option<&T> {
-        let selected = self.selection.selected()?;
-        self.pages.iter().find_map(|page| {
-            selected
-                .checked_sub(page.offset)
-                .and_then(|index| page.items.get(index))
-        })
-    }
-
-    fn items(&self) -> &[T] {
-        self.pages
-            .iter()
-            .find(|page| page.offset == self.offset(self.fetch_size.max(1)))
-            .map_or(&[], |page| page.items.as_slice())
-    }
-
-    fn local_selection(&self) -> ListState {
-        ListState::default().with_selected(
-            self.selection
-                .selected()
-                .map(|index| index - self.offset(self.fetch_size.max(1))),
-        )
+        self.get(self.selection.selected()?)
     }
 }
 
@@ -1113,7 +1165,7 @@ impl LibrarySearch {
 struct LibraryTree {
     directory: PathBuf,
     roots: Arc<Vec<PathBuf>>,
-    ancestors: Vec<(PathBuf, ListState)>,
+    ancestors: Vec<(PathBuf, ListState, usize)>,
     entries: PagedList<DirectoryRow>,
 }
 
@@ -1143,6 +1195,7 @@ impl LibraryTree {
                 self.ancestors.push((
                     std::mem::replace(&mut self.directory, path),
                     std::mem::take(&mut self.entries.selection),
+                    self.entries.viewport_rows,
                 ));
                 self.entries = PagedList::default();
                 None
@@ -1154,12 +1207,13 @@ impl LibraryTree {
     }
 
     fn parent(&mut self) -> bool {
-        let Some((directory, selection)) = self.ancestors.pop() else {
+        let Some((directory, selection, viewport_rows)) = self.ancestors.pop() else {
             return false;
         };
         self.directory = directory;
         self.entries = PagedList {
             selection,
+            viewport_rows,
             ..PagedList::default()
         };
         true
@@ -1352,19 +1406,19 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
     );
     let keys = match &ui.view {
         View::Search(_) => {
-            "Type    search library\nTab     query/results focus\n↑/↓     select result\nPgUp/Dn page result\nR       retry failed page\nBackspace edit query\nEnter   focus results\nEsc     return to queue\n\nSearch matches title, artist, album and path."
+            "Type    search library\nTab     query/results focus\n↑/↓     select result\nPgUp/Dn scroll screen\nR       retry loading\nBackspace edit query\nEnter   focus results\nEsc     return to queue\n\nSearch matches title, artist, album and path."
         }
         View::Tree(_) => {
-            "↑/↓     select entry\nPgUp/Dn page entries\nR       retry failed page\nEnter   open directory/add track\nBackspace/← parent directory\nEsc     return to queue\n/       search library\nP       playlists\nSpace   play/pause\nn/p       next/previous\n→       seek forward 5 sec\nHome/End seek start/end\nr       repeat mode\ns       shuffle\n[/]     volume\nq       quit"
+            "↑/↓     select entry\nPgUp/Dn scroll screen\nR       retry loading\nEnter   open directory/add track\nBackspace/← parent directory\nEsc     return to queue\n/       search library\nP       playlists\nSpace   play/pause\nn/p       next/previous\n→       seek forward 5 sec\nHome/End seek start/end\nr       repeat mode\ns       shuffle\n[/]     volume\nq       quit"
         }
         View::PlaylistDetail { .. } => {
-            "↑/↓     select track\nPgUp/Dn page tracks\nR       retry failed page\nEnter   play track\na       add track to queue\n←/Esc   back to playlists\nSpace   play/pause\nn/p       next/previous\nHome/End seek start/end\nr       repeat mode\ns       shuffle\n[/]     volume\nq       quit"
+            "↑/↓     select track\nPgUp/Dn scroll screen\nR       retry loading\nEnter   play track\na       add track to queue\n←/Esc   back to playlists\nSpace   play/pause\nn/p       next/previous\nHome/End seek start/end\nr       repeat mode\ns       shuffle\n[/]     volume\nq       quit"
         }
         View::Playlists(_) => {
-            "↑/↓     select playlist\nPgUp/Dn page playlists\nR       retry failed page\n→       open playlist\nEnter   play playlist\nEsc     return to queue\nP       playlists\n/       search library\nt       browse library tree\nSpace   play/pause\nn/p       next/previous\nHome/End seek start/end\nr       repeat mode\ns       shuffle\n[/]     volume\nq       quit"
+            "↑/↓     select playlist\nPgUp/Dn scroll screen\nR       retry loading\n→       open playlist\nEnter   play playlist\nEsc     return to queue\nP       playlists\n/       search library\nt       browse library tree\nSpace   play/pause\nn/p       next/previous\nHome/End seek start/end\nr       repeat mode\ns       shuffle\n[/]     volume\nq       quit"
         }
         View::Queue => {
-            "↑/↓     select queue\nPgUp/Dn page queue\nEnter   play selected\nd/Del   remove selected\n/       search library\nt       browse library tree\nP       playlists\nSpace   play/pause\n←/→     seek 5 sec\nHome/End seek start/end\nr       repeat mode\ns       shuffle\n[/]     volume\nq       quit"
+            "↑/↓     select queue\nPgUp/Dn scroll screen\nEnter   play selected\nd/Del   remove selected\n/       search library\nt       browse library tree\nP       playlists\nSpace   play/pause\n←/→     seek 5 sec\nHome/End seek start/end\nr       repeat mode\ns       shuffle\n[/]     volume\nq       quit"
         }
     };
     if ui.show_help {
@@ -1524,10 +1578,13 @@ fn draw_paged_list<T>(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     title: String,
-    page: &PagedList<T>,
+    page: &mut PagedList<T>,
     row: impl Fn(&T) -> String,
 ) {
-    let title = if page.needs_page(page.fetch_size.max(1)) {
+    page.set_viewport(area.height.saturating_sub(2) as usize);
+    let loading = !page.loaded
+        || (page.selection.offset()..page.visible_end()).any(|index| page.get(index).is_none());
+    let title = if loading {
         format!("{title} — loading")
     } else if page.total == 0 {
         format!("{title} — empty")
@@ -1538,8 +1595,13 @@ fn draw_paged_list<T>(
             page.total
         )
     };
-    let items = page.items().iter().map(|item| ListItem::new(row(item)));
-    let mut selection = page.local_selection();
+    let items = (page.selection.offset()..page.visible_end())
+        .map(|index| ListItem::new(page.get(index).map_or_else(|| "…".into(), &row)));
+    let mut selection = ListState::default().with_selected(
+        page.selection
+            .selected()
+            .map(|index| index - page.selection.offset()),
+    );
     frame.render_stateful_widget(
         List::new(items)
             .block(Block::default().title(title).borders(Borders::ALL))
@@ -1557,7 +1619,7 @@ fn draw_paged_list<T>(
 fn draw_playlist_detail(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
-    detail: &PlaylistDetail,
+    detail: &mut PlaylistDetail,
     nerd_symbols: bool,
 ) {
     let marker = if nerd_symbols { "󰎆 " } else { "♪ " };
@@ -1565,7 +1627,7 @@ fn draw_playlist_detail(
         frame,
         area,
         format!("Playlist — {}", detail.name),
-        &detail.entries,
+        &mut detail.entries,
         |entry| {
             format!(
                 "{marker}{} — {}{}",
@@ -1580,7 +1642,7 @@ fn draw_playlist_detail(
 fn draw_playlists(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
-    playlists: &PagedList<PlaylistSummary>,
+    playlists: &mut PagedList<PlaylistSummary>,
     nerd_symbols: bool,
 ) {
     let marker = if nerd_symbols { "󰲋 " } else { "[P] " };
@@ -1614,7 +1676,7 @@ fn draw_search(frame: &mut ratatui::Frame<'_>, area: Rect, search: &mut LibraryS
     } else {
         "Library — Tab to focus".into()
     };
-    draw_paged_list(frame, rows[1], title, &search.results, |track| {
+    draw_paged_list(frame, rows[1], title, &mut search.results, |track| {
         format!(
             "{} — {} [{}]{}",
             track.artist,
@@ -1625,13 +1687,18 @@ fn draw_search(frame: &mut ratatui::Frame<'_>, area: Rect, search: &mut LibraryS
     });
 }
 
-fn draw_tree(frame: &mut ratatui::Frame<'_>, area: Rect, tree: &LibraryTree, nerd_symbols: bool) {
+fn draw_tree(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    tree: &mut LibraryTree,
+    nerd_symbols: bool,
+) {
     let title = if tree.directory.as_os_str().is_empty() {
         "Library tree".into()
     } else {
         format!("Library tree — {}", tree.directory.display())
     };
-    draw_paged_list(frame, area, title, &tree.entries, |entry| match entry {
+    draw_paged_list(frame, area, title, &mut tree.entries, |entry| match entry {
         DirectoryRow::Directory { path } => {
             let marker = if nerd_symbols { "\u{f07b} " } else { "[dir] " };
             let name = path
@@ -1664,4 +1731,395 @@ fn fmt_time(seconds: f64) -> String {
         return "0:00".into();
     }
     format!("{}:{:02}", (seconds as u64) / 60, (seconds as u64) % 60)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{model::Page, response::QueryRevisions};
+    use ratatui::backend::TestBackend;
+
+    fn track(index: usize) -> LibraryRow {
+        LibraryRow {
+            id: index as i64,
+            title: format!("row-{index}"),
+            artist: "artist".into(),
+            album: "album".into(),
+            duration: None,
+            favorite: false,
+            missing: false,
+            play_count: 0,
+        }
+    }
+
+    fn response(request: &QueryRequest, total: usize) -> QueryResult {
+        let indices = request.offset..(request.offset + request.limit).min(total);
+        let view = match &request.kind {
+            QueryKind::Search(_) => ViewResponse::LibraryPage(Page {
+                total,
+                rows: indices.map(track).collect(),
+            }),
+            QueryKind::Directory(_) => ViewResponse::DirectoryPage(Page {
+                total,
+                rows: indices
+                    .map(|index| DirectoryRow::Track(track(index)))
+                    .collect(),
+            }),
+            QueryKind::Playlists => ViewResponse::PlaylistSummaries(Page {
+                total,
+                rows: indices
+                    .map(|index| PlaylistSummary {
+                        id: index as i64,
+                        name: format!("row-{index}"),
+                        entry_count: 12,
+                    })
+                    .collect(),
+            }),
+            QueryKind::Playlist(_) => ViewResponse::PlaylistEntries(Page {
+                total,
+                rows: indices
+                    .map(|index| PlaylistEntryRow {
+                        id: index as i64,
+                        track_id: index as i64,
+                        title: format!("row-{index}"),
+                        artist: "artist".into(),
+                        album: "album".into(),
+                        missing: false,
+                    })
+                    .collect(),
+            }),
+            QueryKind::Roots(_) => {
+                let Query::DirectoryPage { offset, limit, .. } = request.query() else {
+                    unreachable!()
+                };
+                ViewResponse::DirectoryPage(Page {
+                    total,
+                    rows: (offset..(offset + limit).min(total))
+                        .map(|index| DirectoryRow::Track(track(index)))
+                        .collect(),
+                })
+            }
+        };
+        QueryResult {
+            revisions: QueryRevisions::default(),
+            view,
+        }
+    }
+
+    fn load_visible(ui: &mut UiState, state: &TuiSnapshot) {
+        for _ in 0..16 {
+            let Some(request) = ui.query_request(state) else {
+                return;
+            };
+            assert!(ui.apply_query(state, &request, Ok(response(&request, 12))));
+        }
+        panic!("visible requests did not converge");
+    }
+
+    fn render_view(ui: &mut UiState) -> String {
+        let height = if matches!(ui.view, View::Search(_)) {
+            9
+        } else {
+            6
+        };
+        let mut terminal = Terminal::new(TestBackend::new(60, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                match &mut ui.view {
+                    View::Search(search) => draw_search(frame, area, search),
+                    View::Tree(tree) => draw_tree(frame, area, tree, false),
+                    View::Playlists(playlists) => draw_playlists(frame, area, playlists, false),
+                    View::PlaylistDetail { detail, .. } => {
+                        draw_playlist_detail(frame, area, detail, false)
+                    }
+                    View::Queue => panic!("expected a queried view"),
+                }
+            })
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn every_queried_view_renders_across_batches_without_resetting_scroll() {
+        let mut state = TuiSnapshot::default();
+        state.system.page_size = 3;
+        let views = [
+            View::Search(LibrarySearch {
+                focus: SearchFocus::Results,
+                ..LibrarySearch::default()
+            }),
+            View::Tree(LibraryTree {
+                directory: "/music".into(),
+                ..LibraryTree::default()
+            }),
+            View::Playlists(PagedList::default()),
+            View::PlaylistDetail {
+                playlists: (ListState::default(), 1),
+                detail: PlaylistDetail {
+                    playlist_id: 7,
+                    name: "collection".into(),
+                    entries: PagedList::default(),
+                },
+            },
+        ];
+        for view in views {
+            let mut ui = UiState {
+                view,
+                page_size: 4,
+                ..UiState::default()
+            };
+            render_view(&mut ui);
+            load_visible(&mut ui, &state);
+            for _ in 0..3 {
+                ui.key_action(KeyEvent::from(KeyCode::Down), &state);
+            }
+            let rendered = render_view(&mut ui);
+            assert!(rendered.contains("row-0"), "{rendered}");
+            assert!(rendered.contains("row-3"), "{rendered}");
+            let selected = ui.key_action(KeyEvent::from(KeyCode::Enter), &state);
+            match selected {
+                KeyAction::Command(Command::Enqueue { track_ids }) => {
+                    assert_eq!(track_ids, vec![3])
+                }
+                KeyAction::Command(Command::PlayPlaylist { playlist_id: 3 })
+                | KeyAction::Command(Command::Play { track_id: 3 }) => {}
+                _ => panic!("selection did not activate the global row"),
+            }
+            ui.key_action(KeyEvent::from(KeyCode::Down), &state);
+            load_visible(&mut ui, &state);
+            let rendered = render_view(&mut ui);
+            assert!(!rendered.contains("row-0"), "{rendered}");
+            assert!(rendered.contains("row-1"), "{rendered}");
+            assert!(rendered.contains("row-4"), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn viewport_navigation_and_retention_do_not_depend_on_batch_size() {
+        for fetch_size in [1, 3, 32] {
+            let mut list = PagedList::default();
+            list.set_viewport(10);
+            for down in [true, false] {
+                for _ in 0..200 {
+                    let mut requests = 0;
+                    while let Some(offset) = list.next_offset(fetch_size) {
+                        let rows = (offset..(offset + fetch_size).min(10_000)).collect();
+                        list.insert(offset, fetch_size, 10_000, rows);
+                        requests += 1;
+                        assert!(requests <= 10usize.div_ceil(fetch_size) + 4);
+                    }
+                    assert_eq!(list.total, 10_000);
+                    assert!(list.pages.len() <= 10usize.div_ceil(fetch_size) + 3);
+                    assert!(
+                        (list.selection.offset()..list.visible_end())
+                            .all(|index| list.get(index) == Some(&index))
+                    );
+                    let before = list.selection.selected().unwrap();
+                    list.navigate(
+                        if down {
+                            KeyCode::PageDown
+                        } else {
+                            KeyCode::PageUp
+                        },
+                        10,
+                    );
+                    assert_eq!(
+                        list.selection.selected(),
+                        Some(if down {
+                            before + 10
+                        } else {
+                            before.saturating_sub(10)
+                        })
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn configured_roots_and_root_tracks_share_one_continuous_viewport() {
+        let mut state = TuiSnapshot::default();
+        state.system.page_size = 3;
+        let mut ui = UiState {
+            view: View::Tree(LibraryTree::new(&["/first".into(), "/second".into()])),
+            page_size: 4,
+            ..UiState::default()
+        };
+        render_view(&mut ui);
+        load_visible(&mut ui, &state);
+        for _ in 0..3 {
+            ui.key_action(KeyEvent::from(KeyCode::Down), &state);
+        }
+        let rendered = render_view(&mut ui);
+        assert!(rendered.contains("first/"), "{rendered}");
+        assert!(rendered.contains("row-0"), "{rendered}");
+        assert!(rendered.contains("row-1"), "{rendered}");
+        match ui.key_action(KeyEvent::from(KeyCode::Enter), &state) {
+            KeyAction::Command(Command::Enqueue { track_ids }) => assert_eq!(track_ids, vec![1]),
+            _ => panic!("root track selection did not preserve global ordering"),
+        }
+    }
+
+    #[test]
+    fn failed_load_retries_and_stale_revisions_do_not_stall_navigation() {
+        let mut state = TuiSnapshot::default();
+        state.system.page_size = 3;
+        let mut ui = UiState {
+            view: View::Playlists(PagedList::default()),
+            ..UiState::default()
+        };
+        let request = ui.query_request(&state).unwrap();
+        ui.requested = Some(request.clone());
+        assert!(ui.apply_query(&state, &request, Err("connection failed".into())));
+        assert!(ui.query_request(&state).is_none());
+        ui.key_action(KeyEvent::from(KeyCode::Char('R')), &state);
+        assert_eq!(ui.query_request(&state), Some(request.clone()));
+        let mut stale = response(&request, 12);
+        stale.revisions.playlist = 1;
+        ui.requested = Some(request.clone());
+        assert!(!ui.apply_query(&state, &request, Ok(stale)));
+        assert!(ui.requested.is_none());
+        load_visible(&mut ui, &state);
+    }
+
+    #[test]
+    fn replacing_queries_keeps_one_stalled_socket_until_worker_shutdown() {
+        use std::{io::Read, os::unix::net::UnixListener};
+
+        let socket = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+            ".cache/tui-query-worker-{}.sock",
+            std::process::id()
+        ));
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (connected, accepted) = bounded(1);
+        let server = std::thread::spawn(move || {
+            connected.send(listener.accept().unwrap().0).unwrap();
+        });
+        let mut worker = spawn_query_worker(&socket);
+        let state = TuiSnapshot::default();
+        let ui = UiState {
+            view: View::Playlists(PagedList::default()),
+            ..UiState::default()
+        };
+        let request = ui.query_request(&state).unwrap();
+        worker.request(request.clone());
+        let mut stream = accepted.recv_timeout(Duration::from_secs(5)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        for offset in 1..100 {
+            worker.request(QueryRequest {
+                offset,
+                ..request.clone()
+            });
+        }
+        // The peer deliberately stalls Hello. Replacements must not abandon
+        // the active connection and start more server work behind it.
+        let mut buffer = [0; 4096];
+        let retained = loop {
+            match stream.read(&mut buffer) {
+                Ok(0) => break false,
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    break true;
+                }
+                Err(error) => panic!("{error}"),
+            }
+        };
+        drop(worker);
+        let closed = stream.read(&mut buffer).unwrap();
+        server.join().unwrap();
+        std::fs::remove_file(socket).unwrap();
+        assert!(
+            retained,
+            "replacement abandoned an active server connection"
+        );
+        assert_eq!(closed, 0, "worker shutdown must close a stalled connection");
+    }
+    #[test]
+    fn returning_to_parent_restores_selection_and_middle_of_viewport() {
+        let state = TuiSnapshot::default();
+        let mut tree = LibraryTree::default();
+        tree.entries.selection = ListState::default().with_selected(Some(34)).with_offset(30);
+        tree.entries.set_viewport(10);
+        tree.entries.insert(
+            0,
+            100,
+            100,
+            (0..100)
+                .map(|index| DirectoryRow::Directory {
+                    path: format!("/music/{index}").into(),
+                })
+                .collect(),
+        );
+        let mut ui = UiState {
+            view: View::Tree(tree),
+            ..UiState::default()
+        };
+        ui.key_action(KeyEvent::from(KeyCode::Enter), &state);
+        ui.key_action(KeyEvent::from(KeyCode::Backspace), &state);
+        let View::Tree(tree) = &mut ui.view else {
+            panic!("expected parent directory")
+        };
+        tree.entries.insert(
+            20,
+            20,
+            100,
+            (20..40)
+                .map(|index| DirectoryRow::Track(track(index)))
+                .collect(),
+        );
+        tree.entries.set_viewport(10);
+        assert_eq!(tree.entries.selection.selected(), Some(34));
+        assert_eq!(tree.entries.selection.offset(), 30);
+
+        let mut playlists = PagedList::default();
+        playlists.selection = ListState::default().with_selected(Some(34)).with_offset(30);
+        playlists.set_viewport(10);
+        playlists.insert(
+            0,
+            100,
+            100,
+            (0..100)
+                .map(|index| PlaylistSummary {
+                    id: index,
+                    name: format!("collection-{index}"),
+                    entry_count: 1,
+                })
+                .collect(),
+        );
+        ui.view = View::Playlists(playlists);
+        ui.key_action(KeyEvent::from(KeyCode::Right), &state);
+        ui.key_action(KeyEvent::from(KeyCode::Left), &state);
+        let View::Playlists(playlists) = &mut ui.view else {
+            panic!("expected playlist catalog")
+        };
+        playlists.insert(
+            20,
+            20,
+            100,
+            (20..40)
+                .map(|index| PlaylistSummary {
+                    id: index,
+                    name: format!("collection-{index}"),
+                    entry_count: 1,
+                })
+                .collect(),
+        );
+        playlists.set_viewport(10);
+        assert_eq!(playlists.selection.selected(), Some(34));
+        assert_eq!(playlists.selection.offset(), 30);
+    }
 }

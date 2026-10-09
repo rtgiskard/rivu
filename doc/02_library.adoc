@@ -83,8 +83,15 @@ GUI/TUI fetch bounded library and playlist pages as needed. `page_size` controls
 interactive page size, not the total results. Each interactive page reports the
 filtered total and at most `256` rows; `limit = 0` is a count-only read. Query
 responses contain the requested projection and its data revisions, never the
-queue, configuration, or other client state. The TUI retains at most three
-pages per list; the GUI retains one page per view or directory branch.
+queue, configuration, or other client state. The GUI retains one page per
+view or directory branch.
+
+The TUI retains at most `ceil(viewport rows / batch size) + 3` batches per list.
+PageUp/PageDown scroll one screen, independent of query batch size; returning
+from a directory or playlist detail restores the parent selection and viewport.
+The TUI permits one active query and coalesces navigation changes into the most
+recent pending query. Superseded results are discarded without abandoning
+server work; exiting the TUI interrupts a stalled client wait.
 
 CLI listings and playlist export use bounded batches without querying pagination
 totals. Continuations follow track/playlist IDs or playlist `(position, id)`
