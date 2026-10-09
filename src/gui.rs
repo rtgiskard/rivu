@@ -2381,6 +2381,7 @@ impl Render for GuiApp {
         self.scroll_views.begin_frame();
         self.visuals.begin_frame();
         let paint_visuals = self.visuals.clone();
+        let paint_waveform = self.waveform.read(cx).image_releaser();
         let root = self.layout.root.take();
         let layout_view = root
             .as_ref()
@@ -2583,7 +2584,11 @@ impl Render for GuiApp {
             )
             .child(canvas(
                 |_, _, _| (),
-                move |_, _, _, _| paint_visuals.finish_prepaint(),
+                move |_, _, window, _| {
+                    paint_visuals.release_retired(window);
+                    paint_waveform.release_retired(window);
+                    paint_visuals.finish_prepaint();
+                },
             ).absolute().size_full())
             .child(
                 div()

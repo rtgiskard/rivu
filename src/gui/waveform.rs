@@ -151,6 +151,18 @@ fn tile_columns(x_start: u32, x_end: u32, width: u32, count: usize) -> std::ops:
     (first as usize).min(count)..(end as usize).min(count)
 }
 
+/// Called once at the start of a window frame, even when no waveform is visible.
+/// Uncached images survive a full subsequent frame in the pending queue.
+/// Removed cached tiles are released at the next window-frame boundary.
+#[derive(Clone)]
+pub(super) struct WaveformImageRelease(Rc<RefCell<WaveformPlot>>);
+
+impl WaveformImageRelease {
+    pub(super) fn release_retired(&self, window: &mut Window) {
+        self.0.borrow_mut().release_retired(window);
+    }
+}
+
 fn tile_fingerprint(
     values: &[(Option<f32>, Option<f32>, Option<f32>, Option<f32>)],
     start: usize,
@@ -166,6 +178,18 @@ fn tile_fingerprint(
 }
 
 impl WaveformPlot {
+    fn retain_panels(&mut self, mut keep: impl FnMut(u64) -> bool) {
+        let retired = &mut self.retired;
+        self.columns.retain(|id, columns| {
+            if keep(*id) {
+                return true;
+            }
+            retired.extend(columns.tiles.drain(..).map(|tile| tile.image));
+            false
+        });
+        self.paint_tiles.clear();
+    }
+
     fn clear_cache(&mut self) {
         for columns in self.columns.values_mut() {
             columns.values.clear();
@@ -177,8 +201,12 @@ impl WaveformPlot {
     }
 
     fn release_retired(&mut self, window: &mut Window) {
+        self.release_images(|image| { let _ = window.drop_image(image); });
+    }
+
+    fn release_images(&mut self, mut release: impl FnMut(Arc<RenderImage>)) {
         while let Some(image) = self.retired.pop() {
-            let _ = window.drop_image(image);
+            release(image);
         }
         self.retired.append(&mut self.pending_images);
     }
@@ -458,6 +486,10 @@ pub(super) struct Waveform {
 }
 
 impl Waveform {
+    pub(super) fn image_releaser(&self) -> WaveformImageRelease {
+        WaveformImageRelease(Rc::clone(&self.plot))
+    }
+
     pub(super) fn new(shared: Arc<RwLock<WaveformFrame>>) -> Self {
         Self {
             shared,
@@ -483,10 +515,7 @@ impl Waveform {
     }
 
     pub(super) fn retain_panels(&mut self, panels: &[&super::layout::Panel]) {
-        self.plot
-            .borrow_mut()
-            .columns
-            .retain(|id, _| panels.iter().any(|panel| panel.id == *id));
+        self.plot.borrow_mut().retain_panels(|id| panels.iter().any(|panel| panel.id == id));
         self.interaction
             .borrow_mut()
             .panels
@@ -781,7 +810,6 @@ impl Waveform {
                                     ),
                                 );
                                 let mut waveform = waveform.borrow_mut();
-                                waveform.release_retired(window);
                                 let (_revision, progress) = {
                                     let frame = shared.read();
                                     // Playback may replace its source between layout and paint.
@@ -838,6 +866,7 @@ impl Waveform {
                                     let WaveformPlot { pending_images, paint_tiles, .. } = &mut *waveform;
                                     pending_images.extend(paint_tiles.iter().map(|(_, _, image)| Arc::clone(image)));
                                 }
+                                waveform.paint_tiles.clear();
                                 if let Some(fraction) = progress {
                                     // Slow periodic easing gives the droplet a deliberate rhythm;
                                     // it never snaps at a cycle boundary.
@@ -1006,6 +1035,34 @@ mod tests {
             }
         }
         assert_eq!(pixel(1, 49)[3], 0, "Peak-only data must not invent RMS");
+    }
+
+    #[test]
+    fn removed_panels_retire_without_repainting_and_pending_waits_a_frame() {
+        let mut plot = WaveformPlot::default();
+        let data = frame(vec![Some(0.25); 100]);
+        let palette = super::super::visuals::active_palette_lut(crate::config::VisualizationPalette::Deadbeef);
+        plot.columns(1, 100, &data);
+        plot.update_tiles(1, LayerKey {
+            source: Rc::new(Source::from_frame(&data).unwrap()), width: 101, height: 40,
+            rms_gain: 1.0_f32.to_bits(), peak_gain: 1.0_f32.to_bits(), peak_gamma: 1.0_f32.to_bits(),
+            palette: crate::config::VisualizationPalette::Deadbeef,
+        }, true, &palette);
+        let tile = Arc::downgrade(&plot.columns[&1].tiles[0].image);
+        plot.retain_panels(|_| false);
+        assert!(plot.columns.is_empty());
+        assert!(tile.upgrade().is_some());
+        let mut released = 0;
+        plot.release_images(|_| released += 1);
+        assert_eq!(released, 4);
+        assert!(tile.upgrade().is_none());
+        let image = WaveformPlot::build_tile(&[(Some(0.2), Some(0.3), None, None)], 0, 1, 1, 10, &palette);
+        let pending = Arc::downgrade(&image);
+        plot.pending_images.push(image);
+        plot.release_images(|_| panic!("pending image released in its first boundary"));
+        assert!(pending.upgrade().is_some());
+        plot.release_images(drop);
+        assert!(pending.upgrade().is_none());
     }
 
     #[test]

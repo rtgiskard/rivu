@@ -550,6 +550,13 @@ impl Visuals {
         self.data.borrow_mut().finish_prepaint();
     }
 
+    pub(super) fn release_retired(&self, window: &mut Window) {
+        self.data.borrow_mut().release_images(|image| {
+            window.drop_image(image)
+                .map_err(|error| format!("Cannot release spectrogram image: {error}"))
+        });
+    }
+
     fn view(&self, panel_id: u64, mode: VisualMode) -> AnyElement {
         let data = Rc::clone(&self.data);
         let message: Option<SharedString> = {
@@ -602,7 +609,6 @@ impl Visuals {
                     },
                     move |bounds, _, window, cx| {
                         let mut data = data.borrow_mut();
-                        data.release_retired(window);
                         window.paint_quad(fill(bounds, rgb(data.visual_background)));
                         if bounds.size.width <= px(64.0) || bounds.size.height <= px(40.0) {
                             return;
@@ -876,11 +882,12 @@ impl VisualData {
         }
     }
 
-    fn release_retired(&mut self, window: &mut Window) {
-        // Retire uncached images for one complete frame before dropping their atlas entries.
+    fn release_images(&mut self, mut release: impl FnMut(Arc<RenderImage>) -> Result<(), String>) {
+        // Called once per window frame, even with no analysis panels. Pending
+        // uncached images survive one complete intervening frame in the atlas.
         while let Some(image) = self.retired.pop() {
-            if let Err(error) = window.drop_image(image) {
-                self.report_error(format!("Cannot release spectrogram image: {error}"));
+            if let Err(error) = release(image) {
+                self.report_error(error);
             }
         }
         self.retired.append(&mut self.pending_images);
@@ -1867,6 +1874,26 @@ mod tests {
         assert_eq!(data.bar_levels, vec![-60.0; 4]);
         assert_eq!(data.smoothed_levels, vec![-60.0; 4]);
         assert_eq!(data.len, 2);
+    }
+
+    #[test]
+    fn removed_spectrogram_images_release_without_panel_repaint_and_pending_waits_a_frame() {
+        let mut visuals = configured_visuals();
+        visuals.update(&frame(1.0, -30.0));
+        let image = Arc::new(RenderImage::new([image::Frame::new(image::RgbaImage::new(1, 1))]));
+        let cached = Arc::downgrade(&image);
+        visuals.data.borrow_mut().columns[0].image = Some(image);
+        visuals.retain_spectrogram_panels(&[]);
+        assert!(cached.upgrade().is_some());
+        visuals.data.borrow_mut().release_images(|_| Ok(()));
+        assert!(cached.upgrade().is_none());
+        let image = Arc::new(RenderImage::new([image::Frame::new(image::RgbaImage::new(1, 1))]));
+        let pending = Arc::downgrade(&image);
+        visuals.data.borrow_mut().pending_images.push(image);
+        visuals.data.borrow_mut().release_images(|_| panic!("released before complete frame"));
+        assert!(pending.upgrade().is_some());
+        visuals.data.borrow_mut().release_images(|_| Ok(()));
+        assert!(pending.upgrade().is_none());
     }
 
     #[test]
