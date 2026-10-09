@@ -25,8 +25,9 @@ link:02_library.adoc[Library] for root normalization, scan boundaries, and CUE/p
 rules.
 
 `queue_limit` accepts `1`–`4096`; lowering it below the current queue length is
-rejected. `page_size` accepts `20`–`256` and controls GUI/TUI pages, not CLI
-listing or export batch sizes. Queue behavior is described in
+rejected. `page_size` accepts `20`–`256` and tunes internal GUI/TUI query batches,
+not visible pages or CLI listing/export batches. Browsing scrolls continuously;
+query batch tuning stays in the configuration file, not desktop settings. Queue behavior is described in
 link:04_playback.adoc#_queue[Playback]; query and batch contracts in
 link:02_library.adoc#_paged_views[Library].
 
@@ -58,7 +59,7 @@ the output device is selected from the currently available devices in a dropdown
 General groups Library, Playback, Audio, Interface, Desktop integration, and
 Logging. Audio contains output selection, media read buffering, and decoder/remix
 switches; Interface contains the editable font family, font presets, scale,
-list batch size, and Nerd Font symbols. The system tray switch takes effect after
+and Nerd Font symbols. The system tray switch takes effect after
 restarting the graphical host, not merely reopening its window. Media read
 buffering applies to future source opens, including full waveform scans; it does
 not reopen the current track.

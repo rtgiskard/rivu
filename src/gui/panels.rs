@@ -1,9 +1,9 @@
 use super::{
     ACCENT, BORDER, Dragging, Field, GuiApp, HIGHLIGHT, HistorySort, ListFocus, MUTED, Measured,
-    StatusKind, TEXT, UI_INSET, active_control, artwork_preview, column, empty_state, form_field,
-    format_time, icon_button, library::LibraryDrag, list_viewport, metadata_item, panel_header,
-    panel_surface, panel_toolbar, row, row_text, section_group, sortable_header, status_message,
-    track_row, two_column,
+    StatusKind, TEXT, UI_INSET, ViewRequestKind, active_control, artwork_preview, column,
+    empty_state, form_field, format_time, icon_button, library::LibraryDrag, list_viewport,
+    metadata_item, panel_header, panel_surface, panel_toolbar, row, row_text, section_group,
+    sortable_header, status_message, track_row, two_column,
 };
 pub(super) use super::{TRACK_HEIGHT, caption, list_row};
 use crate::{
@@ -422,16 +422,11 @@ impl GuiApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let page_size = self.view_page_size();
-        let (total, page) = if self.library_tree_active {
-            let offset = self.directory_tree.root_offset();
-            (self.directory_tree.root_total(), offset / page_size)
+        let total = if self.library_tree_active {
+            self.directory_tree.root_total()
         } else {
-            (self.library_buffer.total, self.library_page)
+            self.library_buffer.total
         };
-        let page_count = total.div_ceil(page_size).max(1);
-        let can_prev = page > 0;
-        let can_next = page + 1 < page_count;
         let mut tools = panel_toolbar()
             .child(icon_button(
                 ("library-view", panel_id),
@@ -448,45 +443,6 @@ impl GuiApp {
                 cx,
                 |this, _, cx| this.toggle_library_view(cx),
             ))
-            .when(can_prev || can_next, |tools| {
-                tools
-                    .child(
-                        icon_button(
-                            ("library-page-prev", panel_id),
-                            "󰒮",
-                            "Browse earlier tracks",
-                            cx,
-                            move |this, _, cx| {
-                                if can_prev {
-                                    this.set_library_page(page - 1, cx);
-                                }
-                            },
-                        )
-                        .when(!can_prev, |view| {
-                            view.text_color(rgb(MUTED))
-                                .border_color(rgb(BORDER))
-                                .cursor_default()
-                        }),
-                    )
-                    .child(
-                        icon_button(
-                            ("library-page-next", panel_id),
-                            "󰒭",
-                            "Browse more tracks",
-                            cx,
-                            move |this, _, cx| {
-                                if can_next {
-                                    this.set_library_page(page + 1, cx);
-                                }
-                            },
-                        )
-                        .when(!can_next, |view| {
-                            view.text_color(rgb(MUTED))
-                                .border_color(rgb(BORDER))
-                                .cursor_default()
-                        }),
-                    )
-            })
             .child(active_control(
                 icon_button(
                     ("library-filter-favorites", panel_id),
@@ -621,8 +577,13 @@ impl GuiApp {
                         rows,
                         cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                             range
-                                .filter_map(|index| {
-                                    let row = this.library_buffer.rows.get(index)?.clone();
+                                .map(|index| {
+                                    let Some(row) = this.library_buffer.rows.get(index).cloned()
+                                    else {
+                                        return this
+                                            .paged_loading_row(ViewRequestKind::Library, index, cx)
+                                            .into_any_element();
+                                    };
                                     let id = row.id;
                                     let detail = format!(
                                         "{}{}{} · {}{}",
@@ -636,34 +597,38 @@ impl GuiApp {
                                         format_time(row.duration.unwrap_or(0.)),
                                         if row.missing { " · File missing" } else { "" }
                                     );
-                                    Some(
-                                        track_row(
-                                            ("library-track", id as u64),
-                                            ("library-track-text", id as u64),
-                                            this.selected.contains(&id),
-                                            row.title,
-                                            detail,
-                                        )
-                                        .on_click(cx.listener(
-                                            move |this, event: &gpui::ClickEvent, window, cx| {
-                                                this.focus_workspace(window, cx);
-                                                this.list_focus = Some(ListFocus::Library);
-                                                this.select_track(
-                                                    id,
-                                                    event.modifiers().control
-                                                        || event.modifiers().platform,
-                                                    cx,
-                                                );
-                                                if event.click_count() == 2 {
-                                                    this.send(Command::Play { track_id: id }, cx);
-                                                }
-                                            },
-                                        )),
+                                    track_row(
+                                        ("library-track", id as u64),
+                                        ("library-track-text", id as u64),
+                                        this.selected.contains(&id),
+                                        row.title,
+                                        detail,
                                     )
+                                    .on_click(cx.listener(
+                                        move |this, event: &gpui::ClickEvent, window, cx| {
+                                            this.focus_workspace(window, cx);
+                                            this.list_focus = Some(ListFocus::Library);
+                                            this.select_track(
+                                                id,
+                                                event.modifiers().control
+                                                    || event.modifiers().platform,
+                                                cx,
+                                            );
+                                            if event.click_count() == 2 {
+                                                this.send(Command::Play { track_id: id }, cx);
+                                            }
+                                        },
+                                    ))
+                                    .into_any_element()
                                 })
                                 .collect::<Vec<_>>()
                         }),
                     )
+                    .with_decoration(super::paged::viewport_demand(cx.processor(
+                        |this, range, _, cx| {
+                            this.ensure_library_range(range, cx);
+                        },
+                    )))
                     .h_full()
                     .min_h_0()
                     .w_full()
@@ -1004,7 +969,6 @@ impl GuiApp {
         let Some(index) = self
             .playlist_entries
             .rows
-            .iter()
             .position(|entry| entry.id == entry_id)
         else {
             return;
@@ -1018,7 +982,7 @@ impl GuiApp {
             self.send(
                 Command::MovePlaylistEntry {
                     entry_id,
-                    index: self.playlist_entries.offset + target,
+                    index: target,
                 },
                 cx,
             );
@@ -1040,17 +1004,12 @@ impl GuiApp {
                     .find(|p| p.id == id)
                     .map(|p| p.name.clone())
             })
-            .unwrap_or_default();
+            .unwrap_or_else(|| self.selected_playlist_name.clone());
         let entry_count = if playlist_id == self.playlist_entries.playlist_id {
             self.playlist_entries.total
         } else {
             0
         };
-        let page_size = self.view_page_size();
-        let page = self.playlist_buffer.offset / page_size;
-        let page_count = self.playlist_buffer.total.div_ceil(page_size).max(1);
-        let entry_page = self.playlist_entries.offset / page_size;
-        let entry_page_count = entry_count.div_ceil(page_size).max(1);
         let mut panel = panel_surface(("playlists-panel", panel_id))
             .on_drop(cx.listener(|this, drag: &LibraryDrag, window, cx| {
                 window.prevent_default();
@@ -1094,80 +1053,65 @@ impl GuiApp {
                         },
                     )),
             )
-            .child(
-                panel_toolbar()
-                    .child(icon_button(
-                        ("playlist-import", panel_id),
-                        "↓",
-                        "Import M3U",
-                        cx,
-                        |this, _, cx| this.choose_playlist_import(cx),
-                    ))
-                    .when(page > 0, |tools| {
-                        tools.child(icon_button(
-                            ("playlist-page-prev", panel_id),
-                            "󰒮",
-                            "Browse earlier playlists",
-                            cx,
-                            move |this, _, cx| {
-                                this.request_playlist_summaries(
-                                    this.playlist_buffer.offset.saturating_sub(page_size),
-                                    cx,
-                                )
-                            },
-                        ))
-                    })
-                    .when(page + 1 < page_count, |tools| {
-                        tools.child(icon_button(
-                            ("playlist-page-next", panel_id),
-                            "󰒭",
-                            "Browse more playlists",
-                            cx,
-                            move |this, _, cx| {
-                                this.request_playlist_summaries(
-                                    this.playlist_buffer.offset.saturating_add(page_size),
-                                    cx,
-                                )
-                            },
-                        ))
-                    }),
-            )
+            .child(panel_toolbar().child(icon_button(
+                ("playlist-import", panel_id),
+                "↓",
+                "Import M3U",
+                cx,
+                |this, _, cx| this.choose_playlist_import(cx),
+            )))
             .child(list_viewport(
                 uniform_list(
                     ("playlist-catalog", panel_id),
                     self.playlist_buffer.rows.len(),
                     cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                         range
-                            .filter_map(|index| {
-                                let p = this.playlist_buffer.rows.get(index)?.clone();
+                            .map(|index| {
+                                let Some(p) = this.playlist_buffer.rows.get(index).cloned() else {
+                                    return this
+                                        .paged_loading_row(
+                                            ViewRequestKind::PlaylistSummaries,
+                                            index,
+                                            cx,
+                                        )
+                                        .into_any_element();
+                                };
                                 let id = p.id;
-                                Some(
-                                    list_row(
-                                        ("playlist", id as u64),
-                                        this.selected_playlist == Some(id),
-                                    )
-                                    .child(row_text(
-                                        ("playlist-text", id as u64),
-                                        p.name,
-                                        format!("{} tracks", p.entry_count),
-                                    ))
-                                    .on_click(cx.listener(
-                                        move |this, _, _, cx| {
-                                            this.selected_playlist = Some(id);
-                                            this.selected_entry = None;
-                                            this.clear_metadata_selection(cx);
-                                            this.request_playlist_entries(id, 0, cx);
-                                            cx.notify();
-                                        },
-                                    )),
+                                let name = p.name.clone();
+                                list_row(
+                                    ("playlist", id as u64),
+                                    this.selected_playlist == Some(id),
                                 )
+                                .child(row_text(
+                                    ("playlist-text", id as u64),
+                                    p.name,
+                                    format!("{} tracks", p.entry_count),
+                                ))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.selected_playlist_name = name.clone();
+                                    this.playlist_buffer.rows.pin(Some(index));
+                                    if this.selected_playlist != Some(id) {
+                                        this.selected_playlist = Some(id);
+                                        this.selected_entry = None;
+                                        this.clear_metadata_selection(cx);
+                                        this.request_playlist_entries(id, 0, cx);
+                                    }
+                                    cx.notify();
+                                }))
+                                .into_any_element()
                             })
                             .collect::<Vec<_>>()
                     }),
                 )
+                .with_decoration(super::paged::viewport_demand(cx.processor(
+                    |this, range, _, cx| {
+                        this.ensure_playlist_range(range, cx);
+                    },
+                )))
                 .flex_1()
                 .min_h_0()
-                .w_full(),
+                .w_full()
+                .track_scroll(&self.playlist_buffer.scroll),
             ));
         if let Some(id) = playlist_id {
             panel = panel
@@ -1232,6 +1176,7 @@ impl GuiApp {
                             cx,
                             move |this, _, cx| {
                                 this.selected_playlist = None;
+                                this.selected_playlist_name.clear();
                                 this.selected_entry = None;
                                 this.send(Command::DeletePlaylist { playlist_id: id }, cx);
                             },
@@ -1245,18 +1190,14 @@ impl GuiApp {
                                 "Play selected track",
                                 cx,
                                 move |this, _, cx| {
-                                    if let Some(entry) = this
+                                    let track_id = this
                                         .playlist_entries
                                         .rows
                                         .iter()
                                         .find(|entry| Some(entry.id) == this.selected_entry)
-                                    {
-                                        this.send(
-                                            Command::Play {
-                                                track_id: entry.track_id,
-                                            },
-                                            cx,
-                                        );
+                                        .map(|entry| entry.track_id);
+                                    if let Some(track_id) = track_id {
+                                        this.send(Command::Play { track_id }, cx);
                                     }
                                 },
                             ))
@@ -1286,36 +1227,6 @@ impl GuiApp {
                                 cx,
                                 move |this, _, cx| this.move_selected_playlist_entry(true, cx),
                             ))
-                        })
-                        .when(entry_page > 0, |tools| {
-                            tools.child(icon_button(
-                                ("playlist-entry-prev", panel_id),
-                                "󰒮",
-                                "Browse earlier tracks",
-                                cx,
-                                move |this, _, cx| {
-                                    this.request_playlist_entries(
-                                        id,
-                                        this.playlist_entries.offset.saturating_sub(page_size),
-                                        cx,
-                                    )
-                                },
-                            ))
-                        })
-                        .when(entry_page + 1 < entry_page_count, |tools| {
-                            tools.child(icon_button(
-                                ("playlist-entry-next", panel_id),
-                                "󰒭",
-                                "Browse more tracks",
-                                cx,
-                                move |this, _, cx| {
-                                    this.request_playlist_entries(
-                                        id,
-                                        this.playlist_entries.offset.saturating_add(page_size),
-                                        cx,
-                                    )
-                                },
-                            ))
                         }),
                 )
                 .child(list_viewport(
@@ -1324,55 +1235,64 @@ impl GuiApp {
                         self.playlist_entries.rows.len(),
                         cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                             range
-                                .filter_map(|index| {
-                                    let e = this.playlist_entries.rows.get(index)?.clone();
+                                .map(|index| {
+                                    let Some(e) = this.playlist_entries.rows.get(index).cloned()
+                                    else {
+                                        return this
+                                            .paged_loading_row(
+                                                ViewRequestKind::PlaylistEntries,
+                                                index,
+                                                cx,
+                                            )
+                                            .into_any_element();
+                                    };
                                     let id = e.id;
                                     let track_id = e.track_id;
-                                    Some(
-                                        list_row(
-                                            ("playlist-entry", id as u64),
-                                            this.selected_entry == Some(id),
-                                        )
-                                        .child(
-                                            caption(
-                                                (this.playlist_entries.offset + index + 1)
-                                                    .to_string(),
-                                            )
-                                            .w(px(28.)),
-                                        )
-                                        .child(row_text(
-                                            ("playlist-entry-text", id as u64),
-                                            e.title,
-                                            format!(
-                                                "{}{}{}",
-                                                e.artist,
-                                                if e.artist.is_empty() || e.album.is_empty() {
-                                                    ""
-                                                } else {
-                                                    " / "
-                                                },
-                                                e.album
-                                            ),
-                                        ))
-                                        .on_click(cx.listener(
-                                            move |this, event: &gpui::ClickEvent, window, cx| {
-                                                this.focus_workspace(window, cx);
-                                                this.selected_entry = Some(id);
-                                                this.update_metadata_track(track_id, cx);
-                                                if event.click_count() == 2 {
-                                                    this.send(Command::Play { track_id }, cx);
-                                                }
-                                                cx.notify();
-                                            },
-                                        )),
+                                    list_row(
+                                        ("playlist-entry", id as u64),
+                                        this.selected_entry == Some(id),
                                     )
+                                    .child(caption((index + 1).to_string()).w(px(28.)))
+                                    .child(row_text(
+                                        ("playlist-entry-text", id as u64),
+                                        e.title,
+                                        format!(
+                                            "{}{}{}",
+                                            e.artist,
+                                            if e.artist.is_empty() || e.album.is_empty() {
+                                                ""
+                                            } else {
+                                                " / "
+                                            },
+                                            e.album
+                                        ),
+                                    ))
+                                    .on_click(cx.listener(
+                                        move |this, event: &gpui::ClickEvent, window, cx| {
+                                            this.focus_workspace(window, cx);
+                                            this.selected_entry = Some(id);
+                                            this.playlist_entries.rows.pin(Some(index));
+                                            this.update_metadata_track(track_id, cx);
+                                            if event.click_count() == 2 {
+                                                this.send(Command::Play { track_id }, cx);
+                                            }
+                                            cx.notify();
+                                        },
+                                    ))
+                                    .into_any_element()
                                 })
                                 .collect::<Vec<_>>()
                         }),
                     )
+                    .with_decoration(super::paged::viewport_demand(cx.processor(
+                        |this, range, _, cx| {
+                            this.ensure_entry_range(range, cx);
+                        },
+                    )))
                     .h_full()
                     .min_h_0()
-                    .w_full(),
+                    .w_full()
+                    .track_scroll(&self.playlist_entries.scroll),
                 ));
         }
         panel.into_any_element()

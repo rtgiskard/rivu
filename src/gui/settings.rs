@@ -57,7 +57,6 @@ enum Field {
     Volume,
     PlayCountThreshold,
     QueueLimit,
-    PageSize,
     LogRetentionWeeks,
     MediaReadBuffer,
     Font,
@@ -100,7 +99,6 @@ impl Field {
             Self::Volume => "Volume (0–100%)",
             Self::PlayCountThreshold => "Play count threshold (0–<100%)",
             Self::QueueLimit => "Queue limit (1–4096)",
-            Self::PageSize => "List batch size (20–256)",
             Self::LogRetentionWeeks => "Log retention (1–520 weeks)",
             Self::MediaReadBuffer => "Read buffer (1, 2, 4, 8, 16 MiB)",
             Self::Font => "Font family (empty = system)",
@@ -271,7 +269,6 @@ impl Settings {
             Field::Volume,
             Field::PlayCountThreshold,
             Field::QueueLimit,
-            Field::PageSize,
             Field::LogRetentionWeeks,
             Field::MediaReadBuffer,
             Field::Font,
@@ -404,7 +401,6 @@ impl Settings {
             cx,
         );
         self.set_value(Field::QueueLimit, self.draft.queue_limit.to_string(), cx);
-        self.set_value(Field::PageSize, self.draft.page_size.to_string(), cx);
         self.set_value(
             Field::LogRetentionWeeks,
             self.draft.log_retention_weeks.to_string(),
@@ -565,7 +561,6 @@ impl Settings {
         config.volume = self.number::<f32>(Field::Volume, cx)? / 100.;
         config.play_count_threshold_percent = self.number(Field::PlayCountThreshold, cx)?;
         config.queue_limit = self.number(Field::QueueLimit, cx)?;
-        config.page_size = self.number(Field::PageSize, cx)?;
         config.log_retention_weeks = self.number(Field::LogRetentionWeeks, cx)?;
         config.media_read_buffer_mb = self.number(Field::MediaReadBuffer, cx)?;
         config.ui_font = self.value(Field::Font, cx).trim().to_owned();
@@ -1064,19 +1059,7 @@ impl GuiApp {
                                 .child(self.measurement(Measured::SettingsFont)),
                         ),
                 )
-                .child(
-                    row()
-                        .items_start()
-                        .flex_wrap()
-                        .gap_3()
-                        .child(self.settings.field(Field::Scale).flex_1().min_w(px(180.)))
-                        .child(
-                            self.settings
-                                .field(Field::PageSize)
-                                .flex_1()
-                                .min_w(px(220.)),
-                        ),
-                )
+                .child(self.settings.single(Field::Scale))
                 .child(row().child(visual_switch(
                     "settings-nerd-symbols",
                     "Nf",

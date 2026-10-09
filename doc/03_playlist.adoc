@@ -31,13 +31,21 @@ icon; the playlist name is generated from the current date and time. Recent
 tracks are shown in one sortable list with title, play count, and last-played
 time columns.
 
+Playlist catalogs, entries, and the Queue panel's playlist-destination menu
+load rows automatically while scrolling. Entry numbering and move actions use
+absolute playlist positions across query boundaries. Scrolling a catalog away
+from the selected playlist preserves its name and selected entry; query cache
+eviction is not a selection change.
+After a data revision, cached selection positions are discarded and restored
+from matching IDs in fresh rows; obsolete positions do not trigger prefetch.
+
 == Import and export
 
 CLI paths are relative to the invoking client's working directory. Referenced
 media and CUE sheets must lie within configured logical roots; see
 link:02_library.adoc[Library]. Imports may create partial playlists: `--wait`
 reports scan errors even when readable tracks were saved. Import fails if no
-entries resolve to accessible library tracks. CLI listings and exports include every page.
+entries resolve to accessible library tracks. CLI listings and exports include every entry.
 
 [source,sh]
 ----

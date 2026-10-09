@@ -5,6 +5,7 @@ use crate::model::{Command, DirectoryRow};
 use gpui::{AnyElement, Context, Render, Window, div, prelude::*, px, uniform_list};
 use std::{path::Path, sync::Arc};
 
+use tree::TreeItem;
 pub(super) use tree::{BranchStatus, DirectoryTree};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -84,15 +85,18 @@ impl GuiApp {
         }
     }
 
-    fn selected_tree_index(&self) -> Option<usize> {
+    fn remember_tree_selection(&mut self) {
         self.directory_tree
-            .visible_rows()
-            .iter()
-            .position(|visible| self.directory_row_selected(&visible.row))
+            .remember_selection(&self.library_selected_nodes, &self.selected);
+    }
+
+    fn selected_tree_index(&self) -> Option<usize> {
+        self.directory_tree.selected_index()
     }
 
     fn select_library_directory(&mut self, path: Arc<Path>, multi: bool, cx: &mut Context<Self>) {
         let node = LibraryNode::Directory(path);
+        self.directory_tree.cancel_navigation();
         if multi {
             if !self.library_selected_nodes.insert(node.clone()) {
                 self.library_selected_nodes.remove(&node);
@@ -108,22 +112,30 @@ impl GuiApp {
             self.sync_metadata_default(cx);
         }
         self.sync_waveform(cx);
+        self.remember_tree_selection();
         cx.notify();
     }
 
     fn select_tree_row(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(visible) = self.directory_tree.visible_rows().get(index) else {
+        self.directory_tree
+            .scroll
+            .scroll_to_item(index, gpui::ScrollStrategy::Nearest);
+        let Some(TreeItem::Entry(visible)) = self.directory_tree.item(index) else {
+            self.directory_tree.defer_selection(index);
+            for (path, offset) in self.directory_tree.requests_for_range(index..index + 1) {
+                self.request_directory_page(path, offset, cx);
+            }
+            cx.notify();
             return;
         };
-        match visible.row.clone() {
+        self.directory_tree.cancel_navigation();
+        match visible.row {
             DirectoryRow::Directory { path } => {
                 self.select_library_directory(Arc::from(path), false, cx)
             }
             DirectoryRow::Track(track) => self.select_track(track.id, false, cx),
         }
-        self.directory_tree
-            .scroll
-            .scroll_to_item(index, gpui::ScrollStrategy::Nearest);
+        self.remember_tree_selection();
     }
 
     fn set_directory_expanded(&mut self, path: &Path, expanded: bool, cx: &mut Context<Self>) {
@@ -137,14 +149,12 @@ impl GuiApp {
             }
         } else {
             self.directory_tree.collapse(path);
-            self.directory_tree
-                .retain_known_directories(&mut self.library_selected_nodes);
         }
         cx.notify();
     }
 
     pub(super) fn navigate_library_tree(&mut self, down: bool, cx: &mut Context<Self>) {
-        let count = self.directory_tree.visible_rows().len();
+        let count = self.directory_tree.row_count();
         if count == 0 {
             return;
         }
@@ -161,7 +171,10 @@ impl GuiApp {
         let Some(index) = self.selected_tree_index() else {
             return;
         };
-        match self.directory_tree.visible_rows()[index].row.clone() {
+        let Some(TreeItem::Entry(visible)) = self.directory_tree.item(index) else {
+            return;
+        };
+        match visible.row {
             DirectoryRow::Directory { path } => {
                 self.set_directory_expanded(&path, !self.directory_tree.expanded(&path), cx);
             }
@@ -173,8 +186,9 @@ impl GuiApp {
         let Some(index) = self.selected_tree_index() else {
             return;
         };
-        let rows = self.directory_tree.visible_rows();
-        let visible = &rows[index];
+        let Some(TreeItem::Entry(visible)) = self.directory_tree.item(index) else {
+            return;
+        };
         let depth = visible.depth;
         match key {
             "left" => {
@@ -183,8 +197,7 @@ impl GuiApp {
                 {
                     let path = path.clone();
                     self.set_directory_expanded(&path, false, cx);
-                } else if let Some(parent) = rows[..index].iter().rposition(|row| row.depth < depth)
-                {
+                } else if let Some(parent) = self.directory_tree.parent_index(index) {
                     self.select_tree_row(parent, cx);
                 }
             }
@@ -193,7 +206,11 @@ impl GuiApp {
                     if !visible.expanded {
                         let path = path.clone();
                         self.set_directory_expanded(&path, true, cx);
-                    } else if rows.get(index + 1).is_some_and(|row| row.depth > depth) {
+                    } else if matches!(&self.directory_tree.item(index + 1),
+                        Some(TreeItem::Entry(next)) if next.depth > depth)
+                        || matches!(&self.directory_tree.item(index + 1),
+                            Some(TreeItem::Placeholder { depth: next_depth, .. }) if *next_depth > depth)
+                    {
                         self.select_tree_row(index + 1, cx);
                     }
                 }
@@ -208,15 +225,14 @@ impl GuiApp {
         }
     }
 
-    /// Render the visible flattened tree. Directory pages remain in the tree
-    /// cache, so expanding a child never replaces its ancestors.
+    /// Render logical preorder slots, loading only the viewport's missing
+    /// payloads. Expanding a branch never replaces its ancestors or siblings.
     pub(super) fn library_directory_list(
         &self,
         panel_id: u64,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let rows = self.directory_tree.visible_rows();
-        let row_count = rows.len();
+        let row_count = self.directory_tree.row_count();
         let ui_scale = self.state.system.config.ui_scale;
         let nerd_symbols = cx
             .try_global::<super::components::NerdSymbols>()
@@ -227,11 +243,50 @@ impl GuiApp {
                 ("library-directory-tree", panel_id),
                 row_count,
                 cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
-                    let rows = this.directory_tree.visible_rows();
-                    let page_size = this.view_page_size();
                     range
                         .filter_map(|index| {
-                            let visible = rows.get(index)?;
+                            let item = this.directory_tree.item(index)?;
+                            let visible = match item {
+                                TreeItem::Entry(visible) => visible,
+                                TreeItem::Placeholder {
+                                    path,
+                                    offset,
+                                    depth,
+                                    status,
+                                } => {
+                                    let failed = status == BranchStatus::Error;
+                                    let placeholder = super::tree_row(
+                                        gpui::ElementId::named_usize("library-loading", index),
+                                        depth,
+                                        false,
+                                        false,
+                                        false,
+                                    )
+                                    .h(px(32.0 * ui_scale.max(0.5)))
+                                    .child(
+                                        div().text_color(gpui::rgb(super::MUTED)).child(
+                                            if failed { "Unavailable" } else { "Loading…" },
+                                        ),
+                                    )
+                                    .when(failed, |view| {
+                                        view.child(icon_button(
+                                            gpui::ElementId::named_usize("library-retry", index),
+                                            "󰑐",
+                                            "Retry loading folder",
+                                            cx,
+                                            move |this, _, cx| {
+                                                this.directory_tree.retry(&path);
+                                                this.request_directory_page(
+                                                    path.clone(),
+                                                    offset,
+                                                    cx,
+                                                );
+                                            },
+                                        ))
+                                    });
+                                    return Some(placeholder.into_any_element());
+                                }
+                            };
                             let entry = &visible.row;
                             let (node, title, detail, path) = match entry {
                                 DirectoryRow::Directory { path } => {
@@ -242,9 +297,7 @@ impl GuiApp {
                                     let detail = match visible.status {
                                         BranchStatus::Loading => "Loading…".to_owned(),
                                         BranchStatus::Empty => "Empty".to_owned(),
-                                        BranchStatus::Error => {
-                                            "Unavailable — click to retry".to_owned()
-                                        }
+                                        BranchStatus::Error => "Unavailable".to_owned(),
                                         BranchStatus::Unloaded => "Folder".to_owned(),
                                         BranchStatus::Ready => String::new(),
                                     };
@@ -291,7 +344,6 @@ impl GuiApp {
                             } else {
                                 vec![id.clone()]
                             };
-                            let row_path = path.clone();
                             let disclosure_path = path.clone();
                             let scan = path.clone().filter(|_| selected).map(|scan_path| {
                                 let hint = format!("Rescan {}", scan_path.display());
@@ -310,44 +362,6 @@ impl GuiApp {
                                         );
                                     },
                                 )
-                            });
-                            let page_controls = row_path.clone().map(|path| {
-                                let mut controls = row().gap_0().flex_shrink_0();
-                                if visible.offset > 0 {
-                                    let previous = visible.offset.saturating_sub(page_size);
-                                    let previous_path = path.clone();
-                                    controls = controls.child(icon_button(
-                                        gpui::ElementId::named_usize("library-page-prev", index),
-                                        "󰁍",
-                                        "Browse earlier items",
-                                        cx,
-                                        move |this, _, cx| {
-                                            this.request_directory_page(
-                                                previous_path.clone(),
-                                                previous,
-                                                cx,
-                                            );
-                                        },
-                                    ));
-                                }
-                                if visible.offset + page_size < visible.total {
-                                    let next = visible.offset.saturating_add(page_size);
-                                    let next_path = path;
-                                    controls = controls.child(icon_button(
-                                        gpui::ElementId::named_usize("library-page-next", index),
-                                        "󰁔",
-                                        "Browse more items",
-                                        cx,
-                                        move |this, _, cx| {
-                                            this.request_directory_page(
-                                                next_path.clone(),
-                                                next,
-                                                cx,
-                                            );
-                                        },
-                                    ));
-                                }
-                                controls
                             });
                             let disclosure = if path.is_some() && visible.has_children {
                                 let icon = if visible.expanded {
@@ -414,13 +428,13 @@ impl GuiApp {
                                         )
                                     }),
                             )
-                            .when_some(page_controls, |v, controls| v.child(controls))
                             .when_some(scan, |v, scan| v.child(scan))
                             .on_drag(LibraryDrag { nodes: drag_nodes }, |drag, _, _, cx| {
                                 cx.new(|_| drag.clone())
                             })
                             .on_click(cx.listener(
                                 move |this, event: &gpui::ClickEvent, window, cx| {
+                                    this.directory_tree.cancel_navigation();
                                     this.focus_workspace(window, cx);
                                     this.list_focus = Some(ListFocus::Library);
                                     match id.clone() {
@@ -450,13 +464,25 @@ impl GuiApp {
                                             }
                                         }
                                     }
+                                    this.remember_tree_selection();
                                 },
                             ));
-                            Some(row_view)
+                            Some(row_view.into_any_element())
                         })
                         .collect::<Vec<_>>()
                 }),
             )
+            .with_decoration(super::paged::viewport_demand(cx.processor(
+                |this, range: std::ops::Range<usize>, _, cx| {
+                    this.remember_tree_selection();
+                    for (path, offset) in this.directory_tree.requests_for_range(range) {
+                        this.request_directory_page(path, offset, cx);
+                    }
+                    if let Some(index) = this.directory_tree.ready_selection() {
+                        this.select_tree_row(index, cx);
+                    }
+                },
+            )))
             .h_full()
             .min_h_0()
             .w_full()
