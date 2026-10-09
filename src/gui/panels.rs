@@ -297,7 +297,13 @@ impl GuiApp {
     }
 
     fn panel_selected_tracks(&self) -> Vec<i64> {
-        self.selected.iter().copied().collect()
+        if self.library_range_pending() {
+            return Vec::new();
+        }
+        let mut tracks: Vec<_> = self.selected.iter().copied().collect();
+        // Match library drag ordering instead of exposing HashSet iteration order.
+        tracks.sort_unstable();
+        tracks
     }
     pub(super) fn panel_track_text(&self, track_id: i64) -> (String, String) {
         if let Some(track) = self
@@ -416,6 +422,40 @@ impl GuiApp {
         status
     }
 
+    pub(super) fn library_favorite_toggle(
+        &self,
+        id: impl Into<gpui::ElementId>,
+        track_id: i64,
+        favorite: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<Div> {
+        icon_button(
+            id,
+            if favorite { "󰓎" } else { "󰓐" },
+            if favorite {
+                "Remove from favorites"
+            } else {
+                "Add to favorites"
+            },
+            cx,
+            move |this, _, cx| {
+                this.send(
+                    Command::SetFavorite {
+                        track_ids: vec![track_id],
+                        favorite: !favorite,
+                    },
+                    cx,
+                );
+            },
+        )
+        .text_color(rgb(if favorite { ACCENT } else { MUTED }))
+        .opacity(0.)
+        .group_hover("library-track-row", |style| style.opacity(1.))
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+            cx.stop_propagation();
+        })
+    }
+
     pub(super) fn library_panel(
         &mut self,
         panel_id: u64,
@@ -427,7 +467,7 @@ impl GuiApp {
         } else {
             self.library_buffer.total
         };
-        let mut tools = panel_toolbar()
+        let tools = panel_toolbar()
             .child(icon_button(
                 ("library-view", panel_id),
                 if self.library_tree_active {
@@ -493,14 +533,41 @@ impl GuiApp {
                 ),
                 self.force_scan,
             ));
-        if !self.selected.is_empty() {
-            tools = tools
+        let range_pending = self.library_range_pending();
+        let selected_directories = self
+            .library_selected_nodes
+            .iter()
+            .filter(|node| matches!(node, super::library::LibraryNode::Directory(_)))
+            .count();
+        let selection_label = if range_pending {
+            "Selecting…".to_owned()
+        } else if selected_directories > 0 && self.selected.is_empty() {
+            format!("{selected_directories} folders selected")
+        } else if selected_directories > 0 {
+            format!(
+                "{} tracks · {selected_directories} folders selected",
+                self.selected.len()
+            )
+        } else if !self.selected.is_empty() {
+            format!("{} tracks selected", self.selected.len())
+        } else {
+            "Select tracks or folders · Shift-click to select a range".to_owned()
+        };
+        let mut selection_tools = panel_toolbar()
+            .h(gpui::rems(2.))
+            .min_h(gpui::rems(2.))
+            .child(caption(selection_label).flex_1().min_w_0().truncate());
+        if !range_pending && !self.selected.is_empty() {
+            selection_tools = selection_tools
                 .child(icon_button(
                     ("library-enqueue", panel_id),
                     "󰐕",
                     "Append selected tracks to queue",
                     cx,
                     |this, _, cx| {
+                        if this.library_range_pending() {
+                            return;
+                        }
                         this.send(
                             Command::Enqueue {
                                 track_ids: this.panel_selected_tracks(),
@@ -515,6 +582,9 @@ impl GuiApp {
                     "Remove selected tracks from library",
                     cx,
                     |this, _, cx| {
+                        if this.library_range_pending() {
+                            return;
+                        }
                         this.send(
                             Command::RemoveTracks {
                                 track_ids: this.panel_selected_tracks(),
@@ -522,45 +592,13 @@ impl GuiApp {
                             cx,
                         )
                     },
-                ))
-                .child(icon_button(
-                    ("library-favorite-selected", panel_id),
-                    "󰓎",
-                    "Add selected to favorites",
-                    cx,
-                    |this, _, cx| {
-                        this.send(
-                            Command::SetFavorite {
-                                track_ids: this.panel_selected_tracks(),
-                                favorite: true,
-                            },
-                            cx,
-                        )
-                    },
-                ))
-                .child(icon_button(
-                    ("library-unfavorite-selected", panel_id),
-                    "󰓐",
-                    "Remove selected from favorites",
-                    cx,
-                    |this, _, cx| {
-                        this.send(
-                            Command::SetFavorite {
-                                track_ids: this.panel_selected_tracks(),
-                                favorite: false,
-                            },
-                            cx,
-                        )
-                    },
                 ));
         }
         let mut panel = panel_surface(("library-panel", panel_id))
-            .child(panel_header(
-                "Library",
-                format!("{total} entries · {} selected", self.selected.len()),
-            ))
+            .child(panel_header("Library", format!("{total} entries")))
             .child(self.panel_field(Field::Search, "Search title, artist or album"))
-            .child(tools);
+            .child(tools)
+            .child(selection_tools);
         if self.state.system.scan_progress.is_some() || self.state.system.scanning {
             panel = panel.child(self.library_scan_status());
         }
@@ -604,12 +642,21 @@ impl GuiApp {
                                         row.title,
                                         detail,
                                     )
+                                    .group("library-track-row")
+                                    .child(this.library_favorite_toggle(
+                                        ("library-track-favorite", id as u64),
+                                        id,
+                                        row.favorite,
+                                        cx,
+                                    ))
                                     .on_click(cx.listener(
                                         move |this, event: &gpui::ClickEvent, window, cx| {
                                             this.focus_layout(window, cx);
                                             this.list_focus = Some(ListFocus::Library);
-                                            this.select_track(
-                                                id,
+                                            this.select_library_row(
+                                                super::library::LibraryNode::Track(id),
+                                                index,
+                                                event.modifiers().shift,
                                                 event.modifiers().control
                                                     || event.modifiers().platform,
                                                 cx,

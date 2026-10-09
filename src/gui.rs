@@ -509,6 +509,7 @@ pub(super) struct GuiApp {
     library_navigation: Option<usize>,
     library_tree_active: bool,
     library_selected_nodes: HashSet<LibraryNode>,
+    library_selection: library::LibrarySelection,
     favorites_only: bool,
     missing_only: bool,
     force_scan: bool,
@@ -628,6 +629,7 @@ impl GuiApp {
     fn navigate_list(&mut self, focus: ListFocus, down: bool, cx: &mut Context<Self>) {
         match focus {
             ListFocus::Library => {
+                self.invalidate_library_selection();
                 if self.library_tree_active {
                     self.navigate_library_tree(down, cx);
                     return;
@@ -697,6 +699,9 @@ impl GuiApp {
     fn play_focused_selection(&mut self, focus: ListFocus, cx: &mut Context<Self>) {
         match focus {
             ListFocus::Library => {
+                if self.library_range_pending() {
+                    return;
+                }
                 if self.library_tree_active {
                     self.activate_library_tree(cx);
                     return;
@@ -889,6 +894,7 @@ impl GuiApp {
             library_navigation: None,
             library_tree_active: true,
             library_selected_nodes: HashSet::new(),
+            library_selection: library::LibrarySelection::default(),
             favorites_only: false,
             missing_only: false,
             force_scan: false,
@@ -1269,6 +1275,7 @@ impl GuiApp {
     }
 
     fn request_library_page(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.invalidate_library_selection();
         let query = self.value(Field::Search, cx).trim().to_lowercase();
         self.library_buffer.query = (!query.is_empty()).then_some(query);
         self.library_buffer.favorite = self.favorites_only.then_some(true);
@@ -1355,7 +1362,11 @@ impl GuiApp {
                     return;
                 }
                 if let ViewResponse::DirectoryPage(page) = result {
+                    let projection = this.directory_tree.projection_revision();
                     this.directory_tree.accept(&branch, generation, page);
+                    if this.directory_tree.projection_revision() != projection {
+                        this.invalidate_library_selection();
+                    }
                 }
                 cx.notify();
             });
@@ -1516,6 +1527,7 @@ impl GuiApp {
     }
 
     fn toggle_library_view(&mut self, cx: &mut Context<Self>) {
+        self.invalidate_library_selection();
         self.library_tree_active = !self.library_tree_active;
         if self.library_tree_active {
             if self
@@ -1593,6 +1605,7 @@ impl GuiApp {
     }
 
     fn select_track(&mut self, id: i64, multi: bool, cx: &mut Context<Self>) {
+        self.invalidate_library_selection();
         self.library_navigation = None;
         self.directory_tree.cancel_navigation();
         if multi {
@@ -1630,6 +1643,7 @@ impl GuiApp {
         cx.notify();
     }
     fn select_queue_entry(&mut self, id: u64, shift: bool, multi: bool, cx: &mut Context<Self>) {
+        self.invalidate_library_selection();
         let Some(index) = self
             .state
             .queue
@@ -1733,6 +1747,9 @@ impl GuiApp {
                 self.state.system.config.library_roots != state.system.config.library_roots;
             let page_size_changed =
                 self.state.system.config.page_size != state.system.config.page_size;
+            if library_changed || library_structure_changed || roots_changed || page_size_changed {
+                self.invalidate_library_selection();
+            }
             let waveform_seek_disabled = self.state.system.config.waveform_seek_enabled
                 && !state.system.config.waveform_seek_enabled;
             if !matches!(self.dragging, Some(Dragging::Seek(_)))
@@ -2439,7 +2456,13 @@ impl Render for GuiApp {
                 match key {
                     "escape" => {
                         this.focus_layout(window, cx);
+                        this.invalidate_library_selection();
+                        this.library_navigation = None;
+                        this.directory_tree.cancel_navigation();
+                        this.library_selected_nodes.clear();
                         this.selected.clear();
+                        this.directory_tree
+                            .remember_selection(&this.library_selected_nodes, &this.selected);
                         this.selected_queue.clear();
                         this.selected_queue.clear_anchor();
                         this.selected_playlist = None;

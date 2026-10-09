@@ -77,7 +77,20 @@ rivu library edit 12 --title "New title" --artist "Artist" --album "Album"
 rivu library clean-missing
 ----
 
-== Desktop directory tree
+== Desktop selection and directory tree
+
+Library filters, root management, and scan actions occupy their own toolbar.
+Selection count and enqueue/remove actions occupy a separate row. A single
+favorite toggle appears at the right edge of a hovered track row; toggling it
+does not select the row or start playback.
+
+Click selects one row; Ctrl/Command-click toggles it. Shift-click selects the
+inclusive range from the original anchor, and Ctrl/Command-Shift-click adds that
+range. Changing the endpoint keeps the original anchor. Range selection fetches
+missing batches, so evicted or unloaded rows are included, not silently skipped.
+While it is loading, selection actions and dragging are disabled; stale results
+cannot replace a newer selection. Batch track actions use stable track-ID order,
+matching library drag ordering.
 
 Configured roots are shown in configuration order, including empty roots. Root
 labels use their paths to distinguish equal basenames. Child indentation follows
@@ -86,6 +99,7 @@ an enclosing root does not close the same directory shown as another root.
 Directory disclosure markers are unboxed; clicking the directory row expands or
 collapses it. Rows omit redundant Folder labels but retain loading, empty, and
 unavailable status.
+
 
 == Paged views
 

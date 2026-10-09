@@ -1,4 +1,7 @@
+mod selection;
 mod tree;
+
+pub(super) use selection::LibrarySelection;
 
 use super::{GuiApp, ListFocus, icon_button, list_viewport, row};
 use crate::model::{Command, DirectoryRow};
@@ -63,6 +66,9 @@ impl GuiApp {
         directories.sort();
         directories.dedup();
         let track_ids = self.library_drag_track_ids(nodes);
+        if self.library_range_pending() {
+            return;
+        }
         if directories.is_empty() && track_ids.is_empty() {
             return;
         }
@@ -94,29 +100,8 @@ impl GuiApp {
         self.directory_tree.selected_index()
     }
 
-    fn select_library_directory(&mut self, path: Arc<Path>, multi: bool, cx: &mut Context<Self>) {
-        let node = LibraryNode::Directory(path);
-        self.directory_tree.cancel_navigation();
-        if multi {
-            if !self.library_selected_nodes.insert(node.clone()) {
-                self.library_selected_nodes.remove(&node);
-            }
-        } else {
-            self.selected.clear();
-            self.library_selected_nodes.clear();
-            self.library_selected_nodes.insert(node);
-        }
-        if self.selected.is_empty() {
-            self.metadata_track = None;
-            self.full_track = None;
-            self.sync_metadata_default(cx);
-        }
-        self.sync_waveform(cx);
-        self.remember_tree_selection();
-        cx.notify();
-    }
-
     fn select_tree_row(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.invalidate_library_selection();
         self.directory_tree
             .scroll
             .scroll_to_item(index, gpui::ScrollStrategy::Nearest);
@@ -133,12 +118,7 @@ impl GuiApp {
             DirectoryRow::Directory { path } => LibraryNode::Directory(Arc::from(path)),
             DirectoryRow::Track(track) => LibraryNode::Track(track.id),
         };
-        match &node {
-            LibraryNode::Directory(path) => self.select_library_directory(path.clone(), false, cx),
-            LibraryNode::Track(id) => self.select_track(*id, false, cx),
-        }
-        self.directory_tree.focus_selection(&node, index);
-        self.remember_tree_selection();
+        self.select_library_row(node, index, false, false, cx);
     }
 
     fn set_directory_expanded(
@@ -147,6 +127,7 @@ impl GuiApp {
         expanded: bool,
         cx: &mut Context<Self>,
     ) {
+        self.invalidate_library_selection();
         if expanded {
             self.directory_tree.expand(branch);
             if matches!(
@@ -176,6 +157,9 @@ impl GuiApp {
     }
 
     pub(super) fn activate_library_tree(&mut self, cx: &mut Context<Self>) {
+        if self.library_range_pending() {
+            return;
+        }
         let Some(index) = self.selected_tree_index() else {
             return;
         };
@@ -340,7 +324,7 @@ impl GuiApp {
                             };
                             let selected = this.directory_row_selected(entry);
                             let id = node.clone();
-                            let drag_nodes = if selected {
+                            let drag_nodes = if selected && !this.library_range_pending() {
                                 let mut selected_nodes = this.library_selected_nodes.clone();
                                 selected_nodes
                                     .extend(this.selected.iter().copied().map(LibraryNode::Track));
@@ -413,8 +397,29 @@ impl GuiApp {
                                     }),
                             )
                             .when_some(scan, |v, scan| v.child(scan))
-                            .on_drag(LibraryDrag { nodes: drag_nodes }, |drag, _, _, cx| {
-                                cx.new(|_| drag.clone())
+                            .when_some(
+                                match entry {
+                                    DirectoryRow::Track(track) => Some((track.id, track.favorite)),
+                                    DirectoryRow::Directory { .. } => None,
+                                },
+                                |view, (track_id, favorite)| {
+                                    view.group("library-track-row").child(
+                                        this.library_favorite_toggle(
+                                            gpui::ElementId::named_usize(
+                                                "library-tree-favorite",
+                                                index,
+                                            ),
+                                            track_id,
+                                            favorite,
+                                            cx,
+                                        ),
+                                    )
+                                },
+                            )
+                            .when(!this.library_range_pending(), |view| {
+                                view.on_drag(LibraryDrag { nodes: drag_nodes }, |drag, _, _, cx| {
+                                    cx.new(|_| drag.clone())
+                                })
                             })
                             .on_click(cx.listener(
                                 move |this, event: &gpui::ClickEvent, window, cx| {
@@ -424,8 +429,10 @@ impl GuiApp {
                                     match id.clone() {
                                         LibraryNode::Track(id) => {
                                             let modifiers = event.modifiers();
-                                            this.select_track(
-                                                id,
+                                            this.select_library_row(
+                                                LibraryNode::Track(id),
+                                                index,
+                                                modifiers.shift,
                                                 modifiers.control || modifiers.platform,
                                                 cx,
                                             );
@@ -435,11 +442,8 @@ impl GuiApp {
                                         }
                                         LibraryNode::Directory(path) => {
                                             let modifiers = event.modifiers();
-                                            let multi = modifiers.control
-                                                || modifiers.platform
-                                                || modifiers.shift;
-                                            this.select_library_directory(path.clone(), multi, cx);
-                                            if !multi {
+                                            let multi = modifiers.control || modifiers.platform;
+                                            if !multi && !modifiers.shift {
                                                 let branch = visible
                                                     .branch
                                                     .as_ref()
@@ -450,9 +454,15 @@ impl GuiApp {
                                                     cx,
                                                 );
                                             }
+                                            this.select_library_row(
+                                                LibraryNode::Directory(path),
+                                                index,
+                                                modifiers.shift,
+                                                multi,
+                                                cx,
+                                            );
                                         }
                                     }
-                                    this.directory_tree.focus_selection(&id, index);
                                     this.remember_tree_selection();
                                 },
                             ));

@@ -87,6 +87,7 @@ struct CachedPage {
     touched: u64,
 }
 
+#[derive(Clone, PartialEq, Eq)]
 struct Segment {
     start: usize,
     len: usize,
@@ -108,6 +109,7 @@ pub(in crate::gui) struct DirectoryTree {
     navigation_target: Option<(TreeBranch, usize)>,
     selected_locations: HashMap<(super::LibraryNode, TreeBranch), usize>,
     focused: Option<(super::LibraryNode, TreeBranch)>,
+    projection_revision: u64,
     pub(in crate::gui) scroll: UniformListScrollHandle,
 }
 
@@ -124,9 +126,18 @@ impl Default for DirectoryTree {
             navigation_target: None,
             selected_locations: HashMap::new(),
             focused: None,
+            projection_revision: 0,
             scroll: UniformListScrollHandle::new(),
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::gui) struct TreeRangeSpan {
+    pub(in crate::gui) branch: TreeBranch,
+    pub(in crate::gui) offset: usize,
+    pub(in crate::gui) len: usize,
+    pub(in crate::gui) total: usize,
 }
 
 impl DirectoryTree {
@@ -296,6 +307,7 @@ impl DirectoryTree {
 
     /// Release revision-specific payloads and tokens, not logical geometry.
     pub(in crate::gui) fn invalidate(&mut self) {
+        self.projection_revision = self.projection_revision.wrapping_add(1);
         self.pages.clear();
         self.demanded.clear();
         self.navigation_target = None;
@@ -337,6 +349,7 @@ impl DirectoryTree {
     }
 
     pub(in crate::gui) fn expand(&mut self, key: &TreeBranch) {
+        self.projection_revision = self.projection_revision.wrapping_add(1);
         self.branches.entry(key.clone()).or_default().expanded = true;
         let location = self.pages.iter().find_map(|((parent, offset), page)| {
             page.rows
@@ -358,6 +371,7 @@ impl DirectoryTree {
     }
 
     pub(in crate::gui) fn collapse(&mut self, key: &TreeBranch) {
+        self.projection_revision = self.projection_revision.wrapping_add(1);
         if let Some(branch) = self.branches.get_mut(key) {
             branch.expanded = false;
         }
@@ -420,6 +434,9 @@ impl DirectoryTree {
             &mut HashSet::new(),
             &mut segments,
         );
+        if self.segments != segments {
+            self.projection_revision = self.projection_revision.wrapping_add(1);
+        }
         self.segments = segments;
         self.row_count = start;
     }
@@ -468,6 +485,9 @@ impl DirectoryTree {
         }
     }
 
+    pub(in crate::gui) fn projection_revision(&self) -> u64 {
+        self.projection_revision
+    }
     pub(in crate::gui) fn row_count(&self) -> usize {
         self.row_count
     }
@@ -500,6 +520,29 @@ impl DirectoryTree {
             child = parent;
         }
     }
+    #[cfg(test)]
+    pub(in crate::gui) fn cached_row(
+        &self,
+        branch: &TreeBranch,
+        index: usize,
+    ) -> Option<&DirectoryRow> {
+        self.cached_rows(branch, index..index + 1)?.first()
+    }
+
+    pub(in crate::gui) fn cached_rows(
+        &self,
+        branch: &TreeBranch,
+        range: Range<usize>,
+    ) -> Option<&[DirectoryRow]> {
+        self.pages.iter().find_map(|((candidate, start), page)| {
+            if candidate == branch && range.start >= *start {
+                page.rows.get(range.start - start..range.end - start)
+            } else {
+                None
+            }
+        })
+    }
+
     pub(in crate::gui) fn item(&self, index: usize) -> Option<TreeItem> {
         let segment = self.segment(index)?;
         let child_index = segment.offset + index - segment.start;
@@ -574,6 +617,71 @@ impl DirectoryTree {
                 status,
             })
         }
+    }
+
+    /// Compact query intervals, independent of the bounded payload cache.
+    pub(in crate::gui) fn range_spans(&self, range: Range<usize>) -> Option<Vec<TreeRangeSpan>> {
+        if range.start >= range.end || range.end > self.row_count {
+            return None;
+        }
+        let mut spans = Vec::new();
+        for segment in &self.segments {
+            let start = range.start.max(segment.start);
+            let end = range.end.min(segment.start + segment.len);
+            if start >= end {
+                continue;
+            }
+            let total = self.branches.get(&segment.branch)?.total?;
+            spans.push(TreeRangeSpan {
+                branch: segment.branch.clone(),
+                offset: segment.offset + start - segment.start,
+                len: end - start,
+                total,
+            });
+        }
+        Some(spans)
+    }
+
+    /// Revalidate retained expanded identities before using their frozen geometry.
+    pub(in crate::gui) fn range_checks(
+        &self,
+        range: Range<usize>,
+    ) -> Vec<(TreeRangeSpan, TreeBranch)> {
+        let mut checks = BTreeMap::new();
+        for segment in &self.segments {
+            if range.start >= segment.start + segment.len || range.end <= segment.start {
+                continue;
+            }
+            let mut child = &segment.branch;
+            for _ in 0..self.branches.len() {
+                let Some((parent, index)) = self
+                    .branches
+                    .get(child)
+                    .and_then(|branch| branch.parent.as_ref())
+                else {
+                    break;
+                };
+                if let Some(branch) = self.branches.get(parent)
+                    && branch.stale_children.contains(index)
+                    && let Some(total) = branch.total
+                {
+                    checks.insert(
+                        (parent.clone(), *index),
+                        (
+                            TreeRangeSpan {
+                                branch: parent.clone(),
+                                offset: *index,
+                                len: 1,
+                                total,
+                            },
+                            child.clone(),
+                        ),
+                    );
+                }
+                child = parent;
+            }
+        }
+        checks.into_values().collect()
     }
 
     /// Demand viewport pages only, at most one active query per occurrence.
@@ -1137,6 +1245,72 @@ mod tests {
         assert!(tree.requests_for_range(2..3).contains(&(overlap, 0)));
     }
 
+    #[test]
+    fn sparse_preorder_range_plan_crosses_evicted_pages_and_expanded_branches() {
+        let mut tree = DirectoryTree::default();
+        tree.configure_page_size(1);
+        accept(&mut tree, &branch(""), 0, 1, &["/a"], 1);
+        tree.expand(&branch("/a"));
+        accept(&mut tree, &branch("/a"), 0, 2, &["/a/nested"], 40);
+        tree.expand(&branch("/a/nested"));
+        accept(
+            &mut tree,
+            &branch("/a/nested"),
+            0,
+            3,
+            &["/a/nested/entry"],
+            20,
+        );
+        for offset in 1..40 {
+            accept(
+                &mut tree,
+                &branch("/a"),
+                offset,
+                offset as u64 + 4,
+                &[&format!("/a/entry-{offset}")],
+                40,
+            );
+        }
+        assert!(tree.pages.len() <= MAX_CACHED_PAGES);
+        let spans = tree.range_spans(0..61).unwrap();
+        assert_eq!(
+            spans,
+            vec![
+                TreeRangeSpan {
+                    branch: branch(""),
+                    offset: 0,
+                    len: 1,
+                    total: 1
+                },
+                TreeRangeSpan {
+                    branch: branch("/a"),
+                    offset: 0,
+                    len: 1,
+                    total: 40
+                },
+                TreeRangeSpan {
+                    branch: branch("/a/nested"),
+                    offset: 0,
+                    len: 20,
+                    total: 20
+                },
+                TreeRangeSpan {
+                    branch: branch("/a"),
+                    offset: 1,
+                    len: 39,
+                    total: 40
+                },
+            ]
+        );
+        assert!(tree.range_checks(0..61).is_empty());
+        let revision = tree.projection_revision();
+        tree.invalidate();
+        assert_ne!(tree.projection_revision(), revision);
+        assert_eq!(tree.range_spans(0..61).unwrap(), spans);
+        assert_eq!(tree.range_checks(0..61).len(), 2);
+        tree.collapse(&branch("/a/nested"));
+        assert!(tree.range_spans(0..61).is_none());
+    }
 
     #[test]
     fn focused_overlapping_occurrence_drives_keyboard_parent_and_survives_other_root_collapse() {
