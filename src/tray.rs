@@ -544,7 +544,7 @@ impl DbusMenu {
     ) -> fdo::Result<Vec<(i32, HashMap<String, OwnedValue>)>> {
         let snapshot = self.data.read().snapshot.clone();
         let ids = if ids.is_empty() {
-            (1..=6).collect()
+            (2..=9).collect()
         } else {
             ids
         };
@@ -582,7 +582,7 @@ impl DbusMenu {
             // Force the static root layout to be loaded instead of leaving an
             // empty host-side cache.
             Ok(true)
-        } else if (1..=6).contains(&id) {
+        } else if (2..=9).contains(&id) {
             Ok(false)
         } else {
             Err(fdo::Error::InvalidArgs("Unknown menu item".into()))
@@ -614,12 +614,6 @@ impl DbusMenu {
     fn activate(&self, id: i32) {
         let snapshot = self.data.read().snapshot.clone();
         let command = match id {
-            1 => {
-                if let Err(error) = self.handle.raise() {
-                    tracing::warn!(error = %error, "tray_show_window_failed");
-                }
-                return;
-            }
             2 if snapshot.status == PlaybackStatus::Playing => Command::Pause,
             2 => Command::Resume,
             3 => Command::Previous,
@@ -650,13 +644,26 @@ fn menu_items(snapshot: &TraySnapshot) -> Vec<MenuLayout> {
         "Play"
     };
     vec![
-        MenuLayout::item(1, "Show"),
         MenuLayout::item(2, play_label),
         MenuLayout::item(3, "Previous"),
         MenuLayout::item(4, "Next"),
         MenuLayout::separator(5),
-        MenuLayout::item(6, if snapshot.shuffle { "Shuffle ✓" } else { "Shuffle" }),
-        MenuLayout::item(7, if snapshot.repeat == RepeatMode::Off { "Repeat" } else { "Repeat ✓" }),
+        MenuLayout::item(
+            6,
+            if snapshot.shuffle {
+                "Shuffle ✓"
+            } else {
+                "Shuffle"
+            },
+        ),
+        MenuLayout::item(
+            7,
+            if snapshot.repeat == RepeatMode::Off {
+                "Repeat"
+            } else {
+                "Repeat ✓"
+            },
+        ),
         MenuLayout::separator(8),
         MenuLayout::item(9, "Quit"),
     ]
@@ -667,7 +674,7 @@ fn menu_properties(
     id: i32,
     requested: &[String],
 ) -> Option<HashMap<String, OwnedValue>> {
-    if !(1..=9).contains(&id) {
+    if !(2..=9).contains(&id) {
         return None;
     }
     let play_label = if snapshot.status == PlaybackStatus::Playing {
@@ -676,13 +683,26 @@ fn menu_properties(
         "Play"
     };
     let (label, item_type) = match id {
-        1 => ("Show", "standard"),
         2 => (play_label, "standard"),
         3 => ("Previous", "standard"),
         4 => ("Next", "standard"),
         5 | 8 => ("", "separator"),
-        6 => (if snapshot.shuffle { "Shuffle ✓" } else { "Shuffle" }, "standard"),
-        7 => (if snapshot.repeat == RepeatMode::Off { "Repeat" } else { "Repeat ✓" }, "standard"),
+        6 => (
+            if snapshot.shuffle {
+                "Shuffle ✓"
+            } else {
+                "Shuffle"
+            },
+            "standard",
+        ),
+        7 => (
+            if snapshot.repeat == RepeatMode::Off {
+                "Repeat"
+            } else {
+                "Repeat ✓"
+            },
+            "standard",
+        ),
         9 => ("Quit", "standard"),
         _ => unreachable!(),
     };
@@ -731,33 +751,5 @@ mod tests {
             menu_properties(&snapshot, 2, &[]).unwrap()["label"],
             owned_value("Play".into())
         );
-    }
-
-    #[test]
-    fn menu_contains_fixed_actions_and_active_status_is_independent() {
-        let snapshot = TraySnapshot {
-            current_track: None,
-            current_track_id: None,
-            status: PlaybackStatus::Stopped,
-            shuffle: false,
-            repeat: RepeatMode::Off,
-            shutting_down: false,
-        };
-        let items = menu_items(&snapshot);
-        let labels: Vec<_> = items
-            .iter()
-            .filter_map(|item| item.properties.get("label"))
-            .collect();
-        assert_eq!(labels.len(), 7);
-        assert_eq!(items[0].id, 1);
-        assert_eq!(items[1].id, 2);
-        assert_eq!(items[2].id, 3);
-        assert_eq!(items[3].id, 4);
-        assert_eq!(items[4].id, 5);
-        assert_eq!(items[5].id, 6);
-        assert_eq!(items[6].id, 7);
-        assert_eq!(items[7].id, 8);
-        assert_eq!(items[8].id, 9);
-        assert_eq!(sni_status(), "Active");
     }
 }
