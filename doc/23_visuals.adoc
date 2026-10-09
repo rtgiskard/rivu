@@ -8,6 +8,15 @@ Visualization primitives must match their geometry:
 * Peak is a transient marker, rendered as a lightweight solid point or short line.
 * Cached data and cached geometry must have explicit, independent invalidation rules.
 
+== Analysis
+
+The analysis worker retains a rolling stereo window and reuses its FFT plan and
+working buffers. Window preparation traverses the two chronological slices of
+the circular buffer without per-sample modulo arithmetic. One complex FFT packs
+the left and right real signals. The combined power is computed directly from
+the paired bin magnitudes, preserving opposite-phase stereo without reconstructing
+the separate channel spectra. Nyquist retains its single-sided normalization.
+
 == Waveform
 
 === RMS

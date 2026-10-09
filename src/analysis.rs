@@ -243,12 +243,15 @@ impl SpectrumAnalyzer {
     fn transform(&mut self) -> [f32; 2] {
         let n = self.rolling.len();
         let mut rms = [0.0_f32; 2];
-        for i in 0..n {
-            let samples = self.rolling[(self.head + i) % n];
+        for (i, samples) in self.rolling[self.head..]
+            .iter()
+            .chain(&self.rolling[..self.head])
+            .enumerate()
+        {
             rms[0] += samples[0] * samples[0];
             rms[1] += samples[1] * samples[1];
-            // Pack both real channels into one FFT. Recover independent powers
-            // below so opposite-phase stereo does not vanish.
+            // Pack both real channels; the merged power below preserves
+            // opposite-phase stereo without reconstructing either spectrum.
             self.frequency[i] =
                 Complex32::new(samples[0] * self.window[i], samples[1] * self.window[i]);
         }
@@ -258,12 +261,10 @@ impl SpectrumAnalyzer {
             let mut power = 0.0_f32;
             for bin in first..last {
                 let packed = self.frequency[bin];
-                let mirrored = self.frequency[(n - bin) % n].conj();
-                let left = (packed + mirrored) * 0.5;
-                let right = (packed - mirrored) * Complex32::new(0.0, -0.5);
+                let mirrored = self.frequency[(n - bin) % n];
                 // Nyquist has no negative-frequency partner to double.
                 let endpoint_gain = if bin == n / 2 { 0.25 } else { 1.0 };
-                power = power.max((left.norm_sqr() + right.norm_sqr()) * 0.5 * endpoint_gain);
+                power = power.max((packed.norm_sqr() + mirrored.norm_sqr()) * 0.25 * endpoint_gain);
             }
             *level = (power.sqrt() * self.normalization).max(1e-7).log10() * 20.0;
         }
@@ -437,6 +438,29 @@ mod tests {
                     .0;
                 let tolerance = rate as f32 / fft_size as f32;
                 assert!((analyzer.frequencies[strongest] - 1760.0).abs() <= tolerance + 1.0);
+            }
+        }
+    }
+
+    #[test]
+    fn wrapped_window_preserves_asymmetric_nyquist_and_low_amplitudes() {
+        for fft_size in [512, 8192, 32768] {
+            let settings = AnalysisSettings {
+                fps: 20,
+                fft_size,
+                window: SpectrumWindow::None,
+            };
+            for amplitude in [0.5_f32, 1e-6] {
+                let mut analyzer = SpectrumAnalyzer::new(settings, 48_000);
+                for i in 0..fft_size + 137 {
+                    let sample = if i % 2 == 0 { amplitude } else { -amplitude };
+                    analyzer.push([sample, -sample * 0.5]);
+                }
+                let rms = analyzer.transform();
+                let expected = 20.0 * (amplitude * 0.625_f32.sqrt()).log10();
+                assert!((analyzer.levels.last().unwrap() - expected).abs() < 0.001);
+                assert!((rms[0] - amplitude).abs() < amplitude * 0.001);
+                assert!((rms[1] - amplitude * 0.5).abs() < amplitude * 0.001);
             }
         }
     }
