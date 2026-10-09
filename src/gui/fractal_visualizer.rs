@@ -1,5 +1,5 @@
 //! Shared, accepted-audio-clocked generative light views. No simulation in paint.
-use super::fractal_beams;
+use super::{fractal_beams, fractal_flow};
 use crate::{
     analysis::{AnalysisFrame, AnalysisSettings, VisualizerMode},
     config::{Config, RadialSpectrumStyle},
@@ -25,7 +25,46 @@ pub(super) struct LightSegment {
 }
 
 pub(super) fn fractal_style(style: RadialSpectrumStyle) -> bool {
-    matches!(style, RadialSpectrumStyle::FractalBeams)
+    matches!(
+        style,
+        RadialSpectrumStyle::FractalBeams | RadialSpectrumStyle::FractalFlow
+    )
+}
+
+enum Scene {
+    Beams(fractal_beams::Scene),
+    Flow(fractal_flow::Scene),
+}
+
+impl Scene {
+    fn new(style: RadialSpectrumStyle) -> Option<Self> {
+        match style {
+            RadialSpectrumStyle::FractalBeams => Some(Self::Beams(fractal_beams::Scene::new())),
+            RadialSpectrumStyle::FractalFlow => Some(Self::Flow(fractal_flow::Scene::new())),
+            _ => None,
+        }
+    }
+
+    fn reset(&mut self) {
+        match self {
+            Self::Beams(scene) => scene.reset(),
+            Self::Flow(scene) => scene.reset(),
+        }
+    }
+
+    fn advance(&mut self, dt: f32, drive: Drive) {
+        match self {
+            Self::Beams(scene) => scene.advance(dt, drive),
+            Self::Flow(scene) => scene.advance(dt, drive),
+        }
+    }
+
+    fn segments(&self) -> &[LightSegment] {
+        match self {
+            Self::Beams(scene) => scene.segments(),
+            Self::Flow(scene) => scene.segments(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -46,7 +85,7 @@ struct Data {
     last_time: Option<Duration>,
     drive: Drive,
     previous_energy: f32,
-    beams: fractal_beams::Scene,
+    scene: Option<Scene>,
 }
 
 impl FractalVisualizer {
@@ -69,7 +108,7 @@ impl FractalVisualizer {
                 last_time: None,
                 drive: Drive::default(),
                 previous_energy: 0.0,
-                beams: fractal_beams::Scene::new(),
+                scene: Scene::new(config.radial_spectrum_style),
             })),
         }
     }
@@ -77,7 +116,8 @@ impl FractalVisualizer {
     pub(super) fn configure(&self, config: &Config) -> bool {
         let mut data = self.data.borrow_mut();
         let settings = AnalysisSettings::from(config);
-        let reset = data.style != config.radial_spectrum_style
+        let style_changed = data.style != config.radial_spectrum_style;
+        let reset = style_changed
             || data.settings.fft_size != settings.fft_size
             || data.settings.window != settings.window;
         let colors = [
@@ -97,6 +137,9 @@ impl FractalVisualizer {
         data.sensitivity = config.radial_spectrum_sensitivity;
         data.db_range = config.radial_spectrum_db_range();
         data.bloom = config.radial_spectrum_bloom_intensity;
+        if style_changed {
+            data.scene = Scene::new(data.style);
+        }
         if reset {
             data.reset();
         }
@@ -140,7 +183,13 @@ impl Data {
         self.last_time = None;
         self.drive = Drive::default();
         self.previous_energy = 0.0;
-        self.beams.reset();
+        if let Some(scene) = &mut self.scene {
+            scene.reset();
+        }
+    }
+
+    fn segments(&self) -> &[LightSegment] {
+        self.scene.as_ref().map(Scene::segments).unwrap_or(&[])
     }
 
     fn update(&mut self, frame: &AnalysisFrame) {
@@ -186,8 +235,13 @@ impl Data {
         };
         let onset = ((target.energy - self.previous_energy).max(0.0) * 3.0).clamp(0.0, 1.0);
         self.previous_energy = target.energy;
-        // At most five steps; beams have no numerical particle integration.
-        let steps = (elapsed * 10.0).ceil().clamp(1.0, 5.0) as usize;
+        // Flow needs bounded particle-integration steps; beams only deform geometry.
+        let step_rate = if self.style == RadialSpectrumStyle::FractalFlow {
+            120.0
+        } else {
+            10.0
+        };
+        let steps = (elapsed * step_rate).ceil().clamp(1.0, 60.0) as usize;
         let dt = elapsed / steps as f32;
         for step in 0..steps {
             for (value, target) in self.drive.bands.iter_mut().zip(target.bands) {
@@ -195,7 +249,9 @@ impl Data {
             }
             self.drive.energy = smooth(self.drive.energy, target.energy, dt);
             self.drive.onset = if step == 0 { onset } else { 0.0 };
-            self.beams.advance(dt, self.drive);
+            if let Some(scene) = &mut self.scene {
+                scene.advance(dt, self.drive);
+            }
         }
         self.last_time = Some(frame.sample_time);
     }
@@ -228,7 +284,7 @@ impl Data {
             let mut paths: [PathBuilder; 9] =
                 std::array::from_fn(|_| PathBuilder::stroke(px(width)));
             let mut used = [false; 9];
-            for segment in self.beams.segments() {
+            for segment in self.segments() {
                 if segment.strength < 0.015 {
                     continue;
                 }
@@ -287,10 +343,10 @@ mod tests {
     use super::*;
     use crate::analysis::VisualizerFrame;
 
-    fn plot() -> FractalVisualizer {
+    fn plot(style: RadialSpectrumStyle) -> FractalVisualizer {
         let plot = FractalVisualizer::new();
         plot.configure(&Config {
-            radial_spectrum_style: RadialSpectrumStyle::FractalBeams,
+            radial_spectrum_style: style,
             ..Config::default()
         });
         plot
@@ -315,73 +371,106 @@ mod tests {
 
     #[test]
     fn paused_publications_do_not_advance_and_silence_extinguishes_light() {
-        let visual = plot();
-        for t in (50..=1000).step_by(50) {
-            visual.update(&frame(t));
+        for style in [
+            RadialSpectrumStyle::FractalBeams,
+            RadialSpectrumStyle::FractalFlow,
+        ] {
+            let visual = plot(style);
+            for t in (50..=1000).step_by(50) {
+                visual.update(&frame(t));
+            }
+            let before = visual.data.borrow().segments().to_vec();
+            assert!(before.iter().any(|s| s.strength > 0.05));
+            let mut repeated = frame(1000);
+            repeated.sequence += 20;
+            repeated.visualizer.band_rms = [1.0; 3];
+            visual.update(&repeated);
+            assert_eq!(visual.data.borrow().segments(), &before);
+            let mut silence = frame(1000);
+            silence.visualizer.band_rms = [0.0; 3];
+            silence.rms_left = 0.0;
+            silence.rms_right = 0.0;
+            for t in (1050..=11000).step_by(50) {
+                silence.sample_time = Duration::from_millis(t);
+                visual.update(&silence);
+            }
+            assert!(
+                visual
+                    .data
+                    .borrow()
+                    .segments()
+                    .iter()
+                    .all(|s| s.strength < 0.015)
+            );
         }
-        let before = visual.data.borrow().beams.segments().to_vec();
-        assert!(before.iter().any(|s| s.strength > 0.05));
-        let mut repeated = frame(1000);
-        repeated.sequence += 20;
-        repeated.visualizer.band_rms = [1.0; 3];
-        visual.update(&repeated);
-        assert_eq!(visual.data.borrow().beams.segments(), &before);
-        let mut silence = frame(1000);
-        silence.visualizer.band_rms = [0.0; 3];
-        silence.rms_left = 0.0;
-        silence.rms_right = 0.0;
-        for t in (1050..=11000).step_by(50) {
-            silence.sample_time = Duration::from_millis(t);
-            visual.update(&silence);
-        }
-        assert!(
-            visual
-                .data
-                .borrow()
-                .beams
-                .segments()
-                .iter()
-                .all(|s| s.strength < 0.015)
-        );
     }
 
     #[test]
     fn discontinuities_and_stale_configuration_never_bridge_scenes() {
-        let visual = plot();
+        for style in [
+            RadialSpectrumStyle::FractalBeams,
+            RadialSpectrumStyle::FractalFlow,
+        ] {
+            let visual = plot(style);
+            for t in (50..=1000).step_by(50) {
+                visual.update(&frame(t));
+            }
+            let mut stale = frame(1050);
+            stale.generation += 1;
+            stale.visualizer.mode = VisualizerMode::StereoDensity;
+            visual.update(&stale);
+            assert!(
+                visual
+                    .data
+                    .borrow()
+                    .segments()
+                    .iter()
+                    .all(|s| s.strength < 0.015)
+            );
+            let fresh = plot(style);
+            stale.visualizer.mode = VisualizerMode::Generative;
+            visual.update(&stale);
+            fresh.update(&stale);
+            assert_eq!(
+                visual.data.borrow().segments(),
+                fresh.data.borrow().segments()
+            );
+            visual.set_visible(false);
+            visual.update(&frame(1100));
+            assert!(visual.data.borrow().last_time.is_none());
+            visual.set_visible(true);
+            visual.configure(&Config {
+                radial_spectrum_style: style,
+                spectrum_fft_size: 4096,
+                ..Config::default()
+            });
+            visual.update(&frame(1150));
+            assert!(visual.data.borrow().last_time.is_none());
+        }
+    }
+
+    #[test]
+    fn changing_fractal_style_clears_old_motion_even_with_same_analysis_mode() {
+        let visual = plot(RadialSpectrumStyle::FractalBeams);
         for t in (50..=1000).step_by(50) {
             visual.update(&frame(t));
         }
-        let mut stale = frame(1050);
-        stale.generation += 1;
-        stale.visualizer.mode = VisualizerMode::StereoDensity;
-        visual.update(&stale);
-        assert!(
-            visual
-                .data
-                .borrow()
-                .beams
-                .segments()
-                .iter()
-                .all(|s| s.strength < 0.015)
-        );
-        let fresh = plot();
-        stale.visualizer.mode = VisualizerMode::Generative;
-        visual.update(&stale);
-        fresh.update(&stale);
-        assert_eq!(
-            visual.data.borrow().beams.segments(),
-            fresh.data.borrow().beams.segments()
-        );
-        visual.set_visible(false);
-        visual.update(&frame(1100));
-        assert!(visual.data.borrow().last_time.is_none());
-        visual.set_visible(true);
         visual.configure(&Config {
-            radial_spectrum_style: RadialSpectrumStyle::FractalBeams,
-            spectrum_fft_size: 4096,
+            radial_spectrum_style: RadialSpectrumStyle::FractalFlow,
             ..Config::default()
         });
-        visual.update(&frame(1150));
-        assert!(visual.data.borrow().last_time.is_none());
+        assert!(visual.data.borrow().segments().is_empty());
+        visual.update(&frame(1000));
+        let fresh = plot(RadialSpectrumStyle::FractalFlow);
+        fresh.update(&frame(1000));
+        assert_eq!(
+            visual.data.borrow().segments(),
+            fresh.data.borrow().segments()
+        );
+        visual.configure(&Config {
+            radial_spectrum_style: RadialSpectrumStyle::BarsRings,
+            ..Config::default()
+        });
+        assert!(visual.data.borrow().scene.is_none());
     }
 }

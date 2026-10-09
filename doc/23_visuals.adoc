@@ -105,7 +105,13 @@ capacity changes and image retirement.
 Fractal Beams uses fixed recursive topology rather than rebuilding random
 branches on each frame. Three integrated frequency bands drive different
 spatial scales; root-to-tip pulses follow rises in energy, not beat estimates.
-Band power comes from the stereo FFT bins with window-energy normalization,
+
+Fractal Flow uses three spatial scales of a deterministic curl field. Bands
+deform the field rather than steering independent random particles. Trails fade
+and taper; boundary respawns discard old points rather than connecting opposite
+edges. The fixed particle history is allocated only when the style is selected.
+
+Both styles take band power from the stereo FFT bins with window-energy normalization,
 not from summed dB values or maximum-pooled display bands. Opposite-phase
 channels retain their energy.
 
@@ -114,7 +120,9 @@ visible panels. Paint and resize never advance the scene. Discontinuities clear
 the state, and hidden views do not request the optional band-power analysis.
 Glow uses batched, widening translucent strokes rather than an unbounded image
 feedback history. Beams retains 189 branches, 756 line segments, and 12 pulse
-slots; drawing uses at most 27 light paths per panel.
+slots. Flow retains 96 filaments with at most 24 points each and 2208 line segments.
+Both styles draw at most 27 light paths per panel; Flow limits each integration
+step to 1/120 second and each accepted-frame update to 60 steps.
 
 == Evaluating tradeoffs
 

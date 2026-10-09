@@ -283,7 +283,8 @@ impl RadialSpectrum {
                             }
                             RadialSpectrumStyle::StereoDensity
                             | RadialSpectrumStyle::SpatialSpectrum
-                            | RadialSpectrumStyle::FractalBeams => {}
+                            | RadialSpectrumStyle::FractalBeams
+                            | RadialSpectrumStyle::FractalFlow => {}
                         }
                         if fade_alpha < 1.0 {
                             window.paint_quad(gpui::fill(

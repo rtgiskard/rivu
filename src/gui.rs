@@ -3,6 +3,7 @@ mod artwork;
 mod components;
 mod fonts;
 mod fractal_beams;
+mod fractal_flow;
 mod fractal_visualizer;
 mod input;
 mod layout;
@@ -1926,7 +1927,8 @@ impl GuiApp {
                 crate::config::RadialSpectrumStyle::SpatialSpectrum => {
                     crate::analysis::VisualizerMode::SpatialSpectrum
                 }
-                crate::config::RadialSpectrumStyle::FractalBeams => {
+                crate::config::RadialSpectrumStyle::FractalBeams
+                | crate::config::RadialSpectrumStyle::FractalFlow => {
                     crate::analysis::VisualizerMode::Generative
                 }
                 _ => crate::analysis::VisualizerMode::Off,

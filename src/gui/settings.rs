@@ -238,6 +238,7 @@ fn radial_spectrum_style_label(style: RadialSpectrumStyle) -> &'static str {
         RadialSpectrumStyle::StereoDensity => "Stereo Density",
         RadialSpectrumStyle::SpatialSpectrum => "Spatial Spectrum",
         RadialSpectrumStyle::FractalBeams => "Fractal Beams",
+        RadialSpectrumStyle::FractalFlow => "Fractal Flow",
     }
 }
 
@@ -763,12 +764,12 @@ impl Settings {
             .value(Field::RadialSpectrumPrimaryColor, cx)
             .trim()
             .parse::<RgbColor>()
-            .context("Radial Spectrum primary color")?;
+            .context("Audio Visualizer primary color")?;
         config.radial_spectrum_secondary_color = self
             .value(Field::RadialSpectrumSecondaryColor, cx)
             .trim()
             .parse::<RgbColor>()
-            .context("Radial Spectrum secondary color")?;
+            .context("Audio Visualizer secondary color")?;
         config.radial_spectrum_db_range = self.optional_number(Field::RadialSpectrumDb, cx)?;
         config.spectrum_db_range = self.optional_number(Field::SpectrumDb, cx)?;
         config.spectrum_gap = self.number(Field::SpectrumGap, cx)?;
@@ -1580,11 +1581,11 @@ impl GuiApp {
                         .child(two_column(settings.field(Field::Background).min_w(px(180.)), form_field("Color scheme", palette).min_w(px(180.))))
                         .child(settings.single(Field::VisualizationDb))
                         .child(caption("Background: all views. Color scheme: Spectrum, Spectrogram, and Waveform."))
-                        .child(caption("Display range: Spectrum, Spectrogram, and Radial Spectrum. Does not affect analysis, playback volume, or Waveform gain."))))
+                        .child(caption("Display range: Spectrum, Spectrogram, and Audio Visualizer. Fractal styles use it for energy response; playback volume is unchanged."))))
                     .child(settings_group("Frequency analysis", column().gap_2()
                         .child(two_column(form_field("FFT size (samples)", fft).min_w(px(180.)), form_field("FFT window", window).min_w(px(180.))))
                         .child(settings.single(Field::Fps))
-                        .child(caption("Applies to Spectrum, Spectrogram, and Radial Spectrum. Changing FFT size or window clears Spectrogram history."))))
+                        .child(caption("Applies to Spectrum, Spectrogram, and Audio Visualizer. Changing FFT size or window clears visualization history."))))
                     .child(settings_group("Rendering", column().gap_2()
                         .child(row().child(visual_switch("settings-still-mode", "≈", "Still mode", draft.still_mode, cx, |draft| draft.still_mode = !draft.still_mode)))
                         .child(caption("Pauses visualizations and their processing; playback and interface effects are unchanged."))
@@ -1690,7 +1691,7 @@ impl GuiApp {
                 let bars = matches!(draft.radial_spectrum_style, RadialSpectrumStyle::Bars | RadialSpectrumStyle::BarsRings);
                 let rings = matches!(draft.radial_spectrum_style, RadialSpectrumStyle::Rings | RadialSpectrumStyle::BarsRings);
                 let style = dropdown_button("audio-visualizer-style", radial_spectrum_style_label(draft.radial_spectrum_style), cx, |this, _, _| {
-                    let values = [RadialSpectrumStyle::Bars, RadialSpectrumStyle::Rings, RadialSpectrumStyle::BarsRings, RadialSpectrumStyle::StereoDensity, RadialSpectrumStyle::SpatialSpectrum, RadialSpectrumStyle::FractalBeams];
+                    let values = [RadialSpectrumStyle::Bars, RadialSpectrumStyle::Rings, RadialSpectrumStyle::BarsRings, RadialSpectrumStyle::StereoDensity, RadialSpectrumStyle::SpatialSpectrum, RadialSpectrumStyle::FractalBeams, RadialSpectrumStyle::FractalFlow];
                     let selected = values.iter().position(|value| *value == this.settings.draft.radial_spectrum_style).unwrap_or(0);
                     this.open_setting_dropdown(values.into_iter().map(|value| DropdownItem::new(SettingChoice::RadialSpectrumStyle(value), radial_spectrum_style_label(value))).collect(), selected);
                 }).relative().child(self.measurement(Measured::SettingsStyle));
@@ -1698,10 +1699,15 @@ impl GuiApp {
                     .child(settings.pair(Field::RadialSpectrumPrimaryColor, Field::RadialSpectrumSecondaryColor))
                     .child(caption("Independent of the shared color scheme.")));
                 if super::fractal_visualizer::fractal_style(draft.radial_spectrum_style) {
+                    let hint = if draft.radial_spectrum_style == RadialSpectrumStyle::FractalFlow {
+                        "Layered light filaments follow a three-scale flow field. Bass changes broad vortices, mids bend the flow, treble adds fine ripples. Energy rises brighten the trails; this is not beat detection."
+                    } else {
+                        "Stable recursive branches. Bass extends the trunks, mids bend the forks, treble lights the fine branches. Energy rises send pulses toward the tips; this is not beat detection."
+                    };
                     return column().gap_3()
                         .child(settings_group("Generative light", column().gap_2()
                             .child(form_field("Style", style))
-                            .child(caption("Stable recursive branches. Bass extends the trunks, mids bend the forks, treble lights the fine branches. Energy rises send pulses toward the tips; this is not beat detection."))
+                            .child(caption(hint))
                             .child(caption("Motion follows accepted audio time and freezes while paused. Shared FFT and background: Common. Seeking or changing style/FFT clears the scene."))))
                         .child(settings_group("Response & glow", column().gap_2()
                             .child(settings.pair(Field::RadialSpectrumSensitivity, Field::RadialSpectrumBloomIntensity))

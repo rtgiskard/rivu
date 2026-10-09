@@ -267,6 +267,10 @@ see <<_visualization_db_ranges,Visualization dB ranges>>.
   energy extends the trunks, mids bend the forks, and highs light the fine
   branches. Energy rises launch outward pulses; these are not detected beats.
   It is generative art, not an amplitude or phase measurement.
+* `fractal_flow` shows layered light filaments moving through a three-scale flow
+  field. Low, mid, and high energy deform broad vortices, bends, and fine ripples;
+  energy rises brighten the trails. Particles leaving the field restart without
+  a cross-screen connecting line. This is also generative art, not a measurement.
 
 All styles share `spectrum_fft_size`, `spectrum_window`, `analysis_fps`, and the
 two `radial_spectrum_*_color` endpoints. `radial_spectrum_db_range` inherits
@@ -275,12 +279,13 @@ volume or measured amplitude. The two analysis styles retain a 0.5-second
 exponential trail measured in accepted audio time, so pausing freezes the field.
 Seeking, signal gaps, style changes, and FFT size/window changes clear the trail.
 
-Fractal Beams uses `radial_spectrum_sensitivity` and `radial_spectrum_db_range`
+The fractal styles use `radial_spectrum_sensitivity` and `radial_spectrum_db_range`
 to map measured energy into shape and brightness; `radial_spectrum_bloom_intensity`
 controls the halo. Rotation, bar/ring shape, and idle fade do not apply. Motion
 and decay follow accepted audio time: silence extinguishes the light, while
 pause freezes it. Seeking, signal gaps, hiding the view, and style/FFT changes
-reset the scene. The topology and pulse storage remain bounded during playback.
+reset the scene. Beams has bounded topology and pulses; Flow retains 96 filaments
+with at most 24 trajectory points each. Resource use does not grow with play time.
 
 The radial presentation is based on Noctalia Shell v5's
 https://github.com/noctalia-dev/noctalia-shell/blob/e56a9db5/Widgets/AudioSpectrum/NMirroredSpectrum.qml[`NMirroredSpectrum.qml`],
