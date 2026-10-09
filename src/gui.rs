@@ -328,11 +328,9 @@ fn copyable_message(
         .cursor_pointer()
         .child(div().flex_1().min_w_0().truncate().child(message.clone()))
         .child(div().flex_shrink_0().child("⧉"))
-        .tooltip(|_, cx| {
-            cx.new(|_| ButtonTooltip {
-                text: "Copy full message".into(),
-            })
-            .into()
+        .tooltip({
+            let message: SharedString = message.clone().into();
+            move |_, cx| cx.new(|_| ButtonTooltip { text: message.clone() }).into()
         })
         .on_click(cx.listener(move |_, _, _, cx| {
             cx.write_to_clipboard(ClipboardItem::new_string(message.clone()));
