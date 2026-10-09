@@ -1,3 +1,4 @@
+mod analysis_visualizer;
 mod artwork;
 mod components;
 mod fonts;
@@ -207,6 +208,8 @@ impl GuiHost {
 
     fn clear_window_state(&self) {
         self.handle.clear_wakeup();
+        self.handle
+            .set_visualizer_mode(crate::analysis::VisualizerMode::Off);
         let _ = self.handle.send(Command::Analysis { enabled: false });
     }
 
@@ -948,6 +951,11 @@ impl GuiApp {
         // installed. Reconcile once so the first frame never keeps the empty snapshot.
         app.refresh(cx);
         app.layout_focus.focus(window, cx);
+        window
+            .observe_release(&cx.entity(), cx, |this: &mut Self, window, _| {
+                this.radial_spectrum.release_all_images(window);
+            })
+            .detach();
         app
     }
     fn send(&mut self, command: Command, cx: &mut Context<Self>) {
@@ -1859,6 +1867,9 @@ impl GuiApp {
                     self.analysis_staging.settings = frame.settings;
                     self.analysis_staging.rms_left = frame.rms_left;
                     self.analysis_staging.rms_right = frame.rms_right;
+                    self.analysis_staging
+                        .visualizer
+                        .clone_from(&frame.visualizer);
                     self.analysis_sequence = frame.sequence;
                     true
                 } else {
@@ -1900,12 +1911,25 @@ impl GuiApp {
         let spectrum_restored = self
             .visuals
             .set_spectrum_visible(self.window_visible && !spectrum_panel_ids.is_empty());
-        let radial_restored = self.radial_spectrum.set_visible(
-            self.window_visible
-                && active_panels
-                    .iter()
-                    .any(|panel| panel.kind == "audio_visualizer"),
-        );
+        let visualizer_visible = self.window_visible
+            && active_panels
+                .iter()
+                .any(|panel| panel.kind == "audio_visualizer");
+        let radial_restored = self.radial_spectrum.set_visible(visualizer_visible);
+        let visualizer_mode = if visualizer_visible {
+            match self.state.system.config.radial_spectrum_style {
+                crate::config::RadialSpectrumStyle::StereoDensity => {
+                    crate::analysis::VisualizerMode::StereoDensity
+                }
+                crate::config::RadialSpectrumStyle::SpatialSpectrum => {
+                    crate::analysis::VisualizerMode::SpatialSpectrum
+                }
+                _ => crate::analysis::VisualizerMode::Off,
+            }
+        } else {
+            crate::analysis::VisualizerMode::Off
+        };
+        self.handle.set_visualizer_mode(visualizer_mode);
         let analysis_visible = self.window_visible
             && active_panels.iter().any(|panel| {
                 matches!(
@@ -2442,6 +2466,7 @@ impl Render for GuiApp {
         self.scroll_views.begin_frame();
         self.visuals.begin_frame();
         let paint_visuals = self.visuals.clone();
+        let paint_visualizer = self.radial_spectrum.clone();
         let paint_waveform = self.waveform.read(cx).image_releaser();
         let root = self.layout.root.take();
         let layout_view = root
@@ -2649,6 +2674,7 @@ impl Render for GuiApp {
                     move |_, _, window, _| {
                         paint_visuals.release_retired(window);
                         paint_waveform.release_retired(window);
+                        paint_visualizer.release_retired_images(window);
                         paint_visuals.finish_prepaint();
                     },
                 )

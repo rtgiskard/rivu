@@ -14,7 +14,8 @@ CLI, and TUI are different clients of that core.
 * Optional FFmpeg decoding for additional formats, including audio in MKV/MP4
 * Desktop GUI, CLI, TUI, and headless mode; optional MPRIS and StatusNotifier tray
 * Persistent, editable desktop layout with configurable appearance
-* Waveform, Spectrum, Spectrogram, and Radial Spectrum visualizations
+* Waveform, Spectrum, Spectrogram, and Audio Visualizer with radial, stereo-density,
+  and spatial-spectrum styles
 * Generated desktop artwork and embedded-cover support for MPRIS; no network
   media or cover fetching
 

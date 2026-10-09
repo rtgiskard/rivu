@@ -1,5 +1,5 @@
 use crate::{
-    analysis::AnalysisFrame,
+    analysis::{AnalysisControl, AnalysisFrame, VisualizerMode},
     audio::{self, AudioCommand, AudioEngine, AudioEvent},
     config::Config,
     library::{self, M3uItem, ScanResult},
@@ -102,6 +102,7 @@ impl CoreState {
 pub struct AppHandle {
     state: Arc<RwLock<CoreState>>,
     pub analysis: Arc<RwLock<AnalysisFrame>>,
+    analysis_control: Arc<AnalysisControl>,
     pub waveform: Arc<RwLock<audio::WaveformFrame>>,
     sender: Sender<Request>,
     wakeup: Arc<RwLock<Option<Wakeup>>>,
@@ -111,6 +112,11 @@ pub struct AppHandle {
 }
 
 impl AppHandle {
+    /// Select optional plots without reopening output or changing the IPC schema.
+    pub(crate) fn set_visualizer_mode(&self, mode: VisualizerMode) {
+        self.analysis_control.set_visualizer_mode(mode);
+    }
+
     pub fn send(&self, command: Command) -> Result<()> {
         self.sender
             .try_send(Request {
@@ -299,6 +305,7 @@ impl Runtime {
         let handle = AppHandle {
             state: shared.clone(),
             analysis: engine.analysis.clone(),
+            analysis_control: Arc::clone(&engine.analysis_control),
             waveform: Arc::clone(&engine.waveform),
             sender,
             wakeup: wakeup.clone(),

@@ -1,0 +1,806 @@
+//! Fixed-scale, analysis-backed stereo plots. Texture storage is independent of panel size.
+use crate::{
+    analysis::{AnalysisFrame, AnalysisSettings, DENSITY_SIDE, VisualizerMode},
+    config::{Config, RadialSpectrumStyle},
+};
+use gpui::{
+    AnyElement, App, Bounds, Pixels, Point, RenderImage, SharedString, TextAlign, Window, canvas,
+    div, fill, point, prelude::*, px, rgb, size,
+};
+use std::{cell::RefCell, rc::Rc, sync::Arc, time::Duration};
+
+const SPATIAL_WIDTH: usize = 256;
+const SPATIAL_HEIGHT: usize = 128;
+const SPATIAL_DECAY_SECONDS: f32 = 0.5;
+
+#[derive(Clone)]
+pub(super) struct AnalysisVisualizer {
+    data: Rc<RefCell<PlotData>>,
+}
+
+struct PlotData {
+    mode: VisualizerMode,
+    visible: bool,
+    background: u32,
+    primary: u32,
+    secondary: u32,
+    db_range: f32,
+    settings: AnalysisSettings,
+    generation: Option<u64>,
+    sample_rate: u32,
+    sample_time: Option<Duration>,
+    sequence: Option<u64>,
+    // Density is the backend's fixed-scale field; spatial is linear spectral power.
+    field: Vec<f32>,
+    spatial_next: Vec<f32>,
+    image: Option<Arc<RenderImage>>,
+    image_painted: bool,
+    image_error_reported: bool,
+    retired: Vec<Arc<RenderImage>>,
+    pending: Vec<Arc<RenderImage>>,
+    readout: SharedString,
+    range_label: SharedString,
+    high_label: SharedString,
+}
+
+pub(super) fn analysis_style(style: RadialSpectrumStyle) -> bool {
+    matches!(
+        style,
+        RadialSpectrumStyle::StereoDensity | RadialSpectrumStyle::SpatialSpectrum
+    )
+}
+
+fn mode_for_style(style: RadialSpectrumStyle) -> VisualizerMode {
+    match style {
+        RadialSpectrumStyle::StereoDensity => VisualizerMode::StereoDensity,
+        RadialSpectrumStyle::SpatialSpectrum => VisualizerMode::SpatialSpectrum,
+        _ => VisualizerMode::Off,
+    }
+}
+
+impl AnalysisVisualizer {
+    pub(super) fn new() -> Self {
+        let config = Config::default();
+        Self {
+            data: Rc::new(RefCell::new(PlotData {
+                mode: VisualizerMode::Off,
+                visible: true,
+                background: config.visual_background.rgb(),
+                primary: config.radial_spectrum_primary_color.rgb(),
+                secondary: config.radial_spectrum_secondary_color.rgb(),
+                db_range: config.radial_spectrum_db_range(),
+                settings: AnalysisSettings::from(&config),
+                generation: None,
+                sample_rate: 0,
+                sample_time: None,
+                sequence: None,
+                field: Vec::new(),
+                spatial_next: Vec::new(),
+                image: None,
+                image_painted: false,
+                image_error_reported: false,
+                retired: Vec::new(),
+                pending: Vec::new(),
+                readout: "Corr —   L/R —   Side —".into(),
+                range_label: "".into(),
+                high_label: "20 kHz".into(),
+            })),
+        }
+    }
+
+    pub(super) fn configure(&self, config: &Config) -> bool {
+        let mut data = self.data.borrow_mut();
+        let mode = mode_for_style(config.radial_spectrum_style);
+        let settings = AnalysisSettings::from(config);
+        let reset = mode != data.mode
+            || settings.fft_size != data.settings.fft_size
+            || settings.window != data.settings.window;
+        let recolor = data.primary != config.radial_spectrum_primary_color.rgb()
+            || data.secondary != config.radial_spectrum_secondary_color.rgb()
+            || data.db_range != config.radial_spectrum_db_range();
+        let changed = reset || recolor || data.background != config.visual_background.rgb();
+        if reset
+            || data.db_range != config.radial_spectrum_db_range()
+            || data.range_label.is_empty()
+        {
+            let (reference, unit) = if mode == VisualizerMode::StereoDensity {
+                ("Occupancy ", "dB")
+            } else {
+                ("Power ", "dBFS")
+            };
+            data.range_label = format!(
+                "{reference}−{:.0} … 0 {unit} · 0.5 s trail",
+                config.radial_spectrum_db_range()
+            )
+            .into();
+        }
+        data.mode = mode;
+        data.settings = settings;
+        data.primary = config.radial_spectrum_primary_color.rgb();
+        data.secondary = config.radial_spectrum_secondary_color.rgb();
+        data.background = config.visual_background.rgb();
+        data.db_range = config.radial_spectrum_db_range();
+        if reset {
+            data.clear();
+        } else if recolor && !data.field.is_empty() {
+            data.rasterize();
+        }
+        changed
+    }
+
+    pub(super) fn set_visible(&self, visible: bool) {
+        let mut data = self.data.borrow_mut();
+        if data.visible != visible {
+            data.visible = visible;
+            data.clear();
+        }
+    }
+
+    pub(super) fn update(&self, frame: &AnalysisFrame) {
+        self.data.borrow_mut().update(frame);
+    }
+
+    pub(super) fn release_retired_images(&self, window: &mut Window) {
+        let mut data = self.data.borrow_mut();
+        for image in data.retired.drain(..) {
+            if let Err(error) = window.drop_image(image) {
+                eprintln!("rivu analysis visualizer image release: {error}");
+            }
+        }
+        // Keep images for one complete intervening frame, as waveform tiles do.
+        let PlotData {
+            retired, pending, ..
+        } = &mut *data;
+        retired.append(pending);
+    }
+
+    pub(super) fn release_all_images(&self, window: &mut Window) {
+        let mut data = self.data.borrow_mut();
+        data.clear();
+        let PlotData {
+            retired, pending, ..
+        } = &mut *data;
+        for image in retired.drain(..).chain(pending.drain(..)) {
+            if let Err(error) = window.drop_image(image) {
+                eprintln!("rivu analysis visualizer image release: {error}");
+            }
+        }
+    }
+
+    pub(super) fn view(&self, panel_id: u64) -> AnyElement {
+        let data = Rc::clone(&self.data);
+        div()
+            .id(("analysis-visualizer", panel_id))
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .overflow_hidden()
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, cx| {
+                        data.borrow_mut().paint(bounds, window, cx);
+                    },
+                )
+                .size_full(),
+            )
+            .into_any_element()
+    }
+}
+
+impl PlotData {
+    fn retire_image(&mut self) {
+        if let Some(image) = self.image.take() {
+            // Images never painted have no GPU allocation to release.
+            if self.image_painted {
+                self.pending.push(image);
+            }
+        }
+        self.image_painted = false;
+        self.image_error_reported = false;
+    }
+
+    fn clear(&mut self) {
+        self.retire_image();
+        self.field.clear();
+        self.spatial_next.clear();
+        self.generation = None;
+        self.sample_rate = 0;
+        self.sample_time = None;
+        self.sequence = None;
+        self.readout = "Corr —   L/R —   Side —".into();
+    }
+
+    fn update(&mut self, frame: &AnalysisFrame) {
+        if !self.visible || self.mode == VisualizerMode::Off {
+            return;
+        }
+        if self.generation != Some(frame.generation) || self.sample_rate != frame.sample_rate {
+            self.clear();
+            self.generation = Some(frame.generation);
+            self.sample_rate = frame.sample_rate;
+            let high = high_frequency(frame.sample_rate);
+            self.high_label = frequency_label(high).into();
+        }
+        if frame.visualizer.mode != self.mode
+            || !frame.settings.is_some_and(|settings| {
+                settings.fft_size == self.settings.fft_size
+                    && settings.window == self.settings.window
+            })
+        {
+            return;
+        }
+        if self.sequence == Some(frame.sequence) || self.sample_time == Some(frame.sample_time) {
+            return;
+        }
+        if self
+            .sample_time
+            .is_some_and(|last| frame.sample_time < last)
+        {
+            self.clear();
+            self.generation = Some(frame.generation);
+            self.sample_rate = frame.sample_rate;
+        }
+        let mut changed = self.image.is_none();
+        match self.mode {
+            VisualizerMode::StereoDensity => {
+                if frame.visualizer.density.len() != DENSITY_SIDE * DENSITY_SIDE {
+                    return;
+                }
+                if self.field != frame.visualizer.density {
+                    self.field.clone_from(&frame.visualizer.density);
+                    changed = true;
+                }
+                self.readout = stereo_readout(frame).into();
+            }
+            VisualizerMode::SpatialSpectrum => {
+                let high = high_frequency(frame.sample_rate);
+                if high <= 20.0 {
+                    return;
+                }
+                self.field.resize(SPATIAL_WIDTH * SPATIAL_HEIGHT, 0.0);
+                self.spatial_next
+                    .resize(SPATIAL_WIDTH * SPATIAL_HEIGHT, 0.0);
+                let elapsed = self
+                    .sample_time
+                    .map(|last| frame.sample_time.saturating_sub(last).as_secs_f32())
+                    .unwrap_or(0.0);
+                decay_spatial(&self.field, &mut self.spatial_next, elapsed);
+                for bin in &frame.visualizer.spatial {
+                    let Some((x, y)) = spatial_cell(bin.frequency_hz, bin.pan, high) else {
+                        continue;
+                    };
+                    if !bin.power_db.is_finite() {
+                        continue;
+                    }
+                    // Peak hold per cell avoids making louder colors simply because
+                    // more FFT bins share a logarithmic row. It retains calibrated power.
+                    let power = 10.0_f32.powf(bin.power_db.min(0.0) * 0.1);
+                    let cell = &mut self.spatial_next[y * SPATIAL_WIDTH + x];
+                    *cell = cell.max(power);
+                }
+                if self.field != self.spatial_next {
+                    std::mem::swap(&mut self.field, &mut self.spatial_next);
+                    changed = true;
+                }
+            }
+            VisualizerMode::Off => return,
+        }
+        self.sample_time = Some(frame.sample_time);
+        self.sequence = Some(frame.sequence);
+        if changed {
+            self.rasterize();
+        }
+    }
+
+    fn rasterize(&mut self) {
+        let (width, height) = match self.mode {
+            VisualizerMode::StereoDensity => (DENSITY_SIDE, DENSITY_SIDE),
+            VisualizerMode::SpatialSpectrum => (SPATIAL_WIDTH, SPATIAL_HEIGHT),
+            VisualizerMode::Off => return,
+        };
+        let mut pixels = image::RgbaImage::new(width as u32, height as u32);
+        for (pixel, value) in pixels.pixels_mut().zip(&self.field) {
+            let strength = field_strength(*value, self.db_range);
+            let color = mix_color(self.primary, self.secondary, strength);
+            *pixel = image::Rgba([
+                (color >> 16) as u8,
+                (color >> 8) as u8,
+                color as u8,
+                (strength * 255.0).round() as u8,
+            ]);
+        }
+        self.retire_image();
+        self.image = Some(Arc::new(RenderImage::new([image::Frame::new(pixels)])));
+    }
+
+    fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+        window.paint_quad(fill(bounds, rgb(self.background)));
+        let width = bounds.size.width / px(1.0);
+        let height = bounds.size.height / px(1.0);
+        if width < 24.0 || height < 24.0 || !self.visible {
+            return;
+        }
+        let labels = width >= 250.0 && height >= 155.0;
+        let density = self.mode == VisualizerMode::StereoDensity;
+        let left = if labels { 49.0 } else { 6.0 };
+        let top = if labels { 25.0 } else { 6.0 };
+        let bottom = if labels {
+            if density { 72.0 } else { 51.0 }
+        } else {
+            6.0
+        };
+        let plot_width = (width - left - 12.0).max(1.0);
+        let plot_height = (height - top - bottom).max(1.0);
+        let (plot_width, plot_height) = if density {
+            let side = plot_width.min(plot_height);
+            (side, side)
+        } else {
+            (plot_width, plot_height)
+        };
+        let plot = Bounds::new(
+            point(
+                bounds.left() + px(left + (width - left - 12.0 - plot_width) * 0.5),
+                bounds.top() + px(top),
+            ),
+            size(px(plot_width), px(plot_height)),
+        );
+        window.paint_quad(fill(
+            plot,
+            rgb(mix_color(self.background, self.primary, 0.035)),
+        ));
+        if let Some(image) = &self.image {
+            self.image_painted = true;
+            if let Err(error) =
+                window.paint_image(plot, plot, px(0.0).into(), Arc::clone(image), 0, false)
+                && !self.image_error_reported
+            {
+                self.image_error_reported = true;
+                eprintln!("rivu analysis visualizer image paint: {error}");
+            }
+        }
+        for fraction in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let alpha = if fraction == 0.5 { 0.26 } else { 0.10 };
+            window.paint_quad(fill(
+                Bounds::new(
+                    point(
+                        plot.left() + (plot.size.width - px(1.0)) * fraction,
+                        plot.top(),
+                    ),
+                    size(px(1.0), plot.size.height),
+                ),
+                rgb(0xb1bbc5).alpha(alpha),
+            ));
+            if density || fraction == 0.0 || fraction == 1.0 {
+                window.paint_quad(fill(
+                    Bounds::new(
+                        point(
+                            plot.left(),
+                            plot.top() + (plot.size.height - px(1.0)) * fraction,
+                        ),
+                        size(plot.size.width, px(1.0)),
+                    ),
+                    rgb(0xb1bbc5).alpha(alpha),
+                ));
+            }
+        }
+        if !labels {
+            return;
+        }
+        let title = if density {
+            "M/S density · fixed ±1 scale"
+        } else {
+            "Spatial spectrum · energy balance"
+        };
+        label(
+            title.into(),
+            point(bounds.left() + px(10.0), bounds.top() + px(5.0)),
+            0.0,
+            width - 20.0,
+            window,
+            cx,
+        );
+        let axis_labels = if density {
+            ["−1", "0", "+1"]
+        } else {
+            ["L", "C", "R"]
+        };
+        for (index, text) in axis_labels.into_iter().enumerate() {
+            let fraction = index as f32 * 0.5;
+            label(
+                text.into(),
+                point(
+                    plot.left() + plot.size.width * fraction,
+                    plot.bottom() + px(3.0),
+                ),
+                fraction,
+                35.0,
+                window,
+                cx,
+            );
+        }
+        if density {
+            for (text, fraction) in [("+1", 0.0), ("0", 0.5), ("−1", 1.0)] {
+                label(
+                    text.into(),
+                    point(
+                        plot.left() - px(6.0),
+                        plot.top() + (plot.size.height - px(12.0)) * fraction,
+                    ),
+                    1.0,
+                    30.0,
+                    window,
+                    cx,
+                );
+            }
+            label(
+                "Mid".into(),
+                point(bounds.left() + px(5.0), plot.top() + px(16.0)),
+                0.0,
+                35.0,
+                window,
+                cx,
+            );
+            label(
+                "Side (L−R)/2".into(),
+                point(
+                    plot.left() + plot.size.width * 0.5,
+                    plot.bottom() + px(18.0),
+                ),
+                0.5,
+                plot_width,
+                window,
+                cx,
+            );
+            label(
+                self.readout.clone(),
+                point(
+                    bounds.left() + bounds.size.width * 0.5,
+                    plot.bottom() + px(38.0),
+                ),
+                0.5,
+                width - 16.0,
+                window,
+                cx,
+            );
+            label(
+                self.range_label.clone(),
+                point(
+                    bounds.left() + bounds.size.width * 0.5,
+                    plot.bottom() + px(53.0),
+                ),
+                0.5,
+                width - 16.0,
+                window,
+                cx,
+            );
+        } else {
+            let high = high_frequency(if self.sample_rate == 0 {
+                48_000
+            } else {
+                self.sample_rate
+            });
+            label(
+                self.high_label.clone(),
+                point(plot.left() - px(5.0), plot.top()),
+                1.0,
+                44.0,
+                window,
+                cx,
+            );
+            label(
+                "20 Hz".into(),
+                point(plot.left() - px(5.0), plot.bottom() - px(12.0)),
+                1.0,
+                44.0,
+                window,
+                cx,
+            );
+            for hz in [100.0_f32, 1000.0, 10_000.0] {
+                if hz >= high {
+                    continue;
+                }
+                let fraction = 1.0 - (hz / 20.0).ln() / (high / 20.0).ln();
+                let y = plot.top() + plot.size.height * fraction;
+                window.paint_quad(fill(
+                    Bounds::new(point(plot.left(), y), size(plot.size.width, px(1.0))),
+                    rgb(0xb1bbc5).alpha(0.10),
+                ));
+                if plot_height >= 150.0 {
+                    label(
+                        frequency_label(hz).into(),
+                        point(plot.left() - px(5.0), y - px(6.0)),
+                        1.0,
+                        44.0,
+                        window,
+                        cx,
+                    );
+                }
+            }
+            label(
+                self.range_label.clone(),
+                point(
+                    plot.left() + plot.size.width * 0.5,
+                    plot.bottom() + px(20.0),
+                ),
+                0.5,
+                plot_width,
+                window,
+                cx,
+            );
+        }
+    }
+}
+
+fn high_frequency(sample_rate: u32) -> f32 {
+    (sample_rate as f32 * 0.5).min(20_000.0)
+}
+
+fn spatial_cell(frequency: f32, pan: f32, high: f32) -> Option<(usize, usize)> {
+    if !frequency.is_finite()
+        || !pan.is_finite()
+        || high <= 20.0
+        || frequency < 20.0
+        || frequency > high
+    {
+        return None;
+    }
+    let x = (((pan.clamp(-1.0, 1.0) + 1.0) * 0.5) * (SPATIAL_WIDTH - 1) as f32).round() as usize;
+    let y = ((1.0 - (frequency / 20.0).ln() / (high / 20.0).ln()).clamp(0.0, 1.0)
+        * (SPATIAL_HEIGHT - 1) as f32)
+        .round() as usize;
+    Some((x, y))
+}
+
+fn decay_spatial(source: &[f32], target: &mut [f32], elapsed: f32) {
+    let decay = (-elapsed.max(0.0) / SPATIAL_DECAY_SECONDS).exp();
+    for (target, source) in target.iter_mut().zip(source) {
+        *target = *source * decay;
+    }
+}
+
+fn field_strength(value: f32, db_range: f32) -> f32 {
+    // Fixed references: density occupancy=1; spatial spectral power=1 (0 dBFS).
+    // Brightness never depends on the loudest cell in the current field.
+    if !value.is_finite() || value <= 0.0 {
+        0.0
+    } else {
+        ((10.0 * value.log10() + db_range) / db_range).clamp(0.0, 1.0)
+    }
+}
+
+fn stereo_readout(frame: &AnalysisFrame) -> String {
+    let value = |value: Option<f32>| value.filter(|value| value.is_finite());
+    let correlation = value(frame.visualizer.correlation)
+        .map(|v| format!("{:+.2}", v.clamp(-1.0, 1.0)))
+        .unwrap_or_else(|| "—".into());
+    let balance = value(frame.visualizer.balance)
+        .map(|v| {
+            let v = v.clamp(-1.0, 1.0);
+            format!("{:.0}/{:.0}%", (1.0 - v) * 50.0, (1.0 + v) * 50.0)
+        })
+        .unwrap_or_else(|| "—".into());
+    let side = value(frame.visualizer.side_ratio)
+        .map(|v| format!("{:.0}%", v.clamp(0.0, 1.0) * 100.0))
+        .unwrap_or_else(|| "—".into());
+    format!("Corr {correlation}   L/R {balance}   Side {side}")
+}
+
+fn frequency_label(hz: f32) -> String {
+    if hz >= 1000.0 {
+        format!("{:.0} kHz", hz / 1000.0)
+    } else {
+        format!("{hz:.0} Hz")
+    }
+}
+
+fn mix_color(first: u32, second: u32, fraction: f32) -> u32 {
+    let channel = |shift: u32| {
+        let first = ((first >> shift) & 0xff) as f32;
+        let second = ((second >> shift) & 0xff) as f32;
+        (first + (second - first) * fraction.clamp(0.0, 1.0)).round() as u32
+    };
+    (channel(16) << 16) | (channel(8) << 8) | channel(0)
+}
+
+fn label(
+    text: SharedString,
+    anchor: Point<Pixels>,
+    alignment: f32,
+    available_width: f32,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let mut style = window.text_style();
+    style.color = rgb(0xb1bbc5).into();
+    let run = style.to_run(text.len());
+    let line = window
+        .text_system()
+        .shape_line(text, px(10.0), &[run], None);
+    // Tiny panels omit labels rather than overlap or paint out of bounds.
+    if line.width() > px(available_width) {
+        return;
+    }
+    if let Err(error) = line.paint(
+        point(anchor.x - line.width() * alignment, anchor.y),
+        px(14.0),
+        TextAlign::Left,
+        None,
+        window,
+        cx,
+    ) {
+        eprintln!("rivu analysis visualizer label: {error}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::analysis::{SpatialBin, VisualizerFrame};
+
+    fn frame(mode: VisualizerMode) -> AnalysisFrame {
+        AnalysisFrame {
+            sequence: 1,
+            generation: 1,
+            sample_time: Duration::from_secs(1),
+            sample_rate: 48_000,
+            settings: Some(AnalysisSettings::from(&Config::default())),
+            visualizer: VisualizerFrame {
+                mode,
+                spatial: vec![SpatialBin {
+                    frequency_hz: 1000.0,
+                    pan: 0.0,
+                    power_db: -30.0,
+                }],
+                density: if mode == VisualizerMode::StereoDensity {
+                    vec![0.0; DENSITY_SIDE * DENSITY_SIDE]
+                } else {
+                    Vec::new()
+                },
+                ..VisualizerFrame::default()
+            },
+            ..AnalysisFrame::default()
+        }
+    }
+
+    fn plot(style: RadialSpectrumStyle) -> AnalysisVisualizer {
+        let plot = AnalysisVisualizer::new();
+        plot.configure(&Config {
+            radial_spectrum_style: style,
+            ..Config::default()
+        });
+        plot
+    }
+
+    #[test]
+    fn frequency_and_energy_balance_have_fixed_coordinates() {
+        assert_eq!(spatial_cell(20.0, -1.0, 20_000.0), Some((0, 127)));
+        assert_eq!(spatial_cell(20_000.0, 1.0, 20_000.0), Some((255, 0)));
+        let (center_x, center_y) =
+            spatial_cell((20.0_f32 * 20_000.0).sqrt(), 0.0, 20_000.0).unwrap();
+        assert_eq!(center_x, 128);
+        assert!(center_y == 63 || center_y == 64);
+        assert_eq!(spatial_cell(20_001.0, 0.0, 20_000.0), None);
+        assert_eq!(spatial_cell(19.0, 0.0, 20_000.0), None);
+        assert_eq!(spatial_cell(1000.0, f32::NAN, 20_000.0), None);
+        assert_eq!(spatial_cell(3000.0, 0.0, 2000.0), None);
+    }
+
+    #[test]
+    fn trail_decays_only_in_accepted_sample_time_and_does_not_sum_bins() {
+        let plot = plot(RadialSpectrumStyle::SpatialSpectrum);
+        let mut frame = frame(VisualizerMode::SpatialSpectrum);
+        frame.visualizer.spatial.push(frame.visualizer.spatial[0]);
+        plot.update(&frame);
+        let (x, y) = spatial_cell(1000.0, 0.0, 20_000.0).unwrap();
+        let index = y * SPATIAL_WIDTH + x;
+        assert!((plot.data.borrow().field[index] - 0.001).abs() < 1e-7);
+        let image = Arc::clone(plot.data.borrow().image.as_ref().unwrap());
+        frame.sequence += 1;
+        plot.update(&frame);
+        assert!(Arc::ptr_eq(
+            &image,
+            plot.data.borrow().image.as_ref().unwrap()
+        ));
+        frame.sample_time += Duration::from_millis(50);
+        frame.sequence += 1;
+        plot.update(&frame);
+        assert!(Arc::ptr_eq(
+            &image,
+            plot.data.borrow().image.as_ref().unwrap()
+        ));
+        frame.sample_time += Duration::from_millis(500);
+        frame.sequence += 1;
+        frame.visualizer.spatial.clear();
+        plot.update(&frame);
+        assert!((plot.data.borrow().field[index] - 0.001 / std::f32::consts::E).abs() < 1e-7);
+    }
+
+    #[test]
+    fn generation_mode_settings_and_visibility_invalidate_old_fields() {
+        let plot = plot(RadialSpectrumStyle::SpatialSpectrum);
+        let mut frame = frame(VisualizerMode::SpatialSpectrum);
+        plot.update(&frame);
+        frame.generation += 1;
+        frame.visualizer.mode = VisualizerMode::StereoDensity;
+        plot.update(&frame);
+        assert!(plot.data.borrow().image.is_none());
+        frame.visualizer.mode = VisualizerMode::SpatialSpectrum;
+        plot.update(&frame);
+        assert!(plot.data.borrow().image.is_some());
+        plot.configure(&Config {
+            radial_spectrum_style: RadialSpectrumStyle::SpatialSpectrum,
+            spectrum_fft_size: 16384,
+            ..Config::default()
+        });
+        plot.update(&frame);
+        assert!(plot.data.borrow().image.is_none());
+        frame.settings.as_mut().unwrap().fft_size = 16384;
+        plot.update(&frame);
+        plot.set_visible(false);
+        plot.update(&frame);
+        assert!(plot.data.borrow().field.is_empty());
+        plot.set_visible(true);
+        plot.configure(&Config {
+            radial_spectrum_style: RadialSpectrumStyle::StereoDensity,
+            ..Config::default()
+        });
+        plot.update(&frame);
+        assert!(plot.data.borrow().image.is_none());
+        let density = self::frame(VisualizerMode::StereoDensity);
+        plot.update(&density);
+        assert_eq!(plot.data.borrow().field.len(), DENSITY_SIDE * DENSITY_SIDE);
+    }
+
+    #[test]
+    fn density_is_not_auto_normalized_and_unchanged_data_reuses_texture() {
+        assert_eq!(field_strength(0.0, 70.0), 0.0);
+        assert_eq!(field_strength(1.0, 70.0), 1.0);
+        assert!((field_strength(0.001, 60.0) - 0.5).abs() < 1e-6);
+        let plot = plot(RadialSpectrumStyle::StereoDensity);
+        let mut frame = frame(VisualizerMode::StereoDensity);
+        frame.visualizer.density[0] = 0.001;
+        plot.update(&frame);
+        assert_eq!(plot.data.borrow().field[0], 0.001);
+        let image = Arc::clone(plot.data.borrow().image.as_ref().unwrap());
+        frame.sample_time += Duration::from_millis(100);
+        frame.sequence += 1;
+        plot.update(&frame);
+        assert!(Arc::ptr_eq(
+            &image,
+            plot.data.borrow().image.as_ref().unwrap()
+        ));
+        frame.visualizer.density[DENSITY_SIDE * DENSITY_SIDE - 1] = 1.0;
+        frame.sample_time += Duration::from_millis(100);
+        frame.sequence += 1;
+        plot.update(&frame);
+        assert_eq!(plot.data.borrow().field[0], 0.001);
+        assert_eq!(
+            plot.data.borrow().field[DENSITY_SIDE * DENSITY_SIDE - 1],
+            1.0
+        );
+        assert!(!Arc::ptr_eq(
+            &image,
+            plot.data.borrow().image.as_ref().unwrap()
+        ));
+    }
+
+    #[test]
+    fn only_uploaded_images_need_delayed_retirement() {
+        let plot = plot(RadialSpectrumStyle::StereoDensity);
+        let mut frame = frame(VisualizerMode::StereoDensity);
+        plot.update(&frame);
+        let old = Arc::downgrade(plot.data.borrow().image.as_ref().unwrap());
+        frame.visualizer.density[0] = 1.0;
+        frame.sample_time += Duration::from_millis(100);
+        frame.sequence += 1;
+        plot.update(&frame);
+        assert!(old.upgrade().is_none());
+        let uploaded = Arc::downgrade(plot.data.borrow().image.as_ref().unwrap());
+        plot.data.borrow_mut().image_painted = true;
+        plot.set_visible(false);
+        assert!(uploaded.upgrade().is_some());
+        assert_eq!(plot.data.borrow().pending.len(), 1);
+        assert!(plot.data.borrow().image.is_none());
+    }
+}

@@ -235,6 +235,8 @@ fn radial_spectrum_style_label(style: RadialSpectrumStyle) -> &'static str {
         RadialSpectrumStyle::Bars => "Bars",
         RadialSpectrumStyle::Rings => "Rings",
         RadialSpectrumStyle::BarsRings => "Bars + Rings",
+        RadialSpectrumStyle::StereoDensity => "Stereo Density",
+        RadialSpectrumStyle::SpatialSpectrum => "Spatial Spectrum",
     }
 }
 
@@ -1478,7 +1480,7 @@ impl GuiApp {
             ))
             .child(self.settings.tab_button(
                 "visual-audio-visualizer",
-                "Radial Spectrum",
+                "Audio Visualizer",
                 selected == VisualPage::AudioVisualizer,
                 cx,
                 |settings| settings.visual_page = VisualPage::AudioVisualizer,
@@ -1683,111 +1685,51 @@ impl GuiApp {
                         .child(caption("More frequency rows do not add FFT detail.")),
                 )),
             VisualPage::AudioVisualizer => {
-                let bars = draft.radial_spectrum_style != RadialSpectrumStyle::Rings;
-                let rings = draft.radial_spectrum_style != RadialSpectrumStyle::Bars;
-                let style = dropdown_button(
-                    "audio-visualizer-style",
-                    radial_spectrum_style_label(draft.radial_spectrum_style),
-                    cx,
-                    |this, _, _| {
-                        let values = [
-                            RadialSpectrumStyle::Bars,
-                            RadialSpectrumStyle::Rings,
-                            RadialSpectrumStyle::BarsRings,
-                        ];
-                        let selected = values
-                            .iter()
-                            .position(|value| *value == this.settings.draft.radial_spectrum_style)
-                            .unwrap_or(0);
-                        this.open_setting_dropdown(
-                            values
-                                .into_iter()
-                                .map(|value| {
-                                    DropdownItem::new(
-                                        SettingChoice::RadialSpectrumStyle(value),
-                                        radial_spectrum_style_label(value),
-                                    )
-                                })
-                                .collect(),
-                            selected,
-                        );
-                    },
-                )
-                .relative()
-                .child(self.measurement(Measured::SettingsStyle));
-                column()
-                    .gap_3()
-                    .child(settings_group(
-                        "Shape & motion",
-                        column()
-                            .gap_2()
-                            .child(two_column(
-                                form_field("Style", style).min_w(px(180.)),
-                                settings
-                                    .field(Field::RadialSpectrumInnerDiameter)
-                                    .min_w(px(180.)),
-                            ))
-                            .child(settings.pair(
-                                Field::RadialSpectrumSensitivity,
-                                Field::RadialSpectrumRotationSpeed,
-                            ))
+                let radial = matches!(draft.radial_spectrum_style, RadialSpectrumStyle::Bars | RadialSpectrumStyle::Rings | RadialSpectrumStyle::BarsRings);
+                let bars = matches!(draft.radial_spectrum_style, RadialSpectrumStyle::Bars | RadialSpectrumStyle::BarsRings);
+                let rings = matches!(draft.radial_spectrum_style, RadialSpectrumStyle::Rings | RadialSpectrumStyle::BarsRings);
+                let style = dropdown_button("audio-visualizer-style", radial_spectrum_style_label(draft.radial_spectrum_style), cx, |this, _, _| {
+                    let values = [RadialSpectrumStyle::Bars, RadialSpectrumStyle::Rings, RadialSpectrumStyle::BarsRings, RadialSpectrumStyle::StereoDensity, RadialSpectrumStyle::SpatialSpectrum];
+                    let selected = values.iter().position(|value| *value == this.settings.draft.radial_spectrum_style).unwrap_or(0);
+                    this.open_setting_dropdown(values.into_iter().map(|value| DropdownItem::new(SettingChoice::RadialSpectrumStyle(value), radial_spectrum_style_label(value))).collect(), selected);
+                }).relative().child(self.measurement(Measured::SettingsStyle));
+                let colors = settings_group("Colors", column().gap_2()
+                    .child(settings.pair(Field::RadialSpectrumPrimaryColor, Field::RadialSpectrumSecondaryColor))
+                    .child(caption("Independent of the shared color scheme.")));
+                if !radial {
+                    let hint = match draft.radial_spectrum_style {
+                        RadialSpectrumStyle::StereoDensity => "Fixed ±1 Mid/Side axes, no auto gain. Color indicates occupancy in dB, not audio dBFS. Correlation, balance and Side energy describe the current FFT window; silence has no correlation.",
+                        _ => "Logarithmic frequency versus left/right energy balance, not phase or source direction. Color indicates frequency-bin level; the dB range does not change playback volume.",
+                    };
+                    let analysis = column().gap_3()
+                        .child(settings_group("Analysis view", column().gap_2()
+                            .child(form_field("Style", style))
+                            .child(caption(hint))
+                            .child(caption("Shared FFT and background: Common. History fades with accepted audio time and freezes while paused. Radial motion and shape controls do not apply."))))
+                        .child(settings_group("Color mapping", column().gap_2()
                             .child(settings.single(Field::RadialSpectrumDb))
-                            .child(settings.db_range_hint(cx))
-                            .child(row().child(visual_switch(
-                                "audio-visualizer-fade-idle",
-                                "◌",
-                                "Fade when idle",
-                                draft.radial_spectrum_fade_when_idle,
-                                cx,
-                                |draft| {
-                                    draft.radial_spectrum_fade_when_idle =
-                                        !draft.radial_spectrum_fade_when_idle
-                                },
-                            ))),
-                    ))
-                    .child(settings_group(
-                        "Bars & rings",
-                        column()
-                            .gap_2()
-                            .child(two_column(
-                                settings.field_state(
-                                    Field::RadialSpectrumBarWidth,
-                                    bars,
-                                    "Available with Bars or Bars + Rings.",
-                                    cx,
-                                ),
-                                settings.field_state(
-                                    Field::RadialSpectrumBarGlowLayers,
-                                    bars,
-                                    "Available with Bars or Bars + Rings.",
-                                    cx,
-                                ),
-                            ))
-                            .child(two_column(
-                                settings.field_state(
-                                    Field::RadialSpectrumRingOpacity,
-                                    rings,
-                                    "Available with Rings or Bars + Rings.",
-                                    cx,
-                                ),
-                                settings
-                                    .field(Field::RadialSpectrumBloomIntensity)
-                                    .min_w(px(180.)),
-                            ))
-                            .child(caption(
-                                "Bloom affects bars and rings; bar glow requires bloom above zero.",
-                            )),
-                    ))
-                    .child(settings_group(
-                        "Colors",
-                        column()
-                            .gap_2()
-                            .child(settings.pair(
-                                Field::RadialSpectrumPrimaryColor,
-                                Field::RadialSpectrumSecondaryColor,
-                            ))
-                            .child(caption("Independent of the shared color scheme.")),
-                    ))
+                            .child(settings.db_range_hint(cx))));
+                    return analysis.child(colors);
+                }
+                column().gap_3()
+                    .child(settings_group("Shape & motion", column().gap_2()
+                        .child(two_column(form_field("Style", style).min_w(px(180.)), settings.field(Field::RadialSpectrumInnerDiameter).min_w(px(180.))))
+                        .child(settings.pair(Field::RadialSpectrumSensitivity, Field::RadialSpectrumRotationSpeed))
+                        .child(settings.single(Field::RadialSpectrumDb))
+                        .child(settings.db_range_hint(cx))
+                        .child(row().child(visual_switch("audio-visualizer-fade-idle", "◌", "Fade when not playing", draft.radial_spectrum_fade_when_idle, cx, |draft| draft.radial_spectrum_fade_when_idle = !draft.radial_spectrum_fade_when_idle)))
+                        .child(caption("Noctalia Fancy. Shared analysis and background: Common. Inner diameter is relative to panel size."))))
+                    .child(settings_group("Bars & rings", column().gap_2()
+                        .child(two_column(
+                            settings.field_state(Field::RadialSpectrumBarWidth, bars, "Select Bars or Bars + Rings to edit bar width", cx),
+                            settings.field_state(Field::RadialSpectrumBarGlowLayers, bars, "Select Bars or Bars + Rings to edit bar glow", cx),
+                        ))
+                        .child(two_column(
+                            settings.field_state(Field::RadialSpectrumRingOpacity, rings, "Select Rings or Bars + Rings to edit ring opacity", cx),
+                            settings.field(Field::RadialSpectrumBloomIntensity).min_w(px(180.)),
+                        ))
+                        .child(caption("Bloom affects bars and rings; bar glow requires bloom above zero."))))
+                    .child(colors)
             }
             VisualPage::Waveform => column()
                 .gap_3()

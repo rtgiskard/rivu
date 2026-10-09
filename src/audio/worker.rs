@@ -505,14 +505,9 @@ mod tests {
             let (shutdown, cancelled) = bounded(0);
             let analysis = Arc::new(RwLock::new(AnalysisFrame::default()));
             let waveform = Arc::new(RwLock::new(WaveformFrame::default()));
-            let worker = Worker::new(
-                receive,
-                events,
-                cancelled,
-                AnalysisWorker::new(analysis.clone()).unwrap(),
-                waveform.clone(),
-                1024,
-            );
+            let analyzer = AnalysisWorker::new(analysis.clone()).unwrap();
+            let analysis_control = Arc::clone(&analyzer.control);
+            let worker = Worker::new(receive, events, cancelled, analyzer, waveform.clone(), 1024);
             let worker = std::thread::spawn(move || {
                 worker.event(AudioEvent::Ended { generation: 2 });
                 worker.run();
@@ -521,6 +516,7 @@ mod tests {
                 commands,
                 events: event_receive,
                 analysis,
+                analysis_control,
                 waveform,
                 worker: Some(worker),
                 shutdown: Mutex::new(Some(shutdown)),

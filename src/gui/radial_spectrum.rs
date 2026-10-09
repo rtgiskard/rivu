@@ -3,6 +3,7 @@
 //! Rivu's RadialSpectrum follows the Noctalia v5 control's Bars/Rings concept
 //! and parameter model, using GPUI-native paths for the local rendering backend.
 
+use super::analysis_visualizer::{AnalysisVisualizer, analysis_style};
 use crate::{
     analysis::{AnalysisFrame, AnalysisSettings},
     config::{Config, RadialSpectrumStyle},
@@ -28,8 +29,10 @@ const BAR_GLOW_PASSES: [(f32, f32, f32); 4] = [
     (0.006, 1.2, 0.55),
 ];
 
+#[derive(Clone)]
 pub(super) struct RadialSpectrum {
     data: Rc<RefCell<VisualizerData>>,
+    analysis: AnalysisVisualizer,
 }
 
 struct VisualizerData {
@@ -58,6 +61,7 @@ struct VisualizerData {
 impl RadialSpectrum {
     pub(super) fn new() -> Self {
         Self {
+            analysis: AnalysisVisualizer::new(),
             data: Rc::new(RefCell::new(VisualizerData {
                 background: 0x08090c,
                 style: RadialSpectrumStyle::BarsRings,
@@ -85,6 +89,7 @@ impl RadialSpectrum {
     }
 
     pub(super) fn configure(&mut self, config: &Config) -> bool {
+        let analysis_changed = self.analysis.configure(config);
         let mut data = self.data.borrow_mut();
         let db_range = config.radial_spectrum_db_range();
         let expected_settings = AnalysisSettings::from(config);
@@ -104,7 +109,7 @@ impl RadialSpectrum {
             || data.expected_settings.fft_size != expected_settings.fft_size
             || data.expected_settings.window != expected_settings.window;
         if !changed {
-            return false;
+            return analysis_changed;
         }
         data.background = config.visual_background.rgb();
         data.style = config.radial_spectrum_style;
@@ -128,6 +133,7 @@ impl RadialSpectrum {
     }
 
     pub(super) fn set_visible(&self, visible: bool) -> bool {
+        self.analysis.set_visible(visible);
         let mut data = self.data.borrow_mut();
         let restored = visible && !data.visible;
         if data.visible != visible {
@@ -141,6 +147,10 @@ impl RadialSpectrum {
     }
 
     pub(super) fn update(&mut self, frame: &AnalysisFrame) {
+        if analysis_style(self.data.borrow().style) {
+            self.analysis.update(frame);
+            return;
+        }
         if frame.spectrum_db.is_empty() || frame.frequencies_hz.is_empty() {
             return;
         }
@@ -210,7 +220,18 @@ impl RadialSpectrum {
         data.time = (frame.sample_time.as_secs_f32() * data.rotation_speed).rem_euclid(TWO_PI);
     }
 
+    pub(super) fn release_retired_images(&self, window: &mut Window) {
+        self.analysis.release_retired_images(window);
+    }
+
+    pub(super) fn release_all_images(&self, window: &mut Window) {
+        self.analysis.release_all_images(window);
+    }
+
     pub(super) fn view(&self, panel_id: u64, playing: bool) -> AnyElement {
+        if analysis_style(self.data.borrow().style) {
+            return self.analysis.view(panel_id);
+        }
         let data = Rc::clone(&self.data);
         div()
             .id(("radial-spectrum", panel_id))
@@ -248,6 +269,8 @@ impl RadialSpectrum {
                                 paint_rings(bounds, &data, window);
                                 paint_bars(bounds, &data, window);
                             }
+                            RadialSpectrumStyle::StereoDensity
+                            | RadialSpectrumStyle::SpatialSpectrum => {}
                         }
                         if fade_alpha < 1.0 {
                             window.paint_quad(gpui::fill(

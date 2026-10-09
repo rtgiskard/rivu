@@ -82,7 +82,7 @@ pub fn waveform(
     source::Source::waveform(path, range, media_read_buffer_mb, ffmpeg_enabled, cancelled)
 }
 
-use crate::analysis::{AnalysisFrame, AnalysisSettings, AnalysisWorker};
+use crate::analysis::{AnalysisControl, AnalysisFrame, AnalysisSettings, AnalysisWorker};
 use crate::library::MediaInfo;
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, bounded};
@@ -156,6 +156,7 @@ pub struct AudioEngine {
     pub commands: Sender<AudioCommand>,
     pub events: Receiver<AudioEvent>,
     pub analysis: Arc<RwLock<AnalysisFrame>>,
+    pub(crate) analysis_control: Arc<AnalysisControl>,
     pub waveform: Arc<RwLock<WaveformFrame>>,
     worker: Option<JoinHandle<()>>,
     shutdown: Mutex<Option<Sender<()>>>,
@@ -169,6 +170,7 @@ impl AudioEngine {
         let waveform = Arc::new(RwLock::new(WaveformFrame::default()));
         let worker_waveform = waveform.clone();
         let analyzer = AnalysisWorker::new(analysis.clone())?;
+        let analysis_control = Arc::clone(&analyzer.control);
         let media_read_buffer_len = usize::try_from(media_read_buffer_mb)
             .expect("media read buffer size does not fit usize")
             .saturating_mul(BYTES_PER_MEBIBYTE);
@@ -189,6 +191,7 @@ impl AudioEngine {
             commands,
             events,
             analysis,
+            analysis_control,
             waveform,
             worker: Some(worker),
             shutdown: Mutex::new(Some(shutdown)),

@@ -246,15 +246,32 @@ Both views use a logarithmic frequency axis and share `spectrum_fft_size` and
 `spectrogram_db_range` overrides inherit `visualization_db_range` when omitted;
 see <<_visualization_db_ranges,Visualization dB ranges>>.
 
-=== Radial Spectrum
+=== Audio Visualizer
 
-`radial_spectrum_style` accepts `bars`, `rings`, or `bars_rings`. The remaining
-`radial_spectrum_*` settings control sensitivity, rotation, bar width/glow, ring
-opacity/Bloom, inner diameter, idle fade, and two endpoint colors. Its independent
-`radial_spectrum_db_range` override inherits `visualization_db_range` when omitted.
-It shares the Spectrum analyzer but has no absolute frequency labels.
+`radial_spectrum_style` selects the Audio Visualizer presentation:
 
-The presentation model is based on Noctalia Shell v5's
+* `bars`, `rings`, and `bars_rings` use the radial Spectrum presentation.
+  Sensitivity, rotation, bar width/glow, ring opacity/Bloom, inner diameter,
+  and idle fade apply to these styles only.
+* `stereo_density` shows a Mid/Side occupancy field: horizontal Side `(L−R)/2`,
+  vertical Mid `(L+R)/2`, both fixed at ±1 without automatic gain. Equal channels
+  form a vertical trace; opposite channels form a horizontal trace. Its readout
+  reports correlation, left/right energy balance, and the Side share of energy
+  over the current FFT window. Correlation is undefined for silence or a silent
+  channel. Color represents decaying sample occupancy in dB, not audio dBFS.
+* `spatial_spectrum` shows logarithmic frequency vertically and left/right
+  energy balance horizontally, with color representing frequency-bin power in
+  dBFS. Equal-energy channels appear at the center even when their phases differ;
+  this is not a source-direction or phase measurement.
+
+All styles share `spectrum_fft_size`, `spectrum_window`, `analysis_fps`, and the
+ two `radial_spectrum_*_color` endpoints. `radial_spectrum_db_range` inherits
+`visualization_db_range` when omitted; it controls color mapping, not playback
+volume or measured amplitude. The two analysis styles retain a 0.5-second
+exponential trail measured in accepted audio time, so pausing freezes the field.
+Seeking, signal gaps, style changes, and FFT size/window changes clear the trail.
+
+The radial presentation is based on Noctalia Shell v5's
 https://github.com/noctalia-dev/noctalia-shell/blob/e56a9db5/Widgets/AudioSpectrum/NMirroredSpectrum.qml[`NMirroredSpectrum.qml`],
 not a pixel-identical port.
 
