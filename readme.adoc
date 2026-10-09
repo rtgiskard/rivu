@@ -37,37 +37,6 @@ Wire implementation: link:src/ipc/protocol.rs[protocol],
 link:src/ipc/transport.rs[transport], and link:src/ipc/client.rs[client].
 Runtime ownership: link:src/core.rs[core] and link:src/core/runtime.rs[runtime].
 
-== Desktop UI controls
-
-Shared GPUI controls live in link:src/gui/components.rs[components] and keep
-visual treatment separate from application actions. Buttons and select triggers
-share their geometry, typography, and hover surface; `active_control` supplies
-the selected treatment for toggles, tabs, and sortable headers. Primary playback
-emphasis is distinct from selection. Reuse these primitives instead of adding
-page-specific highlight styles.
-
-Dropdown state wraps keyboard navigation, clamps out-of-range selection, and
-does not open an empty popover. Settings triggers own focus and repaint after
-opening; the popup uses the same rem-based row height as its rendered options
-and reveals the selected option when opened.
-Menus and dropdowns block clicks through their surfaces. Clicking outside
-dismisses the popup and consumes that click without activating the control below.
-
-About opens as an overlay inside the main window, with the Rivu logo on the left
-and left-aligned application/version details on the right. It shows only the
-Git build identifier, without the package-version wrapper used by `rivu -V`.
-The embedded Unix build timestamp is converted
-to the local timezone for display, including its UTC offset. The top-right ×,
-Escape, or an outside click closes the overlay.
-
-=== Planned shared controls
-
-Scrollbars are a pending shared-component requirement, not a Library-only widget.
-Lists, trees, and other scrollable panels should share thumb dragging, track
-clicking, hover treatment, and UI-scale behavior. For virtualized views, thumb
-position and size must reflect the logical content and viewport without loading
-all rows or resetting selection as query batches arrive.
-
 == Build and install
 
 Rivu currently targets Linux; the desktop UI uses Wayland. On Arch Linux, install
@@ -117,13 +86,10 @@ decoding behavior.
 
 === Build information
 
-About and `rivu -V` reuse the build-time `RIVU_GIT_VERSION`. `make build` supplies
-it with `git describe --long --tags --always --dirty`; no repository lookup runs
-at application startup. A nonempty, trimmed environment value overrides the
-package version; plain Cargo builds without that value use the package version.
-The build script embeds `RIVU_BUILD_TIMESTAMP` as integer Unix seconds; only
-the UI formats it as local date/time. No formatted date string is parsed back.
-Source changes refresh the build timestamp.
+About and `rivu -V` report the build-time `RIVU_GIT_VERSION`. `make build` supplies
+it with `git describe --long --tags --always --dirty`. A nonempty, trimmed
+environment value overrides the package version; plain Cargo builds without
+that value use the package version. About displays the build time in local time.
 
 For reproducible timestamps, set `SOURCE_DATE_EPOCH` to a nonnegative integer
 number of seconds since the Unix epoch. Invalid or unsupported values fail the

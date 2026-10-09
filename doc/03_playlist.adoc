@@ -27,9 +27,7 @@ link:../src/store.rs[playlist storage].
 == Desktop UI
 
 The Queue panel can save a non-empty queue as a regular playlist with the save
-icon; the playlist name is generated from the current date and time. Recent
-tracks are shown in one sortable list with title, play count, and last-played
-time columns.
+icon; the playlist name is generated from the current date and time.
 
 Playlist catalogs, entries, and the Queue panel's playlist-destination menu
 load rows automatically while scrolling. Entry numbering and move actions use

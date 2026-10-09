@@ -7,10 +7,8 @@ link:../src/audio/playback.rs[audio playback].
 
 == Transport and timing
 
-The desktop transport shows artwork, title, artist, status, elapsed and total
-time, seek, volume, Shuffle, Previous, Play/Pause, Next, and Repeat. Repeat
-cycles Off, All, and One. Previous restarts the current entry after three seconds;
-near the start it navigates back, using playback history when shuffling.
+Repeat cycles Off, All, and One. Previous restarts the current entry after three
+seconds; near the start it navigates back, using playback history when shuffling.
 CUE playback uses the original source without splitting or transcoding it.
 Positions and seeks are relative to the subtrack; pregap directives do not
 synthesize silence absent from the source. Range handling:

@@ -54,19 +54,14 @@ link:../src/config.rs[`Config`]; log handling is in link:../src/logging.rs[loggi
 
 == Desktop settings
 
-The bottom-right gear opens settings. Library roots are separated by semicolons;
-the output device is selected from the currently available devices in a dropdown.
+Open Settings from the application menu. Separate library roots with semicolons.
 In an open dropdown, Up/Down moves the highlight with wraparound;
 PageUp/PageDown moves by the visible row count and clamps at the first or last
 option without scrolling the settings underneath. Enter or Space accepts an
 option in non-editable dropdowns, and Escape closes the dropdown.
-General groups Library, Playback, Audio, Interface, Desktop integration, and
-Logging. Audio contains output selection, media read buffering, and decoder/remix
-switches; Interface contains a single searchable font selector, scale,
-and Nerd Font symbols. The system tray switch takes effect after
-restarting the graphical host, not merely reopening its window. Media read
-buffering applies to future source opens, including full waveform scans; it does
-not reopen the current track.
+The system tray switch takes effect after restarting the graphical host, not
+merely reopening its window. Media read buffering applies to future source opens,
+including full waveform scans; it does not reopen the current track.
 
 Visualizations is grouped by view, with shared controls in Common:
 
@@ -82,14 +77,6 @@ Visualizations is grouped by view, with shared controls in Common:
 * Rendering: `visualization_cache` reuses derived graphics in Spectrum,
   Spectrogram, and Waveform; it is separate from media read buffering.
 
-Spectrum separates shape/detail, body motion, and peak markers. Spectrogram
-separates color/history from frequency sampling. Radial Spectrum separates
-shape/motion, bars/rings effects, and colors. Waveform separates appearance from
-amplitude display. Buttons remain icon-first; hover reveals toggle names and
-On/Off state, repeat mode, and runtime status where available. Related fields
-share a row when space permits and wrap on narrower panels; standalone numeric
-fields keep the same half-row width instead of stretching across the panel.
-
 Spectrum, Spectrogram, and Radial Spectrum each expose a range override in their
 own tab. Empty inherits Common, with the current Common default shown in the
 hint. Entering a number makes that view independent; clearing the input restores
@@ -97,10 +84,8 @@ inheritance. Apply saves the Common default and all overrides together, includin
 fields on other tabs. Reopening or discarding settings restores an empty input
 for inherited ranges and the saved number for explicit overrides.
 
-Inactive style-dependent fields stay in place, dimmed, with their values
-preserved: Solid disables Spectrum count/width/gap controls, hidden peak markers
-disable peak motion controls, and Radial styles disable controls for absent bars
-or rings. Hover an inactive field for the reason; switch back to resume editing.
+Style-dependent fields preserve their values while inactive. Hover an inactive
+field for the reason; switch back to a compatible style to resume editing.
 
 Font: type to search installed families, or use the arrow to browse them and
 `serif`, `sans-serif`, and `monospace`. Enter or a click selects a choice; Space
@@ -121,9 +106,7 @@ must be available.
 Apply validates and saves all pages together; navigation preserves the draft.
 Discard drops unapplied changes. Saving library roots does not scan or enqueue
 tracks; use `Scan paths` in Library. Display-only changes do not reopen audio.
-The fixed footer retains icon Apply/Discard actions. Errors show a truncated
-message with a copy icon; hover reveals the complete message and clicking copies
-it without truncation.
+Hover an error to read its complete message, or click its copy icon to copy it.
 Settings controls are implemented in link:../src/gui/settings.rs[settings].
 
 See link:../readme.adoc[README] for application lifecycle and host behavior.
