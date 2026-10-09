@@ -13,6 +13,8 @@ use std::{
 const MAX_SCAN: usize = 4 * 1024 * 1024;
 const MIN_FRAME: usize = 96;
 const MAX_FRAME: usize = 32 * 1024;
+const SCAN_CHUNK: usize = 64 * 1024;
+const SCAN_WINDOW: usize = SCAN_CHUNK + MAX_FRAME * 3 - 1;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Detection {
@@ -30,37 +32,36 @@ pub(super) fn scan(path: &Path) -> Result<Option<Detection>> {
     if &magic[..4] == b"fLaC" || &magic[..4] == b"OggS" || &magic[4..8] == b"ftyp" {
         return Ok(None);
     }
+    let mut window = vec![0u8; SCAN_WINDOW];
     if let Some(regions) = riff_data_regions(&mut file)? {
         for (offset, length) in regions {
-            if let Some(found) = scan_region(&mut file, offset, length)? {
+            if let Some(found) = scan_region(&mut file, offset, length, &mut window)? {
                 return Ok(Some(found));
             }
         }
         return Ok(None);
     }
     let length = file.metadata()?.len();
-    scan_region(&mut file, 0, length)
+    scan_region(&mut file, 0, length, &mut window)
 }
 
-fn scan_region(file: &mut File, offset: u64, length: u64) -> Result<Option<Detection>> {
-    const CHUNK: usize = 64 * 1024;
+fn scan_region(file: &mut File, offset: u64, length: u64, window: &mut [u8]) -> Result<Option<Detection>> {
     let limit = length.min(MAX_SCAN as u64);
     let mut position = 0u64;
-    let mut overlap = Vec::new();
+    // Chunk reads and retained overlap share bounded storage. Each region starts
+    // empty so detection never joins independent RIFF data payloads.
+    let mut overlap = 0;
+    file.seek(SeekFrom::Start(offset))?;
     while position < limit {
-        let count = (limit - position).min(CHUNK as u64) as usize;
-        file.seek(SeekFrom::Start(offset + position))?;
-        let mut chunk = vec![0u8; count];
-        file.read_exact(&mut chunk)?;
-        let mut window = Vec::with_capacity(overlap.len() + chunk.len());
-        window.extend_from_slice(&overlap);
-        window.extend_from_slice(&chunk);
-        if let Some(found) = scan_bytes(&window) {
+        let count = (limit - position).min(SCAN_CHUNK as u64) as usize;
+        file.read_exact(&mut window[overlap..overlap + count])?;
+        let length = overlap + count;
+        if let Some(found) = scan_bytes(&window[..length]) {
             return Ok(Some(found));
         }
-        let keep = (MAX_FRAME * 3 - 1).min(window.len());
-        overlap.clear();
-        overlap.extend_from_slice(&window[window.len() - keep..]);
+        let keep = (MAX_FRAME * 3 - 1).min(length);
+        window.copy_within(length - keep..length, 0);
+        overlap = keep;
         position += count as u64;
     }
     Ok(None)
@@ -270,6 +271,27 @@ mod tests {
         bytes[100..104].copy_from_slice(&[0x7f, 0xfe, 0x80, 0x01]);
         assert!(scan_bytes(&bytes).is_none());
     }
+    #[test]
+    fn scan_retains_cross_chunk_frames_but_never_crosses_regions_or_limit() {
+        use std::io::Write;
+        let mut file = tempfile::tempfile().unwrap();
+        let prefix = SCAN_CHUNK - 40;
+        let frames = core16(false);
+        file.write_all(&vec![0; prefix]).unwrap();
+        file.write_all(&frames).unwrap();
+        let mut window = vec![0; SCAN_WINDOW];
+        let length = (prefix + frames.len()) as u64;
+        assert!(scan_region(&mut file, 0, length, &mut window).unwrap().is_some());
+        assert!(scan_region(&mut file, 0, length - 1, &mut window).unwrap().is_none());
+        assert!(scan_region(&mut file, prefix as u64, 192, &mut window).unwrap().is_none());
+        assert!(scan_region(&mut file, (prefix + 192) as u64, 96, &mut window).unwrap().is_none());
+        file.set_len(0).unwrap();
+        file.rewind().unwrap();
+        file.write_all(&vec![0; MAX_SCAN - 96]).unwrap();
+        file.write_all(&frames).unwrap();
+        assert!(scan_region(&mut file, 0, (MAX_SCAN + 192) as u64, &mut window).unwrap().is_none());
+    }
+
 
     fn set_bits(bytes: &mut [u8], start: usize, count: usize, value: u32) {
         for n in 0..count {
