@@ -47,6 +47,15 @@ impl WaveformCoverage {
     }
 }
 
+/// One earlier contiguous candidate, never a history of seeks. Choosing the
+/// earliest prefix ensures a packetized full traversal can reach cached RMS.
+#[derive(Clone, Debug)]
+pub(crate) struct RmsPrefix {
+    span: std::ops::Range<u64>,
+    energy: [f64; 3],
+    counts: [u64; 3],
+}
+
 #[derive(Clone, Debug)]
 pub struct WaveformFrame {
     pub revision: u64,
@@ -58,7 +67,8 @@ pub struct WaveformFrame {
     pub max_peak: f32,
     /// `None` is not yet decoded; `Some(0.0)` is decoded silence.
     pub peaks: Vec<Option<f32>>,
-    /// Per-bin RMS energy, accumulated from the same PCM pass as `peaks`.
+    /// RMS of one contiguous decoded interval per bin. Disjoint previews retain
+    /// peaks but enter RMS only when a later traversal connects their samples.
     pub(crate) rms: Vec<Option<f32>>,
     pub(crate) rms_counts: Vec<u64>,
     pub(crate) left_peaks: Vec<Option<f32>>,
@@ -68,7 +78,8 @@ pub struct WaveformFrame {
     pub(crate) left_rms_counts: Vec<u64>,
     pub(crate) right_rms_counts: Vec<u64>,
     pub(crate) channel_weights: Vec<[f32; 2]>,
-    pub(crate) last_push_start: Option<f64>,
+    pub(crate) rms_spans: Vec<Option<std::ops::Range<u64>>>,
+    pub(crate) rms_prefixes: Vec<Option<RmsPrefix>>,
 }
 
 impl Default for WaveformFrame {
@@ -91,31 +102,47 @@ impl Default for WaveformFrame {
             left_rms_counts: Vec::new(),
             right_rms_counts: Vec::new(),
             channel_weights: Vec::new(),
-            last_push_start: None,
+            rms_spans: Vec::new(),
+            rms_prefixes: Vec::new(),
         }
     }
 }
 
-fn merge_bin(peaks: &mut [Option<f32>], rms: &mut [Option<f32>], counts: &mut [u64], index: usize) {
-    peaks[index] = match (peaks[index * 2], peaks[index * 2 + 1]) {
-        (Some(left), Some(right)) => Some(left.max(right)),
-        (left, right) => left.or(right),
-    };
-    let left = index * 2;
-    let right = left + 1;
-    let count = counts[left].saturating_add(counts[right]);
-    rms[index] = if count == 0 {
-        None
-    } else {
-        let left_energy = rms[left].map_or(0.0, |value| {
-            f64::from(value) * f64::from(value) * counts[left] as f64
-        });
-        let right_energy = rms[right].map_or(0.0, |value| {
-            f64::from(value) * f64::from(value) * counts[right] as f64
-        });
-        Some(((left_energy + right_energy) / count as f64).sqrt() as f32)
-    };
-    counts[index] = count;
+/// Compact at most four disjoint intervals on the stack. Adjacent intervals
+/// merge; across gaps, display the longest and retain the earliest prefix.
+fn compact_statistics(intervals: [Option<RmsPrefix>; 4]) -> (Option<RmsPrefix>, Option<RmsPrefix>) {
+    let mut merged: [Option<RmsPrefix>; 4] = [None, None, None, None];
+    let mut len = 0;
+    for interval in intervals.into_iter().flatten() {
+        if len > 0 && merged[len - 1].as_ref().unwrap().span.end == interval.span.start {
+            let previous = merged[len - 1].as_mut().unwrap();
+            previous.span.end = interval.span.end;
+            for side in 0..3 {
+                previous.energy[side] += interval.energy[side];
+                previous.counts[side] = previous.counts[side].saturating_add(interval.counts[side]);
+            }
+        } else {
+            merged[len] = Some(interval);
+            len += 1;
+        }
+    }
+    if len == 0 {
+        return (None, None);
+    }
+    let mut longest = 0;
+    for index in 1..len {
+        let span = &merged[index].as_ref().unwrap().span;
+        let best = &merged[longest].as_ref().unwrap().span;
+        if span.end - span.start > best.end - best.start {
+            longest = index;
+        }
+    }
+    let primary = merged[longest].take().unwrap();
+    let prefix = merged
+        .into_iter()
+        .flatten()
+        .find(|interval| interval.span.end <= primary.span.start);
+    (Some(primary), prefix)
 }
 
 fn update_bin(
@@ -127,15 +154,15 @@ fn update_bin(
     energy: f64,
     sample_count: u64,
 ) -> bool {
-    if sample_count == 0 {
-        return false;
-    }
     let mut changed = false;
     let previous = peaks[index];
     let next = Some(previous.unwrap_or(0.0).max(peak));
     if previous != next {
         peaks[index] = next;
         changed = true;
+    }
+    if sample_count == 0 {
+        return changed;
     }
     let old_count = counts[index];
     let old_energy = rms[index].map_or(0.0, |value| {
@@ -148,6 +175,7 @@ fn update_bin(
         changed = true;
     }
     counts[index] = count;
+    changed |= count != old_count;
     changed
 }
 
@@ -214,11 +242,14 @@ impl WaveformAccumulator {
             left_rms_counts,
             right_rms_counts
         );
+        shared.rms_spans[start..end].clone_from_slice(&self.frame.rms_spans[start..end]);
+        shared.rms_spans.truncate(self.frame.rms_spans.len());
+        shared.rms_prefixes[start..end].clone_from_slice(&self.frame.rms_prefixes[start..end]);
+        shared.rms_prefixes.truncate(self.frame.rms_prefixes.len());
         shared.complete = self.frame.complete;
         shared.duration = self.frame.duration;
         shared.span_seconds = self.frame.span_seconds;
         shared.max_peak = self.frame.max_peak;
-        shared.last_push_start = self.frame.last_push_start;
         if shared.channel_weights != self.frame.channel_weights {
             shared
                 .channel_weights
@@ -244,6 +275,59 @@ impl WaveformFrame {
         frame.revision = self.revision.wrapping_add(1);
         frame.complete = true;
         *self = frame;
+    }
+
+    fn bin_statistics(&self, index: usize) -> Option<RmsPrefix> {
+        self.rms_spans[index].clone().map(|span| {
+            let counts = [
+                self.rms_counts[index],
+                self.left_rms_counts[index],
+                self.right_rms_counts[index],
+            ];
+            let values = [self.rms[index], self.left_rms[index], self.right_rms[index]];
+            let energy = std::array::from_fn(|side| {
+                values[side].map_or(0.0, |value| f64::from(value).powi(2) * counts[side] as f64)
+            });
+            RmsPrefix {
+                span,
+                energy,
+                counts,
+            }
+        })
+    }
+
+    fn compact_bin(&mut self, index: usize) {
+        let left = index * 2;
+        let right = left + 1;
+        let intervals = [
+            self.rms_prefixes[left].take(),
+            self.bin_statistics(left),
+            self.rms_prefixes[right].take(),
+            self.bin_statistics(right),
+        ];
+        let (primary, prefix) = compact_statistics(intervals);
+        for peaks in [&mut self.peaks, &mut self.left_peaks, &mut self.right_peaks] {
+            peaks[index] = match (peaks[left], peaks[right]) {
+                (Some(left), Some(right)) => Some(left.max(right)),
+                (left, right) => left.or(right),
+            };
+        }
+        for (side, (rms, counts)) in [
+            (&mut self.rms, &mut self.rms_counts),
+            (&mut self.left_rms, &mut self.left_rms_counts),
+            (&mut self.right_rms, &mut self.right_rms_counts),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let count = primary.as_ref().map_or(0, |primary| primary.counts[side]);
+            counts[index] = count;
+            rms[index] = primary.as_ref().and_then(|primary| {
+                (count != 0).then(|| (primary.energy[side] / count as f64).sqrt() as f32)
+            });
+        }
+        self.rms_spans[index] = primary.map(|primary| primary.span);
+        self.rms_prefixes[index] = prefix;
     }
 
     /// Reopening the same source (including seeks and device changes) retains
@@ -284,9 +368,12 @@ impl WaveformFrame {
         self.left_rms_counts.resize(bins, 0);
         self.right_rms_counts.clear();
         self.right_rms_counts.resize(bins, 0);
+        self.rms_spans.clear();
+        self.rms_spans.resize(bins, None);
+        self.rms_prefixes.clear();
+        self.rms_prefixes.resize(bins, None);
         self.channel_weights.clear();
         self.max_peak = 1.0;
-        self.last_push_start = None;
         self.revision = self.revision.wrapping_add(1);
     }
 
@@ -308,6 +395,8 @@ impl WaveformFrame {
                 self.right_rms.truncate(bins);
                 self.left_rms_counts.truncate(bins);
                 self.right_rms_counts.truncate(bins);
+                self.rms_spans.truncate(bins);
+                self.rms_prefixes.truncate(bins);
             }
         }
         self.complete = true;
@@ -351,29 +440,13 @@ impl WaveformFrame {
         if !end_seconds.is_finite() || end_seconds <= 0.0 {
             return;
         }
-        if self.last_push_start == Some(start_seconds) {
-            return;
-        }
-        self.last_push_start = Some(start_seconds);
         let mut changed = false;
         if self.duration.is_none() {
             // Doubling merges adjacent bins exactly, unlike arbitrary rescaling
             // which would misplace or lose old peaks. Empty bins stay unknown.
             while end_seconds > self.span_seconds {
                 for index in 0..MAX_BINS / 2 {
-                    merge_bin(&mut self.peaks, &mut self.rms, &mut self.rms_counts, index);
-                    merge_bin(
-                        &mut self.left_peaks,
-                        &mut self.left_rms,
-                        &mut self.left_rms_counts,
-                        index,
-                    );
-                    merge_bin(
-                        &mut self.right_peaks,
-                        &mut self.right_rms,
-                        &mut self.right_rms_counts,
-                        index,
-                    );
+                    self.compact_bin(index);
                 }
                 self.peaks[MAX_BINS / 2..].fill(None);
                 self.rms[MAX_BINS / 2..].fill(None);
@@ -384,6 +457,8 @@ impl WaveformFrame {
                 self.right_rms[MAX_BINS / 2..].fill(None);
                 self.left_rms_counts[MAX_BINS / 2..].fill(0);
                 self.right_rms_counts[MAX_BINS / 2..].fill(0);
+                self.rms_spans[MAX_BINS / 2..].fill(None);
+                self.rms_prefixes[MAX_BINS / 2..].fill(None);
                 self.span_seconds *= 2.0;
                 changed = true;
                 *dirty = Some(0..self.peaks.len());
@@ -406,11 +481,36 @@ impl WaveformFrame {
                 break;
             }
             let bin = (u128::from(frame) * bins / u128::from(total_frames)) as usize;
+            let boundary = ((bin as u128 + 1) * u128::from(total_frames)).div_ceil(bins) as u64;
+            let mut take = (boundary - frame).min((count - offset) as u64) as usize;
+            let primary = self.rms_spans[bin].as_ref();
+            let prefix = self.rms_prefixes[bin].as_ref();
+            let mut represented = false;
+            for span in [primary, prefix.map(|prefix| &prefix.span)]
+                .into_iter()
+                .flatten()
+            {
+                if frame < span.start {
+                    take = take.min((span.start - frame) as usize);
+                } else if frame < span.end {
+                    take = take.min((span.end - frame) as usize);
+                    represented = true;
+                }
+            }
+            if represented {
+                // Cached main/prefix overlaps are skipped before reading PCM.
+                offset += take;
+                continue;
+            }
+            let end = frame + take as u64;
+            let accumulate = primary.is_none_or(|span| end == span.start || frame == span.end);
+            let collect_prefix = !accumulate
+                && primary.is_some_and(|span| end <= span.start)
+                && prefix
+                    .is_none_or(|prefix| frame < prefix.span.start || frame == prefix.span.end);
             let dirty = dirty.get_or_insert(bin..bin + 1);
             dirty.start = dirty.start.min(bin);
             dirty.end = dirty.end.max(bin + 1);
-            let boundary = ((bin as u128 + 1) * u128::from(total_frames)).div_ceil(bins) as u64;
-            let take = (boundary - frame).min((count - offset) as u64) as usize;
             let mut combined_peak = 0.0_f32;
             let mut combined_energy = 0.0_f64;
             let mut combined_count = 0_u64;
@@ -479,7 +579,7 @@ impl WaveformFrame {
                 bin,
                 combined_peak,
                 combined_energy,
-                combined_count.max(1),
+                if accumulate { combined_count.max(1) } else { 0 },
             );
             changed |= update_bin(
                 &mut self.left_peaks,
@@ -488,7 +588,7 @@ impl WaveformFrame {
                 bin,
                 side_peaks[0],
                 side_energy[0],
-                side_counts[0],
+                if accumulate { side_counts[0] } else { 0 },
             );
             changed |= update_bin(
                 &mut self.right_peaks,
@@ -497,8 +597,71 @@ impl WaveformFrame {
                 bin,
                 side_peaks[1],
                 side_energy[1],
-                side_counts[1],
+                if accumulate { side_counts[1] } else { 0 },
             );
+            if accumulate {
+                let end = frame + take as u64;
+                self.rms_spans[bin] = Some(match &self.rms_spans[bin] {
+                    Some(span) => span.start.min(frame)..span.end.max(end),
+                    None => frame..end,
+                });
+            }
+            if collect_prefix {
+                let energy = [combined_energy, side_energy[0], side_energy[1]];
+                let counts = [combined_count.max(1), side_counts[0], side_counts[1]];
+                match &mut self.rms_prefixes[bin] {
+                    Some(prefix) if end == prefix.span.start || frame == prefix.span.end => {
+                        prefix.span = prefix.span.start.min(frame)..prefix.span.end.max(end);
+                        for side in 0..3 {
+                            prefix.energy[side] += energy[side];
+                            prefix.counts[side] = prefix.counts[side].saturating_add(counts[side]);
+                        }
+                    }
+                    slot => {
+                        *slot = Some(RmsPrefix {
+                            span: frame..end,
+                            energy,
+                            counts,
+                        })
+                    }
+                }
+                changed = true;
+            }
+            if self.rms_prefixes[bin].as_ref().is_some_and(|prefix| {
+                self.rms_spans[bin]
+                    .as_ref()
+                    .is_some_and(|span| prefix.span.end == span.start)
+            }) {
+                let prefix = self.rms_prefixes[bin].take().unwrap();
+                self.rms_spans[bin].as_mut().unwrap().start = prefix.span.start;
+                changed |= update_bin(
+                    &mut self.peaks,
+                    &mut self.rms,
+                    &mut self.rms_counts,
+                    bin,
+                    0.0,
+                    prefix.energy[0],
+                    prefix.counts[0],
+                );
+                changed |= update_bin(
+                    &mut self.left_peaks,
+                    &mut self.left_rms,
+                    &mut self.left_rms_counts,
+                    bin,
+                    0.0,
+                    prefix.energy[1],
+                    prefix.counts[1],
+                );
+                changed |= update_bin(
+                    &mut self.right_peaks,
+                    &mut self.right_rms,
+                    &mut self.right_rms_counts,
+                    bin,
+                    0.0,
+                    prefix.energy[2],
+                    prefix.counts[2],
+                );
+            }
             self.max_peak = self
                 .max_peak
                 .max(combined_peak)
@@ -530,37 +693,35 @@ mod tests {
         assert_eq!(actual.duration, expected.duration);
         assert_eq!(actual.span_seconds, expected.span_seconds);
         assert_eq!(actual.max_peak, expected.max_peak);
-        assert_eq!(actual.last_push_start, expected.last_push_start);
     }
 
     #[test]
-    fn local_accumulation_publishes_counts_doubling_seek_and_finish_exactly() {
-        for duration in [None, Some(240.0)] {
-            let mut shared = frame(duration, 100);
-            let mut expected = shared.clone();
-            let mut accumulator = WaveformAccumulator::new(shared.clone());
-            accumulator.set_channel_weights(&[[0.8, 0.2], [0.1, 0.9]]);
-            expected.set_channel_weights(&[[0.8, 0.2], [0.1, 0.9]]);
-            for start in [0.0, 0.01, 59.99, 61.0, 121.0, 0.02] {
-                let samples = [0.2, -0.5, 0.8, 0.1];
-                accumulator.push(start, &samples, 100, 2);
-                expected.push(start, &samples, 100, 2);
-                accumulator.publish(&mut shared);
-                assert_same_bins(&shared, &expected);
-            }
-            shared.select(Path::new("track.wav"), None, duration, 100);
+    fn cached_seek_reopens_preserve_unique_counts_and_accept_new_pcm() {
+        let mut shared = frame(Some(1.0), 3200);
+        let mut accumulator = WaveformAccumulator::new(shared.clone());
+        accumulator.push(0.0, &[1.0], 3200, 1);
+        accumulator.publish(&mut shared);
+        let revision = shared.revision;
+        // Same RMS/peak, but newly represented PCM must still be published.
+        accumulator.push(1.0 / 3200.0, &[1.0], 3200, 1);
+        accumulator.publish(&mut shared);
+        assert!(shared.revision > revision);
+        assert_eq!(shared.rms_counts[0], 2);
+        for _ in 0..100 {
+            shared.select(Path::new("track.wav"), None, Some(1.0), 3200);
             let mut reopened = WaveformAccumulator::new(shared.clone());
-            reopened.push(20.0, &[0.7, 0.3], 100, 2);
-            expected.push(20.0, &[0.7, 0.3], 100, 2);
+            let revision = shared.revision;
+            reopened.push(0.0, &[1.0, 1.0], 3200, 1);
             reopened.publish(&mut shared);
-            assert_same_bins(&shared, &expected);
-            let mut coverage = WaveformCoverage::new(0.0);
-            coverage.record(0.0, 12300, 100);
-            reopened.finish(&coverage);
-            coverage.finish(&mut expected);
-            reopened.publish(&mut shared);
-            assert_same_bins(&shared, &expected);
+            assert_eq!(shared.revision, revision);
+            assert_eq!(shared.rms_counts[0], 2);
         }
+        let mut reopened = WaveformAccumulator::new(shared.clone());
+        reopened.push(2.0 / 3200.0, &[0.5, 0.0], 3200, 1);
+        reopened.publish(&mut shared);
+        assert_eq!(shared.rms_counts[..2], [2, 2]);
+        assert_eq!(shared.peaks[..2], [Some(1.0), Some(0.5)]);
+        assert!(!shared.complete);
     }
 
     #[test]
@@ -586,6 +747,218 @@ mod tests {
         let mut frame = WaveformFrame::default();
         frame.select(Path::new("track.wav"), None, duration, rate);
         frame
+    }
+
+    fn assert_statistics(actual: &WaveformFrame, expected: &WaveformFrame) {
+        assert_eq!(actual.peaks, expected.peaks);
+        assert_eq!(actual.left_peaks, expected.left_peaks);
+        assert_eq!(actual.right_peaks, expected.right_peaks);
+        assert_eq!(actual.rms_counts, expected.rms_counts);
+        assert_eq!(actual.left_rms_counts, expected.left_rms_counts);
+        assert_eq!(actual.right_rms_counts, expected.right_rms_counts);
+        for (actual, expected) in [
+            (&actual.rms, &expected.rms),
+            (&actual.left_rms, &expected.left_rms),
+            (&actual.right_rms, &expected.right_rms),
+        ] {
+            for (actual, expected) in actual.iter().zip(expected) {
+                match (actual, expected) {
+                    (Some(actual), Some(expected)) => assert!((actual - expected).abs() < 1e-6),
+                    (None, None) => {}
+                    _ => panic!("RMS coverage differs: {actual:?} vs {expected:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn seeking_back_does_not_reweight_the_original_two_sample_bin() {
+        let mut frame = frame(Some(1.0), 3200);
+        frame.push(0.0, &[1.0], 3200, 1);
+        frame.push(1.0 / 3200.0, &[0.0], 3200, 1);
+        let expected = (0.5_f32).sqrt();
+        let revision = frame.revision;
+        for _ in 0..100 {
+            frame.push(0.0, &[1.0], 3200, 1);
+            frame.push(1.0 / 3200.0, &[0.0], 3200, 1);
+            assert_eq!(frame.rms[0], Some(expected));
+            assert_eq!(frame.rms_counts[0], 2);
+            assert_eq!(frame.left_rms[0], Some(expected));
+            assert_eq!(frame.right_rms[0], Some(expected));
+            assert_eq!(frame.left_rms_counts[0], 2);
+            assert_eq!(frame.right_rms_counts[0], 2);
+            assert_eq!(frame.revision, revision);
+        }
+    }
+
+    #[test]
+    fn overlapping_packets_prefixes_and_longer_same_timestamp_packets_are_unique() {
+        let rate = 12800;
+        let samples: Vec<f32> = (0..16)
+            .flat_map(|index| [index as f32 / 16.0, -(index as f32) / 32.0])
+            .collect();
+        let mut expected = frame(Some(1.0), rate);
+        expected.push(0.0, &samples, rate, 2);
+        for packets in [
+            vec![2..4, 0..4, 0..16, 5..12],
+            vec![6..8, 4..7, 0..5, 7..16, 0..16],
+            vec![0..1, 1..3, 3..8, 8..16, 0..16],
+        ] {
+            let mut actual = frame(Some(1.0), rate);
+            for packet in packets {
+                actual.push(
+                    packet.start as f64 / f64::from(rate),
+                    &samples[packet.start * 2..packet.end * 2],
+                    rate,
+                    2,
+                );
+            }
+            assert_statistics(&actual, &expected);
+            assert_eq!(actual.rms_counts[..2], [16, 16]);
+            assert_eq!(actual.left_rms_counts[..2], [8, 8]);
+            assert_eq!(actual.right_rms_counts[..2], [8, 8]);
+        }
+    }
+
+    #[test]
+    fn disjoint_previews_keep_peaks_and_a_bridge_recovers_all_rms_samples() {
+        let mut actual = frame(Some(1.0), 12800);
+        actual.push(0.0, &[1.0], 12800, 1);
+        actual.push(3.0 / 12800.0, &[2.0], 12800, 1);
+        assert_eq!(actual.peaks[0], Some(2.0));
+        assert_eq!(actual.rms[0], Some(1.0));
+        assert_eq!(actual.rms_counts[0], 1);
+        assert!(!actual.complete);
+        // The overlap is skipped; the newly connected suffix includes the
+        // previously peak-only preview exactly once.
+        let samples = [1.0, 0.0, 0.5, 2.0, 0.0, 0.0, 0.0, 0.0];
+        actual.push(0.0, &samples, 12800, 1);
+        let mut expected = frame(Some(1.0), 12800);
+        expected.push(0.0, &samples, 12800, 1);
+        assert_statistics(&actual, &expected);
+        actual.push(3.0 / 12800.0, &[2.0], 12800, 1);
+        assert_statistics(&actual, &expected);
+    }
+
+    #[test]
+    fn middle_bin_cache_recovers_from_small_packets_across_reopens() {
+        let rate = 12800;
+        let samples: Vec<f32> = (0..rate).map(|index| (index % 8) as f32 / 8.0).collect();
+        let mut shared = frame(Some(1.0), rate);
+        let mut accumulator = WaveformAccumulator::new(shared.clone());
+        accumulator.push(6.0 / f64::from(rate), &samples[6..7], rate, 1);
+        accumulator.push(4.0 / f64::from(rate), &samples[4..5], rate, 1);
+        accumulator.publish(&mut shared);
+        assert_eq!(shared.rms_counts[0], 1);
+        let mut coverage = WaveformCoverage::new(0.0);
+        for start in (0..16).step_by(2) {
+            // Reopening retains both displayed RMS and the earlier candidate;
+            // no PCM is needed to recover candidate energy after publication.
+            shared.select(Path::new("track.wav"), None, Some(1.0), rate);
+            let mut reopened = WaveformAccumulator::new(shared.clone());
+            let timestamp = start as f64 / f64::from(rate);
+            reopened.push(timestamp, &samples[start..start + 2], rate, 1);
+            reopened.publish(&mut shared);
+            coverage.record(timestamp, 2, rate);
+            if start < 4 {
+                assert_eq!(shared.rms_counts[0], 1);
+            }
+        }
+        let mut reopened = WaveformAccumulator::new(shared.clone());
+        reopened.push(16.0 / f64::from(rate), &samples[16..], rate, 1);
+        coverage.record(16.0 / f64::from(rate), samples.len() - 16, rate);
+        reopened.finish(&coverage);
+        reopened.publish(&mut shared);
+        let mut expected = frame(Some(1.0), rate);
+        expected.push(0.0, &samples, rate, 1);
+        assert!(shared.complete);
+        assert_statistics(&shared, &expected);
+        assert!(shared.rms_counts.iter().all(|count| *count == 8));
+    }
+
+    #[test]
+    fn unknown_doubling_keeps_unique_spans_and_full_traversal_recovers_gaps() {
+        for adjacent in [false, true] {
+            let mut actual = frame(None, 100);
+            let mut samples = vec![0.0; 6001];
+            samples[1] = 1.0;
+            samples[4] = 2.0;
+            if adjacent {
+                actual.push(0.0, &samples[..8], 100, 1);
+            } else {
+                actual.push(0.01, &[1.0], 100, 1);
+                actual.push(0.04, &[2.0], 100, 1);
+            }
+            actual.push(60.0, &[0.0], 100, 1);
+            assert_eq!(actual.span_seconds, 120.0);
+            assert_eq!(actual.peaks[0], Some(2.0));
+            let count = if adjacent { 8 } else { 1 };
+            assert_eq!(actual.rms_counts[0], count);
+            actual.select(Path::new("track.wav"), None, None, 100);
+            actual.push(0.01, &[1.0], 100, 1);
+            actual.push(0.04, &[2.0], 100, 1);
+            assert_eq!(actual.rms_counts[0], count);
+            assert!(!actual.complete);
+            for start in (0..samples.len()).step_by(17) {
+                let end = (start + 17).min(samples.len());
+                actual.push(start as f64 / 100.0, &samples[start..end], 100, 1);
+            }
+            let mut expected = frame(None, 100);
+            expected.push(0.0, &samples, 100, 1);
+            assert_statistics(&actual, &expected);
+            let mut coverage = WaveformCoverage::new(0.0);
+            coverage.record(0.0, samples.len(), 100);
+            coverage.finish(&mut actual);
+            coverage.finish(&mut expected);
+            assert!(actual.complete);
+            assert_eq!(actual.duration, Some(60.01));
+            assert_eq!(actual.span_seconds, expected.span_seconds);
+            assert_statistics(&actual, &expected);
+            actual.select(Path::new("track.wav"), None, None, 100);
+            actual.push(0.0, &samples, 100, 1);
+            assert_statistics(&actual, &expected);
+        }
+    }
+
+    #[test]
+    fn a_full_traversal_prefix_survives_a_packet_that_doubles_the_timeline() {
+        let samples: Vec<f32> = (0..6001).map(|index| (index % 7) as f32 / 7.0).collect();
+        let mut actual = frame(None, 100);
+        actual.push(59.99, &samples[5999..6000], 100, 1);
+        actual.push(0.0, &samples[..5997], 100, 1);
+        actual.push(59.97, &samples[5997..5998], 100, 1);
+        // The cached last bin now has a gap between its prefix and RMS span.
+        // This packet doubles before decoding that gap, so compaction must
+        // join the prefix with the preceding bin's continuous statistics.
+        actual.push(59.98, &samples[5998..], 100, 1);
+        let mut expected = frame(None, 100);
+        expected.push(0.0, &samples, 100, 1);
+        assert_eq!(actual.span_seconds, 120.0);
+        assert_statistics(&actual, &expected);
+        let mut coverage = WaveformCoverage::new(0.0);
+        coverage.record(0.0, samples.len(), 100);
+        coverage.finish(&mut actual);
+        coverage.finish(&mut expected);
+        assert!(actual.complete);
+        assert_statistics(&actual, &expected);
+    }
+
+    #[test]
+    fn a_continuous_complete_scan_has_exact_bin_counts_and_rms() {
+        let samples: Vec<f32> = (0..3200).map(|index| (index % 2) as f32).collect();
+        let mut actual = frame(Some(1.0), 3200);
+        let mut coverage = WaveformCoverage::new(0.0);
+        for start in (0..samples.len()).step_by(7) {
+            let end = (start + 7).min(samples.len());
+            let timestamp = start as f64 / 3200.0;
+            actual.push(timestamp, &samples[start..end], 3200, 1);
+            coverage.record(timestamp, end - start, 3200);
+        }
+        coverage.finish(&mut actual);
+        assert!(actual.complete);
+        assert!(actual.rms_counts.iter().all(|count| *count == 2));
+        assert!(actual.rms.iter().all(|rms| *rms == Some((0.5_f32).sqrt())));
+        assert!(actual.peaks.iter().all(|peak| *peak == Some(1.0)));
     }
 
     #[test]
@@ -756,12 +1129,18 @@ mod tests {
         frame.select(Path::new("track.wav"), cue, Some(2.0), 1);
         assert!(frame.matches(Path::new("track.wav"), cue));
         assert_eq!(frame.peaks, [None, None]);
+        assert!(frame.rms_counts.iter().all(|count| *count == 0));
         assert_eq!(frame.max_peak, 1.0);
         frame.push(0.0, &[0.75], 1, 1);
+        assert_eq!(frame.rms_counts, [1, 0]);
+        assert_eq!(frame.rms[0], Some(0.75));
         let revision = frame.revision;
         frame.select(Path::new("other.wav"), cue, Some(2.0), 1);
         assert_eq!(frame.peaks, [None, None]);
         assert_eq!(frame.revision, revision + 1);
+        frame.push(0.0, &[0.25], 1, 1);
+        assert_eq!(frame.rms_counts, [1, 0]);
+        assert_eq!(frame.rms[0], Some(0.25));
     }
 
     #[test]

@@ -1236,8 +1236,8 @@ mod tests {
                 .map(|value| u64::from(value.is_some()))
                 .collect(),
             channel_weights: Vec::new(),
-            last_push_start: None,
             complete: false,
+            ..WaveformFrame::default()
         }
     }
 
