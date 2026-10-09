@@ -75,9 +75,12 @@ the native build and runtime prerequisites:
 
 [source,sh]
 ----
-sudo pacman -S --needed rust pkgconf alsa-lib libpipewire opus fontconfig libxkbcommon
+sudo pacman -S --needed rust binutils pkgconf alsa-lib libpipewire opus fontconfig libxkbcommon
 cargo build --release
 ----
+
+Linux builds prefer `mold` when available and otherwise use the toolchain's
+default linker. Install it optionally with `sudo pacman -S --needed mold`.
 
 The default Cargo build has no FFmpeg dependency. The optional extension needs
 FFmpeg 9 development headers (`libavutil 61` , `libavcodec 63` , `libavformat 63`)
@@ -97,6 +100,10 @@ native-only build/install paths. For a native-only executable, use the first Car
 command and install `.cache/target/release/rivu` into a directory on `PATH`.
 Build outputs default to `.cache/target/`; `CARGO_TARGET_DIR` overrides that path.
 Ensure `~/.local/bin` is on `PATH` when using the install example.
+
+Release builds use ThinLTO, one codegen unit, and strip symbols to reduce file
+size. To retain symbols for troubleshooting, set `CARGO_PROFILE_RELEASE_STRIP=none`
+when running `cargo build --release` or `make install`.
 
 The FFmpeg feature accepts only little-endian x86-64 and aarch64 Linux and rejects
 other targets or header ABI major versions. These guards are compatibility

@@ -61,6 +61,7 @@ pkg-config = { version = "0.3", optional = true }
 [profile.release]
 lto = "thin"
 codegen-units = 1
+strip = "symbols"
 
 [patch.crates-io]
 # GPUI schedules nested idle callbacks; use its pinned nonblocking dispatcher.

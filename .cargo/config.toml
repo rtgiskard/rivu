@@ -1,2 +1,5 @@
 [build]
 target-dir = ".cache/target"
+
+[target.'cfg(target_os = "linux")']
+linker = ".cargo/linker.sh"
