@@ -1836,6 +1836,8 @@ impl GuiApp {
                     self.analysis_staging.sequence = frame.sequence;
                     self.analysis_staging.sample_rate = frame.sample_rate;
                     self.analysis_staging.sample_time = frame.sample_time;
+                    self.analysis_staging.generation = frame.generation;
+                    self.analysis_staging.settings = frame.settings;
                     self.analysis_staging.rms_left = frame.rms_left;
                     self.analysis_staging.rms_right = frame.rms_right;
                     self.analysis_sequence = frame.sequence;
@@ -1870,8 +1872,9 @@ impl GuiApp {
         self.visuals
             .retain_spectrogram_panels(&spectrogram_panel_ids);
         self.visuals.retain_spectrum_panels(&spectrum_panel_ids);
-        self.visuals.set_spectrum_visible(self.window_visible && !spectrum_panel_ids.is_empty());
-        self.radial_spectrum.set_visible(self.window_visible
+        let spectrum_restored = self.visuals
+            .set_spectrum_visible(self.window_visible && !spectrum_panel_ids.is_empty());
+        let radial_restored = self.radial_spectrum.set_visible(self.window_visible
             && active_panels.iter().any(|panel| panel.kind == "audio_visualizer"));
         let analysis_visible = self.window_visible
             && active_panels.iter().any(|panel| {
@@ -1881,9 +1884,10 @@ impl GuiApp {
                 )
             });
         if analysis_visible {
-            self.visuals.configure(&self.state.system.config);
-            self.radial_spectrum.configure(&self.state.system.config);
-            self.analysis_needs_refresh = true;
+            let spectrum_changed = self.visuals.configure(&self.state.system.config);
+            let radial_changed = self.radial_spectrum.configure(&self.state.system.config);
+            self.analysis_needs_refresh |= spectrum_restored || radial_restored
+                || spectrum_changed || radial_changed;
         }
         if analysis_visible != self.analysis_worker_enabled {
             self.analysis_worker_enabled = analysis_visible;

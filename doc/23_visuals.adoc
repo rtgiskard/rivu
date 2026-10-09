@@ -17,6 +17,14 @@ the left and right real signals. The combined power is computed directly from
 the paired bin magnitudes, preserving opposite-phase stereo without reconstructing
 the separate channel spectra. Nyquist retains its single-sided normalization.
 
+Published frames carry the actual FFT settings and a discontinuity generation.
+Stream resets, analysis restarts, dropped tap frames, and FFT/window changes
+start a fresh generation. Views reject frames produced with stale FFT settings,
+reset envelopes on generation changes, and never pool history across a signal
+break. Same-frequency historical buckets remain available. Sample time measures
+accepted audio, not wall time or the track seek position. The worker drains a
+bounded queued prefix using a reusable 1024-frame input buffer.
+
 == Waveform
 
 === RMS

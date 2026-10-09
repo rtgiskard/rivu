@@ -103,6 +103,7 @@ struct Column {
     interval_start: Duration,
     image: Option<Arc<RenderImage>>,
     generation: u64,
+    source_generation: Option<u64>,
 }
 
 #[derive(Clone, Copy)]
@@ -227,6 +228,7 @@ struct VisualData {
     configured_history_columns: usize,
     history_columns: usize,
     stream_generation: u64,
+    source_generation: Option<u64>,
     head: usize,
     len: usize,
     latest: Option<usize>,
@@ -304,6 +306,7 @@ impl Visuals {
                 history_columns: 0,
                 heat_sample_generation: 0,
                 stream_generation: 0,
+                source_generation: None,
                 head: 0,
                 len: 0,
                 latest: None,
@@ -314,7 +317,7 @@ impl Visuals {
             })),
         }
     }
-    pub(super) fn configure(&mut self, config: &Config) {
+    pub(super) fn configure(&mut self, config: &Config) -> bool {
         let mut data = self.data.borrow_mut();
         let spectrum_db_range = config.spectrum_db_range();
         let spectrogram_db_range = config.spectrogram_db_range();
@@ -350,7 +353,7 @@ impl Visuals {
             || data.configured_history_columns != configured_history_columns
             || cache_changed;
         if !changed {
-            return;
+            return false;
         }
         let history_changed = data.spectrogram_history_seconds
             != config.spectrogram_history_seconds
@@ -406,6 +409,7 @@ impl Visuals {
             data.clear_history();
             data.latest_levels.clear();
             data.last_update = None;
+            data.envelope_initialized = false;
         } else if heat_changed {
             data.invalidate_images();
         }
@@ -417,10 +421,21 @@ impl Visuals {
         data.top_db = (levels.iter().copied().fold(0.0, f32::max) / 6.0).ceil() * 6.0;
         data.refresh_frequency_labels();
         data.refresh_db_labels();
+        true
     }
 
     pub(super) fn update(&mut self, frame: &AnalysisFrame) {
         let mut data = self.data.borrow_mut();
+        if !frame.settings.is_some_and(|settings| {
+            settings.fft_size == data.spectrum_fft_size && settings.window == data.spectrum_window
+        }) {
+            return;
+        }
+        if data.source_generation != Some(frame.generation) {
+            data.source_generation = Some(frame.generation);
+            data.envelope_initialized = false;
+            data.last_update = None;
+        }
         if frame.spectrum_db.len() != frame.frequencies_hz.len() {
             data.report_error("Analysis frequency and level counts differ".into());
             return;
@@ -524,13 +539,15 @@ impl Visuals {
         }
     }
 
-    pub(super) fn set_spectrum_visible(&self, visible: bool) {
+    pub(super) fn set_spectrum_visible(&self, visible: bool) -> bool {
         let mut data = self.data.borrow_mut();
+        let restored = visible && !data.spectrum_visible;
         if data.spectrum_visible != visible {
             data.spectrum_visible = visible;
             data.envelope_initialized = false;
             data.last_update = None;
         }
+        restored
     }
 
     pub(super) fn retain_spectrum_panels(&mut self, panel_ids: &[u64]) {
@@ -715,7 +732,8 @@ impl VisualData {
         }
         let discontinuity = self
             .latest
-            .is_some_and(|index| self.columns[index].generation != self.stream_generation)
+            .is_some_and(|index| self.columns[index].generation != self.stream_generation
+                || self.columns[index].source_generation != self.source_generation)
             || self
                 .latest_sample_time
                 .is_some_and(|previous| time.saturating_sub(previous) > HISTORY_GAP_RESET);
@@ -725,6 +743,7 @@ impl VisualData {
             Duration::from_nanos(((time.as_nanos() / width.as_nanos()) * width.as_nanos()) as u64);
         let merge = self.latest.filter(|&index| {
             self.columns[index].generation == self.stream_generation
+                && self.columns[index].source_generation == self.source_generation
                 && self.columns[index].bucket_start == Some(bucket)
         });
         let index = merge.unwrap_or(self.head);
@@ -750,6 +769,7 @@ impl VisualData {
             self.len = (self.len + 1).min(self.history_columns);
         }
         self.columns[index].generation = self.stream_generation;
+        self.columns[index].source_generation = self.source_generation;
         self.columns[index].sample_time = Some(time);
         if changed && let Some(image) = self.columns[index].image.take() {
             self.retired.push(image);
@@ -1815,7 +1835,47 @@ mod tests {
             sample_time: Duration::from_secs_f64(time),
             frequencies_hz: vec![20.0, 200.0, 2000.0, 20_000.0],
             spectrum_db: vec![level; 4],
+            settings: Some(crate::analysis::AnalysisSettings::from(&Config::default())),
+            generation: 1,
             ..AnalysisFrame::default()
+        }
+    }
+
+    #[test]
+    fn same_rate_seek_starts_new_bucket_and_resets_hold_and_smoothing() {
+        let mut visuals = configured_visuals();
+        visuals.update(&frame(1.02, -10.0));
+        let mut next = frame(1.03, -60.0);
+        next.generation = 2;
+        visuals.update(&next);
+        let data = visuals.data.borrow();
+        assert_eq!(data.len, 2);
+        assert_eq!(data.columns[0].levels, vec![-10.0; 4]);
+        assert_eq!(data.columns[1].levels, vec![-60.0; 4]);
+        assert_eq!(data.columns[1].interval_start, next.sample_time);
+        assert_eq!(data.peaks, vec![-60.0; 4]);
+        assert_eq!(data.bar_levels, vec![-60.0; 4]);
+        assert_eq!(data.smoothed_levels, vec![-60.0; 4]);
+    }
+
+    #[test]
+    fn reconfigured_analysis_rejects_old_fft_and_window_frames() {
+        for config in [Config { spectrum_fft_size: 16384, ..Config::default() },
+                       Config { spectrum_window: SpectrumWindow::Hann, ..Config::default() }] {
+            let mut visuals = configured_visuals();
+            visuals.update(&frame(1.0, -10.0));
+            visuals.configure(&config);
+            visuals.update(&frame(2.0, -20.0));
+            assert!(visuals.data.borrow().latest_levels.is_empty());
+            assert_eq!(visuals.data.borrow().len, 0);
+            let mut fresh = frame(2.1, -60.0);
+            fresh.settings = Some(crate::analysis::AnalysisSettings::from(&config));
+            fresh.generation = 2;
+            visuals.update(&fresh);
+            assert_eq!(visuals.data.borrow().peaks, vec![-60.0; 4]);
+            let before = visuals.data.borrow().latest_sample_time;
+            visuals.update(&frame(2.2, -5.0));
+            assert_eq!(visuals.data.borrow().latest_sample_time, before);
         }
     }
 

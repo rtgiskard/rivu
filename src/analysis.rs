@@ -1,6 +1,6 @@
 use crate::config::{Config, SpectrumWindow};
 use parking_lot::RwLock;
-use ringbuf::{HeapCons, HeapProd, HeapRb, traits::Consumer};
+use ringbuf::{HeapCons, HeapProd, HeapRb, traits::{Consumer, Observer}};
 use rustfft::{Fft, FftPlanner, num_complex::Complex32};
 use std::{
     sync::{
@@ -14,6 +14,10 @@ use std::{
 #[derive(Clone, Debug, Default)]
 pub struct AnalysisFrame {
     pub sequence: u64,
+    /// Changes whenever a window cannot continue the preceding signal.
+    pub generation: u64,
+    /// Absent until the first publication; identifies the FFT producing this frame.
+    pub settings: Option<AnalysisSettings>,
     pub sample_rate: u32,
     /// Monotonic amount of accepted audio represented by this frame.
     pub sample_time: Duration,
@@ -99,9 +103,13 @@ impl AnalysisWorker {
         HeapProd::new(self.ring.clone())
     }
     pub fn set_enabled(&self, enabled: bool) {
-        self.control.enabled.store(enabled, Ordering::Release);
-        if let Some(worker) = &self.worker {
-            worker.thread().unpark();
+        if self.control.enabled.swap(enabled, Ordering::AcqRel) != enabled {
+            // A quick disable/enable must invalidate queued samples even if the
+            // analysis thread never observes the disabled state.
+            self.control.epoch.fetch_add(2, Ordering::AcqRel);
+            if let Some(worker) = &self.worker {
+                worker.thread().unpark();
+            }
         }
     }
     pub fn reset(&self, sample_rate: u32) {
@@ -110,10 +118,20 @@ impl AnalysisWorker {
             .sample_rate
             .store(sample_rate, Ordering::Release);
         self.control.epoch.fetch_add(1, Ordering::AcqRel);
+        if self.control.enabled.load(Ordering::Acquire)
+            && let Some(worker) = &self.worker
+        {
+            worker.thread().unpark();
+        }
     }
     pub fn configure(&self, settings: AnalysisSettings) {
         if settings.valid() {
-            *self.control.settings.write() = settings;
+            let mut current = self.control.settings.write();
+            if *current == settings {
+                return;
+            }
+            *current = settings;
+            drop(current);
             if self.control.enabled.load(Ordering::Acquire)
                 && let Some(worker) = &self.worker
             {
@@ -165,6 +183,7 @@ struct SpectrumAnalyzer {
     rolling: Vec<[f32; 2]>,
     head: usize,
     filled: usize,
+    generation: u64,
     metadata_dirty: bool,
 }
 
@@ -218,6 +237,7 @@ impl SpectrumAnalyzer {
             rolling: vec![[0.0; 2]; n],
             head: 0,
             filled: 0,
+            generation: 0,
             metadata_dirty: true,
         }
     }
@@ -225,6 +245,7 @@ impl SpectrumAnalyzer {
     fn reset(&mut self) {
         self.head = 0;
         self.filled = 0;
+        self.generation = self.generation.wrapping_add(1);
     }
 
     fn push(&mut self, samples: [f32; 2]) {
@@ -279,6 +300,8 @@ impl SpectrumAnalyzer {
         }
         frame.spectrum_db.clone_from(&self.levels);
         frame.sample_rate = self.sample_rate;
+        frame.generation = self.generation;
+        frame.settings = Some(self.settings);
         frame.rms_left = rms[0];
         frame.rms_right = rms[1];
         frame.sample_time = sample_time;
@@ -295,7 +318,7 @@ fn analyze(
         *control.settings.read(),
         control.sample_rate.load(Ordering::Acquire),
     );
-    let mut incoming = vec![TapFrame::default(); 32768];
+    let mut incoming = vec![TapFrame::default(); 1024];
     let mut epoch = 0;
     let mut sample_time = Duration::ZERO;
     loop {
@@ -322,18 +345,26 @@ fn analyze(
             || settings.fft_size != analyzer.settings.fft_size
             || settings.window != analyzer.settings.window
         {
+            let generation = analyzer.generation.wrapping_add(1);
             analyzer = SpectrumAnalyzer::new(settings, sample_rate);
+            analyzer.generation = generation;
         }
+        analyzer.settings = settings;
         if current_epoch != epoch {
             epoch = current_epoch;
             analyzer.reset();
         }
         let mut accepted = 0;
-        loop {
-            let count = consumer.pop_slice(&mut incoming);
+        // Bound a cycle to the queued prefix; continuous production must not
+        // postpone publication or shutdown indefinitely.
+        let mut remaining = consumer.occupied_len();
+        while remaining != 0 {
+            let limit = remaining.min(incoming.len());
+            let count = consumer.pop_slice(&mut incoming[..limit]);
             if count == 0 {
                 break;
             }
+            remaining -= count;
             for frame in &incoming[..count] {
                 if frame.epoch == current_epoch {
                     accepted += 1;
@@ -344,7 +375,10 @@ fn analyze(
         sample_time += Duration::from_secs_f64(accepted as f64 / sample_rate.max(1) as f64);
         if accepted != 0 && analyzer.filled == analyzer.rolling.len() {
             let rms = analyzer.transform();
-            if control.epoch.load(Ordering::Acquire) == current_epoch {
+            if control.epoch.load(Ordering::Acquire) == current_epoch
+                && control.enabled.load(Ordering::Acquire)
+                && *control.settings.read() == settings
+            {
                 analyzer.publish(&mut shared.write(), rms, sample_time);
             }
         }
@@ -356,6 +390,62 @@ fn analyze(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_publishes_stream_gap_and_configuration_generations() {
+        use ringbuf::traits::Producer;
+        let shared = Arc::new(RwLock::new(AnalysisFrame::default()));
+        let worker = AnalysisWorker::new(shared.clone()).unwrap();
+        let mut settings = AnalysisSettings {
+            fps: 60,
+            fft_size: 512,
+            window: SpectrumWindow::None,
+        };
+        worker.configure(settings);
+        worker.set_enabled(true);
+        let mut producer = worker.producer();
+        let mut previous = AnalysisFrame::default();
+        for transition in 0..5 {
+            match transition {
+                1 => worker.reset(48_000),
+                2 => {
+                    worker.set_enabled(false);
+                    worker.set_enabled(true);
+                }
+                4 => {
+                    settings.window = SpectrumWindow::Hann;
+                    worker.configure(settings);
+                }
+                _ => {}
+            }
+            let epoch = worker.control.epoch.load(Ordering::Acquire);
+            let value = (transition + 1) as f32 * 0.125;
+            for index in 0..512 {
+                assert!(producer.try_push(TapFrame {
+                    samples: [value, -value],
+                    epoch,
+                    gap: transition == 3 && index == 0,
+                }).is_ok());
+            }
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let current = loop {
+                let frame = shared.read();
+                if frame.sequence != previous.sequence {
+                    break frame.clone();
+                }
+                drop(frame);
+                assert!(Instant::now() < deadline, "analysis publication timed out");
+                thread::sleep(Duration::from_millis(1));
+            };
+            assert!(current.generation > previous.generation);
+            assert_eq!(current.settings, Some(settings));
+            assert_eq!(current.sample_rate, 48_000);
+            assert!(current.sample_time > previous.sample_time);
+            assert!((current.rms_left - value).abs() < 0.001);
+            assert!((current.rms_right - value).abs() < 0.001);
+            previous = current;
+        }
+    }
 
     #[test]
     fn tap_gap_requires_a_complete_new_window() {

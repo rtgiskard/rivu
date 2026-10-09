@@ -4,7 +4,7 @@
 //! and parameter model, using GPUI-native paths for the local rendering backend.
 
 use crate::{
-    analysis::AnalysisFrame,
+    analysis::{AnalysisFrame, AnalysisSettings},
     config::{Config, RadialSpectrumStyle},
 };
 use gpui::{
@@ -50,6 +50,8 @@ struct VisualizerData {
     visible: bool,
     displayed: Vec<f32>,
     last_sample_time: Option<Duration>,
+    source_generation: Option<u64>,
+    expected_settings: AnalysisSettings,
     time: f32,
     fade_started: Option<Instant>,
 }
@@ -74,15 +76,18 @@ impl RadialSpectrum {
                 visible: true,
                 displayed: Vec::with_capacity(FANCY_BANDS),
                 last_sample_time: None,
+                source_generation: None,
+                expected_settings: AnalysisSettings::from(&Config::default()),
                 time: 0.0,
                 fade_started: None,
             })),
         }
     }
 
-    pub(super) fn configure(&mut self, config: &Config) {
+    pub(super) fn configure(&mut self, config: &Config) -> bool {
         let mut data = self.data.borrow_mut();
         let db_range = config.radial_spectrum_db_range();
+        let expected_settings = AnalysisSettings::from(config);
         let changed = data.background != config.visual_background.rgb()
             || data.style != config.radial_spectrum_style
             || data.sensitivity != config.radial_spectrum_sensitivity
@@ -95,9 +100,11 @@ impl RadialSpectrum {
             || data.fade_when_idle != config.radial_spectrum_fade_when_idle
             || data.primary_color != config.radial_spectrum_primary_color.rgb()
             || data.secondary_color != config.radial_spectrum_secondary_color.rgb()
-            || data.db_range != db_range;
+            || data.db_range != db_range
+            || data.expected_settings.fft_size != expected_settings.fft_size
+            || data.expected_settings.window != expected_settings.window;
         if !changed {
-            return;
+            return false;
         }
         data.background = config.visual_background.rgb();
         data.style = config.radial_spectrum_style;
@@ -112,14 +119,17 @@ impl RadialSpectrum {
         data.primary_color = config.radial_spectrum_primary_color.rgb();
         data.secondary_color = config.radial_spectrum_secondary_color.rgb();
         data.db_range = db_range;
+        data.expected_settings = expected_settings;
         data.values.clear();
         data.displayed.clear();
         data.last_sample_time = None;
         data.time = 0.0;
+        true
     }
 
-    pub(super) fn set_visible(&self, visible: bool) {
+    pub(super) fn set_visible(&self, visible: bool) -> bool {
         let mut data = self.data.borrow_mut();
+        let restored = visible && !data.visible;
         if data.visible != visible {
             data.visible = visible;
             data.displayed.clear();
@@ -127,6 +137,7 @@ impl RadialSpectrum {
             data.last_sample_time = None;
             data.fade_started = None;
         }
+        restored
     }
 
     pub(super) fn update(&mut self, frame: &AnalysisFrame) {
@@ -134,8 +145,18 @@ impl RadialSpectrum {
             return;
         }
         let mut data = self.data.borrow_mut();
-        if !data.visible {
+        if !data.visible || frame.spectrum_db.len() != frame.frequencies_hz.len()
+            || !frame.settings.is_some_and(|settings| {
+                settings.fft_size == data.expected_settings.fft_size
+                    && settings.window == data.expected_settings.window
+            }) {
             return;
+        }
+        if data.source_generation != Some(frame.generation) {
+            data.source_generation = Some(frame.generation);
+            data.displayed.clear();
+            data.last_sample_time = None;
+            data.fade_started = None;
         }
         let count = FANCY_BANDS.min(frame.spectrum_db.len()).max(1);
         let low = 20.0_f32.max(*frame.frequencies_hz.first().unwrap_or(&20.0));
@@ -585,7 +606,38 @@ mod tests {
             sample_time: Duration::from_secs(1),
             frequencies_hz: vec![20.0, 200.0, 2000.0, 20_000.0],
             spectrum_db: vec![-35.0; 4],
+            settings: Some(AnalysisSettings::from(&Config::default())),
+            generation: 1,
             ..AnalysisFrame::default()
+        }
+    }
+
+    #[test]
+    fn same_rate_new_generation_resets_radial_smoothing() {
+        let mut radial = RadialSpectrum::new();
+        radial.update(&frame());
+        let mut next = frame();
+        next.sample_time += Duration::from_millis(1);
+        next.generation = 2;
+        next.spectrum_db.fill(-70.0);
+        radial.update(&next);
+        assert_eq!(radial.data.borrow().displayed, vec![0.0; 4]);
+    }
+
+    #[test]
+    fn radial_rejects_stale_fft_and_window_configuration() {
+        for config in [Config { spectrum_fft_size: 16384, ..Config::default() },
+                       Config { spectrum_window: crate::config::SpectrumWindow::Hann, ..Config::default() }] {
+            let mut radial = RadialSpectrum::new();
+            radial.update(&frame());
+            radial.configure(&config);
+            radial.update(&frame());
+            assert!(radial.data.borrow().displayed.is_empty());
+            let mut next = frame();
+            next.settings = Some(AnalysisSettings::from(&config));
+            next.generation = 2;
+            radial.update(&next);
+            assert_eq!(radial.data.borrow().displayed, vec![0.5; 4]);
         }
     }
 
