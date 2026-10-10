@@ -255,7 +255,7 @@ impl GuiApp {
         let row_count = self.directory_tree.row_count();
         let ui_scale = self.state.system.config.ui_scale;
         let scroll = &self.directory_tree.scroll;
-        let mut view = list_viewport(
+        let view = list_viewport(
             uniform_list(
                 ("library-directory-tree", panel_id),
                 row_count,
@@ -506,9 +506,6 @@ impl GuiApp {
             .w_full()
             .track_scroll(scroll),
         );
-        if row_count == 0 {
-            view = view.child(super::empty_state("No library directories or tracks"));
-        }
         view.into_any_element()
     }
 }

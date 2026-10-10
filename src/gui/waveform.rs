@@ -481,10 +481,7 @@ fn cursor_wobble(position: f64) -> f32 {
     (0.68 * smooth_ping_pong(position, 5.0) + 0.32 * smooth_ping_pong(position + 1.4, 8.0)) as f32
 }
 
-fn preview_message(source: Option<&Source>, frame: &WaveformFrame) -> Option<&'static str> {
-    let Some(source) = source else {
-        return Some("Select a track to preview its waveform");
-    };
+fn preview_message(source: &Source, frame: &WaveformFrame) -> Option<&'static str> {
     if !frame.matches(&source.path, source.range) || !frame.peaks.iter().any(Option::is_some) {
         return Some("Play or buffer this track to build its waveform");
     }
@@ -826,8 +823,11 @@ impl Waveform {
             self.plot.borrow_mut().clear_cache();
             self.visualization_cache = config.visualization_cache;
         }
+        let Some(source) = self.source.as_deref() else {
+            return panel.into_any_element();
+        };
         let status = self.manual_message();
-        let message = preview_message(self.source.as_deref(), &self.shared.read());
+        let message = preview_message(source, &self.shared.read());
         if let Some(message) = message {
             return panel
                 .child(super::components::visualization_status(
@@ -1375,19 +1375,18 @@ mod tests {
             path: PathBuf::from("track.flac"),
             range: None,
         };
-        assert!(preview_message(None, &frame).is_some());
-        assert!(preview_message(Some(&source), &frame).is_none());
+        assert!(preview_message(&source, &frame).is_none());
         frame.path = Some(PathBuf::from("other.flac"));
-        assert!(preview_message(Some(&source), &frame).is_some());
+        assert!(preview_message(&source, &frame).is_some());
         frame.path = Some(source.path.clone());
         frame.range = Some(PlaybackRange {
             start_seconds: 2.0,
             end_seconds: Some(4.0),
         });
-        assert!(preview_message(Some(&source), &frame).is_some());
+        assert!(preview_message(&source, &frame).is_some());
         frame.range = None;
         frame.peaks[0] = None;
-        assert!(preview_message(Some(&source), &frame).is_some());
+        assert!(preview_message(&source, &frame).is_some());
     }
 
     #[test]

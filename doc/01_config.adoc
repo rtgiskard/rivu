@@ -291,6 +291,10 @@ line is peak amplitude. Unknown intervals remain blank. Playback builds the
 preview progressively; `Load full waveform now` requests the complete preview.
 Click or drag to seek the current track; a non-playing selection preview does
 not seek playback.
+To preview a track without starting playback, select it in Library and use
+`Load full waveform now`. A selected track with no decoded samples can also
+build its preview through playback.
+
 `waveform_seek_enabled` defaults to `true`. Disable Click and drag to seek in
 the Waveform settings page or its panel right-click menu to prevent accidental
 seeks. Disabling it cancels any active waveform drag and preview; the playback

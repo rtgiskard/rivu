@@ -39,11 +39,6 @@ pub(crate) fn status_message(message: impl Into<SharedString>, kind: StatusKind)
     caption(message).text_color(rgb(color))
 }
 
-/// Shared empty-state surface used by panels and virtualized lists.
-pub(crate) fn empty_state(message: impl Into<SharedString>) -> Div {
-    visualization_status(message)
-}
-
 /// Shared wrapping toolbar shell for panel actions.
 pub(crate) fn panel_toolbar() -> Div {
     super::row().flex_wrap().flex_shrink_0()

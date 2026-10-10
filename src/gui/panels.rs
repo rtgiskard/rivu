@@ -1,7 +1,7 @@
 use super::{
     ACCENT, BORDER, Dragging, Field, GuiApp, HIGHLIGHT, HistorySort, ListFocus, MUTED, Measured,
     StatusKind, TEXT, UI_INSET, ViewRequestKind, active_control, artwork_preview, column,
-    empty_state, form_field, format_time, icon_button, library::LibraryDrag, list_viewport,
+    form_field, format_time, icon_button, library::LibraryDrag, list_viewport,
     metadata_item, panel_header, panel_surface, panel_toolbar, row, row_text, section_group,
     sortable_header, status_message, track_row, two_column,
 };
@@ -547,8 +547,9 @@ impl GuiApp {
         } else if !self.selected.is_empty() {
             format!("{} tracks selected", self.selected.len())
         } else {
-            "Select tracks or folders · Shift-click to select a range".to_owned()
+            String::new()
         };
+        let has_selection = !selection_label.is_empty();
         let mut selection_tools = panel_toolbar()
             .h(gpui::rems(2.))
             .min_h(gpui::rems(2.))
@@ -594,7 +595,7 @@ impl GuiApp {
             .child(panel_header("Library", format!("{total} entries")))
             .child(self.panel_field(Field::Search, "Search title, artist or album"))
             .child(tools)
-            .child(selection_tools);
+            .when(has_selection, |panel| panel.child(selection_tools));
         if self.state.system.scan_progress.is_some() || self.state.system.scanning {
             panel = panel.child(self.library_scan_status());
         }
@@ -901,11 +902,6 @@ impl GuiApp {
             ))
             .when(!self.state.queue.entries.is_empty(), |panel| {
                 panel.child(tools)
-            })
-            .when(self.state.queue.entries.is_empty(), |panel| {
-                panel.child(empty_state(
-                    "Your queue is empty. Enqueue tracks from Library.",
-                ))
             })
             .child(list_viewport(
                 uniform_list(
@@ -1495,10 +1491,6 @@ impl GuiApp {
                         )),
                 );
             panel = panel.child(details);
-        } else {
-            panel = panel.child(column().flex_1().p(px(UI_INSET)).gap_2().child(empty_state(
-                "Start playback or select a Library track to view its details.",
-            )));
         }
         panel.into_any_element()
     }

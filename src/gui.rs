@@ -32,7 +32,7 @@ use ashpd::desktop::file_chooser::SelectedFiles;
 pub(super) use components::{
     ButtonTooltip, DropdownItem, DropdownState, POPOVER_MAX_HEIGHT, SelectionModel, StatusKind,
     TRACK_HEIGHT, active_control, artwork_preview, button, caption, context_menu_container,
-    drag_preview, dropdown_container, dropdown_row, dropdown_trigger, empty_state, form_field,
+    drag_preview, dropdown_container, dropdown_row, dropdown_trigger, form_field,
     icon_button, list_row, list_viewport, menu_item, metadata_item, panel_header, panel_surface,
     panel_toolbar, row_text, section_group, sortable_header, status_message, toggle_button,
     track_row, tree_row, two_column,
@@ -3379,11 +3379,7 @@ impl Render for GuiApp {
                         .w_full(),
                     );
                     if has_selected_queue {
-                        if self.playlist_buffer.rows.is_empty() {
-                            menu = menu.child(panels::caption(
-                                "No playlists yet. Create one in Playlists.",
-                            ));
-                        } else {
+                        if !self.playlist_buffer.rows.is_empty() {
                             let height = (self.playlist_buffer.rows.len() as f32
                                 * panels::TRACK_HEIGHT)
                                 .min(240.)
