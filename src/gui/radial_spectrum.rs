@@ -143,8 +143,8 @@ impl RadialSpectrum {
         let restored = visible && !data.visible;
         if data.visible != visible {
             data.visible = visible;
-            data.displayed.clear();
-            data.values.clear();
+            data.displayed = Vec::new();
+            data.values = Vec::new();
             data.last_sample_time = None;
             data.fade_started = None;
         }

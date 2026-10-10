@@ -163,9 +163,12 @@ impl Worker {
                 self.refresh_analysis();
             }
             AudioCommand::StillMode(enabled) => {
+                self.analyzer.set_still_mode(enabled);
                 self.still_mode = enabled;
                 if let Some(playback) = self.playback.as_mut() {
                     playback.set_still_mode(enabled);
+                } else {
+                    self.waveform.write().set_still_mode(enabled);
                 }
                 self.refresh_analysis();
             }
@@ -391,6 +394,58 @@ fn send_event(events: &Sender<AudioEvent>, shutdown: &Receiver<()>, event: Audio
 mod tests {
     use super::*;
     use crossbeam_channel::bounded;
+
+    #[test]
+    fn still_mode_discards_stopped_waveforms_without_changing_playback_policy() {
+        let (_send, commands) = bounded(1);
+        let (events, _receive) = bounded(1);
+        let (_stop, shutdown) = bounded(0);
+        let analyzer = AnalysisWorker::new(Arc::new(RwLock::new(
+            crate::analysis::AnalysisFrame::default(),
+        )))
+        .unwrap();
+        let mut frame = WaveformFrame::default();
+        frame.select(std::path::Path::new("stopped.wav"), None, Some(1.0), 8000);
+        frame.push(0.0, &[0.5; 8000], 8000, 1);
+        frame.finish_scan(1.0);
+        let completed = frame.clone();
+        let waveform = Arc::new(RwLock::new(frame));
+        let mut worker = Worker::new(
+            commands,
+            events,
+            shutdown,
+            analyzer,
+            waveform.clone(),
+            65536,
+        );
+        worker.command(AudioCommand::Volume(0.3));
+        worker.command(AudioCommand::Analysis(true));
+        worker.command(AudioCommand::StillMode(true));
+        let revision = waveform.read().revision;
+        assert!(revision > completed.revision);
+        for command in [
+            AudioCommand::StillMode(true),
+            AudioCommand::Seek(0.5),
+            AudioCommand::Pause(true),
+            AudioCommand::Analysis(true),
+            AudioCommand::AnalysisSettings(crate::analysis::AnalysisSettings::from(
+                &crate::config::Config::default(),
+            )),
+        ] {
+            worker.command(command);
+            assert_eq!(waveform.read().revision, revision);
+            assert_eq!(waveform.read().retained_capacity_bytes(), 0);
+            assert_eq!(worker.volume, 0.3);
+            assert!(worker.device.is_none());
+            assert!(worker.playback.is_none());
+            assert!(worker.wanted_analysis);
+        }
+        waveform.write().install_full(completed);
+        assert_eq!(waveform.read().retained_capacity_bytes(), 0);
+        worker.command(AudioCommand::StillMode(false));
+        assert_eq!(waveform.read().retained_capacity_bytes(), 0);
+        assert_eq!(waveform.read().revision, revision);
+    }
 
     #[test]
     fn consecutive_seeks_stop_at_every_non_seek_barrier() {

@@ -108,7 +108,7 @@ impl FractalVisualizer {
                 last_time: None,
                 drive: Drive::default(),
                 previous_energy: 0.0,
-                scene: Scene::new(config.radial_spectrum_style),
+                scene: None,
             })),
         }
     }
@@ -138,7 +138,7 @@ impl FractalVisualizer {
         data.db_range = config.radial_spectrum_db_range();
         data.bloom = config.radial_spectrum_bloom_intensity;
         if style_changed {
-            data.scene = Scene::new(data.style);
+            data.scene = None;
         }
         if reset {
             data.reset();
@@ -150,6 +150,7 @@ impl FractalVisualizer {
         let mut data = self.data.borrow_mut();
         if data.visible != visible {
             data.visible = visible;
+            data.scene = None;
             data.reset();
         }
     }
@@ -210,6 +211,9 @@ impl Data {
         }
         if self.last_time == Some(frame.sample_time) {
             return;
+        }
+        if self.scene.is_none() {
+            self.scene = Scene::new(self.style);
         }
         let mut elapsed = self
             .last_time
@@ -472,5 +476,43 @@ mod tests {
             ..Config::default()
         });
         assert!(visual.data.borrow().scene.is_none());
+    }
+
+    #[test]
+    fn hidden_scenes_release_storage_and_only_valid_audio_recreates_them() {
+        for style in [
+            RadialSpectrumStyle::FractalBeams,
+            RadialSpectrumStyle::FractalFlow,
+        ] {
+            let visual = plot(style);
+            visual.update(&frame(50));
+            assert!(visual.data.borrow().scene.is_some());
+            visual.set_visible(false);
+            assert!(visual.data.borrow().scene.is_none());
+            let next_style = if style == RadialSpectrumStyle::FractalBeams {
+                RadialSpectrumStyle::FractalFlow
+            } else {
+                RadialSpectrumStyle::FractalBeams
+            };
+            visual.configure(&Config {
+                radial_spectrum_style: next_style,
+                ..Config::default()
+            });
+            visual.update(&frame(100));
+            assert!(visual.data.borrow().scene.is_none());
+            visual.set_visible(true);
+            assert!(visual.data.borrow().scene.is_none());
+            let mut stale = frame(150);
+            stale.visualizer.mode = VisualizerMode::Off;
+            visual.update(&stale);
+            assert!(visual.data.borrow().scene.is_none());
+            visual.update(&frame(200));
+            let fresh = plot(next_style);
+            fresh.update(&frame(200));
+            assert_eq!(
+                visual.data.borrow().segments(),
+                fresh.data.borrow().segments()
+            );
+        }
     }
 }

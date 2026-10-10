@@ -33,8 +33,10 @@ every analysis frame regardless of whether it can be consumed.
 Still Mode overrides visualization demand at both the GUI and audio-worker
 boundaries. The worker ignores effective analysis enablement while the mode is
 active, skips the output tap, and parks the analysis thread without reopening
-playback. On resumption the GUI waits for a new publication rather than reusing
-the last pre-mode frame.
+playback. Mode entry drops FFT working storage and shared results on their owning
+threads, with sequence/generation invalidation even across a quick on/off switch.
+No fresh FFT storage is allocated until current-epoch audio arrives. On resumption
+the GUI waits for new data rather than reusing the last pre-mode frame.
 
 == Waveform
 
@@ -42,13 +44,15 @@ Playback builds a progressive waveform, while a completed full-track scan takes
 precedence over an in-flight progressive update. This keeps the displayed
 preview from regressing after a complete result becomes available.
 
-Still Mode also gates progressive waveform accumulation and publication,
-independently of FFT analysis. Skipping nonempty PCM invalidates the current
-traversal's coverage, so EOF cannot claim that a partial envelope is complete.
-Existing bins remain reusable and later PCM can still add new bins; there is no
-automatic backfill. A fresh uninterrupted traversal from zero can complete it.
-Explicit full-waveform scans use their existing cancellation/generation boundary
-on mode entry, preventing a late result from installing after cancellation.
+Still Mode discards both the progressive waveform accumulator and shared bins,
+independently of FFT analysis. Source identity and timeline metadata survive,
+but no prior samples count toward coverage. EOF cannot claim a discarded or
+skipped interval is complete. Only fresh decoded PCM allocates and fills bins;
+there is no automatic backfill or rescan. A fresh uninterrupted traversal from
+zero can complete the envelope.
+Explicit full-waveform scans are cancelled on entry. A shared suspension
+generation also rejects late results before GUI cancellation and across quick
+on/off transitions, so old scans cannot restore discarded bins.
 
 RMS fills extend above and below the centerline for the respective stereo
 channels. Each display column has its own gradient endpoint, preserving color
@@ -109,7 +113,7 @@ spatial scales; root-to-tip pulses follow rises in energy, not beat estimates.
 Fractal Flow uses three spatial scales of a deterministic curl field. Bands
 deform the field rather than steering independent random particles. Trails fade
 and taper; boundary respawns discard old points rather than connecting opposite
-edges. The fixed particle history is allocated only when the style is selected.
+edges. The fixed particle history is allocated on the first valid audio frame.
 
 Both styles take band power from the stereo FFT bins with window-energy normalization,
 not from summed dB values or maximum-pooled display bands. Opposite-phase

@@ -1375,6 +1375,7 @@ impl GuiApp {
             "Interface",
             column()
                 .gap_2()
+
                 .child(row().child(self.font_control(cx).flex_1().min_w(px(260.))))
                 .child(self.settings.single(Field::Scale))
                 .child(row().child(visual_switch(

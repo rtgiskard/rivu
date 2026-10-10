@@ -184,18 +184,22 @@ and link:23_visuals.adoc[Visualization Rendering Design] for rendering choices.
 views with a static status, stops analysis sampling and FFT work, and removes
 the GUI's analysis-rate refresh timer. Progressive waveform statistics stop;
 any running full-waveform request is cancelled, and new requests are unavailable.
-Display caches and Spectrogram history are released through their normal image
-lifecycle. Small bounded analysis buffers and base waveform data remain retained.
+All visualization results are discarded: waveform bins, spectrum and spectrogram
+history, stereo plots, and fractal scenes. FFT plans and working buffers are
+released on the analysis thread; submitted images retire safely at frame boundaries.
 
 Playback, seeking through the playback slider, ordinary interface effects,
 library operations, covers, IPC, MPRIS, and the tray are unchanged. Layout and
 visualization settings are preserved, including `visualization_cache`.
 
-Disabling Still Mode resumes the visible views from newly published analysis
-without reopening audio output or the decoder. Spectrogram history starts fresh.
-Skipped waveform intervals are not filled retrospectively, and an interrupted
-traversal is not marked complete. Cancelled full-waveform requests do not restart
-automatically; request one explicitly after leaving the mode if needed.
+Disabling Still Mode starts the visible views fresh, without reopening audio
+output or the decoder. Storage is rebuilt only when new audio is available;
+leaving the mode while paused does not restore an old picture. Waveform starts
+accumulating from subsequently decoded PCM, with discarded and skipped intervals
+left blank. An interrupted traversal is not marked complete. Full-waveform
+requests do not restart automatically; request one explicitly after leaving the
+mode if needed. Ordinary playback pause remains different: it freezes the current
+visualizations without discarding their results.
 
 === Waveform
 

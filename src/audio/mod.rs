@@ -120,7 +120,7 @@ pub enum AudioCommand {
         auto_mix: bool,
     },
     Analysis(bool),
-    /// Suspend visualization work without changing playback.
+    /// Drop visualization results/storage and suspend their work, preserving playback.
     StillMode(bool),
     MediaReadBuffer(u32),
     FfmpegEnabled(bool),

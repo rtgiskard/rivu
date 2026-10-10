@@ -80,6 +80,8 @@ pub struct WaveformFrame {
     pub(crate) channel_weights: Vec<[f32; 2]>,
     pub(crate) rms_spans: Vec<Option<std::ops::Range<u64>>>,
     pub(crate) rms_prefixes: Vec<Option<RmsPrefix>>,
+    pub(crate) suspended: bool,
+    pub(crate) suspension_generation: u64,
 }
 
 impl Default for WaveformFrame {
@@ -104,6 +106,8 @@ impl Default for WaveformFrame {
             channel_weights: Vec::new(),
             rms_spans: Vec::new(),
             rms_prefixes: Vec::new(),
+            suspended: false,
+            suspension_generation: 0,
         }
     }
 }
@@ -264,7 +268,53 @@ impl WaveformFrame {
     pub fn matches(&self, path: &Path, range: Option<PlaybackRange>) -> bool {
         self.path.as_deref() == Some(path) && self.range == range
     }
+
+    pub(crate) fn suspension_generation(&self) -> u64 {
+        self.suspension_generation
+    }
+    #[cfg(test)]
+    pub(super) fn retained_capacity_bytes(&self) -> usize {
+        fn bytes<T>(values: &Vec<T>) -> usize {
+            values.capacity() * std::mem::size_of::<T>()
+        }
+        bytes(&self.peaks)
+            + bytes(&self.rms)
+            + bytes(&self.rms_counts)
+            + bytes(&self.left_peaks)
+            + bytes(&self.right_peaks)
+            + bytes(&self.left_rms)
+            + bytes(&self.right_rms)
+            + bytes(&self.left_rms_counts)
+            + bytes(&self.right_rms_counts)
+            + bytes(&self.channel_weights)
+            + bytes(&self.rms_spans)
+            + bytes(&self.rms_prefixes)
+    }
+
+    /// Still Mode owns this guard so late manual scans cannot restore results.
+    pub(crate) fn set_still_mode(&mut self, suspended: bool) {
+        if self.suspended == suspended {
+            return;
+        }
+        self.suspended = suspended;
+        if suspended {
+            *self = Self {
+                revision: self.revision.wrapping_add(1),
+                path: self.path.take(),
+                range: self.range,
+                duration: self.duration,
+                span_seconds: self.span_seconds,
+                suspended,
+                suspension_generation: self.suspension_generation.wrapping_add(1),
+                ..Self::default()
+            };
+        }
+    }
+
     pub(super) fn set_channel_weights(&mut self, weights: &[[f32; 2]]) {
+        if self.suspended {
+            return;
+        }
         self.channel_weights.clear();
         self.channel_weights.extend_from_slice(weights);
     }
@@ -272,7 +322,12 @@ impl WaveformFrame {
     /// The caller validates source identity and request generation before
     /// publishing a manual full scan. Preserve the shared version sequence.
     pub fn install_full(&mut self, mut frame: Self) {
+        if self.suspended {
+            return;
+        }
         frame.revision = self.revision.wrapping_add(1);
+        frame.suspended = self.suspended;
+        frame.suspension_generation = self.suspension_generation;
         frame.complete = true;
         *self = frame;
     }
@@ -330,14 +385,13 @@ impl WaveformFrame {
         self.rms_prefixes[index] = prefix;
     }
 
-    /// Reopening the same source (including seeks and device changes) retains
-    /// its timeline and every peak. Track metadata is deliberately not a key.
-    pub(super) fn select(
+    /// Reopening the same source retains its timeline and results unless Still
+    /// Mode discarded them. Metadata selection alone never allocates bins.
+    pub(super) fn select_source(
         &mut self,
         path: &Path,
         range: Option<PlaybackRange>,
         duration: Option<f64>,
-        sample_rate: u32,
     ) {
         if self.matches(path, range) {
             return;
@@ -346,39 +400,56 @@ impl WaveformFrame {
         self.range = range;
         self.duration = duration.filter(|value| value.is_finite() && *value > 0.0);
         self.span_seconds = self.duration.unwrap_or(INITIAL_UNKNOWN_SPAN);
-        let bins = self.duration.map_or(MAX_BINS, |duration| {
-            ((duration * f64::from(sample_rate)).round().max(1.0) as usize).min(MAX_BINS)
-        });
         self.complete = false;
         self.peaks.clear();
-        self.peaks.resize(bins, None);
         self.rms.clear();
-        self.rms.resize(bins, None);
         self.rms_counts.clear();
-        self.rms_counts.resize(bins, 0);
         self.left_peaks.clear();
-        self.left_peaks.resize(bins, None);
         self.right_peaks.clear();
-        self.right_peaks.resize(bins, None);
         self.left_rms.clear();
-        self.left_rms.resize(bins, None);
         self.right_rms.clear();
-        self.right_rms.resize(bins, None);
         self.left_rms_counts.clear();
-        self.left_rms_counts.resize(bins, 0);
         self.right_rms_counts.clear();
-        self.right_rms_counts.resize(bins, 0);
         self.rms_spans.clear();
-        self.rms_spans.resize(bins, None);
         self.rms_prefixes.clear();
-        self.rms_prefixes.resize(bins, None);
         self.channel_weights.clear();
         self.max_peak = 1.0;
         self.revision = self.revision.wrapping_add(1);
     }
 
+    pub(super) fn select(
+        &mut self,
+        path: &Path,
+        range: Option<PlaybackRange>,
+        duration: Option<f64>,
+        sample_rate: u32,
+    ) {
+        self.select_source(path, range, duration);
+        self.prepare_bins(sample_rate);
+    }
+
+    pub(super) fn prepare_bins(&mut self, sample_rate: u32) {
+        if self.suspended || !self.peaks.is_empty() {
+            return;
+        }
+        let bins = self.duration.map_or(MAX_BINS, |duration| {
+            ((duration * f64::from(sample_rate)).round().max(1.0) as usize).min(MAX_BINS)
+        });
+        self.peaks.resize(bins, None);
+        self.rms.resize(bins, None);
+        self.rms_counts.resize(bins, 0);
+        self.left_peaks.resize(bins, None);
+        self.right_peaks.resize(bins, None);
+        self.left_rms.resize(bins, None);
+        self.right_rms.resize(bins, None);
+        self.left_rms_counts.resize(bins, 0);
+        self.right_rms_counts.resize(bins, 0);
+        self.rms_spans.resize(bins, None);
+        self.rms_prefixes.resize(bins, None);
+    }
+
     pub(super) fn finish_scan(&mut self, end_seconds: f64) {
-        if self.complete {
+        if self.suspended || self.complete {
             return;
         }
         if self.duration.is_none() && end_seconds.is_finite() && end_seconds > 0.0 {
@@ -693,6 +764,61 @@ mod tests {
         assert_eq!(actual.duration, expected.duration);
         assert_eq!(actual.span_seconds, expected.span_seconds);
         assert_eq!(actual.max_peak, expected.max_peak);
+    }
+
+    #[test]
+    fn still_mode_releases_all_bins_and_blocks_late_scans_across_source_changes() {
+        let mut shared = frame(Some(2.0), 8_000);
+        shared.set_channel_weights(&[[1.0, 0.0], [0.0, 1.0]]);
+        shared.push(0.0, &[0.75; 1600], 8_000, 2);
+        let mut pending = WaveformAccumulator::new(shared.clone());
+        let manual = shared.clone();
+        let retained = shared.retained_capacity_bytes();
+        eprintln!("waveform {MAX_BINS} bins: shared result capacity {retained} -> 0 bytes");
+        assert!(retained > 0);
+        let revision = shared.revision;
+        shared.set_still_mode(true);
+        let suspended_revision = shared.revision;
+        assert!(suspended_revision > revision);
+        assert_eq!(shared.suspension_generation(), 1);
+        assert_eq!(shared.retained_capacity_bytes(), 0);
+        assert!(shared.matches(Path::new("track.wav"), None));
+        assert_eq!(shared.duration, Some(2.0));
+        assert!(!shared.complete);
+        for _ in 0..100 {
+            shared.set_still_mode(true);
+            shared.select(Path::new("track.wav"), None, Some(2.0), 8_000);
+            shared.set_channel_weights(&[[1.0, 0.0]]);
+            shared.push(0.0, &[1.0], 8_000, 1);
+            shared.finish_scan(2.0);
+            shared.install_full(manual.clone());
+            pending.publish(&mut shared);
+            assert_eq!(shared.revision, suspended_revision);
+            assert_eq!(shared.retained_capacity_bytes(), 0);
+            assert_eq!(shared.suspension_generation(), 1);
+        }
+        for path in ["other.wav", "track.wav"] {
+            shared.select(Path::new(path), None, Some(2.0), 8_000);
+            assert!(shared.matches(Path::new(path), None));
+            assert_eq!(shared.retained_capacity_bytes(), 0);
+        }
+        shared.set_still_mode(false);
+        let resumed_revision = shared.revision;
+        assert_eq!(shared.retained_capacity_bytes(), 0);
+        shared.prepare_bins(8_000);
+        let mut resumed = WaveformAccumulator::new(shared.clone());
+        resumed.push(1.0, &[0.0; 160], 8_000, 1);
+        resumed.publish(&mut shared);
+        assert!(shared.revision > resumed_revision);
+        assert!(shared.peaks[..800].iter().all(Option::is_none));
+        assert!(shared.peaks.iter().flatten().all(|peak| *peak == 0.0));
+        assert_eq!(shared.rms_counts.iter().sum::<u64>(), 160);
+        assert!(shared.retained_capacity_bytes() <= retained);
+        shared.install_full(manual);
+        assert_eq!(shared.suspension_generation(), 1);
+        shared.set_still_mode(true);
+        assert_eq!(shared.suspension_generation(), 2);
+        assert_eq!(shared.retained_capacity_bytes(), 0);
     }
 
     #[test]

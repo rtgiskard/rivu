@@ -18,13 +18,15 @@ the same meaning. Re-enabling it requires an initial rebuild before reuse
 resumes. Temporary images still remain alive long enough for their submitted
 scene to render safely.
 
-Still Mode is separate from this cache policy. It stops visualization work and
-drops retained display columns, geometry, and Spectrogram history, while keeping
-the configured cache preference and bounded base waveform/analysis storage.
-Submitted images still pass through the existing frame-boundary retirement path;
-the root release hook continues running even when all visualization views are
-replaced by static status messages. Leaving the mode rebuilds display resources
-on demand rather than restoring old Spectrogram history.
+Still Mode is separate from this cache policy. It discards visualization results
+and derived storage, including base waveform bins, shared analysis frames, FFT
+plans/workspaces, stereo fields, and fractal scenes. It preserves settings and
+source/timeline metadata, not a restorable picture. Decoder and output PCM
+buffers, the bounded tap ring, and audio playback accounting are unchanged.
+Submitted images still pass through frame-boundary retirement. The root release
+hook requests the final retirement frame when needed, even with the analysis
+timer stopped and every visualization replaced by a static status. Leaving the
+mode rebuilds storage from new audio on demand; no automatic full-track scan runs.
 
 == Reuse and invalidation
 

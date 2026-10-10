@@ -40,7 +40,8 @@ pub(super) struct Playback {
     eof: bool,
     paused: bool,
     waveform: Arc<RwLock<WaveformFrame>>,
-    waveform_accumulator: WaveformAccumulator,
+    waveform_accumulator: Option<WaveformAccumulator>,
+    waveform_weights: Vec<[f32; 2]>,
     waveform_coverage: WaveformCoverage,
     still_mode: bool,
 }
@@ -81,18 +82,12 @@ impl Playback {
             pipewire_auto_mix,
             analyzer,
         )?;
-        let weights = super::output::analysis_weights(source.layout());
-        let mut waveform_accumulator = {
+        let waveform_weights = super::output::analysis_weights(source.layout());
+        {
             let mut waveform = waveform.write();
-            waveform.select(
-                &path,
-                range,
-                source.info().duration,
-                source.info().sample_rate,
-            );
-            WaveformAccumulator::new(waveform.clone())
-        };
-        waveform_accumulator.set_channel_weights(&weights);
+            waveform.set_still_mode(still_mode);
+            waveform.select_source(&path, range, source.info().duration);
+        }
         Ok(Self {
             source,
             output,
@@ -104,7 +99,8 @@ impl Playback {
             eof: false,
             paused,
             waveform,
-            waveform_accumulator,
+            waveform_accumulator: None,
+            waveform_weights,
             waveform_coverage: WaveformCoverage::new(start),
             still_mode,
         })
@@ -181,6 +177,16 @@ impl Playback {
     }
 
     pub(super) fn set_still_mode(&mut self, enabled: bool) {
+        if self.still_mode == enabled {
+            return;
+        }
+        if enabled {
+            self.waveform_accumulator = None;
+            // Discarding the prefix invalidates coverage even when no PCM is
+            // decoded during a quick on/off transition.
+            self.waveform_coverage.skip();
+        }
+        self.waveform.write().set_still_mode(enabled);
         self.still_mode = enabled;
     }
 
@@ -236,16 +242,21 @@ impl Playback {
                     if !frames.is_empty() {
                         self.waveform_coverage.skip();
                     }
-                } else {
+                } else if !frames.is_empty() {
                     self.waveform_coverage.record(
                         start_seconds,
                         frames.len() / channels,
                         sample_rate,
                     );
-                    self.waveform_accumulator
-                        .push(start_seconds, frames, sample_rate, channels);
-                    self.waveform_accumulator
-                        .publish(&mut self.waveform.write());
+                    let accumulator = self.waveform_accumulator.get_or_insert_with(|| {
+                        let mut waveform = self.waveform.write();
+                        waveform.prepare_bins(sample_rate);
+                        let mut accumulator = WaveformAccumulator::new(waveform.clone());
+                        accumulator.set_channel_weights(&self.waveform_weights);
+                        accumulator
+                    });
+                    accumulator.push(start_seconds, frames, sample_rate, channels);
+                    accumulator.publish(&mut self.waveform.write());
                 }
                 // Submit decoded PCM directly; retain only the packet tail that
                 // did not fit in the bounded output ring. At most one decoded
@@ -253,10 +264,9 @@ impl Playback {
                 let count = self.output.push(frames);
                 self.pending.extend_from_slice(&frames[count * channels..]);
             } else {
-                if !self.still_mode {
-                    self.waveform_accumulator.finish(&self.waveform_coverage);
-                    self.waveform_accumulator
-                        .publish(&mut self.waveform.write());
+                if let Some(accumulator) = &mut self.waveform_accumulator {
+                    accumulator.finish(&self.waveform_coverage);
+                    accumulator.publish(&mut self.waveform.write());
                 }
                 self.eof = true;
             }
@@ -306,9 +316,9 @@ mod tests {
         let waveform = Arc::new(RwLock::new(WaveformFrame::default()));
         waveform
             .write()
-            .select(path, Some(range), source.info().duration, 8_000);
+            .select_source(path, Some(range), source.info().duration);
         let (output, render) = super::super::output::test_backend(8_000, false, source.layout());
-        let waveform_accumulator = WaveformAccumulator::new(waveform.read().clone());
+        let waveform_weights = super::super::output::analysis_weights(source.layout());
         let playback = Playback {
             source,
             output,
@@ -320,12 +330,19 @@ mod tests {
             eof: false,
             paused: false,
             waveform,
-            waveform_accumulator,
+            waveform_accumulator: None,
+            waveform_weights,
             waveform_coverage: WaveformCoverage::new(0.0),
             still_mode: false,
         };
         (playback, render)
     }
+
+    fn assert_waveform_absent(playback: &Playback) {
+        assert!(playback.waveform_accumulator.is_none());
+        assert_eq!(playback.waveform.read().retained_capacity_bytes(), 0);
+    }
+
     #[test]
     fn still_mode_preserves_pcm_and_never_completes_an_interrupted_envelope() {
         let file = pcm();
@@ -337,18 +354,29 @@ mod tests {
                     end_seconds: Some(2.0),
                 },
             );
+            assert_waveform_absent(&playback);
             playback.fill().unwrap();
             let initial = playback.waveform.read().clone();
             assert!(!initial.complete);
+            let pending = playback.pending.clone();
+            let offset = playback.offset_frames;
+            let position = playback.position();
+            let heard = playback.heard();
             playback.set_still_mode(true);
+            let suspended_revision = playback.waveform.read().revision;
+            assert!(suspended_revision > initial.revision);
+            assert_waveform_absent(&playback);
+            assert_eq!(playback.pending, pending);
+            assert_eq!(playback.offset_frames, offset);
+            assert_eq!(playback.position(), position);
+            assert_eq!(playback.heard(), heard);
             let mut data = [0.0; 160];
             for block in 0..100 {
                 if resume_before_eof && block == 30 {
-                    let suspended = playback.waveform.read();
-                    assert_eq!(suspended.revision, initial.revision);
-                    assert_eq!(suspended.rms_counts, initial.rms_counts);
-                    drop(suspended);
+                    assert_eq!(playback.waveform.read().revision, suspended_revision);
+                    assert_waveform_absent(&playback);
                     playback.set_still_mode(false);
+                    assert_waveform_absent(&playback);
                 }
                 playback.fill().unwrap();
                 render(&mut data, block * 20);
@@ -361,16 +389,68 @@ mod tests {
             let interrupted = playback.waveform.read().clone();
             assert!(!interrupted.complete);
             if resume_before_eof {
-                assert!(interrupted.revision > initial.revision);
-                assert_ne!(interrupted.rms_counts, initial.rms_counts);
+                assert!(interrupted.revision > suspended_revision);
+                assert!(interrupted.rms_counts.iter().sum::<u64>() < 16_000);
+                for (old, fresh) in initial.peaks.iter().zip(&interrupted.peaks) {
+                    if old.is_some() {
+                        assert!(fresh.is_none());
+                    }
+                }
+                assert!(interrupted.retained_capacity_bytes() <= initial.retained_capacity_bytes());
             } else {
-                assert_eq!(interrupted.revision, initial.revision);
-                assert_eq!(interrupted.rms_counts, initial.rms_counts);
+                assert_eq!(interrupted.revision, suspended_revision);
+                assert_waveform_absent(&playback);
                 playback.set_still_mode(false);
                 playback.fill().unwrap();
                 assert!(!playback.waveform.read().complete);
+                assert_waveform_absent(&playback);
             }
         }
+    }
+
+    #[test]
+    fn repeated_paused_still_roundtrips_do_not_restore_or_complete_old_coverage() {
+        let file = pcm();
+        let (mut playback, mut render) = test_playback(
+            file.path(),
+            PlaybackRange {
+                start_seconds: 0.0,
+                end_seconds: Some(2.0),
+            },
+        );
+        playback.fill().unwrap();
+        playback.pause(true);
+        let retained_revision = playback.waveform.read().revision;
+        let pending = playback.pending.clone();
+        let pending_capacity = playback.pending.capacity();
+        for pass in 0..32 {
+            playback.set_still_mode(true);
+            let revision = playback.waveform.read().revision;
+            assert_eq!(revision, retained_revision + pass + 1);
+            playback.set_still_mode(true);
+            playback.fill().unwrap();
+            assert_eq!(playback.waveform.read().revision, revision);
+            assert_waveform_absent(&playback);
+            playback.set_still_mode(false);
+            playback.fill().unwrap();
+            assert!(playback.paused());
+            assert_eq!(playback.pending, pending);
+            assert_eq!(playback.pending.capacity(), pending_capacity);
+            assert_waveform_absent(&playback);
+        }
+        playback.pause(false);
+        let mut data = [0.0; 160];
+        for block in 0..100 {
+            playback.fill().unwrap();
+            render(&mut data, block * 20);
+            for (offset, sample) in data.iter().enumerate() {
+                assert_eq!(*sample, (block as usize * 160 + offset) as f32 / 32768.0);
+            }
+        }
+        playback.fill().unwrap();
+        assert!(playback.eof);
+        assert!(!playback.waveform.read().complete);
+        assert!(playback.waveform.read().rms_counts.iter().sum::<u64>() < 16_000);
     }
 
     #[test]
@@ -384,6 +464,7 @@ mod tests {
             },
         );
         playback.fill().unwrap();
+        let capacity_bound = playback.waveform.read().retained_capacity_bytes();
         playback.set_still_mode(true);
         for target in [None, Some(0.0), Some(0.5)] {
             let initial_revision = playback.waveform.read().revision;
@@ -393,8 +474,12 @@ mod tests {
                 .restart_output_with(target, |_, _| Ok(output))
                 .unwrap();
             playback.fill().unwrap();
+            assert_waveform_absent(&playback);
+            playback.set_still_mode(true);
+            assert_waveform_absent(&playback);
             assert_eq!(playback.waveform.read().revision, initial_revision);
             playback.set_still_mode(false);
+            assert_waveform_absent(&playback);
             let mut data = [0.0; 160];
             for block in 0..110 {
                 playback.fill().unwrap();
@@ -402,7 +487,9 @@ mod tests {
             }
             assert!(playback.eof);
             assert!(!playback.waveform.read().complete);
+            assert!(playback.waveform.read().retained_capacity_bytes() <= capacity_bound);
             playback.set_still_mode(true);
+            assert_waveform_absent(&playback);
         }
         playback.set_still_mode(false);
         let (output, mut render) =

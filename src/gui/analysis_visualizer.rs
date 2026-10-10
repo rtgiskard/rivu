@@ -122,6 +122,10 @@ impl AnalysisVisualizer {
         data.db_range = config.radial_spectrum_db_range();
         if reset {
             data.clear();
+            if !data.visible || mode == VisualizerMode::Off {
+                data.field = Vec::new();
+                data.spatial_next = Vec::new();
+            }
         } else if recolor && !data.field.is_empty() {
             data.rasterize();
         }
@@ -133,6 +137,10 @@ impl AnalysisVisualizer {
         if data.visible != visible {
             data.visible = visible;
             data.clear();
+            if !visible {
+                data.field = Vec::new();
+                data.spatial_next = Vec::new();
+            }
         }
     }
 
@@ -152,6 +160,10 @@ impl AnalysisVisualizer {
             retired, pending, ..
         } = &mut *data;
         retired.append(pending);
+        if !retired.is_empty() {
+            // Still Mode has no analysis timer to supply the final retirement frame.
+            window.request_animation_frame();
+        }
     }
 
     pub(super) fn release_all_images(&self, window: &mut Window) {
@@ -802,5 +814,37 @@ mod tests {
         assert!(uploaded.upgrade().is_some());
         assert_eq!(plot.data.borrow().pending.len(), 1);
         assert!(plot.data.borrow().image.is_none());
+    }
+
+    #[test]
+    fn hidden_analysis_releases_fields_without_recoloring_or_consuming_audio() {
+        for (style, mode) in [
+            (
+                RadialSpectrumStyle::StereoDensity,
+                VisualizerMode::StereoDensity,
+            ),
+            (
+                RadialSpectrumStyle::SpatialSpectrum,
+                VisualizerMode::SpatialSpectrum,
+            ),
+        ] {
+            let plot = plot(style);
+            plot.update(&frame(mode));
+            assert!(plot.data.borrow().field.capacity() > 0);
+            plot.set_visible(false);
+            assert_eq!(plot.data.borrow().field.capacity(), 0);
+            assert_eq!(plot.data.borrow().spatial_next.capacity(), 0);
+            plot.configure(&Config {
+                radial_spectrum_style: style,
+                radial_spectrum_db_range: Some(50.0),
+                ..Config::default()
+            });
+            plot.update(&frame(mode));
+            assert!(plot.data.borrow().image.is_none());
+            assert_eq!(plot.data.borrow().field.capacity(), 0);
+            plot.set_visible(true);
+            plot.update(&frame(mode));
+            assert!(plot.data.borrow().image.is_some());
+        }
     }
 }

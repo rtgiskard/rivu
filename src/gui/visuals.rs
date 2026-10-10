@@ -614,11 +614,15 @@ impl Visuals {
     }
 
     pub(super) fn release_retired(&self, window: &mut Window) {
-        self.data.borrow_mut().release_images(|image| {
+        let mut data = self.data.borrow_mut();
+        data.release_images(|image| {
             window
                 .drop_image(image)
                 .map_err(|error| format!("Cannot release spectrogram image: {error}"))
         });
+        if !data.retired.is_empty() {
+            window.request_animation_frame();
+        }
     }
 
     fn view(&self, panel_id: u64, mode: VisualMode) -> AnyElement {

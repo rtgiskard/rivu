@@ -3,7 +3,7 @@
 //! The audio worker owns the bounded peak bins. Unknown intervals remain blank.
 //! Only an explicit full-preview request opens a separate decoder; hiding and
 //! metadata/display changes never cancel or restart it. Still Mode cancels that
-//! request and releases display caches without discarding buffered peak bins.
+//! request and releases display caches; the audio worker discards buffered bins.
 
 use std::{
     cell::RefCell,
@@ -52,6 +52,7 @@ impl Source {
 struct ManualRequest {
     source: Rc<Source>,
     previous_source: Option<Source>,
+    suspension_generation: u64,
     cancelled: Arc<AtomicBool>,
 }
 
@@ -205,6 +206,9 @@ impl WaveformPlot {
         self.release_images(|image| {
             let _ = window.drop_image(image);
         });
+        if !self.retired.is_empty() {
+            window.request_animation_frame();
+        }
     }
 
     fn release_images(&mut self, mut release: impl FnMut(Arc<RenderImage>)) {
@@ -532,8 +536,8 @@ impl Waveform {
         }
     }
 
-    /// Suspend display work and cancel explicit scans, retaining source identity
-    /// and shared peak bins so ordinary sync can resume without a decoder scan.
+    /// Suspend display work and cancel explicit scans. The audio worker discards
+    /// shared results; resuming ordinary sync never starts a decoder scan.
     pub(super) fn set_enabled(&mut self, enabled: bool) {
         if self.enabled == enabled {
             return;
@@ -543,6 +547,8 @@ impl Waveform {
             return;
         }
         self.cancel_full();
+        self.source = None;
+        self.revision = None;
         let mut plot = self.plot.borrow_mut();
         plot.retain_panels(|_| false);
         plot.columns = HashMap::new();
@@ -641,13 +647,15 @@ impl Waveform {
     fn start_full(&mut self) -> (u64, Arc<AtomicBool>) {
         self.generation = self.generation.wrapping_add(1);
         let cancelled = Arc::new(AtomicBool::new(false));
+        let shared = self.shared.read();
         self.manual = Some(ManualRequest {
             source: Rc::clone(
                 self.source
                     .as_ref()
                     .expect("full preview source is present"),
             ),
-            previous_source: Source::from_frame(&self.shared.read()),
+            previous_source: Source::from_frame(&shared),
+            suspension_generation: shared.suspension_generation(),
             cancelled: Arc::clone(&cancelled),
         });
         self.manual_error = None;
@@ -677,6 +685,10 @@ impl Waveform {
                 anyhow::bail!("Full waveform source changed before completion");
             }
             let mut shared = self.shared.write();
+            // The worker can purge before GUI cancellation, even across a quick on/off.
+            if request.suspension_generation != shared.suspension_generation() {
+                return Ok(());
+            }
             let previous_unchanged = match &request.previous_source {
                 Some(previous) => previous.matches(&shared),
                 None => shared.path.is_none(),
@@ -1377,7 +1389,7 @@ mod tests {
     }
 
     #[test]
-    fn disabling_cancels_full_scan_and_retires_display_without_losing_base_data() {
+    fn disabling_cancels_full_scan_and_retires_display_before_resume() {
         let data = frame(vec![Some(0.25), None]);
         let mut waveform = preview(data);
         waveform.revision = Some(1);
@@ -1424,10 +1436,8 @@ mod tests {
         assert!(!waveform.dragging);
         assert!(waveform.interaction.borrow().panels.is_empty());
         assert!(waveform.interaction.borrow().active_panel.is_none());
-        assert_eq!(waveform.revision, Some(1));
-        assert!(Rc::ptr_eq(waveform.source.as_ref().unwrap(), &source));
-        assert_eq!(waveform.shared.read().peaks, vec![Some(0.25), None]);
-        assert_eq!(waveform.shared.read().revision, 1);
+        assert!(waveform.revision.is_none());
+        assert!(waveform.source.is_none());
         {
             let mut plot = waveform.plot.borrow_mut();
             assert_eq!(plot.columns.capacity(), 0);
@@ -1442,8 +1452,24 @@ mod tests {
         waveform.set_enabled(true);
         assert!(waveform.manual.is_none());
         assert!(!waveform.finish_full(generation, Ok(frame(vec![Some(1.0), Some(1.0)]))));
-        assert_eq!(waveform.shared.read().peaks, vec![Some(0.25), None]);
-        assert!(!waveform.shared.read().complete);
+    }
+
+    #[test]
+    fn backend_still_transition_rejects_manual_results_before_gui_cancellation() {
+        for resume_before_completion in [false, true] {
+            let mut waveform = preview(frame(vec![Some(0.25), None]));
+            let (request, _) = waveform.start_full();
+            waveform.shared.write().set_still_mode(true);
+            if resume_before_completion {
+                waveform.shared.write().set_still_mode(false);
+            }
+            let revision = waveform.shared.read().revision;
+            assert!(waveform.finish_full(request, Ok(frame(vec![Some(1.0), Some(1.0)]))));
+            assert!(waveform.manual.is_none());
+            assert!(waveform.manual_error.is_none());
+            assert_eq!(waveform.shared.read().peaks.capacity(), 0);
+            assert_eq!(waveform.shared.read().revision, revision);
+        }
     }
 
     #[test]
