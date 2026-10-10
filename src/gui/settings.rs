@@ -11,7 +11,7 @@ use crate::{
         AudioVisualizerOptions, Config, LogLevel, RadialSpectrumStyle, RgbColor, SpectrumStyle,
         SpectrumWindow, VisualizationPalette,
     },
-    model::{Command, RepeatMode},
+    model::Command,
 };
 use anyhow::{Context as _, Result};
 use gpui::{prelude::*, *};
@@ -156,7 +156,7 @@ impl Field {
             | Self::RadialSpectrumSecondaryColor
             | Self::CursorColor => "#RRGGBB.",
             Self::VisualizationDb => "1–160.",
-            // The group supplies the live inherited range for these fields.
+            // These controls attach a live inherited-range tooltip in Settings::field.
             Self::SpectrumDb | Self::RadialSpectrumDb | Self::SpectrogramDb => "",
             Self::RadialSpectrumSensitivity => "0–5.",
             Self::RadialSpectrumRotationSpeed => "0–10.",
@@ -187,7 +187,15 @@ impl Field {
 
     fn form(self, control: impl IntoElement) -> Div {
         let hint = self.hint();
-        form_field(self.label(), control).when(!hint.is_empty(), |field| field.child(caption(hint)))
+        let inline_hint = matches!(self, Self::Roots);
+        let control = div()
+            .id(("settings-field-help", self as usize))
+            .w_full()
+            .child(control)
+            .when(!hint.is_empty() && !inline_hint, |control| {
+                control.tooltip(move |_, cx| cx.new(|_| ButtonTooltip { text: hint.into() }).into())
+            });
+        form_field(self.label(), control).when(inline_hint, |field| field.child(caption(hint)))
     }
 }
 
@@ -447,7 +455,35 @@ impl Settings {
     }
 
     fn field(&self, field: Field) -> Div {
-        field.form(self.inputs[&field].clone())
+        let input = self.inputs[&field].clone();
+        if matches!(
+            field,
+            Field::SpectrumDb | Field::RadialSpectrumDb | Field::SpectrogramDb
+        ) {
+            let common = self.inputs[&Field::VisualizationDb].clone();
+            let fallback = self.draft.visualization_db_range;
+            return field.form(
+                div()
+                    .id(("settings-range-help", field as usize))
+                    .w_full()
+                    .child(input)
+                    .tooltip(move |_, cx| {
+                        let range = common
+                            .read(cx)
+                            .text()
+                            .trim()
+                            .parse::<f32>()
+                            .ok()
+                            .filter(|range| range.is_finite() && (1.0..=160.0).contains(range))
+                            .unwrap_or(fallback);
+                        cx.new(|_| ButtonTooltip {
+                            text: format!("1–160 dB; empty = Common ({range} dB).").into(),
+                        })
+                        .into()
+                    }),
+            );
+        }
+        field.form(input)
     }
 
     fn pair(&self, first: Field, second: Field) -> Div {
@@ -459,15 +495,6 @@ impl Settings {
 
     fn single(&self, field: Field) -> Div {
         row().child(self.field(field).w(relative(0.5)).min_w(px(180.)).pr_2())
-    }
-
-    fn db_range_hint(&self, cx: &App) -> Div {
-        let range = self
-            .number::<f32>(Field::VisualizationDb, cx)
-            .ok()
-            .filter(|range| range.is_finite() && (1.0..=160.0).contains(range))
-            .unwrap_or(self.draft.visualization_db_range);
-        caption(format!("1–160 dB; empty = Common ({range} dB)."))
     }
 
     fn field_state(&self, field: Field, enabled: bool, reason: &'static str, cx: &App) -> Div {
@@ -997,7 +1024,7 @@ impl GuiApp {
             cx.notify();
             return;
         }
-        let config = match self.settings.parse(cx) {
+        let mut config = match self.settings.parse(cx) {
             Ok(config) => config,
             Err(error) => {
                 self.settings.feedback = Some(Err(format!("Invalid settings: {error:#}")));
@@ -1005,6 +1032,16 @@ impl GuiApp {
                 return;
             }
         };
+        let live = self.handle.state(crate::response::StateSections {
+            playback: true,
+            ..Default::default()
+        });
+        let playback = &live
+            .playback
+            .expect("playback section was requested")
+            .playback;
+        config.shuffle = playback.shuffle;
+        config.repeat = playback.repeat;
         self.settings.applying = true;
         self.settings.feedback = None;
         let session = self.settings.session;
@@ -1228,9 +1265,7 @@ impl GuiApp {
                 .child(self.measurement(Measured::Device)),
             );
         let draft = &self.settings.draft;
-        let (shuffle, repeat, mpris, tray, ffmpeg, remix) = (
-            draft.shuffle,
-            draft.repeat,
+        let (mpris, tray, ffmpeg, remix) = (
             draft.mpris_enabled,
             draft.tray_enabled,
             draft.ffmpeg_enabled,
@@ -1315,45 +1350,7 @@ impl GuiApp {
             column()
                 .gap_2()
                 .child(self.settings.pair(Field::Volume, Field::PlayCountThreshold))
-                .child(self.settings.single(Field::QueueLimit))
-                .child(
-                    row()
-                        .flex_wrap()
-                        .gap_2()
-                        .child(visual_switch(
-                            "settings-shuffle",
-                            "󰒟",
-                            "Shuffle",
-                            shuffle,
-                            cx,
-                            |draft| draft.shuffle = !draft.shuffle,
-                        ))
-                        .child(active_control(
-                            icon_button(
-                                "settings-repeat",
-                                if repeat == RepeatMode::One {
-                                    "󰑘"
-                                } else {
-                                    "󰑖"
-                                },
-                                match repeat {
-                                    RepeatMode::Off => "Repeat: Off; click for All",
-                                    RepeatMode::All => "Repeat: All; click for One",
-                                    RepeatMode::One => "Repeat: One; click for Off",
-                                },
-                                cx,
-                                |this, _, cx| {
-                                    this.settings.draft.repeat = match this.settings.draft.repeat {
-                                        RepeatMode::Off => RepeatMode::All,
-                                        RepeatMode::All => RepeatMode::One,
-                                        RepeatMode::One => RepeatMode::Off,
-                                    };
-                                    cx.notify();
-                                },
-                            ),
-                            repeat != RepeatMode::Off,
-                        )),
-                ),
+                .child(self.settings.single(Field::QueueLimit)),
         );
         let audio = settings_group(
             "Audio",
@@ -1409,34 +1406,30 @@ impl GuiApp {
             "Interface",
             column()
                 .gap_2()
-                .child(row().child(self.font_control(cx).flex_1().min_w(px(260.))))
-                .child(self.settings.single(Field::Scale))
-                .child(row().child(visual_switch(
-                    "settings-nerd-symbols",
-                    "Nf",
-                    "Nerd Font symbols",
-                    draft.nerd_symbols,
-                    cx,
-                    |draft| draft.nerd_symbols = !draft.nerd_symbols,
-                )))
-                .child(row().child(visual_switch(
-                    "settings-library-tree-lines",
-                    "├",
-                    "Library tree lines",
-                    draft.library_tree_lines,
-                    cx,
-                    |draft| draft.library_tree_lines = !draft.library_tree_lines,
-                )))
-                .child(caption("Tree lines off = disclosure arrows.")),
-        );
-        let desktop = settings_group(
-            "Desktop integration",
-            column()
-                .gap_2()
+                .child(two_column(
+                    self.font_control(cx).min_w(px(180.)),
+                    self.settings.field(Field::Scale).min_w(px(180.)),
+                ))
                 .child(
                     row()
                         .flex_wrap()
                         .gap_2()
+                        .child(visual_switch(
+                            "settings-nerd-symbols",
+                            "Nf",
+                            "Nerd Font symbols",
+                            draft.nerd_symbols,
+                            cx,
+                            |draft| draft.nerd_symbols = !draft.nerd_symbols,
+                        ))
+                        .child(visual_switch(
+                            "settings-library-tree-lines",
+                            "├",
+                            "Library tree lines",
+                            draft.library_tree_lines,
+                            cx,
+                            |draft| draft.library_tree_lines = !draft.library_tree_lines,
+                        ))
                         .child(active_control(
                             icon_button(
                                 "settings-mpris",
@@ -1465,7 +1458,7 @@ impl GuiApp {
                             |draft| draft.tray_enabled = !draft.tray_enabled,
                         )),
                 )
-                .child(caption("Requires restarting the graphical host.")),
+                .child(caption("System tray changes require restarting the graphical host.")),
         );
 
         column()
@@ -1474,7 +1467,6 @@ impl GuiApp {
             .child(playback)
             .child(audio)
             .child(interface)
-            .child(desktop)
             .child(logging)
     }
 
@@ -1668,7 +1660,6 @@ impl GuiApp {
                             settings.field_state(Field::SpectrumGap, !solid, "Unavailable with Solid; has no bar gaps.", cx),
                         ))
                         .child(settings.single(Field::SpectrumDb))
-                        .child(settings.db_range_hint(cx))
                         .child(row().flex_wrap().gap_2()
                             .child(visual_switch("spectrum-interpolate", "≈", "Frequency interpolation", draft.spectrum_interpolate, cx, |draft| draft.spectrum_interpolate = !draft.spectrum_interpolate))
                             .child(visual_switch("spectrum-grid", "#", "Grid lines", draft.spectrum_grid, cx, |draft| draft.spectrum_grid = !draft.spectrum_grid))
@@ -1692,7 +1683,6 @@ impl GuiApp {
                     column()
                         .gap_2()
                         .child(settings.pair(Field::SpectrogramDb, Field::SpectrogramHistory))
-                        .child(settings.db_range_hint(cx))
                         .child(row().child(visual_switch(
                             "spectrogram-labels",
                             "T",
@@ -1803,7 +1793,6 @@ impl GuiApp {
                     .child(caption("Effect parameters below are shared by all instances, regardless of the default style."))
                     .child(settings_group("Response & glow", column().gap_2()
                         .child(settings.single(Field::RadialSpectrumDb))
-                        .child(settings.db_range_hint(cx))
                         .child(settings.pair(Field::RadialSpectrumSensitivity, Field::RadialSpectrumBloomIntensity))
                         .child(caption("Fractal styles: silence fades the light; pause freezes it. Pulses follow energy rises, not detected beats."))))
                     .child(settings_group("Shape & motion", column().gap_2()

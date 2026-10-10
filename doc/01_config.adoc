@@ -66,10 +66,11 @@ including full waveform scans; it does not reopen the current track.
 Still mode is under Visualizations → Common → Rendering and takes effect when
 settings are applied, without restarting playback. It is persisted as `still_mode`.
 
-General groups controls into Library, Playback, Audio, Interface, Desktop
-integration, and Logging. Labels name the setting and its unit; nearby hints
-give ranges, special values, or when changes take effect. Shared rules appear
-once per group. Configuration keys, defaults, and validation are unchanged.
+General groups controls into Library, Playback, Audio, Interface, and Logging.
+Interface pairs font and scale in two columns, with symbol, tree-line, MPRIS,
+and tray toggles in one wrapping row. Shuffle and Repeat remain in Playback
+controls, not General settings. Numeric ranges and format hints appear as input
+tooltips; optional dB ranges also show the current inherited Common value.
 
 Visualizations is grouped by view, with shared controls in Common:
 
