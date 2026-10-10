@@ -74,15 +74,15 @@ once per group. Configuration keys, defaults, and validation are unchanged.
 Visualizations is grouped by view, with shared controls in Common:
 
 * Appearance: background for all views; color scheme for Spectrum, Spectrogram,
-  and Waveform. Radial Spectrum has independent primary and secondary colors.
+  and Waveform. Audio Visualizer has independent primary and secondary colors.
 * Default display range: `visualization_db_range` supplies the display span for Spectrum,
-  Spectrogram, and Radial Spectrum unless a view overrides it. It belongs to
+  Spectrogram, and Audio Visualizer unless a view overrides it. It belongs to
   Appearance, not frequency analysis, and does not affect Waveform gain or volume.
 * Frequency analysis: FFT size, window, and analysis rate for Spectrum,
-  Spectrogram, and Radial Spectrum, not Waveform. FFT size defaults to `8192`;
+  Spectrogram, and Audio Visualizer, not Waveform. FFT size defaults to `8192`;
   configuration keys remain `spectrum_fft_size` and `spectrum_window`. Changing
-  size or window clears Spectrogram history.
-* Rendering: Still mode pauses visualization processing. Rendering cache
+  size or window clears visualization history.
+* Rendering: Still mode stops visualization processing and discards results. Rendering cache
   (`visualization_cache`) reuses derived graphics in Spectrum, Spectrogram, and
   Waveform, trading memory for less CPU work; it is separate from media read buffering.
 
@@ -92,8 +92,10 @@ or clear an explicit value to restore inheritance. See
 
 Spectrum groups controls into Appearance, Bar motion, and Peak markers;
 Spectrogram uses Display and Frequency sampling; Waveform uses Appearance &
-interaction and Amplitude display. Radial Spectrum keeps Shape & motion,
-Bars & rings, and Colors.
+interaction and Amplitude display. All Audio Visualizer styles share Appearance
+(style and display range) and Colors. Radial styles also show Shape & motion and
+Bars & rings; fractal styles show Response & glow. Density and spatial styles
+omit controls that do not affect them.
 
 Style-dependent fields preserve their values while inactive. Hover an inactive
 field for the reason; switch back to a compatible style to resume editing.
@@ -167,7 +169,7 @@ override equal to the current resolved value leaves the display unchanged.
 == Visualizations
 
 Live FFT analysis runs during playback only when Still Mode is off, the
-application window is visible, and a Spectrum, Spectrogram, or Radial Spectrum
+application window is visible, and a Spectrum, Spectrogram, or Audio Visualizer
 panel is visible.
 `analysis_fps` accepts `5`–`60`; all views use `visual_background`.
 `visual_palette` accepts `tokyo_night` or `deadbeef` (default `deadbeef`) and is
