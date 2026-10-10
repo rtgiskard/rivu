@@ -24,6 +24,14 @@
 - Delete obsolete tests; merge redundant tests without losing distinct behavioral coverage
 - Do not pursue coverage numbers; weigh bug-prevention value against setup, runtime, and maintenance costs, and use throwaway smoke checks for one-off verification
 
+## Documentation
+
+- Keep entry-point documentation concise: project purpose, capabilities, installation, startup, critical limitations, and topical links
+- User references describe operations, configuration, results, and errors, not decorative appearance or internal mechanisms; include control names and locations only when needed for a task
+- Technical design documents explain protocols, ownership, invariants, resource boundaries, rationale, and alternatives; include code details only when essential to a consequential design decision, not as a code walkthrough
+- Update documentation for meaningful behavior, contract, or design changes; pure refactoring, internal optimization, and visual polish do not automatically require updates
+- Update the authoritative section and link rather than duplicate; documentation is not a change log or UI acceptance record
+
 ## Commits
 
 - Prefer one coherent responsibility per commit without requiring strict atomicity
