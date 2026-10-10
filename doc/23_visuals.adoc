@@ -97,6 +97,13 @@ than retaining a second target buffer. Density and spatial views reuse their
 field storage across continuity resets, but release it when hidden or inactive;
 one invalidation path owns both policies.
 
+Visualizer presentation options belong to panel instances. Density, spatial,
+and band-energy demand are independent flags combined across visible panels;
+one accepted audio window and stereo FFT supply all requested payloads.
+Rendering state is shared per style, not across different styles. Overlay
+toggles are paint-only and do not reset analysis or simulation. Hidden styles
+release their result storage; analysis images retain their delayed retirement.
+
 == Spectrogram
 
 Spectrogram maps retained frequency history to colored image columns. Stable

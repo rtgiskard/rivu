@@ -16,6 +16,7 @@ mod settings;
 mod visuals;
 mod waveform;
 use crate::{
+    config::{AudioVisualizerOptions, RadialSpectrumStyle},
     core::AppHandle,
     model::{Command, PlaybackStatus, Query, playback_key_command},
     projection::GuiSnapshot,
@@ -75,43 +76,43 @@ enum Field {
 struct PanelSpec {
     kind: &'static str,
     title: &'static str,
-    render: fn(&mut GuiApp, u64, &mut Window, &mut Context<GuiApp>) -> AnyElement,
+    render: fn(&mut GuiApp, &layout::Panel, &mut Window, &mut Context<GuiApp>) -> AnyElement,
 }
 const PANELS: &[PanelSpec] = &[
     PanelSpec {
         kind: "transport",
         title: "Playback",
-        render: GuiApp::transport_panel,
+        render: |app, panel, window, cx| app.transport_panel(panel.id, window, cx),
     },
     PanelSpec {
         kind: "library",
         title: "Library",
-        render: GuiApp::library_panel,
+        render: |app, panel, window, cx| app.library_panel(panel.id, window, cx),
     },
     PanelSpec {
         kind: "queue",
         title: "Queue",
-        render: GuiApp::queue_panel,
+        render: |app, panel, window, cx| app.queue_panel(panel.id, window, cx),
     },
     PanelSpec {
         kind: "playlists",
         title: "Playlists",
-        render: GuiApp::playlists_panel,
+        render: |app, panel, window, cx| app.playlists_panel(panel.id, window, cx),
     },
     PanelSpec {
         kind: "metadata",
         title: "Track details",
-        render: GuiApp::metadata_panel,
+        render: |app, panel, window, cx| app.metadata_panel(panel.id, window, cx),
     },
     PanelSpec {
         kind: "history",
         title: "Recent tracks",
-        render: GuiApp::history_panel,
+        render: |app, panel, window, cx| app.history_panel(panel.id, window, cx),
     },
     PanelSpec {
         kind: "spectrum",
         title: "Spectrum",
-        render: GuiApp::spectrum_panel,
+        render: |app, panel, window, cx| app.spectrum_panel(panel.id, window, cx),
     },
     PanelSpec {
         kind: "audio_visualizer",
@@ -121,12 +122,12 @@ const PANELS: &[PanelSpec] = &[
     PanelSpec {
         kind: "waveform",
         title: "Waveform",
-        render: GuiApp::waveform_panel,
+        render: |app, panel, window, cx| app.waveform_panel(panel.id, window, cx),
     },
     PanelSpec {
         kind: "spectrogram",
         title: "Spectrogram",
-        render: GuiApp::spectrogram_panel,
+        render: |app, panel, window, cx| app.spectrogram_panel(panel.id, window, cx),
     },
 ];
 fn panel_spec(kind: &str) -> Option<&'static PanelSpec> {
@@ -212,7 +213,7 @@ impl GuiHost {
     fn clear_window_state(&self) {
         self.handle.clear_wakeup();
         self.handle
-            .set_visualizer_mode(crate::analysis::VisualizerMode::Off);
+            .set_visualizer_demand(crate::analysis::VisualizerDemand::default());
         let _ = self.handle.send(Command::Analysis { enabled: false });
     }
 
@@ -774,7 +775,7 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) -> Self {
         let state = handle.gui_snapshot();
-        let (layout, error) = if layout_path.exists() {
+        let (layout, mut error) = if layout_path.exists() {
             match Layout::load(&layout_path) {
                 Ok(layout) => (layout, None),
                 Err(error) => (
@@ -794,6 +795,13 @@ impl GuiApp {
             .collect();
         for id in settings_panels {
             layout.remove(id);
+        }
+        if layout.initialize_audio_visualizers(AudioVisualizerOptions::from(
+            state.system.config.as_ref(),
+        )) {
+            if let Err(save_error) = layout.save(&layout_path) {
+                error = Some(format!("Saving layout: {save_error:#}"));
+            }
         }
         let ui_font = fonts::resolve(&state.system.config.ui_font, cx);
         let mut inputs = HashMap::new();
@@ -1914,29 +1922,31 @@ impl GuiApp {
         let spectrum_restored = self
             .visuals
             .set_spectrum_visible(self.window_visible && !spectrum_panel_ids.is_empty());
-        let visualizer_visible = self.window_visible
-            && active_panels
-                .iter()
-                .any(|panel| panel.kind == "audio_visualizer");
-        let radial_restored = self.radial_spectrum.set_visible(visualizer_visible);
-        let visualizer_mode = if visualizer_visible {
-            match self.state.system.config.radial_spectrum_style {
-                crate::config::RadialSpectrumStyle::StereoDensity => {
-                    crate::analysis::VisualizerMode::StereoDensity
+        let radial_changed = self.radial_spectrum.sync(
+            &self.state.system.config,
+            &active_panels,
+            self.window_visible,
+        );
+        let mut demand = crate::analysis::VisualizerDemand::default();
+        if self.window_visible {
+            for panel in &active_panels {
+                if panel.kind != "audio_visualizer" {
+                    continue;
                 }
-                crate::config::RadialSpectrumStyle::SpatialSpectrum => {
-                    crate::analysis::VisualizerMode::SpatialSpectrum
+                let options = panel.audio_visualizer.unwrap_or_else(|| {
+                    AudioVisualizerOptions::from(self.state.system.config.as_ref())
+                });
+                match options.style {
+                    RadialSpectrumStyle::StereoDensity => demand.stereo_density = true,
+                    RadialSpectrumStyle::SpatialSpectrum => demand.spatial_spectrum = true,
+                    RadialSpectrumStyle::FractalBeams | RadialSpectrumStyle::FractalFlow => {
+                        demand.band_energy = true;
+                    }
+                    _ => {}
                 }
-                crate::config::RadialSpectrumStyle::FractalBeams
-                | crate::config::RadialSpectrumStyle::FractalFlow => {
-                    crate::analysis::VisualizerMode::Generative
-                }
-                _ => crate::analysis::VisualizerMode::Off,
             }
-        } else {
-            crate::analysis::VisualizerMode::Off
-        };
-        self.handle.set_visualizer_mode(visualizer_mode);
+        }
+        self.handle.set_visualizer_demand(demand);
         let analysis_visible = self.window_visible
             && active_panels.iter().any(|panel| {
                 matches!(
@@ -1946,9 +1956,7 @@ impl GuiApp {
             });
         if analysis_visible {
             let spectrum_changed = self.visuals.configure(&self.state.system.config);
-            let radial_changed = self.radial_spectrum.configure(&self.state.system.config);
-            self.analysis_needs_refresh |=
-                spectrum_restored || radial_restored || spectrum_changed || radial_changed;
+            self.analysis_needs_refresh |= spectrum_restored || spectrum_changed || radial_changed;
         }
         if analysis_visible != self.analysis_worker_enabled {
             self.analysis_worker_enabled = analysis_visible;
@@ -2016,6 +2024,10 @@ impl GuiApp {
             .retain(|key, _| active.contains(key));
     }
     fn persist_layout(&mut self, cx: &mut Context<Self>) {
+        self.layout
+            .initialize_audio_visualizers(AudioVisualizerOptions::from(
+                self.state.system.config.as_ref(),
+            ));
         self.prune_measured();
         if let Err(error) = self.layout.save(&self.layout_path) {
             self.error = Some(format!("Saving layout: {error:#}"));
@@ -2028,12 +2040,18 @@ impl GuiApp {
     }
     fn audio_visualizer_panel(
         &mut self,
-        id: u64,
+        panel: &layout::Panel,
         _: &mut Window,
         _: &mut Context<GuiApp>,
     ) -> AnyElement {
-        self.radial_spectrum
-            .view(id, self.state.playback.status == PlaybackStatus::Playing)
+        let options = panel
+            .audio_visualizer
+            .unwrap_or_else(|| AudioVisualizerOptions::from(self.state.system.config.as_ref()));
+        self.radial_spectrum.view(
+            panel.id,
+            self.state.playback.status == PlaybackStatus::Playing,
+            options,
+        )
     }
     fn spectrogram_panel(&mut self, id: u64, _: &mut Window, _: &mut Context<Self>) -> AnyElement {
         self.visuals.spectrogram(id)
@@ -2264,7 +2282,7 @@ impl GuiApp {
                                 .into_any_element();
                         }
                         panel_spec(&panel.kind)
-                            .map(|spec| (spec.render)(self, panel.id, window, cx))
+                            .map(|spec| (spec.render)(self, panel, window, cx))
                             .unwrap_or_else(|| {
                                 div()
                                     .p(gpui::px(UI_INSET))
@@ -2939,15 +2957,117 @@ impl Render for GuiApp {
                         ));
                     }
                     if is_audio_visualizer {
-                        menu = menu.child(menu_item(
-                            "audio-visualizer-noctalia-fancy",
-                            "Noctalia Fancy ✓",
-                            cx,
-                            |this, _, cx| {
-                                this.panel_menu = None;
-                                cx.notify();
-                            },
-                        ));
+                        if let Some(options) = self.layout.audio_visualizer_options(state.panel_id)
+                        {
+                            menu = menu.child(caption("Style").px(gpui::px(UI_INSET)).py_1());
+                            for (style, label, selected_label) in [
+                                (RadialSpectrumStyle::Bars, "Bars", "Bars ✓"),
+                                (RadialSpectrumStyle::Rings, "Rings", "Rings ✓"),
+                                (
+                                    RadialSpectrumStyle::BarsRings,
+                                    "Bars + Rings",
+                                    "Bars + Rings ✓",
+                                ),
+                                (
+                                    RadialSpectrumStyle::StereoDensity,
+                                    "Stereo Density",
+                                    "Stereo Density ✓",
+                                ),
+                                (
+                                    RadialSpectrumStyle::SpatialSpectrum,
+                                    "Spatial Spectrum",
+                                    "Spatial Spectrum ✓",
+                                ),
+                                (
+                                    RadialSpectrumStyle::FractalBeams,
+                                    "Fractal Beams",
+                                    "Fractal Beams ✓",
+                                ),
+                                (
+                                    RadialSpectrumStyle::FractalFlow,
+                                    "Fractal Flow",
+                                    "Fractal Flow ✓",
+                                ),
+                            ] {
+                                menu = menu.child(menu_item(
+                                    label,
+                                    if options.style == style {
+                                        selected_label
+                                    } else {
+                                        label
+                                    },
+                                    cx,
+                                    move |this, _, cx| {
+                                        this.panel_menu = None;
+                                        if let Some(mut options) =
+                                            this.layout.audio_visualizer_options(state.panel_id)
+                                        {
+                                            options.style = style;
+                                            this.layout.set_audio_visualizer_options(
+                                                state.panel_id,
+                                                options,
+                                            );
+                                            this.persist_layout(cx);
+                                        }
+                                    },
+                                ));
+                            }
+                            menu = menu
+                                .child(menu_item(
+                                    "audio-visualizer-grid",
+                                    if options.reference_lines {
+                                        "Reference lines ✓"
+                                    } else {
+                                        "Reference lines"
+                                    },
+                                    cx,
+                                    move |this, _, cx| {
+                                        this.panel_menu = None;
+                                        if let Some(mut options) =
+                                            this.layout.audio_visualizer_options(state.panel_id)
+                                        {
+                                            options.reference_lines = !options.reference_lines;
+                                            this.layout.set_audio_visualizer_options(
+                                                state.panel_id,
+                                                options,
+                                            );
+                                            this.persist_layout(cx);
+                                        }
+                                    },
+                                ))
+                                .child(menu_item(
+                                    "audio-visualizer-labels",
+                                    if options.labels {
+                                        "Labels ✓"
+                                    } else {
+                                        "Labels"
+                                    },
+                                    cx,
+                                    move |this, _, cx| {
+                                        this.panel_menu = None;
+                                        if let Some(mut options) =
+                                            this.layout.audio_visualizer_options(state.panel_id)
+                                        {
+                                            options.labels = !options.labels;
+                                            this.layout.set_audio_visualizer_options(
+                                                state.panel_id,
+                                                options,
+                                            );
+                                            this.persist_layout(cx);
+                                        }
+                                    },
+                                ))
+                                .child(menu_item(
+                                    "audio-visualizer-settings",
+                                    "Visualizer settings…",
+                                    cx,
+                                    move |this, window, cx| {
+                                        this.panel_menu = None;
+                                        this.load_visualizer_settings(state.panel_id, cx);
+                                        this.settings_focus.focus(window, cx);
+                                    },
+                                ));
+                        }
                     }
                     if is_queue {
                         menu = menu

@@ -6,8 +6,9 @@
 //! the persistence path (the desktop uses `layout.json`).
 //! Legacy ID layouts without a version gain a docked Playback panel above
 //! their unchanged tree. New layouts preserve deliberate panel removal.
-//! Persistence stores only split/tab structure, panel kinds and group-local
-//! active indices (zero is omitted). Runtime IDs are rebuilt in traversal order.
+//! Persistence stores split/tab structure, panel kinds and instance preferences,
+//! plus group-local active indices (zero is omitted). Runtime IDs are rebuilt
+//! in traversal order.
 
 use std::{
     collections::HashSet,
@@ -20,11 +21,14 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
+use crate::config::AudioVisualizerOptions;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Panel {
     pub id: u64,
     pub kind: String,
     pub show_tab_bar: bool,
+    pub audio_visualizer: Option<AudioVisualizerOptions>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,6 +102,8 @@ mod persistence {
         kind: &'a str,
         #[serde(skip_serializing_if = "is_true")]
         show_tab_bar: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        audio_visualizer: Option<AudioVisualizerOptions>,
     }
 
     #[derive(Serialize)]
@@ -163,6 +169,7 @@ mod persistence {
                 sequence.serialize_element(&PanelView {
                     kind: &panel.kind,
                     show_tab_bar: panel.show_tab_bar,
+                    audio_visualizer: panel.audio_visualizer,
                 })?;
             }
             sequence.end()
@@ -201,6 +208,8 @@ mod persistence {
         kind: String,
         #[serde(default = "default_tab_bar")]
         show_tab_bar: bool,
+        #[serde(default)]
+        audio_visualizer: Option<AudioVisualizerOptions>,
     }
 
     fn is_false(value: &bool) -> bool {
@@ -256,6 +265,7 @@ mod persistence {
                                 id: read_id(panel.id, next_id, legacy)?,
                                 kind: panel.kind,
                                 show_tab_bar: panel.show_tab_bar,
+                                audio_visualizer: panel.audio_visualizer,
                             })
                         })
                         .collect::<Result<Vec<_>>>()?;
@@ -513,6 +523,7 @@ impl Default for Layout {
                 id: panel_id,
                 kind: kind.to_owned(),
                 show_tab_bar: true,
+                audio_visualizer: None,
             }],
             active: panel_id,
         };
@@ -560,6 +571,7 @@ impl Layout {
                 id,
                 kind: "transport".into(),
                 show_tab_bar: true,
+                audio_visualizer: None,
             }],
             active: id,
         };
@@ -603,6 +615,7 @@ impl Layout {
             id,
             kind: kind.to_owned(),
             show_tab_bar: true,
+            audio_visualizer: None,
         };
         if let Some(root) = self.root.as_mut() {
             let target = target
@@ -792,6 +805,70 @@ impl Layout {
         self.root
             .as_mut()
             .is_some_and(|root| update(root, panel_id, visible))
+    }
+
+    /// Seed missing instance preferences without overwriting saved choices.
+    pub fn initialize_audio_visualizers(&mut self, defaults: AudioVisualizerOptions) -> bool {
+        fn initialize(node: &mut Node, defaults: AudioVisualizerOptions) -> bool {
+            match node {
+                Node::Split { first, second, .. } => {
+                    let first_changed = initialize(first, defaults);
+                    let second_changed = initialize(second, defaults);
+                    first_changed || second_changed
+                }
+                Node::Tabs { panels, .. } => {
+                    let mut changed = false;
+                    for panel in panels {
+                        if panel.kind == "audio_visualizer" && panel.audio_visualizer.is_none() {
+                            panel.audio_visualizer = Some(defaults);
+                            changed = true;
+                        }
+                    }
+                    changed
+                }
+            }
+        }
+        self.root
+            .as_mut()
+            .is_some_and(|root| initialize(root, defaults))
+    }
+
+    pub fn audio_visualizer_options(&self, id: u64) -> Option<AudioVisualizerOptions> {
+        let Node::Tabs { panels, .. } = self.root.as_ref()?.panel_group(id)? else {
+            return None;
+        };
+        panels
+            .iter()
+            .find(|panel| panel.id == id && panel.kind == "audio_visualizer")?
+            .audio_visualizer
+    }
+
+    /// Update one visualizer, including inactive tabs; reject other panel kinds.
+    pub fn set_audio_visualizer_options(
+        &mut self,
+        id: u64,
+        options: AudioVisualizerOptions,
+    ) -> bool {
+        fn update(node: &mut Node, id: u64, options: AudioVisualizerOptions) -> bool {
+            match node {
+                Node::Split { first, second, .. } => {
+                    update(first, id, options) || update(second, id, options)
+                }
+                Node::Tabs { panels, .. } => {
+                    let Some(panel) = panels
+                        .iter_mut()
+                        .find(|panel| panel.id == id && panel.kind == "audio_visualizer")
+                    else {
+                        return false;
+                    };
+                    panel.audio_visualizer = Some(options);
+                    true
+                }
+            }
+        }
+        self.root
+            .as_mut()
+            .is_some_and(|root| update(root, id, options))
     }
 
     pub fn active_panels(&self) -> Vec<&Panel> {
@@ -1168,6 +1245,154 @@ mod tests {
     }
 
     #[test]
+    fn audio_visualizer_defaults_initialize_only_missing_instances() {
+        use crate::config::RadialSpectrumStyle;
+
+        let defaults = AudioVisualizerOptions {
+            style: RadialSpectrumStyle::Bars,
+            reference_lines: false,
+            labels: false,
+        };
+        let custom = AudioVisualizerOptions {
+            style: RadialSpectrumStyle::Rings,
+            reference_lines: true,
+            labels: false,
+        };
+        let mut layout = Layout::default();
+        let first = layout.add("audio_visualizer", Some(2));
+        let second = layout.add("audio_visualizer", Some(5));
+        assert!(layout.initialize_audio_visualizers(defaults));
+        assert_eq!(layout.audio_visualizer_options(first), Some(defaults));
+        assert_eq!(layout.audio_visualizer_options(second), Some(defaults));
+        assert!(layout.activate(3));
+        assert!(!layout.active_panels().iter().any(|panel| panel.id == first));
+        assert!(layout.set_audio_visualizer_options(first, custom));
+        assert_eq!(layout.audio_visualizer_options(first), Some(custom));
+        assert_eq!(layout.audio_visualizer_options(second), Some(defaults));
+        assert!(!layout.initialize_audio_visualizers(custom));
+        assert_eq!(layout.audio_visualizer_options(second), Some(defaults));
+        let third = layout.add("audio_visualizer", Some(5));
+        assert!(layout.initialize_audio_visualizers(custom));
+        assert_eq!(layout.audio_visualizer_options(third), Some(custom));
+        assert_eq!(layout.audio_visualizer_options(second), Some(defaults));
+        assert!(!layout.set_audio_visualizer_options(3, custom));
+        assert!(!layout.set_audio_visualizer_options(u64::MAX, custom));
+        assert_eq!(layout.audio_visualizer_options(3), None);
+        assert_eq!(layout.audio_visualizer_options(u64::MAX), None);
+        assert!(
+            layout.panels().iter().all(|panel| {
+                panel.kind == "audio_visualizer" || panel.audio_visualizer.is_none()
+            })
+        );
+        assert!(layout.remove(first));
+        assert_eq!(layout.audio_visualizer_options(first), None);
+    }
+
+    #[test]
+    fn audio_visualizer_options_survive_moves_reordering_and_restart() {
+        use crate::config::RadialSpectrumStyle;
+
+        let first_options = AudioVisualizerOptions {
+            style: RadialSpectrumStyle::Bars,
+            reference_lines: true,
+            labels: false,
+        };
+        let second_options = AudioVisualizerOptions {
+            style: RadialSpectrumStyle::Rings,
+            reference_lines: false,
+            labels: true,
+        };
+        let mut layout = Layout::default();
+        // Model an allocator advanced by instances removed before this session.
+        layout.next_id = 100;
+        let first = layout.add("audio_visualizer", Some(2));
+        let second = layout.add("audio_visualizer", Some(2));
+        assert!(layout.set_audio_visualizer_options(first, first_options));
+        assert!(layout.set_audio_visualizer_options(second, second_options));
+        assert!(layout.move_panel(second, 2, Edge::Center, Some(0)));
+        assert_eq!(layout.audio_visualizer_options(first), Some(first_options));
+        assert_eq!(
+            layout.audio_visualizer_options(second),
+            Some(second_options)
+        );
+        assert!(layout.move_panel(first, 5, Edge::Center, None));
+        assert!(layout.move_panel(second, 8, Edge::Bottom, None));
+        assert_eq!(layout.audio_visualizer_options(first), Some(first_options));
+        assert_eq!(
+            layout.audio_visualizer_options(second),
+            Some(second_options)
+        );
+
+        static TEST_ID: AtomicU64 = AtomicU64::new(1);
+        let directory = std::env::temp_dir().join(format!(
+            "rivu-visualizer-layout-test-{}-{}",
+            std::process::id(),
+            TEST_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        let path = directory.join("layout.json");
+        layout.save(&path).unwrap();
+        let mut reopened = Layout::load(&path).unwrap();
+        assert_same_layout(&reopened, &layout);
+        let visualizers: Vec<_> = reopened
+            .panels()
+            .into_iter()
+            .filter(|panel| panel.kind == "audio_visualizer")
+            .map(|panel| (panel.id, panel.audio_visualizer))
+            .collect();
+        assert_eq!(visualizers.len(), 2);
+        assert_ne!(visualizers[0].0, first);
+        assert_ne!(visualizers[1].0, second);
+        assert_eq!(visualizers[0].1, Some(first_options));
+        assert_eq!(visualizers[1].1, Some(second_options));
+        assert!(!reopened.initialize_audio_visualizers(first_options));
+        assert_same_layout(&reopened, &layout);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn legacy_audio_visualizers_load_without_options_and_initialize_once() {
+        use crate::config::RadialSpectrumStyle;
+
+        let mut source = Layout::default();
+        source.add("audio_visualizer", Some(2));
+        source.add("audio_visualizer", Some(5));
+        let defaults = AudioVisualizerOptions {
+            style: RadialSpectrumStyle::BarsRings,
+            reference_lines: false,
+            labels: true,
+        };
+        for value in [legacy_value(&source), encoded(&source)] {
+            let mut layout = decoded(value).unwrap();
+            assert!(
+                layout
+                    .panels()
+                    .iter()
+                    .all(|panel| panel.audio_visualizer.is_none())
+            );
+            assert!(
+                !serde_json::to_string(&encoded(&layout))
+                    .unwrap()
+                    .contains("\"audio_visualizer\":")
+            );
+            assert!(layout.initialize_audio_visualizers(defaults));
+            assert!(!layout.initialize_audio_visualizers(defaults));
+            let reopened = decoded(encoded(&layout)).unwrap();
+            let visualizers: Vec<_> = reopened
+                .panels()
+                .into_iter()
+                .filter(|panel| panel.kind == "audio_visualizer")
+                .collect();
+            assert_eq!(visualizers.len(), 2);
+            assert!(
+                visualizers
+                    .iter()
+                    .all(|panel| panel.audio_visualizer == Some(defaults))
+            );
+            assert_same_layout(&reopened, &layout);
+        }
+    }
+
+    #[test]
     fn tab_bar_visibility_is_per_instance_and_survives_moves_and_roundtrips() {
         let mut layout = Layout::default();
         let duplicate = layout.add("library", Some(2));
@@ -1478,6 +1703,7 @@ mod tests {
                         id: panel_id,
                         kind: "library".into(),
                         show_tab_bar: true,
+                        audio_visualizer: None,
                     }],
                     active,
                 }),

@@ -3,14 +3,16 @@
 //! Rivu's RadialSpectrum follows the Noctalia v5 control's Bars/Rings concept
 //! and parameter model, using GPUI-native paths for the local rendering backend.
 
-use super::analysis_visualizer::{AnalysisVisualizer, analysis_style};
-use super::fractal_visualizer::{FractalVisualizer, fractal_style};
+use super::{
+    analysis_visualizer::AnalysisVisualizer, fractal_visualizer::FractalVisualizer, layout,
+};
 use crate::{
     analysis::{AnalysisFrame, AnalysisSettings},
-    config::{Config, RadialSpectrumStyle},
+    config::{AudioVisualizerOptions, Config, RadialSpectrumStyle},
 };
 use gpui::{
-    AnyElement, Bounds, PathBuilder, Rgba, Window, canvas, div, point, prelude::*, px, rgb,
+    AnyElement, App, Bounds, PathBuilder, Rgba, TextAlign, Window, canvas, div, point, prelude::*,
+    px, rgb,
 };
 use std::{
     cell::RefCell,
@@ -30,16 +32,24 @@ const BAR_GLOW_PASSES: [(f32, f32, f32); 4] = [
     (0.006, 1.2, 0.55),
 ];
 
+const ANALYSIS_STYLES: [RadialSpectrumStyle; 2] = [
+    RadialSpectrumStyle::StereoDensity,
+    RadialSpectrumStyle::SpatialSpectrum,
+];
+const FRACTAL_STYLES: [RadialSpectrumStyle; 2] = [
+    RadialSpectrumStyle::FractalBeams,
+    RadialSpectrumStyle::FractalFlow,
+];
+
 #[derive(Clone)]
 pub(super) struct RadialSpectrum {
     data: Rc<RefCell<VisualizerData>>,
-    analysis: AnalysisVisualizer,
-    fractal: FractalVisualizer,
+    analysis: [AnalysisVisualizer; 2],
+    fractal: [FractalVisualizer; 2],
 }
 
 struct VisualizerData {
     background: u32,
-    style: RadialSpectrumStyle,
     sensitivity: f32,
     rotation_speed: f32,
     bar_width: f32,
@@ -62,11 +72,10 @@ struct VisualizerData {
 impl RadialSpectrum {
     pub(super) fn new() -> Self {
         Self {
-            analysis: AnalysisVisualizer::new(),
-            fractal: FractalVisualizer::new(),
+            analysis: ANALYSIS_STYLES.map(AnalysisVisualizer::new),
+            fractal: FRACTAL_STYLES.map(FractalVisualizer::new),
             data: Rc::new(RefCell::new(VisualizerData {
                 background: 0x08090c,
-                style: RadialSpectrumStyle::BarsRings,
                 sensitivity: 1.5,
                 rotation_speed: 0.5,
                 bar_width: 0.6,
@@ -89,14 +98,49 @@ impl RadialSpectrum {
         }
     }
 
-    pub(super) fn configure(&mut self, config: &Config) -> bool {
-        let analysis_changed = self.analysis.configure(config);
-        let fractal_changed = self.fractal.configure(config);
+    pub(super) fn sync(
+        &mut self,
+        config: &Config,
+        panels: &[&layout::Panel],
+        window_visible: bool,
+    ) -> bool {
+        let mut radial_visible = false;
+        let mut analysis_visible = [false; 2];
+        let mut fractal_visible = [false; 2];
+        if window_visible {
+            for panel in panels {
+                if panel.kind != "audio_visualizer" {
+                    continue;
+                }
+                let options = panel.audio_visualizer.unwrap_or_else(|| config.into());
+                match options.style {
+                    RadialSpectrumStyle::Bars
+                    | RadialSpectrumStyle::Rings
+                    | RadialSpectrumStyle::BarsRings => radial_visible = true,
+                    RadialSpectrumStyle::StereoDensity => analysis_visible[0] = true,
+                    RadialSpectrumStyle::SpatialSpectrum => analysis_visible[1] = true,
+                    RadialSpectrumStyle::FractalBeams => fractal_visible[0] = true,
+                    RadialSpectrumStyle::FractalFlow => fractal_visible[1] = true,
+                }
+            }
+        }
+        let mut changed = self.set_visible(radial_visible);
+        for (renderer, visible) in self.analysis.iter().zip(analysis_visible) {
+            changed |= renderer.set_visible(visible);
+            changed |= renderer.configure(config);
+        }
+        for (renderer, visible) in self.fractal.iter().zip(fractal_visible) {
+            changed |= renderer.set_visible(visible);
+            changed |= renderer.configure(config);
+        }
+        changed | self.configure(config)
+    }
+
+    fn configure(&mut self, config: &Config) -> bool {
         let mut data = self.data.borrow_mut();
         let db_range = config.radial_spectrum_db_range();
         let expected_settings = AnalysisSettings::from(config);
         let changed = data.background != config.visual_background.rgb()
-            || data.style != config.radial_spectrum_style
             || data.sensitivity != config.radial_spectrum_sensitivity
             || data.rotation_speed != config.radial_spectrum_rotation_speed
             || data.bar_width != config.radial_spectrum_bar_width
@@ -111,10 +155,9 @@ impl RadialSpectrum {
             || data.expected_settings.fft_size != expected_settings.fft_size
             || data.expected_settings.window != expected_settings.window;
         if !changed {
-            return analysis_changed || fractal_changed;
+            return false;
         }
         data.background = config.visual_background.rgb();
-        data.style = config.radial_spectrum_style;
         data.sensitivity = config.radial_spectrum_sensitivity;
         data.rotation_speed = config.radial_spectrum_rotation_speed;
         data.bar_width = config.radial_spectrum_bar_width;
@@ -133,9 +176,7 @@ impl RadialSpectrum {
         true
     }
 
-    pub(super) fn set_visible(&self, visible: bool) -> bool {
-        self.analysis.set_visible(visible);
-        self.fractal.set_visible(visible);
+    fn set_visible(&self, visible: bool) -> bool {
         let mut data = self.data.borrow_mut();
         let restored = visible && !data.visible;
         if data.visible != visible {
@@ -148,13 +189,11 @@ impl RadialSpectrum {
     }
 
     pub(super) fn update(&mut self, frame: &AnalysisFrame) {
-        if fractal_style(self.data.borrow().style) {
-            self.fractal.update(frame);
-            return;
+        for renderer in &self.analysis {
+            renderer.update(frame);
         }
-        if analysis_style(self.data.borrow().style) {
-            self.analysis.update(frame);
-            return;
+        for renderer in &self.fractal {
+            renderer.update(frame);
         }
         if frame.spectrum_db.is_empty() || frame.frequencies_hz.is_empty() {
             return;
@@ -217,19 +256,33 @@ impl RadialSpectrum {
     }
 
     pub(super) fn release_retired_images(&self, window: &mut Window) {
-        self.analysis.release_retired_images(window);
+        for renderer in &self.analysis {
+            renderer.release_retired_images(window);
+        }
     }
 
     pub(super) fn release_all_images(&self, window: &mut Window) {
-        self.analysis.release_all_images(window);
+        for renderer in &self.analysis {
+            renderer.release_all_images(window);
+        }
     }
 
-    pub(super) fn view(&self, panel_id: u64, playing: bool) -> AnyElement {
-        if fractal_style(self.data.borrow().style) {
-            return self.fractal.view(panel_id);
-        }
-        if analysis_style(self.data.borrow().style) {
-            return self.analysis.view(panel_id);
+    pub(super) fn view(
+        &self,
+        panel_id: u64,
+        playing: bool,
+        options: AudioVisualizerOptions,
+    ) -> AnyElement {
+        match options.style {
+            RadialSpectrumStyle::StereoDensity => return self.analysis[0].view(panel_id, options),
+            RadialSpectrumStyle::SpatialSpectrum => {
+                return self.analysis[1].view(panel_id, options);
+            }
+            RadialSpectrumStyle::FractalBeams => return self.fractal[0].view(panel_id, options),
+            RadialSpectrumStyle::FractalFlow => return self.fractal[1].view(panel_id, options),
+            RadialSpectrumStyle::Bars
+            | RadialSpectrumStyle::Rings
+            | RadialSpectrumStyle::BarsRings => {}
         }
         let data = Rc::clone(&self.data);
         div()
@@ -241,10 +294,11 @@ impl RadialSpectrum {
             .child(
                 canvas(
                     |_, _, _| (),
-                    move |bounds, _, window, _| {
+                    move |bounds, _, window, cx| {
                         let mut data = data.borrow_mut();
                         window.paint_quad(gpui::fill(bounds, rgb(data.background)));
                         if data.displayed.is_empty() {
+                            paint_guides(bounds, options, data.background, window, cx);
                             return;
                         }
                         let fade_alpha = if playing || !data.fade_when_idle {
@@ -261,7 +315,7 @@ impl RadialSpectrum {
                             }
                             alpha
                         };
-                        match data.style {
+                        match options.style {
                             RadialSpectrumStyle::Bars => paint_bars(bounds, &data, window),
                             RadialSpectrumStyle::Rings => paint_rings(bounds, &data, window),
                             RadialSpectrumStyle::BarsRings => {
@@ -279,11 +333,82 @@ impl RadialSpectrum {
                                 rgb(data.background).alpha(1.0 - fade_alpha),
                             ));
                         }
+                        paint_guides(bounds, options, data.background, window, cx);
                     },
                 )
                 .size_full(),
             )
             .into_any_element()
+    }
+}
+
+// Normalized post-sensitivity, clipped bar level, not dB or frequency. Decorative
+// animated rings do not follow this scale; it is a fixed reference for bar tips.
+fn bar_level_radius(scale: f32, level: f32) -> f32 {
+    (0.35 + level * 0.5) * scale
+}
+
+fn paint_guides(
+    bounds: Bounds<gpui::Pixels>,
+    options: AudioVisualizerOptions,
+    background: u32,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if !options.reference_lines && !options.labels {
+        return;
+    }
+    let side = (bounds.size.width / px(1.0)).min(bounds.size.height / px(1.0));
+    if side < 24.0 {
+        return;
+    }
+    let center = point(
+        bounds.left() + bounds.size.width * 0.5,
+        bounds.top() + bounds.size.height * 0.5,
+    );
+    let scale = side * 0.5;
+    for (level, label) in [
+        (0.0, "Bar level 0%"),
+        (0.5, "Bar level 50%"),
+        (1.0, "Bar level 100%"),
+    ] {
+        let radius = bar_level_radius(scale, level);
+        if options.reference_lines {
+            paint_arc(
+                window,
+                center,
+                radius,
+                0.0,
+                TWO_PI,
+                px(1.0),
+                rgb(0xb1bbc5).alpha(0.24),
+            );
+        }
+        // Keep 18px between labels and omit them rather than overlap tiny panels.
+        if !options.labels || side < 144.0 {
+            continue;
+        }
+        let mut style = window.text_style();
+        style.color = rgb(0xb1bbc5).into();
+        let run = style.to_run(label.len());
+        let line = window
+            .text_system()
+            .shape_line(label.into(), px(10.0), &[run], None);
+        let origin = point(center.x - line.width() * 0.5, center.y - px(radius + 7.0));
+        if origin.x < bounds.left() + px(2.0) || origin.x + line.width() > bounds.right() - px(2.0)
+        {
+            continue;
+        }
+        window.paint_quad(gpui::fill(
+            Bounds::new(
+                point(origin.x - px(2.0), origin.y),
+                gpui::size(line.width() + px(4.0), px(14.0)),
+            ),
+            rgb(background).alpha(0.85),
+        ));
+        if let Err(error) = line.paint(origin, px(14.0), TextAlign::Left, None, window, cx) {
+            eprintln!("rivu visualization label: {error}");
+        }
     }
 }
 
@@ -298,7 +423,7 @@ fn paint_bars(bounds: Bounds<gpui::Pixels>, data: &VisualizerData, window: &mut 
     );
     let scale = side * 0.5;
     let inner = (data.inner_diameter * 0.5 * scale).max(2.0);
-    let base = 0.35 * scale;
+    let base = bar_level_radius(scale, 0.0);
     let count = data.displayed.len() * 2;
     let section = TWO_PI / count as f32;
     let angular_width =
@@ -311,7 +436,7 @@ fn paint_bars(bounds: Bounds<gpui::Pixels>, data: &VisualizerData, window: &mut 
         };
         let value = (data.displayed[value_index] * data.sensitivity).clamp(0.0, 1.0);
         let angle = -PI + section * (index as f32 + 0.5) + data.time * 0.2;
-        let end = base + value * scale * 0.5;
+        let end = bar_level_radius(scale, value);
         let color = fancy_bar_color(data, value);
         if data.bloom_intensity > 0.01 && value > 0.005 {
             let glow = data.bloom_intensity.clamp(0.0, 2.0);

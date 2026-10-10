@@ -8,8 +8,8 @@ use super::{
 };
 use crate::{
     config::{
-        Config, LogLevel, RadialSpectrumStyle, RgbColor, SpectrumStyle, SpectrumWindow,
-        VisualizationPalette,
+        AudioVisualizerOptions, Config, LogLevel, RadialSpectrumStyle, RgbColor, SpectrumStyle,
+        SpectrumWindow, VisualizationPalette,
     },
     model::{Command, RepeatMode},
 };
@@ -323,6 +323,7 @@ pub(super) struct Settings {
     feedback: Option<std::result::Result<(), String>>,
     page: SettingsPage,
     visual_page: VisualPage,
+    visualizer_panel: Option<u64>,
 }
 
 impl Settings {
@@ -341,6 +342,7 @@ impl Settings {
             feedback: None,
             page: SettingsPage::General,
             visual_page: VisualPage::Common,
+            visualizer_panel: None,
         }
     }
 
@@ -529,6 +531,8 @@ impl Settings {
     }
 
     fn reset(&mut self, config: &Config, cx: &mut App) {
+        self.session = self.session.wrapping_add(1);
+        self.visualizer_panel = None;
         self.draft = config.clone();
         self.applying = false;
         self.feedback = None;
@@ -959,8 +963,38 @@ impl GuiApp {
         cx.notify();
     }
 
+    pub(super) fn load_visualizer_settings(&mut self, panel_id: u64, cx: &mut Context<Self>) {
+        let Some(options) = self.layout.audio_visualizer_options(panel_id) else {
+            return;
+        };
+        self.load_settings(cx);
+        self.settings.visualizer_panel = Some(panel_id);
+        self.settings.page = SettingsPage::Visualizations;
+        self.settings.visual_page = VisualPage::AudioVisualizer;
+        self.settings.draft.radial_spectrum_style = options.style;
+        self.settings.draft.radial_spectrum_grid = options.reference_lines;
+        self.settings.draft.radial_spectrum_labels = options.labels;
+        self.settings_open = true;
+        cx.notify();
+    }
+
     fn apply_settings(&mut self, cx: &mut Context<Self>) {
         if self.settings.applying {
+            return;
+        }
+        if let Some(panel_id) = self.settings.visualizer_panel {
+            let options = AudioVisualizerOptions::from(&self.settings.draft);
+            self.settings.feedback = Some(
+                if self.layout.set_audio_visualizer_options(panel_id, options) {
+                    self.layout
+                        .save(&self.layout_path)
+                        .map_err(|error| format!("Saving layout: {error:#}"))
+                } else {
+                    Err("This visualizer instance no longer exists".into())
+                },
+            );
+            self.sync_analysis(cx);
+            cx.notify();
             return;
         }
         let config = match self.settings.parse(cx) {
@@ -1736,44 +1770,50 @@ impl GuiApp {
                     }
                     _ => "",
                 };
-                let mut content = column().gap_3().child(settings_group(
-                    "Appearance",
+                let instance = settings.visualizer_panel.is_some();
+                let display = settings_group(
+                    if instance { "This instance" } else { "New instance defaults" },
                     column()
                         .gap_2()
                         .child(form_field("Style", style))
                         .when(!hint.is_empty(), |group| group.child(caption(hint)))
-                        .child(settings.single(Field::RadialSpectrumDb))
-                        .child(settings.db_range_hint(cx)),
-                ));
-                match draft.radial_spectrum_style {
-                    RadialSpectrumStyle::FractalBeams | RadialSpectrumStyle::FractalFlow => {
-                        content = content.child(settings_group("Response & glow", column().gap_2()
-                            .child(settings.pair(Field::RadialSpectrumSensitivity, Field::RadialSpectrumBloomIntensity))
-                            .child(caption("Silence fades the light; pause freezes it. Pulses follow energy rises, not detected beats."))));
-                    }
-                    RadialSpectrumStyle::Bars
-                    | RadialSpectrumStyle::Rings
-                    | RadialSpectrumStyle::BarsRings => {
-                        let bars = draft.radial_spectrum_style != RadialSpectrumStyle::Rings;
-                        let rings = draft.radial_spectrum_style != RadialSpectrumStyle::Bars;
-                        content = content
-                            .child(settings_group("Shape & motion", column().gap_2()
-                                .child(settings.single(Field::RadialSpectrumInnerDiameter))
-                                .child(settings.pair(Field::RadialSpectrumSensitivity, Field::RadialSpectrumRotationSpeed))
-                                .child(row().child(visual_switch("audio-visualizer-fade-idle", "◌", "Fade when idle", draft.radial_spectrum_fade_when_idle, cx, |draft| draft.radial_spectrum_fade_when_idle = !draft.radial_spectrum_fade_when_idle)))))
-                            .child(settings_group("Bars & rings", column().gap_2()
-                                .child(two_column(
-                                    settings.field_state(Field::RadialSpectrumBarWidth, bars, "Available with Bars or Bars + Rings.", cx),
-                                    settings.field_state(Field::RadialSpectrumBarGlowLayers, bars, "Available with Bars or Bars + Rings.", cx),
-                                ))
-                                .child(two_column(
-                                    settings.field_state(Field::RadialSpectrumRingOpacity, rings, "Available with Rings or Bars + Rings.", cx),
-                                    settings.field(Field::RadialSpectrumBloomIntensity).min_w(px(180.)),
-                                ))
-                                .child(caption("Bloom affects bars and rings; bar glow requires bloom above zero."))));
-                    }
-                    RadialSpectrumStyle::StereoDensity | RadialSpectrumStyle::SpatialSpectrum => {}
+                        .child(row().flex_wrap().gap_2()
+                            .child(visual_switch(
+                                "audio-visualizer-grid", "#", "Reference lines",
+                                draft.radial_spectrum_grid, cx,
+                                |draft| draft.radial_spectrum_grid = !draft.radial_spectrum_grid,
+                            ))
+                            .child(visual_switch(
+                                "audio-visualizer-labels", "T", "Labels",
+                                draft.radial_spectrum_labels, cx,
+                                |draft| draft.radial_spectrum_labels = !draft.radial_spectrum_labels,
+                            )))
+                        .child(caption(if instance {
+                            "Only this visualizer changes. These controls are also in its right-click menu."
+                        } else {
+                            "Existing instances keep their choices. Right-click a visualizer to edit it."
+                        }))
+                        .child(caption("Bars and rings guides show normalized levels, not dB or frequency.")),
+                );
+                if instance {
+                    return column().child(display);
                 }
+                let content = column().gap_3()
+                    .child(display)
+                    .child(caption("Effect parameters below are shared by all instances, regardless of the default style."))
+                    .child(settings_group("Response & glow", column().gap_2()
+                        .child(settings.single(Field::RadialSpectrumDb))
+                        .child(settings.db_range_hint(cx))
+                        .child(settings.pair(Field::RadialSpectrumSensitivity, Field::RadialSpectrumBloomIntensity))
+                        .child(caption("Fractal styles: silence fades the light; pause freezes it. Pulses follow energy rises, not detected beats."))))
+                    .child(settings_group("Shape & motion", column().gap_2()
+                        .child(settings.pair(Field::RadialSpectrumInnerDiameter, Field::RadialSpectrumRotationSpeed))
+                        .child(row().child(visual_switch("audio-visualizer-fade-idle", "◌", "Fade when idle", draft.radial_spectrum_fade_when_idle, cx, |draft| draft.radial_spectrum_fade_when_idle = !draft.radial_spectrum_fade_when_idle)))
+                        .child(caption("Controls the Bars, Rings and Bars + Rings styles."))))
+                    .child(settings_group("Bars & rings", column().gap_2()
+                        .child(settings.pair(Field::RadialSpectrumBarWidth, Field::RadialSpectrumBarGlowLayers))
+                        .child(settings.single(Field::RadialSpectrumRingOpacity))
+                        .child(caption("Bloom affects bars and rings; bar glow requires bloom above zero."))));
                 content.child(settings_group(
                     "Colors",
                     column()
@@ -1864,7 +1904,9 @@ impl GuiApp {
             .flex_1()
             .min_h_0()
             .gap_0()
-            .child(category);
+            .when(self.settings.visualizer_panel.is_none(), |panel| {
+                panel.child(category)
+            });
         let page_id = match (self.settings.page, self.settings.visual_page) {
             (SettingsPage::General, _) => "settings-general-scroll",
             (_, VisualPage::Common) => "settings-common-scroll",
@@ -1876,7 +1918,9 @@ impl GuiApp {
         let content = match self.settings.page {
             SettingsPage::General => self.general_settings(cx),
             SettingsPage::Visualizations => {
-                panel = panel.child(self.visual_settings_tabs(cx));
+                if self.settings.visualizer_panel.is_none() {
+                    panel = panel.child(self.visual_settings_tabs(cx));
+                }
                 self.visual_settings(cx)
             }
         };

@@ -1,5 +1,5 @@
 use crate::{
-    analysis::{AnalysisControl, AnalysisFrame, VisualizerMode},
+    analysis::{AnalysisControl, AnalysisFrame, VisualizerDemand},
     audio::{self, AudioCommand, AudioEngine, AudioEvent},
     config::Config,
     library::{self, M3uItem, ScanResult},
@@ -112,9 +112,9 @@ pub struct AppHandle {
 }
 
 impl AppHandle {
-    /// Select optional plots without reopening output or changing the IPC schema.
-    pub(crate) fn set_visualizer_mode(&self, mode: VisualizerMode) {
-        self.analysis_control.set_visualizer_mode(mode);
+    /// Request optional plots without reopening output or changing the IPC schema.
+    pub(crate) fn set_visualizer_demand(&self, demand: VisualizerDemand) {
+        self.analysis_control.set_visualizer_demand(demand);
     }
 
     pub fn send(&self, command: Command) -> Result<()> {

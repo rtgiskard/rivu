@@ -1,11 +1,12 @@
 //! Shared, accepted-audio-clocked generative light views. No simulation in paint.
 use super::{fractal_beams, fractal_flow};
 use crate::{
-    analysis::{AnalysisFrame, AnalysisSettings, VisualizerMode},
-    config::{Config, RadialSpectrumStyle},
+    analysis::{AnalysisFrame, AnalysisSettings},
+    config::{AudioVisualizerOptions, Config, RadialSpectrumStyle},
 };
 use gpui::{
-    AnyElement, Bounds, PathBuilder, Pixels, Window, canvas, div, fill, point, prelude::*, px, rgb,
+    AnyElement, App, Bounds, PathBuilder, Pixels, TextAlign, Window, canvas, div, fill, point,
+    prelude::*, px, rgb, size,
 };
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
@@ -89,11 +90,12 @@ struct Data {
 }
 
 impl FractalVisualizer {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(style: RadialSpectrumStyle) -> Self {
+        assert!(fractal_style(style));
         let config = Config::default();
         Self {
             data: Rc::new(RefCell::new(Data {
-                style: config.radial_spectrum_style,
+                style,
                 visible: true,
                 background: config.visual_background.rgb(),
                 colors: [
@@ -116,10 +118,8 @@ impl FractalVisualizer {
     pub(super) fn configure(&self, config: &Config) -> bool {
         let mut data = self.data.borrow_mut();
         let settings = AnalysisSettings::from(config);
-        let style_changed = data.style != config.radial_spectrum_style;
-        let reset = style_changed
-            || data.settings.fft_size != settings.fft_size
-            || data.settings.window != settings.window;
+        let reset =
+            data.settings.fft_size != settings.fft_size || data.settings.window != settings.window;
         let colors = [
             config.radial_spectrum_primary_color.rgb(),
             config.radial_spectrum_secondary_color.rgb(),
@@ -130,36 +130,34 @@ impl FractalVisualizer {
             || data.sensitivity != config.radial_spectrum_sensitivity
             || data.db_range != config.radial_spectrum_db_range()
             || data.bloom != config.radial_spectrum_bloom_intensity;
-        data.style = config.radial_spectrum_style;
         data.settings = settings;
         data.colors = colors;
         data.background = config.visual_background.rgb();
         data.sensitivity = config.radial_spectrum_sensitivity;
         data.db_range = config.radial_spectrum_db_range();
         data.bloom = config.radial_spectrum_bloom_intensity;
-        if style_changed {
-            data.scene = None;
-        }
         if reset {
             data.reset();
         }
         changed
     }
 
-    pub(super) fn set_visible(&self, visible: bool) {
+    pub(super) fn set_visible(&self, visible: bool) -> bool {
         let mut data = self.data.borrow_mut();
+        let restored = visible && !data.visible;
         if data.visible != visible {
             data.visible = visible;
             data.scene = None;
             data.reset();
         }
+        restored
     }
 
     pub(super) fn update(&self, frame: &AnalysisFrame) {
         self.data.borrow_mut().update(frame);
     }
 
-    pub(super) fn view(&self, panel_id: u64) -> AnyElement {
+    pub(super) fn view(&self, panel_id: u64, options: AudioVisualizerOptions) -> AnyElement {
         let data = Rc::clone(&self.data);
         div()
             .id(("fractal-visualizer", panel_id))
@@ -170,7 +168,7 @@ impl FractalVisualizer {
             .child(
                 canvas(
                     |_, _, _| (),
-                    move |bounds, _, window, _| data.borrow().paint(bounds, window),
+                    move |bounds, _, window, cx| data.borrow().paint(bounds, options, window, cx),
                 )
                 .size_full(),
             )
@@ -194,15 +192,15 @@ impl Data {
     }
 
     fn update(&mut self, frame: &AnalysisFrame) {
-        if !self.visible || !fractal_style(self.style) {
+        if !self.visible {
             return;
         }
         if self.source != Some((frame.generation, frame.sample_rate)) {
             self.reset();
             self.source = Some((frame.generation, frame.sample_rate));
         }
-        // Never consume an old mode/window while reconfiguration is in flight.
-        if frame.visualizer.mode != VisualizerMode::Generative
+        // Never consume an undemanded payload or an old window during reconfiguration.
+        if !frame.visualizer.demand.band_energy
             || !frame.settings.is_some_and(|s| {
                 s.fft_size == self.settings.fft_size && s.window == self.settings.window
             })
@@ -260,9 +258,15 @@ impl Data {
         self.last_time = Some(frame.sample_time);
     }
 
-    fn paint(&self, bounds: Bounds<Pixels>, window: &mut Window) {
+    fn paint(
+        &self,
+        bounds: Bounds<Pixels>,
+        options: AudioVisualizerOptions,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         window.paint_quad(fill(bounds, rgb(self.background)));
-        if !self.visible || !fractal_style(self.style) {
+        if !self.visible {
             return;
         }
         let side = (bounds.size.width / px(1.0)).min(bounds.size.height / px(1.0));
@@ -317,6 +321,93 @@ impl Data {
                 }
             }
         }
+        paint_scene_guides(bounds, options, self.background, window, cx);
+    }
+}
+
+// Both simulations use centered scene coordinates with +y down. These fixed
+// spatial references describe the drawing, never audio level or frequency.
+fn paint_scene_guides(
+    bounds: Bounds<Pixels>,
+    options: AudioVisualizerOptions,
+    background: u32,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if !options.reference_lines && !options.labels {
+        return;
+    }
+    let side = (bounds.size.width / px(1.0)).min(bounds.size.height / px(1.0));
+    if side < 24.0 {
+        return;
+    }
+    let center = point(
+        bounds.left() + bounds.size.width * 0.5,
+        bounds.top() + bounds.size.height * 0.5,
+    );
+    let scale = px(side * 0.47);
+    if options.reference_lines {
+        for coordinate in [-1.0, -0.5, 0.0, 0.5, 1.0] {
+            let color = rgb(0xb1bbc5).alpha(if coordinate == 0.0 { 0.30 } else { 0.14 });
+            window.paint_quad(fill(
+                Bounds::new(
+                    point(center.x + scale * coordinate, center.y - scale),
+                    size(px(1.0), scale * 2.0),
+                ),
+                color,
+            ));
+            window.paint_quad(fill(
+                Bounds::new(
+                    point(center.x - scale, center.y + scale * coordinate),
+                    size(scale * 2.0, px(1.0)),
+                ),
+                color,
+            ));
+        }
+    }
+    if !options.labels || side < 180.0 {
+        return;
+    }
+    // Static text and the exact same transform as the scene; no per-frame format.
+    for (text, x, y, align) in [
+        ("Scene coordinates (normalized)", 0.0, -1.0, 0.5),
+        ("x −1", -1.0, 0.0, 0.0),
+        ("x 0", 0.0, 0.0, 0.5),
+        ("x +1", 1.0, 0.0, 1.0),
+        ("y −1", -1.0, -1.0, 0.0),
+        ("y 0", -1.0, 0.0, 0.0),
+        ("y +1", -1.0, 1.0, 0.0),
+    ] {
+        let mut style = window.text_style();
+        style.color = rgb(0xb1bbc5).into();
+        let run = style.to_run(text.len());
+        let line = window
+            .text_system()
+            .shape_line(text.into(), px(10.0), &[run], None);
+        let label_y = if text.starts_with('x') {
+            center.y + px(3.0)
+        } else if text.starts_with('y') {
+            (center.y + scale * y - px(15.0)).max(bounds.top() + px(18.0))
+        } else {
+            center.y - scale
+        };
+        let origin = point(center.x + scale * x - line.width() * align, label_y);
+        if origin.x < bounds.left() + px(2.0)
+            || origin.x + line.width() > bounds.right() - px(2.0)
+            || origin.y + px(14.0) > bounds.bottom() - px(2.0)
+        {
+            continue;
+        }
+        window.paint_quad(fill(
+            Bounds::new(
+                point(origin.x - px(2.0), origin.y),
+                size(line.width() + px(4.0), px(14.0)),
+            ),
+            rgb(background).alpha(0.85),
+        ));
+        if let Err(error) = line.paint(origin, px(14.0), TextAlign::Left, None, window, cx) {
+            eprintln!("rivu scene coordinate label: {error}");
+        }
     }
 }
 
@@ -345,14 +436,11 @@ fn blend(from: u32, to: u32, t: f32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analysis::VisualizerFrame;
+    use crate::analysis::{VisualizerDemand, VisualizerFrame};
 
     fn plot(style: RadialSpectrumStyle) -> FractalVisualizer {
-        let plot = FractalVisualizer::new();
-        plot.configure(&Config {
-            radial_spectrum_style: style,
-            ..Config::default()
-        });
+        let plot = FractalVisualizer::new(style);
+        plot.configure(&Config::default());
         plot
     }
 
@@ -365,7 +453,10 @@ mod tests {
             rms_left: 0.3,
             rms_right: 0.3,
             visualizer: VisualizerFrame {
-                mode: VisualizerMode::Generative,
+                demand: VisualizerDemand {
+                    band_energy: true,
+                    ..VisualizerDemand::default()
+                },
                 band_rms: [0.2; 3],
                 ..VisualizerFrame::default()
             },
@@ -421,7 +512,7 @@ mod tests {
             }
             let mut stale = frame(1050);
             stale.generation += 1;
-            stale.visualizer.mode = VisualizerMode::StereoDensity;
+            stale.visualizer.demand.band_energy = false;
             visual.update(&stale);
             assert!(
                 visual
@@ -432,7 +523,7 @@ mod tests {
                     .all(|s| s.strength < 0.015)
             );
             let fresh = plot(style);
-            stale.visualizer.mode = VisualizerMode::Generative;
+            stale.visualizer.demand.band_energy = true;
             visual.update(&stale);
             fresh.update(&stale);
             assert_eq!(
@@ -454,28 +545,46 @@ mod tests {
     }
 
     #[test]
-    fn changing_fractal_style_clears_old_motion_even_with_same_analysis_mode() {
-        let visual = plot(RadialSpectrumStyle::FractalBeams);
+    fn concurrent_scenes_ignore_global_style_and_hiding_one_preserves_the_other() {
+        let beams = plot(RadialSpectrumStyle::FractalBeams);
+        let flow = plot(RadialSpectrumStyle::FractalFlow);
+        let mut audio = frame(50);
+        audio.visualizer.demand.stereo_density = true;
+        audio.visualizer.demand.spatial_spectrum = true;
         for t in (50..=1000).step_by(50) {
-            visual.update(&frame(t));
+            audio.sample_time = Duration::from_millis(t);
+            beams.update(&audio);
+            flow.update(&audio);
         }
-        visual.configure(&Config {
-            radial_spectrum_style: RadialSpectrumStyle::FractalFlow,
+        let beams_before = beams.data.borrow().segments().to_vec();
+        let flow_before = flow.data.borrow().segments().to_vec();
+        assert!(beams_before.iter().any(|s| s.strength > 0.05));
+        assert!(flow_before.iter().any(|s| s.strength > 0.05));
+        assert_ne!(beams_before, flow_before);
+        let config = Config {
+            radial_spectrum_style: RadialSpectrumStyle::StereoDensity,
             ..Config::default()
-        });
-        assert!(visual.data.borrow().segments().is_empty());
-        visual.update(&frame(1000));
-        let fresh = plot(RadialSpectrumStyle::FractalFlow);
-        fresh.update(&frame(1000));
+        };
+        assert!(!beams.configure(&config));
+        assert!(!flow.configure(&config));
+        assert_eq!(beams.data.borrow().segments(), &beams_before);
+        assert_eq!(flow.data.borrow().segments(), &flow_before);
+        beams.set_visible(false);
+        assert!(beams.data.borrow().scene.is_none());
+        assert_eq!(flow.data.borrow().segments(), &flow_before);
+        audio.sample_time += Duration::from_millis(50);
+        beams.update(&audio);
+        flow.update(&audio);
+        assert!(beams.data.borrow().scene.is_none());
+        assert_ne!(flow.data.borrow().segments(), &flow_before);
+        beams.set_visible(true);
+        beams.update(&audio);
+        let fresh = plot(RadialSpectrumStyle::FractalBeams);
+        fresh.update(&audio);
         assert_eq!(
-            visual.data.borrow().segments(),
+            beams.data.borrow().segments(),
             fresh.data.borrow().segments()
         );
-        visual.configure(&Config {
-            radial_spectrum_style: RadialSpectrumStyle::BarsRings,
-            ..Config::default()
-        });
-        assert!(visual.data.borrow().scene.is_none());
     }
 
     #[test]
@@ -489,25 +598,16 @@ mod tests {
             assert!(visual.data.borrow().scene.is_some());
             visual.set_visible(false);
             assert!(visual.data.borrow().scene.is_none());
-            let next_style = if style == RadialSpectrumStyle::FractalBeams {
-                RadialSpectrumStyle::FractalFlow
-            } else {
-                RadialSpectrumStyle::FractalBeams
-            };
-            visual.configure(&Config {
-                radial_spectrum_style: next_style,
-                ..Config::default()
-            });
             visual.update(&frame(100));
             assert!(visual.data.borrow().scene.is_none());
             visual.set_visible(true);
             assert!(visual.data.borrow().scene.is_none());
             let mut stale = frame(150);
-            stale.visualizer.mode = VisualizerMode::Off;
+            stale.visualizer.demand.band_energy = false;
             visual.update(&stale);
             assert!(visual.data.borrow().scene.is_none());
             visual.update(&frame(200));
-            let fresh = plot(next_style);
+            let fresh = plot(style);
             fresh.update(&frame(200));
             assert_eq!(
                 visual.data.borrow().segments(),

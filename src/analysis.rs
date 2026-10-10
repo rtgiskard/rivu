@@ -7,7 +7,7 @@ use ringbuf::{
 use rustfft::{Fft, FftPlanner, num_complex::Complex32};
 use std::{
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
@@ -15,22 +15,27 @@ use std::{
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum VisualizerMode {
-    #[default]
-    Off,
-    StereoDensity,
-    SpatialSpectrum,
-    Generative,
+pub struct VisualizerDemand {
+    pub stereo_density: bool,
+    pub spatial_spectrum: bool,
+    pub band_energy: bool,
 }
 
-impl VisualizerMode {
+impl VisualizerDemand {
+    const MASK: u64 = 7;
+
     fn from_bits(bits: u64) -> Self {
-        match bits & 3 {
-            1 => Self::StereoDensity,
-            2 => Self::SpatialSpectrum,
-            3 => Self::Generative,
-            _ => Self::Off,
+        Self {
+            stereo_density: bits & 1 != 0,
+            spatial_spectrum: bits & 2 != 0,
+            band_energy: bits & 4 != 0,
         }
+    }
+
+    fn bits(self) -> u64 {
+        u64::from(self.stereo_density)
+            | (u64::from(self.spatial_spectrum) << 1)
+            | (u64::from(self.band_energy) << 2)
     }
 }
 
@@ -46,7 +51,7 @@ pub struct SpatialBin {
 
 #[derive(Debug, Default)]
 pub struct VisualizerFrame {
-    pub mode: VisualizerMode,
+    pub demand: VisualizerDemand,
     pub density: Vec<f32>,
     pub spatial: Vec<SpatialBin>,
     pub correlation: Option<f32>,
@@ -64,9 +69,17 @@ impl Clone for VisualizerFrame {
     }
 
     fn clone_from(&mut self, source: &Self) {
-        self.mode = source.mode;
-        self.density.clone_from(&source.density);
-        self.spatial.clone_from(&source.spatial);
+        self.demand = source.demand;
+        if source.demand.stereo_density {
+            self.density.clone_from(&source.density);
+        } else {
+            self.density = Vec::new();
+        }
+        if source.demand.spatial_spectrum {
+            self.spatial.clone_from(&source.spatial);
+        } else {
+            self.spatial = Vec::new();
+        }
         self.correlation = source.correlation;
         self.balance = source.balance;
         self.side_ratio = source.side_ratio;
@@ -180,20 +193,29 @@ pub(crate) struct AnalysisControl {
     /// Even epochs are stable; odd epochs mark sample-rate reset in progress.
     pub epoch: AtomicU64,
     shutdown: AtomicBool,
-    // Low bits encode mode; upper bits detect even a quick away/back switch.
-    visualizer_mode: AtomicU64,
+    // Three demand bits and their transition epoch form one coherent snapshot.
+    visualizer_demand: AtomicU64,
+    worker_thread: OnceLock<thread::Thread>,
     // Low bit is Still Mode; upper bits preserve quick destructive transitions.
     still_mode: AtomicU64,
 }
 
 impl AnalysisControl {
-    pub(crate) fn set_visualizer_mode(&self, mode: VisualizerMode) {
-        let _ = self
-            .visualizer_mode
+    pub(crate) fn set_visualizer_demand(&self, demand: VisualizerDemand) {
+        if self
+            .visualizer_demand
             .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                (VisualizerMode::from_bits(current) != mode)
-                    .then(|| ((current & !3).wrapping_add(4)) | mode as u64)
-            });
+                (VisualizerDemand::from_bits(current) != demand).then(|| {
+                    (current & !VisualizerDemand::MASK).wrapping_add(VisualizerDemand::MASK + 1)
+                        | demand.bits()
+                })
+            })
+            .is_ok()
+            && let Some(worker) = self.worker_thread.get()
+        {
+            // Relinquish storage even when analysis is disabled or paused.
+            worker.unpark();
+        }
     }
 }
 
@@ -212,7 +234,8 @@ impl AnalysisWorker {
             sample_rate: AtomicU32::new(48_000),
             epoch: AtomicU64::new(0),
             shutdown: AtomicBool::new(false),
-            visualizer_mode: AtomicU64::new(0),
+            visualizer_demand: AtomicU64::new(0),
+            worker_thread: OnceLock::new(),
             still_mode: AtomicU64::new(0),
         });
         let consumer = HeapCons::new(ring.clone());
@@ -220,6 +243,7 @@ impl AnalysisWorker {
         let worker = thread::Builder::new()
             .name("rivu-analysis".into())
             .spawn(move || analyze(consumer, thread_control, shared))?;
+        let _ = control.worker_thread.set(worker.thread().clone());
         Ok(Self {
             control,
             ring,
@@ -418,30 +442,38 @@ impl SpectrumAnalyzer {
         self.visualizer.band_rms = [0.0; 3];
     }
 
-    fn set_visualizer_mode(&mut self, mode: VisualizerMode) {
-        self.visualizer = VisualizerFrame {
-            mode,
-            ..VisualizerFrame::default()
-        };
-        self.density =
-            (mode == VisualizerMode::StereoDensity).then(|| DensityField::new(self.sample_rate));
-        match mode {
-            VisualizerMode::StereoDensity => {
+    fn set_visualizer_demand(&mut self, demand: VisualizerDemand) {
+        if demand.stereo_density {
+            if self.density.is_none() {
+                self.density = Some(DensityField::new(self.sample_rate));
                 self.visualizer
                     .density
                     .resize(DENSITY_SIDE * DENSITY_SIDE, 0.0);
             }
-            VisualizerMode::SpatialSpectrum => {
+        } else {
+            self.density = None;
+            self.visualizer.density = Vec::new();
+            self.visualizer.correlation = None;
+            self.visualizer.balance = None;
+            self.visualizer.side_ratio = None;
+        }
+        if demand.spatial_spectrum {
+            if !self.visualizer.demand.spatial_spectrum {
                 self.visualizer.spatial.reserve(self.rolling.len() / 2);
             }
-            VisualizerMode::Off | VisualizerMode::Generative => {}
+        } else {
+            self.visualizer.spatial = Vec::new();
         }
+        if !demand.band_energy {
+            self.visualizer.band_rms = [0.0; 3];
+        }
+        self.visualizer.demand = demand;
     }
 
     fn push(&mut self, samples: [f32; 2]) {
         // Optional plots treat nonfinite channels as silence; leave the
         // existing spectrum-only sample path unchanged.
-        let samples = if self.visualizer.mode == VisualizerMode::Off {
+        let samples = if self.visualizer.demand == VisualizerDemand::default() {
             samples
         } else {
             samples.map(|value| if value.is_finite() { value } else { 0.0 })
@@ -464,7 +496,7 @@ impl SpectrumAnalyzer {
     fn transform(&mut self) -> [f32; 2] {
         let n = self.rolling.len();
         let mut rms = [0.0_f32; 2];
-        let density_mode = self.visualizer.mode == VisualizerMode::StereoDensity;
+        let density_demand = self.visualizer.demand.stereo_density;
         let mut energies = [0.0_f64; 3];
         for (i, samples) in self.rolling[self.head..]
             .iter()
@@ -473,7 +505,7 @@ impl SpectrumAnalyzer {
         {
             rms[0] += samples[0] * samples[0];
             rms[1] += samples[1] * samples[1];
-            if density_mode {
+            if density_demand {
                 let left = samples[0] as f64;
                 let right = samples[1] as f64;
                 energies[0] += left * left;
@@ -487,7 +519,7 @@ impl SpectrumAnalyzer {
         }
         self.fft
             .process_with_scratch(&mut self.frequency, &mut self.scratch);
-        if self.visualizer.mode == VisualizerMode::Generative {
+        if self.visualizer.demand.band_energy {
             for (target, &(first, last)) in
                 self.visualizer.band_rms.iter_mut().zip(&self.drive_bins)
             {
@@ -502,7 +534,7 @@ impl SpectrumAnalyzer {
                 *target = (power * self.power_normalization).sqrt();
             }
         }
-        if density_mode {
+        if density_demand {
             let [left, right, cross] = energies;
             let total = left + right;
             self.visualizer.correlation = (left > 0.0 && right > 0.0)
@@ -517,7 +549,7 @@ impl SpectrumAnalyzer {
                 }
             }
         }
-        if self.visualizer.mode == VisualizerMode::SpatialSpectrum {
+        if self.visualizer.demand.spatial_spectrum {
             self.visualizer.spatial.clear();
             for bin in 1..=n / 2 {
                 let packed = self.frequency[bin];
@@ -575,7 +607,7 @@ impl SpectrumAnalyzer {
 /// Discard results and continuity, retaining reusable FFT machinery.
 fn discard_analysis(analyzer: &mut SpectrumAnalyzer, shared: &RwLock<AnalysisFrame>) {
     analyzer.reset();
-    analyzer.set_visualizer_mode(VisualizerMode::Off);
+    analyzer.set_visualizer_demand(VisualizerDemand::default());
     analyzer.metadata_dirty = true;
     let retired = {
         let mut frame = shared.write();
@@ -602,7 +634,7 @@ fn analyze(
     let mut incoming = [TapFrame::default(); 1024];
     let mut epoch = 0;
     let mut still_token = 0;
-    let mut mode_token = u64::MAX;
+    let mut demand_token = u64::MAX;
     let mut sample_time = Duration::ZERO;
     loop {
         if control.shutdown.load(Ordering::Acquire) {
@@ -612,12 +644,28 @@ fn analyze(
         if current_still_token != still_token {
             discard_analysis(&mut analyzer, &shared);
             still_token = current_still_token;
-            mode_token = u64::MAX;
+            demand_token = u64::MAX;
         }
         if current_still_token & 1 != 0 {
             consumer.clear();
             thread::park();
             continue;
+        }
+        let current_demand_token = control.visualizer_demand.load(Ordering::Acquire);
+        let demand = VisualizerDemand::from_bits(current_demand_token);
+        if demand_token != current_demand_token {
+            demand_token = current_demand_token;
+            analyzer.set_visualizer_demand(demand);
+            // A quick away/back transition must not revive old plot history or
+            // publish a partially old FFT window under a newly requested demand.
+            analyzer.reset();
+            let mut frame = shared.write();
+            frame.visualizer = VisualizerFrame {
+                demand,
+                ..VisualizerFrame::default()
+            };
+            frame.generation = analyzer.generation;
+            frame.settings = None;
         }
         if !control.enabled.load(Ordering::Acquire) {
             consumer.clear();
@@ -627,8 +675,6 @@ fn analyze(
         }
         let cycle_start = Instant::now();
         let previous_generation = analyzer.generation;
-        let current_mode_token = control.visualizer_mode.load(Ordering::Acquire);
-        let mode = VisualizerMode::from_bits(current_mode_token);
         let current_epoch = control.epoch.load(Ordering::Acquire);
         let sample_rate = control.sample_rate.load(Ordering::Acquire);
         if !current_epoch.is_multiple_of(2)
@@ -645,15 +691,7 @@ fn analyze(
             let generation = analyzer.generation.wrapping_add(1);
             analyzer = SpectrumAnalyzer::new(settings, sample_rate);
             analyzer.generation = generation;
-            analyzer.set_visualizer_mode(mode);
-        }
-        if mode_token != current_mode_token {
-            mode_token = current_mode_token;
-            analyzer.set_visualizer_mode(mode);
-            shared.write().visualizer = VisualizerFrame {
-                mode,
-                ..VisualizerFrame::default()
-            };
+            analyzer.set_visualizer_demand(demand);
         }
         analyzer.settings = settings;
         if current_epoch != epoch {
@@ -680,7 +718,7 @@ fn analyze(
         }
         if analyzer.generation != previous_generation {
             shared.write().visualizer = VisualizerFrame {
-                mode,
+                demand,
                 ..VisualizerFrame::default()
             };
         }
@@ -690,7 +728,7 @@ fn analyze(
             if control.epoch.load(Ordering::Acquire) == current_epoch
                 && control.enabled.load(Ordering::Acquire)
                 && *control.settings.read() == settings
-                && control.visualizer_mode.load(Ordering::Acquire) == current_mode_token
+                && control.visualizer_demand.load(Ordering::Acquire) == current_demand_token
                 && control.still_mode.load(Ordering::Acquire) == current_still_token
             {
                 analyzer.publish(&mut shared.write(), rms, sample_time);
@@ -705,7 +743,28 @@ fn analyze(
 mod tests {
     use super::*;
 
-    fn visualizer_analyzer(mode: VisualizerMode) -> SpectrumAnalyzer {
+    const DENSITY_DEMAND: VisualizerDemand = VisualizerDemand {
+        stereo_density: true,
+        spatial_spectrum: false,
+        band_energy: false,
+    };
+    const SPATIAL_DEMAND: VisualizerDemand = VisualizerDemand {
+        stereo_density: false,
+        spatial_spectrum: true,
+        band_energy: false,
+    };
+    const BAND_ENERGY_DEMAND: VisualizerDemand = VisualizerDemand {
+        stereo_density: false,
+        spatial_spectrum: false,
+        band_energy: true,
+    };
+    const ALL_DEMAND: VisualizerDemand = VisualizerDemand {
+        stereo_density: true,
+        spatial_spectrum: true,
+        band_energy: true,
+    };
+
+    fn visualizer_analyzer(demand: VisualizerDemand) -> SpectrumAnalyzer {
         let mut analyzer = SpectrumAnalyzer::new(
             AnalysisSettings {
                 fps: 20,
@@ -714,12 +773,164 @@ mod tests {
             },
             5120,
         );
-        analyzer.set_visualizer_mode(mode);
+        analyzer.set_visualizer_demand(demand);
         analyzer
     }
 
     #[test]
-    fn generative_bands_integrate_power_without_phase_cancellation() {
+    fn demand_flags_and_transition_epoch_are_packed_coherently() {
+        let worker = AnalysisWorker::new(Arc::new(RwLock::new(AnalysisFrame::default()))).unwrap();
+        let mut previous = 0;
+        for bits in 0..=VisualizerDemand::MASK {
+            let demand = VisualizerDemand::from_bits(bits);
+            assert_eq!(demand.bits(), bits);
+            worker.control.set_visualizer_demand(demand);
+            let token = worker.control.visualizer_demand.load(Ordering::Acquire);
+            assert_eq!(VisualizerDemand::from_bits(token), demand);
+            if bits != 0 {
+                assert_eq!(token & !VisualizerDemand::MASK, previous + 8);
+            }
+            previous = token & !VisualizerDemand::MASK;
+            worker.control.set_visualizer_demand(demand);
+            assert_eq!(
+                worker.control.visualizer_demand.load(Ordering::Acquire),
+                token
+            );
+        }
+        let before = worker.control.visualizer_demand.load(Ordering::Acquire);
+        worker
+            .control
+            .set_visualizer_demand(VisualizerDemand::default());
+        worker.control.set_visualizer_demand(ALL_DEMAND);
+        let after = worker.control.visualizer_demand.load(Ordering::Acquire);
+        assert_eq!(VisualizerDemand::from_bits(after), ALL_DEMAND);
+        assert_eq!(after, before + 16);
+    }
+
+    #[test]
+    fn simultaneous_visualizer_payloads_share_one_accepted_window() {
+        let settings = AnalysisSettings {
+            fps: 20,
+            fft_size: 4096,
+            window: SpectrumWindow::None,
+        };
+        let mut combined = SpectrumAnalyzer::new(settings, 32768);
+        combined.set_visualizer_demand(ALL_DEMAND);
+        let mut separate = [DENSITY_DEMAND, SPATIAL_DEMAND, BAND_ENERGY_DEMAND].map(|demand| {
+            let mut analyzer = SpectrumAnalyzer::new(settings, 32768);
+            analyzer.set_visualizer_demand(demand);
+            analyzer
+        });
+        let tones = [(128.0, 0.1), (1024.0, 0.2), (8192.0, 0.3)];
+        for i in 0..settings.fft_size {
+            let value = tones
+                .iter()
+                .map(|(frequency, amplitude)| {
+                    amplitude * (std::f32::consts::TAU * frequency * i as f32 / 32768.0).sin()
+                })
+                .sum::<f32>();
+            let samples = [value, -value];
+            combined.push(samples);
+            for analyzer in &mut separate {
+                analyzer.push(samples);
+            }
+        }
+        let rms = combined.transform();
+        for analyzer in &mut separate {
+            assert_eq!(analyzer.transform(), rms);
+            assert_eq!(analyzer.levels, combined.levels);
+        }
+        let payload = &combined.visualizer;
+        assert_eq!(payload.density, separate[0].visualizer.density);
+        assert!(payload.density.iter().any(|value| *value > 0.0));
+        assert_eq!(payload.correlation, Some(-1.0));
+        assert_eq!(payload.balance, Some(0.0));
+        assert_eq!(payload.side_ratio, Some(1.0));
+        assert_eq!(payload.spatial.len(), settings.fft_size as usize / 2);
+        for (actual, expected) in payload.spatial.iter().zip(&separate[1].visualizer.spatial) {
+            assert_eq!(actual.frequency_hz, expected.frequency_hz);
+            assert_eq!(actual.pan, expected.pan);
+            assert_eq!(actual.power_db, expected.power_db);
+        }
+        assert_eq!(payload.band_rms, separate[2].visualizer.band_rms);
+        for (band, (frequency, amplitude)) in tones.into_iter().enumerate() {
+            assert!((payload.band_rms[band] - amplitude / 2.0_f32.sqrt()).abs() < 0.0001);
+            let bin = payload
+                .spatial
+                .iter()
+                .find(|bin| bin.frequency_hz == frequency)
+                .unwrap();
+            assert!(bin.pan.abs() < 0.0001);
+            assert!((bin.power_db - 20.0 * amplitude.log10()).abs() < 0.001);
+        }
+        let mut frame = AnalysisFrame::default();
+        combined.publish(&mut frame, rms, Duration::from_millis(125));
+        assert_eq!(frame.visualizer.demand, ALL_DEMAND);
+        assert_eq!(frame.visualizer.density, separate[0].visualizer.density);
+        assert_eq!(
+            frame.visualizer.spatial.len(),
+            separate[1].visualizer.spatial.len()
+        );
+        assert_eq!(frame.visualizer.band_rms, separate[2].visualizer.band_rms);
+        assert_eq!(frame.sample_time, Duration::from_millis(125));
+        assert_eq!(frame.sequence, 1);
+    }
+
+    #[test]
+    fn demand_relinquishes_unused_payloads_and_reuses_active_storage() {
+        let mut analyzer = visualizer_analyzer(ALL_DEMAND);
+        let fft = analyzer.fft.clone();
+        let frequency = analyzer.frequency.as_ptr();
+        let mut frame = AnalysisFrame::default();
+        for _ in 0..8 {
+            analyzer.set_visualizer_demand(ALL_DEMAND);
+            for i in 0..512 {
+                let tone = 0.5 * (std::f32::consts::TAU * i as f32 / 32.0).sin();
+                analyzer.push([tone, -tone]);
+            }
+            let rms = analyzer.transform();
+            analyzer.publish(&mut frame, rms, Duration::from_millis(100));
+            let density = analyzer.visualizer.density.as_ptr();
+            let cells = analyzer.density.as_ref().unwrap().cells.as_ptr();
+            let spatial = analyzer.visualizer.spatial.as_ptr();
+            let published_density = frame.visualizer.density.as_ptr();
+            let published_spatial = frame.visualizer.spatial.as_ptr();
+            analyzer.set_visualizer_demand(ALL_DEMAND);
+            analyzer.transform();
+            analyzer.publish(&mut frame, rms, Duration::from_millis(100));
+            assert_eq!(analyzer.visualizer.density.as_ptr(), density);
+            assert_eq!(analyzer.density.as_ref().unwrap().cells.as_ptr(), cells);
+            assert_eq!(analyzer.visualizer.spatial.as_ptr(), spatial);
+            assert_eq!(frame.visualizer.density.as_ptr(), published_density);
+            assert_eq!(frame.visualizer.spatial.as_ptr(), published_spatial);
+            assert_eq!(
+                analyzer.visualizer.density.capacity(),
+                DENSITY_SIDE * DENSITY_SIDE
+            );
+            assert_eq!(analyzer.visualizer.spatial.capacity(), 256);
+            let drive = analyzer.visualizer.band_rms;
+            analyzer.set_visualizer_demand(BAND_ENERGY_DEMAND);
+            frame.visualizer.clone_from(&analyzer.visualizer);
+            assert!(analyzer.density.is_none());
+            for payload in [&analyzer.visualizer, &frame.visualizer] {
+                assert_eq!(payload.density.capacity(), 0);
+                assert_eq!(payload.spatial.capacity(), 0);
+                assert_eq!(payload.correlation, None);
+                assert_eq!(payload.balance, None);
+                assert_eq!(payload.side_ratio, None);
+                assert_eq!(payload.band_rms, drive);
+            }
+            assert!(drive[0] > 0.0);
+            analyzer.set_visualizer_demand(VisualizerDemand::default());
+            frame.visualizer.clone_from(&analyzer.visualizer);
+            assert_eq!(frame.visualizer.band_rms, [0.0; 3]);
+            assert!(Arc::ptr_eq(&analyzer.fft, &fft));
+            assert_eq!(analyzer.frequency.as_ptr(), frequency);
+        }
+    }
+
+    #[test]
+    fn band_energy_bands_integrate_power_without_phase_cancellation() {
         for window in [
             SpectrumWindow::None,
             SpectrumWindow::Hann,
@@ -734,7 +945,7 @@ mod tests {
                     },
                     32768,
                 );
-                analyzer.set_visualizer_mode(VisualizerMode::Generative);
+                analyzer.set_visualizer_demand(BAND_ENERGY_DEMAND);
                 for i in 0..4096 {
                     let value =
                         0.5 * (std::f32::consts::TAU * frequency * i as f32 / 32768.0).sin();
@@ -754,7 +965,7 @@ mod tests {
     }
 
     #[test]
-    fn generative_nyquist_is_not_doubled_and_silence_has_no_drive() {
+    fn band_energy_nyquist_is_not_doubled_and_silence_has_no_drive() {
         let mut analyzer = SpectrumAnalyzer::new(
             AnalysisSettings {
                 fps: 20,
@@ -763,7 +974,7 @@ mod tests {
             },
             8000,
         );
-        analyzer.set_visualizer_mode(VisualizerMode::Generative);
+        analyzer.set_visualizer_demand(BAND_ENERGY_DEMAND);
         for i in 0..512 {
             analyzer.push([if i % 2 == 0 { 0.5 } else { -0.5 }, 0.0]);
         }
@@ -779,7 +990,7 @@ mod tests {
     #[test]
     fn density_axes_and_stereo_statistics_describe_actual_signal() {
         for inverted in [false, true] {
-            let mut analyzer = visualizer_analyzer(VisualizerMode::StereoDensity);
+            let mut analyzer = visualizer_analyzer(DENSITY_DEMAND);
             for i in 0..512 {
                 let left = 0.8 * (std::f32::consts::TAU * i as f32 / 32.0).sin();
                 analyzer.push([left, if inverted { -left } else { left }]);
@@ -816,7 +1027,7 @@ mod tests {
 
     #[test]
     fn density_silence_and_nonfinite_samples_do_not_create_center_dot() {
-        let mut analyzer = visualizer_analyzer(VisualizerMode::StereoDensity);
+        let mut analyzer = visualizer_analyzer(DENSITY_DEMAND);
         for _ in 0..512 {
             analyzer.push([f32::NAN, f32::INFINITY]);
         }
@@ -838,7 +1049,7 @@ mod tests {
 
     #[test]
     fn density_ingests_once_and_decays_by_accepted_time() {
-        let mut analyzer = visualizer_analyzer(VisualizerMode::StereoDensity);
+        let mut analyzer = visualizer_analyzer(DENSITY_DEMAND);
         for _ in 0..512 {
             analyzer.push([0.5, 0.5]);
         }
@@ -856,8 +1067,8 @@ mod tests {
     }
 
     #[test]
-    fn gaps_and_mode_roundtrips_discard_density_history() {
-        let mut analyzer = visualizer_analyzer(VisualizerMode::StereoDensity);
+    fn gaps_and_demand_roundtrips_discard_density_history() {
+        let mut analyzer = visualizer_analyzer(DENSITY_DEMAND);
         for _ in 0..512 {
             analyzer.push([0.7, -0.7]);
         }
@@ -877,9 +1088,9 @@ mod tests {
                 .all(|value| *value == 0.0)
         );
         analyzer.push([0.7, -0.7]);
-        analyzer.set_visualizer_mode(VisualizerMode::SpatialSpectrum);
+        analyzer.set_visualizer_demand(SPATIAL_DEMAND);
         assert!(analyzer.density.is_none());
-        analyzer.set_visualizer_mode(VisualizerMode::StereoDensity);
+        analyzer.set_visualizer_demand(DENSITY_DEMAND);
         analyzer.transform();
         assert!(
             analyzer
@@ -888,7 +1099,7 @@ mod tests {
                 .iter()
                 .all(|value| *value == 0.0)
         );
-        analyzer.set_visualizer_mode(VisualizerMode::Off);
+        analyzer.set_visualizer_demand(VisualizerDemand::default());
         assert!(analyzer.density.is_none());
         assert!(analyzer.visualizer.density.is_empty());
         assert!(analyzer.visualizer.spatial.is_empty());
@@ -897,7 +1108,7 @@ mod tests {
     #[test]
     fn spatial_channel_tones_preserve_frequency_energy_and_phase() {
         for channels in [[1.0, 0.0], [0.0, 1.0], [1.0, -1.0]] {
-            let mut analyzer = visualizer_analyzer(VisualizerMode::SpatialSpectrum);
+            let mut analyzer = visualizer_analyzer(SPATIAL_DEMAND);
             for i in 0..512 {
                 let tone = 0.5 * (std::f32::consts::TAU * i as f32 / 32.0).sin();
                 analyzer.push(channels.map(|channel| channel * tone));
@@ -924,7 +1135,7 @@ mod tests {
                 .log10();
             assert!((strongest.power_db - expected_db).abs() < 0.001);
         }
-        let mut analyzer = visualizer_analyzer(VisualizerMode::SpatialSpectrum);
+        let mut analyzer = visualizer_analyzer(SPATIAL_DEMAND);
         for i in 0..512 {
             let phase = std::f32::consts::TAU * i as f32;
             analyzer.push([0.5 * (phase / 32.0).sin(), 0.25 * (phase / 16.0).sin()]);
@@ -944,7 +1155,7 @@ mod tests {
 
     #[test]
     fn spatial_nyquist_uses_single_sided_endpoint_normalization() {
-        let mut analyzer = visualizer_analyzer(VisualizerMode::SpatialSpectrum);
+        let mut analyzer = visualizer_analyzer(SPATIAL_DEMAND);
         for i in 0..512 {
             analyzer.push([if i % 2 == 0 { 0.5 } else { -0.5 }, 0.0]);
         }
@@ -960,7 +1171,7 @@ mod tests {
     #[test]
     fn density_panned_channel_readouts_are_correct() {
         for (samples, balance) in [([0.5, 0.0], -1.0), ([0.0, 0.5], 1.0)] {
-            let mut analyzer = visualizer_analyzer(VisualizerMode::StereoDensity);
+            let mut analyzer = visualizer_analyzer(DENSITY_DEMAND);
             for _ in 0..512 {
                 analyzer.push(samples);
             }
@@ -972,7 +1183,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_mode_roundtrip_does_not_revive_previous_density() {
+    fn worker_demand_roundtrip_does_not_revive_previous_density() {
         use ringbuf::traits::Producer;
         let shared = Arc::new(RwLock::new(AnalysisFrame::default()));
         let worker = AnalysisWorker::new(shared.clone()).unwrap();
@@ -981,18 +1192,16 @@ mod tests {
             fft_size: 512,
             window: SpectrumWindow::None,
         });
-        worker
-            .control
-            .set_visualizer_mode(VisualizerMode::StereoDensity);
+        worker.control.set_visualizer_demand(DENSITY_DEMAND);
         worker.set_enabled(true);
         let mut producer = worker.producer();
         let mut sequence = 0;
         for samples in [[0.7, -0.7], [0.5, 0.5]] {
             if sequence != 0 {
-                worker.control.set_visualizer_mode(VisualizerMode::Off);
                 worker
                     .control
-                    .set_visualizer_mode(VisualizerMode::StereoDensity);
+                    .set_visualizer_demand(VisualizerDemand::default());
+                worker.control.set_visualizer_demand(DENSITY_DEMAND);
             }
             let epoch = worker.control.epoch.load(Ordering::Acquire);
             for _ in 0..512 {
@@ -1010,7 +1219,7 @@ mod tests {
             loop {
                 let frame = shared.read();
                 if frame.sequence > sequence {
-                    assert_eq!(frame.visualizer.mode, VisualizerMode::StereoDensity);
+                    assert_eq!(frame.visualizer.demand, DENSITY_DEMAND);
                     if sequence != 0 {
                         assert_eq!(frame.visualizer.density[128 * DENSITY_SIDE + 217], 0.0);
                         assert!(frame.visualizer.density[64 * DENSITY_SIDE + 128] > 0.0);
@@ -1024,6 +1233,82 @@ mod tests {
                 thread::sleep(Duration::from_millis(1));
             }
         }
+    }
+
+    #[test]
+    fn worker_demand_transition_requires_fresh_window_and_releases_disabled_payloads() {
+        use ringbuf::traits::Producer;
+        let shared = Arc::new(RwLock::new(AnalysisFrame::default()));
+        let worker = AnalysisWorker::new(shared.clone()).unwrap();
+        worker.configure(AnalysisSettings {
+            fps: 60,
+            fft_size: 512,
+            window: SpectrumWindow::None,
+        });
+        worker.control.set_visualizer_demand(DENSITY_DEMAND);
+        worker.set_enabled(true);
+        let mut producer = worker.producer();
+        let epoch = worker.control.epoch.load(Ordering::Acquire);
+        push_window(&mut producer, epoch, [0.7, -0.7]);
+        wait_for_frame(&shared, |frame| frame.settings.is_some());
+        let previous = shared.read().clone();
+
+        worker.control.set_visualizer_demand(ALL_DEMAND);
+        wait_for_frame(&shared, |frame| {
+            frame.visualizer.demand == ALL_DEMAND && frame.settings.is_none()
+        });
+        for _ in 0..511 {
+            assert!(
+                producer
+                    .try_push(TapFrame {
+                        epoch,
+                        ..TapFrame::default()
+                    })
+                    .is_ok()
+            );
+        }
+        wait_for_frame(&shared, |_| producer.occupied_len() == 0);
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(shared.read().sequence, previous.sequence);
+        assert_eq!(shared.read().settings, None);
+        assert!(
+            producer
+                .try_push(TapFrame {
+                    epoch,
+                    ..TapFrame::default()
+                })
+                .is_ok()
+        );
+        wait_for_frame(&shared, |frame| frame.sequence > previous.sequence);
+        {
+            let frame = shared.read();
+            assert_eq!(frame.visualizer.demand, ALL_DEMAND);
+            assert!(frame.generation > previous.generation);
+            assert_eq!([frame.rms_left, frame.rms_right], [0.0; 2]);
+            assert_eq!(frame.visualizer.density.len(), DENSITY_SIDE * DENSITY_SIDE);
+            assert!(frame.visualizer.density.iter().all(|value| *value == 0.0));
+            assert_eq!(frame.visualizer.spatial.len(), 256);
+            assert!(
+                frame
+                    .visualizer
+                    .spatial
+                    .iter()
+                    .all(|bin| bin.power_db == -140.0)
+            );
+            assert_eq!(frame.visualizer.band_rms, [0.0; 3]);
+        }
+
+        worker.set_enabled(false);
+        worker
+            .control
+            .set_visualizer_demand(VisualizerDemand::default());
+        wait_for_frame(&shared, |frame| {
+            frame.visualizer.demand == VisualizerDemand::default() && frame.settings.is_none()
+        });
+        let frame = shared.read();
+        assert_eq!(frame.visualizer.density.capacity(), 0);
+        assert_eq!(frame.visualizer.spatial.capacity(), 0);
+        assert_eq!(frame.visualizer.band_rms, [0.0; 3]);
     }
 
     fn push_window(producer: &mut HeapProd<TapFrame>, epoch: u64, samples: [f32; 2]) {
@@ -1062,9 +1347,7 @@ mod tests {
             window: SpectrumWindow::None,
         };
         worker.configure(settings);
-        worker
-            .control
-            .set_visualizer_mode(VisualizerMode::StereoDensity);
+        worker.control.set_visualizer_demand(ALL_DEMAND);
         worker.set_enabled(true);
         let mut producer = worker.producer();
         let old_epoch = worker.control.epoch.load(Ordering::Acquire);
@@ -1085,6 +1368,11 @@ mod tests {
             assert_eq!(shared.read().sequence, suspended_sequence);
             assert!(shared.read().spectrum_db.is_empty());
             assert_eq!(shared.read().settings, None);
+            assert_eq!(shared.read().visualizer.demand, VisualizerDemand::default());
+            assert_eq!(shared.read().visualizer.density.capacity(), 0);
+            assert_eq!(shared.read().visualizer.spatial.capacity(), 0);
+            worker.control.set_visualizer_demand(BAND_ENERGY_DEMAND);
+            worker.control.set_visualizer_demand(ALL_DEMAND);
         }
         worker.set_still_mode(false);
         wait_for_frame(&shared, |frame| frame.sequence > suspended_sequence);
@@ -1104,6 +1392,20 @@ mod tests {
         assert!(frame.sample_time > previous.sample_time);
         assert_eq!([frame.rms_left, frame.rms_right], [0.0; 2]);
         assert!(frame.visualizer.density.iter().all(|value| *value == 0.0));
+        assert_eq!(frame.visualizer.demand, ALL_DEMAND);
+        assert_eq!(frame.visualizer.density.len(), DENSITY_SIDE * DENSITY_SIDE);
+        assert_eq!(
+            frame.visualizer.spatial.len(),
+            settings.fft_size as usize / 2
+        );
+        assert!(
+            frame
+                .visualizer
+                .spatial
+                .iter()
+                .all(|bin| bin.power_db == -140.0)
+        );
+        assert_eq!(frame.visualizer.band_rms, [0.0; 3]);
         let published = frame.sequence;
         drop(frame);
         worker.set_still_mode(true);

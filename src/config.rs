@@ -37,6 +37,23 @@ pub enum RadialSpectrumStyle {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioVisualizerOptions {
+    pub style: RadialSpectrumStyle,
+    pub reference_lines: bool,
+    pub labels: bool,
+}
+
+impl From<&Config> for AudioVisualizerOptions {
+    fn from(config: &Config) -> Self {
+        Self {
+            style: config.radial_spectrum_style,
+            reference_lines: config.radial_spectrum_grid,
+            labels: config.radial_spectrum_labels,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SpectrumStyle {
     Bars,
@@ -182,6 +199,8 @@ pub struct Config {
     pub spectrum_grid: bool,
     pub spectrum_labels: bool,
     pub radial_spectrum_style: RadialSpectrumStyle,
+    pub radial_spectrum_grid: bool,
+    pub radial_spectrum_labels: bool,
     pub radial_spectrum_sensitivity: f32,
     pub radial_spectrum_rotation_speed: f32,
     pub radial_spectrum_bar_width: f32,
@@ -264,6 +283,8 @@ impl Default for Config {
             spectrum_grid: true,
             spectrum_labels: true,
             radial_spectrum_style: RadialSpectrumStyle::BarsRings,
+            radial_spectrum_grid: false,
+            radial_spectrum_labels: false,
             radial_spectrum_sensitivity: 1.5,
             radial_spectrum_rotation_speed: 0.5,
             radial_spectrum_bar_width: 0.6,
@@ -682,6 +703,8 @@ mod tests {
             spectrum_grid: false,
             spectrum_labels: false,
             radial_spectrum_style: RadialSpectrumStyle::BarsRings,
+            radial_spectrum_grid: true,
+            radial_spectrum_labels: true,
             radial_spectrum_sensitivity: 2.0,
             radial_spectrum_rotation_speed: 1.0,
             radial_spectrum_bar_width: 0.8,

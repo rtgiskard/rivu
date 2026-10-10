@@ -20,8 +20,9 @@ body
 The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
-Bodies use Postcard serialization without COBS framing. The four-byte frame
-length remains little-endian; body integers follow Postcard's encoding.
+Bodies use Postcard serialization without COBS framing. Clients and servers
+must use matching wire schemas. The four-byte frame length remains
+little-endian; body integers follow Postcard's encoding.
 
 Request bodies are limited to 64 KiB. Response bodies are limited to 16 MiB.
 The server accepts at most 16 concurrent clients. An unbound client must send a

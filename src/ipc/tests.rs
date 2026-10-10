@@ -158,6 +158,8 @@ fn request_round_trip_uses_explicit_message_types() {
 fn configure_request_round_trip_preserves_optional_config_field() {
     for output_device in [None, Some("USB audio output".to_owned())] {
         let config = crate::config::Config {
+            radial_spectrum_grid: output_device.is_some(),
+            radial_spectrum_labels: output_device.is_none(),
             output_device,
             ..Default::default()
         };

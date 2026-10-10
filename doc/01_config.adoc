@@ -92,13 +92,11 @@ or clear an explicit value to restore inheritance. See
 
 Spectrum groups controls into Appearance, Bar motion, and Peak markers;
 Spectrogram uses Display and Frequency sampling; Waveform uses Appearance &
-interaction and Amplitude display. All Audio Visualizer styles share Appearance
-(style and display range) and Colors. Radial styles also show Shape & motion and
-Bars & rings; fractal styles show Response & glow. Density and spatial styles
-omit controls that do not affect them.
-
-Style-dependent fields preserve their values while inactive. Hover an inactive
-field for the reason; switch back to a compatible style to resume editing.
+interaction and Amplitude display. Audio Visualizer separates new-instance
+defaults from shared Response & glow, Shape & motion, Bars & rings, and Colors.
+Shared parameters remain editable regardless of the default presentation.
+Spectrum style-dependent fields preserve their values while inactive; hover
+an inactive field for the reason.
 
 Font: type to search installed families, or use the arrow to browse them and
 `serif`, `sans-serif`, and `monospace`. Enter or a click selects a choice; Space
@@ -255,7 +253,18 @@ see <<_visualization_db_ranges,Visualization dB ranges>>.
 
 === Audio Visualizer
 
-`radial_spectrum_style` selects the Audio Visualizer presentation:
+Each Audio Visualizer instance stores its style, reference-line visibility, and
+label visibility in `layout.json`. Right-click the instance to change any of
+these directly, or open Visualizer settings and apply changes to that instance.
+Moving panels and restarting preserve their choices. Different styles can run
+simultaneously. Global `radial_spectrum_style`, `radial_spectrum_grid`, and
+`radial_spectrum_labels` seed new instances only; both overlay defaults are false.
+Existing layouts without instance options copy these defaults once.
+
+Reference lines and labels are independently optional. Radial guides show
+normalized bar levels; analysis views use their measured axes; fractal guides
+show normalized scene coordinates, not audio measurements. Small views omit
+labels that would overlap. Available styles:
 
 * `bars`, `rings`, and `bars_rings` use the radial Spectrum presentation.
   Sensitivity, rotation, bar width/glow, ring opacity/Bloom, inner diameter,
