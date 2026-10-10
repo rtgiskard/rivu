@@ -1,9 +1,27 @@
 = IPC
 
-== Scope
+== Core and client boundary
 
-IPC is the local control and state transport between the Rivu server and CLI, TUI,
-and GUI clients. Clients and the server must use compatible builds.
+One core owns library storage, queue mutations, configuration, and playback
+coordination for a data directory. Commands and queries are dispatched through
+that core; frontends do not maintain independent authoritative playback or
+library state. Audio output and analysis have their own workers, so client
+transport and rendering are outside the audio callback.
+
+The GUI, tray, and MPRIS service use in-process handles and purpose-specific
+projections. CLI and TUI clients use the local IPC socket. Both paths reach the
+same command and query boundary. The GUI's shared analysis and waveform data
+are in-process resources, not IPC state sections.
+
+Projections expose what a consumer needs without copying the whole library on
+each playback update. Library rows are queried separately; state reads contain
+summary information, the queue, playback, and system state. In-process
+projections can share immutable data, whereas socket responses serialize it.
+This avoids a second control implementation without making every consumer pay
+for a universal snapshot.
+
+Startup and single-instance operation are documented in
+link:../readme.adoc[README]. Socket clients and the core must use compatible builds.
 
 == Transport and frame format
 
@@ -24,26 +42,36 @@ Bodies use Postcard serialization without COBS framing. Clients and servers
 must use matching wire schemas. The four-byte frame length remains
 little-endian; body integers follow Postcard's encoding.
 
-Request bodies are limited to 64 KiB. Response bodies are limited to 16 MiB.
-The server accepts at most 16 concurrent clients. An unbound client must send a
-Hello request within one second.
+Request frame content is limited to 64 KiB
+and response frame content to 16 MiB, including the version and message type but
+excluding the length prefix. The server accepts at most 16 concurrent clients;
+additional connections receive `IPC server is busy` and close. An unbound client
+has one second to complete each incoming frame while waiting for Hello.
 
 Frame limits bound encoded bytes, not decoded heap usage. Decoding must reject
 malicious lengths without disproportionate allocation or work; changes to the
 Wire schema must preserve that resource bound.
 
 An oversized frame prefix closes the connection before its body is consumed.
-Invalid headers or payloads within the frame limit receive an Error response
-and close that connection; other client sessions remain usable.
+Invalid headers, unknown message types, incompatible versions, malformed
+Postcard payloads, and trailing payload bytes within the frame limit receive an
+Error response and close that connection; other client sessions remain usable.
+
+The socket is created with owner-only permissions (`0600`). There is no separate
+credential exchange: the socket's filesystem access boundary controls who may
+issue commands. Startup refuses to replace a non-socket path or an accepting
+socket, and removes a stale socket only after connection refusal or absence.
 
 The transport retains partial input across cancelled reads and keeps frames
-independent.
+independent. Sessions process requests serially; frames have no request IDs or
+multiplexed response matching.
 
 == Session handshake
 
 A client session starts unbound and must send Hello before State, Query, Command,
-or Watch. The server rejects other requests until the handshake completes and
-rejects a second Hello on the same session.
+or Watch. Hello can request initial state sections, including none. A non-Hello
+request before binding or a second Hello receives Error, but does not close the
+session. The first successful Hello binds it.
 
 The Hello response contains a random nonzero `u32` instance ID encoded as four
 little-endian bytes. The ID is generated once per server start. Zero is reserved
@@ -76,25 +104,62 @@ not be reordered; new variants may only be appended.
 == Revisions and watching
 
 State revisions are tracked independently for Playback, Queue, Library, and
-System sections. A Watch request waits until the current revisions differ from
-the expected revisions. The response contains the latest revisions rather than
-an event log.
+System sections. They are equality tokens, not ordered clocks. A Watch request
+waits until the current revisions differ from the expected revisions. The
+response contains the latest revisions rather than an event log.
 
 Clients initialize from a state read, watch for revision changes, then read only
-the invalidated sections. Notifications coalesce to the latest state. A server
-restart requires a fresh Hello and state read.
+the invalidated sections. State reads capture selected sections and all revision
+tokens under one shared-state lock. Omitted sections preserve the client's
+previous values; the client advances tokens only for sections actually read,
+otherwise it could acknowledge an unseen change. Notifications coalesce to the
+latest state. A server restart requires a fresh Hello and state read.
+
+Watch has no fixed expiry. A complete new request on that connection supersedes
+a pending Watch without a Watch response. The preserved input then becomes the
+next request; disconnect or server shutdown terminates the wait.
 
 == Query results and pagination
 
-Query responses contain the requested projection and its revisions, not a full
-client state or queue snapshot. Command acknowledgements likewise do not replace
-an explicit state read.
+Query responses contain the requested projection and its data revisions, not a
+full client state or queue snapshot. Rows and query revisions come from the same
+core dispatch. Library-content, directory-structure, and playlist revisions are
+separate from the four state-section tokens. Command acknowledgements contain
+success or an error and the core's publication revision, not replacement state.
 
-Interactive pages return a total count and at most 256 rows; larger limits are
-clamped, and `limit = 0` returns the count without rows. Cursor batches require a
-limit from 1 through 256 and reject zero or larger values. Continuations are tied
-to the relevant data revision; clients must restart traversal when it changes.
+Interactive pages return an exact filtered total and at most 256 rows; larger
+limits are clamped, and `limit = 0` returns the count without rows. Offset pages
+do not reserve a snapshot across requests. Cursor batches avoid the total-count
+query and return a continuation only when more rows exist. They require a limit
+from 1 through 256 and reject zero or larger values.
 
+To traverse consistently, the caller captures the first batch's query revisions
+and supplies them as `expected` on later requests. Track batches check library
+content; playlist batches check both library and playlist revisions. A mismatch
+returns `QueryError::RevisionChanged` with `Query data changed while reading;
+restart the listing`. Without `expected`, the server does not enforce traversal
+consistency. This uses bounded results and explicit restart rather than retaining
+a database snapshot for an arbitrarily slow client.
+
+== Request failures and completion
+
+Well-formed requests with invalid values, handshake-order errors, and server-side
+dispatch failures receive Error without ending the session. Core query failures
+instead appear in the Query result, and core command failures in an unsuccessful
+Ack. Transport failure or an oversized response can end the connection without
+a usable response.
+
+Core request capacity is bounded to 64 queued operations. Requests waiting for
+capacity or a result can fail as unavailable; UI fire-and-forget sends report
+`Rivu is busy or stopped` rather than blocking. The server bounds query and
+ordinary command dispatch waits to 15 seconds, with 120 seconds for database
+optimization. One-shot clients allow 120 seconds for each response read.
+
+A timeout or client disconnect is not command cancellation: an operation
+already queued at the core may still execute. An unsuccessful acknowledgement
+caused by a response timeout therefore does not prove the requested mutation
+was absent. Clients must consult current state before deciding whether to repeat
+a non-idempotent operation.
 
 == Wire schemas
 

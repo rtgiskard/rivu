@@ -1,11 +1,11 @@
 = Configuration and layout
 
-Desktop settings keep supplementary help in hover tooltips on controls and
-setting groups rather than separate description rows. Hover a field for its
-accepted range or input syntax; visualization groups explain scope and effects.
-
-Rivu reads `~/.config/rivu/config.toml` by default; path overrides are described in
-link:../readme.adoc[the README]. Omitted fields use defaults. A minimal example:
+Rivu reads `~/.config/rivu/config.toml` by default (or the XDG configuration
+directory); path overrides are described in link:../readme.adoc[the README].
+A missing file or omitted field uses defaults. Unreadable files, malformed TOML,
+unknown keys, and invalid values are errors, not a reason to fall back to defaults.
+Paths are literal: `~` and environment variables are not expanded.
+A minimal example:
 
 [source,toml]
 ----
@@ -36,15 +36,22 @@ query batch tuning stays in the configuration file, not desktop settings. Queue 
 link:04_playback.adoc#_queue[Playback]; query and batch contracts in
 link:02_library.adoc#_paged_views[Library].
 
-Accepted media read buffer sizes are `1`, `2`, `4`, `8`, and `16` MiB.
+`media_read_buffer_mb` defaults to `2`; accepted sizes are `1`, `2`, `4`, `8`,
+and `16` MiB.
 
 `ffmpeg_enabled` is available only when the binary includes the `ffmpeg` feature;
 see link:../readme.adoc[README] for build variants. In a default build the
 setting remains off and enabling it is rejected with the extension-unavailable
 error; native decoders continue to work.
+Enabling affects future source opens. Disabling stops a track currently decoded
+through FFmpeg; native-decoded playback is unaffected.
 
-`play_count_threshold_percent` must be finite and in `[0, 100)`; zero still requires
-some confirmed heard time. Edit it in the configuration file or GUI preferences.
+`volume` accepts finite values from `0` to `1` and defaults to `0.7`.
+`shuffle` defaults to `false`; `repeat` accepts `off`, `all`, or `one` and defaults
+to `off`. `play_count_threshold_percent` defaults to `20` and must be finite and
+in `[0, 100)`; zero still requires some confirmed heard time. Edit the threshold
+in the configuration file or desktop settings; see
+link:02_library.adoc#_play_counts_and_recent_tracks[Library] for counting semantics.
 
 `pipewire_auto_mix` controls channel remixing; see link:04_playback.adoc[Playback].
 `tray_enabled` and `mpris_enabled` independently control desktop integration.
@@ -54,8 +61,8 @@ always go to stderr. `log_to_file` enables weekly logs under the data directory;
 `log_retention_weeks` accepts `1`–`520`. `NO_COLOR` or `RIVU_COLOR=never` disables
 stderr colors.
 
-The complete field set, defaults, and validation are in
-link:../src/config.rs[`Config`]; log handling is in link:../src/logging.rs[logging].
+Color settings use quoted `"#RRGGBB"` values. The complete field set, defaults,
+and validation are in link:../src/config.rs[`Config`].
 
 == Desktop settings
 
@@ -70,72 +77,71 @@ including full waveform scans; it does not reopen the current track.
 Still mode is under Visualizations → Common → Rendering and takes effect when
 settings are applied, without restarting playback. It is persisted as `still_mode`.
 
-General groups controls into Library, Playback, Audio, Interface, and Logging.
-Interface pairs font and scale in two columns, with symbol, MPRIS,
-and tray toggles in one wrapping row. Shuffle and Repeat remain in Playback
-controls, not General settings. Numeric ranges and format hints appear as input
-tooltips; optional dB ranges also show the current inherited Common value.
+Shuffle and Repeat are playback controls, not desktop settings.
+Hover settings fields for accepted ranges and input syntax.
 
-Visualizations is grouped by view, with shared controls in Common:
+Common visualization settings apply as follows:
 
-* Appearance: background for all views; color scheme for Spectrum, Spectrogram,
-  and Waveform. Audio Visualizer has independent primary and secondary colors.
-* Default display range: `visualization_db_range` supplies the display span for Spectrum,
-  Spectrogram, and Audio Visualizer unless a view overrides it. It belongs to
-  Appearance, not frequency analysis, and does not affect Waveform gain or volume.
-* Frequency analysis: FFT size, window, and analysis rate for Spectrum,
-  Spectrogram, and Audio Visualizer, not Waveform. FFT size defaults to `8192`;
-  configuration keys are `analysis_fft_size` and `analysis_window`. Changing
-  size or window clears visualization history.
-* Rendering: Still mode stops visualization processing and discards results. Rendering cache
-  (`visualization_cache`) reuses derived graphics in Spectrum, Spectrogram, and
-  Waveform, trading memory for less CPU work; it is separate from media read buffering.
+* `visual_background` sets the background for all views; `visual_palette` is
+  shared by Spectrum, Spectrogram, and Waveform. Audio Visualizer has independent
+  primary and secondary colors.
+* `visualization_db_range` supplies the display span for Spectrum, Spectrogram,
+  and Audio Visualizer unless a view overrides it. It does not affect Waveform
+  gain or volume.
+* `analysis_fft_size`, `analysis_window`, and `analysis_fps` apply to Spectrum,
+  Spectrogram, and Audio Visualizer, not Waveform. FFT size accepts powers of two
+  from `512` to `32768` and defaults to `8192`. Window accepts `hann`,
+  `blackman_harris` (default), or `none`. Changing size or window clears
+  visualization history.
+* Still Mode stops visualization processing and discards results; see
+  <<_still_mode,Still Mode>>. `visualization_cache` controls rendering reuse,
+  separately from media read buffering; see link:22_cache.adoc[Visualization Cache].
 
 Each frequency view has a range override; leave it empty to inherit Common,
 or clear an explicit value to restore inheritance. See
 <<_visualization_db_ranges,Visualization dB ranges>> for the configuration contract.
 
-Spectrum groups controls into Appearance, Bar motion, and Peak markers;
-Spectrogram uses Display and Frequency sampling; Waveform uses Appearance &
-interaction and Amplitude display. Audio Visualizer separates new-instance
-defaults from shared Response & glow, Shape & motion, Bars & rings, and Colors.
-Shared parameters remain editable regardless of the default presentation.
-Spectrum style-dependent fields preserve their values while inactive; hover
-an inactive field for the reason.
+Audio Visualizer style, reference lines, and labels are defaults for new
+instances, while effect parameters are shared by all instances. See
+<<_audio_visualizer,Audio Visualizer>> for instance settings and style-specific
+effects. Inactive Spectrum style-dependent settings retain their values.
 
 Font: type to search installed families, or use the arrow to browse them and
 `serif`, `sans-serif`, and `monospace`. Enter or a click selects a choice; Space
 remains text. Custom family names are accepted.
 
 `ui_font` defaults to `sans-serif`; empty values also select `sans-serif`.
-There is no separate System default choice. Family names use Fontconfig system
-and user rules (`~/.config/fontconfig/fonts.conf`) to select the primary family.
+Family names use Fontconfig system and user rules
+(`~/.config/fontconfig/fonts.conf`) to select the primary family.
 Missing text glyphs use native fallback, which does not guarantee Fontconfig's
 custom fallback order. Restart the GUI after changing Fontconfig rules.
 
-GPUI selects faces within each family and renders through cosmic-text/Swash;
-Fontconfig hinting, subpixel, and synthetic-bold settings do not apply.
+Fontconfig hinting, subpixel, and synthetic-bold settings do not control GUI
+rendering. If the requested primary family cannot be resolved or is unavailable
+to the GUI, Rivu logs a warning and uses `sans-serif`.
 
 `ui_scale` accepts `0.75`–`2.0`.
-Icons always use Nerd glyphs; there is no symbol-mode switch. By default, the GUI
-uses the system-installed Symbols Nerd Font Mono independently of `ui_font`.
-Font embedding is disabled by default. The optional `embed-nerd-font` Cargo
-feature embeds an installed Nerd Font found through the build host's Fontconfig,
-preferring the standalone Symbols families. A missing build-host font is an error.
-See link:../readme.adoc[build instructions] for installation and licensing details.
+GUI icons use the system-installed Symbols Nerd Font Mono independently of
+`ui_font`. The optional `embed-nerd-font` Cargo feature embeds a build-host font;
+see link:../readme.adoc[build instructions] for requirements and licensing.
 The TUI requires a Nerd Font or Nerd Symbols fallback in the displaying terminal.
 For SSH, configure the local client terminal; installing fonts on the server
 does not supply terminal glyphs. Missing glyphs can appear as boxes or blanks.
-Remove the obsolete `nerd_symbols` entry from existing configuration files.
 
 Omitted `output_device` uses the default output; a selected device must be available.
+Changing the output device or `pipewire_auto_mix` reopens the current audio
+source and output, unlike display-only settings.
 
-Library uses thin hierarchy guide lines.
+Apply validates and saves all General and Visualizations pages together;
+navigation preserves the draft. Discard drops unapplied changes and closes
+settings. Invalid input, an unavailable output device, or a save failure is
+reported in settings. Settings opened for one Audio Visualizer instance instead
+apply only that instance's style, reference lines, and labels to `layout.json`;
+applying fails if the instance no longer exists.
 
-Apply validates and saves all pages together; navigation preserves the draft.
-Discard drops unapplied changes. Saving library roots does not scan or enqueue
-tracks; use `Scan paths` in Library. Display-only changes do not reopen audio.
-Hover an error to read its complete message, or click its copy icon to copy it.
+Saving library roots does not scan or enqueue tracks; use `Scan paths` in Library.
+Display-only changes do not reopen audio. Hover an error to read its complete
+message, or click its copy icon to copy it.
 
 See link:../readme.adoc[README] for application lifecycle and host behavior.
 
@@ -147,6 +153,10 @@ layout lock. While unlocked, panels can be added, removed, moved, resized,
 and reordered. Right-click a panel to toggle its tab bar; right-click the
 bottom-right layout button to toggle the lock, or left-click it to add a
 panel. Playback and tab selection remain available while locked.
+
+If `layout.json` cannot be read or validated, Rivu reports the load error and
+opens the default layout. Layout save failures are reported; changes already
+made in the window are not undone.
 
 Errors and scan progress appear in the footer. Click a message or its copy icon
 to copy the complete text.
@@ -181,10 +191,10 @@ override equal to the current resolved value leaves the display unchanged.
 Live FFT analysis runs during playback only when Still Mode is off, the
 application window is visible, and a Spectrum, Spectrogram, or Audio Visualizer
 panel is visible.
-`analysis_fps` accepts `5`–`60`; all views use `visual_background`.
+`analysis_fps` accepts `5`–`60` and defaults to `20`.
 `visual_palette` accepts `tokyo_night` or `deadbeef` (default `deadbeef`) and is
-shared by Spectrum, Spectrogram, and Waveform. Defaults and accepted ranges are
-in link:../src/config.rs[`Config`].
+shared by Spectrum, Spectrogram, and Waveform. See
+link:../src/config.rs[`Config`] for the full setting ranges and defaults.
 `visualization_cache` defaults to `true`; disabling it preserves the displayed
 results but rebuilds derived graphics on repaint. It does not affect Radial
 Spectrum. See link:22_cache.adoc[Visualization Cache] for scope and trade-offs,
@@ -193,13 +203,9 @@ and link:23_visuals.adoc[Visualization Rendering Design] for rendering choices.
 === Still Mode
 
 `still_mode` defaults to `false`. Enabling it replaces all four visualization
-views with a static status, stops analysis sampling and FFT work, and removes
-the GUI's analysis-rate refresh timer. Progressive waveform statistics stop;
-any running full-waveform request is cancelled, and new requests are unavailable.
-All visualization results are discarded: waveform bins, spectrum and spectrogram
-history, stereo plots, and fractal scenes. FFT plans and reusable working buffers
-remain allocated; the sampling window is reset. Submitted images retire safely
-at frame boundaries.
+views with a static status, stops analysis sampling and FFT work, and discards
+all visualization results. Progressive waveform collection stops; any running
+full-waveform request is cancelled, and new requests are unavailable.
 
 Playback, seeking through the playback slider, ordinary interface effects,
 library operations, covers, IPC, MPRIS, and the tray are unchanged. Layout and
@@ -241,8 +247,10 @@ volume or decoded preview data.
 === Spectrum and Spectrogram
 
 Spectrum shows current frequency energy. `spectrum_style` accepts `bars`,
-`outline`, `led`, `line`, or `solid`; the remaining `spectrum_*` settings control
-FFT resolution/window, band density, spacing, peak hold, release motion, and labels.
+`outline`, `led`, `line`, or `solid` (default `bars`). The remaining `spectrum_*`
+settings control band density, spacing, bar and peak hold, release motion,
+smoothing, reference lines, labels, and display range. `spectrum_bars = 0`
+(default) chooses the band count automatically; explicit counts accept `1`–`512`.
 Motion freezes while paused.
 
 `spectrum_interpolate` controls frequency interpolation and whether `solid` has a
@@ -254,9 +262,11 @@ Spectrogram shows recent frequency history; `spectrogram_*` settings control its
 history duration, color range, labels, interpolation, and the `0.4`–`1.4`
 `spectrogram_sampling_points_scale` used to choose source frequency rows. Retained
 history also depends on panel width and analysis rate; unavailable history stays blank.
-`spectrogram_interpolation_points` defaults to `1024`; the settings page labels
-it Maximum frequency rows. This rendering row limit applies with or without
-frequency interpolation; it is not the FFT size, and increasing it does not add
+`spectrogram_history_seconds` accepts `1`–`120` and defaults to `20` seconds.
+`spectrogram_interpolation_points` accepts `64`–`4096` and defaults to `1024`;
+the settings page labels it Maximum frequency rows. This rendering row limit
+applies with or without frequency interpolation; it is not the FFT size, and
+increasing it does not add
 measured frequency detail.
 Both views use a logarithmic frequency axis and share `analysis_fft_size` and
 `analysis_window`. Their independent `spectrum_db_range` and
@@ -270,8 +280,8 @@ label visibility in `layout.json`. Right-click the instance to change any of
 these directly, or open Visualizer settings and apply changes to that instance.
 Moving panels and restarting preserve their choices. Different styles can run
 simultaneously. Global `audio_visualizer_style`, `audio_visualizer_grid`, and
-`audio_visualizer_labels` seed new instances only; both overlay defaults are false.
-Existing layouts without instance options copy these defaults once.
+`audio_visualizer_labels` seed new instances only. Style defaults to `bars_rings`;
+both overlay defaults are `false`.
 
 Reference lines and labels are independently optional. Radial guides show
 normalized bar levels; analysis views use their measured axes; fractal guides
@@ -279,8 +289,8 @@ show normalized scene coordinates, not audio measurements. Small views omit
 labels that would overlap. Available styles:
 
 * `bars`, `rings`, and `bars_rings` use the radial Spectrum presentation.
-  Sensitivity, rotation, bar width/glow, ring opacity/Bloom, inner diameter,
-  and idle fade apply to these styles only.
+  Rotation, bar width/glow, ring opacity, inner diameter, and idle fade apply
+  to these styles only. Sensitivity and Bloom also affect the fractal styles.
 * `stereo_density` shows a Mid/Side occupancy field: horizontal Side `(L−R)/2`,
   vertical Mid `(L+R)/2`, both fixed at ±1 without automatic gain. Equal channels
   form a vertical trace; opposite channels form a horizontal trace. Its readout
@@ -291,14 +301,13 @@ labels that would overlap. Available styles:
   energy balance horizontally, with color representing frequency-bin power in
   dBFS. Equal-energy channels appear at the center even when their phases differ;
   this is not a source-direction or phase measurement.
-* `fractal_beams` shows stable, recursively branching light. Low-frequency
-  energy extends the trunks, mids bend the forks, and highs light the fine
-  branches. Energy rises launch outward pulses; these are not detected beats.
-  It is generative art, not an amplitude or phase measurement.
-* `fractal_flow` shows layered light filaments moving through a three-scale flow
-  field. Low, mid, and high energy deform broad vortices, bends, and fine ripples;
-  energy rises brighten the trails. Particles leaving the field restart without
-  a cross-screen connecting line. This is also generative art, not a measurement.
+* `fractal_beams` maps low-frequency energy to branch length, mids to bending,
+  and highs to fine-branch intensity. Energy rises launch outward pulses;
+  these are not detected beats.
+* `fractal_flow` maps low, mid, and high energy to filament motion;
+  energy rises brighten the trails.
+
+Both fractal styles are generative art, not amplitude or phase measurements.
 
 All styles share `analysis_fft_size`, `analysis_window`, `analysis_fps`, and the
 two `audio_visualizer_*_color` endpoints. `audio_visualizer_db_range` inherits
@@ -312,22 +321,6 @@ to map measured energy into shape and brightness; `audio_visualizer_bloom_intens
 controls the halo. Rotation, bar/ring shape, and idle fade do not apply. Motion
 and decay follow accepted audio time: silence extinguishes the light, while
 pause freezes it. Seeking, signal gaps, hiding the view, and style/FFT changes
-reset the scene. Beams has bounded topology and pulses; Flow retains 96 filaments
-with at most 24 trajectory points each. Resource use does not grow with play time.
+reset the scene. See link:23_visuals.adoc[Visualization Rendering Design] for
+analysis continuity, scene resource boundaries, and rendering trade-offs.
 
-The radial presentation is based on Noctalia Shell v5's
-https://github.com/noctalia-dev/noctalia-shell/blob/e56a9db5/Widgets/AudioSpectrum/NMirroredSpectrum.qml[`NMirroredSpectrum.qml`],
-not a pixel-identical port.
-
-== Visual assets
-
-`assets/rivu.svg` is the application icon; `assets/rivu.png` is its 256×256 export.
-Album artwork is described in link:04_playback.adoc[Playback].
-
-To regenerate the application icon PNG after editing the SVG source (requires
-librsvg):
-
-[source,sh]
-----
-rsvg-convert -w 256 -h 256 -o assets/rivu.png assets/rivu.svg
-----

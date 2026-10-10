@@ -1,7 +1,9 @@
 = Playlists
 
 Playlists are ordered collections of library tracks. Each track ID appears at
-most once; adding it again leaves the existing entry unchanged.
+most once; adding it again leaves the existing entry unchanged. Imports and
+saved queues retain the first occurrence of each track, unlike the
+link:04_playback.adoc#_queue[playback queue].
 
 == Management
 
@@ -24,8 +26,9 @@ the existing queue unchanged. See link:04_playback.adoc#_queue[Playback queue].
 
 == Desktop UI
 
-The Queue panel can save a non-empty queue as a regular playlist with the save
-icon; the playlist name is generated from the current date and time.
+Use the Queue panel's Save queue as playlist control to save a non-empty queue.
+The playlist name is generated from the current date and time; duplicate queue
+occurrences become one playlist entry.
 
 Playlist catalogs, entries, and the Queue panel's playlist-destination menu
 load rows automatically while scrolling. Entry numbering and move actions use
@@ -37,9 +40,15 @@ scrolling and query failure behavior.
 
 CLI paths are relative to the invoking client's working directory. Referenced
 media and CUE sheets must lie within configured logical roots; see
-link:02_library.adoc[Library]. Imports may create partial playlists: `--wait`
-reports scan errors even when readable tracks were saved. Import fails if no
-entries resolve to accessible library tracks. CLI listings and exports include every entry.
+link:02_library.adoc#_roots_and_scanning[Library scan boundaries and errors].
+Imports scan referenced sources before creating the playlist and may create
+partial playlists: `--wait` reports scan errors even when readable tracks were
+saved. Import fails if no entries resolve to accessible library tracks. Without
+`--name`, the playlist name comes from the imported file's name without its
+extension. Another import or scan cannot start while scanning is active.
+
+Listings and exports include every entry, not only the visible rows. For listing
+changes and retry behavior, see link:02_library.adoc#_paged_views[Paged views].
 
 [source,sh]
 ----
@@ -51,8 +60,10 @@ rivu playlist export PLAYLIST_ID exported/mix.m3u8
 === M3U/M3U8
 
 Import accepts UTF-8, including BOM, and resolves entries relative to the playlist
-file. Export writes standard UTF-8 M3U with paths relative to the destination
-directory. Ordinary audio and complete CUE sheets may be mixed.
+file. Ordinary audio and complete CUE sheets may be mixed. Export writes standard
+UTF-8 M3U with paths relative to the destination directory; that directory must
+already exist. Export errors leave an existing destination untouched. Paths that
+cannot be represented as UTF-8 are rejected.
 
 === CUE import
 

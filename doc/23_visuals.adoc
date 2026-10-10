@@ -15,44 +15,72 @@ and resource lifetime are covered by link:22_cache.adoc[Visualization Cache].
 == Analysis boundary
 
 Visualization analysis is separate from audio output and observes samples
-before output volume gain. It combines stereo energy without cancelling
-opposite-phase channels. Analysis backpressure never blocks playback: dropped
-samples instead mark a discontinuity.
+before output volume gain. The output callback sends a stereo analysis tap to a
+bounded ring; analysis consumes it off the real-time thread. Spectrum combines
+channel energy rather than averaging signed channels, so opposite-phase stereo
+does not cancel. Optional spatial analysis retains the channels' relationship.
 
-Stream resets, analysis restarts, dropped samples, and FFT/window changes break
-signal continuity. Views reject frames from stale analysis settings and reset
-their envelopes at a break rather than smoothing across unrelated audio.
-Spectrogram does not pool new samples across that break; compatible historical
-frequency buckets can remain visible. Its sample time follows accepted audio,
-not wall time or the track's seek position.
+The tap holds at most 32,768 frames. Analysis backpressure never blocks playback:
+dropped samples mark a discontinuity in the next accepted input. Each processing
+cycle consumes only the queued prefix present at its start, so continued
+production cannot postpone publication or shutdown indefinitely. One latest
+shared frame is published rather than an unbounded queue of analysis results.
+The priority is reliable playback and coherent displays, not collecting every
+frame regardless of whether it can be consumed.
 
-Work and queued input are bounded, and GUI analysis demand follows visible
-views. The priority is reliable playback and coherent displays, not collecting
-every analysis frame regardless of whether it can be consumed.
+Stream resets, analysis restarts, dropped samples, FFT/window changes, and
+optional-payload demand transitions break signal continuity. Views reject
+frames from stale analysis settings and reset envelopes or simulations at a
+break rather than smoothing across unrelated audio. Spectrogram does not pool
+new samples across that break; compatible historical frequency buckets can
+remain visible. Its sample time follows accepted audio, not wall time or the
+track's seek position.
 
-Still Mode overrides visualization demand at both the GUI and audio-worker
-boundaries. The worker ignores effective analysis enablement while the mode is
-active, skips the output tap, and parks the analysis thread without reopening
-playback. One analyzer retains its FFT plan and reusable buffers; mode entry
-resets sample continuity and discards shared results. Sequence/generation
-invalidation covers quick on/off switches. Only sample-rate or FFT configuration
-changes rebuild the analyzer; resumption waits for a new complete audio window.
+GUI analysis demand follows visible views. Stereo density, spatial spectrum,
+and integrated band energy are independent requests combined across panels;
+one accepted audio window and stereo FFT supply all requested payloads. This
+avoids separate analyzers for different views while allowing unused result
+storage to be released. A demand transition invalidates the sampling window,
+including a quick hide/show that the worker did not observe as a steady state.
+
+== Still Mode
+
+Still Mode overrides visualization demand at both GUI and audio-worker
+boundaries. It stops the output tap and parks analysis without reopening
+playback. Entry discards shared analysis results, Spectrogram history, stereo
+fields, fractal scenes, and progressive and shared waveform bins. FFT plans and
+working buffers remain reusable, but their sampling window is reset.
+
+Settings, source identity, playback timeline, and accounting survive. Mode
+transitions invalidate queued samples and publications even across quick on/off
+switches. Sample-rate, FFT-size, or window changes rebuild the analyzer;
+resumption waits for a new complete audio window. Already submitted graphics
+follow link:22_cache.adoc#_resource_boundaries[frame-boundary retirement],
+independently of suspended analysis.
+
+Waveform coverage is also discarded: prior samples cannot count toward a
+complete envelope, and EOF cannot make a skipped or discarded interval complete.
+Only fresh decoded PCM allocates and fills bins. There is no automatic backfill
+or full-track rescan; an uninterrupted fresh traversal from zero can complete
+the envelope. Explicit full-waveform scans are cancelled on entry. A shared
+suspension generation rejects late results before GUI cancellation and across
+quick on/off transitions, so old scans cannot restore discarded data.
 
 == Waveform
 
-Playback builds a progressive waveform, while a completed full-track scan takes
-precedence over an in-flight progressive update. This keeps the displayed
-preview from regressing after a complete result becomes available.
+Playback builds a progressive waveform from decoded PCM, not from the FFT tap.
+It retains at most 1600 bins rather than whole-track PCM. Unknown-duration
+timelines expand by coarsening existing bins, preserving bounded memory at the
+cost of preview resolution. An undecoded interval is distinct from decoded
+silence. Peaks can survive disjoint visits, but RMS represents a contiguous
+sample interval rather than repeatedly counting seeked or replayed samples.
 
-Still Mode discards both the progressive waveform accumulator and shared bins,
-independently of FFT analysis. Source identity and timeline metadata survive,
-but no prior samples count toward coverage. EOF cannot claim a discarded or
-skipped interval is complete. Only fresh decoded PCM allocates and fills bins;
-there is no automatic backfill or rescan. A fresh uninterrupted traversal from
-zero can complete the envelope.
-Explicit full-waveform scans are cancelled on entry. A shared suspension
-generation also rejects late results before GUI cancellation and across quick
-on/off transitions, so old scans cannot restore discarded bins.
+A completed explicit full-track scan takes precedence over an in-flight
+progressive update. Source identity is the file and optional playback range,
+not metadata or panel visibility. A source change cancels the explicit scan;
+ordinary display changes do not start a decoder. This keeps the preview from
+regressing after a complete result becomes available and avoids background
+full-track reads merely to display a panel.
 
 RMS fills extend above and below the centerline for the respective stereo
 channels. Each display column has its own gradient endpoint, preserving color
@@ -92,24 +120,51 @@ increase geometry work, and the shared gradient requires renderer submissions
 for its palette intervals. The choice favors batching where the visual model
 allows it, rather than forcing Waveform and Spectrum through one strategy.
 
-Radial styles map and smooth each band directly into the display buffer rather
-than retaining a second target buffer. Density and spatial views reuse their
-field storage across continuity resets, but release it when hidden or inactive;
-one invalidation path owns both policies.
+== Audio Visualizer ownership
 
-Visualizer presentation options belong to panel instances. Density, spatial,
-and band-energy demand are independent flags combined across visible panels;
-one accepted audio window and stereo FFT supply all requested payloads.
-Rendering state is shared per style, not across different styles. Overlay
-toggles are paint-only and do not reset analysis or simulation. Hidden styles
-release their result storage; analysis images retain their delayed retirement.
+Panel instances own presentation options, while analysis and simulation results
+are shared by rendering style. Multiple panels of one style do not duplicate its
+field or advance its simulation independently; distinct styles do not overwrite
+each other's state. Overlay toggles are paint-only and do not reset analysis or
+simulation. Hidden styles release result storage; submitted analysis images
+retain the retirement boundary described in link:22_cache.adoc[Visualization Cache].
+
+=== Radial styles
+
+The radial presentation adapts Noctalia Shell v5's
+https://github.com/noctalia-dev/noctalia-shell/blob/e56a9db5/Widgets/AudioSpectrum/NMirroredSpectrum.qml[`NMirroredSpectrum.qml`]
+concept and parameter model, not its rendering implementation or pixel output.
+GPUI-native paths use a bounded display of at most 32 logarithmic bands.
+Rotation follows accepted sample time. There is no reusable rendering cache
+for these styles.
+
+=== Stereo analysis styles
+
+Stereo Density uses a fixed 256 by 256 mid/side field with decay normalized to
+accepted audio time. Silence advances decay without creating a false center
+point. Correlation requires energy in both channels; balance and side ratio
+require nonzero total energy. Undefined metrics remain absent, not fabricated
+as zero. Spatial Spectrum maps individual FFT bins by frequency and channel
+power balance into a fixed 256 by 128 field. Cells retain the strongest power
+rather than summing crowded logarithmic rows, which would make color depend on
+bin density instead of signal level.
+
+Both styles retain fixed-resolution field images independently of panel size;
+enlarging a panel does not multiply analysis resolution or allocate another
+field. Continuity breaks clear existing field contents while preserving storage
+for visible styles; hiding a style releases it. Recoloring uses retained fields
+rather than another FFT. This trades fixed display resolution for predictable
+storage and coherent reuse across differently sized panels.
 
 == Spectrogram
 
 Spectrogram maps retained frequency history to colored image columns. Stable
 history is a natural reuse boundary: newly accepted audio changes recent
-columns without requiring the entire visible history to be rebuilt. Display
-mapping can recolor retained frequency data without re-running audio analysis.
+columns without requiring the entire visible history to be rebuilt. Frames that
+share a time bucket are max-pooled rather than averaged, retaining short
+transients without storing every frame. Display mapping can recolor compatible
+retained frequency data without re-running audio analysis. A gap starts a new
+interval instead of drawing new audio across the missing time.
 
 History width and image resolution bound retained resources. Increasing display
 resolution does not create additional FFT information. Multiple panels share
@@ -134,11 +189,27 @@ channels retain their energy.
 Simulation advances once per accepted analysis frame and is shared across
 visible panels. Paint and resize never advance the scene. Discontinuities clear
 the state, and hidden views do not request the optional band-power analysis.
-Glow uses batched, widening translucent strokes rather than an unbounded image
-feedback history. Beams retains 189 branches, 756 line segments, and 12 pulse
-slots. Flow retains 96 filaments with at most 24 points each and 2208 line segments.
-Both styles draw at most 27 light paths per panel; Flow limits each integration
-step to 1/120 second and each accepted-frame update to 60 steps.
+Glow uses batched, widening translucent strokes rather than image feedback
+history or a blur post-pass. This bounds retained scene storage and submissions,
+at the cost of approximating the light spread. Beams retains 189 branches, 756
+line segments, and 12 pulse slots. Flow retains 96 filaments with at most 24
+points each and 2208 line segments. Both styles draw at most 27 light paths per
+panel; Flow limits each integration step to 1/120 second and each accepted-frame
+update to 60 steps. A gap longer than half a second resets the scene instead of
+attempting unbounded catch-up.
+
+== Failure boundaries
+
+Views without accepted data do not invent signal history. Analysis frames with
+incompatible FFT settings are ignored; Spectrum and Spectrogram reject mismatched
+frequency and level counts. Explicit full-waveform decoding failures preserve
+an error result rather than installing an incomplete scan as complete.
+
+Spectrum tessellation and Spectrogram image upload/paint failures are surfaced
+as visualization errors. Stereo-analysis image failures are reported separately.
+These rendering failures do not issue playback commands or make the audio
+callback wait for graphics. Very small plots can omit geometry rather than
+attempting invalid dimensions.
 
 == Evaluating tradeoffs
 

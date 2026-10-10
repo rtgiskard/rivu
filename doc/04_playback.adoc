@@ -2,34 +2,24 @@
 
 Selecting a missing source manually leaves the current track running and reports
 an error. If the next entry cannot be opened at natural end, playback stops.
-Playback transitions: link:../src/core/playback.rs[core playback] and
-link:../src/audio/playback.rs[audio playback].
 
 == Transport and timing
 
-Repeat cycles Off, All, and One. Previous restarts the current entry after three
-seconds; near the start it navigates back, using playback history when shuffling.
+Use `rivu playback` for play, pause, resume (`play` without a track ID), stop,
+next, previous, seek, volume, shuffle, and repeat controls. Seek positions are
+seconds; CLI volume is a percentage from 0 to 100.
+
+Repeat cycles Off, All, and One. Previous restarts the current entry when its
+position exceeds three seconds; at or before three seconds it navigates back,
+using playback history when shuffling.
 CUE playback uses the original source without splitting or transcoding it.
 Positions and seeks are relative to the subtrack; pregap directives do not
-synthesize silence absent from the source. Range handling:
-link:../src/cue.rs[CUE parser] and link:../src/audio/source.rs[audio source].
+synthesize silence absent from the source.
 
 Seek targets must be finite and non-negative; a known duration clamps them to
 the end. Seeking to the end follows normal queue completion; seeking while
 paused keeps playback paused. Pause also pauses live analysis. Listening
 statistics use confirmed heard time; see link:02_library.adoc[Library].
-
-Seek scheduling and pause handling: link:../src/audio/worker.rs[audio worker].
-Output timing: link:../src/audio/output.rs[output].
-
-Seeking reuses the source and decoder while rebuilding output state, preventing
-old queued audio from crossing the seek boundary. Seek coalescing preserves
-ordering relative to other playback commands.
-
-Refill and paused playback are event-driven. Audible-position accounting uses
-the PipeWire stream clock rather than treating decoded or queued PCM as heard.
-Format probing is bounded and validates audio structure to avoid mistaking
-metadata for playable payload.
 
 == Output devices and speaker layouts
 
@@ -38,32 +28,23 @@ PipeWire sinks only. Omit the setting for the default PipeWire sink, or use
 `PipeWire: <node.name>` for a named sink. PipeWire must be running; there is no
 direct ALSA output or fallback to a different backend.
 
-Decoded PCM is submitted at the source rate. PipeWire owns device-rate
-conversion; Rivu does not keep a separate resampler or conversion queue.
-
-Each stream owns a dedicated event loop and stays bound to its selected sink.
-Invalid or disappearing routes fail explicitly instead of silently rerouting.
+PipeWire handles device-rate conversion. Playback stays bound to its selected
+sink; invalid or disappearing routes fail explicitly instead of silently
+rerouting. Select an available sink and start playback again to recover.
 
 Multichannel output preserves speaker identities. `pipewire_auto_mix` is enabled
 by default and permits PipeWire remixing; disable it to require a compatible
 sink layout without remixing. Unsupported routes report an error.
-Device selection and routing: link:../src/audio/output.rs[output],
-link:../src/audio/output_layout.rs[layout negotiation], and
-link:../src/audio/output_pipewire.rs[PipeWire].
 
 == Optional FFmpeg decoder
 
 Native decoding is the default. Enable `ffmpeg_enabled` for additional formats,
 including audio in MKV/MP4. Missing or incompatible runtime libraries are
-reported through decoder status and playback errors. Disabling the extension
-stops an active FFmpeg-backed decoder without affecting native playback.
-
-Source owns the reusable decoded PCM buffer and applies seek and CUE boundaries;
-the FFmpeg decoder does not maintain a second PCM staging queue.
+reported through decoder status and playback errors.
 
 Build prerequisites and ABI compatibility: link:../readme.adoc[README].
-Decoder selection: link:../src/audio/source.rs[source]. Runtime loading:
-link:../src/audio/ffmpeg.rs[FFmpeg].
+Enablement, disabling an active decoder, and build-feature restrictions:
+link:01_config.adoc[Configuration].
 
 == Queue
 
@@ -73,9 +54,11 @@ directory expansions, and playlist loads are rejected without changing the queue
 Saved queues restore valid occurrences in order up to the configured limit,
 preserving duplicates and skipping removed records.
 
-Capacity settings: link:01_config.adoc[Configuration]. Queue operations
-and restoration: link:../src/core/queue.rs[queue handling] and
-link:../src/core.rs[core startup].
+Use `rivu queue list` to find occurrence IDs for `queue play`, `queue remove`,
+and `queue move`. Move positions start at zero. `queue add TRACK_ID...` appends
+occurrences; `queue clear` empties the queue and stops playback. JSON output
+contracts: link:02_library.adoc#_cli_output[Library].
+Capacity settings: link:01_config.adoc[Configuration].
 
 The Queue panel displays occurrences in order and marks the current occurrence.
 Click selects one row; Ctrl/Cmd toggles; Shift selects a contiguous range;
@@ -90,26 +73,59 @@ Dragging library tracks or directories onto Queue appends the resolved tracks.
 Removing the current occurrence stops playback; removing other occurrences does
 not. Queue controls remain available while the layout is locked.
 
+The Queue panel menu provides Randomize queue and Remove duplicates. Randomizing
+changes queue order without changing the current playback or shuffle setting.
+Removing duplicates keeps each track at its first position; if a later duplicate
+is playing, playback continues as that track's retained occurrence.
+
+Saving a queue as a playlist: link:03_playlist.adoc#_desktop_ui[Playlists].
+Scrolling and query retries: link:02_library.adoc#_paged_views[Library].
+
 == Terminal client
 
 `?` toggles context-sensitive help; `/` searches, `t` browses directories, and
-`P` lists playlists. Up/Down and PageUp/PageDown navigate. Enter on search results
-or directory tracks enqueues them; Right opens playlist entries and Enter plays
-a selected playlist, playlist track, or queue occurrence. Left/Backspace goes to
-the parent directory; Left/Esc leaves playlist details. `q` exits outside the
-Search view without stopping the core.
-Implementation: link:../src/terminal.rs[terminal.rs].
+`P` lists playlists. Up/Down and PageUp/PageDown navigate. In Search, Tab switches
+between the query and results; Enter from the query focuses results, and Enter
+on a result enqueues it. Enter on a directory opens it; Enter on a directory
+track enqueues it. Right opens playlist entries; Enter plays a selected playlist,
+playlist track, or queue occurrence. In playlist details, `a` enqueues the selected
+track. In Queue, `d` or Delete removes the selected occurrence.
 
-== Artwork and MPRIS
+Left/Backspace goes to the parent directory; Left/Esc leaves playlist details.
+Esc returns from search, the tree, or the playlist catalog to Queue. `q` exits
+outside Search without stopping the core.
 
-The GUI transport shows generated Rivu artwork, not embedded covers. MPRIS
-prefers embedded front-cover artwork, then another supported image, then the
-bundled icon. Images are local, cached under `artwork/`, and exposed through
-`mpris:artUrl` when available; cache failures do not prevent playback.
-GUI artwork: link:../src/gui/artwork.rs[generated artwork]. Extraction and MPRIS:
-link:../src/artwork.rs[artwork manager] and link:../src/mpris.rs[MPRIS adapter].
+== Desktop tray and window lifecycle
+
+Closing the window, including the application menu's Close window action, leaves
+the core and playback running. Activate the tray icon, use `rivu gui`, or invoke
+MPRIS `Raise` to reopen or focus the window. CLI and MPRIS reopening work with
+the tray disabled or unavailable; a headless core has no graphical host to raise.
+Use the application menu's Quit application action, tray Quit, or `rivu quit`
+to stop the core.
+
+`tray_enabled` controls tray startup and takes effect after restarting the
+graphical host, not merely reopening its window. The tray requires a session
+D-Bus and a StatusNotifier-compatible desktop host. If unavailable, the GUI and
+playback remain usable. Its menu offers Play/Pause, Previous, Next, Shuffle,
+Repeat, and Quit. Repeat follows the cycle described under
+<<_transport_and_timing,Transport and timing>>.
+
+== MPRIS and artwork
+
+`mpris_enabled` enables desktop media controls for graphical and headless cores
+and can be changed while running. A session D-Bus is required; unavailable media
+controls are reported in status without preventing playback. If enabling fails,
+disable and re-enable the setting after restoring the session bus.
+
+MPRIS prefers embedded front-cover artwork, then another supported image, then
+the bundled icon. Local images are cached under the data directory's `artwork/`
+and exposed through `mpris:artUrl` when available; cache failures do not prevent
+playback. The GUI does not display embedded covers.
 
 MPRIS supports transport, volume, shuffle, and repeat; only rate `1.0` is supported.
 Relative `Seek` beyond a known end advances when a next occurrence is available;
 out-of-range `SetPosition` is ignored. `OpenUri` is rejected: import media first.
 `Raise` is unavailable for a headless core, while `Quit` remains available.
+Next and Previous preserve paused or stopped state when used through MPRIS.
+`SetPosition` for an occurrence other than the current one is ignored.

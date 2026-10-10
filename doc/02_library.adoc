@@ -27,11 +27,12 @@ from being marked missing. Other read, traversal, or sheet errors may still mark
 tracks missing; successfully read tracks are saved. Inspect diagnostics and
 rescan before cleaning missing records.
 
-Scanning runs asynchronously without stopping playback. The desktop UI does not
-scan configured roots during startup; trigger scans from the Library controls or
-use `rivu library scan PATH...`. Progress covers discovery, metadata reading,
-saving, and completion or failure. `--wait` waits for completion; `--force`
-rereads unchanged audio metadata; CUE sheets are always reread.
+Scanning runs asynchronously without stopping playback; a second scan or playlist
+import is rejected while one is active. The desktop UI does not scan configured
+roots during startup; trigger scans from the Library controls or use
+`rivu library scan PATH...`. Progress reports completion or failure. `--wait`
+waits for completion and reports scan errors even when readable tracks were saved;
+`--force` rereads unchanged audio metadata. CUE sheets are always reread.
 
 [source,sh]
 ----
@@ -75,8 +76,8 @@ rivu library clean-missing
 
 == Desktop selection and directory tree
 
-Hover a track to access its favorite toggle; favorited tracks have an accented
-star. Toggling a favorite does not change the selection or start playback.
+Hover a track to access its favorite toggle. Toggling a favorite does not change
+the selection or start playback; double-click a track to play it.
 
 Click selects one row; Ctrl/Command-click toggles it. Shift-click selects the
 inclusive range from the original anchor, and Ctrl/Command-Shift-click adds that
@@ -88,47 +89,58 @@ Configured roots are shown in configuration order, including empty roots, and
 identified by their paths. Click a directory row to expand or collapse it.
 Overlapping roots expand independently: closing an enclosing root does not close
 the same directory shown as another root.
-Thin hierarchy guide lines connect directory and track rows, including loading
-and error placeholders. Directory and file icons retain their own slot beside
-the label; there is no disclosure-arrow mode.
 
 == Paged views
 
-GUI/TUI library and playlist views scroll continuously: visible rows trigger
-bounded queries automatically, with no page numbers, next/previous controls,
-or manual load-more operation. GUI trees fetch children on expansion and fetch
-further visible ranges on scrolling, including configured roots. Unloaded rows
-keep their height and position; failed loads expose an explicit retry instead
-of retrying indefinitely while the view is stationary. Scrolling back reloads
-evicted rows without clearing selections or metadata drafts.
-Collapsing a directory preserves descendant expansion choices for reopening.
+GUI/TUI library and playlist views load results automatically while scrolling;
+there are no page numbers or manual load-more controls. Expand a GUI directory
+to browse its children. Collapsing it preserves descendant expansion choices
+for reopening. Loading more rows does not clear selections or metadata drafts.
+Failed GUI loads offer a retry action; press `R` in the TUI to retry.
 
 In the GUI, unmodified `PageUp` / `PageDown` scroll one viewport height without
 changing selected rows. They target the last-clicked visible scroll viewport;
 after clicking elsewhere, the viewport under the pointer is used instead.
-This applies to flat Library and its directory tree, Queue, the playlist catalog
-and entries, history, metadata, and overflowing Playback content. Scrolling
-clamps at either end and loads newly visible library/playlist rows normally.
-Hidden or closed views cannot remain keyboard targets. Settings captures these
-keys for its current page; text inputs retain editing behavior, and About or an
-open menu prevents background paging. Settings dropdowns handle their own keys.
+This applies to Library, Queue, playlists, history, metadata, and overflowing
+Playback content. Hidden or closed views cannot remain keyboard targets.
+Settings uses these keys for its current page or open dropdown; text inputs
+retain editing behavior. About and open menus prevent background paging.
+`page_size` controls query batch size, not the visible viewport or total results;
+see link:01_config.adoc[Configuration] for its range. In the TUI,
+PageUp/PageDown moves the selection by one screen; returning from a directory or
+playlist detail restores the parent selection and viewport. Exiting the TUI
+does not have to wait for a stalled query.
 
-`page_size` controls query batch size, not the visible viewport or total results.
-GUI/TUI retain bounded working sets rather than loading the entire result.
-In the TUI, PageUp/PageDown scroll one screen; returning from a directory or
-playlist detail restores the parent selection and viewport. Rapid navigation
-uses the latest requested view, and exiting interrupts a stalled client wait.
-
-CLI listings and playlist export also read bounded batches, independently of
-`page_size`. Separate requests are not a database snapshot: CLI listings reject
-continuations when relevant library or playlist data changes.
-Listings stream directly to stdout. If a later batch detects a revision change,
-the command stops, prints a `Listing incomplete` notice on stderr, and exits
-successfully; already emitted text may be incomplete (and JSON may be invalid),
-so callers should discard it and retry. GUI/TUI discard stale query results and
-refetch them; click a failed GUI row's retry action, or press `R` in the TUI.
+CLI library and playlist listings include all matching rows, independently of
+`page_size`. If relevant data changes while a listing is being read, the command
+stops, prints a `Listing incomplete` notice on stderr, and exits successfully.
+Already emitted text may be incomplete, and JSON may be invalid; discard it and
+retry. GUI/TUI refresh stale query results automatically.
 
 Query limits, revisions, and batch contracts: link:21_ipc.adoc[IPC].
+
+== CLI output
+
+`--json` uses a command-specific shape rather than one universal response:
+
+* `library list` streams an array of full track records. `playlist list` streams
+  an array of playlists with `id`, `name`, `entry_count`, and `entries`.
+  See <<_paged_views,Paged views>> before consuming streamed output.
+* `library status` returns a state object with `revisions`, `playback`, `queue`,
+  `library`, and `system`. `queue list` requests only `queue`; `library history`
+  requests only `library`; scan/import with `--wait` and `library optimize`
+  request only `system`. Unrequested sections are `null`, not empty data.
+* Successful ordinary mutations return an acknowledgement with `ok`, `error`,
+  and `revision`; acceptance does not mean an asynchronous scan has completed.
+  Rejected commands and failed scan waits report an error on stderr and exit
+  unsuccessfully rather than printing a JSON acknowledgement.
+* `library stats` returns aggregate statistics; `library probe` returns metadata
+  and decoder status; `playback devices` returns an array of device names.
+
+State responses contain the requested section, not just the requested list:
+read queue occurrences from `queue.entries` and history from `library.history`.
+History's `--limit` affects human output only. Protocol and query contracts are
+described in link:21_ipc.adoc[IPC].
 
 == Play counts and recent tracks
 
@@ -146,8 +158,7 @@ History records the last playback activity, not necessarily a counted play;
 it is not a per-play log. Timestamps are Unix seconds in JSON.
 
 `rivu library history --limit N` prints up to N retained rows in human mode.
-With `--json`, it returns the full status response and ignores `--limit`;
-callers must limit the returned history themselves.
+For the JSON history shape and `--limit` behavior, see <<_cli_output,CLI output>>.
 
 == SQLite maintenance
 

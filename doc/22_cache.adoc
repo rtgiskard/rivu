@@ -2,15 +2,17 @@
 
 == Scope and contract
 
-`visualization_cache` defaults to `true` and trades retained graphics memory for
-less repeated rendering work. It does not change audio analysis, waveform
-samples, spectrum levels, palette mapping, or playback state. Settings and
-display controls are documented in link:01_config.adoc[Configuration and layout];
-rendering choices are explained in link:23_visuals.adoc[Visualization Rendering Design].
+`visualization_cache` trades retained graphics memory for less repeated rendering
+work. It does not change audio analysis, waveform samples, spectrum levels,
+palette mapping, or playback state. Settings and display controls are documented
+in link:01_config.adoc[Configuration and layout]; signal continuity and rendering
+rationale are explained in link:23_visuals.adoc[Visualization Rendering Design].
 
-The cache covers Waveform display columns and static images, Spectrum body
-geometry, and Spectrogram history images. Radial Spectrum currently has no
-reusable rendering cache, so the setting has no effect on that control.
+The policy covers Waveform display columns and static images, Spectrum body
+geometry, and Spectrogram history images. Audio Visualizer styles are independent:
+radial styles do not retain reusable graphics, stereo analysis styles retain
+their own result images, and generative styles retain simulation state. The
+setting does not control those resources or font caches.
 
 Disabling the cache bypasses reusable graphics, not the underlying audio data
 or Spectrogram history. Peak hold, smoothing, and display calculations retain
@@ -18,15 +20,11 @@ the same meaning. Re-enabling it requires an initial rebuild before reuse
 resumes. Temporary images still remain alive long enough for their submitted
 scene to render safely.
 
-Still Mode is separate from this cache policy. It discards visualization results
-and derived storage, including base waveform bins, shared analysis frames,
-stereo fields, and fractal scenes. FFT plans and working buffers remain reusable,
-but their sampling window is reset. Settings, source/timeline metadata, decoder
-and output PCM buffers, the tap ring, and playback accounting are unchanged.
-Submitted images still pass through frame-boundary retirement. The root release
-hook requests the final retirement frame when needed, even with the analysis
-timer stopped and every visualization replaced by a static status. Leaving the
-mode rebuilds results from new audio; no automatic full-track scan runs.
+Still Mode is a destructive suspension, not another cache policy: it stops
+visualization demand and discards results as well as derived graphics. Its
+analysis, waveform-coverage, and late-result invariants are authoritative in
+link:23_visuals.adoc#_still_mode[Visualization Rendering Design]. Graphics that
+have already been submitted still follow the retirement boundary below.
 
 == Reuse and invalidation
 
@@ -50,21 +48,32 @@ analysis data, not on a fixed expected hit rate.
 
 Spectrogram retains images for unchanged history columns. New audio updates the
 recent columns while older columns remain reusable. Palette, display range,
-frequency mapping, and image-size changes rebuild affected images so retained
-history is shown with the current settings.
+frequency mapping, and image-size changes rebuild affected images so compatible
+retained history is shown with the current settings. FFT-size or window changes
+discard history rather than recoloring data with a different analysis meaning.
 
 Visible Spectrogram panels share one bounded history sized for the largest
-requested column count. Narrow and wide panels therefore do not compete to
-resize it during painting. Capacity changes preserve the newest chronological
-columns. Recoloring history does not discard its underlying frequency data.
+requested plot width, capped by configured history seconds multiplied by
+analysis FPS, with a minimum capacity of two columns. Shared image resolution
+follows the largest visible panel height and the configured row cap. Narrow and
+wide panels therefore do not compete to resize it during painting. Capacity
+changes preserve the newest chronological columns. Recoloring compatible
+history does not discard its underlying frequency data.
+
+When no Spectrogram panel remains active, its images are retired but CPU history
+keeps its last capacity. It can continue accumulating while another view keeps
+analysis active. Hiding the whole window disables analysis demand, not all
+retained graphics. Still Mode instead releases history and derived storage.
 
 == Resource boundaries
 
 Caches are local to active panels or bounded Spectrogram history, not an
-unbounded record of earlier render states. Waveform image memory grows with
-panel dimensions and panel count. Spectrum geometry cost depends on style and
-bar density; dense LED layouts contain substantially more geometry than simple
-curves. Spectrogram image memory grows with retained history width and image
+unbounded record of earlier render states. Base waveform storage is bounded
+independently of its derived images; see link:23_visuals.adoc#_waveform[Waveform].
+Derived image memory grows with panel dimensions and panel count.
+Spectrum uses at most 2000 display slots, further limited by drawable width;
+dense LED layouts contain substantially more geometry than simple curves.
+Spectrogram image memory grows with bounded history capacity and capped image
 height, in addition to the frequency data needed to preserve that history.
 
 These are CPU and renderer resources: image payload alone does not describe
@@ -72,6 +81,15 @@ total process or GPU memory. Removed panel entries are pruned. Replaced images
 and images from hidden or removed panels are retired through the window
 lifecycle, without requiring those panels to paint again. Window closure
 releases the remaining retained images.
+
+An image cannot be dropped merely because the application has stopped reusing
+it: a submitted scene can still reference it. Replaced cached waveform and
+Spectrogram images retire at a subsequent window-frame boundary; transient
+uncached images and uploaded stereo-analysis images survive a complete
+intervening frame. Retirement runs from the root window independently of panel
+visibility. It requests a final frame when needed, including in Still Mode with
+the analysis timer stopped. This retains temporary memory longer than immediate
+release, but keeps scene ownership valid.
 
 == Design tradeoffs
 
@@ -90,15 +108,35 @@ by profiling real workloads, not assumed hit rates or submission counts alone.
 
 == Font data and glyphs
 
-Font retention is independent of `visualization_cache`. Primary-font selection
-and fallback behavior are described in link:01_config.adoc[Configuration and layout].
-Rivu uses the native GPUI/cosmic-text fallback rather than eagerly loading an
-explicit application fallback list. This avoids a local font-backend fork, but
-does not enforce Fontconfig ordering beyond the primary family.
+Font retention is independent of `visualization_cache` and Still Mode.
+Primary-font selection and fallback behavior are documented in
+link:01_config.adoc[Configuration and layout]. Rivu resolves the primary family
+at startup or when its saved setting changes, not during painting. It leaves
+missing-glyph fallback to the native GPUI/cosmic-text backend rather than
+providing an explicit fallback list: that backend eagerly loads explicit
+candidates. This avoids unnecessary application-directed loading and a local
+font-backend fork, but does not enforce Fontconfig ordering beyond the primary
+family.
+
+Icon text selects a separate symbol family, independent of the UI text font.
+Without `embed-nerd-font`, that family is `Symbols Nerd Font Mono`. With the
+feature enabled, build-host Fontconfig discovery prefers `Symbols Nerd Font
+Mono`, then `Symbols Nerd Font`, then other detected Nerd Font families. It
+selects one font file and its family, embeds that file's bytes, and registers
+them with GPUI before creating the GUI. Icon text uses the selected family;
+embedding is not a font subset or a bundled fallback chain. If discovery cannot
+find an installed Nerd Font, the build fails; if registration fails, GUI startup
+fails. Build requirements belong in link:../readme.adoc[README].
+
+Embedding removes the runtime dependency on that icon-font file, but trades
+executable size and backend registration for availability. Selecting a patched
+text font instead of a symbols-only font can embed much more data; backend
+parsing, shaping, and glyph rendering still require their own storage.
 
 The backend owns font, shaping, glyph, and atlas caches. It may retain multiple
 faces or fonts considered during fallback, not only those that supplied visible
 glyphs. Rivu adds no font eviction policy, so switching fonts may leave earlier
-data resident. Font-file mappings share kernel file pages; parsed font and glyph
-data also consume process memory. Font discovery alone is not a measure of
-retained memory, and total process memory includes unrelated renderer resources.
+data resident. System font-file mappings can share kernel file pages, whereas
+parsed font and glyph data also consume process memory. Font discovery alone
+is not a measure of retained memory, and total process memory includes unrelated
+renderer resources.

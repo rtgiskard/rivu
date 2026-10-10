@@ -1,8 +1,7 @@
 = Rivu
 
-Rivu is a local-first music player for Linux. A shared Rust core owns the
-library, playlists, queue, playback, analysis, and MPRIS state; the desktop UI,
-CLI, and TUI are different clients of that core.
+Rivu is a local-first music player for Linux, with desktop, command-line,
+terminal, and headless modes that share one playback instance.
 
 == Features
 
@@ -19,22 +18,6 @@ CLI, and TUI are different clients of that core.
 * Generated desktop artwork and embedded-cover support for MPRIS; no network
   media or cover fetching
 
-The desktop About dialog shows labeled version, local build time, and license
-information beside the app icon. The version includes enabled Cargo features
-(`none` for the default build); the card uses generous padding around its content.
-The Add panel button uses the `` icon; GUI icons use Nerd Symbols independently of the text font.
-Audio Visualizer is the last entry in its popup.
-
-== Architecture
-
-One core runs per data directory and owns the library, queue, playback, and live
-analysis. CLI/TUI clients connect through `rivu.sock`; GUI, tray, and MPRIS use
-in-process handles. Opening a client does not create a second playback engine.
-
-Commands, queries, and state notifications are separate: clients read only the
-state sections invalidated by revision changes. This keeps frequent playback
-updates from resending the library or queue. See link:doc/21_ipc.adoc[IPC design]
-for session, compatibility, and resource-boundary decisions.
 
 == Build and install
 
@@ -43,23 +26,21 @@ the native build and runtime prerequisites:
 
 [source,sh]
 ----
-sudo pacman -S --needed rust binutils pkgconf libpipewire opus fontconfig libxkbcommon
+sudo pacman -S --needed rust gcc binutils clang pkgconf libpipewire opus fontconfig libxkbcommon
 cargo build --release
 ----
 
-Use the repository's Rust toolchain and `Cargo.lock` for reproducible dependency
-selection; update the pinned GPUI dependencies together.
+Use the repository's Rust toolchain and `Cargo.lock` when building.
 
 Linux builds prefer `mold` when available and otherwise use the toolchain's
 default linker. Install it optionally with `sudo pacman -S --needed mold`.
 
-Audio output requires a running PipeWire server; there is no direct ALSA backend.
-PipeWire performs device-rate conversion. FFmpeg binding generation shares
-PipeWire's generator dependency rather than introducing a second toolchain.
+Audio output requires PipeWire 1.2 or newer and a running PipeWire server;
+there is no direct ALSA backend. PipeWire performs device-rate conversion.
 
 The default Cargo build has no FFmpeg dependency. The optional extension needs
-FFmpeg development headers (`libavutil`, `libavcodec`, `libavformat`)
-and `libclang` for binding generation:
+FFmpeg development headers (`libavutil` 61.x, `libavcodec` 63.x, `libavformat` 63.x)
+and `libclang`:
 
 [source,sh]
 ----
@@ -87,22 +68,17 @@ cargo build --release --features embed-nerd-font
 cargo build --release --features ffmpeg,embed-nerd-font
 ----
 
-The optional feature uses the build host's `fc-list`, preferring Symbols Nerd Font
-Mono, then Symbols Nerd Font, then another installed Nerd Font. It fails if none
-is available. No font binary is kept in the source tree or downloaded during the
-build. Rebuild with `cargo clean -p rivu` after changing the host font selection.
-When distributing an embedded-font build, obtain and include the selected font's
-license from its upstream project or system package.
-Embedding affects the GUI only; TUI glyphs still come from the displaying terminal.
+Embedding requires Fontconfig's `fc-list` and an installed Nerd Font on the build
+host; the build fails if none is available. No font is downloaded during the build.
+After changing the host font selection, rebuild with `cargo clean -p rivu` first.
+Distributions of embedded-font builds must include the selected font's license.
+Embedding affects the GUI only; TUI glyphs come from the displaying terminal.
 
 Release builds strip symbols. For troubleshooting, set
 `CARGO_PROFILE_RELEASE_STRIP=none` when building or installing.
 
-The FFmpeg feature accepts only little-endian x86-64 and aarch64 Linux and rejects
-other targets or header ABI major versions. These guards are compatibility
-requirements, not proof of a working cross-build: target-matched headers,
-pkg-config metadata, linker libraries, and platform backends are still required.
-Cross-compiling is not currently a supported build path.
+The FFmpeg feature supports little-endian x86-64 and aarch64 Linux with the header
+versions listed above. Cross-compiling is not currently a supported build path.
 
 Compilation makes the extension available; `ffmpeg_enabled = true` enables it
 at runtime. See link:doc/04_playback.adoc[Playback] for runtime dependencies and
@@ -146,66 +122,41 @@ On startup, the desktop UI does not scan configured roots. Trigger a scan from
 the Library controls, or pass explicit paths to `gui PATH...`; explicit paths
 select what to scan but do not add library roots. On an existing graphical
 instance, `gui PATH...` requests a scan after raising the window.
-All clients must use the same `--data-dir` to reach the same instance. `--config`
-selects configuration when starting a core; it does not reconfigure an existing
-instance.
+One core runs per data directory. All clients must use the same `--data-dir` to
+reach the same instance. `--config` selects configuration when starting a core;
+it does not reconfigure an existing instance.
 
 Closing the GUI window leaves playback and the core running. Reopen it with
 `rivu gui`; stop the instance with `rivu quit`, `Quit Rivu`, or MPRIS `Quit` when
 enabled. A `serve` instance must be stopped before starting a graphical host in
 the same data directory.
+Ctrl-C or SIGTERM also shuts down the core cleanly.
 
-The optional StatusNotifier tray belongs to the graphical host and is independent
-of MPRIS. When `tray_enabled` is true, clicking its icon opens the window; its
-`com.canonical.dbusmenu` menu exposes playback and quit controls without a
-separate Show action.
-Without a StatusNotifierHost or session bus, Rivu warns and continues without a
-tray; `serve` never creates one.
+The optional desktop tray provides window, playback, and quit controls. See
+link:doc/04_playback.adoc[Playback] for tray and MPRIS behavior.
 
-== CLI quick reference
+== CLI
 
 CLI/TUI controls require a running core; `library probe` and `playback devices`
 can run independently. All commands accept `--data-dir DIRECTORY`, `--config FILE`,
-and `--json`. Generated `--help` defines exact arguments; the syntax below is a
-quick reference, not a shell script.
+and `--json`. Use `rivu --help` or a subcommand's `--help` for exact arguments.
 
-[source,text]
+[source,sh]
 ----
-# Playback
-rivu playback ACTION
-# ACTION: play, pause, toggle, stop, next, previous, seek, volume,
-#         shuffle, repeat, devices, device
+# Scan after configuring library roots
+rivu library scan ~/Music --wait
+rivu library list --query "artist"
 
-# Library
-rivu library scan PATH... [--wait] [--force]
-rivu library list [--query TEXT] [--favorites] [--missing]
-rivu library edit TRACK_ID [--title TEXT] [--artist TEXT] [--album TEXT]
-rivu library probe PATH
-rivu library status|stats|optimize|clean-missing
-rivu library history [--limit N]
-rivu library remove TRACK_ID...
-rivu library favorite TRACK_ID... --set on|off
-
-# Playlists
-rivu playlist ACTION
-# ACTION: list, new, rename, delete, add, remove, move, play, import, export
-
-# Queue
-rivu queue ACTION
-# ACTION: list, add, remove, move, play, clear
+# Control the current playback
+rivu playback toggle
+rivu playback volume 50
 ----
 
-Mutating commands normally acknowledge acceptance, not completed playback or
-scanning. Use `--wait` for scan/import completion and `--json` for machine-readable
-responses; response shape depends on the command. Paths are resolved relative to
-the invoking client. The topical documents below define library, playback, and
-playlist contracts; generated `--help` defines exact arguments.
-
-With `--json`, ordinary mutations return an acknowledgement (`ok`, `error`,
-`revision`). State reads return section revisions and only the requested
-sections; omitted sections are `null`. Library and playlist listings remain
-streamed JSON arrays. Scan/import `--wait` returns the completed System section
-instead of fetching an unrelated queue or playback snapshot.
+Mutating commands normally acknowledge acceptance, not completion. Use `--wait`
+for scan/import completion. `--json` selects machine-readable output whose shape
+depends on the command; library and playlist listings are streamed arrays.
+Paths are relative to the invoking client. The user references below describe
+library, playlist, playback, and queue operations and their failure behavior.
 
 == Files and data directories
 
