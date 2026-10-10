@@ -4700,6 +4700,7 @@ dependencies = [
  "rustfft",
  "serde",
  "serde_json",
+ "signal-hook",
  "symphonia",
  "tempfile",
  "tokio",

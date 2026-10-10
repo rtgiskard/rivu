@@ -3,12 +3,16 @@ use clap::{Parser, Subcommand, ValueEnum};
 use crossbeam_channel::{bounded, select};
 use rivu::{
     audio, config,
-    core::Runtime,
+    core::{AppHandle, Runtime},
     gui, ipc,
     model::{Command, MAX_QUERY_ROWS, PlaybackStatus, Query, RepeatMode},
     mpris,
     response::{QueryError, StateResponse, StateSections, ViewResponse},
     terminal,
+};
+use signal_hook::{
+    consts::{SIGINT, SIGTERM},
+    iterator::{Handle as SignalHandle, Signals},
 };
 use std::{
     io::{self, Write},
@@ -514,12 +518,47 @@ fn open_gui(data_dir: PathBuf, config_path: PathBuf, paths: Vec<PathBuf>) -> Res
     }
 }
 
+struct ShutdownSignals {
+    handle: SignalHandle,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl ShutdownSignals {
+    fn start(mut signals: Signals, app: AppHandle) -> Result<Self> {
+        let handle = signals.handle();
+        let worker = thread::Builder::new()
+            .name("rivu-signals".into())
+            .spawn(move || {
+                // Coalesce repeated signals into one request. Waiting for queue
+                // capacity is safe here, never in the low-level signal handler.
+                if let Some(signal) = signals.forever().next() {
+                    tracing::info!(signal, "shutdown_signal_received");
+                    let _ = app.request_shutdown();
+                }
+            })?;
+        Ok(Self {
+            handle,
+            worker: Some(worker),
+        })
+    }
+}
+
+impl Drop for ShutdownSignals {
+    fn drop(&mut self) {
+        self.handle.close();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 fn start(
     data_dir: PathBuf,
     config_path: PathBuf,
     paths: Vec<PathBuf>,
     desktop: bool,
 ) -> Result<()> {
+    let signals = Signals::new([SIGINT, SIGTERM]).context("Registering shutdown signals")?;
     let socket = data_dir.join("rivu.sock");
     ipc::bind(&socket)?;
     let mut runtime = match Runtime::start(&data_dir, &config_path) {
@@ -529,6 +568,7 @@ fn start(
             return Err(error);
         }
     };
+    let _shutdown_signals = ShutdownSignals::start(signals, runtime.handle.clone())?;
     let server = ipc::Server::start(socket, runtime.handle.clone())?;
     let media_handle = runtime.handle.clone();
     let media_changes = media_handle.subscribe();

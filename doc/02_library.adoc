@@ -156,6 +156,12 @@ the music files again. This resets playlists, saved queue, favorites, metadata
 overrides, and playback statistics; audio files, `config.toml`, and
 `layout.json` are independent.
 
+Graceful core shutdown (`rivu quit`, `SIGINT`, or `SIGTERM`) closes its database
+connection. SQLite normally checkpoints and removes the WAL/SHM sidecars when
+the last connection closes; external connections can defer that cleanup.
+After an abrupt exit such as `SIGKILL`, keep any remaining WAL with the database
+so SQLite can recover committed transactions on the next open.
+
 To reclaim database/WAL space and refresh SQLite query statistics, ensure
 playback is stopped and no scan is active, then run:
 

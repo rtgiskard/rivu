@@ -125,6 +125,15 @@ impl AppHandle {
             })
             .context("Rivu is busy or stopped")
     }
+    /// Enqueue graceful shutdown, waiting for request capacity off the UI thread.
+    pub fn request_shutdown(&self) -> Result<()> {
+        self.sender
+            .send(Request {
+                operation: Operation::Command(Command::Shutdown),
+                reply: None,
+            })
+            .context("Rivu is stopped")
+    }
     pub fn is_shutting_down(&self) -> bool {
         self.state.read().system.shutting_down
     }
@@ -407,10 +416,7 @@ impl Drop for Runtime {
             .as_ref()
             .is_some_and(|worker| !worker.is_finished())
         {
-            let _ = self.handle.sender.send(Request {
-                operation: Operation::Command(Command::Shutdown),
-                reply: None,
-            });
+            let _ = self.handle.request_shutdown();
         }
         let _ = self.join();
     }
