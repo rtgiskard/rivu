@@ -296,21 +296,14 @@ enum VisualPage {
 
 struct FontOption {
     family: String,
-    label: String,
     search: String,
 }
 
 impl FontOption {
     fn new(family: String) -> Self {
-        let label = if family.is_empty() {
-            "System default".to_owned()
-        } else {
-            family.clone()
-        };
-        let search = label.to_lowercase();
+        let search = family.to_lowercase();
         Self {
             family,
-            label,
             search,
         }
     }
@@ -404,7 +397,7 @@ impl Settings {
         .map(|field| {
             let input = cx.new(|cx| {
                 if field == Field::Font {
-                    Input::new("", "System default — search fonts", cx).with_trailing_space(px(28.))
+                    Input::new("", "sans-serif — search fonts", cx).with_trailing_space(px(28.))
                 } else {
                     Input::new("", field.label(), cx)
                 }
@@ -412,7 +405,7 @@ impl Settings {
             (field, input)
         })
         .collect();
-        let generic = ["", "sans-serif", "serif", "monospace"];
+        let generic = ["sans-serif", "serif", "monospace"];
         self.font_options = generic
             .iter()
             .map(|family| FontOption::new((*family).to_owned()))
@@ -421,7 +414,7 @@ impl Settings {
             cx.text_system()
                 .all_font_names()
                 .into_iter()
-                .filter(|family| !generic.contains(&family.as_str()))
+                .filter(|family| !generic.contains(&family.as_str()) && family != super::fonts::SYMBOLS_FAMILY)
                 .map(FontOption::new),
         );
         self.initialized = true;
@@ -437,7 +430,7 @@ impl Settings {
             .enumerate()
             .filter(|(_, option)| option.search.contains(&search))
             .map(|(index, option)| {
-                DropdownItem::new(SettingChoice::Font(index), option.label.clone())
+                DropdownItem::new(SettingChoice::Font(index), option.family.clone())
             })
             .collect();
         if !query.is_empty()
@@ -772,6 +765,9 @@ impl Settings {
         config.log_retention_weeks = self.number(Field::LogRetentionWeeks, cx)?;
         config.media_read_buffer_mb = self.number(Field::MediaReadBuffer, cx)?;
         config.ui_font = self.value(Field::Font, cx).trim().to_owned();
+        if config.ui_font.is_empty() {
+            config.ui_font = "sans-serif".to_owned();
+        }
         config.ui_scale = self.number(Field::Scale, cx)?;
         config.analysis_fps = self.number(Field::Fps, cx)?;
         config.visualization_db_range = self.number(Field::VisualizationDb, cx)?;
@@ -959,7 +955,8 @@ impl GuiApp {
                     .items_center()
                     .justify_center()
                     .cursor_pointer()
-                    .child("▾")
+                    .font_family(super::fonts::SYMBOLS_FAMILY)
+                    .child("󰅀")
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, window, cx| {
@@ -1322,14 +1319,10 @@ impl GuiApp {
                         .flex_1()
                         .min_w(px(180.)),
                 )
-                .child(visual_switch(
-                    "settings-log-file",
-                    "▤",
-                    "Write logs to disk",
-                    draft.log_to_file,
-                    cx,
-                    |draft| draft.log_to_file = !draft.log_to_file,
-                )),
+                .child(visual_switch("settings-log-file", "", "Write logs to disk",
+                draft.log_to_file,
+                cx,
+                |draft| draft.log_to_file = !draft.log_to_file,)),
         );
         let library = settings_group(
             "Library",
@@ -1414,14 +1407,6 @@ impl GuiApp {
                     row()
                         .flex_wrap()
                         .gap_2()
-                        .child(visual_switch(
-                            "settings-nerd-symbols",
-                            "Nf",
-                            "Nerd Font symbols",
-                            draft.nerd_symbols,
-                            cx,
-                            |draft| draft.nerd_symbols = !draft.nerd_symbols,
-                        ))
                         .child(active_control(
                             icon_button(
                                 "settings-mpris",
@@ -1441,14 +1426,10 @@ impl GuiApp {
                             .text_size(rems(1.)),
                             mpris,
                         ))
-                        .child(visual_switch(
-                            "settings-tray",
-                            "▣",
-                            "System tray",
-                            tray,
-                            cx,
-                            |draft| draft.tray_enabled = !draft.tray_enabled,
-                        )),
+                        .child(visual_switch("settings-tray", "", "System tray",
+                        tray,
+                        cx,
+                        |draft| draft.tray_enabled = !draft.tray_enabled,)),
                 )
                 .child(caption("System tray changes require restarting the graphical host.")),
         );
@@ -1605,9 +1586,9 @@ impl GuiApp {
                         .child(settings.single(Field::Fps))
                         .child(caption("Applies to Spectrum, Spectrogram, and Audio Visualizer. Changing FFT size or window clears visualization history."))))
                     .child(settings_group("Rendering", column().gap_2()
-                        .child(row().child(visual_switch("settings-still-mode", "≈", "Still mode", draft.still_mode, cx, |draft| draft.still_mode = !draft.still_mode)))
+                        .child(row().child(visual_switch("settings-still-mode", "", "Still mode", draft.still_mode, cx, |draft| draft.still_mode = !draft.still_mode)))
                         .child(caption("Stops visualization processing and discards results; playback and interface effects are unchanged."))
-                        .child(row().child(visual_switch("visual-cache", "▤", "Rendering cache", draft.visualization_cache, cx, |draft| draft.visualization_cache = !draft.visualization_cache)))
+                        .child(row().child(visual_switch("visual-cache", "", "Rendering cache", draft.visualization_cache, cx, |draft| draft.visualization_cache = !draft.visualization_cache)))
                         .child(caption("Reduces CPU use at the cost of memory in Spectrum, Spectrogram, and Waveform."))))
             }
             VisualPage::Spectrum => {
@@ -1653,16 +1634,16 @@ impl GuiApp {
                         ))
                         .child(settings.single(Field::SpectrumDb))
                         .child(row().flex_wrap().gap_2()
-                            .child(visual_switch("spectrum-interpolate", "≈", "Frequency interpolation", draft.spectrum_interpolate, cx, |draft| draft.spectrum_interpolate = !draft.spectrum_interpolate))
-                            .child(visual_switch("spectrum-grid", "#", "Grid lines", draft.spectrum_grid, cx, |draft| draft.spectrum_grid = !draft.spectrum_grid))
-                            .child(visual_switch("spectrum-labels", "T", "Axis labels", draft.spectrum_labels, cx, |draft| draft.spectrum_labels = !draft.spectrum_labels)))
+                            .child(visual_switch("spectrum-interpolate", "", "Frequency interpolation", draft.spectrum_interpolate, cx, |draft| draft.spectrum_interpolate = !draft.spectrum_interpolate))
+                            .child(visual_switch("spectrum-grid", "", "Grid lines", draft.spectrum_grid, cx, |draft| draft.spectrum_grid = !draft.spectrum_grid))
+                            .child(visual_switch("spectrum-labels", "", "Axis labels", draft.spectrum_labels, cx, |draft| draft.spectrum_labels = !draft.spectrum_labels)))
                         .child(caption("Automatic bar count uses bar width and gap."))))
                     .child(settings_group("Bar motion", column().gap_2()
                         .child(settings.pair(Field::SpectrumBarHold, Field::SpectrumBarGravity))
                         .child(settings.single(Field::SpectrumSmoothing))
                         .child(caption("Gravity 0 snaps after hold, bypassing smoothing. Attacks stay immediate."))))
                     .child(settings_group("Peak markers", column().gap_2()
-                        .child(row().child(visual_switch("spectrum-peaks", "∧", "Peak markers", draft.spectrum_peaks, cx, |draft| draft.spectrum_peaks = !draft.spectrum_peaks)))
+                        .child(row().child(visual_switch("spectrum-peaks", "", "Peak markers", draft.spectrum_peaks, cx, |draft| draft.spectrum_peaks = !draft.spectrum_peaks)))
                         .child(two_column(
                             settings.field_state(Field::SpectrumHold, draft.spectrum_peaks, "Enable peak markers to edit.", cx),
                             settings.field_state(Field::SpectrumGravity, draft.spectrum_peaks, "Enable peak markers to edit.", cx),
@@ -1675,14 +1656,10 @@ impl GuiApp {
                     column()
                         .gap_2()
                         .child(settings.pair(Field::SpectrogramDb, Field::SpectrogramHistory))
-                        .child(row().child(visual_switch(
-                            "spectrogram-labels",
-                            "T",
-                            "Axis labels",
-                            draft.spectrogram_labels,
-                            cx,
-                            |draft| draft.spectrogram_labels = !draft.spectrogram_labels,
-                        ))),
+                        .child(row().child(visual_switch("spectrogram-labels", "", "Axis labels",
+                        draft.spectrogram_labels,
+                        cx,
+                        |draft| draft.spectrogram_labels = !draft.spectrogram_labels,))),
                 ))
                 .child(settings_group(
                     "Frequency sampling",
@@ -1694,7 +1671,7 @@ impl GuiApp {
                         ))
                         .child(row().child(visual_switch(
                             "spectrogram-interpolate",
-                            "≈",
+                            "",
                             "Frequency interpolation",
                             draft.spectrogram_interpolate,
                             cx,
@@ -1761,12 +1738,12 @@ impl GuiApp {
                         .when(!hint.is_empty(), |group| group.child(caption(hint)))
                         .child(row().flex_wrap().gap_2()
                             .child(visual_switch(
-                                "audio-visualizer-grid", "#", "Reference lines",
+                                "audio-visualizer-grid", "", "Reference lines",
                                 draft.audio_visualizer_grid, cx,
                                 |draft| draft.audio_visualizer_grid = !draft.audio_visualizer_grid,
                             ))
                             .child(visual_switch(
-                                "audio-visualizer-labels", "T", "Labels",
+                                "audio-visualizer-labels", "", "Labels",
                                 draft.audio_visualizer_labels, cx,
                                 |draft| draft.audio_visualizer_labels = !draft.audio_visualizer_labels,
                             )))
@@ -1789,7 +1766,7 @@ impl GuiApp {
                         .child(caption("Fractal styles: silence fades the light; pause freezes it. Pulses follow energy rises, not detected beats."))))
                     .child(settings_group("Shape & motion", column().gap_2()
                         .child(settings.pair(Field::AudioVisualizerInnerDiameter, Field::AudioVisualizerRotationSpeed))
-                        .child(row().child(visual_switch("audio-visualizer-fade-idle", "◌", "Fade when idle", draft.audio_visualizer_fade_when_idle, cx, |draft| draft.audio_visualizer_fade_when_idle = !draft.audio_visualizer_fade_when_idle)))
+                        .child(row().child(visual_switch("audio-visualizer-fade-idle", "", "Fade when idle", draft.audio_visualizer_fade_when_idle, cx, |draft| draft.audio_visualizer_fade_when_idle = !draft.audio_visualizer_fade_when_idle)))
                         .child(caption("Controls the Bars, Rings and Bars + Rings styles."))))
                     .child(settings_group("Bars & rings", column().gap_2()
                         .child(settings.pair(Field::AudioVisualizerBarWidth, Field::AudioVisualizerBarGlowLayers))
@@ -1817,14 +1794,10 @@ impl GuiApp {
                             row()
                                 .flex_wrap()
                                 .gap_2()
-                                .child(visual_switch(
-                                    "waveform-labels",
-                                    "T",
-                                    "Time labels",
-                                    draft.waveform_labels,
-                                    cx,
-                                    |draft| draft.waveform_labels = !draft.waveform_labels,
-                                ))
+                                .child(visual_switch("waveform-labels", "", "Time labels",
+                                draft.waveform_labels,
+                                cx,
+                                |draft| draft.waveform_labels = !draft.waveform_labels,))
                                 .child(visual_switch(
                                     "waveform-seek",
                                     "󱀞",
@@ -1948,26 +1921,18 @@ impl GuiApp {
                         .child(feedback),
                 )
                 .child(
-                    icon_button(
-                        "settings-apply",
-                        "✓",
-                        "Apply settings",
-                        cx,
-                        |this, _, cx| this.apply_settings(cx),
-                    )
+                    icon_button("settings-apply", "", "Apply settings",
+                    cx,
+                    |this, _, cx| this.apply_settings(cx),)
                     .opacity(if self.settings.applying { 0.4 } else { 1.0 }),
                 )
-                .child(icon_button(
-                    "settings-discard",
-                    "×",
-                    "Discard changes and close",
-                    cx,
-                    |this, _, cx| {
-                        this.load_settings(cx);
-                        this.settings_open = false;
-                        cx.notify();
-                    },
-                )),
+                .child(icon_button("settings-discard", "", "Discard changes and close",
+                cx,
+                |this, _, cx| {
+                    this.load_settings(cx);
+                    this.settings_open = false;
+                    cx.notify();
+                },)),
         );
         if self.settings.dropdown.is_open() {
             let bounds = self

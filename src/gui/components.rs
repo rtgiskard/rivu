@@ -171,13 +171,13 @@ pub(crate) fn sortable_header(
     cx: &mut Context<GuiApp>,
     action: impl Fn(&mut GuiApp, &mut Window, &mut Context<GuiApp>) + 'static,
 ) -> Stateful<Div> {
-    let marker = if active {
-        if descending { " ↓" } else { " ↑" }
-    } else {
-        ""
-    };
-    let label = format!("{}{}", label.into(), marker);
-    let mut control = active_control(button(id, label, cx, action), active);
+    let mut control = active_control(button(id, label, cx, action), active).when(active, |control| {
+        control.gap_1().child(
+            div()
+                .font_family(super::fonts::SYMBOLS_FAMILY)
+                .child(if descending { "󰁅" } else { "󰁝" }),
+        )
+    });
     if let Some(width) = width {
         control = control.w(width).flex_shrink_0();
     } else {
@@ -186,7 +186,7 @@ pub(crate) fn sortable_header(
     control
 }
 
-/// Icon button with the application's fallback glyphs and tooltip behavior.
+/// Icon button with the Nerd symbol font and shared tooltip behavior.
 pub(crate) fn icon_button(
     id: impl Into<ElementId>,
     icon: impl Into<SharedString>,
@@ -195,43 +195,8 @@ pub(crate) fn icon_button(
     action: impl Fn(&mut GuiApp, &mut Window, &mut Context<GuiApp>) + 'static,
 ) -> Stateful<Div> {
     let hint = hint.into();
-    let mut icon = icon.into();
-    if !cx
-        .try_global::<NerdSymbols>()
-        .is_none_or(|settings| settings.0)
-    {
-        let fallback = match icon.as_ref() {
-            "󰒟" => Some("⤨"),
-            "󰒮" => Some("|◀"),
-            "󰒭" => Some("▶|"),
-            "󰏤" => Some("Ⅱ"),
-            "󰐊" => Some("▶"),
-            "󰑖" => Some("↻"),
-            "󰑘" => Some("↻₁"),
-            "󰐹" => Some("♫"),
-            "󱀞" => Some("↔"),
-            "\u{f0193}" => Some("▣"),
-            "\u{f384}" => Some("F"),
-            "󰌾" => Some("▣"),
-            "󰉋" => Some("▸"),
-            "󰉢" => Some("≡"),
-            "󰐕" => Some("+"),
-            "󰆴" => Some("×"),
-            "󰑐" | "󰑓" => Some("↻"),
-            "󰓎" => Some("★"),
-            "󰓐" => Some("☆"),
-            "󰌶" => Some("!"),
-            "󰁍" => Some("‹"),
-            "󰁔" => Some("›"),
-            "\u{f0142}" => Some("▸"),
-            "\u{f0140}" => Some("▾"),
-            _ => None,
-        };
-        if let Some(fallback) = fallback {
-            icon = fallback.into();
-        }
-    }
     button(id, icon, cx, action)
+        .font_family(super::fonts::SYMBOLS_FAMILY)
         .size(gpui::rems(2.))
         .p_0()
         .flex()
@@ -360,12 +325,10 @@ pub(crate) fn dropdown_trigger(
             div()
                 .flex_shrink_0()
                 .text_color(rgb(super::MUTED))
-                .child("⌄"),
+                .font_family(super::fonts::SYMBOLS_FAMILY)
+                .child("󰅀"),
         )
 }
-
-pub(super) struct NerdSymbols(pub bool);
-impl gpui::Global for NerdSymbols {}
 
 /// Shared shell for application context menus. The caller supplies menu rows
 /// and owns dismissal and action dispatch.

@@ -103,18 +103,28 @@ Font: type to search installed families, or use the arrow to browse them and
 `serif`, `sans-serif`, and `monospace`. Enter or a click selects a choice; Space
 remains text. Custom family names are accepted.
 
-`ui_font`: empty/System default uses the platform UI font. Nonempty values use
-Fontconfig system and user rules (`~/.config/fontconfig/fonts.conf`) to select
-the primary family. Missing glyphs use native fallback, which does not guarantee
-Fontconfig's custom fallback order. Restart the GUI after changing Fontconfig rules.
+`ui_font` defaults to `sans-serif`; empty values also select `sans-serif`.
+There is no separate System default choice. Family names use Fontconfig system
+and user rules (`~/.config/fontconfig/fonts.conf`) to select the primary family.
+Missing text glyphs use native fallback, which does not guarantee Fontconfig's
+custom fallback order. Restart the GUI after changing Fontconfig rules.
 
 GPUI selects faces within each family and renders through cosmic-text/Swash;
 Fontconfig hinting, subpixel, and synthetic-bold settings do not apply.
 
 `ui_scale` accepts `0.75`–`2.0`.
-Omitted `nerd_symbols` follows installed Nerd Font detection; an explicit value
-overrides it. Omitted `output_device` uses the default output; a selected device
-must be available.
+Icons always use Nerd glyphs; there is no symbol-mode switch. By default, the GUI
+uses the system-installed Symbols Nerd Font Mono independently of `ui_font`.
+Font embedding is disabled by default. The optional `embed-nerd-font` Cargo
+feature embeds an installed Nerd Font found through the build host's Fontconfig,
+preferring the standalone Symbols families. A missing build-host font is an error.
+See link:../readme.adoc[build instructions] for installation and licensing details.
+The TUI requires a Nerd Font or Nerd Symbols fallback in the displaying terminal.
+For SSH, configure the local client terminal; installing fonts on the server
+does not supply terminal glyphs. Missing glyphs can appear as boxes or blanks.
+Remove the obsolete `nerd_symbols` entry from existing configuration files.
+
+Omitted `output_device` uses the default output; a selected device must be available.
 
 Library uses thin hierarchy guide lines.
 

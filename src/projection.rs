@@ -117,7 +117,6 @@ pub struct TuiSystemSnapshot {
     pub last_error: Option<String>,
     pub revision: u64,
     pub shutting_down: bool,
-    pub nerd_symbols: bool,
     pub library_roots: Arc<Vec<std::path::PathBuf>>,
     pub page_size: u32,
 }
@@ -129,7 +128,6 @@ impl Default for TuiSystemSnapshot {
             last_error: None,
             revision: 0,
             shutting_down: false,
-            nerd_symbols: false,
             library_roots: Arc::default(),
             page_size: crate::config::DEFAULT_PAGE_SIZE,
         }
@@ -155,7 +153,6 @@ impl TuiSnapshot {
                 last_error: state.system.last_error.clone(),
                 revision: state.system.revision,
                 shutting_down: state.system.shutting_down,
-                nerd_symbols: state.system.config.nerd_symbols,
                 library_roots: Arc::new(state.system.config.library_roots.clone()),
                 page_size: state.system.config.page_size,
             },

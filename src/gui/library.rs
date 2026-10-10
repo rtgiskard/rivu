@@ -254,9 +254,6 @@ impl GuiApp {
     ) -> AnyElement {
         let row_count = self.directory_tree.row_count();
         let ui_scale = self.state.system.config.ui_scale;
-        let nerd_symbols = cx
-            .try_global::<super::components::NerdSymbols>()
-            .is_none_or(|settings| settings.0);
         let scroll = &self.directory_tree.scroll;
         let mut view = list_viewport(
             uniform_list(
@@ -399,12 +396,8 @@ impl GuiApp {
                                 div()
                                     .flex_shrink_0()
                                     .text_sm()
-                                    .child(match (path.is_some(), nerd_symbols) {
-                                        (true, true) => "󰉋",
-                                        (false, true) => "󰈙",
-                                        (true, false) => "▣",
-                                        (false, false) => "♪",
-                                    }),
+                                    .font_family(super::fonts::SYMBOLS_FAMILY)
+                                    .child(if path.is_some() { "󰉋" } else { "󰈙" }),
                             )
                             .child(
                                 row()

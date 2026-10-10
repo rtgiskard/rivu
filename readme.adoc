@@ -70,6 +70,25 @@ command and install `.cache/target/release/rivu` into a directory on `PATH`.
 Build outputs default to `.cache/target/`; `CARGO_TARGET_DIR` overrides that path.
 Ensure `~/.local/bin` is on `PATH` when using the install example.
 
+Font embedding is off by default, including `make build` and `make install`.
+Install Symbols Nerd Font Mono on the machine displaying the GUI (on Arch Linux,
+`sudo pacman -S --needed ttf-nerd-fonts-symbols-mono`). To embed a build-host font:
+
+[source,sh]
+----
+cargo build --release --features embed-nerd-font
+# Combine with optional decoding:
+cargo build --release --features ffmpeg,embed-nerd-font
+----
+
+The optional feature uses the build host's `fc-list`, preferring Symbols Nerd Font
+Mono, then Symbols Nerd Font, then another installed Nerd Font. It fails if none
+is available. No font binary is kept in the source tree or downloaded during the
+build. Rebuild with `cargo clean -p rivu` after changing the host font selection.
+When distributing an embedded-font build, obtain and include the selected font's
+license from its upstream project or system package.
+Embedding affects the GUI only; TUI glyphs still come from the displaying terminal.
+
 Release builds strip symbols. For troubleshooting, set
 `CARGO_PROFILE_RELEASE_STRIP=none` when building or installing.
 

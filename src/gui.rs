@@ -259,6 +259,12 @@ pub fn run(handle: AppHandle, layout_path: PathBuf) -> Result<()> {
     gpui_platform::application()
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx: &mut App| {
+            #[cfg(feature = "embed-nerd-font")]
+            if let Err(error) = fonts::register_symbols(cx) {
+                app_host.borrow_mut().error = Some(error.context("Could not load embedded icon font"));
+                cx.quit();
+                return;
+            }
             Input::init(cx);
             let closed_host = app_host.clone();
             cx.on_window_closed(move |_, id| closed_host.borrow_mut().window_closed(id))
@@ -2249,7 +2255,8 @@ impl GuiApp {
                                         .px_1()
                                         .text_color(rgb(MUTED))
                                         .hover(|style| style.text_color(rgb(TEXT)))
-                                        .child("×")
+                                        .font_family(fonts::SYMBOLS_FAMILY)
+                                        .child("󰅖")
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             cx.stop_propagation();
                                             if this.layout.locked {
@@ -2484,9 +2491,6 @@ impl GuiApp {
 }
 impl Render for GuiApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        cx.set_global(components::NerdSymbols(
-            self.state.system.config.nerd_symbols,
-        ));
         window.set_rem_size(px(16. * self.state.system.config.ui_scale));
         self.scroll_views.begin_frame();
         self.visuals.begin_frame();
@@ -2737,16 +2741,12 @@ impl Render for GuiApp {
                     .text_color(rgb(TEXT))
                     .child(copyable_message("copy-error", error, cx))
                     .child(
-                        icon_button(
-                            "dismiss-error",
-                            "×",
-                            "Dismiss message",
-                            cx,
-                            |this, _, cx| {
-                                this.error = None;
-                                this.send(Command::DismissError, cx);
-                            },
-                        )
+                        icon_button("dismiss-error", "", "Dismiss message",
+                        cx,
+                        |this, _, cx| {
+                            this.error = None;
+                            this.send(Command::DismissError, cx);
+                        },)
                         .size(px(24.0))
                         .border_0()
                         .bg(rgb(ERROR_BG))
@@ -2800,7 +2800,7 @@ impl Render for GuiApp {
                     }),
                 ),
             )
-            .child(icon_button("app-menu", "☰", "Menu", cx, |this, _, cx| {
+            .child(icon_button("app-menu", "", "Menu", cx, |this, _, cx| {
                 this.app_menu_open = !this.app_menu_open;
                 this.catalog_open = false;
                 this.panel_menu = None;
@@ -3449,17 +3449,13 @@ impl Render for GuiApp {
                                     .child(caption("GPL-3.0-or-later")),
                             )
                             .child(
-                                icon_button(
-                                    "about-close",
-                                    "×",
-                                    "Close",
-                                    cx,
-                                    |this, window, cx| {
-                                        this.about_open = false;
-                                        this.focus_layout(window, cx);
-                                        cx.notify();
-                                    },
-                                )
+                                icon_button("about-close", "", "Close",
+                                cx,
+                                |this, window, cx| {
+                                    this.about_open = false;
+                                    this.focus_layout(window, cx);
+                                    cx.notify();
+                                },)
                                 .absolute()
                                 .top(px(8.))
                                 .right(px(8.)),

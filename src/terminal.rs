@@ -1321,30 +1321,9 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
         .map(|t| format!("{} — {}", t.artist, t.title))
         .unwrap_or_else(|| "Nothing playing".into());
     let (status, status_icon) = match state.playback.status {
-        PlaybackStatus::Playing => (
-            "Playing",
-            if state.system.nerd_symbols {
-                "󰐊"
-            } else {
-                ">"
-            },
-        ),
-        PlaybackStatus::Paused => (
-            "Paused",
-            if state.system.nerd_symbols {
-                "󰏤"
-            } else {
-                "||"
-            },
-        ),
-        PlaybackStatus::Stopped => (
-            "Stopped",
-            if state.system.nerd_symbols {
-                "󰓛"
-            } else {
-                "[]"
-            },
-        ),
+        PlaybackStatus::Playing => ("Playing", "󰐊"),
+        PlaybackStatus::Paused => ("Paused", "󰏤"),
+        PlaybackStatus::Stopped => ("Stopped", "󰓛"),
     };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -1377,12 +1356,12 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
     }
     match &mut ui.view {
         View::Search(search) => draw_search(frame, columns[0], search),
-        View::Tree(tree) => draw_tree(frame, columns[0], tree, state.system.nerd_symbols),
+        View::Tree(tree) => draw_tree(frame, columns[0], tree),
         View::PlaylistDetail { detail, .. } => {
-            draw_playlist_detail(frame, columns[0], detail, state.system.nerd_symbols)
+            draw_playlist_detail(frame, columns[0], detail)
         }
         View::Playlists(playlists) => {
-            draw_playlists(frame, columns[0], playlists, state.system.nerd_symbols)
+            draw_playlists(frame, columns[0], playlists)
         }
         View::Queue => draw_queue(frame, columns[0], state, &mut ui.queue, &mut ui.queue_cache),
     }
@@ -1427,23 +1406,13 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
             .block(Block::default().title("Keys").borders(Borders::ALL));
         frame.render_widget(help, columns[1]);
     }
-    let status = if state.system.nerd_symbols {
-        format!(
-            "󰕾 {:>3}% 󰒝 {} 󰑖 {} 󰘦 {}",
-            (state.playback.volume * 100.0).round() as u8,
-            if state.playback.shuffle { "on" } else { "off" },
-            repeat_label(state.playback.repeat),
-            state.queue.entries.len()
-        )
-    } else {
-        format!(
-            "vol {:>3}%  shuffle {}  repeat {}  queue {}",
-            (state.playback.volume * 100.0).round() as u8,
-            if state.playback.shuffle { "on" } else { "off" },
-            repeat_label(state.playback.repeat),
-            state.queue.entries.len()
-        )
-    };
+    let status = format!(
+        "󰕾 {:>3}% 󰒝 {} 󰑖 {} 󰘦 {}",
+        (state.playback.volume * 100.0).round() as u8,
+        if state.playback.shuffle { "on" } else { "off" },
+        repeat_label(state.playback.repeat),
+        state.queue.entries.len()
+    );
     let status_columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
@@ -1620,9 +1589,8 @@ fn draw_playlist_detail(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     detail: &mut PlaylistDetail,
-    nerd_symbols: bool,
 ) {
-    let marker = if nerd_symbols { "󰎆 " } else { "♪ " };
+    let marker = "󰎆 ";
     draw_paged_list(
         frame,
         area,
@@ -1643,9 +1611,8 @@ fn draw_playlists(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     playlists: &mut PagedList<PlaylistSummary>,
-    nerd_symbols: bool,
 ) {
-    let marker = if nerd_symbols { "󰲋 " } else { "[P] " };
+    let marker = "󰲋 ";
     draw_paged_list(frame, area, "Playlists".into(), playlists, |playlist| {
         format!(
             "{marker}{}  ({} tracks)",
@@ -1691,7 +1658,6 @@ fn draw_tree(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     tree: &mut LibraryTree,
-    nerd_symbols: bool,
 ) {
     let title = if tree.directory.as_os_str().is_empty() {
         "Library tree".into()
@@ -1700,7 +1666,7 @@ fn draw_tree(
     };
     draw_paged_list(frame, area, title, &mut tree.entries, |entry| match entry {
         DirectoryRow::Directory { path } => {
-            let marker = if nerd_symbols { "\u{f07b} " } else { "[dir] " };
+            let marker = "\u{f07b} ";
             let name = path
                 .file_name()
                 .unwrap_or(path.as_os_str())
@@ -1708,7 +1674,7 @@ fn draw_tree(
             format!("{marker}{name}/")
         }
         DirectoryRow::Track(track) => {
-            let marker = if nerd_symbols { "\u{f001} " } else { "      " };
+            let marker = "\u{f001} ";
             format!(
                 "{marker}{} — {}{}",
                 track.artist,
@@ -1828,10 +1794,10 @@ mod tests {
                 let area = frame.area();
                 match &mut ui.view {
                     View::Search(search) => draw_search(frame, area, search),
-                    View::Tree(tree) => draw_tree(frame, area, tree, false),
-                    View::Playlists(playlists) => draw_playlists(frame, area, playlists, false),
+                    View::Tree(tree) => draw_tree(frame, area, tree),
+                    View::Playlists(playlists) => draw_playlists(frame, area, playlists),
                     View::PlaylistDetail { detail, .. } => {
-                        draw_playlist_detail(frame, area, detail, false)
+                        draw_playlist_detail(frame, area, detail)
                     }
                     View::Queue => panic!("expected a queried view"),
                 }

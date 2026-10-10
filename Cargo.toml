@@ -7,6 +7,7 @@ description = "A lightweight, local-first Linux music player"
 [features]
 default = []
 ffmpeg = ["dep:bindgen", "dep:libloading"]
+embed-nerd-font = []
 
 [dependencies]
 anyhow = "1"

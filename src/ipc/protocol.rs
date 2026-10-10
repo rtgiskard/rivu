@@ -776,7 +776,6 @@ pub(super) struct WireConfig {
     waveform_peak_gamma: f32,
     visualization_cache: bool,
     media_read_buffer_mb: u32,
-    nerd_symbols: bool,
     ffmpeg_enabled: bool,
     pipewire_auto_mix: bool,
 }
@@ -850,7 +849,6 @@ impl From<&crate::config::Config> for WireConfig {
             waveform_peak_gamma: value.waveform_peak_gamma,
             visualization_cache: value.visualization_cache,
             media_read_buffer_mb: value.media_read_buffer_mb,
-            nerd_symbols: value.nerd_symbols,
             ffmpeg_enabled: value.ffmpeg_enabled,
             pipewire_auto_mix: value.pipewire_auto_mix,
         }
@@ -926,7 +924,6 @@ impl From<WireConfig> for crate::config::Config {
             waveform_peak_gamma: value.waveform_peak_gamma,
             visualization_cache: value.visualization_cache,
             media_read_buffer_mb: value.media_read_buffer_mb,
-            nerd_symbols: value.nerd_symbols,
             ffmpeg_enabled: value.ffmpeg_enabled,
             pipewire_auto_mix: value.pipewire_auto_mix,
         }

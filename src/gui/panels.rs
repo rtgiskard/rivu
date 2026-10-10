@@ -204,11 +204,8 @@ impl GuiApp {
                     .flex_shrink_0()
                     .text_lg()
                     .text_color(rgb(MUTED))
-                    .child(if self.state.system.config.nerd_symbols {
-                        "󰕾"
-                    } else {
-                        "♪"
-                    })
+                    .font_family(super::fonts::SYMBOLS_FAMILY)
+                    .child("󰕾")
                     .tooltip(|_, cx| {
                         cx.new(|_| super::ButtonTooltip {
                             text: "Volume ([ / ])".into(),
@@ -260,11 +257,8 @@ impl GuiApp {
                                             .flex_shrink_0()
                                             .text_lg()
                                             .text_color(rgb(MUTED))
-                                            .child(if self.state.system.config.nerd_symbols {
-                                                "󰅐"
-                                            } else {
-                                                "◷"
-                                            })
+                                            .font_family(super::fonts::SYMBOLS_FAMILY)
+                                            .child("󰅐")
                                             .tooltip(|_, cx| {
                                                 cx.new(|_| super::ButtonTooltip {
                                                     text: "Playback progress".into(),
@@ -846,63 +840,47 @@ impl GuiApp {
         }
         if selection_count > 0 {
             tools = tools
-                .child(icon_button(
-                    ("queue-play", panel_id),
-                    "▶",
-                    "Play selected queue entry",
-                    cx,
-                    |this, _, cx| {
-                        let queue_id = this
-                            .selected_queue
-                            .anchor()
-                            .copied()
-                            .filter(|id| this.selected_queue.contains(id))
-                            .or_else(|| {
-                                this.state
-                                    .queue
-                                    .entries
-                                    .iter()
-                                    .find(|entry| this.selected_queue.contains(&entry.id))
-                                    .map(|entry| entry.id)
-                            });
-                        if let Some(queue_id) = queue_id {
-                            this.send(Command::PlayQueue { queue_id }, cx);
-                        }
-                    },
-                ))
-                .child(icon_button(
-                    ("queue-remove", panel_id),
-                    "×",
-                    "Remove selected queue entries",
-                    cx,
-                    |this, _, cx| {
-                        let queue_ids = this.selected_queue_ids_in_order();
-                        if !queue_ids.is_empty() {
-                            this.selected_queue.clear();
-                            this.selected_queue.clear_anchor();
-                            this.send(Command::RemoveQueueEntries { queue_ids }, cx);
-                            cx.notify();
-                        }
-                    },
-                ));
+                .child(icon_button(("queue-play", panel_id), "󰐊", "Play selected queue entry",
+                cx,
+                |this, _, cx| {
+                    let queue_id = this
+                        .selected_queue
+                        .anchor()
+                        .copied()
+                        .filter(|id| this.selected_queue.contains(id))
+                        .or_else(|| {
+                            this.state
+                                .queue
+                                .entries
+                                .iter()
+                                .find(|entry| this.selected_queue.contains(&entry.id))
+                                .map(|entry| entry.id)
+                        });
+                    if let Some(queue_id) = queue_id {
+                        this.send(Command::PlayQueue { queue_id }, cx);
+                    }
+                },))
+                .child(icon_button(("queue-remove", panel_id), "", "Remove selected queue entries",
+                cx,
+                |this, _, cx| {
+                    let queue_ids = this.selected_queue_ids_in_order();
+                    if !queue_ids.is_empty() {
+                        this.selected_queue.clear();
+                        this.selected_queue.clear_anchor();
+                        this.send(Command::RemoveQueueEntries { queue_ids }, cx);
+                        cx.notify();
+                    }
+                },));
             if let Some(index) = selected_index {
                 if index > 0 {
-                    tools = tools.child(icon_button(
-                        ("queue-up", panel_id),
-                        "↑",
-                        "Move selected entry up",
-                        cx,
-                        |this, _, cx| this.move_selected_queue(false, cx),
-                    ));
+                    tools = tools.child(icon_button(("queue-up", panel_id), "", "Move selected entry up",
+                    cx,
+                    |this, _, cx| this.move_selected_queue(false, cx),));
                 }
                 if index + 1 < self.state.queue.entries.len() {
-                    tools = tools.child(icon_button(
-                        ("queue-down", panel_id),
-                        "↓",
-                        "Move selected entry down",
-                        cx,
-                        |this, _, cx| this.move_selected_queue(true, cx),
-                    ));
+                    tools = tools.child(icon_button(("queue-down", panel_id), "", "Move selected entry down",
+                    cx,
+                    |this, _, cx| this.move_selected_queue(true, cx),));
                 }
             }
         }
@@ -953,8 +931,9 @@ impl GuiApp {
                                             .text_xs()
                                             .whitespace_nowrap()
                                             .text_color(rgb(if playing { ACCENT } else { MUTED }))
+                                            .when(playing, |view| view.font_family(super::fonts::SYMBOLS_FAMILY))
                                             .child(if playing {
-                                                "▶".to_owned()
+                                                "󰐊".to_owned()
                                             } else {
                                                 (index + 1).to_string()
                                             }),
@@ -1095,28 +1074,20 @@ impl GuiApp {
                         self.panel_field(Field::PlaylistName, "Playlist name")
                             .flex_1(),
                     )
-                    .child(icon_button(
-                        ("playlist-create", panel_id),
-                        "+",
-                        "Create playlist",
-                        cx,
-                        |this, _, cx| {
-                            let name = this.value(Field::PlaylistName, cx).trim().to_owned();
-                            if name.is_empty() {
-                                this.panel_error("Enter a playlist name first.", cx);
-                            } else {
-                                this.send(Command::CreatePlaylist { name }, cx);
-                            }
-                        },
-                    )),
+                    .child(icon_button(("playlist-create", panel_id), "", "Create playlist",
+                    cx,
+                    |this, _, cx| {
+                        let name = this.value(Field::PlaylistName, cx).trim().to_owned();
+                        if name.is_empty() {
+                            this.panel_error("Enter a playlist name first.", cx);
+                        } else {
+                            this.send(Command::CreatePlaylist { name }, cx);
+                        }
+                    },)),
             )
-            .child(panel_toolbar().child(icon_button(
-                ("playlist-import", panel_id),
-                "↓",
-                "Import M3U",
-                cx,
-                |this, _, cx| this.choose_playlist_import(cx),
-            )))
+            .child(panel_toolbar().child(icon_button(("playlist-import", panel_id), "", "Import M3U",
+            cx,
+            |this, _, cx| this.choose_playlist_import(cx),)))
             .child(list_viewport(
                 uniform_list(
                     ("playlist-catalog", panel_id),
@@ -1179,115 +1150,79 @@ impl GuiApp {
                 .child(caption(format!("{} · {entry_count} tracks", selected_name)).truncate())
                 .child(
                     panel_toolbar()
-                        .child(icon_button(
-                            ("playlist-add", panel_id),
-                            "+",
-                            "Add selected tracks",
-                            cx,
-                            move |this, _, cx| {
+                        .child(icon_button(("playlist-add", panel_id), "", "Add selected tracks",
+                        cx,
+                        move |this, _, cx| {
+                            this.send(
+                                Command::AddPlaylist {
+                                    playlist_id: id,
+                                    track_ids: this.panel_selected_tracks(),
+                                },
+                                cx,
+                            )
+                        },))
+                        .child(icon_button(("playlist-play", panel_id), "󰐊", "Play playlist",
+                        cx,
+                        move |this, _, cx| {
+                            this.send(Command::PlayPlaylist { playlist_id: id }, cx)
+                        },))
+                        .child(icon_button(("playlist-export", panel_id), "", "Export playlist",
+                        cx,
+                        move |this, _, cx| this.choose_playlist_export(id, cx),))
+                        .child(icon_button(("playlist-rename", panel_id), "", "Rename playlist",
+                        cx,
+                        move |this, _, cx| {
+                            let name = this.value(Field::PlaylistName, cx).trim().to_owned();
+                            if name.is_empty() {
+                                this.panel_error("Enter a playlist name first.", cx);
+                            } else {
                                 this.send(
-                                    Command::AddPlaylist {
+                                    Command::RenamePlaylist {
                                         playlist_id: id,
-                                        track_ids: this.panel_selected_tracks(),
+                                        name,
                                     },
                                     cx,
-                                )
-                            },
-                        ))
-                        .child(icon_button(
-                            ("playlist-play", panel_id),
-                            "▶",
-                            "Play playlist",
-                            cx,
-                            move |this, _, cx| {
-                                this.send(Command::PlayPlaylist { playlist_id: id }, cx)
-                            },
-                        ))
-                        .child(icon_button(
-                            ("playlist-export", panel_id),
-                            "↑",
-                            "Export playlist",
-                            cx,
-                            move |this, _, cx| this.choose_playlist_export(id, cx),
-                        ))
-                        .child(icon_button(
-                            ("playlist-rename", panel_id),
-                            "✎",
-                            "Rename playlist",
-                            cx,
-                            move |this, _, cx| {
-                                let name = this.value(Field::PlaylistName, cx).trim().to_owned();
-                                if name.is_empty() {
-                                    this.panel_error("Enter a playlist name first.", cx);
-                                } else {
-                                    this.send(
-                                        Command::RenamePlaylist {
-                                            playlist_id: id,
-                                            name,
-                                        },
-                                        cx,
-                                    );
-                                }
-                            },
-                        ))
-                        .child(icon_button(
-                            ("playlist-delete", panel_id),
-                            "×",
-                            "Delete playlist",
-                            cx,
-                            move |this, _, cx| {
-                                this.selected_playlist = None;
-                                this.selected_playlist_name.clear();
-                                this.selected_entry = None;
-                                this.send(Command::DeletePlaylist { playlist_id: id }, cx);
-                            },
-                        ))
+                                );
+                            }
+                        },))
+                        .child(icon_button(("playlist-delete", panel_id), "", "Delete playlist",
+                        cx,
+                        move |this, _, cx| {
+                            this.selected_playlist = None;
+                            this.selected_playlist_name.clear();
+                            this.selected_entry = None;
+                            this.send(Command::DeletePlaylist { playlist_id: id }, cx);
+                        },))
                         .child(caption("Playlist").text_xs().text_color(rgb(MUTED)))
                         .child(div().w(px(1.)).h(px(20.)).bg(rgb(BORDER)))
                         .when(self.selected_entry.is_some(), |bar| {
-                            bar.child(icon_button(
-                                ("entry-play", panel_id),
-                                "▶",
-                                "Play selected track",
-                                cx,
-                                move |this, _, cx| {
-                                    let track_id = this
-                                        .playlist_entries
-                                        .rows
-                                        .iter()
-                                        .find(|entry| Some(entry.id) == this.selected_entry)
-                                        .map(|entry| entry.track_id);
-                                    if let Some(track_id) = track_id {
-                                        this.send(Command::Play { track_id }, cx);
-                                    }
-                                },
-                            ))
-                            .child(icon_button(
-                                ("entry-remove", panel_id),
-                                "×",
-                                "Remove selected entry",
-                                cx,
-                                move |this, _, cx| {
-                                    if let Some(entry_id) = this.selected_entry.take() {
-                                        this.send(Command::RemovePlaylistEntry { entry_id }, cx);
-                                        this.clear_metadata_selection(cx);
-                                    }
-                                },
-                            ))
-                            .child(icon_button(
-                                ("entry-up", panel_id),
-                                "↑",
-                                "Move entry up",
-                                cx,
-                                move |this, _, cx| this.move_selected_playlist_entry(false, cx),
-                            ))
-                            .child(icon_button(
-                                ("entry-down", panel_id),
-                                "↓",
-                                "Move entry down",
-                                cx,
-                                move |this, _, cx| this.move_selected_playlist_entry(true, cx),
-                            ))
+                            bar.child(icon_button(("entry-play", panel_id), "󰐊", "Play selected track",
+                            cx,
+                            move |this, _, cx| {
+                                let track_id = this
+                                    .playlist_entries
+                                    .rows
+                                    .iter()
+                                    .find(|entry| Some(entry.id) == this.selected_entry)
+                                    .map(|entry| entry.track_id);
+                                if let Some(track_id) = track_id {
+                                    this.send(Command::Play { track_id }, cx);
+                                }
+                            },))
+                            .child(icon_button(("entry-remove", panel_id), "", "Remove selected entry",
+                            cx,
+                            move |this, _, cx| {
+                                if let Some(entry_id) = this.selected_entry.take() {
+                                    this.send(Command::RemovePlaylistEntry { entry_id }, cx);
+                                    this.clear_metadata_selection(cx);
+                                }
+                            },))
+                            .child(icon_button(("entry-up", panel_id), "", "Move entry up",
+                            cx,
+                            move |this, _, cx| this.move_selected_playlist_entry(false, cx),))
+                            .child(icon_button(("entry-down", panel_id), "", "Move entry down",
+                            cx,
+                            move |this, _, cx| this.move_selected_playlist_entry(true, cx),))
                         }),
                 )
                 .child(list_viewport(

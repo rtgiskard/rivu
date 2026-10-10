@@ -12,8 +12,6 @@ use std::{
     fs,
     io::{ErrorKind, Write},
     path::{Path, PathBuf},
-    process::Command,
-    sync::LazyLock,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,31 +69,6 @@ pub enum LogLevel {
     #[default]
     Warning,
     Error,
-}
-
-fn is_nerd_font_family(family: &str) -> bool {
-    let family = family.trim().to_ascii_lowercase();
-    family.contains("nerd font")
-        || family.contains("nerdfont")
-        || family.ends_with(" nf")
-        || family.ends_with(" nfm")
-        || family.ends_with(" nfp")
-}
-
-pub(crate) fn nerd_fonts_available() -> bool {
-    static AVAILABLE: LazyLock<bool> = LazyLock::new(|| {
-        Command::new("fc-list")
-            .args(["--format", "%{family}\\n"])
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .is_some_and(|output| {
-                String::from_utf8_lossy(&output.stdout)
-                    .split(['\n', ','])
-                    .any(is_nerd_font_family)
-            })
-    });
-    *AVAILABLE
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,7 +145,7 @@ pub struct Config {
     pub queue_limit: u32,
     /// Default number of rows fetched by GUI and TUI paginated views.
     pub page_size: u32,
-    /// UI font family; empty selects the platform UI font.
+    /// UI font family; defaults to sans-serif, including empty saved values.
     pub ui_font: String,
     pub ui_scale: f32,
     /// Stop audio visualizations and their analysis without changing playback.
@@ -237,7 +210,6 @@ pub struct Config {
     /// Enable reusable caches owned by visualization controls.
     pub visualization_cache: bool,
     pub media_read_buffer_mb: u32,
-    pub nerd_symbols: bool,
     pub ffmpeg_enabled: bool,
     pub pipewire_auto_mix: bool,
 }
@@ -259,7 +231,7 @@ impl Default for Config {
             log_retention_weeks: 4,
             queue_limit: 4096,
             page_size: DEFAULT_PAGE_SIZE,
-            ui_font: String::new(),
+            ui_font: "sans-serif".to_owned(),
             ui_scale: 1.0,
             still_mode: false,
             analysis_fps: 20,
@@ -312,7 +284,6 @@ impl Default for Config {
             waveform_peak_gamma: 1.1,
             visualization_cache: true,
             media_read_buffer_mb: 2,
-            nerd_symbols: nerd_fonts_available(),
             ffmpeg_enabled: false,
             pipewire_auto_mix: true,
         }
@@ -346,8 +317,11 @@ impl Config {
                     .with_context(|| format!("cannot read configuration {}", path.display()));
             }
         };
-        let config: Self = toml::from_str(&contents)
+        let mut config: Self = toml::from_str(&contents)
             .with_context(|| format!("cannot parse TOML configuration {}", path.display()))?;
+        if config.ui_font.is_empty() {
+            config.ui_font = "sans-serif".to_owned();
+        }
         config
             .validate()
             .with_context(|| format!("invalid configuration {}", path.display()))?;
@@ -649,7 +623,6 @@ mod tests {
             spectrum_db_range: Some(80.0),
             audio_visualizer_db_range: Some(60.0),
             media_read_buffer_mb: 8,
-            nerd_symbols: true,
             ffmpeg_enabled: true,
             pipewire_auto_mix: false,
             spectrum_style: SpectrumStyle::Solid,
@@ -842,34 +815,6 @@ mod tests {
                 Config::load(&path).is_err(),
                 "accepted invalid config: {contents}"
             );
-        }
-    }
-
-    #[test]
-    fn nerd_font_detection_and_saved_preferences() {
-        for family in [
-            "Symbols Nerd Font",
-            "Symbols Nerd Font Mono",
-            "FiraCode Nerd Font",
-            "JetBrainsMono NerdFont",
-            "Hack NF",
-            "Iosevka NFM",
-            "CaskaydiaCove NFP",
-        ] {
-            assert!(is_nerd_font_family(family), "missed {family}");
-        }
-        for family in ["DejaVu Sans", "monospace", "Noto Sans", "Nerdy Sans"] {
-            assert!(!is_nerd_font_family(family), "misidentified {family}");
-        }
-        assert_eq!(Config::default().nerd_symbols, nerd_fonts_available());
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("config.toml");
-        for enabled in [false, true] {
-            fs::write(&path, format!("nerd_symbols = {enabled}\n")).unwrap();
-            let config = Config::load(&path).unwrap();
-            assert_eq!(config.nerd_symbols, enabled);
-            config.save(&path).unwrap();
-            assert_eq!(Config::load(&path).unwrap().nerd_symbols, enabled);
         }
     }
 
