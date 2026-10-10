@@ -147,19 +147,82 @@ See link:../readme.adoc[README] for application lifecycle and host behavior.
 
 == Layout
 
-The desktop layout is persisted as `layout.json` in the data directory,
-including panel layout, split ratios, tab order, tab-bar visibility, and the
-layout lock. While unlocked, panels can be added, removed, moved, resized,
-and reordered. Right-click a panel to toggle its tab bar; right-click the
-bottom-right layout button to toggle the lock, or left-click it to add a
-panel. Playback and tab selection remain available while locked.
+The desktop stores named layouts and the current selection in `layout.json` in
+the data directory. Each layout has its own panel tree, relative sizes, tab
+order and selection, tab-bar visibility, instance options, and edit lock.
+
+Open `Menu > Layouts` to switch layouts, duplicate the current layout under a new
+name, rename it, or delete another layout after confirmation. Names must be
+nonempty and unique after trimming surrounding whitespace. To delete the current
+layout, switch to another one first; the collection always retains a layout.
+
+Switching or duplicating rebuilds the interface inside the same window. Playback,
+queue, global configuration, and window placement are unchanged. Searches,
+filters, selections, scroll positions, and visualization history reset. Finish
+or discard settings before changing layouts. Renaming and deleting an inactive
+layout do not rebuild the interface. Press `Escape` to close the layout manager,
+including after renaming the current layout.
+
+While unlocked, panels can be added, removed, moved, resized, and reordered.
+Right-click a panel to toggle its tab bar; right-click the bottom-right layout
+button to toggle the lock, or left-click it to add a panel. Playback, tab
+selection, and layout management remain available while locked.
+
+Rows and columns contain two or more ordered regions. Docking at an edge splits
+the target region; matching directions become siblings rather than nested
+splits. Dragging a separator resizes only its two neighboring regions. Removing
+panels collapses empty and single-region containers and merges same-direction
+splits while preserving relative proportions.
 
 If `layout.json` cannot be read or validated, Rivu reports the load error and
-opens the default layout. Layout save failures are reported; changes already
-made in the window are not undone.
-
+opens the default collection. Panel edits remain visible when saving fails.
+Failed layout-management operations leave the current selection and saved
+collection unchanged; a failed switch does not rebuild the interface.
 Errors and scan progress appear in the footer. Click a message or its copy icon
 to copy the complete text.
+
+
+=== Layout file
+
+The file uses one format, without runtime IDs or version fields. `active` names
+an entry in the nonempty `layouts` object. Each entry requires `root`; `null`
+means an empty layout. `locked` defaults to `false`.
+
+[source,json]
+----
+{
+  "active": "Work",
+  "layouts": {
+    "Work": {
+      "root": {
+        "type": "split",
+        "axis": "horizontal",
+        "children": [
+          {"weight": 2, "node": {"type": "tabs", "panels": [{"kind": "library"}]}},
+          {"node": {"type": "tabs", "panels": [{"kind": "queue"}]}},
+          {"node": {"type": "tabs", "panels": [{"kind": "waveform"}]}}
+        ]
+      }
+    }
+  }
+}
+----
+
+`horizontal` orders children left to right; `vertical` orders them top to bottom.
+Each child has a finite positive `weight`, defaulting to `1`; weights divide the
+space remaining after separators and need not sum to one. Weight sums must be
+representable. Splits require at least two children and cannot directly contain
+a split in the same direction.
+
+`tabs` requires a nonempty `panels` array. Its optional `active` is a zero-based
+index, defaulting to `0`. Panel objects require `kind`; `show_tab_bar` defaults to
+`true`. Audio Visualizer objects additionally store `style`, `reference_lines`,
+and `labels` directly in the panel object. These three fields must be supplied
+together or omitted together; omission initializes the instance from global
+defaults when that layout is opened. Once initialized, all three choices are
+saved explicitly. Unknown fields, invalid structures, and out-of-range indices
+are errors.
+
 
 == Visualization dB ranges
 

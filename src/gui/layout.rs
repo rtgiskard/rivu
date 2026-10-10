@@ -1,17 +1,10 @@
-//! Layout docking, independent of the windowing toolkit.
+//! Normalized docking trees and their named desktop collection.
 //!
-//! Node and panel IDs share one monotonically allocated namespace. Every public
-//! transition preserves a normalized tree: tabs are nonempty, each split has
-//! two children, and each active ID belongs to its tab group. The caller chooses
-//! the persistence path (the desktop uses `layout.json`).
-//! Legacy ID layouts without a version gain a docked Playback panel above
-//! their unchanged tree. New layouts preserve deliberate panel removal.
-//! Persistence stores split/tab structure, panel kinds and instance preferences,
-//! plus group-local active indices (zero is omitted). Runtime IDs are rebuilt
-//! in traversal order.
+//! IDs are runtime-only. Persistence borrows the collection, writes one strict
+//! format, and atomically replaces the caller-selected file.
 
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     fs::{self, File, OpenOptions},
     io::{BufReader, BufWriter, Write},
     path::Path,
@@ -21,7 +14,7 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
-use crate::config::AudioVisualizerOptions;
+use crate::config::{AudioVisualizerOptions, AudioVisualizerStyle};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Panel {
@@ -32,6 +25,7 @@ pub struct Panel {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Axis {
     Horizontal,
     Vertical,
@@ -46,14 +40,28 @@ pub enum Edge {
     Center,
 }
 
+impl Edge {
+    fn axis(self) -> Axis {
+        match self {
+            Self::Left | Self::Right => Axis::Horizontal,
+            Self::Top | Self::Bottom => Axis::Vertical,
+            Self::Center => unreachable!("center docking does not split"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Child {
+    pub weight: f32,
+    pub node: Node,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Node {
     Split {
         id: u64,
         axis: Axis,
-        ratio: f32,
-        first: Box<Node>,
-        second: Box<Node>,
+        children: Vec<Child>,
     },
     Tabs {
         id: u64,
@@ -67,52 +75,53 @@ pub struct Layout {
     pub root: Option<Node>,
     pub next_id: u64,
     pub locked: bool,
-    version: u32,
 }
 
-// The reader alone understands legacy IDs. Runtime docking types deliberately
-// have no serde implementation, so persistence cannot accidentally expose IDs.
+#[derive(Debug, PartialEq)]
+pub struct LayoutSet {
+    active: String,
+    layouts: BTreeMap<String, Layout>,
+}
+
+// Runtime types intentionally do not implement serde: IDs can never leak into
+// the file, and saving does not construct an owned copy of any layout.
 mod persistence {
     use super::*;
-    use serde::ser::SerializeSeq;
+    use serde::ser::{SerializeMap, SerializeSeq};
 
     #[derive(Serialize)]
     pub(super) struct View<'a> {
-        root: Option<NodeRef<'a>>,
-        version: u32,
-        #[serde(skip_serializing_if = "is_false")]
-        locked: bool,
+        active: &'a str,
+        layouts: LayoutsRef<'a>,
     }
 
-    impl<'a> From<&'a Layout> for View<'a> {
-        fn from(layout: &'a Layout) -> Self {
+    impl<'a> From<&'a LayoutSet> for View<'a> {
+        fn from(set: &'a LayoutSet) -> Self {
             Self {
-                root: layout.root.as_ref().map(NodeRef),
-                version: layout.version,
-                locked: layout.locked,
+                active: &set.active,
+                layouts: LayoutsRef(&set.layouts),
             }
         }
     }
 
+    struct LayoutsRef<'a>(&'a BTreeMap<String, Layout>);
     struct NodeRef<'a>(&'a Node);
+    struct ChildrenRef<'a>(&'a [Child]);
     struct PanelsRef<'a>(&'a [Panel]);
 
     #[derive(Serialize)]
-    struct PanelView<'a> {
-        kind: &'a str,
-        #[serde(skip_serializing_if = "is_true")]
-        show_tab_bar: bool,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        audio_visualizer: Option<AudioVisualizerOptions>,
+    struct LayoutView<'a> {
+        root: Option<NodeRef<'a>>,
+        #[serde(skip_serializing_if = "is_false")]
+        locked: bool,
     }
 
     #[derive(Serialize)]
+    #[serde(tag = "type", rename_all = "lowercase")]
     enum NodeView<'a> {
         Split {
             axis: Axis,
-            ratio: f32,
-            first: NodeRef<'a>,
-            second: NodeRef<'a>,
+            children: ChildrenRef<'a>,
         },
         Tabs {
             panels: PanelsRef<'a>,
@@ -121,32 +130,67 @@ mod persistence {
         },
     }
 
-    fn is_zero(index: &usize) -> bool {
-        *index == 0
+    #[derive(Serialize)]
+    struct ChildView<'a> {
+        #[serde(skip_serializing_if = "is_one")]
+        weight: f32,
+        node: NodeRef<'a>,
     }
 
+    #[derive(Serialize)]
+    struct PanelView<'a> {
+        kind: &'a str,
+        #[serde(skip_serializing_if = "is_true")]
+        show_tab_bar: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        style: Option<AudioVisualizerStyle>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reference_lines: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        labels: Option<bool>,
+    }
+
+    fn is_false(value: &bool) -> bool {
+        !*value
+    }
     fn is_true(value: &bool) -> bool {
         *value
     }
-
-    fn default_tab_bar() -> bool {
+    fn is_zero(value: &usize) -> bool {
+        *value == 0
+    }
+    fn is_one(value: &f32) -> bool {
+        *value == 1.0
+    }
+    fn default_true() -> bool {
         true
+    }
+    fn default_weight() -> f32 {
+        1.0
+    }
+
+    impl Serialize for LayoutsRef<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let mut map = serializer.serialize_map(Some(self.0.len()))?;
+            for (name, layout) in self.0 {
+                map.serialize_entry(
+                    name,
+                    &LayoutView {
+                        root: layout.root.as_ref().map(NodeRef),
+                        locked: layout.locked,
+                    },
+                )?;
+            }
+            map.end()
+        }
     }
 
     impl Serialize for NodeRef<'_> {
         fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
             let view = match self.0 {
-                Node::Split {
-                    axis,
-                    ratio,
-                    first,
-                    second,
-                    ..
-                } => NodeView::Split {
+                Node::Split { axis, children, .. } => NodeView::Split {
                     axis: *axis,
-                    ratio: *ratio,
-                    first: NodeRef(first),
-                    second: NodeRef(second),
+                    children: ChildrenRef(children),
                 },
                 Node::Tabs { panels, active, .. } => NodeView::Tabs {
                     panels: PanelsRef(panels),
@@ -162,6 +206,19 @@ mod persistence {
         }
     }
 
+    impl Serialize for ChildrenRef<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
+            for child in self.0 {
+                sequence.serialize_element(&ChildView {
+                    weight: child.weight,
+                    node: NodeRef(&child.node),
+                })?;
+            }
+            sequence.end()
+        }
+    }
+
     impl Serialize for PanelsRef<'_> {
         fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
             let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
@@ -169,7 +226,11 @@ mod persistence {
                 sequence.serialize_element(&PanelView {
                     kind: &panel.kind,
                     show_tab_bar: panel.show_tab_bar,
-                    audio_visualizer: panel.audio_visualizer,
+                    style: panel.audio_visualizer.map(|options| options.style),
+                    reference_lines: panel
+                        .audio_visualizer
+                        .map(|options| options.reference_lines),
+                    labels: panel.audio_visualizer.map(|options| options.labels),
                 })?;
             }
             sequence.end()
@@ -177,49 +238,95 @@ mod persistence {
     }
 
     #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
     pub(super) struct Input {
+        active: String,
+        #[serde(deserialize_with = "read_layouts")]
+        layouts: BTreeMap<String, LayoutInput>,
+    }
+
+    // A map visitor rejects duplicate keys instead of silently losing a layout.
+    fn read_layouts<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<BTreeMap<String, LayoutInput>, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = BTreeMap<String, LayoutInput>;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("uniquely named layouts")
+            }
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                mut map: M,
+            ) -> Result<Self::Value, M::Error> {
+                let mut layouts = BTreeMap::new();
+                while let Some((name, layout)) = map.next_entry::<String, LayoutInput>()? {
+                    if layouts.insert(name, layout).is_some() {
+                        return Err(serde::de::Error::custom("duplicate layout name"));
+                    }
+                }
+                Ok(layouts)
+            }
+        }
+        deserializer.deserialize_map(Visitor)
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct LayoutInput {
+        // deserialize_with makes a missing root an error, while allowing null.
+        #[serde(deserialize_with = "read_root")]
         root: Option<NodeInput>,
-        next_id: Option<u64>,
-        version: Option<u32>,
         #[serde(default)]
         locked: bool,
     }
 
+    fn read_root<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<NodeInput>, D::Error> {
+        Option::deserialize(deserializer)
+    }
+
     #[derive(Deserialize)]
+    #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
     enum NodeInput {
         Split {
-            id: Option<u64>,
             axis: Axis,
-            ratio: f32,
-            first: Box<NodeInput>,
-            second: Box<NodeInput>,
+            children: Vec<ChildInput>,
         },
         Tabs {
-            id: Option<u64>,
             panels: Vec<PanelInput>,
-            #[serde(default, deserialize_with = "read_active")]
-            active: Option<u64>,
+            #[serde(default)]
+            active: usize,
         },
     }
 
     #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ChildInput {
+        #[serde(default = "default_weight")]
+        weight: f32,
+        node: NodeInput,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct PanelInput {
-        id: Option<u64>,
         kind: String,
-        #[serde(default = "default_tab_bar")]
+        #[serde(default = "default_true")]
         show_tab_bar: bool,
-        #[serde(default)]
-        audio_visualizer: Option<AudioVisualizerOptions>,
+        #[serde(default, deserialize_with = "present")]
+        style: Option<AudioVisualizerStyle>,
+        #[serde(default, deserialize_with = "present")]
+        reference_lines: Option<bool>,
+        #[serde(default, deserialize_with = "present")]
+        labels: Option<bool>,
     }
 
-    fn is_false(value: &bool) -> bool {
-        !*value
-    }
-
-    fn read_active<'de, D: serde::Deserializer<'de>>(
+    fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
         deserializer: D,
-    ) -> Result<Option<u64>, D::Error> {
-        u64::deserialize(deserializer).map(Some)
+    ) -> Result<Option<T>, D::Error> {
+        T::deserialize(deserializer).map(Some)
     }
 
     fn allocate(next_id: &mut u64) -> Result<u64> {
@@ -230,122 +337,208 @@ mod persistence {
         Ok(id)
     }
 
-    fn read_id(id: Option<u64>, next_id: &mut u64, legacy: bool) -> Result<u64> {
-        if legacy {
-            id.ok_or_else(|| anyhow!("legacy layout is missing an ID"))
-        } else if id.is_some() {
-            Err(anyhow!("layout IDs require the legacy next_id field"))
-        } else {
-            allocate(next_id)
-        }
-    }
-
     impl NodeInput {
-        fn into_node(self, next_id: &mut u64, legacy: bool) -> Result<Node> {
+        fn into_node(self, next_id: &mut u64) -> Result<Node> {
+            let id = allocate(next_id)?;
             Ok(match self {
-                Self::Split {
+                Self::Split { axis, children } => Node::Split {
                     id,
                     axis,
-                    ratio,
-                    first,
-                    second,
-                } => Node::Split {
-                    id: read_id(id, next_id, legacy)?,
-                    axis,
-                    ratio,
-                    first: Box::new(first.into_node(next_id, legacy)?),
-                    second: Box::new(second.into_node(next_id, legacy)?),
-                },
-                Self::Tabs { id, panels, active } => {
-                    let id = read_id(id, next_id, legacy)?;
-                    let panels = panels
+                    children: children
                         .into_iter()
-                        .map(|panel| {
-                            Ok(Panel {
-                                id: read_id(panel.id, next_id, legacy)?,
-                                kind: panel.kind,
-                                show_tab_bar: panel.show_tab_bar,
-                                audio_visualizer: panel.audio_visualizer,
+                        .map(|child| {
+                            Ok(Child {
+                                weight: child.weight,
+                                node: child.node.into_node(next_id)?,
                             })
                         })
-                        .collect::<Result<Vec<_>>>()?;
-                    let active = if legacy {
-                        active
-                            .or_else(|| panels.first().map(|panel| panel.id))
-                            .ok_or_else(|| anyhow!("tab group is empty"))?
-                    } else {
-                        let index = active.unwrap_or(0);
-                        usize::try_from(index)
-                            .ok()
-                            .and_then(|index| panels.get(index))
-                            .ok_or_else(|| anyhow!("tab group has invalid active index {index}"))?
-                            .id
-                    };
+                        .collect::<Result<_>>()?,
+                },
+                Self::Tabs { panels, active } => {
+                    let panels = panels.into_iter().map(|panel| {
+                        let audio_visualizer = match (panel.style, panel.reference_lines, panel.labels) {
+                            (None, None, None) => None,
+                            (Some(style), Some(reference_lines), Some(labels)) if panel.kind == "audio_visualizer" =>
+                                Some(AudioVisualizerOptions { style, reference_lines, labels }),
+                            _ => return Err(anyhow!("visualizer options must be complete and belong to an audio_visualizer")),
+                        };
+                        Ok(Panel { id: allocate(next_id)?, kind: panel.kind,
+                            show_tab_bar: panel.show_tab_bar, audio_visualizer })
+                    }).collect::<Result<Vec<_>>>()?;
+                    let active = panels
+                        .get(active)
+                        .ok_or_else(|| anyhow!("invalid active tab index {active}"))?
+                        .id;
                     Node::Tabs { id, panels, active }
                 }
             })
         }
     }
 
-    // Legacy selections are IDs, never indices. Validate those relationships
-    // before discarding IDs, then renumber the migrated tree in preorder.
-    fn renumber(node: &mut Node, next_id: &mut u64) -> Result<()> {
-        match node {
-            Node::Split {
-                id, first, second, ..
-            } => {
-                *id = allocate(next_id)?;
-                renumber(first, next_id)?;
-                renumber(second, next_id)?;
-            }
-            Node::Tabs { id, panels, active } => {
-                *id = allocate(next_id)?;
-                let old_active = *active;
-                for panel in panels {
-                    let selected = panel.id == old_active;
-                    panel.id = allocate(next_id)?;
-                    if selected {
-                        *active = panel.id;
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
     impl Input {
-        pub(super) fn into_layout(self) -> Result<Layout> {
-            let legacy = self.next_id.is_some();
-            let version = self.version.unwrap_or(if legacy { 0 } else { 1 });
-            let mut next_id = 1;
-            let root = self
-                .root
-                .map(|root| root.into_node(&mut next_id, legacy))
-                .transpose()?;
-            let mut layout = Layout {
-                root,
-                next_id: self.next_id.unwrap_or(next_id),
-                version,
-                locked: self.locked,
-            };
-            layout.validate().map_err(|error| anyhow!(error))?;
-            if legacy {
-                layout.next_id = 1;
-                if let Some(root) = &mut layout.root {
-                    renumber(root, &mut layout.next_id)?;
+        pub(super) fn into_set(self) -> Result<LayoutSet> {
+            let mut layouts = BTreeMap::new();
+            for (name, input) in self.layouts {
+                let name = checked_name(&name)?.to_owned();
+                let mut next_id = 1;
+                let root = input
+                    .root
+                    .map(|root| root.into_node(&mut next_id))
+                    .transpose()?;
+                let layout = Layout {
+                    root,
+                    next_id,
+                    locked: input.locked,
+                };
+                layout.validate().map_err(|error| anyhow!(error))?;
+                if layouts.insert(name, layout).is_some() {
+                    return Err(anyhow!("duplicate trimmed layout name"));
                 }
             }
-            layout.migrate()?;
-            // The Playback migration may wrap the root after allocating IDs.
-            if version == 0 {
-                layout.next_id = 1;
-                if let Some(root) = &mut layout.root {
-                    renumber(root, &mut layout.next_id)?;
-                }
-            }
-            Ok(layout)
+            let active = checked_name(&self.active)?.to_owned();
+            let set = LayoutSet { active, layouts };
+            set.validate()?;
+            Ok(set)
         }
     }
+}
+
+fn checked_name(name: &str) -> Result<&str> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(anyhow!("layout name must not be empty"));
+    }
+    Ok(name)
+}
+
+fn weight_sum(weights: impl IntoIterator<Item = f32>) -> Result<f64> {
+    let mut sum = 0.0_f64;
+    for weight in weights {
+        if !weight.is_finite() || weight <= 0.0 {
+            return Err(anyhow!("split weights must be finite and positive"));
+        }
+        sum += f64::from(weight);
+    }
+    if sum <= 0.0 || sum > f64::from(f32::MAX) {
+        return Err(anyhow!("split weight sum is not representable"));
+    }
+    Ok(sum)
+}
+
+fn scaled_weight(outer: f32, inner: f32, sum: f64) -> Result<f32> {
+    let weight = (f64::from(outer) * f64::from(inner) / sum) as f32;
+    if !weight.is_finite() || weight <= 0.0 {
+        return Err(anyhow!("normalized weight is not representable"));
+    }
+    Ok(weight)
+}
+
+// Raw edits keep every original container until preflight passes. This borrowed
+// projection checks the exact post-collapse/flatten weights without allocating
+// a second tree, so even floating-point limits can roll back losslessly.
+fn effective_node(node: &Node) -> Option<&Node> {
+    match node {
+        Node::Tabs { panels, .. } => (!panels.is_empty()).then_some(node),
+        Node::Split { children, .. } => {
+            let mut survivor = None;
+            for child in children {
+                if let Some(effective) = effective_node(&child.node) {
+                    if survivor.is_some() {
+                        return Some(node);
+                    }
+                    survivor = Some(effective);
+                }
+            }
+            survivor
+        }
+    }
+}
+
+fn visit_normalized_weights(node: &Node, visitor: &mut dyn FnMut(f32) -> Result<()>) -> Result<()> {
+    let Node::Split { axis, children, .. } = node else {
+        unreachable!("effective split");
+    };
+    for child in children {
+        let Some(effective) = effective_node(&child.node) else {
+            continue;
+        };
+        if matches!(effective, Node::Split { axis: child_axis, .. } if child_axis == axis) {
+            let sum = normalized_weight_sum(effective)?;
+            visit_normalized_weights(effective, &mut |inner| {
+                visitor(scaled_weight(child.weight, inner, sum)?)
+            })?;
+        } else {
+            visitor(child.weight)?;
+        }
+    }
+    Ok(())
+}
+
+fn normalized_weight_sum(node: &Node) -> Result<f64> {
+    let mut sum = 0.0;
+    visit_normalized_weights(node, &mut |weight| {
+        if !weight.is_finite() || weight <= 0.0 {
+            return Err(anyhow!("split weights must be finite and positive"));
+        }
+        sum += f64::from(weight);
+        Ok(())
+    })?;
+    if sum <= 0.0 || sum > f64::from(f32::MAX) {
+        return Err(anyhow!("normalized weight sum is not representable"));
+    }
+    Ok(sum)
+}
+
+fn check_normalization(node: &Node) -> Result<()> {
+    // Normalized subtrees need one visit. Only same-axis flattening needs to
+    // inspect projected weights again to preserve the exact f32 rounding.
+    fn summarize(node: &Node) -> Result<Option<(&Node, f64)>> {
+        let Node::Split { axis, children, .. } = node else {
+            return Ok(match node {
+                Node::Tabs { panels, .. } if panels.is_empty() => None,
+                _ => Some((node, 0.0)),
+            });
+        };
+        let mut first: Option<((&Node, f64), f32)> = None;
+        let mut multiple = false;
+        let mut sum = 0.0;
+        let mut add = |effective: &Node, inner_sum: f64, outer: f32| -> Result<()> {
+            if !outer.is_finite() || outer <= 0.0 {
+                return Err(anyhow!("split weights must be finite and positive"));
+            }
+            if matches!(effective, Node::Split { axis: child_axis, .. } if child_axis == axis) {
+                visit_normalized_weights(effective, &mut |inner| {
+                    sum += f64::from(scaled_weight(outer, inner, inner_sum)?);
+                    Ok(())
+                })?;
+            } else {
+                sum += f64::from(outer);
+            }
+            Ok(())
+        };
+        for child in children {
+            let Some(summary) = summarize(&child.node)? else {
+                continue;
+            };
+            if let Some((previous, weight)) = first {
+                if !multiple {
+                    add(previous.0, previous.1, weight)?;
+                    multiple = true;
+                }
+                add(summary.0, summary.1, child.weight)?;
+            } else {
+                first = Some((summary, child.weight));
+            }
+        }
+        if !multiple {
+            return Ok(first.map(|(summary, _)| summary));
+        }
+        if sum <= 0.0 || sum > f64::from(f32::MAX) {
+            return Err(anyhow!("normalized weight sum is not representable"));
+        }
+        Ok(Some((node, sum)))
+    }
+    summarize(node).map(|_| ())
 }
 
 impl Node {
@@ -360,7 +553,9 @@ impl Node {
             return Some(self);
         }
         match self {
-            Self::Split { first, second, .. } => first.find(target).or_else(|| second.find(target)),
+            Self::Split { children, .. } => {
+                children.iter().find_map(|child| child.node.find(target))
+            }
             Self::Tabs { .. } => None,
         }
     }
@@ -370,9 +565,9 @@ impl Node {
             return Some(self);
         }
         match self {
-            Self::Split { first, second, .. } => {
-                first.find_mut(target).or_else(|| second.find_mut(target))
-            }
+            Self::Split { children, .. } => children
+                .iter_mut()
+                .find_map(|child| child.node.find_mut(target)),
             Self::Tabs { .. } => None,
         }
     }
@@ -383,110 +578,132 @@ impl Node {
                 .iter()
                 .any(|panel| panel.id == panel_id)
                 .then_some(self),
-            Self::Split { first, second, .. } => first
-                .panel_group(panel_id)
-                .or_else(|| second.panel_group(panel_id)),
+            Self::Split { children, .. } => children
+                .iter()
+                .find_map(|child| child.node.panel_group(panel_id)),
         }
     }
 
     fn first_tabs(&self) -> u64 {
         match self {
             Self::Tabs { id, .. } => *id,
-            Self::Split { first, .. } => first.first_tabs(),
+            Self::Split { children, .. } => children[0].node.first_tabs(),
         }
     }
 
     fn collect_panels<'a>(&'a self, output: &mut Vec<&'a Panel>, active_only: bool) {
         match self {
-            Self::Tabs { panels, active, .. } => {
-                output.extend(
-                    panels
-                        .iter()
-                        .filter(|panel| !active_only || panel.id == *active),
-                );
-            }
-            Self::Split { first, second, .. } => {
-                first.collect_panels(output, active_only);
-                second.collect_panels(output, active_only);
-            }
-        }
-    }
-
-    // Consuming the node lets removal collapse splits without cloning panels.
-    // Surviving split boxes are reused rather than rebuilding the tree.
-    fn extract(self, panel_id: u64, removed: &mut Option<Panel>) -> Option<Self> {
-        if removed.is_some() {
-            return Some(self);
-        }
-        match self {
-            Self::Tabs {
-                id,
-                mut panels,
-                mut active,
-            } => {
-                if let Some(index) = panels.iter().position(|panel| panel.id == panel_id) {
-                    *removed = Some(panels.remove(index));
-                    if panels.is_empty() {
-                        return None;
-                    }
-                    if active == panel_id {
-                        active = panels[index.min(panels.len() - 1)].id;
-                    }
+            Self::Tabs { panels, active, .. } => output.extend(
+                panels
+                    .iter()
+                    .filter(|panel| !active_only || panel.id == *active),
+            ),
+            Self::Split { children, .. } => {
+                for child in children {
+                    child.node.collect_panels(output, active_only);
                 }
-                Some(Self::Tabs { id, panels, active })
-            }
-            Self::Split {
-                id,
-                axis,
-                ratio,
-                mut first,
-                mut second,
-            } => {
-                let Some(left) = (*first).extract(panel_id, removed) else {
-                    return Some(*second);
-                };
-                *first = left;
-                let Some(right) = (*second).extract(panel_id, removed) else {
-                    return Some(*first);
-                };
-                *second = right;
-                Some(Self::Split {
-                    id,
-                    axis,
-                    ratio,
-                    first,
-                    second,
-                })
             }
         }
     }
 
-    fn map_node<F: FnOnce(Self) -> Self>(self, target: u64, update: &mut Option<F>) -> Self {
+    fn map_node<F: FnOnce(Self) -> Self>(mut self, target: u64, update: &mut Option<F>) -> Self {
         if update.is_none() {
             return self;
         }
         if self.id() == target {
             return update.take().expect("matched update")(self);
         }
+        if let Self::Split { children, .. } = &mut self {
+            // Ownership traversal reuses the existing child allocation.
+            for child in children {
+                let placeholder = Self::Tabs {
+                    id: 0,
+                    panels: Vec::new(),
+                    active: 0,
+                };
+                child.node =
+                    std::mem::replace(&mut child.node, placeholder).map_node(target, update);
+                if update.is_none() {
+                    break;
+                }
+            }
+        }
+        self
+    }
+
+    fn normalize(self) -> Option<Self> {
         match self {
+            Self::Tabs { ref panels, .. } if panels.is_empty() => None,
+            Self::Tabs { .. } => Some(self),
             Self::Split {
                 id,
                 axis,
-                ratio,
-                mut first,
-                mut second,
+                mut children,
             } => {
-                *first = (*first).map_node(target, update);
-                *second = (*second).map_node(target, update);
-                Self::Split {
+                children.retain_mut(|child| {
+                    let placeholder = Self::Tabs {
+                        id: 0,
+                        panels: Vec::new(),
+                        active: 0,
+                    };
+                    let node = std::mem::replace(&mut child.node, placeholder);
+                    if let Some(node) = node.normalize() {
+                        child.node = node;
+                        true
+                    } else {
+                        false
+                    }
+                });
+                if children.is_empty() {
+                    return None;
+                }
+                if children.len() == 1 {
+                    return Some(children.pop().expect("one child").node);
+                }
+                let flattened_len = children
+                    .iter()
+                    .map(|child| match &child.node {
+                        Self::Split {
+                            axis: child_axis,
+                            children,
+                            ..
+                        } if *child_axis == axis => children.len(),
+                        _ => 1,
+                    })
+                    .sum();
+                if flattened_len == children.len() {
+                    return Some(Self::Split { id, axis, children });
+                }
+                let mut flattened = Vec::with_capacity(flattened_len);
+                for child in children {
+                    match child.node {
+                        Self::Split {
+                            axis: child_axis,
+                            children: inner,
+                            ..
+                        } if child_axis == axis => {
+                            let sum = weight_sum(inner.iter().map(|child| child.weight))
+                                .expect("preflight weights");
+                            for inner in inner {
+                                flattened.push(Child {
+                                    weight: scaled_weight(child.weight, inner.weight, sum)
+                                        .expect("preflight scaling"),
+                                    node: inner.node,
+                                });
+                            }
+                        }
+                        node => flattened.push(Child {
+                            weight: child.weight,
+                            node,
+                        }),
+                    }
+                }
+                Some(Self::Split {
                     id,
                     axis,
-                    ratio,
-                    first,
-                    second,
-                }
+                    children: flattened,
+                })
             }
-            tabs => tabs,
         }
     }
 
@@ -496,136 +713,115 @@ impl Node {
             active: panel.id,
             panels: vec![panel],
         };
-        let axis = match edge {
-            Edge::Left | Edge::Right => Axis::Horizontal,
-            Edge::Top | Edge::Bottom => Axis::Vertical,
-            Edge::Center => unreachable!("center docking inserts into existing tabs"),
-        };
         let (first, second) = match edge {
             Edge::Left | Edge::Top => (incoming, self),
             _ => (self, incoming),
         };
         Self::Split {
             id: split_id,
-            axis,
-            ratio: 0.5,
-            first: Box::new(first),
-            second: Box::new(second),
+            axis: edge.axis(),
+            children: vec![
+                Child {
+                    weight: 1.0,
+                    node: first,
+                },
+                Child {
+                    weight: 1.0,
+                    node: second,
+                },
+            ],
         }
     }
 }
 
 impl Default for Layout {
     fn default() -> Self {
-        let tabs = |id, panel_id, kind: &str| Node::Tabs {
-            id,
-            panels: vec![Panel {
-                id: panel_id,
-                kind: kind.to_owned(),
-                show_tab_bar: true,
-                audio_visualizer: None,
-            }],
-            active: panel_id,
-        };
-        let mut layout = Self {
+        fn tabs(id: u64, panel_id: u64, kind: &str) -> Node {
+            Node::Tabs {
+                id,
+                panels: vec![Panel {
+                    id: panel_id,
+                    kind: kind.into(),
+                    show_tab_bar: true,
+                    audio_visualizer: None,
+                }],
+                active: panel_id,
+            }
+        }
+        Self {
             root: Some(Node::Split {
                 id: 1,
-                axis: Axis::Horizontal,
-                ratio: 0.65,
-                first: Box::new(tabs(2, 3, "library")),
-                second: Box::new(Node::Split {
-                    id: 4,
-                    axis: Axis::Vertical,
-                    ratio: 0.45,
-                    first: Box::new(tabs(5, 6, "queue")),
-                    second: Box::new(Node::Split {
-                        id: 7,
-                        axis: Axis::Vertical,
-                        ratio: 0.5,
-                        first: Box::new(tabs(8, 9, "spectrum")),
-                        second: Box::new(tabs(10, 11, "spectrogram")),
-                    }),
-                }),
+                axis: Axis::Vertical,
+                children: vec![
+                    Child {
+                        weight: 1.0,
+                        node: tabs(2, 3, "transport"),
+                    },
+                    Child {
+                        weight: 3.0,
+                        node: Node::Split {
+                            id: 4,
+                            axis: Axis::Horizontal,
+                            children: vec![
+                                Child {
+                                    weight: 0.65,
+                                    node: tabs(5, 6, "library"),
+                                },
+                                Child {
+                                    weight: 0.35,
+                                    node: Node::Split {
+                                        id: 7,
+                                        axis: Axis::Vertical,
+                                        children: vec![
+                                            Child {
+                                                weight: 0.45,
+                                                node: tabs(8, 9, "queue"),
+                                            },
+                                            Child {
+                                                weight: 0.275,
+                                                node: tabs(10, 11, "spectrum"),
+                                            },
+                                            Child {
+                                                weight: 0.275,
+                                                node: tabs(12, 13, "spectrogram"),
+                                            },
+                                        ],
+                                    },
+                                },
+                            ],
+                        },
+                    },
+                ],
             }),
+            next_id: 14,
             locked: false,
-            next_id: 12,
-            version: 1,
-        };
-        layout
-            .add_transport()
-            .expect("default layout has spare IDs");
-        layout
+        }
     }
 }
 
 impl Layout {
-    fn add_transport(&mut self) -> Result<()> {
-        let id = self.next_id;
-        let count = if self.root.is_some() { 3 } else { 2 };
-        let next_id = id
-            .checked_add(count)
-            .ok_or_else(|| anyhow!("layout ID space exhausted"))?;
-        let transport = Node::Tabs {
-            id: id + 1,
-            panels: vec![Panel {
-                id,
-                kind: "transport".into(),
-                show_tab_bar: true,
-                audio_visualizer: None,
-            }],
-            active: id,
-        };
-        self.root = Some(match self.root.take() {
-            Some(root) => Node::Split {
-                id: id + 2,
-                axis: Axis::Vertical,
-                ratio: 0.25,
-                first: Box::new(transport),
-                second: Box::new(root),
-            },
-            None => transport,
-        });
-        self.next_id = next_id;
-        Ok(())
-    }
-
-    fn migrate(&mut self) -> Result<()> {
-        if self.version == 0 {
-            if !self.panels().iter().any(|panel| panel.kind == "transport") {
-                self.add_transport()?;
-            }
-            self.version = 1;
-        }
-        Ok(())
-    }
-
-    fn allocate_ids(&mut self, count: u64) -> u64 {
-        let first = self.next_id;
-        self.next_id = first.checked_add(count).expect("layout ID space exhausted");
-        first
-    }
-
-    /// Add a fresh instance and activate it. A split target selects its first
-    /// tabs; a missing target selects the layout's first tabs. Empty layouts
-    /// receive a new root group. Kinds are opaque catalog keys, not an enum.
+    /// Add and activate an instance. Missing targets use the first tabs; split
+    /// targets select their first tabs. Kinds are opaque panel catalog keys.
     pub fn add(&mut self, kind: &str, target: Option<u64>) -> u64 {
+        let id = self.next_id;
         let count = if self.root.is_some() { 1 } else { 2 };
-        let id = self.allocate_ids(count);
+        let next_id = id.checked_add(count).expect("layout ID space exhausted");
         let panel = Panel {
             id,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             show_tab_bar: true,
             audio_visualizer: None,
         };
-        if let Some(root) = self.root.as_mut() {
+        if let Some(root) = &mut self.root {
             let target = target
                 .and_then(|id| root.find(id))
                 .unwrap_or(root)
                 .first_tabs();
-            if let Some(Node::Tabs { panels, active, .. }) = root.find_mut(target) {
-                panels.push(panel);
-                *active = id;
-            }
+            let Some(Node::Tabs { panels, active, .. }) = root.find_mut(target) else {
+                unreachable!("tabs target");
+            };
+            panels.push(panel);
+            *active = id;
         } else {
             self.root = Some(Node::Tabs {
                 id: id + 1,
@@ -633,23 +829,61 @@ impl Layout {
                 active: id,
             });
         }
+        self.next_id = next_id;
         id
     }
 
-    pub fn remove(&mut self, panel_id: u64) -> bool {
-        let Some(root) = self.root.take() else {
-            return false;
+    fn take_panel(&mut self, group: u64, panel_id: u64) -> (Panel, usize, u64) {
+        let Some(Node::Tabs { panels, active, .. }) =
+            self.root.as_mut().and_then(|root| root.find_mut(group))
+        else {
+            unreachable!("checked panel group");
         };
-        let mut removed = None;
-        self.root = root.extract(panel_id, &mut removed);
-        removed.is_some()
+        let index = panels
+            .iter()
+            .position(|panel| panel.id == panel_id)
+            .expect("checked panel");
+        let previous_active = *active;
+        let panel = panels.remove(index);
+        if *active == panel_id {
+            *active = panels
+                .get(index.min(panels.len().saturating_sub(1)))
+                .map_or(0, |panel| panel.id);
+        }
+        (panel, index, previous_active)
     }
 
-    /// Move an instance without changing its ID. Center insertion indices refer
-    /// to the destination after removing the source and are clamped to its end.
-    /// Edge docking accepts either a group or a split. A lone tab dropped onto
-    /// its own group is a successful no-op, including drops at an edge.
-    /// All source/target checks happen before the tree or allocator is changed.
+    fn insert_panel(&mut self, group: u64, panel: Panel, index: Option<usize>, active_id: u64) {
+        let Some(Node::Tabs { panels, active, .. }) =
+            self.root.as_mut().and_then(|root| root.find_mut(group))
+        else {
+            unreachable!("preserved panel group");
+        };
+        panels.insert(index.unwrap_or(panels.len()).min(panels.len()), panel);
+        *active = active_id;
+    }
+
+    pub fn remove(&mut self, panel_id: u64) -> bool {
+        let Some(group) = self
+            .root
+            .as_ref()
+            .and_then(|root| root.panel_group(panel_id))
+            .map(Node::id)
+        else {
+            return false;
+        };
+        let (panel, index, active) = self.take_panel(group, panel_id);
+        if check_normalization(self.root.as_ref().expect("source root")).is_err() {
+            self.insert_panel(group, panel, Some(index), active);
+            return false;
+        }
+        self.root = self.root.take().and_then(Node::normalize);
+        true
+    }
+
+    /// Center indices refer to the destination after source removal and clamp
+    /// to its end. Split targets accept edge drops. A lone self-drop is a no-op.
+    /// All invalid edits preserve both the tree and allocator exactly.
     pub fn move_panel(
         &mut self,
         panel_id: u64,
@@ -657,7 +891,7 @@ impl Layout {
         edge: Edge,
         index: Option<usize>,
     ) -> bool {
-        let Some(root) = self.root.as_ref() else {
+        let Some(root) = &self.root else {
             return false;
         };
         let Some(source) = root.panel_group(panel_id) else {
@@ -669,107 +903,125 @@ impl Layout {
         if edge == Edge::Center && !matches!(target, Node::Tabs { .. }) {
             return false;
         }
-        let same_group = source.id() == target_node;
-        if same_group && matches!(source, Node::Tabs { panels, .. } if panels.len() == 1) {
+        let group = source.id();
+        if group == target_node && matches!(source, Node::Tabs { panels, .. } if panels.len() == 1)
+        {
             return true;
         }
-        if same_group && edge == Edge::Center {
-            if let Some(Node::Tabs { panels, active, .. }) = self
-                .root
-                .as_mut()
-                .and_then(|root| root.find_mut(target_node))
-            {
-                let old_index = panels
-                    .iter()
-                    .position(|panel| panel.id == panel_id)
-                    .expect("source was checked");
-                let panel = panels.remove(old_index);
-                panels.insert(index.unwrap_or(panels.len()).min(panels.len()), panel);
-                *active = panel_id;
-            }
-            return true;
-        }
-        let target_contains_source = target.panel_group(panel_id).is_some();
-        if edge == Edge::Center {
-            let mut removed = None;
-            self.root = self
-                .root
-                .take()
-                .expect("source was checked")
-                .extract(panel_id, &mut removed);
-            let Some(Node::Tabs { panels, active, .. }) = self
-                .root
-                .as_mut()
-                .and_then(|root| root.find_mut(target_node))
-            else {
-                unreachable!("a distinct destination group survives extraction");
-            };
-            panels.insert(
-                index.unwrap_or(panels.len()).min(panels.len()),
-                removed.expect("source was checked"),
-            );
-            *active = panel_id;
+        let next_id = if edge == Edge::Center {
+            self.next_id
         } else {
-            // Allocate before taking the root, so even exhausted IDs cannot
-            // leave the layout with its source removed.
-            let tabs_id = self.allocate_ids(2);
-            let split_id = tabs_id + 1;
-            let mut root = self.root.take().expect("source was checked");
-            if target_contains_source {
-                // Normalize inside the destination before wrapping it. Its old
-                // ID may disappear when removing a child collapses that split.
-                root = root.map_node(
+            let Some(next_id) = self.next_id.checked_add(2) else {
+                return false;
+            };
+            next_id
+        };
+        let destination_active = match target {
+            Node::Tabs { active, .. } => *active,
+            _ => 0,
+        };
+        let (panel, old_index, old_active) = self.take_panel(group, panel_id);
+        let tabs_id = self.next_id;
+        let split_id = tabs_id.saturating_add(1);
+        if edge == Edge::Center {
+            self.insert_panel(target_node, panel, index, panel_id);
+        } else {
+            // Normalize only after docking: ancestor destinations and their IDs
+            // remain reachable even when removal empties one of their children.
+            self.root = self.root.take().map(|root| {
+                root.map_node(
                     target_node,
-                    &mut Some(|target: Node| {
-                        let mut removed = None;
-                        let remaining = target
-                            .extract(panel_id, &mut removed)
-                            .expect("lone self-drops were handled above");
-                        remaining.dock(
-                            removed.expect("source was checked"),
-                            edge,
-                            tabs_id,
-                            split_id,
-                        )
-                    }),
-                );
-            } else {
-                let mut removed = None;
-                root = root
-                    .extract(panel_id, &mut removed)
-                    .expect("a distinct destination survives extraction");
-                root = root.map_node(
-                    target_node,
-                    &mut Some(|target: Node| {
-                        target.dock(
-                            removed.expect("source was checked"),
-                            edge,
-                            tabs_id,
-                            split_id,
-                        )
-                    }),
-                );
-            }
-            self.root = Some(root);
+                    &mut Some(|target: Node| target.dock(panel, edge, tabs_id, split_id)),
+                )
+            });
         }
+        if check_normalization(self.root.as_ref().expect("destination root")).is_err() {
+            let panel = if edge == Edge::Center {
+                let (panel, _, _) = self.take_panel(target_node, panel_id);
+                if let Some(Node::Tabs { active, .. }) = self
+                    .root
+                    .as_mut()
+                    .and_then(|root| root.find_mut(target_node))
+                {
+                    *active = destination_active;
+                }
+                panel
+            } else {
+                let mut recovered = None;
+                self.root = self.root.take().map(|root| {
+                    root.map_node(
+                        split_id,
+                        &mut Some(|wrapper: Node| {
+                            let Node::Split { mut children, .. } = wrapper else {
+                                unreachable!("new docking split");
+                            };
+                            let incoming = if matches!(edge, Edge::Left | Edge::Top) {
+                                0
+                            } else {
+                                1
+                            };
+                            let Node::Tabs { mut panels, .. } = children.remove(incoming).node
+                            else {
+                                unreachable!("incoming tabs");
+                            };
+                            recovered = panels.pop();
+                            children.pop().expect("original target").node
+                        }),
+                    )
+                });
+                recovered.expect("incoming panel")
+            };
+            self.insert_panel(group, panel, Some(old_index), old_active);
+            return false;
+        }
+        self.root = self.root.take().and_then(Node::normalize);
+        self.next_id = next_id;
         true
     }
 
-    pub fn set_ratio(&mut self, split_id: u64, ratio: f32) -> bool {
-        if !ratio.is_finite() || !(0.1..=0.9).contains(&ratio) {
+    /// Resize only the adjacent pair. The fraction is measured within that
+    /// pair, and neither the other weights nor the allocator change.
+    pub fn set_boundary(&mut self, split_id: u64, index: usize, fraction: f32) -> bool {
+        if !fraction.is_finite() || fraction <= 0.0 || fraction >= 1.0 {
             return false;
         }
-        match self.root.as_mut().and_then(|root| root.find_mut(split_id)) {
-            Some(Node::Split { ratio: current, .. }) => {
-                *current = ratio;
-                true
-            }
-            _ => false,
+        let Some(Node::Split { children, .. }) =
+            self.root.as_mut().and_then(|root| root.find_mut(split_id))
+        else {
+            return false;
+        };
+        let Some(right) = index.checked_add(1).filter(|right| *right < children.len()) else {
+            return false;
+        };
+        let sum = f64::from(children[index].weight) + f64::from(children[right].weight);
+        let first = (sum * f64::from(fraction)) as f32;
+        let second = (sum - f64::from(first)) as f32;
+        if !first.is_finite() || !second.is_finite() || first <= 0.0 || second <= 0.0 {
+            return false;
         }
+        let total: f64 = children
+            .iter()
+            .enumerate()
+            .map(|(i, child)| {
+                f64::from(if i == index {
+                    first
+                } else if i == right {
+                    second
+                } else {
+                    child.weight
+                })
+            })
+            .sum();
+        if total > f64::from(f32::MAX) {
+            return false;
+        }
+        children[index].weight = first;
+        children[right].weight = second;
+        true
     }
 
     pub fn activate(&mut self, panel_id: u64) -> bool {
-        let Some(group_id) = self
+        let Some(group) = self
             .root
             .as_ref()
             .and_then(|root| root.panel_group(panel_id))
@@ -777,44 +1029,40 @@ impl Layout {
         else {
             return false;
         };
-        if let Some(Node::Tabs { active, .. }) =
-            self.root.as_mut().and_then(|root| root.find_mut(group_id))
-        {
-            *active = panel_id;
-        }
+        let Some(Node::Tabs { active, .. }) =
+            self.root.as_mut().and_then(|root| root.find_mut(group))
+        else {
+            unreachable!("panel group");
+        };
+        *active = panel_id;
         true
     }
 
-    /// Update an instance's preference, including inactive tabs. Returns false
-    /// only when the panel is missing; moving a panel preserves its preference.
-    pub fn set_tab_bar_visible(&mut self, panel_id: u64, visible: bool) -> bool {
-        fn update(node: &mut Node, panel_id: u64, visible: bool) -> bool {
-            match node {
-                Node::Split { first, second, .. } => {
-                    update(first, panel_id, visible) || update(second, panel_id, visible)
-                }
-                Node::Tabs { panels, .. } => {
-                    let Some(panel) = panels.iter_mut().find(|panel| panel.id == panel_id) else {
-                        return false;
-                    };
-                    panel.show_tab_bar = visible;
-                    true
-                }
-            }
-        }
-        self.root
-            .as_mut()
-            .is_some_and(|root| update(root, panel_id, visible))
+    fn panel_mut(&mut self, id: u64) -> Option<&mut Panel> {
+        let group = self.root.as_ref()?.panel_group(id)?.id();
+        let Node::Tabs { panels, .. } = self.root.as_mut()?.find_mut(group)? else {
+            return None;
+        };
+        panels.iter_mut().find(|panel| panel.id == id)
     }
 
-    /// Seed missing instance preferences without overwriting saved choices.
+    pub fn set_tab_bar_visible(&mut self, panel_id: u64, visible: bool) -> bool {
+        let Some(panel) = self.panel_mut(panel_id) else {
+            return false;
+        };
+        panel.show_tab_bar = visible;
+        true
+    }
+
     pub fn initialize_audio_visualizers(&mut self, defaults: AudioVisualizerOptions) -> bool {
         fn initialize(node: &mut Node, defaults: AudioVisualizerOptions) -> bool {
             match node {
-                Node::Split { first, second, .. } => {
-                    let first_changed = initialize(first, defaults);
-                    let second_changed = initialize(second, defaults);
-                    first_changed || second_changed
+                Node::Split { children, .. } => {
+                    let mut changed = false;
+                    for child in children {
+                        changed |= initialize(&mut child.node, defaults);
+                    }
+                    changed
                 }
                 Node::Tabs { panels, .. } => {
                     let mut changed = false;
@@ -843,32 +1091,19 @@ impl Layout {
             .audio_visualizer
     }
 
-    /// Update one visualizer, including inactive tabs; reject other panel kinds.
     pub fn set_audio_visualizer_options(
         &mut self,
         id: u64,
         options: AudioVisualizerOptions,
     ) -> bool {
-        fn update(node: &mut Node, id: u64, options: AudioVisualizerOptions) -> bool {
-            match node {
-                Node::Split { first, second, .. } => {
-                    update(first, id, options) || update(second, id, options)
-                }
-                Node::Tabs { panels, .. } => {
-                    let Some(panel) = panels
-                        .iter_mut()
-                        .find(|panel| panel.id == id && panel.kind == "audio_visualizer")
-                    else {
-                        return false;
-                    };
-                    panel.audio_visualizer = Some(options);
-                    true
-                }
-            }
-        }
-        self.root
-            .as_mut()
-            .is_some_and(|root| update(root, id, options))
+        let Some(panel) = self
+            .panel_mut(id)
+            .filter(|panel| panel.kind == "audio_visualizer")
+        else {
+            return false;
+        };
+        panel.audio_visualizer = Some(options);
+        true
     }
 
     pub fn active_panels(&self) -> Vec<&Panel> {
@@ -893,11 +1128,8 @@ impl Layout {
             next_id: u64,
             ids: &mut HashSet<u64>,
         ) -> std::result::Result<(), String> {
-            if id == 0 {
-                return Err("layout IDs must be nonzero".into());
-            }
-            if id >= next_id {
-                return Err(format!("ID {id} is not below next_id {next_id}"));
+            if id == 0 || id >= next_id {
+                return Err(format!("invalid layout ID {id} for next_id {next_id}"));
             }
             if !ids.insert(id) {
                 return Err(format!("duplicate layout ID {id}"));
@@ -911,30 +1143,32 @@ impl Layout {
         ) -> std::result::Result<(), String> {
             record(node.id(), next_id, ids)?;
             match node {
-                Node::Split {
-                    ratio,
-                    first,
-                    second,
-                    ..
-                } => {
-                    if !ratio.is_finite() || !(0.1..=0.9).contains(ratio) {
-                        return Err(format!("split {} has invalid ratio {ratio}", node.id()));
+                Node::Split { axis, children, .. } => {
+                    if children.len() < 2 {
+                        return Err("split must have at least two children".into());
                     }
-                    visit(first, next_id, ids)?;
-                    visit(second, next_id, ids)?;
+                    weight_sum(children.iter().map(|child| child.weight))
+                        .map_err(|error| error.to_string())?;
+                    for child in children {
+                        if matches!(&child.node, Node::Split { axis: child_axis, .. } if child_axis == axis)
+                        {
+                            return Err("same-axis split children must be flattened".into());
+                        }
+                        visit(&child.node, next_id, ids)?;
+                    }
                 }
                 Node::Tabs { panels, active, .. } => {
                     if panels.is_empty() {
-                        return Err(format!("tab group {} is empty", node.id()));
+                        return Err("tab group must not be empty".into());
                     }
                     for panel in panels {
                         record(panel.id, next_id, ids)?;
+                        if panel.audio_visualizer.is_some() && panel.kind != "audio_visualizer" {
+                            return Err("visualizer options on a non-visualizer panel".into());
+                        }
                     }
                     if !panels.iter().any(|panel| panel.id == *active) {
-                        return Err(format!(
-                            "tab group {} has invalid active ID {active}",
-                            node.id()
-                        ));
+                        return Err("invalid active panel ID".into());
                     }
                 }
             }
@@ -948,22 +1182,136 @@ impl Layout {
         }
         Ok(())
     }
+}
+
+impl Default for LayoutSet {
+    fn default() -> Self {
+        Self {
+            active: "Default".into(),
+            layouts: BTreeMap::from([("Default".into(), Layout::default())]),
+        }
+    }
+}
+
+impl LayoutSet {
+    pub fn current(&self) -> &Layout {
+        self.layouts
+            .get(&self.active)
+            .expect("active layout exists")
+    }
+    pub fn current_mut(&mut self) -> &mut Layout {
+        self.layouts
+            .get_mut(&self.active)
+            .expect("active layout exists")
+    }
+    pub fn active_name(&self) -> &str {
+        &self.active
+    }
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.layouts.keys().map(String::as_str)
+    }
+
+    fn unused_name<'a>(&self, name: &'a str) -> Result<&'a str> {
+        let name = checked_name(name)?;
+        if self.layouts.contains_key(name) {
+            return Err(anyhow!("layout {name:?} already exists"));
+        }
+        Ok(name)
+    }
+
+    pub fn select(&mut self, name: &str) -> Result<()> {
+        let name = checked_name(name)?;
+        if !self.layouts.contains_key(name) {
+            return Err(anyhow!("layout {name:?} does not exist"));
+        }
+        if self.active != name {
+            self.active = name.into();
+        }
+        Ok(())
+    }
+
+    pub fn duplicate(&mut self, name: &str) -> Result<()> {
+        let name = self.unused_name(name)?.to_owned();
+        let copy = self.current().clone();
+        self.layouts.insert(name.clone(), copy);
+        self.active = name;
+        Ok(())
+    }
+
+    pub fn rename(&mut self, name: &str) -> Result<()> {
+        let name = checked_name(name)?;
+        if name == self.active {
+            return Ok(());
+        }
+        let name = self.unused_name(name)?.to_owned();
+        let layout = self
+            .layouts
+            .remove(&self.active)
+            .expect("active layout exists");
+        self.layouts.insert(name.clone(), layout);
+        self.active = name;
+        Ok(())
+    }
+
+    fn removable_name<'a>(&self, name: &'a str) -> Result<&'a str> {
+        let name = checked_name(name)?;
+        if name == self.active {
+            return Err(anyhow!("cannot remove the current layout"));
+        }
+        if !self.layouts.contains_key(name) {
+            return Err(anyhow!("layout {name:?} does not exist"));
+        }
+        Ok(name)
+    }
+
+    pub fn remove(&mut self, name: &str) -> Result<()> {
+        let name = self.removable_name(name)?;
+        self.layouts.remove(name);
+        Ok(())
+    }
+
+    /// Delete and persist as one operation, restoring the owned entry on save
+    /// failure. GUI deletion cannot use a compensating public rename/select.
+    pub fn remove_saved(&mut self, name: &str, path: &Path) -> Result<()> {
+        let name = self.removable_name(name)?.to_owned();
+        let removed = self.layouts.remove(&name).expect("checked layout");
+        if let Err(error) = self.save(path) {
+            self.layouts.insert(name, removed);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.layouts.is_empty() {
+            return Err(anyhow!("layout collection is empty"));
+        }
+        if !self.layouts.contains_key(&self.active) {
+            return Err(anyhow!("active layout does not exist"));
+        }
+        for (name, layout) in &self.layouts {
+            if checked_name(name)? != name {
+                return Err(anyhow!("layout name is not trimmed"));
+            }
+            layout.validate().map_err(|error| anyhow!(error))?;
+        }
+        Ok(())
+    }
 
     pub fn load(path: &Path) -> Result<Self> {
         let file =
             File::open(path).with_context(|| format!("opening layout {}", path.display()))?;
         let input: persistence::Input = serde_json::from_reader(BufReader::new(file))
             .with_context(|| format!("decoding layout {}", path.display()))?;
-        let layout = input
-            .into_layout()
-            .with_context(|| format!("invalid layout {}", path.display()))?;
-        Ok(layout)
+        input
+            .into_set()
+            .with_context(|| format!("invalid layout {}", path.display()))
     }
 
-    /// Validate, write a unique sibling temporary file, and atomically replace
-    /// the destination. A failed write never replaces the previous layout.
+    /// Validate, write a unique sibling temporary file, then atomically replace
+    /// the destination. Failed writes never replace the previous collection.
     pub fn save(&self, path: &Path) -> Result<()> {
-        self.validate().map_err(|error| anyhow!(error))?;
+        self.validate()?;
         let parent = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -979,7 +1327,7 @@ impl Layout {
             temporary_name.push(format!(
                 ".{}.{}.tmp",
                 std::process::id(),
-                TEMP_ID.fetch_add(1, Ordering::Relaxed),
+                TEMP_ID.fetch_add(1, Ordering::Relaxed)
             ));
             let temporary = parent.join(temporary_name);
             match OpenOptions::new()
@@ -995,9 +1343,9 @@ impl Layout {
         let result = (|| -> Result<()> {
             let mut writer = BufWriter::new(file);
             serde_json::to_writer_pretty(&mut writer, &persistence::View::from(self))
-                .context("encoding layout")?;
+                .context("encoding layouts")?;
             writer.write_all(b"\n")?;
-            writer.flush().context("flushing layout")?;
+            writer.flush().context("flushing layouts")?;
             drop(writer);
             fs::rename(&temporary, path)
                 .with_context(|| format!("replacing layout {}", path.display()))?;
@@ -1013,11 +1361,31 @@ impl Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{Value, json};
 
-    fn ids(layout: &Layout) -> Vec<u64> {
-        let mut ids: Vec<_> = layout.panels().iter().map(|panel| panel.id).collect();
-        ids.sort_unstable();
-        ids
+    fn empty() -> Layout {
+        Layout {
+            root: None,
+            next_id: 1,
+            locked: false,
+        }
+    }
+
+    fn tabs(id: u64, kind: &str) -> Node {
+        Node::Tabs {
+            id,
+            panels: vec![Panel {
+                id: id + 1,
+                kind: kind.into(),
+                show_tab_bar: true,
+                audio_visualizer: None,
+            }],
+            active: id + 1,
+        }
+    }
+
+    fn child(weight: f32, node: Node) -> Child {
+        Child { weight, node }
     }
 
     fn group(layout: &Layout, panel: u64) -> u64 {
@@ -1030,723 +1398,547 @@ mod tests {
             .id()
     }
 
-    fn encoded(layout: &Layout) -> serde_json::Value {
-        serde_json::to_value(persistence::View::from(layout)).unwrap()
+    fn weights(layout: &Layout) -> Vec<f32> {
+        let Some(Node::Split { children, .. }) = &layout.root else {
+            panic!("expected split");
+        };
+        children.iter().map(|child| child.weight).collect()
     }
 
-    fn decoded(value: serde_json::Value) -> Result<Layout> {
-        serde_json::from_value::<persistence::Input>(value)?.into_layout()
+    fn encoded(set: &LayoutSet) -> Value {
+        serde_json::to_value(persistence::View::from(set)).unwrap()
     }
 
-    fn assert_same_layout(actual: &Layout, expected: &Layout) {
-        actual.validate().unwrap();
-        expected.validate().unwrap();
-        assert_eq!(encoded(actual), encoded(expected));
+    fn decoded(value: Value) -> Result<LayoutSet> {
+        serde_json::from_value::<persistence::Input>(value)?.into_set()
     }
 
-    // Explicitly model the old wire format; runtime types must not regain serde
-    // implementations just to manufacture migration fixtures.
-    fn legacy_value(layout: &Layout) -> serde_json::Value {
-        fn node_value(node: &Node) -> serde_json::Value {
-            match node {
-                Node::Split {
-                    id,
-                    axis,
-                    ratio,
-                    first,
-                    second,
-                } => serde_json::json!({
-                    "Split": {
-                        "id": id, "axis": axis, "ratio": ratio,
-                        "first": node_value(first), "second": node_value(second)
-                    }
-                }),
-                Node::Tabs { id, panels, active } => serde_json::json!({
-                    "Tabs": {
-                        "id": id, "active": active,
-                        "panels": panels.iter().map(|panel| serde_json::json!({
-                            "id": panel.id, "kind": panel.kind,
-                            "show_tab_bar": panel.show_tab_bar
-                        })).collect::<Vec<_>>()
-                    }
-                }),
-            }
+    fn one_layout(root: Value) -> Value {
+        json!({"active":"Work", "layouts":{"Work":{"root":root}}})
+    }
+
+    fn wire_tabs(kind: &str) -> Value {
+        json!({"type":"tabs", "panels":[{"kind":kind}]})
+    }
+
+    struct TemporaryDirectory(std::path::PathBuf);
+
+    impl TemporaryDirectory {
+        fn new() -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(1);
+            let path = std::env::temp_dir().join(format!(
+                "rivu-layout-test-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&path).unwrap();
+            Self(path)
         }
-        serde_json::json!({
-            "root": layout.root.as_ref().map(node_value),
-            "next_id": layout.next_id,
-            "version": layout.version
-        })
+    }
+
+    impl Drop for TemporaryDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
     }
 
     #[test]
-    fn layout_uses_local_indices_and_allocates_preorder_ids() {
-        let value = serde_json::json!({
-            "root": {"Split": {
-                "axis": "Horizontal", "ratio": 0.5,
-                "first": {"Tabs": {
-                    "panels": [{"kind": "library"}, {"kind": "library"}], "active": 1
-                }},
-                "second": {"Tabs": {
-                    "panels": [{"kind": "queue"}, {"kind": "plugin-panel"}], "active": 1
-                }}
-            }},
-            "version": 1
-        });
-        let layout = decoded(value.clone()).unwrap();
-        assert_eq!(encoded(&layout), value);
-        assert_eq!(layout.root.as_ref().unwrap().id(), 1);
-        assert_eq!(group(&layout, 3), 2);
-        assert_eq!(group(&layout, 6), 5);
-        assert_eq!(ids(&layout), vec![3, 4, 6, 7]);
-        assert_eq!(layout.next_id, 8);
-        assert_eq!(
-            layout
-                .active_panels()
-                .iter()
-                .map(|panel| panel.id)
-                .collect::<Vec<_>>(),
-            vec![4, 7]
-        );
-        assert_same_layout(&decoded(encoded(&layout)).unwrap(), &layout);
-
-        let mut defaulted = value;
-        defaulted["root"]["Split"]["first"]["Tabs"]["active"] = 0.into();
-        defaulted["root"]["Split"]["second"]["Tabs"]
-            .as_object_mut()
-            .unwrap()
-            .remove("active");
-        let mut layout = decoded(defaulted).unwrap();
-        assert_eq!(
-            layout
-                .active_panels()
-                .iter()
-                .map(|panel| panel.id)
-                .collect::<Vec<_>>(),
-            vec![3, 6]
-        );
-        let saved = encoded(&layout);
-        assert!(
-            saved["root"]["Split"]["first"]["Tabs"]
-                .get("active")
-                .is_none()
-        );
-        assert!(
-            saved["root"]["Split"]["second"]["Tabs"]
-                .get("active")
-                .is_none()
-        );
-        assert_eq!(layout.add("history", Some(2)), 8);
+    fn same_axis_docking_adds_siblings_without_resizing_other_regions() {
+        let mut layout = empty();
+        let first = layout.add("first", None);
+        let second = layout.add("second", None);
+        assert!(layout.move_panel(second, group(&layout, first), Edge::Right, None));
+        let split = layout.root.as_ref().unwrap().id();
+        assert!(layout.set_boundary(split, 0, 0.75));
+        let third = layout.add("third", Some(group(&layout, second)));
+        assert!(layout.move_panel(third, group(&layout, second), Edge::Left, None));
+        assert_eq!(weights(&layout), vec![1.5, 0.25, 0.25]);
+        let fourth = layout.add("fourth", Some(group(&layout, third)));
+        assert!(layout.move_panel(fourth, group(&layout, third), Edge::Top, None));
+        assert_eq!(weights(&layout), vec![1.5, 0.25, 0.25]);
+        let Some(Node::Split { children, .. }) = &layout.root else {
+            unreachable!();
+        };
+        assert!(matches!(
+            children[1].node,
+            Node::Split {
+                axis: Axis::Vertical,
+                ..
+            }
+        ));
         layout.validate().unwrap();
     }
 
     #[test]
-    fn new_versionless_and_empty_layouts_preserve_their_structure() {
-        let layout = decoded(serde_json::json!({
-            "root": {"Tabs": {"panels": [{"kind": "queue"}, {"kind": "history"}]}}
-        }))
-        .unwrap();
-        assert_eq!(layout.panels().len(), 2);
-        assert_eq!(layout.active_panels()[0].kind, "queue");
-        assert!(layout.panels().iter().all(|panel| panel.show_tab_bar));
-        let empty = decoded(serde_json::json!({"root": null})).unwrap();
-        assert!(empty.root.is_none());
-        assert_eq!(empty.next_id, 1);
-        assert_same_layout(&decoded(encoded(&empty)).unwrap(), &empty);
+    fn removal_flattens_exposed_same_axis_children_proportionally() {
+        let mut layout = Layout {
+            next_id: 100,
+            locked: false,
+            root: Some(Node::Split {
+                id: 1,
+                axis: Axis::Horizontal,
+                children: vec![
+                    child(
+                        6.0,
+                        Node::Split {
+                            id: 2,
+                            axis: Axis::Vertical,
+                            children: vec![
+                                child(1.0, tabs(3, "remove")),
+                                child(
+                                    1.0,
+                                    Node::Split {
+                                        id: 5,
+                                        axis: Axis::Horizontal,
+                                        children: vec![
+                                            child(2.0, tabs(6, "left")),
+                                            child(1.0, tabs(8, "middle")),
+                                        ],
+                                    },
+                                ),
+                            ],
+                        },
+                    ),
+                    child(4.0, tabs(10, "right")),
+                ],
+            }),
+        };
+        layout.validate().unwrap();
+        assert!(layout.remove(4));
+        assert_eq!(weights(&layout), vec![4.0, 2.0, 4.0]);
+        assert_eq!(layout.root.as_ref().unwrap().id(), 1);
+        layout.validate().unwrap();
+        assert!(layout.remove(7));
+        assert!(layout.remove(9));
+        assert_eq!(layout.root.as_ref().unwrap().id(), 10);
+        assert!(layout.remove(11));
+        assert!(layout.root.is_none());
+        let replacement = layout.add("replacement", None);
+        assert_eq!(layout.active_panels()[0].id, replacement);
+        layout.validate().unwrap();
     }
 
     #[test]
-    fn layout_rejects_invalid_indices_and_structure() {
-        let value = serde_json::json!({
-            "root": {"Tabs": {"panels": [{"kind": "library"}, {"kind": "queue"}]}}
-        });
-        for active in [
-            serde_json::json!(2),
-            serde_json::json!(u64::MAX),
-            serde_json::json!(-1),
-            serde_json::json!(0.5),
-            serde_json::json!("1"),
-            serde_json::Value::Null,
-        ] {
-            let mut invalid = value.clone();
-            invalid["root"]["Tabs"]["active"] = active;
-            assert!(decoded(invalid).is_err());
+    fn boundary_resize_only_changes_its_adjacent_pair() {
+        let mut layout = Layout {
+            next_id: 20,
+            locked: false,
+            root: Some(Node::Split {
+                id: 1,
+                axis: Axis::Horizontal,
+                children: vec![
+                    child(2.0, tabs(2, "a")),
+                    child(3.0, tabs(4, "b")),
+                    child(5.0, tabs(6, "c")),
+                    child(7.0, tabs(8, "d")),
+                ],
+            }),
+        };
+        assert!(layout.set_boundary(1, 1, 0.25));
+        assert_eq!(weights(&layout), vec![2.0, 2.0, 6.0, 7.0]);
+        let before = layout.clone();
+        for fraction in [0.0, 1.0, -0.1, 1.1, f32::NAN, f32::INFINITY] {
+            assert!(!layout.set_boundary(1, 1, fraction));
+            assert_eq!(layout, before);
         }
-        let mut empty = value.clone();
-        empty["root"]["Tabs"]["panels"] = serde_json::json!([]);
-        assert!(decoded(empty).is_err());
-        let mut invalid = value.clone();
-        invalid["root"]["Tabs"]["id"] = 42.into();
-        assert!(decoded(invalid).is_err());
-        let mut invalid = value;
-        invalid["root"]["Tabs"]["panels"][0]["show_tab_bar"] = "false".into();
-        assert!(decoded(invalid).is_err());
-        for ratio in [0.0, 1.0] {
-            assert!(
-                decoded(serde_json::json!({
-                    "root": {"Split": {
-                        "axis": "Vertical", "ratio": ratio,
-                        "first": {"Tabs": {"panels": [{"kind": "queue"}]}},
-                        "second": {"Tabs": {"panels": [{"kind": "history"}]}}
-                    }}
-                }))
-                .is_err()
-            );
+        for (split, index) in [(1, 3), (1, usize::MAX), (2, 0), (999, 0)] {
+            assert!(!layout.set_boundary(split, index, 0.5));
+            assert_eq!(layout, before);
         }
+        layout.validate().unwrap();
     }
 
     #[test]
-    fn legacy_ids_convert_to_local_selection_and_missing_active_defaults_first() {
-        let legacy = serde_json::json!({
-            "root": {"Split": {
-                "id": 100, "axis": "Vertical", "ratio": 0.5,
-                "first": {"Tabs": {
-                    "id": 200, "panels": [{"id": 400, "kind": "queue"}, {"id": 300, "kind": "queue"}],
-                    "active": 300
-                }},
-                "second": {"Tabs": {
-                    "id": 500, "panels": [{"id": 700, "kind": "library"}, {"id": 600, "kind": "history"}]
-                }}
-            }},
-            "next_id": u64::MAX,
-            "version": 1
-        });
-        let layout = decoded(legacy.clone()).unwrap();
+    fn tabs_reorder_transfer_and_preserve_instance_preferences() {
+        let mut layout = empty();
+        let a = layout.add("a", None);
+        let b = layout.add("audio_visualizer", None);
+        let c = layout.add("c", None);
+        let options = AudioVisualizerOptions {
+            style: AudioVisualizerStyle::Bars,
+            reference_lines: true,
+            labels: false,
+        };
+        assert!(layout.set_audio_visualizer_options(b, options));
+        assert!(layout.set_tab_bar_visible(b, false));
+        let source = group(&layout, a);
+        assert!(layout.move_panel(b, source, Edge::Center, Some(0)));
         assert_eq!(
             layout
-                .active_panels()
+                .panels()
                 .iter()
                 .map(|panel| panel.id)
                 .collect::<Vec<_>>(),
-            vec![4, 6]
+            vec![b, a, c]
         );
-        assert_eq!(layout.next_id, 8);
-        let saved = encoded(&layout);
-        assert_eq!(saved["root"]["Split"]["first"]["Tabs"]["active"], 1);
-        assert!(
-            saved["root"]["Split"]["second"]["Tabs"]
-                .get("active")
-                .is_none()
+        assert_eq!(layout.active_panels()[0].id, b);
+        assert!(layout.move_panel(c, source, Edge::Right, None));
+        let destination = group(&layout, c);
+        assert!(layout.move_panel(b, destination, Edge::Center, Some(999)));
+        let Node::Tabs { panels, active, .. } =
+            layout.root.as_ref().unwrap().find(destination).unwrap()
+        else {
+            unreachable!();
+        };
+        assert_eq!(
+            panels.iter().map(|panel| panel.id).collect::<Vec<_>>(),
+            vec![c, b]
         );
-        assert!(saved.get("next_id").is_none());
-        assert_same_layout(&decoded(saved).unwrap(), &layout);
-        assert!(layout.panels().iter().all(|panel| panel.show_tab_bar));
-        for active in [0, 1, 700, 999] {
-            let mut invalid = legacy.clone();
-            invalid["root"]["Split"]["first"]["Tabs"]["active"] = active.into();
-            assert!(decoded(invalid).is_err());
+        assert_eq!(*active, b);
+        assert!(!panels[1].show_tab_bar);
+        assert_eq!(panels[1].audio_visualizer, Some(options));
+        assert!(layout.activate(c));
+        layout.validate().unwrap();
+    }
+
+    #[test]
+    fn lone_self_drops_are_noops_and_invalid_targets_are_unchanged() {
+        let mut layout = empty();
+        let panel = layout.add("a", None);
+        let target = group(&layout, panel);
+        let before = layout.clone();
+        for edge in [
+            Edge::Left,
+            Edge::Right,
+            Edge::Top,
+            Edge::Bottom,
+            Edge::Center,
+        ] {
+            assert!(layout.move_panel(panel, target, edge, None));
+            assert_eq!(layout, before);
         }
-        let mut duplicate = legacy.clone();
-        duplicate["root"]["Split"]["second"]["Tabs"]["panels"][0]["id"] = 400.into();
-        assert!(decoded(duplicate).is_err());
-        let mut invalid_allocator = legacy;
-        invalid_allocator["next_id"] = 700.into();
-        assert!(decoded(invalid_allocator).is_err());
+        assert!(!layout.move_panel(panel, 999, Edge::Right, None));
+        assert!(!layout.move_panel(999, target, Edge::Center, None));
+        assert!(!layout.remove(999));
+        assert_eq!(layout, before);
+        let other = layout.add("b", None);
+        assert!(layout.move_panel(other, target, Edge::Right, None));
+        let split = layout.root.as_ref().unwrap().id();
+        let before = layout.clone();
+        assert!(!layout.move_panel(panel, split, Edge::Center, None));
+        assert_eq!(layout, before);
     }
 
     #[test]
-    fn audio_visualizer_defaults_initialize_only_missing_instances() {
-        use crate::config::AudioVisualizerStyle;
-
-        let defaults = AudioVisualizerOptions {
-            style: AudioVisualizerStyle::Bars,
-            reference_lines: false,
-            labels: false,
-        };
-        let custom = AudioVisualizerOptions {
-            style: AudioVisualizerStyle::Rings,
-            reference_lines: true,
-            labels: false,
-        };
-        let mut layout = Layout::default();
-        let first = layout.add("audio_visualizer", Some(2));
-        let second = layout.add("audio_visualizer", Some(5));
-        assert!(layout.initialize_audio_visualizers(defaults));
-        assert_eq!(layout.audio_visualizer_options(first), Some(defaults));
-        assert_eq!(layout.audio_visualizer_options(second), Some(defaults));
-        assert!(layout.activate(3));
-        assert!(!layout.active_panels().iter().any(|panel| panel.id == first));
-        assert!(layout.set_audio_visualizer_options(first, custom));
-        assert_eq!(layout.audio_visualizer_options(first), Some(custom));
-        assert_eq!(layout.audio_visualizer_options(second), Some(defaults));
-        assert!(!layout.initialize_audio_visualizers(custom));
-        assert_eq!(layout.audio_visualizer_options(second), Some(defaults));
-        let third = layout.add("audio_visualizer", Some(5));
-        assert!(layout.initialize_audio_visualizers(custom));
-        assert_eq!(layout.audio_visualizer_options(third), Some(custom));
-        assert_eq!(layout.audio_visualizer_options(second), Some(defaults));
-        assert!(!layout.set_audio_visualizer_options(3, custom));
-        assert!(!layout.set_audio_visualizer_options(u64::MAX, custom));
-        assert_eq!(layout.audio_visualizer_options(3), None);
-        assert_eq!(layout.audio_visualizer_options(u64::MAX), None);
-        assert!(
-            layout.panels().iter().all(|panel| {
-                panel.kind == "audio_visualizer" || panel.audio_visualizer.is_none()
-            })
-        );
-        assert!(layout.remove(first));
-        assert_eq!(layout.audio_visualizer_options(first), None);
-    }
-
-    #[test]
-    fn audio_visualizer_options_survive_moves_reordering_and_restart() {
-        use crate::config::AudioVisualizerStyle;
-
-        let first_options = AudioVisualizerOptions {
-            style: AudioVisualizerStyle::Bars,
-            reference_lines: true,
-            labels: false,
-        };
-        let second_options = AudioVisualizerOptions {
-            style: AudioVisualizerStyle::Rings,
-            reference_lines: false,
-            labels: true,
-        };
-        let mut layout = Layout::default();
-        // Model an allocator advanced by instances removed before this session.
-        layout.next_id = 100;
-        let first = layout.add("audio_visualizer", Some(2));
-        let second = layout.add("audio_visualizer", Some(2));
-        assert!(layout.set_audio_visualizer_options(first, first_options));
-        assert!(layout.set_audio_visualizer_options(second, second_options));
-        assert!(layout.move_panel(second, 2, Edge::Center, Some(0)));
-        assert_eq!(layout.audio_visualizer_options(first), Some(first_options));
-        assert_eq!(
-            layout.audio_visualizer_options(second),
-            Some(second_options)
-        );
-        assert!(layout.move_panel(first, 5, Edge::Center, None));
-        assert!(layout.move_panel(second, 8, Edge::Bottom, None));
-        assert_eq!(layout.audio_visualizer_options(first), Some(first_options));
-        assert_eq!(
-            layout.audio_visualizer_options(second),
-            Some(second_options)
-        );
-
-        static TEST_ID: AtomicU64 = AtomicU64::new(1);
-        let directory = std::env::temp_dir().join(format!(
-            "rivu-visualizer-layout-test-{}-{}",
-            std::process::id(),
-            TEST_ID.fetch_add(1, Ordering::Relaxed),
-        ));
-        let path = directory.join("layout.json");
-        layout.save(&path).unwrap();
-        let mut reopened = Layout::load(&path).unwrap();
-        assert_same_layout(&reopened, &layout);
-        let visualizers: Vec<_> = reopened
-            .panels()
-            .into_iter()
-            .filter(|panel| panel.kind == "audio_visualizer")
-            .map(|panel| (panel.id, panel.audio_visualizer))
-            .collect();
-        assert_eq!(visualizers.len(), 2);
-        assert_ne!(visualizers[0].0, first);
-        assert_ne!(visualizers[1].0, second);
-        assert_eq!(visualizers[0].1, Some(first_options));
-        assert_eq!(visualizers[1].1, Some(second_options));
-        assert!(!reopened.initialize_audio_visualizers(first_options));
-        assert_same_layout(&reopened, &layout);
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn legacy_audio_visualizers_load_without_options_and_initialize_once() {
-        use crate::config::AudioVisualizerStyle;
-
-        let mut source = Layout::default();
-        source.add("audio_visualizer", Some(2));
-        source.add("audio_visualizer", Some(5));
-        let defaults = AudioVisualizerOptions {
-            style: AudioVisualizerStyle::BarsRings,
-            reference_lines: false,
-            labels: true,
-        };
-        for value in [legacy_value(&source), encoded(&source)] {
-            let mut layout = decoded(value).unwrap();
-            assert!(
+    fn ancestor_target_survives_removal_and_collapse() {
+        for edge in [Edge::Right, Edge::Bottom] {
+            let mut layout = empty();
+            let a = layout.add("a", None);
+            let b = layout.add("b", None);
+            assert!(layout.move_panel(b, group(&layout, a), Edge::Right, None));
+            let ancestor = layout.root.as_ref().unwrap().id();
+            assert!(layout.move_panel(a, ancestor, edge, None));
+            assert_eq!(
                 layout
                     .panels()
                     .iter()
-                    .all(|panel| panel.audio_visualizer.is_none())
+                    .map(|panel| panel.id)
+                    .collect::<Vec<_>>(),
+                vec![b, a]
             );
-            assert!(
-                !serde_json::to_string(&encoded(&layout))
-                    .unwrap()
-                    .contains("\"audio_visualizer\":")
-            );
-            assert!(layout.initialize_audio_visualizers(defaults));
-            assert!(!layout.initialize_audio_visualizers(defaults));
-            let reopened = decoded(encoded(&layout)).unwrap();
-            let visualizers: Vec<_> = reopened
-                .panels()
-                .into_iter()
-                .filter(|panel| panel.kind == "audio_visualizer")
-                .collect();
-            assert_eq!(visualizers.len(), 2);
-            assert!(
-                visualizers
-                    .iter()
-                    .all(|panel| panel.audio_visualizer == Some(defaults))
-            );
-            assert_same_layout(&reopened, &layout);
+            assert_eq!(weights(&layout), vec![1.0, 1.0]);
+            let Some(Node::Split { axis, .. }) = &layout.root else {
+                unreachable!();
+            };
+            assert_eq!(*axis, edge.axis());
+            layout.validate().unwrap();
         }
     }
 
     #[test]
-    fn tab_bar_visibility_is_per_instance_and_survives_moves_and_roundtrips() {
-        let mut layout = Layout::default();
-        let duplicate = layout.add("library", Some(2));
-        assert!(layout.set_tab_bar_visible(3, false));
-        assert!(layout.set_tab_bar_visible(3, false));
-        assert!(!layout.set_tab_bar_visible(u64::MAX, false));
-        assert!(
-            !layout
-                .panels()
-                .iter()
-                .find(|panel| panel.id == 3)
-                .unwrap()
-                .show_tab_bar
-        );
-        assert!(
+    fn split_container_drop_preserves_existing_region_proportions() {
+        let mut layout = Layout {
+            next_id: 30,
+            locked: false,
+            root: Some(Node::Split {
+                id: 1,
+                axis: Axis::Vertical,
+                children: vec![
+                    child(1.0, tabs(2, "source")),
+                    child(
+                        3.0,
+                        Node::Split {
+                            id: 4,
+                            axis: Axis::Horizontal,
+                            children: vec![child(3.0, tabs(5, "a")), child(1.0, tabs(7, "b"))],
+                        },
+                    ),
+                ],
+            }),
+        };
+        assert!(layout.move_panel(3, 4, Edge::Right, None));
+        assert_eq!(weights(&layout), vec![0.75, 0.25, 1.0]);
+        assert_eq!(
             layout
                 .panels()
                 .iter()
-                .find(|panel| panel.id == duplicate)
-                .unwrap()
-                .show_tab_bar
-        );
-        assert!(!layout.active_panels().iter().any(|panel| panel.id == 3));
-        let reopened = decoded(encoded(&layout)).unwrap();
-        assert_same_layout(&reopened, &layout);
-        let libraries = reopened
-            .panels()
-            .into_iter()
-            .filter(|panel| panel.kind == "library")
-            .collect::<Vec<_>>();
-        assert_eq!(
-            libraries
-                .iter()
-                .map(|panel| panel.show_tab_bar)
+                .map(|panel| panel.kind.as_str())
                 .collect::<Vec<_>>(),
-            vec![false, true]
+            vec!["a", "b", "source"]
         );
-        assert!(layout.move_panel(3, 5, Edge::Center, None));
-        assert!(
-            !layout
-                .active_panels()
-                .iter()
-                .find(|panel| panel.id == 3)
-                .unwrap()
-                .show_tab_bar
-        );
-        assert_same_layout(&decoded(encoded(&layout)).unwrap(), &layout);
-        assert_same_layout(&decoded(legacy_value(&layout)).unwrap(), &layout);
-        assert!(layout.set_tab_bar_visible(3, true));
-        assert!(layout.panels().iter().all(|panel| panel.show_tab_bar));
-        let mut compact = decoded(serde_json::json!({
-            "root": {"Tabs": {"panels": [{"kind": "queue", "show_tab_bar": false}]}}
-        }))
-        .unwrap();
-        assert_eq!(
-            encoded(&compact)["root"]["Tabs"]["panels"][0]["show_tab_bar"],
-            false
-        );
-        assert!(compact.set_tab_bar_visible(2, true));
-        assert!(
-            encoded(&compact)["root"]["Tabs"]["panels"][0]
-                .get("show_tab_bar")
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn layout_lock_defaults_off_and_roundtrips_without_blocking_tab_selection() {
-        let mut layout = Layout::default();
-        assert!(!layout.locked);
-        assert!(encoded(&layout).get("locked").is_none());
-        assert!(!decoded(encoded(&layout)).unwrap().locked);
-        assert!(!decoded(legacy_value(&layout)).unwrap().locked);
-        let added = layout.add("history", Some(2));
-        layout.locked = true;
-        assert!(layout.activate(3));
-        assert!(!layout.active_panels().iter().any(|panel| panel.id == added));
-        let saved = encoded(&layout);
-        assert_eq!(saved["locked"], true);
-        assert_same_layout(&decoded(saved).unwrap(), &layout);
-        layout.locked = false;
-        assert!(encoded(&layout).get("locked").is_none());
-    }
-
-    #[test]
-    fn default_transport_can_move_and_stay_closed_after_reopening() {
-        let mut layout = Layout::default();
-        let transport = layout
-            .active_panels()
-            .into_iter()
-            .find(|panel| panel.kind == "transport")
-            .unwrap()
-            .id;
-        assert!(layout.move_panel(transport, group(&layout, 3), Edge::Bottom, None));
         layout.validate().unwrap();
-        let reopened = decoded(encoded(&layout)).unwrap();
-        assert_same_layout(&reopened, &layout);
-        assert!(layout.remove(transport));
-        let reopened = decoded(encoded(&layout)).unwrap();
-        assert_same_layout(&reopened, &layout);
+    }
+
+    #[test]
+    fn unrepresentable_edits_and_exhausted_ids_roll_back_exactly() {
+        let tiny = f32::from_bits(1);
+        let mut layout = Layout {
+            next_id: 20,
+            locked: false,
+            root: Some(Node::Split {
+                id: 1,
+                axis: Axis::Horizontal,
+                children: vec![
+                    child(tiny, tabs(2, "target")),
+                    child(tiny, tabs(4, "other")),
+                    child(1.0, tabs(6, "source")),
+                ],
+            }),
+        };
+        let before = layout.clone();
+        assert!(!layout.move_panel(7, 2, Edge::Right, None));
+        assert_eq!(layout, before);
+        assert!(!layout.set_boundary(1, 0, tiny));
+        assert_eq!(layout, before);
+        layout.next_id = u64::MAX;
+        let before = layout.clone();
+        assert!(!layout.move_panel(7, 2, Edge::Bottom, None));
+        assert_eq!(layout, before);
+
+        let mut layout = Layout {
+            next_id: 30,
+            locked: false,
+            root: Some(Node::Split {
+                id: 1,
+                axis: Axis::Horizontal,
+                children: vec![
+                    child(
+                        tiny,
+                        Node::Split {
+                            id: 2,
+                            axis: Axis::Vertical,
+                            children: vec![
+                                child(1.0, tabs(3, "remove")),
+                                child(
+                                    1.0,
+                                    Node::Split {
+                                        id: 5,
+                                        axis: Axis::Horizontal,
+                                        children: vec![
+                                            child(1.0, tabs(6, "a")),
+                                            child(1.0, tabs(8, "b")),
+                                        ],
+                                    },
+                                ),
+                            ],
+                        },
+                    ),
+                    child(1.0, tabs(10, "other")),
+                ],
+            }),
+        };
+        layout.validate().unwrap();
+        let before = layout.clone();
+        assert!(!layout.remove(4));
+        assert_eq!(layout, before);
+    }
+
+    #[test]
+    fn named_layouts_have_distinct_ownership_and_atomic_name_operations() {
+        let mut set = LayoutSet::default();
+        let original = set.current().clone();
+        set.duplicate("  Work  ").unwrap();
+        assert_eq!(set.active_name(), "Work");
+        let custom = set.current_mut().add("custom", None);
+        set.current_mut().locked = true;
+        set.select(" Default ").unwrap();
+        assert_eq!(set.current(), &original);
+        set.select("Work").unwrap();
         assert!(
-            !reopened
+            set.current()
                 .panels()
                 .iter()
-                .any(|panel| panel.kind == "transport")
+                .any(|panel| panel.id == custom)
         );
-    }
-
-    #[test]
-    fn legacy_migration_preserves_tree_and_only_adds_transport_once() {
-        let mut original = Layout::default();
-        assert!(original.remove(12));
-        original.add("history", Some(2));
-        assert!(original.set_ratio(1, 0.73));
-        let mut legacy = legacy_value(&original);
-        legacy.as_object_mut().unwrap().remove("version");
-        let mut migrated = decoded(legacy).unwrap();
-        migrated.validate().unwrap();
-        let Some(Node::Split {
-            axis,
-            first,
-            second,
-            ..
-        }) = &migrated.root
-        else {
-            panic!("migration must wrap the existing layout");
-        };
-        assert_eq!(*axis, Axis::Vertical);
-        let original_subtree = Layout {
-            root: Some(second.as_ref().clone()),
-            next_id: migrated.next_id,
-            version: 1,
-            locked: false,
-        };
-        assert_same_layout(&original_subtree, &original);
-        assert!(matches!(first.as_ref(), Node::Tabs { panels, active, .. }
-            if panels.len() == 1 && panels[0].kind == "transport" && panels[0].id == *active));
-        assert_same_layout(&decoded(encoded(&migrated)).unwrap(), &migrated);
-        let once = migrated.clone();
-        migrated.migrate().unwrap();
-        assert_eq!(migrated, once);
-        migrated.version = 0;
-        migrated.migrate().unwrap();
-        assert_eq!(migrated, once);
-    }
-
-    #[test]
-    fn empty_legacy_layout_migrates_and_id_exhaustion_is_non_destructive() {
-        let empty = decoded(serde_json::json!({"root": null, "next_id": 1})).unwrap();
-        empty.validate().unwrap();
-        assert_eq!(empty.panels().len(), 1);
-        assert_eq!(empty.panels()[0].kind, "transport");
-        let mut exhausted = Layout {
-            root: None,
-            next_id: u64::MAX,
-            version: 0,
-            locked: false,
-        };
-        let original = exhausted.clone();
-        assert!(exhausted.migrate().is_err());
-        assert_eq!(exhausted, original);
-    }
-
-    #[test]
-    fn remove_collapses_splits_and_can_repopulate_empty_layout() {
-        let mut layout = Layout::default();
-        layout.validate().unwrap();
-        let original_ids = ids(&layout);
-        for (index, panel) in original_ids.iter().enumerate() {
-            assert!(layout.remove(*panel));
-            assert!(!layout.remove(*panel));
-            layout.validate().unwrap();
-            assert_eq!(ids(&layout), original_ids[index + 1..]);
+        set.rename("  Music  ").unwrap();
+        set.rename("Music").unwrap();
+        assert_eq!(set.names().collect::<Vec<_>>(), vec!["Default", "Music"]);
+        let before = encoded(&set);
+        for invalid in ["", "  ", "Default"] {
+            assert!(set.duplicate(invalid).is_err());
+            assert!(set.rename(invalid).is_err());
+            assert_eq!(encoded(&set), before);
         }
-        assert!(layout.root.is_none());
-        let id = layout.add("history", None);
-        assert!(id > *original_ids.last().unwrap());
-        layout.validate().unwrap();
-        assert_eq!(ids(&layout), vec![id]);
-        assert_eq!(layout.active_panels()[0].id, id);
+        assert!(set.select("missing").is_err());
+        assert!(set.remove("Music").is_err());
+        assert!(set.remove("missing").is_err());
+        assert_eq!(encoded(&set), before);
+        set.remove(" Default ").unwrap();
+        assert_eq!(set.names().collect::<Vec<_>>(), vec!["Music"]);
+        assert!(set.remove("Music").is_err());
     }
 
     #[test]
-    fn reorder_and_move_preserve_instances_and_active_selection() {
-        let mut layout = Layout::default();
-        let target = group(&layout, 3);
-        let a = layout.add("playlists", Some(target));
-        let b = layout.add("metadata", Some(target));
-        let original_ids = ids(&layout);
-        assert!(layout.move_panel(b, target, Edge::Center, Some(0)));
-        assert!(matches!(layout.root.as_ref().unwrap().find(target),
-            Some(Node::Tabs { panels, active, .. })
-            if panels.iter().map(|panel| panel.id).collect::<Vec<_>>() == vec![b, 3, a] && *active == b));
-        assert!(layout.activate(3));
-        assert!(layout.move_panel(3, group(&layout, 6), Edge::Center, Some(0)));
-        assert!(layout.active_panels().iter().any(|panel| panel.id == a));
-        assert!(layout.active_panels().iter().any(|panel| panel.id == 3));
-        assert!(layout.remove(a));
-        layout.validate().unwrap();
+    fn instance_preferences_roundtrip_flat_and_initialization_keeps_saved_choices() {
+        let mut set = LayoutSet::default();
+        *set.current_mut() = empty();
+        let first = set.current_mut().add("audio_visualizer", None);
+        let second = set.current_mut().add("audio_visualizer", None);
+        let saved = AudioVisualizerOptions {
+            style: AudioVisualizerStyle::Rings,
+            reference_lines: false,
+            labels: true,
+        };
+        let defaults = AudioVisualizerOptions {
+            style: AudioVisualizerStyle::Bars,
+            reference_lines: true,
+            labels: false,
+        };
+        assert!(set.current_mut().set_audio_visualizer_options(first, saved));
+        assert!(set.current_mut().set_tab_bar_visible(first, false));
+        assert!(set.current_mut().initialize_audio_visualizers(defaults));
+        assert!(!set.current_mut().initialize_audio_visualizers(saved));
+        assert_eq!(set.current().audio_visualizer_options(first), Some(saved));
         assert_eq!(
-            ids(&layout),
-            original_ids
-                .into_iter()
-                .filter(|id| *id != a)
-                .collect::<Vec<_>>()
+            set.current().audio_visualizer_options(second),
+            Some(defaults)
         );
-        assert!(layout.active_panels().iter().any(|panel| panel.id == b));
+        set.current_mut().locked = true;
+        set.duplicate("Another").unwrap();
+        let value = encoded(&set);
+        let panels = &value["layouts"]["Default"]["root"]["panels"];
+        assert_eq!(panels[0]["style"], "rings");
+        assert_eq!(panels[0]["reference_lines"], false);
+        assert_eq!(panels[0]["labels"], true);
+        assert!(panels[0].get("audio_visualizer").is_none());
+        let reopened = decoded(value.clone()).unwrap();
+        assert_eq!(encoded(&reopened), value);
+        reopened.validate().unwrap();
     }
 
     #[test]
-    fn invalid_moves_and_lone_self_drops_are_unchanged() {
-        let mut layout = Layout::default();
-        let original = layout.clone();
-        assert!(!layout.move_panel(3, 999, Edge::Left, None));
-        assert!(!layout.move_panel(999, 2, Edge::Center, None));
-        assert!(!layout.move_panel(3, 1, Edge::Center, None));
-        for edge in [
-            Edge::Center,
-            Edge::Left,
-            Edge::Right,
-            Edge::Top,
-            Edge::Bottom,
+    fn strict_format_rejects_unknown_fields_and_malformed_structures() {
+        let leaf = wire_tabs("a");
+        let split = json!({"type":"split", "axis":"horizontal", "children":[
+            {"node":leaf.clone()}, {"node":wire_tabs("b")}
+        ]});
+        for root in [
+            json!({"type":"unknown"}),
+            json!({"type":"tabs", "panels":[]}),
+            json!({"type":"tabs", "panels":[{"kind":"a"}], "active":1}),
+            json!({"type":"tabs", "panels":[{"kind":"a"}], "active":-1}),
+            json!({"type":"tabs", "panels":[{"kind":"a", "show_tabs":true}]}),
+            json!({"type":"tabs", "panels":[{}]}),
+            json!({"type":"tabs", "panels":[{"kind":"audio_visualizer", "style":"bars"}]}),
+            json!({"type":"tabs", "panels":[{"kind":"a", "style":"bars", "reference_lines":true, "labels":true}]}),
+            json!({"type":"tabs", "panels":[{"kind":"audio_visualizer", "style":null}]}),
+            json!({"type":"split", "axis":"horizontal", "children":[{"node":leaf.clone()}]}),
+            json!({"type":"split", "axis":"Horizontal", "children":[{"node":leaf.clone()}, {"node":leaf.clone()}]}),
+            json!({"type":"split", "axis":"horizontal", "children":[{"node":split}, {"node":leaf.clone()}]}),
+            json!({"type":"split", "axis":"vertical", "children":[{"weigth":2, "node":leaf.clone()}, {"node":leaf.clone()}]}),
         ] {
-            assert!(layout.move_panel(3, 2, edge, None));
-            assert_eq!(layout, original);
-        }
-    }
-
-    #[test]
-    fn edge_moves_handle_siblings_own_groups_and_ancestor_collapse() {
-        for edge in [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom] {
-            let mut layout = Layout::default();
-            let original_ids = ids(&layout);
-            assert!(layout.move_panel(3, 5, edge, None));
-            layout.validate().unwrap();
-            assert_eq!(ids(&layout), original_ids);
-            let source_group = group(&layout, 3);
-            let added = layout.add("devices", Some(source_group));
-            assert!(layout.move_panel(3, source_group, edge, None));
-            layout.validate().unwrap();
-            assert_ne!(group(&layout, 3), group(&layout, added));
-            let root_id = layout.root.as_ref().unwrap().id();
-            assert!(layout.move_panel(3, root_id, edge, None));
-            layout.validate().unwrap();
-            let mut expected = original_ids;
-            expected.push(added);
-            expected.sort_unstable();
-            assert_eq!(ids(&layout), expected);
-            let Node::Split {
-                axis,
-                first,
-                second,
-                ..
-            } = layout.root.as_ref().unwrap()
-            else {
-                panic!("edge docking must create a split");
-            };
-            assert_eq!(
-                *axis,
-                if matches!(edge, Edge::Left | Edge::Right) {
-                    Axis::Horizontal
-                } else {
-                    Axis::Vertical
-                }
-            );
-            let incoming = if matches!(edge, Edge::Left | Edge::Top) {
-                first
-            } else {
-                second
-            };
             assert!(
-                matches!(incoming.as_ref(), Node::Tabs { panels, active, .. }
-                if panels.len() == 1 && *active == 3)
+                decoded(one_layout(root.clone())).is_err(),
+                "accepted {root}"
             );
         }
-        let mut layout = Layout::default();
-        assert!(layout.move_panel(3, 1, Edge::Left, None));
-        layout.validate().unwrap();
-        assert_eq!(ids(&layout), vec![3, 6, 9, 11, 12]);
-        assert!(layout.root.as_ref().unwrap().find(1).is_none());
-    }
-
-    #[test]
-    fn ratios_and_structural_validation_reject_invalid_state() {
-        let mut layout = Layout::default();
-        let original = layout.clone();
-        for ratio in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.09, 0.91] {
-            assert!(!layout.set_ratio(1, ratio));
-            assert_eq!(layout, original);
-        }
-        assert!(!layout.set_ratio(2, 0.5));
-        assert!(!layout.set_ratio(999, 0.5));
-        assert!(layout.set_ratio(1, 0.1));
-        assert!(layout.set_ratio(1, 0.9));
-        layout.validate().unwrap();
-        for (node_id, panel_id, active, next_id) in [
-            (0, 2, 2, 3),
-            (1, 0, 0, 3),
-            (1, 1, 1, 3),
-            (1, 2, 99, 3),
-            (1, 2, 2, 2),
-            (1, 2, 2, 0),
+        for weight in [
+            json!(0),
+            json!(-1),
+            json!(null),
+            json!("1"),
+            json!(f64::MAX),
         ] {
-            let invalid = Layout {
-                root: Some(Node::Tabs {
-                    id: node_id,
-                    panels: vec![Panel {
-                        id: panel_id,
-                        kind: "library".into(),
-                        show_tab_bar: true,
-                        audio_visualizer: None,
-                    }],
-                    active,
-                }),
-                next_id,
-                version: 1,
-                locked: false,
-            };
-            assert!(invalid.validate().is_err());
+            let root = json!({"type":"split", "axis":"horizontal", "children":[
+                {"weight":weight, "node":leaf.clone()}, {"node":leaf.clone()}
+            ]});
+            assert!(decoded(one_layout(root)).is_err());
         }
-        let mut invalid = Layout::default();
-        if let Some(Node::Split { ratio, .. }) = invalid.root.as_mut() {
-            *ratio = f32::NAN;
+        let overflowing = json!({"type":"split", "axis":"horizontal", "children":[
+            {"weight":f32::MAX, "node":leaf.clone()}, {"weight":f32::MAX, "node":leaf}
+        ]});
+        assert!(decoded(one_layout(overflowing)).is_err());
+        for value in [
+            json!({"layouts":{"Work":{"root":null}}}),
+            json!({"active":"Work", "layouts":{}}),
+            json!({"active":"Missing", "layouts":{"Work":{"root":null}}}),
+            json!({"active":"Work", "layouts":{"Work":{}}}),
+            json!({"active":"Work", "layouts":{"Work":{"root":null,"lock":true}}}),
+            json!({"active":"Work", "layouts":{"Work":{"root":null}}, "selected":"Work"}),
+            json!({"active":"Work", "layouts":{"Work":{"root":null}, " Work ":{"root":null}}}),
+            json!({"active":" ", "layouts":{" ":{"root":null}}}),
+        ] {
+            assert!(decoded(value.clone()).is_err(), "accepted {value}");
         }
-        assert!(invalid.validate().is_err());
+        assert!(
+            serde_json::from_str::<persistence::Input>(
+                r#"{"active":"Work","layouts":{"Work":{"root":null},"Work":{"root":null}}}"#
+            )
+            .is_err()
+        );
+        let empty = decoded(one_layout(Value::Null)).unwrap();
+        assert!(empty.current().root.is_none());
+        assert!(decoded(one_layout(wire_tabs("extension-panel-kind"))).is_ok());
     }
 
     #[test]
-    fn deterministic_transition_sequence_preserves_all_instances() {
+    fn atomic_save_and_failed_deletion_preserve_previous_collection() {
+        let directory = TemporaryDirectory::new();
+        let path = directory.0.join("layout.json");
+        let mut set = LayoutSet::default();
+        set.duplicate("Work").unwrap();
+        set.current_mut().add("custom", None);
+        set.save(&path).unwrap();
+        assert_eq!(encoded(&LayoutSet::load(&path).unwrap()), encoded(&set));
+        let previous_bytes = fs::read(&path).unwrap();
+        let next_id = set.current().next_id;
+        set.current_mut().next_id = 1;
+        assert!(set.save(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), previous_bytes);
+        set.current_mut().next_id = next_id;
+
+        // Rename over a directory fails after the complete temporary write.
+        let blocked = directory.0.join("blocked");
+        fs::create_dir(&blocked).unwrap();
+        fs::write(blocked.join("keep"), b"unchanged").unwrap();
+        let before = encoded(&set);
+        assert!(set.remove_saved("Default", &blocked).is_err());
+        assert_eq!(encoded(&set), before);
+        assert_eq!(fs::read(blocked.join("keep")).unwrap(), b"unchanged");
+        assert_eq!(fs::read(&path).unwrap(), previous_bytes);
+        assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 2);
+        set.remove_saved("Default", &path).unwrap();
+        assert_eq!(
+            LayoutSet::load(&path).unwrap().names().collect::<Vec<_>>(),
+            vec!["Work"]
+        );
+    }
+
+    #[test]
+    fn mixed_transitions_keep_instances_and_normalized_structure() {
         let mut layout = Layout::default();
-        let mut expected = ids(&layout);
-        let kinds = [
-            "library",
-            "queue",
-            "playlists",
-            "metadata",
-            "history",
-            "devices",
-            "spectrum",
-            "spectrogram",
-        ];
+        let mut expected = layout
+            .panels()
+            .iter()
+            .map(|panel| panel.id)
+            .collect::<Vec<_>>();
         let edges = [
             Edge::Center,
             Edge::Left,
-            Edge::Right,
             Edge::Top,
+            Edge::Right,
             Edge::Bottom,
         ];
-        for step in 0..160 {
-            let panels = ids(&layout);
+        for step in 0..80 {
+            let panels = layout
+                .panels()
+                .iter()
+                .map(|panel| panel.id)
+                .collect::<Vec<_>>();
             let source = panels[step % panels.len()];
             let target = group(&layout, panels[(step * 7 + 1) % panels.len()]);
             match step % 4 {
-                0 => expected.push(layout.add(kinds[step / 4 % kinds.len()], Some(target))),
+                0 => expected.push(layout.add("custom", Some(target))),
                 1 | 2 => assert!(layout.move_panel(
                     source,
                     target,
@@ -1758,50 +1950,15 @@ mod tests {
                     expected.retain(|id| *id != source);
                 }
             }
-            expected.sort_unstable();
             layout.validate().unwrap();
-            assert_eq!(ids(&layout), expected);
-            let reopened = decoded(encoded(&layout)).unwrap();
-            assert_same_layout(&reopened, &layout);
+            expected.sort_unstable();
+            let mut actual = layout
+                .panels()
+                .iter()
+                .map(|panel| panel.id)
+                .collect::<Vec<_>>();
+            actual.sort_unstable();
+            assert_eq!(actual, expected);
         }
-    }
-
-    #[test]
-    fn atomic_save_preserves_structure_and_invalid_save_preserves_previous_file() {
-        static TEST_ID: AtomicU64 = AtomicU64::new(1);
-        let directory = std::env::temp_dir().join(format!(
-            "rivu-layout-test-{}-{}",
-            std::process::id(),
-            TEST_ID.fetch_add(1, Ordering::Relaxed),
-        ));
-        fs::create_dir(&directory).unwrap();
-        let path = directory.join("layout.json");
-        let mut layout = Layout::default();
-        layout.save(&path).unwrap();
-        let custom = layout.add("history", Some(2));
-        assert!(layout.move_panel(custom, 5, Edge::Bottom, None));
-        let split = layout.root.as_ref().unwrap().id();
-        assert!(layout.set_ratio(split, 0.73));
-        assert!(layout.activate(3));
-        layout.save(&path).unwrap();
-        assert_same_layout(&Layout::load(&path).unwrap(), &layout);
-        let mut invalid = layout.clone();
-        invalid.next_id = 1;
-        assert!(invalid.save(&path).is_err());
-        assert_same_layout(&Layout::load(&path).unwrap(), &layout);
-        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
-        let mut legacy = legacy_value(&layout);
-        legacy.as_object_mut().unwrap().remove("version");
-        fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
-        let migrated = Layout::load(&path).unwrap();
-        assert_same_layout(&migrated, &layout);
-        migrated.save(&path).unwrap();
-        let saved: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_same_layout(&decoded(saved).unwrap(), &layout);
-        fs::write(&path, b"{broken").unwrap();
-        assert!(Layout::load(&path).is_err());
-        fs::write(&path, serde_json::to_vec(&legacy_value(&invalid)).unwrap()).unwrap();
-        assert!(Layout::load(&path).is_err());
-        fs::remove_dir_all(directory).unwrap();
     }
 }

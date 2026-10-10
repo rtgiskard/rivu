@@ -23,7 +23,7 @@ use std::{cell::RefCell, collections::HashMap, ops::Range, rc::Rc, sync::Arc, ti
 
 use crate::{
     analysis::AnalysisFrame,
-    config::{Config, SpectrumStyle, AnalysisWindow, VisualizationPalette},
+    config::{AnalysisWindow, Config, SpectrumStyle, VisualizationPalette},
 };
 
 const HISTORY_GAP_RESET: Duration = Duration::from_secs(1);
@@ -622,6 +622,30 @@ impl Visuals {
         });
         if !data.retired.is_empty() {
             window.request_animation_frame();
+        }
+    }
+
+    pub(super) fn release_all_images(&self, window: &mut Window) {
+        let mut data = self.data.borrow_mut();
+        let mut failure = None;
+        let VisualData {
+            columns,
+            retired,
+            pending_images,
+            ..
+        } = &mut *data;
+        for image in columns
+            .iter_mut()
+            .filter_map(|column| column.image.take())
+            .chain(retired.drain(..))
+            .chain(pending_images.drain(..))
+        {
+            if let Err(error) = window.drop_image(image) {
+                failure = Some(format!("Cannot release spectrogram image: {error}"));
+            }
+        }
+        if let Some(error) = failure {
+            data.report_error(error);
         }
     }
 

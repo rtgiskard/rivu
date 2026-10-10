@@ -1,5 +1,6 @@
 mod analysis_visualizer;
 mod artwork;
+mod audio_visualizer;
 mod components;
 mod fonts;
 mod fractal_beams;
@@ -7,10 +8,10 @@ mod fractal_flow;
 mod fractal_visualizer;
 mod input;
 mod layout;
+mod layout_manager;
 mod library;
 mod paged;
 mod panels;
-mod audio_visualizer;
 mod scrolling;
 mod settings;
 mod visuals;
@@ -39,14 +40,14 @@ pub(super) use components::{
 use futures::{FutureExt, StreamExt, channel::mpsc};
 use gpui::{prelude::*, *};
 use input::{Input, InputEvent};
-use layout::{Axis, Edge, Layout, Node};
+use layout::{Axis, Edge, LayoutSet, Node};
 use library::LibraryNode;
 use paged::PagedRows;
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    rc::Rc,
+    rc::{Rc, Weak},
     sync::Arc,
     time::Duration,
 };
@@ -68,6 +69,7 @@ const SPLIT_GUTTER: f32 = 4.0;
 enum Field {
     Search,
     PlaylistName,
+    LayoutName,
     Title,
     Artist,
     Album,
@@ -137,6 +139,7 @@ fn panel_spec(kind: &str) -> Option<&'static PanelSpec> {
 struct GuiHost {
     handle: AppHandle,
     layout_path: PathBuf,
+    self_weak: Weak<RefCell<GuiHost>>,
     window: Option<WindowHandle<GuiApp>>,
     tray: Option<TrayController>,
     error: Option<anyhow::Error>,
@@ -167,6 +170,7 @@ impl GuiHost {
         let bounds = Bounds::centered(None, size(px(1200.), px(800.)), cx);
         let handle = self.handle.clone();
         let layout_path = self.layout_path.clone();
+        let host = self.self_weak.clone();
         match cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -178,17 +182,40 @@ impl GuiHost {
                 app_id: Some("rivu".into()),
                 ..Default::default()
             },
-            move |window, cx| cx.new(|cx| GuiApp::new(handle, layout_path, window, cx)),
+            move |window, cx| cx.new(|cx| GuiApp::new(handle, layout_path, host, window, cx)),
         ) {
             Ok(window) => {
                 self.window = Some(window);
+                self.error = None;
                 tracing::info!("gui_window_created");
                 cx.activate(true);
             }
             Err(error) => {
+                tracing::error!(%error, "Could not open Rivu window; use Show window to retry");
                 self.error = Some(error.context("Could not open Rivu window"));
-                self.quit(cx);
             }
+        }
+    }
+
+    fn reload_window(&mut self, cx: &mut App) {
+        if self.quitting || self.handle.is_shutting_down() {
+            return;
+        }
+        let Some(window) = self.window else {
+            return;
+        };
+        let handle = self.handle.clone();
+        let layout_path = self.layout_path.clone();
+        let host = self.self_weak.clone();
+        self.clear_window_state();
+        if let Err(error) = window.update(cx, |old, window, cx| {
+            old.release_render_images(window, cx);
+            window.replace_root(cx, |window, cx| {
+                GuiApp::new(handle, layout_path, host, window, cx)
+            });
+        }) {
+            tracing::error!(%error, "Could not reload Rivu window; use Show window to retry");
+            self.window_closed(window.window_id());
         }
     }
 
@@ -247,21 +274,25 @@ pub fn run(handle: AppHandle, layout_path: PathBuf) -> Result<()> {
     } else {
         None
     };
-    let host = Rc::new(RefCell::new(GuiHost {
-        handle: handle.clone(),
-        layout_path,
-        window: None,
-        tray,
-        error: None,
-        quitting: false,
-    }));
+    let host = Rc::new_cyclic(|self_weak| {
+        RefCell::new(GuiHost {
+            handle: handle.clone(),
+            layout_path,
+            self_weak: self_weak.clone(),
+            window: None,
+            tray,
+            error: None,
+            quitting: false,
+        })
+    });
     let app_host = host.clone();
     gpui_platform::application()
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx: &mut App| {
             #[cfg(feature = "embed-nerd-font")]
             if let Err(error) = fonts::register_symbols(cx) {
-                app_host.borrow_mut().error = Some(error.context("Could not load embedded icon font"));
+                app_host.borrow_mut().error =
+                    Some(error.context("Could not load embedded icon font"));
                 cx.quit();
                 return;
             }
@@ -404,7 +435,7 @@ enum Measured {
 }
 #[derive(Clone, Copy)]
 enum Dragging {
-    Split(u64, Axis),
+    Split(u64, usize, Axis, Bounds<Pixels>),
     Seek(u64),
     Volume(u64),
 }
@@ -500,7 +531,8 @@ struct PlaylistEntriesBuffer {
 pub(super) struct GuiApp {
     handle: AppHandle,
     state: GuiSnapshot,
-    layout: Layout,
+    layouts: LayoutSet,
+    host: Weak<RefCell<GuiHost>>,
     layout_path: PathBuf,
     inputs: HashMap<Field, Entity<Input>>,
     selected: HashSet<i64>,
@@ -547,6 +579,8 @@ pub(super) struct GuiApp {
     about_open: bool,
     about_focus: FocusHandle,
     app_menu_open: bool,
+    layouts_open: bool,
+    layout_action: Option<layout_manager::Action>,
     panel_menu: Option<PanelMenu>,
     playlist_delete_confirm: Option<i64>,
     settings_focus: FocusHandle,
@@ -586,13 +620,15 @@ impl GuiApp {
         cx: &mut Context<Self>,
         focus_search: bool,
     ) {
-        if let Some(panel) = self
-            .layout
+        if let Some(panel_id) = self
+            .layouts
+            .current()
             .panels()
             .into_iter()
             .find(|panel| panel.kind == "library")
+            .map(|panel| panel.id)
         {
-            self.layout.activate(panel.id);
+            self.layouts.current_mut().activate(panel_id);
             self.list_focus = Some(ListFocus::Library);
             self.catalog_open = false;
             if focus_search {
@@ -601,14 +637,14 @@ impl GuiApp {
                 });
             }
             self.persist_layout(cx);
-        } else if self.layout.locked {
+        } else if self.layouts.current().locked {
             self.error = Some(
                 "Library panel is not in this locked layout; unlock it to add Library.".into(),
             );
             cx.notify();
         } else {
-            let panel_id = self.layout.add("library", self.target_group);
-            self.layout.activate(panel_id);
+            let panel_id = self.layouts.current_mut().add("library", self.target_group);
+            self.layouts.current_mut().activate(panel_id);
             self.list_focus = Some(ListFocus::Library);
             self.catalog_open = false;
             if focus_search {
@@ -622,7 +658,8 @@ impl GuiApp {
 
     fn active_list_focus(&self) -> Option<ListFocus> {
         self.list_focus.or_else(|| {
-            self.layout
+            self.layouts
+                .current()
                 .active_panels()
                 .into_iter()
                 .find_map(|panel| match panel.kind.as_str() {
@@ -777,36 +814,30 @@ impl GuiApp {
     fn new(
         handle: AppHandle,
         layout_path: PathBuf,
+        host: Weak<RefCell<GuiHost>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let state = handle.gui_snapshot();
-        let (layout, mut error) = if layout_path.exists() {
-            match Layout::load(&layout_path) {
-                Ok(layout) => (layout, None),
+        let (mut layouts, mut error) = if layout_path.exists() {
+            match LayoutSet::load(&layout_path) {
+                Ok(layouts) => (layouts, None),
                 Err(error) => (
-                    Layout::default(),
-                    Some(format!("Could not load layout: {error:#}")),
+                    LayoutSet::default(),
+                    Some(format!("Could not load layouts: {error:#}")),
                 ),
             }
         } else {
-            (Layout::default(), None)
+            (LayoutSet::default(), None)
         };
-        let mut layout = layout;
-        let settings_panels: Vec<_> = layout
-            .panels()
-            .into_iter()
-            .filter(|panel| panel.kind == "settings")
-            .map(|panel| panel.id)
-            .collect();
-        for id in settings_panels {
-            layout.remove(id);
-        }
-        if layout.initialize_audio_visualizers(AudioVisualizerOptions::from(
-            state.system.config.as_ref(),
-        )) {
-            if let Err(save_error) = layout.save(&layout_path) {
-                error = Some(format!("Saving layout: {save_error:#}"));
+        if layouts
+            .current_mut()
+            .initialize_audio_visualizers(AudioVisualizerOptions::from(
+                state.system.config.as_ref(),
+            ))
+        {
+            if let Err(save_error) = layouts.save(&layout_path) {
+                error = Some(format!("Saving layouts: {save_error:#}"));
             }
         }
         let ui_font = fonts::resolve(&state.system.config.ui_font, cx);
@@ -814,6 +845,7 @@ impl GuiApp {
         for (field, placeholder) in [
             (Field::Search, "Search title, artist or album"),
             (Field::PlaylistName, "Playlist name"),
+            (Field::LayoutName, "Layout name"),
             (Field::Title, "Title"),
             (Field::Artist, "Artist"),
             (Field::Album, "Album"),
@@ -851,6 +883,18 @@ impl GuiApp {
                 cx.notify();
             }
         }));
+        subscriptions.push(cx.subscribe_in(
+            &inputs[&Field::LayoutName],
+            window,
+            |this, _, event, window, cx| {
+                if matches!(event, InputEvent::Submit)
+                    && this.layouts_open
+                    && this.layout_action.is_some()
+                {
+                    this.finish_layout_action(window, cx);
+                }
+            },
+        ));
         for field in [Field::Title, Field::Artist, Field::Album] {
             subscriptions.push(cx.subscribe(&inputs[&field], |_, _, event, cx| {
                 if matches!(event, InputEvent::Changed) {
@@ -892,7 +936,8 @@ impl GuiApp {
             settings: settings::Settings::new(&state.system.config),
             handle,
             state,
-            layout,
+            layouts,
+            host,
             layout_path,
             inputs,
             selected: HashSet::new(),
@@ -940,6 +985,8 @@ impl GuiApp {
             about_open: false,
             about_focus: cx.focus_handle(),
             app_menu_open: false,
+            layouts_open: false,
+            layout_action: None,
             panel_menu: None,
             playlist_delete_confirm: None,
             settings_focus: cx.focus_handle(),
@@ -969,11 +1016,19 @@ impl GuiApp {
         app.refresh(cx);
         app.layout_focus.focus(window, cx);
         window
-            .observe_release(&cx.entity(), cx, |this: &mut Self, window, _| {
-                this.audio_visualizer.release_all_images(window);
+            .observe_release(&cx.entity(), cx, |this: &mut Self, window, cx| {
+                this.release_render_images(window, cx);
             })
             .detach();
         app
+    }
+    fn release_render_images(&self, window: &mut Window, cx: &App) {
+        self.audio_visualizer.release_all_images(window);
+        self.visuals.release_all_images(window);
+        self.waveform
+            .read(cx)
+            .image_releaser()
+            .release_all_images(window);
     }
     fn send(&mut self, command: Command, cx: &mut Context<Self>) {
         if let Err(error) = self.handle.send(command) {
@@ -1908,7 +1963,7 @@ impl GuiApp {
         let enabled = !self.state.system.config.still_mode;
         self.visuals.set_enabled(enabled);
         let active_panels = if enabled {
-            self.layout.active_panels()
+            self.layouts.current().active_panels()
         } else {
             Vec::new()
         };
@@ -1962,7 +2017,8 @@ impl GuiApp {
             });
         if analysis_visible {
             let spectrum_changed = self.visuals.configure(&self.state.system.config);
-            self.analysis_needs_refresh |= spectrum_restored || spectrum_changed || audio_visualizer_changed;
+            self.analysis_needs_refresh |=
+                spectrum_restored || spectrum_changed || audio_visualizer_changed;
         }
         if analysis_visible != self.analysis_worker_enabled {
             self.analysis_worker_enabled = analysis_visible;
@@ -1979,7 +2035,7 @@ impl GuiApp {
     fn sync_waveform(&mut self, cx: &mut Context<Self>) {
         let enabled = !self.state.system.config.still_mode;
         let panels = if enabled {
-            self.layout.active_panels()
+            self.layouts.current().active_panels()
         } else {
             Vec::new()
         };
@@ -2005,12 +2061,11 @@ impl GuiApp {
     fn prune_measured(&mut self) {
         fn collect(node: &Node, keys: &mut HashSet<Measured>) {
             match node {
-                Node::Split {
-                    id, first, second, ..
-                } => {
+                Node::Split { id, children, .. } => {
                     keys.insert(Measured::Node(*id));
-                    collect(first, keys);
-                    collect(second, keys);
+                    for child in children {
+                        collect(&child.node, keys);
+                    }
                 }
                 Node::Tabs { id, panels, .. } => {
                     keys.insert(Measured::Node(*id));
@@ -2022,7 +2077,7 @@ impl GuiApp {
             }
         }
         let mut active = HashSet::from([Measured::Device]);
-        if let Some(root) = &self.layout.root {
+        if let Some(root) = &self.layouts.current().root {
             collect(root, &mut active);
         }
         self.measured
@@ -2030,12 +2085,13 @@ impl GuiApp {
             .retain(|key, _| active.contains(key));
     }
     fn persist_layout(&mut self, cx: &mut Context<Self>) {
-        self.layout
+        self.layouts
+            .current_mut()
             .initialize_audio_visualizers(AudioVisualizerOptions::from(
                 self.state.system.config.as_ref(),
             ));
         self.prune_measured();
-        if let Err(error) = self.layout.save(&self.layout_path) {
+        if let Err(error) = self.layouts.save(&self.layout_path) {
             self.error = Some(format!("Saving layout: {error:#}"));
         }
         self.sync_analysis(cx);
@@ -2103,10 +2159,14 @@ impl GuiApp {
         index: Option<usize>,
         cx: &mut Context<Self>,
     ) {
-        if self.layout.locked {
+        if self.layouts.current().locked {
             return;
         }
-        if self.layout.move_panel(panel_id, target, edge, index) {
+        if self
+            .layouts
+            .current_mut()
+            .move_panel(panel_id, target, edge, index)
+        {
             self.target_group = Some(target);
             self.persist_layout(cx);
         }
@@ -2118,64 +2178,81 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match node {
-            Node::Split {
-                id,
-                axis,
-                ratio,
-                first,
-                second,
-            } => {
+            Node::Split { id, axis, children } => {
                 let id = *id;
                 let axis = *axis;
-                let ratio = *ratio;
-                let a = self.render_node(first, window, cx);
-                let b = self.render_node(second, window, cx);
-                let wrap = |child: AnyElement, fraction: f32| {
-                    div()
-                        .min_w_0()
-                        .min_h_0()
-                        .overflow_hidden()
-                        .when(axis == Axis::Horizontal, |view| {
-                            view.h_full().w(relative(fraction))
-                        })
-                        .when(axis == Axis::Vertical, |view| {
-                            view.w_full().h(relative(fraction))
-                        })
-                        .child(child)
-                };
-                let gutter = div()
-                    .id(("split", id))
-                    .flex_shrink_0()
-                    .bg(rgb(BG))
-                    .hover(|style| style.bg(rgb(ACCENT)))
-                    .when(axis == Axis::Horizontal, |view| {
-                        view.w(px(SPLIT_GUTTER)).h_full().cursor_col_resize()
-                    })
-                    .when(axis == Axis::Vertical, |view| {
-                        view.h(px(SPLIT_GUTTER)).w_full().cursor_row_resize()
-                    })
-                    .when(self.layout.locked, |view| view.cursor_default())
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _, cx| {
-                            if this.layout.locked {
-                                return;
-                            }
-                            this.dragging = Some(Dragging::Split(id, axis));
-                            cx.stop_propagation();
-                        }),
-                    );
-                div()
+                let total: f32 = children.iter().map(|child| child.weight).sum();
+                let mut split = div()
                     .id(("node", id))
                     .relative()
                     .size_full()
                     .flex()
                     .min_w_0()
                     .min_h_0()
-                    .when(axis == Axis::Vertical, |view| view.flex_col())
-                    .child(wrap(a, ratio))
-                    .child(gutter)
-                    .child(wrap(b, 1. - ratio))
+                    .when(axis == Axis::Vertical, |view| view.flex_col());
+                for (index, child) in children.iter().enumerate() {
+                    let content = self.render_node(&child.node, window, cx);
+                    split = split.child(
+                        div()
+                            .min_w_0()
+                            .min_h_0()
+                            .flex_basis(px(0.))
+                            .flex_grow(child.weight / total * children.len() as f32)
+                            .overflow_hidden()
+                            .when(axis == Axis::Horizontal, |view| view.h_full())
+                            .when(axis == Axis::Vertical, |view| view.w_full())
+                            .child(content),
+                    );
+                    if let Some(next) = children.get(index + 1) {
+                        let node_id = |node: &Node| match node {
+                            Node::Split { id, .. } | Node::Tabs { id, .. } => *id,
+                        };
+                        let first = node_id(&child.node);
+                        let second = node_id(&next.node);
+                        split = split.child(
+                            div()
+                                .id(("split", index))
+                                .flex_shrink_0()
+                                .bg(rgb(BG))
+                                .hover(|style| style.bg(rgb(ACCENT)))
+                                .when(axis == Axis::Horizontal, |view| {
+                                    view.w(px(SPLIT_GUTTER)).h_full().cursor_col_resize()
+                                })
+                                .when(axis == Axis::Vertical, |view| {
+                                    view.h(px(SPLIT_GUTTER)).w_full().cursor_row_resize()
+                                })
+                                .when(self.layouts.current().locked, |view| view.cursor_default())
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, _, cx| {
+                                        if this.layouts.current().locked {
+                                            return;
+                                        }
+                                        let measured = this.measured.borrow();
+                                        let pair = measured
+                                            .get(&Measured::Node(first))
+                                            .zip(measured.get(&Measured::Node(second)))
+                                            .map(|(a, b)| {
+                                                Bounds::new(
+                                                    a.origin,
+                                                    size(
+                                                        b.origin.x + b.size.width - a.origin.x,
+                                                        b.origin.y + b.size.height - a.origin.y,
+                                                    ),
+                                                )
+                                            });
+                                        drop(measured);
+                                        if let Some(pair) = pair {
+                                            this.dragging =
+                                                Some(Dragging::Split(id, index, axis, pair));
+                                        }
+                                        cx.stop_propagation();
+                                    }),
+                                ),
+                        );
+                    }
+                }
+                split
                     .child(self.measurement(Measured::Node(id)))
                     .into_any_element()
             }
@@ -2213,11 +2290,11 @@ impl GuiApp {
                             .py_1()
                             .rounded_sm()
                             .text_xs()
-                            .when(!self.layout.locked, |view| view.cursor_move())
+                            .when(!self.layouts.current().locked, |view| view.cursor_move())
                             .bg(rgb(if active == panel_id { HIGHLIGHT } else { PANEL }))
                             .text_color(rgb(if active == panel_id { TEXT } else { MUTED }))
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.layout.activate(panel_id);
+                                this.layouts.current_mut().activate(panel_id);
                                 this.target_group = Some(node_id);
                                 this.persist_layout(cx);
                             }))
@@ -2234,7 +2311,7 @@ impl GuiApp {
                                     cx.notify();
                                 }),
                             )
-                            .when(!self.layout.locked, |view| {
+                            .when(!self.layouts.current().locked, |view| {
                                 view.on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone()))
                             })
                             .on_drop(cx.listener(move |this, drag: &PanelDrag, _, cx| {
@@ -2247,7 +2324,7 @@ impl GuiApp {
                                 )
                             }))
                             .child(title)
-                            .when(!self.layout.locked, |view| {
+                            .when(!self.layouts.current().locked, |view| {
                                 view.child(
                                     div()
                                         .id(("close", panel_id))
@@ -2259,10 +2336,10 @@ impl GuiApp {
                                         .child("󰅖")
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             cx.stop_propagation();
-                                            if this.layout.locked {
+                                            if this.layouts.current().locked {
                                                 return;
                                             }
-                                            this.layout.remove(panel_id);
+                                            this.layouts.current_mut().remove(panel_id);
                                             this.persist_layout(cx);
                                         })),
                                 )
@@ -2350,36 +2427,39 @@ impl GuiApp {
                     }))
                     .drag_over::<PanelDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
                     .on_drag_move::<PanelDrag>(cx.listener(|_, _, _, cx| cx.notify()))
-                    .when(!self.layout.locked && cx.has_active_drag(), |view| {
-                        view.child(
-                            canvas(
-                                |bounds, _, _| bounds,
-                                |bounds, _, window, _| {
-                                    let position = window.mouse_position();
-                                    if !bounds.contains(&position) {
-                                        return;
-                                    }
-                                    let mut preview = bounds;
-                                    match dock_edge(position, bounds) {
-                                        Edge::Left => preview.size.width *= 0.5,
-                                        Edge::Right => {
-                                            preview.origin.x += preview.size.width * 0.5;
-                                            preview.size.width *= 0.5;
+                    .when(
+                        !self.layouts.current().locked && cx.has_active_drag(),
+                        |view| {
+                            view.child(
+                                canvas(
+                                    |bounds, _, _| bounds,
+                                    |bounds, _, window, _| {
+                                        let position = window.mouse_position();
+                                        if !bounds.contains(&position) {
+                                            return;
                                         }
-                                        Edge::Top => preview.size.height *= 0.5,
-                                        Edge::Bottom => {
-                                            preview.origin.y += preview.size.height * 0.5;
-                                            preview.size.height *= 0.5;
+                                        let mut preview = bounds;
+                                        match dock_edge(position, bounds) {
+                                            Edge::Left => preview.size.width *= 0.5,
+                                            Edge::Right => {
+                                                preview.origin.x += preview.size.width * 0.5;
+                                                preview.size.width *= 0.5;
+                                            }
+                                            Edge::Top => preview.size.height *= 0.5,
+                                            Edge::Bottom => {
+                                                preview.origin.y += preview.size.height * 0.5;
+                                                preview.size.height *= 0.5;
+                                            }
+                                            Edge::Center => {}
                                         }
-                                        Edge::Center => {}
-                                    }
-                                    window.paint_quad(fill(preview, rgb(ACCENT).alpha(0.18)));
-                                },
+                                        window.paint_quad(fill(preview, rgb(ACCENT).alpha(0.18)));
+                                    },
+                                )
+                                .absolute()
+                                .size_full(),
                             )
-                            .absolute()
-                            .size_full(),
-                        )
-                    })
+                        },
+                    )
                     .child(self.measurement(Measured::Node(node_id)));
                 panel.into_any_element()
             }
@@ -2389,17 +2469,23 @@ impl GuiApp {
         let Some(dragging) = self.dragging else {
             return;
         };
-        let key = match dragging {
-            Dragging::Split(id, _) => Measured::Node(id),
-            Dragging::Seek(id) => Measured::Seek(id),
-            Dragging::Volume(id) => Measured::Volume(id),
-        };
-        let Some(bounds) = self.measured.borrow().get(&key).copied() else {
-            return;
+        let bounds = match dragging {
+            Dragging::Split(_, _, _, bounds) => bounds,
+            Dragging::Seek(id) | Dragging::Volume(id) => {
+                let key = if matches!(dragging, Dragging::Seek(_)) {
+                    Measured::Seek(id)
+                } else {
+                    Measured::Volume(id)
+                };
+                let Some(bounds) = self.measured.borrow().get(&key).copied() else {
+                    return;
+                };
+                bounds
+            }
         };
         match dragging {
-            Dragging::Split(id, axis) => {
-                if self.layout.locked {
+            Dragging::Split(id, index, axis, _) => {
+                if self.layouts.current().locked {
                     return;
                 }
                 let (offset, length) = if axis == Axis::Horizontal {
@@ -2407,10 +2493,15 @@ impl GuiApp {
                 } else {
                     (position.y - bounds.origin.y, bounds.size.height)
                 };
+                let length = f32::from(length) - SPLIT_GUTTER;
+                if length <= 0. {
+                    return;
+                }
                 let minimum = if axis == Axis::Horizontal { 160. } else { 100. };
-                let lower = (minimum / f32::from(length)).clamp(0.1, 0.45);
-                let ratio = (offset / length).clamp(lower, 1. - lower);
-                if self.layout.set_ratio(id, ratio) {
+                let lower = (minimum / length).min(0.5);
+                let fraction =
+                    ((f32::from(offset) - SPLIT_GUTTER * 0.5) / length).clamp(lower, 1. - lower);
+                if self.layouts.current_mut().set_boundary(id, index, fraction) {
                     cx.notify();
                 }
             }
@@ -2497,7 +2588,7 @@ impl Render for GuiApp {
         let paint_visuals = self.visuals.clone();
         let paint_visualizer = self.audio_visualizer.clone();
         let paint_waveform = self.waveform.read(cx).image_releaser();
-        let root = self.layout.root.take();
+        let root = self.layouts.current_mut().root.take();
         let layout_view = root
             .as_ref()
             .map(|root| self.render_node(root, window, cx))
@@ -2511,7 +2602,7 @@ impl Render for GuiApp {
                     .child("Add a panel to build your layout")
                     .into_any_element()
             });
-        self.layout.root = root;
+        self.layouts.current_mut().root = root;
         let mut app = column()
             .id("rivu")
             .relative()
@@ -2579,7 +2670,23 @@ impl Render for GuiApp {
                         return;
                     }
                     if key == "escape" {
-                        this.settings_open = false;
+                        if !this.settings.applying {
+                            this.load_settings(cx);
+                            this.settings_open = false;
+                            this.focus_layout(window, cx);
+                            cx.notify();
+                        }
+                        cx.stop_propagation();
+                    }
+                    return;
+                }
+                if this.layouts_open {
+                    if key == "escape" {
+                        if this.layout_action.is_some() {
+                            this.layout_action = None;
+                        } else {
+                            this.layouts_open = false;
+                        }
                         this.focus_layout(window, cx);
                         cx.notify();
                         cx.stop_propagation();
@@ -2741,12 +2848,16 @@ impl Render for GuiApp {
                     .text_color(rgb(TEXT))
                     .child(copyable_message("copy-error", error, cx))
                     .child(
-                        icon_button("dismiss-error", "", "Dismiss message",
-                        cx,
-                        |this, _, cx| {
-                            this.error = None;
-                            this.send(Command::DismissError, cx);
-                        },)
+                        icon_button(
+                            "dismiss-error",
+                            "",
+                            "Dismiss message",
+                            cx,
+                            |this, _, cx| {
+                                this.error = None;
+                                this.send(Command::DismissError, cx);
+                            },
+                        )
                         .size(px(24.0))
                         .border_0()
                         .bg(rgb(ERROR_BG))
@@ -2769,15 +2880,19 @@ impl Render for GuiApp {
             .child(
                 icon_button(
                     "layout",
-                    if self.layout.locked { "󰌾" } else { "" },
-                    if self.layout.locked {
+                    if self.layouts.current().locked {
+                        "󰌾"
+                    } else {
+                        ""
+                    },
+                    if self.layouts.current().locked {
                         "Layout locked\nRight-click to unlock"
                     } else {
                         "Left-click: add panel\nRight-click: lock layout"
                     },
                     cx,
                     |this, _, cx| {
-                        if this.layout.locked {
+                        if this.layouts.current().locked {
                             return;
                         }
                         this.catalog_open = !this.catalog_open;
@@ -2785,12 +2900,16 @@ impl Render for GuiApp {
                         cx.notify();
                     },
                 )
-                .text_color(rgb(if self.layout.locked { ACCENT } else { MUTED }))
+                .text_color(rgb(if self.layouts.current().locked {
+                    ACCENT
+                } else {
+                    MUTED
+                }))
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(|this, _, _, cx| {
                         cx.stop_propagation();
-                        this.layout.locked = !this.layout.locked;
+                        this.layouts.current_mut().locked = !this.layouts.current().locked;
                         this.catalog_open = false;
                         this.panel_menu = None;
                         if matches!(this.dragging, Some(Dragging::Split(..))) {
@@ -2844,6 +2963,21 @@ impl Render for GuiApp {
                             cx.notify();
                         },
                     ))
+                    .child(menu_item(
+                        "app-layouts",
+                        "Layouts",
+                        cx,
+                        |this, window, cx| {
+                            if !this.layout_management_allowed(cx) {
+                                return;
+                            }
+                            this.app_menu_open = false;
+                            this.layouts_open = true;
+                            this.layout_action = None;
+                            this.focus_layout(window, cx);
+                            cx.notify();
+                        },
+                    ))
                     .child(about)
                     .child(menu_item(
                         "app-close-window",
@@ -2868,15 +3002,15 @@ impl Render for GuiApp {
 
         app = app.child(footer);
 
-        if self.catalog_open && !self.layout.locked {
+        if self.catalog_open && !self.layouts.current().locked {
             let mut choices = row().flex_wrap().gap_1();
             for spec in PANELS {
                 let kind = spec.kind;
                 choices = choices.child(button(kind, spec.title, cx, move |this, _, cx| {
-                    if this.layout.locked {
+                    if this.layouts.current().locked {
                         return;
                     }
-                    this.layout.add(kind, this.target_group);
+                    this.layouts.current_mut().add(kind, this.target_group);
                     this.catalog_open = false;
                     this.persist_layout(cx);
                 }));
@@ -2906,7 +3040,8 @@ impl Render for GuiApp {
 
         if let Some(state) = self.panel_menu {
             let panel_kind = self
-                .layout
+                .layouts
+                .current()
                 .panels()
                 .into_iter()
                 .find(|panel| panel.id == state.panel_id)
@@ -2957,7 +3092,10 @@ impl Render for GuiApp {
                         ));
                     }
                     if is_audio_visualizer {
-                        if let Some(options) = self.layout.audio_visualizer_options(state.panel_id)
+                        if let Some(options) = self
+                            .layouts
+                            .current()
+                            .audio_visualizer_options(state.panel_id)
                         {
                             menu = menu.child(caption("Style").px(gpui::px(UI_INSET)).py_1());
                             for (style, label, selected_label) in [
@@ -2999,14 +3137,18 @@ impl Render for GuiApp {
                                     cx,
                                     move |this, _, cx| {
                                         this.panel_menu = None;
-                                        if let Some(mut options) =
-                                            this.layout.audio_visualizer_options(state.panel_id)
+                                        if let Some(mut options) = this
+                                            .layouts
+                                            .current()
+                                            .audio_visualizer_options(state.panel_id)
                                         {
                                             options.style = style;
-                                            this.layout.set_audio_visualizer_options(
-                                                state.panel_id,
-                                                options,
-                                            );
+                                            this.layouts
+                                                .current_mut()
+                                                .set_audio_visualizer_options(
+                                                    state.panel_id,
+                                                    options,
+                                                );
                                             this.persist_layout(cx);
                                         }
                                     },
@@ -3023,14 +3165,18 @@ impl Render for GuiApp {
                                     cx,
                                     move |this, _, cx| {
                                         this.panel_menu = None;
-                                        if let Some(mut options) =
-                                            this.layout.audio_visualizer_options(state.panel_id)
+                                        if let Some(mut options) = this
+                                            .layouts
+                                            .current()
+                                            .audio_visualizer_options(state.panel_id)
                                         {
                                             options.reference_lines = !options.reference_lines;
-                                            this.layout.set_audio_visualizer_options(
-                                                state.panel_id,
-                                                options,
-                                            );
+                                            this.layouts
+                                                .current_mut()
+                                                .set_audio_visualizer_options(
+                                                    state.panel_id,
+                                                    options,
+                                                );
                                             this.persist_layout(cx);
                                         }
                                     },
@@ -3045,14 +3191,18 @@ impl Render for GuiApp {
                                     cx,
                                     move |this, _, cx| {
                                         this.panel_menu = None;
-                                        if let Some(mut options) =
-                                            this.layout.audio_visualizer_options(state.panel_id)
+                                        if let Some(mut options) = this
+                                            .layouts
+                                            .current()
+                                            .audio_visualizer_options(state.panel_id)
                                         {
                                             options.labels = !options.labels;
-                                            this.layout.set_audio_visualizer_options(
-                                                state.panel_id,
-                                                options,
-                                            );
+                                            this.layouts
+                                                .current_mut()
+                                                .set_audio_visualizer_options(
+                                                    state.panel_id,
+                                                    options,
+                                                );
                                             this.persist_layout(cx);
                                         }
                                     },
@@ -3122,7 +3272,7 @@ impl Render for GuiApp {
                         .when(is_queue || is_waveform || is_audio_visualizer, |view| {
                             view.child(div().h(px(1.)).mx_2().my_1().bg(rgb(BORDER)))
                         })
-                        .when(self.layout.locked, |view| {
+                        .when(self.layouts.current().locked, |view| {
                             view.child(
                                 div()
                                     .px(gpui::px(UI_INSET))
@@ -3132,7 +3282,7 @@ impl Render for GuiApp {
                                     .child("Layout is locked"),
                             )
                         })
-                        .when(!self.layout.locked, |view| {
+                        .when(!self.layouts.current().locked, |view| {
                             view.child(menu_item(
                                 "toggle-tab-bar",
                                 if state.tab_bar_visible {
@@ -3142,10 +3292,10 @@ impl Render for GuiApp {
                                 },
                                 cx,
                                 move |this, _, cx| {
-                                    if this.layout.locked {
+                                    if this.layouts.current().locked {
                                         return;
                                     }
-                                    this.layout.set_tab_bar_visible(
+                                    this.layouts.current_mut().set_tab_bar_visible(
                                         state.panel_id,
                                         !state.tab_bar_visible,
                                     );
@@ -3328,6 +3478,9 @@ impl Render for GuiApp {
             );
         }
 
+        if self.layouts_open {
+            app = app.child(self.layouts_panel(window, cx));
+        }
         if self.settings_open {
             let settings = self.settings_panel(u64::MAX, window, cx);
             app = app.child(
@@ -3458,27 +3611,33 @@ impl Render for GuiApp {
                                             ("License", "GPL-3.0-or-later".to_owned()),
                                         ]
                                         .into_iter()
-                                        .map(|(label, value)| {
-                                            row()
-                                                .gap_3()
-                                                .child(
-                                                    div()
-                                                        .w(rems(4.))
-                                                        .flex_shrink_0()
-                                                        .child(caption(label)),
-                                                )
-                                                .child(caption(value))
-                                        }),
+                                        .map(
+                                            |(label, value)| {
+                                                row()
+                                                    .gap_3()
+                                                    .child(
+                                                        div()
+                                                            .w(rems(4.))
+                                                            .flex_shrink_0()
+                                                            .child(caption(label)),
+                                                    )
+                                                    .child(caption(value))
+                                            },
+                                        ),
                                     ),
                             )
                             .child(
-                                icon_button("about-close", "", "Close",
-                                cx,
-                                |this, window, cx| {
-                                    this.about_open = false;
-                                    this.focus_layout(window, cx);
-                                    cx.notify();
-                                },)
+                                icon_button(
+                                    "about-close",
+                                    "",
+                                    "Close",
+                                    cx,
+                                    |this, window, cx| {
+                                        this.about_open = false;
+                                        this.focus_layout(window, cx);
+                                        cx.notify();
+                                    },
+                                )
                                 .absolute()
                                 .top(px(8.))
                                 .right(px(8.)),

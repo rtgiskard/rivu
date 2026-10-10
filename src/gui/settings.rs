@@ -8,8 +8,8 @@ use super::{
 };
 use crate::{
     config::{
-        AudioVisualizerOptions, Config, LogLevel, AudioVisualizerStyle, RgbColor, SpectrumStyle,
-        AnalysisWindow, VisualizationPalette,
+        AnalysisWindow, AudioVisualizerOptions, AudioVisualizerStyle, Config, LogLevel, RgbColor,
+        SpectrumStyle, VisualizationPalette,
     },
     model::Command,
 };
@@ -156,7 +156,9 @@ impl Field {
                 "#RRGGBB. Shared by all instances, independent of the shared color scheme."
             }
             Self::CursorColor => "#RRGGBB. The waterline stays still while paused.",
-            Self::VisualizationDb => "1–160. Applies to Spectrum, Spectrogram, and Audio Visualizer. Fractal styles use it for energy response; playback volume is unchanged.",
+            Self::VisualizationDb => {
+                "1–160. Applies to Spectrum, Spectrogram, and Audio Visualizer. Fractal styles use it for energy response; playback volume is unchanged."
+            }
             // These controls attach a live inherited-range tooltip in Settings::field.
             Self::SpectrumDb | Self::AudioVisualizerDb | Self::SpectrogramDb => "",
             Self::AudioVisualizerSensitivity => "0–5.",
@@ -172,8 +174,12 @@ impl Field {
             Self::SpectrumGap => "0–8.",
             Self::SpectrumHold | Self::SpectrumBarHold => "0–2000.",
             Self::SpectrumGravity => "0–500.",
-            Self::SpectrumBarGravity => "0–500; 0 snaps after hold, bypassing smoothing. Attacks stay immediate.",
-            Self::SpectrumSmoothing => "0–1000. Gravity 0 bypasses smoothing. Attacks stay immediate.",
+            Self::SpectrumBarGravity => {
+                "0–500; 0 snaps after hold, bypassing smoothing. Attacks stay immediate."
+            }
+            Self::SpectrumSmoothing => {
+                "0–1000. Gravity 0 bypasses smoothing. Attacks stay immediate."
+            }
             Self::SpectrogramHistory => "1–120; limited by panel width and analysis rate.",
             Self::SpectrogramSamplingPointsScale => {
                 "0.4–1.4; relative to the tallest visible panel."
@@ -183,7 +189,9 @@ impl Field {
             }
             Self::Glow => "0–2; 0 = off.",
             Self::WaveformRmsGain => "0–3. Display only; does not affect playback volume.",
-            Self::WaveformPeakGamma => "0.25–3; above 1 reduces low peaks, below 1 lifts them. Display only; does not affect playback volume.",
+            Self::WaveformPeakGamma => {
+                "0.25–3; above 1 reduces low peaks, below 1 lifts them. Display only; does not affect playback volume."
+            }
         }
     }
 
@@ -223,10 +231,16 @@ fn visual_switch(
 ) -> Stateful<Div> {
     let hint = match id {
         "settings-tray" => "Changes require restarting the graphical host.",
-        "settings-still-mode" => "Stops visualization processing and discards results; playback and interface effects are unchanged.",
-        "visual-cache" => "Reduces CPU use at the cost of memory in Spectrum, Spectrogram, and Waveform.",
+        "settings-still-mode" => {
+            "Stops visualization processing and discards results; playback and interface effects are unchanged."
+        }
+        "visual-cache" => {
+            "Reduces CPU use at the cost of memory in Spectrum, Spectrogram, and Waveform."
+        }
         "audio-visualizer-fade-idle" => "Controls the Bars, Rings and Bars + Rings styles.",
-        "audio-visualizer-grid" => "Bars and rings guides show normalized levels, not dB or frequency.",
+        "audio-visualizer-grid" => {
+            "Bars and rings guides show normalized levels, not dB or frequency."
+        }
         _ => "",
     };
     let label: SharedString = if hint.is_empty() {
@@ -323,10 +337,7 @@ struct FontOption {
 impl FontOption {
     fn new(family: String) -> Self {
         let search = family.to_lowercase();
-        Self {
-            family,
-            search,
-        }
+        Self { family, search }
     }
 }
 
@@ -340,7 +351,7 @@ pub(super) struct Settings {
     font_value: String,
     device_scroll: UniformListScrollHandle,
     dropdown_anchor: Measured,
-    applying: bool,
+    pub(super) applying: bool,
     session: u64,
     feedback: Option<std::result::Result<(), String>>,
     page: SettingsPage,
@@ -435,7 +446,9 @@ impl Settings {
             cx.text_system()
                 .all_font_names()
                 .into_iter()
-                .filter(|family| !generic.contains(&family.as_str()) && family != super::fonts::SYMBOLS_FAMILY)
+                .filter(|family| {
+                    !generic.contains(&family.as_str()) && family != super::fonts::SYMBOLS_FAMILY
+                })
                 .map(FontOption::new),
         );
         self.initialized = true;
@@ -803,7 +816,8 @@ impl Settings {
         config.audio_visualizer_bar_width = self.number(Field::AudioVisualizerBarWidth, cx)?;
         config.audio_visualizer_bar_glow_layers =
             self.number(Field::AudioVisualizerBarGlowLayers, cx)?;
-        config.audio_visualizer_ring_opacity = self.number(Field::AudioVisualizerRingOpacity, cx)?;
+        config.audio_visualizer_ring_opacity =
+            self.number(Field::AudioVisualizerRingOpacity, cx)?;
         config.audio_visualizer_bloom_intensity =
             self.number(Field::AudioVisualizerBloomIntensity, cx)?;
         config.audio_visualizer_inner_diameter =
@@ -1009,7 +1023,7 @@ impl GuiApp {
     }
 
     pub(super) fn load_visualizer_settings(&mut self, panel_id: u64, cx: &mut Context<Self>) {
-        let Some(options) = self.layout.audio_visualizer_options(panel_id) else {
+        let Some(options) = self.layouts.current().audio_visualizer_options(panel_id) else {
             return;
         };
         self.load_settings(cx);
@@ -1029,11 +1043,24 @@ impl GuiApp {
         }
         if let Some(panel_id) = self.settings.visualizer_panel {
             let options = AudioVisualizerOptions::from(&self.settings.draft);
+            let previous = self.layouts.current().audio_visualizer_options(panel_id);
             self.settings.feedback = Some(
-                if self.layout.set_audio_visualizer_options(panel_id, options) {
-                    self.layout
-                        .save(&self.layout_path)
-                        .map_err(|error| format!("Saving layout: {error:#}"))
+                if self
+                    .layouts
+                    .current_mut()
+                    .set_audio_visualizer_options(panel_id, options)
+                {
+                    match self.layouts.save(&self.layout_path) {
+                        Ok(()) => Ok(()),
+                        Err(error) => {
+                            if let Some(previous) = previous {
+                                self.layouts
+                                    .current_mut()
+                                    .set_audio_visualizer_options(panel_id, previous);
+                            }
+                            Err(format!("Saving layout: {error:#}"))
+                        }
+                    }
                 } else {
                     Err("This visualizer instance no longer exists".into())
                 },
@@ -1340,10 +1367,14 @@ impl GuiApp {
                         .flex_1()
                         .min_w(px(180.)),
                 )
-                .child(visual_switch("settings-log-file", "", "Write logs to disk",
-                draft.log_to_file,
-                cx,
-                |draft| draft.log_to_file = !draft.log_to_file,)),
+                .child(visual_switch(
+                    "settings-log-file",
+                    "",
+                    "Write logs to disk",
+                    draft.log_to_file,
+                    cx,
+                    |draft| draft.log_to_file = !draft.log_to_file,
+                )),
         );
         let library = settings_group(
             "Library",
@@ -1447,13 +1478,19 @@ impl GuiApp {
                             .text_size(rems(1.)),
                             mpris,
                         ))
-                        .child(visual_switch("settings-tray", "", "System tray",
-                        tray,
-                        cx,
-                        |draft| draft.tray_enabled = !draft.tray_enabled,)),
+                        .child(visual_switch(
+                            "settings-tray",
+                            "",
+                            "System tray",
+                            tray,
+                            cx,
+                            |draft| draft.tray_enabled = !draft.tray_enabled,
+                        )),
                 )
                 .id("settings-interface-help")
-                .tooltip(settings_tooltip("System tray changes require restarting the graphical host.")),
+                .tooltip(settings_tooltip(
+                    "System tray changes require restarting the graphical host.",
+                )),
         );
 
         column()
@@ -1682,10 +1719,14 @@ impl GuiApp {
                     column()
                         .gap_2()
                         .child(settings.pair(Field::SpectrogramDb, Field::SpectrogramHistory))
-                        .child(row().child(visual_switch("spectrogram-labels", "", "Axis labels",
-                        draft.spectrogram_labels,
-                        cx,
-                        |draft| draft.spectrogram_labels = !draft.spectrogram_labels,))),
+                        .child(row().child(visual_switch(
+                            "spectrogram-labels",
+                            "",
+                            "Axis labels",
+                            draft.spectrogram_labels,
+                            cx,
+                            |draft| draft.spectrogram_labels = !draft.spectrogram_labels,
+                        ))),
                 ))
                 .child(settings_group(
                     "Frequency sampling",
@@ -1695,12 +1736,18 @@ impl GuiApp {
                             Field::SpectrogramSamplingPointsScale,
                             Field::SpectrogramInterpolationPoints,
                         ))
-                        .child(row().child(visual_switch("spectrogram-interpolate", "", "Frequency interpolation",
-                        draft.spectrogram_interpolate,
-                        cx,
-                        |draft| draft.spectrogram_interpolate = !draft.spectrogram_interpolate,)))
+                        .child(row().child(visual_switch(
+                            "spectrogram-interpolate",
+                            "",
+                            "Frequency interpolation",
+                            draft.spectrogram_interpolate,
+                            cx,
+                            |draft| draft.spectrogram_interpolate = !draft.spectrogram_interpolate,
+                        )))
                         .id("settings-frequency-sampling-help")
-                        .tooltip(settings_tooltip("More frequency rows do not add FFT detail.")),
+                        .tooltip(settings_tooltip(
+                            "More frequency rows do not add FFT detail.",
+                        )),
                 )),
             VisualPage::AudioVisualizer => {
                 let style = dropdown_button(
@@ -1817,10 +1864,14 @@ impl GuiApp {
                             row()
                                 .flex_wrap()
                                 .gap_2()
-                                .child(visual_switch("waveform-labels", "", "Time labels",
-                                draft.waveform_labels,
-                                cx,
-                                |draft| draft.waveform_labels = !draft.waveform_labels,))
+                                .child(visual_switch(
+                                    "waveform-labels",
+                                    "",
+                                    "Time labels",
+                                    draft.waveform_labels,
+                                    cx,
+                                    |draft| draft.waveform_labels = !draft.waveform_labels,
+                                ))
                                 .child(visual_switch(
                                     "waveform-seek",
                                     "󱀞",
@@ -1842,7 +1893,9 @@ impl GuiApp {
                         .child(settings.pair(Field::WaveformRmsGain, Field::WaveformPeakGain))
                         .child(settings.single(Field::WaveformPeakGamma))
                         .id("settings-amplitude-help")
-                        .tooltip(settings_tooltip("Display only; does not affect playback volume.")),
+                        .tooltip(settings_tooltip(
+                            "Display only; does not affect playback volume.",
+                        )),
                 )),
         }
     }
@@ -1946,18 +1999,29 @@ impl GuiApp {
                         .child(feedback),
                 )
                 .child(
-                    icon_button("settings-apply", "", "Apply settings",
-                    cx,
-                    |this, _, cx| this.apply_settings(cx),)
+                    icon_button(
+                        "settings-apply",
+                        "",
+                        "Apply settings",
+                        cx,
+                        |this, _, cx| this.apply_settings(cx),
+                    )
                     .opacity(if self.settings.applying { 0.4 } else { 1.0 }),
                 )
-                .child(icon_button("settings-discard", "", "Discard changes and close",
-                cx,
-                |this, _, cx| {
-                    this.load_settings(cx);
-                    this.settings_open = false;
-                    cx.notify();
-                },)),
+                .child(icon_button(
+                    "settings-discard",
+                    "",
+                    "Discard changes and close",
+                    cx,
+                    |this, _, cx| {
+                        if this.settings.applying {
+                            return;
+                        }
+                        this.load_settings(cx);
+                        this.settings_open = false;
+                        cx.notify();
+                    },
+                )),
         );
         if self.settings.dropdown.is_open() {
             let bounds = self

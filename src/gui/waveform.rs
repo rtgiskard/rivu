@@ -163,6 +163,28 @@ impl WaveformImageRelease {
     pub(super) fn release_retired(&self, window: &mut Window) {
         self.0.borrow_mut().release_retired(window);
     }
+
+    pub(super) fn release_all_images(&self, window: &mut Window) {
+        let mut plot = self.0.borrow_mut();
+        plot.paint_tiles.clear();
+        let WaveformPlot {
+            columns,
+            retired,
+            pending_images,
+            retire_scratch,
+            ..
+        } = &mut *plot;
+        for image in columns
+            .values_mut()
+            .flat_map(|columns| columns.tiles.drain(..).map(|tile| tile.image))
+            .chain(retired.drain(..))
+            .chain(pending_images.drain(..))
+            .chain(retire_scratch.drain(..))
+        {
+            let _ = window.drop_image(image);
+        }
+        columns.clear();
+    }
 }
 
 fn tile_fingerprint(
