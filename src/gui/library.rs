@@ -254,7 +254,6 @@ impl GuiApp {
     ) -> AnyElement {
         let row_count = self.directory_tree.row_count();
         let ui_scale = self.state.system.config.ui_scale;
-        let tree_lines = self.state.system.config.library_tree_lines;
         let nerd_symbols = cx
             .try_global::<super::components::NerdSymbols>()
             .is_none_or(|settings| settings.0);
@@ -283,12 +282,7 @@ impl GuiApp {
                                     )
                                     .h(px(32.0 * ui_scale.max(0.5)))
                                     .relative()
-                                    .when(tree_lines, |view| {
-                                        view.child(tree_guides(&this.directory_tree, index))
-                                    })
-                                    .when(!tree_lines, |view| {
-                                        view.child(div().w(gpui::rems(1.)).flex_shrink_0())
-                                    })
+                                    .child(tree_guides(&this.directory_tree, index))
                                     .child(
                                         div().text_color(gpui::rgb(super::MUTED)).child(
                                             if failed { "Unavailable" } else { "Loading…" },
@@ -328,7 +322,9 @@ impl GuiApp {
                                         BranchStatus::Loading => "Loading…".to_owned(),
                                         BranchStatus::Empty => "Empty".to_owned(),
                                         BranchStatus::Error => "Unavailable".to_owned(),
-                                        BranchStatus::Unloaded | BranchStatus::Ready => String::new(),
+                                        BranchStatus::Unloaded | BranchStatus::Ready => {
+                                            String::new()
+                                        }
                                     };
                                     (
                                         LibraryNode::Directory(Arc::from(path.as_path())),
@@ -391,11 +387,6 @@ impl GuiApp {
                                     },
                                 ))
                             });
-                            let disclosure = if path.is_some() && visible.has_children {
-                                if visible.expanded { "▾" } else { "▸" }
-                            } else {
-                                ""
-                            };
                             let row_view = super::tree_row(
                                 gpui::ElementId::named_usize("library-node", index),
                                 visible.depth,
@@ -403,26 +394,18 @@ impl GuiApp {
                             )
                             .h(px(32.0 * ui_scale.max(0.5)))
                             .relative()
-                            .when(tree_lines, |view| {
-                                view.child(tree_guides(&this.directory_tree, index))
-                            })
-                            .when(!tree_lines, |view| {
-                                view.child(
-                                    div()
-                                        .w(gpui::rems(1.))
-                                        .flex_shrink_0()
-                                        .text_color(gpui::rgb(super::MUTED))
-                                        .child(disclosure),
-                                )
-                            })
-                            .child(div().flex_shrink_0().text_sm().child(
-                                match (path.is_some(), nerd_symbols) {
-                                    (true, true) => "󰉋",
-                                    (false, true) => "󰈙",
-                                    (true, false) => "▣",
-                                    (false, false) => "♪",
-                                },
-                            ))
+                            .child(tree_guides(&this.directory_tree, index))
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_sm()
+                                    .child(match (path.is_some(), nerd_symbols) {
+                                        (true, true) => "󰉋",
+                                        (false, true) => "󰈙",
+                                        (true, false) => "▣",
+                                        (false, false) => "♪",
+                                    }),
+                            )
                             .child(
                                 row()
                                     .flex_1()

@@ -39,7 +39,6 @@ pub(in crate::gui) struct VisibleDirectoryRow {
     pub(in crate::gui) row: DirectoryRow,
     pub(in crate::gui) depth: usize,
     pub(in crate::gui) expanded: bool,
-    pub(in crate::gui) has_children: bool,
     pub(in crate::gui) status: BranchStatus,
     pub(in crate::gui) branch: Option<TreeBranch>,
 }
@@ -597,7 +596,6 @@ impl DirectoryTree {
                 row,
                 depth: segment.depth,
                 expanded,
-                has_children: status != BranchStatus::Empty,
                 status,
                 branch,
             }))

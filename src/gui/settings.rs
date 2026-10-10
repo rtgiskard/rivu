@@ -1422,14 +1422,6 @@ impl GuiApp {
                             cx,
                             |draft| draft.nerd_symbols = !draft.nerd_symbols,
                         ))
-                        .child(visual_switch(
-                            "settings-library-tree-lines",
-                            "├",
-                            "Library tree lines",
-                            draft.library_tree_lines,
-                            cx,
-                            |draft| draft.library_tree_lines = !draft.library_tree_lines,
-                        ))
                         .child(active_control(
                             icon_button(
                                 "settings-mpris",

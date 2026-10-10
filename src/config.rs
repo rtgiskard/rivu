@@ -175,7 +175,6 @@ pub struct Config {
     /// UI font family; empty selects the platform UI font.
     pub ui_font: String,
     pub ui_scale: f32,
-    pub library_tree_lines: bool,
     /// Stop audio visualizations and their analysis without changing playback.
     pub still_mode: bool,
     pub analysis_fps: u32,
@@ -262,7 +261,6 @@ impl Default for Config {
             page_size: DEFAULT_PAGE_SIZE,
             ui_font: String::new(),
             ui_scale: 1.0,
-            library_tree_lines: true,
             still_mode: false,
             analysis_fps: 20,
             visual_background: RgbColor(0x08090c),
@@ -675,7 +673,6 @@ mod tests {
             queue_limit: 128,
             ui_font: "sans-serif".to_owned(),
             ui_scale: 1.5,
-            library_tree_lines: false,
             still_mode: true,
             analysis_fps: 30,
             visualization_db_range: 90.0,
@@ -807,6 +804,8 @@ mod tests {
         for contents in [
             "volume = [",
             "volum = 0.5",
+            "library_tree_lines = true",
+            "library_tree_lines = false",
             "volume = 'loud'",
             "volume = -0.01",
             "volume = 1.01",

@@ -67,7 +67,7 @@ Still mode is under Visualizations → Common → Rendering and takes effect whe
 settings are applied, without restarting playback. It is persisted as `still_mode`.
 
 General groups controls into Library, Playback, Audio, Interface, and Logging.
-Interface pairs font and scale in two columns, with symbol, tree-line, MPRIS,
+Interface pairs font and scale in two columns, with symbol, MPRIS,
 and tray toggles in one wrapping row. Shuffle and Repeat remain in Playback
 controls, not General settings. Numeric ranges and format hints appear as input
 tooltips; optional dB ranges also show the current inherited Common value.
@@ -116,10 +116,8 @@ Omitted `nerd_symbols` follows installed Nerd Font detection; an explicit value
 overrides it. Omitted `output_device` uses the default output; a selected device
 must be available.
 
-`library_tree_lines` defaults to `true`: Library uses thin hierarchy connectors
-instead of disclosure arrows. Set it to `false` for arrows without connectors.
-The same switch is under General → Interface (`Library tree lines`). Apply
-updates the tree immediately without changing expansion or selection.
+Library always uses thin hierarchy guide lines. The `library_tree_lines`
+configuration key has been removed; delete it from existing configuration files.
 
 Apply validates and saves all pages together; navigation preserves the draft.
 Discard drops unapplied changes. Saving library roots does not scan or enqueue

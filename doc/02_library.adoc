@@ -88,8 +88,9 @@ Configured roots are shown in configuration order, including empty roots, and
 identified by their paths. Click a directory row to expand or collapse it.
 Overlapping roots expand independently: closing an enclosing root does not close
 the same directory shown as another root.
-`library_tree_lines = false` replaces the default hierarchy connectors with
-disclosure arrows; both styles use the same interactions.
+Thin hierarchy guide lines connect directory and track rows, including loading
+and error placeholders. Directory and file icons retain their own slot beside
+the label; there is no disclosure-arrow mode.
 
 == Paged views
 
