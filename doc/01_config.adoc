@@ -1,5 +1,9 @@
 = Configuration and layout
 
+Desktop settings keep supplementary help in hover tooltips on controls and
+setting groups rather than separate description rows. Hover a field for its
+accepted range or input syntax; visualization groups explain scope and effects.
+
 Rivu reads `~/.config/rivu/config.toml` by default; path overrides are described in
 link:../readme.adoc[the README]. Omitted fields use defaults. A minimal example:
 

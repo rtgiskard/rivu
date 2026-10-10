@@ -150,12 +150,13 @@ impl Field {
             Self::MediaReadBuffer => "1, 2, 4, 8, or 16. Applies when media is next opened.",
             Self::Font => "",
             Self::Scale => "0.75–2.",
-            Self::Fps => "5–60.",
-            Self::Background
-            | Self::AudioVisualizerPrimaryColor
-            | Self::AudioVisualizerSecondaryColor
-            | Self::CursorColor => "#RRGGBB.",
-            Self::VisualizationDb => "1–160.",
+            Self::Fps => "5–60. Applies to Spectrum, Spectrogram, and Audio Visualizer.",
+            Self::Background => "#RRGGBB. Applies to all views.",
+            Self::AudioVisualizerPrimaryColor | Self::AudioVisualizerSecondaryColor => {
+                "#RRGGBB. Shared by all instances, independent of the shared color scheme."
+            }
+            Self::CursorColor => "#RRGGBB. The waterline stays still while paused.",
+            Self::VisualizationDb => "1–160. Applies to Spectrum, Spectrogram, and Audio Visualizer. Fractal styles use it for energy response; playback volume is unchanged.",
             // These controls attach a live inherited-range tooltip in Settings::field.
             Self::SpectrumDb | Self::AudioVisualizerDb | Self::SpectrogramDb => "",
             Self::AudioVisualizerSensitivity => "0–5.",
@@ -167,35 +168,35 @@ impl Field {
             Self::AudioVisualizerRingOpacity => "0–1.",
             Self::AudioVisualizerInnerDiameter => "0–2; relative to panel size.",
             Self::SpectrumBarWidth => "1–20; used with automatic bar count.",
-            Self::SpectrumBars => "1–512; 0 = automatic.",
+            Self::SpectrumBars => "1–512; 0 = automatic, using bar width and gap.",
             Self::SpectrumGap => "0–8.",
             Self::SpectrumHold | Self::SpectrumBarHold => "0–2000.",
-            Self::SpectrumGravity | Self::SpectrumBarGravity => "0–500.",
-            Self::SpectrumSmoothing => "0–1000.",
+            Self::SpectrumGravity => "0–500.",
+            Self::SpectrumBarGravity => "0–500; 0 snaps after hold, bypassing smoothing. Attacks stay immediate.",
+            Self::SpectrumSmoothing => "0–1000. Gravity 0 bypasses smoothing. Attacks stay immediate.",
             Self::SpectrogramHistory => "1–120; limited by panel width and analysis rate.",
             Self::SpectrogramSamplingPointsScale => {
                 "0.4–1.4; relative to the tallest visible panel."
             }
             Self::SpectrogramInterpolationPoints => {
-                "64–4096; applies with or without interpolation."
+                "64–4096; applies with or without interpolation. More frequency rows do not add FFT detail."
             }
             Self::Glow => "0–2; 0 = off.",
-            Self::WaveformRmsGain => "0–3.",
-            Self::WaveformPeakGamma => "0.25–3; above 1 reduces low peaks, below 1 lifts them.",
+            Self::WaveformRmsGain => "0–3. Display only; does not affect playback volume.",
+            Self::WaveformPeakGamma => "0.25–3; above 1 reduces low peaks, below 1 lifts them. Display only; does not affect playback volume.",
         }
     }
 
     fn form(self, control: impl IntoElement) -> Div {
         let hint = self.hint();
-        let inline_hint = matches!(self, Self::Roots);
         let control = div()
             .id(("settings-field-help", self as usize))
             .w_full()
             .child(control)
-            .when(!hint.is_empty() && !inline_hint, |control| {
+            .when(!hint.is_empty(), |control| {
                 control.tooltip(move |_, cx| cx.new(|_| ButtonTooltip { text: hint.into() }).into())
             });
-        form_field(self.label(), control).when(inline_hint, |field| field.child(caption(hint)))
+        form_field(self.label(), control)
     }
 }
 
@@ -220,6 +221,19 @@ fn visual_switch(
     cx: &mut Context<GuiApp>,
     toggle: impl Fn(&mut Config) + 'static,
 ) -> Stateful<Div> {
+    let hint = match id {
+        "settings-tray" => "Changes require restarting the graphical host.",
+        "settings-still-mode" => "Stops visualization processing and discards results; playback and interface effects are unchanged.",
+        "visual-cache" => "Reduces CPU use at the cost of memory in Spectrum, Spectrogram, and Waveform.",
+        "audio-visualizer-fade-idle" => "Controls the Bars, Rings and Bars + Rings styles.",
+        "audio-visualizer-grid" => "Bars and rings guides show normalized levels, not dB or frequency.",
+        _ => "",
+    };
+    let label: SharedString = if hint.is_empty() {
+        label.into()
+    } else {
+        format!("{label} ({hint})").into()
+    };
     toggle_button(id, icon, label, enabled, cx, move |this, _| {
         toggle(&mut this.settings.draft);
     })
@@ -227,6 +241,13 @@ fn visual_switch(
 
 fn settings_group(title: &'static str, content: impl IntoElement) -> Div {
     section_group(title, content)
+}
+
+fn settings_tooltip(
+    text: impl Into<SharedString>,
+) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView {
+    let text = text.into();
+    move |_, cx| cx.new(|_| ButtonTooltip { text: text.clone() }).into()
 }
 
 fn spectrum_style_label(style: SpectrumStyle) -> &'static str {
@@ -1431,7 +1452,8 @@ impl GuiApp {
                         cx,
                         |draft| draft.tray_enabled = !draft.tray_enabled,)),
                 )
-                .child(caption("System tray changes require restarting the graphical host.")),
+                .id("settings-interface-help")
+                .tooltip(settings_tooltip("System tray changes require restarting the graphical host.")),
         );
 
         column()
@@ -1579,17 +1601,19 @@ impl GuiApp {
                     .child(settings_group("Appearance", column().gap_2()
                         .child(two_column(settings.field(Field::Background).min_w(px(180.)), form_field("Color scheme", palette).min_w(px(180.))))
                         .child(settings.single(Field::VisualizationDb))
-                        .child(caption("Background: all views. Color scheme: Spectrum, Spectrogram, and Waveform."))
-                        .child(caption("Display range: Spectrum, Spectrogram, and Audio Visualizer. Fractal styles use it for energy response; playback volume is unchanged."))))
+                        .id("settings-appearance-help")
+                        .tooltip(settings_tooltip("Background: all views. Color scheme: Spectrum, Spectrogram, and Waveform. Display range: Spectrum, Spectrogram, and Audio Visualizer. Fractal styles use it for energy response; playback volume is unchanged."))))
                     .child(settings_group("Frequency analysis", column().gap_2()
                         .child(two_column(form_field("FFT size (samples)", fft).min_w(px(180.)), form_field("FFT window", window).min_w(px(180.))))
                         .child(settings.single(Field::Fps))
-                        .child(caption("Applies to Spectrum, Spectrogram, and Audio Visualizer. Changing FFT size or window clears visualization history."))))
+                        .id("settings-analysis-help")
+                        .tooltip(settings_tooltip("Applies to Spectrum, Spectrogram, and Audio Visualizer. Changing FFT size or window clears visualization history."))))
                     .child(settings_group("Rendering", column().gap_2()
                         .child(row().child(visual_switch("settings-still-mode", "", "Still mode", draft.still_mode, cx, |draft| draft.still_mode = !draft.still_mode)))
-                        .child(caption("Stops visualization processing and discards results; playback and interface effects are unchanged."))
+                        .id("settings-rendering-help")
+                        .tooltip(settings_tooltip("Still mode stops visualization processing and discards results; playback and interface effects are unchanged. Rendering cache reduces CPU use at the cost of memory in Spectrum, Spectrogram, and Waveform."))
                         .child(row().child(visual_switch("visual-cache", "", "Rendering cache", draft.visualization_cache, cx, |draft| draft.visualization_cache = !draft.visualization_cache)))
-                        .child(caption("Reduces CPU use at the cost of memory in Spectrum, Spectrogram, and Waveform."))))
+                    ))
             }
             VisualPage::Spectrum => {
                 let solid = draft.spectrum_style == SpectrumStyle::Solid;
@@ -1637,11 +1661,13 @@ impl GuiApp {
                             .child(visual_switch("spectrum-interpolate", "", "Frequency interpolation", draft.spectrum_interpolate, cx, |draft| draft.spectrum_interpolate = !draft.spectrum_interpolate))
                             .child(visual_switch("spectrum-grid", "", "Grid lines", draft.spectrum_grid, cx, |draft| draft.spectrum_grid = !draft.spectrum_grid))
                             .child(visual_switch("spectrum-labels", "", "Axis labels", draft.spectrum_labels, cx, |draft| draft.spectrum_labels = !draft.spectrum_labels)))
-                        .child(caption("Automatic bar count uses bar width and gap."))))
+                        .id("settings-spectrum-appearance-help")
+                        .tooltip(settings_tooltip("Automatic bar count uses bar width and gap."))))
                     .child(settings_group("Bar motion", column().gap_2()
                         .child(settings.pair(Field::SpectrumBarHold, Field::SpectrumBarGravity))
                         .child(settings.single(Field::SpectrumSmoothing))
-                        .child(caption("Gravity 0 snaps after hold, bypassing smoothing. Attacks stay immediate."))))
+                        .id("settings-bar-motion-help")
+                        .tooltip(settings_tooltip("Gravity 0 snaps after hold, bypassing smoothing. Attacks stay immediate."))))
                     .child(settings_group("Peak markers", column().gap_2()
                         .child(row().child(visual_switch("spectrum-peaks", "", "Peak markers", draft.spectrum_peaks, cx, |draft| draft.spectrum_peaks = !draft.spectrum_peaks)))
                         .child(two_column(
@@ -1669,15 +1695,12 @@ impl GuiApp {
                             Field::SpectrogramSamplingPointsScale,
                             Field::SpectrogramInterpolationPoints,
                         ))
-                        .child(row().child(visual_switch(
-                            "spectrogram-interpolate",
-                            "",
-                            "Frequency interpolation",
-                            draft.spectrogram_interpolate,
-                            cx,
-                            |draft| draft.spectrogram_interpolate = !draft.spectrogram_interpolate,
-                        )))
-                        .child(caption("More frequency rows do not add FFT detail.")),
+                        .child(row().child(visual_switch("spectrogram-interpolate", "", "Frequency interpolation",
+                        draft.spectrogram_interpolate,
+                        cx,
+                        |draft| draft.spectrogram_interpolate = !draft.spectrogram_interpolate,)))
+                        .id("settings-frequency-sampling-help")
+                        .tooltip(settings_tooltip("More frequency rows do not add FFT detail.")),
                 )),
             VisualPage::AudioVisualizer => {
                 let style = dropdown_button(
@@ -1734,44 +1757,43 @@ impl GuiApp {
                     if instance { "This instance" } else { "New instance defaults" },
                     column()
                         .gap_2()
-                        .child(form_field("Style", style))
-                        .when(!hint.is_empty(), |group| group.child(caption(hint)))
+                        .child(form_field("Style", style.when(!hint.is_empty(), |control| {
+                            control.tooltip(settings_tooltip(hint))
+                        })))
                         .child(row().flex_wrap().gap_2()
-                            .child(visual_switch(
-                                "audio-visualizer-grid", "", "Reference lines",
-                                draft.audio_visualizer_grid, cx,
-                                |draft| draft.audio_visualizer_grid = !draft.audio_visualizer_grid,
-                            ))
-                            .child(visual_switch(
-                                "audio-visualizer-labels", "", "Labels",
-                                draft.audio_visualizer_labels, cx,
-                                |draft| draft.audio_visualizer_labels = !draft.audio_visualizer_labels,
-                            )))
-                        .child(caption(if instance {
-                            "Only this visualizer changes. These controls are also in its right-click menu."
+                            .child(visual_switch("audio-visualizer-grid", "", "Reference lines",
+                            draft.audio_visualizer_grid, cx,
+                            |draft| draft.audio_visualizer_grid = !draft.audio_visualizer_grid,))
+                            .child(visual_switch("audio-visualizer-labels", "", "Labels",
+                            draft.audio_visualizer_labels, cx,
+                            |draft| draft.audio_visualizer_labels = !draft.audio_visualizer_labels,)))
+                        .id("settings-visualizer-display-help")
+                        .tooltip(settings_tooltip(if instance {
+                            "Only this visualizer changes. These controls are also in its right-click menu. Bars and rings guides show normalized levels, not dB or frequency."
                         } else {
-                            "Existing instances keep their choices. Right-click a visualizer to edit it."
-                        }))
-                        .child(caption("Bars and rings guides show normalized levels, not dB or frequency.")),
+                            "Existing instances keep their choices. Right-click a visualizer to edit it. Bars and rings guides show normalized levels, not dB or frequency."
+                        })),
                 );
                 if instance {
                     return column().child(display);
                 }
                 let content = column().gap_3()
                     .child(display)
-                    .child(caption("Effect parameters below are shared by all instances, regardless of the default style."))
                     .child(settings_group("Response & glow", column().gap_2()
                         .child(settings.single(Field::AudioVisualizerDb))
                         .child(settings.pair(Field::AudioVisualizerSensitivity, Field::AudioVisualizerBloomIntensity))
-                        .child(caption("Fractal styles: silence fades the light; pause freezes it. Pulses follow energy rises, not detected beats."))))
+                        .id("settings-visualizer-response-help")
+                        .tooltip(settings_tooltip("Effect parameters are shared by all instances, regardless of the default style. Fractal styles: silence fades the light; pause freezes it. Pulses follow energy rises, not detected beats."))))
                     .child(settings_group("Shape & motion", column().gap_2()
                         .child(settings.pair(Field::AudioVisualizerInnerDiameter, Field::AudioVisualizerRotationSpeed))
                         .child(row().child(visual_switch("audio-visualizer-fade-idle", "", "Fade when idle", draft.audio_visualizer_fade_when_idle, cx, |draft| draft.audio_visualizer_fade_when_idle = !draft.audio_visualizer_fade_when_idle)))
-                        .child(caption("Controls the Bars, Rings and Bars + Rings styles."))))
+                        .id("settings-visualizer-motion-help")
+                        .tooltip(settings_tooltip("Effect parameters are shared by all instances. Controls the Bars, Rings and Bars + Rings styles."))))
                     .child(settings_group("Bars & rings", column().gap_2()
                         .child(settings.pair(Field::AudioVisualizerBarWidth, Field::AudioVisualizerBarGlowLayers))
                         .child(settings.single(Field::AudioVisualizerRingOpacity))
-                        .child(caption("Bloom affects bars and rings; bar glow requires bloom above zero."))));
+                        .id("settings-bars-rings-help")
+                        .tooltip(settings_tooltip("Effect parameters are shared by all instances. Bloom affects bars and rings; bar glow requires bloom above zero."))));
                 content.child(settings_group(
                     "Colors",
                     column()
@@ -1780,7 +1802,8 @@ impl GuiApp {
                             Field::AudioVisualizerPrimaryColor,
                             Field::AudioVisualizerSecondaryColor,
                         ))
-                        .child(caption("Independent of the shared color scheme.")),
+                        .id("settings-visualizer-colors-help")
+                        .tooltip(settings_tooltip("Colors are shared by all instances, independent of the shared color scheme.")),
                 ))
             }
             VisualPage::Waveform => column()
@@ -1809,7 +1832,8 @@ impl GuiApp {
                                     },
                                 )),
                         )
-                        .child(caption("The waterline stays still while paused.")),
+                        .id("settings-waveform-help")
+                        .tooltip(settings_tooltip("The waterline stays still while paused.")),
                 ))
                 .child(settings_group(
                     "Amplitude display",
@@ -1817,7 +1841,8 @@ impl GuiApp {
                         .gap_2()
                         .child(settings.pair(Field::WaveformRmsGain, Field::WaveformPeakGain))
                         .child(settings.single(Field::WaveformPeakGamma))
-                        .child(caption("Display only; does not affect playback volume.")),
+                        .id("settings-amplitude-help")
+                        .tooltip(settings_tooltip("Display only; does not affect playback volume.")),
                 )),
         }
     }
