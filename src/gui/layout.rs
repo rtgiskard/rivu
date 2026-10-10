@@ -1246,15 +1246,15 @@ mod tests {
 
     #[test]
     fn audio_visualizer_defaults_initialize_only_missing_instances() {
-        use crate::config::RadialSpectrumStyle;
+        use crate::config::AudioVisualizerStyle;
 
         let defaults = AudioVisualizerOptions {
-            style: RadialSpectrumStyle::Bars,
+            style: AudioVisualizerStyle::Bars,
             reference_lines: false,
             labels: false,
         };
         let custom = AudioVisualizerOptions {
-            style: RadialSpectrumStyle::Rings,
+            style: AudioVisualizerStyle::Rings,
             reference_lines: true,
             labels: false,
         };
@@ -1290,15 +1290,15 @@ mod tests {
 
     #[test]
     fn audio_visualizer_options_survive_moves_reordering_and_restart() {
-        use crate::config::RadialSpectrumStyle;
+        use crate::config::AudioVisualizerStyle;
 
         let first_options = AudioVisualizerOptions {
-            style: RadialSpectrumStyle::Bars,
+            style: AudioVisualizerStyle::Bars,
             reference_lines: true,
             labels: false,
         };
         let second_options = AudioVisualizerOptions {
-            style: RadialSpectrumStyle::Rings,
+            style: AudioVisualizerStyle::Rings,
             reference_lines: false,
             labels: true,
         };
@@ -1351,13 +1351,13 @@ mod tests {
 
     #[test]
     fn legacy_audio_visualizers_load_without_options_and_initialize_once() {
-        use crate::config::RadialSpectrumStyle;
+        use crate::config::AudioVisualizerStyle;
 
         let mut source = Layout::default();
         source.add("audio_visualizer", Some(2));
         source.add("audio_visualizer", Some(5));
         let defaults = AudioVisualizerOptions {
-            style: RadialSpectrumStyle::BarsRings,
+            style: AudioVisualizerStyle::BarsRings,
             reference_lines: false,
             labels: true,
         };

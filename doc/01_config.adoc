@@ -81,7 +81,7 @@ Visualizations is grouped by view, with shared controls in Common:
   Appearance, not frequency analysis, and does not affect Waveform gain or volume.
 * Frequency analysis: FFT size, window, and analysis rate for Spectrum,
   Spectrogram, and Audio Visualizer, not Waveform. FFT size defaults to `8192`;
-  configuration keys remain `spectrum_fft_size` and `spectrum_window`. Changing
+  configuration keys are `analysis_fft_size` and `analysis_window`. Changing
   size or window clears visualization history.
 * Rendering: Still mode stops visualization processing and discards results. Rendering cache
   (`visualization_cache`) reuses derived graphics in Spectrum, Spectrogram, and
@@ -116,8 +116,7 @@ Omitted `nerd_symbols` follows installed Nerd Font detection; an explicit value
 overrides it. Omitted `output_device` uses the default output; a selected device
 must be available.
 
-Library always uses thin hierarchy guide lines. The `library_tree_lines`
-configuration key has been removed; delete it from existing configuration files.
+Library uses thin hierarchy guide lines.
 
 Apply validates and saves all pages together; navigation preserves the draft.
 Discard drops unapplied changes. Saving library roots does not scan or enqueue
@@ -141,7 +140,7 @@ to copy the complete text.
 == Visualization dB ranges
 
 `visualization_db_range` defaults to `70` dB. The optional `spectrum_db_range`,
-`spectrogram_db_range`, and `radial_spectrum_db_range` override it only for their
+`spectrogram_db_range`, and `audio_visualizer_db_range` override it only for their
 named view. Every supplied range must be finite and between `1` and `160` dB,
 inclusive. An explicit override remains an override even if it equals Common's
 current value; changing Common later affects only views without overrides.
@@ -154,7 +153,7 @@ inherited range omits that override key.
 ----
 visualization_db_range = 80.0
 spectrum_db_range = 60.0
-radial_spectrum_db_range = 100.0
+audio_visualizer_db_range = 100.0
 # spectrogram_db_range is omitted, so Spectrogram uses 80 dB
 ----
 
@@ -245,8 +244,8 @@ history also depends on panel width and analysis rate; unavailable history stays
 it Maximum frequency rows. This rendering row limit applies with or without
 frequency interpolation; it is not the FFT size, and increasing it does not add
 measured frequency detail.
-Both views use a logarithmic frequency axis and share `spectrum_fft_size` and
-`spectrum_window`. Their independent `spectrum_db_range` and
+Both views use a logarithmic frequency axis and share `analysis_fft_size` and
+`analysis_window`. Their independent `spectrum_db_range` and
 `spectrogram_db_range` overrides inherit `visualization_db_range` when omitted;
 see <<_visualization_db_ranges,Visualization dB ranges>>.
 
@@ -256,8 +255,8 @@ Each Audio Visualizer instance stores its style, reference-line visibility, and
 label visibility in `layout.json`. Right-click the instance to change any of
 these directly, or open Visualizer settings and apply changes to that instance.
 Moving panels and restarting preserve their choices. Different styles can run
-simultaneously. Global `radial_spectrum_style`, `radial_spectrum_grid`, and
-`radial_spectrum_labels` seed new instances only; both overlay defaults are false.
+simultaneously. Global `audio_visualizer_style`, `audio_visualizer_grid`, and
+`audio_visualizer_labels` seed new instances only; both overlay defaults are false.
 Existing layouts without instance options copy these defaults once.
 
 Reference lines and labels are independently optional. Radial guides show
@@ -287,15 +286,15 @@ labels that would overlap. Available styles:
   energy rises brighten the trails. Particles leaving the field restart without
   a cross-screen connecting line. This is also generative art, not a measurement.
 
-All styles share `spectrum_fft_size`, `spectrum_window`, `analysis_fps`, and the
-two `radial_spectrum_*_color` endpoints. `radial_spectrum_db_range` inherits
+All styles share `analysis_fft_size`, `analysis_window`, `analysis_fps`, and the
+two `audio_visualizer_*_color` endpoints. `audio_visualizer_db_range` inherits
 `visualization_db_range` when omitted; it controls color mapping, not playback
 volume or measured amplitude. The two analysis styles retain a 0.5-second
 exponential trail measured in accepted audio time, so pausing freezes the field.
 Seeking, signal gaps, style changes, and FFT size/window changes clear the trail.
 
-The fractal styles use `radial_spectrum_sensitivity` and `radial_spectrum_db_range`
-to map measured energy into shape and brightness; `radial_spectrum_bloom_intensity`
+The fractal styles use `audio_visualizer_sensitivity` and `audio_visualizer_db_range`
+to map measured energy into shape and brightness; `audio_visualizer_bloom_intensity`
 controls the halo. Rotation, bar/ring shape, and idle fade do not apply. Motion
 and decay follow accepted audio time: silence extinguishes the light, while
 pause freezes it. Seeking, signal gaps, hiding the view, and style/FFT changes

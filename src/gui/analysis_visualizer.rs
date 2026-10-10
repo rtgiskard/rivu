@@ -1,7 +1,7 @@
 //! Fixed-scale, analysis-backed stereo plots. Texture storage is independent of panel size.
 use crate::{
     analysis::{AnalysisFrame, AnalysisSettings, DENSITY_SIDE},
-    config::{AudioVisualizerOptions, Config, RadialSpectrumStyle},
+    config::{AudioVisualizerOptions, Config, AudioVisualizerStyle},
 };
 use gpui::{
     AnyElement, App, Bounds, Pixels, Point, RenderImage, SharedString, TextAlign, Window, canvas,
@@ -19,7 +19,7 @@ pub(super) struct AnalysisVisualizer {
 }
 
 struct PlotData {
-    style: RadialSpectrumStyle,
+    style: AudioVisualizerStyle,
     visible: bool,
     background: u32,
     primary: u32,
@@ -44,15 +44,15 @@ struct PlotData {
     high_label: SharedString,
 }
 
-pub(super) fn analysis_style(style: RadialSpectrumStyle) -> bool {
+pub(super) fn analysis_style(style: AudioVisualizerStyle) -> bool {
     matches!(
         style,
-        RadialSpectrumStyle::StereoDensity | RadialSpectrumStyle::SpatialSpectrum
+        AudioVisualizerStyle::StereoDensity | AudioVisualizerStyle::SpatialSpectrum
     )
 }
 
 impl AnalysisVisualizer {
-    pub(super) fn new(style: RadialSpectrumStyle) -> Self {
+    pub(super) fn new(style: AudioVisualizerStyle) -> Self {
         assert!(analysis_style(style));
         let config = Config::default();
         Self {
@@ -60,9 +60,9 @@ impl AnalysisVisualizer {
                 style,
                 visible: true,
                 background: config.visual_background.rgb(),
-                primary: config.radial_spectrum_primary_color.rgb(),
-                secondary: config.radial_spectrum_secondary_color.rgb(),
-                db_range: config.radial_spectrum_db_range(),
+                primary: config.audio_visualizer_primary_color.rgb(),
+                secondary: config.audio_visualizer_secondary_color.rgb(),
+                db_range: config.audio_visualizer_db_range(),
                 settings: AnalysisSettings::from(&config),
                 generation: None,
                 sample_rate: 0,
@@ -88,18 +88,18 @@ impl AnalysisVisualizer {
         let settings = AnalysisSettings::from(config);
         let reset =
             settings.fft_size != data.settings.fft_size || settings.window != data.settings.window;
-        let recolor = data.primary != config.radial_spectrum_primary_color.rgb()
-            || data.secondary != config.radial_spectrum_secondary_color.rgb()
-            || data.db_range != config.radial_spectrum_db_range();
+        let recolor = data.primary != config.audio_visualizer_primary_color.rgb()
+            || data.secondary != config.audio_visualizer_secondary_color.rgb()
+            || data.db_range != config.audio_visualizer_db_range();
         let changed = reset || recolor || data.background != config.visual_background.rgb();
-        if data.db_range != config.radial_spectrum_db_range() {
+        if data.db_range != config.audio_visualizer_db_range() {
             data.range_label = "".into();
         }
         data.settings = settings;
-        data.primary = config.radial_spectrum_primary_color.rgb();
-        data.secondary = config.radial_spectrum_secondary_color.rgb();
+        data.primary = config.audio_visualizer_primary_color.rgb();
+        data.secondary = config.audio_visualizer_secondary_color.rgb();
         data.background = config.visual_background.rgb();
-        data.db_range = config.radial_spectrum_db_range();
+        data.db_range = config.audio_visualizer_db_range();
         if reset {
             data.clear();
         } else if recolor && !data.field.is_empty() {
@@ -214,8 +214,8 @@ impl PlotData {
             self.sample_rate = frame.sample_rate;
         }
         let demanded = match self.style {
-            RadialSpectrumStyle::StereoDensity => frame.visualizer.demand.stereo_density,
-            RadialSpectrumStyle::SpatialSpectrum => frame.visualizer.demand.spatial_spectrum,
+            AudioVisualizerStyle::StereoDensity => frame.visualizer.demand.stereo_density,
+            AudioVisualizerStyle::SpatialSpectrum => frame.visualizer.demand.spatial_spectrum,
             _ => false,
         };
         if !demanded
@@ -239,7 +239,7 @@ impl PlotData {
         }
         let mut changed = self.image.is_none();
         match self.style {
-            RadialSpectrumStyle::StereoDensity => {
+            AudioVisualizerStyle::StereoDensity => {
                 if frame.visualizer.density.len() != DENSITY_SIDE * DENSITY_SIDE {
                     return;
                 }
@@ -257,7 +257,7 @@ impl PlotData {
                     self.readout = "".into();
                 }
             }
-            RadialSpectrumStyle::SpatialSpectrum => {
+            AudioVisualizerStyle::SpatialSpectrum => {
                 let high = high_frequency(frame.sample_rate);
                 if high <= 20.0 {
                     return;
@@ -299,8 +299,8 @@ impl PlotData {
 
     fn rasterize(&mut self) {
         let (width, height) = match self.style {
-            RadialSpectrumStyle::StereoDensity => (DENSITY_SIDE, DENSITY_SIDE),
-            RadialSpectrumStyle::SpatialSpectrum => (SPATIAL_WIDTH, SPATIAL_HEIGHT),
+            AudioVisualizerStyle::StereoDensity => (DENSITY_SIDE, DENSITY_SIDE),
+            AudioVisualizerStyle::SpatialSpectrum => (SPATIAL_WIDTH, SPATIAL_HEIGHT),
             _ => return,
         };
         let mut pixels = image::RgbaImage::new(width as u32, height as u32);
@@ -332,7 +332,7 @@ impl PlotData {
             return;
         }
         let labels = options.labels && width >= 250.0 && height >= 155.0;
-        let density = self.style == RadialSpectrumStyle::StereoDensity;
+        let density = self.style == AudioVisualizerStyle::StereoDensity;
         let left = if labels { 49.0 } else { 6.0 };
         let top = if labels { 25.0 } else { 6.0 };
         let bottom = if labels {
@@ -679,7 +679,7 @@ mod tests {
     use super::*;
     use crate::analysis::{SpatialBin, VisualizerDemand, VisualizerFrame};
 
-    fn frame(style: RadialSpectrumStyle) -> AnalysisFrame {
+    fn frame(style: AudioVisualizerStyle) -> AnalysisFrame {
         AnalysisFrame {
             sequence: 1,
             generation: 1,
@@ -688,8 +688,8 @@ mod tests {
             settings: Some(AnalysisSettings::from(&Config::default())),
             visualizer: VisualizerFrame {
                 demand: VisualizerDemand {
-                    stereo_density: style == RadialSpectrumStyle::StereoDensity,
-                    spatial_spectrum: style == RadialSpectrumStyle::SpatialSpectrum,
+                    stereo_density: style == AudioVisualizerStyle::StereoDensity,
+                    spatial_spectrum: style == AudioVisualizerStyle::SpatialSpectrum,
                     band_energy: false,
                 },
                 spatial: vec![SpatialBin {
@@ -697,7 +697,7 @@ mod tests {
                     pan: 0.0,
                     power_db: -30.0,
                 }],
-                density: if style == RadialSpectrumStyle::StereoDensity {
+                density: if style == AudioVisualizerStyle::StereoDensity {
                     vec![0.0; DENSITY_SIDE * DENSITY_SIDE]
                 } else {
                     Vec::new()
@@ -708,7 +708,7 @@ mod tests {
         }
     }
 
-    fn plot(style: RadialSpectrumStyle) -> AnalysisVisualizer {
+    fn plot(style: AudioVisualizerStyle) -> AnalysisVisualizer {
         let plot = AnalysisVisualizer::new(style);
         plot.configure(&Config::default());
         plot
@@ -730,8 +730,8 @@ mod tests {
 
     #[test]
     fn trail_decays_only_in_accepted_sample_time_and_does_not_sum_bins() {
-        let plot = plot(RadialSpectrumStyle::SpatialSpectrum);
-        let mut frame = frame(RadialSpectrumStyle::SpatialSpectrum);
+        let plot = plot(AudioVisualizerStyle::SpatialSpectrum);
+        let mut frame = frame(AudioVisualizerStyle::SpatialSpectrum);
         frame.visualizer.spatial.push(frame.visualizer.spatial[0]);
         plot.update(&frame);
         let (x, y) = spatial_cell(1000.0, 0.0, 20_000.0).unwrap();
@@ -760,8 +760,8 @@ mod tests {
 
     #[test]
     fn generation_demand_settings_and_visibility_invalidate_old_fields() {
-        let plot = plot(RadialSpectrumStyle::SpatialSpectrum);
-        let mut frame = frame(RadialSpectrumStyle::SpatialSpectrum);
+        let plot = plot(AudioVisualizerStyle::SpatialSpectrum);
+        let mut frame = frame(AudioVisualizerStyle::SpatialSpectrum);
         plot.update(&frame);
         frame.generation += 1;
         frame.visualizer.demand.spatial_spectrum = false;
@@ -771,8 +771,8 @@ mod tests {
         plot.update(&frame);
         assert!(plot.data.borrow().image.is_some());
         plot.configure(&Config {
-            radial_spectrum_style: RadialSpectrumStyle::SpatialSpectrum,
-            spectrum_fft_size: 16384,
+            audio_visualizer_style: AudioVisualizerStyle::SpatialSpectrum,
+            analysis_fft_size: 16384,
             ..Config::default()
         });
         plot.update(&frame);
@@ -784,15 +784,15 @@ mod tests {
         assert!(plot.data.borrow().field.is_empty());
         plot.set_visible(true);
         plot.configure(&Config {
-            radial_spectrum_style: RadialSpectrumStyle::StereoDensity,
+            audio_visualizer_style: AudioVisualizerStyle::StereoDensity,
             ..Config::default()
         });
         plot.update(&frame);
         assert!(plot.data.borrow().image.is_none());
-        let density = self::frame(RadialSpectrumStyle::StereoDensity);
+        let density = self::frame(AudioVisualizerStyle::StereoDensity);
         plot.update(&density);
         assert!(plot.data.borrow().field.is_empty());
-        plot.update(&self::frame(RadialSpectrumStyle::SpatialSpectrum));
+        plot.update(&self::frame(AudioVisualizerStyle::SpatialSpectrum));
         assert_eq!(
             plot.data.borrow().field.len(),
             SPATIAL_WIDTH * SPATIAL_HEIGHT
@@ -804,8 +804,8 @@ mod tests {
         assert_eq!(field_strength(0.0, 70.0), 0.0);
         assert_eq!(field_strength(1.0, 70.0), 1.0);
         assert!((field_strength(0.001, 60.0) - 0.5).abs() < 1e-6);
-        let plot = plot(RadialSpectrumStyle::StereoDensity);
-        let mut frame = frame(RadialSpectrumStyle::StereoDensity);
+        let plot = plot(AudioVisualizerStyle::StereoDensity);
+        let mut frame = frame(AudioVisualizerStyle::StereoDensity);
         frame.visualizer.density[0] = 0.001;
         plot.update(&frame);
         assert_eq!(plot.data.borrow().field[0], 0.001);
@@ -834,8 +834,8 @@ mod tests {
 
     #[test]
     fn only_uploaded_images_need_delayed_retirement() {
-        let plot = plot(RadialSpectrumStyle::StereoDensity);
-        let mut frame = frame(RadialSpectrumStyle::StereoDensity);
+        let plot = plot(AudioVisualizerStyle::StereoDensity);
+        let mut frame = frame(AudioVisualizerStyle::StereoDensity);
         plot.update(&frame);
         let old = Arc::downgrade(plot.data.borrow().image.as_ref().unwrap());
         frame.visualizer.density[0] = 1.0;
@@ -854,8 +854,8 @@ mod tests {
     #[test]
     fn hidden_analysis_releases_fields_without_recoloring_or_consuming_audio() {
         for style in [
-            RadialSpectrumStyle::StereoDensity,
-            RadialSpectrumStyle::SpatialSpectrum,
+            AudioVisualizerStyle::StereoDensity,
+            AudioVisualizerStyle::SpatialSpectrum,
         ] {
             let plot = plot(style);
             plot.update(&frame(style));
@@ -864,8 +864,8 @@ mod tests {
             assert_eq!(plot.data.borrow().field.capacity(), 0);
             assert_eq!(plot.data.borrow().spatial_next.capacity(), 0);
             plot.configure(&Config {
-                radial_spectrum_style: style,
-                radial_spectrum_db_range: Some(50.0),
+                audio_visualizer_style: style,
+                audio_visualizer_db_range: Some(50.0),
                 ..Config::default()
             });
             plot.update(&frame(style));
@@ -879,9 +879,9 @@ mod tests {
 
     #[test]
     fn simultaneous_analysis_styles_keep_independent_fields_and_retire_only_hidden_images() {
-        let density = plot(RadialSpectrumStyle::StereoDensity);
-        let spatial = plot(RadialSpectrumStyle::SpatialSpectrum);
-        let mut frame = frame(RadialSpectrumStyle::StereoDensity);
+        let density = plot(AudioVisualizerStyle::StereoDensity);
+        let spatial = plot(AudioVisualizerStyle::SpatialSpectrum);
+        let mut frame = frame(AudioVisualizerStyle::StereoDensity);
         frame.visualizer.demand.spatial_spectrum = true;
         frame.visualizer.demand.band_energy = true;
         frame.visualizer.density[0] = 0.25;
@@ -894,7 +894,7 @@ mod tests {
         density.data.borrow_mut().image_painted = true;
         spatial.data.borrow_mut().image_painted = true;
         let config = Config {
-            radial_spectrum_style: RadialSpectrumStyle::FractalFlow,
+            audio_visualizer_style: AudioVisualizerStyle::FractalFlow,
             ..Config::default()
         };
         assert!(!density.configure(&config));

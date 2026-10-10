@@ -8,8 +8,8 @@ use super::{
 };
 use crate::{
     config::{
-        AudioVisualizerOptions, Config, LogLevel, RadialSpectrumStyle, RgbColor, SpectrumStyle,
-        SpectrumWindow, VisualizationPalette,
+        AudioVisualizerOptions, Config, LogLevel, AudioVisualizerStyle, RgbColor, SpectrumStyle,
+        AnalysisWindow, VisualizationPalette,
     },
     model::Command,
 };
@@ -24,10 +24,10 @@ enum SettingChoice {
     CustomFont,
     SpectrumStyle(SpectrumStyle),
     Fft(u32),
-    RadialSpectrumStyle(RadialSpectrumStyle),
+    AudioVisualizerStyle(AudioVisualizerStyle),
     Palette(VisualizationPalette),
     LogLevel(LogLevel),
-    Window(SpectrumWindow),
+    Window(AnalysisWindow),
 }
 
 impl SettingChoice {
@@ -35,7 +35,7 @@ impl SettingChoice {
         match self {
             Self::Device(_) | Self::Font(_) | Self::CustomFont => String::new(),
             Self::SpectrumStyle(value) => spectrum_style_label(value).to_owned(),
-            Self::RadialSpectrumStyle(value) => radial_spectrum_style_label(value).to_owned(),
+            Self::AudioVisualizerStyle(value) => audio_visualizer_style_label(value).to_owned(),
             Self::Palette(value) => visualization_palette_label(value).to_owned(),
             Self::Fft(value) => value.to_string(),
             Self::LogLevel(value) => match value {
@@ -44,9 +44,9 @@ impl SettingChoice {
                 LogLevel::Warning => "Warning".to_owned(),
                 LogLevel::Error => "Error".to_owned(),
             },
-            Self::Window(SpectrumWindow::Hann) => "Hann".to_owned(),
-            Self::Window(SpectrumWindow::BlackmanHarris) => "Blackman–Harris".to_owned(),
-            Self::Window(SpectrumWindow::None) => "None".to_owned(),
+            Self::Window(AnalysisWindow::Hann) => "Hann".to_owned(),
+            Self::Window(AnalysisWindow::BlackmanHarris) => "Blackman–Harris".to_owned(),
+            Self::Window(AnalysisWindow::None) => "None".to_owned(),
         }
     }
 }
@@ -65,16 +65,16 @@ enum Field {
     Fps,
     Background,
     VisualizationDb,
-    RadialSpectrumSensitivity,
-    RadialSpectrumRotationSpeed,
-    RadialSpectrumBarWidth,
-    RadialSpectrumBarGlowLayers,
-    RadialSpectrumRingOpacity,
-    RadialSpectrumBloomIntensity,
-    RadialSpectrumInnerDiameter,
-    RadialSpectrumPrimaryColor,
-    RadialSpectrumSecondaryColor,
-    RadialSpectrumDb,
+    AudioVisualizerSensitivity,
+    AudioVisualizerRotationSpeed,
+    AudioVisualizerBarWidth,
+    AudioVisualizerBarGlowLayers,
+    AudioVisualizerRingOpacity,
+    AudioVisualizerBloomIntensity,
+    AudioVisualizerInnerDiameter,
+    AudioVisualizerPrimaryColor,
+    AudioVisualizerSecondaryColor,
+    AudioVisualizerDb,
     SpectrumDb,
     SpectrumBarWidth,
     SpectrumBars,
@@ -109,16 +109,16 @@ impl Field {
             Self::Fps => "Analysis rate (Hz)",
             Self::Background => "Background color",
             Self::VisualizationDb => "Default display range (dB)",
-            Self::RadialSpectrumSensitivity => "Sensitivity",
-            Self::RadialSpectrumRotationSpeed => "Rotation speed",
-            Self::RadialSpectrumBarWidth => "Bar width",
-            Self::RadialSpectrumBarGlowLayers => "Bar glow layers",
-            Self::RadialSpectrumRingOpacity => "Ring opacity",
-            Self::RadialSpectrumBloomIntensity => "Bloom intensity",
-            Self::RadialSpectrumInnerDiameter => "Inner diameter",
-            Self::RadialSpectrumPrimaryColor => "Primary color",
-            Self::RadialSpectrumSecondaryColor => "Secondary color",
-            Self::SpectrumDb | Self::RadialSpectrumDb => "Display range (dB)",
+            Self::AudioVisualizerSensitivity => "Sensitivity",
+            Self::AudioVisualizerRotationSpeed => "Rotation speed",
+            Self::AudioVisualizerBarWidth => "Bar width",
+            Self::AudioVisualizerBarGlowLayers => "Bar glow layers",
+            Self::AudioVisualizerRingOpacity => "Ring opacity",
+            Self::AudioVisualizerBloomIntensity => "Bloom intensity",
+            Self::AudioVisualizerInnerDiameter => "Inner diameter",
+            Self::AudioVisualizerPrimaryColor => "Primary color",
+            Self::AudioVisualizerSecondaryColor => "Secondary color",
+            Self::SpectrumDb | Self::AudioVisualizerDb => "Display range (dB)",
             Self::SpectrogramDb => "Color range (dB)",
             Self::SpectrumBarWidth => "Automatic bar width (px)",
             Self::SpectrumBars => "Bar count",
@@ -152,20 +152,20 @@ impl Field {
             Self::Scale => "0.75–2.",
             Self::Fps => "5–60.",
             Self::Background
-            | Self::RadialSpectrumPrimaryColor
-            | Self::RadialSpectrumSecondaryColor
+            | Self::AudioVisualizerPrimaryColor
+            | Self::AudioVisualizerSecondaryColor
             | Self::CursorColor => "#RRGGBB.",
             Self::VisualizationDb => "1–160.",
             // These controls attach a live inherited-range tooltip in Settings::field.
-            Self::SpectrumDb | Self::RadialSpectrumDb | Self::SpectrogramDb => "",
-            Self::RadialSpectrumSensitivity => "0–5.",
-            Self::RadialSpectrumRotationSpeed => "0–10.",
-            Self::RadialSpectrumBarWidth
-            | Self::RadialSpectrumBloomIntensity
+            Self::SpectrumDb | Self::AudioVisualizerDb | Self::SpectrogramDb => "",
+            Self::AudioVisualizerSensitivity => "0–5.",
+            Self::AudioVisualizerRotationSpeed => "0–10.",
+            Self::AudioVisualizerBarWidth
+            | Self::AudioVisualizerBloomIntensity
             | Self::WaveformPeakGain => "0–2.",
-            Self::RadialSpectrumBarGlowLayers => "0–4.",
-            Self::RadialSpectrumRingOpacity => "0–1.",
-            Self::RadialSpectrumInnerDiameter => "0–2; relative to panel size.",
+            Self::AudioVisualizerBarGlowLayers => "0–4.",
+            Self::AudioVisualizerRingOpacity => "0–1.",
+            Self::AudioVisualizerInnerDiameter => "0–2; relative to panel size.",
             Self::SpectrumBarWidth => "1–20; used with automatic bar count.",
             Self::SpectrumBars => "1–512; 0 = automatic.",
             Self::SpectrumGap => "0–8.",
@@ -238,15 +238,15 @@ fn spectrum_style_label(style: SpectrumStyle) -> &'static str {
         SpectrumStyle::Solid => "Solid",
     }
 }
-fn radial_spectrum_style_label(style: RadialSpectrumStyle) -> &'static str {
+fn audio_visualizer_style_label(style: AudioVisualizerStyle) -> &'static str {
     match style {
-        RadialSpectrumStyle::Bars => "Bars",
-        RadialSpectrumStyle::Rings => "Rings",
-        RadialSpectrumStyle::BarsRings => "Bars + Rings",
-        RadialSpectrumStyle::StereoDensity => "Stereo Density",
-        RadialSpectrumStyle::SpatialSpectrum => "Spatial Spectrum",
-        RadialSpectrumStyle::FractalBeams => "Fractal Beams",
-        RadialSpectrumStyle::FractalFlow => "Fractal Flow",
+        AudioVisualizerStyle::Bars => "Bars",
+        AudioVisualizerStyle::Rings => "Rings",
+        AudioVisualizerStyle::BarsRings => "Bars + Rings",
+        AudioVisualizerStyle::StereoDensity => "Stereo Density",
+        AudioVisualizerStyle::SpatialSpectrum => "Spatial Spectrum",
+        AudioVisualizerStyle::FractalBeams => "Fractal Beams",
+        AudioVisualizerStyle::FractalFlow => "Fractal Flow",
     }
 }
 
@@ -371,16 +371,16 @@ impl Settings {
             Field::Fps,
             Field::Background,
             Field::VisualizationDb,
-            Field::RadialSpectrumSensitivity,
-            Field::RadialSpectrumRotationSpeed,
-            Field::RadialSpectrumBarWidth,
-            Field::RadialSpectrumBarGlowLayers,
-            Field::RadialSpectrumRingOpacity,
-            Field::RadialSpectrumBloomIntensity,
-            Field::RadialSpectrumInnerDiameter,
-            Field::RadialSpectrumPrimaryColor,
-            Field::RadialSpectrumSecondaryColor,
-            Field::RadialSpectrumDb,
+            Field::AudioVisualizerSensitivity,
+            Field::AudioVisualizerRotationSpeed,
+            Field::AudioVisualizerBarWidth,
+            Field::AudioVisualizerBarGlowLayers,
+            Field::AudioVisualizerRingOpacity,
+            Field::AudioVisualizerBloomIntensity,
+            Field::AudioVisualizerInnerDiameter,
+            Field::AudioVisualizerPrimaryColor,
+            Field::AudioVisualizerSecondaryColor,
+            Field::AudioVisualizerDb,
             Field::SpectrumDb,
             Field::SpectrumBarWidth,
             Field::SpectrumBars,
@@ -458,7 +458,7 @@ impl Settings {
         let input = self.inputs[&field].clone();
         if matches!(
             field,
-            Field::SpectrumDb | Field::RadialSpectrumDb | Field::SpectrogramDb
+            Field::SpectrumDb | Field::AudioVisualizerDb | Field::SpectrogramDb
         ) {
             let common = self.inputs[&Field::VisualizationDb].clone();
             let fallback = self.draft.visualization_db_range;
@@ -614,54 +614,54 @@ impl Settings {
             cx,
         );
         self.set_value(
-            Field::RadialSpectrumSensitivity,
-            self.draft.radial_spectrum_sensitivity.to_string(),
+            Field::AudioVisualizerSensitivity,
+            self.draft.audio_visualizer_sensitivity.to_string(),
             cx,
         );
         self.set_value(
-            Field::RadialSpectrumRotationSpeed,
-            self.draft.radial_spectrum_rotation_speed.to_string(),
+            Field::AudioVisualizerRotationSpeed,
+            self.draft.audio_visualizer_rotation_speed.to_string(),
             cx,
         );
         self.set_value(
-            Field::RadialSpectrumBarWidth,
-            self.draft.radial_spectrum_bar_width.to_string(),
+            Field::AudioVisualizerBarWidth,
+            self.draft.audio_visualizer_bar_width.to_string(),
             cx,
         );
         self.set_value(
-            Field::RadialSpectrumBarGlowLayers,
-            self.draft.radial_spectrum_bar_glow_layers.to_string(),
+            Field::AudioVisualizerBarGlowLayers,
+            self.draft.audio_visualizer_bar_glow_layers.to_string(),
             cx,
         );
         self.set_value(
-            Field::RadialSpectrumRingOpacity,
-            self.draft.radial_spectrum_ring_opacity.to_string(),
+            Field::AudioVisualizerRingOpacity,
+            self.draft.audio_visualizer_ring_opacity.to_string(),
             cx,
         );
         self.set_value(
-            Field::RadialSpectrumBloomIntensity,
-            self.draft.radial_spectrum_bloom_intensity.to_string(),
+            Field::AudioVisualizerBloomIntensity,
+            self.draft.audio_visualizer_bloom_intensity.to_string(),
             cx,
         );
         self.set_value(
-            Field::RadialSpectrumInnerDiameter,
-            self.draft.radial_spectrum_inner_diameter.to_string(),
+            Field::AudioVisualizerInnerDiameter,
+            self.draft.audio_visualizer_inner_diameter.to_string(),
             cx,
         );
         self.set_value(
-            Field::RadialSpectrumPrimaryColor,
-            self.draft.radial_spectrum_primary_color.to_string(),
+            Field::AudioVisualizerPrimaryColor,
+            self.draft.audio_visualizer_primary_color.to_string(),
             cx,
         );
         self.set_value(
-            Field::RadialSpectrumSecondaryColor,
-            self.draft.radial_spectrum_secondary_color.to_string(),
+            Field::AudioVisualizerSecondaryColor,
+            self.draft.audio_visualizer_secondary_color.to_string(),
             cx,
         );
         self.set_value(
-            Field::RadialSpectrumDb,
+            Field::AudioVisualizerDb,
             self.draft
-                .radial_spectrum_db_range
+                .audio_visualizer_db_range
                 .map(|range| range.to_string())
                 .unwrap_or_default(),
             cx,
@@ -780,28 +780,28 @@ impl Settings {
             .trim()
             .parse::<RgbColor>()
             .context("Visualization background")?;
-        config.radial_spectrum_sensitivity = self.number(Field::RadialSpectrumSensitivity, cx)?;
-        config.radial_spectrum_rotation_speed =
-            self.number(Field::RadialSpectrumRotationSpeed, cx)?;
-        config.radial_spectrum_bar_width = self.number(Field::RadialSpectrumBarWidth, cx)?;
-        config.radial_spectrum_bar_glow_layers =
-            self.number(Field::RadialSpectrumBarGlowLayers, cx)?;
-        config.radial_spectrum_ring_opacity = self.number(Field::RadialSpectrumRingOpacity, cx)?;
-        config.radial_spectrum_bloom_intensity =
-            self.number(Field::RadialSpectrumBloomIntensity, cx)?;
-        config.radial_spectrum_inner_diameter =
-            self.number(Field::RadialSpectrumInnerDiameter, cx)?;
-        config.radial_spectrum_primary_color = self
-            .value(Field::RadialSpectrumPrimaryColor, cx)
+        config.audio_visualizer_sensitivity = self.number(Field::AudioVisualizerSensitivity, cx)?;
+        config.audio_visualizer_rotation_speed =
+            self.number(Field::AudioVisualizerRotationSpeed, cx)?;
+        config.audio_visualizer_bar_width = self.number(Field::AudioVisualizerBarWidth, cx)?;
+        config.audio_visualizer_bar_glow_layers =
+            self.number(Field::AudioVisualizerBarGlowLayers, cx)?;
+        config.audio_visualizer_ring_opacity = self.number(Field::AudioVisualizerRingOpacity, cx)?;
+        config.audio_visualizer_bloom_intensity =
+            self.number(Field::AudioVisualizerBloomIntensity, cx)?;
+        config.audio_visualizer_inner_diameter =
+            self.number(Field::AudioVisualizerInnerDiameter, cx)?;
+        config.audio_visualizer_primary_color = self
+            .value(Field::AudioVisualizerPrimaryColor, cx)
             .trim()
             .parse::<RgbColor>()
             .context("Audio Visualizer primary color")?;
-        config.radial_spectrum_secondary_color = self
-            .value(Field::RadialSpectrumSecondaryColor, cx)
+        config.audio_visualizer_secondary_color = self
+            .value(Field::AudioVisualizerSecondaryColor, cx)
             .trim()
             .parse::<RgbColor>()
             .context("Audio Visualizer secondary color")?;
-        config.radial_spectrum_db_range = self.optional_number(Field::RadialSpectrumDb, cx)?;
+        config.audio_visualizer_db_range = self.optional_number(Field::AudioVisualizerDb, cx)?;
         config.spectrum_db_range = self.optional_number(Field::SpectrumDb, cx)?;
         config.spectrum_gap = self.number(Field::SpectrumGap, cx)?;
         config.spectrum_peak_hold_ms = self.number(Field::SpectrumHold, cx)?;
@@ -998,9 +998,9 @@ impl GuiApp {
         self.settings.visualizer_panel = Some(panel_id);
         self.settings.page = SettingsPage::Visualizations;
         self.settings.visual_page = VisualPage::AudioVisualizer;
-        self.settings.draft.radial_spectrum_style = options.style;
-        self.settings.draft.radial_spectrum_grid = options.reference_lines;
-        self.settings.draft.radial_spectrum_labels = options.labels;
+        self.settings.draft.audio_visualizer_style = options.style;
+        self.settings.draft.audio_visualizer_grid = options.reference_lines;
+        self.settings.draft.audio_visualizer_labels = options.labels;
         self.settings_open = true;
         cx.notify();
     }
@@ -1101,13 +1101,13 @@ impl GuiApp {
                 self.select_font(value, cx);
             }
             SettingChoice::SpectrumStyle(value) => self.settings.draft.spectrum_style = value,
-            SettingChoice::RadialSpectrumStyle(value) => {
-                self.settings.draft.radial_spectrum_style = value
+            SettingChoice::AudioVisualizerStyle(value) => {
+                self.settings.draft.audio_visualizer_style = value
             }
             SettingChoice::Palette(value) => self.settings.draft.visual_palette = value,
-            SettingChoice::Fft(value) => self.settings.draft.spectrum_fft_size = value,
+            SettingChoice::Fft(value) => self.settings.draft.analysis_fft_size = value,
             SettingChoice::LogLevel(value) => self.settings.draft.log_level = value,
-            SettingChoice::Window(value) => self.settings.draft.spectrum_window = value,
+            SettingChoice::Window(value) => self.settings.draft.analysis_window = value,
         }
         self.settings.dropdown.select_index(index);
         self.settings.dropdown.close();
@@ -1122,7 +1122,7 @@ impl GuiApp {
                 SettingChoice::Fft(_) => Measured::SettingsFft,
                 SettingChoice::LogLevel(_) => Measured::SettingsLogLevel,
                 SettingChoice::Window(_) => Measured::SettingsWindow,
-                SettingChoice::RadialSpectrumStyle(_) => Measured::SettingsStyle,
+                SettingChoice::AudioVisualizerStyle(_) => Measured::SettingsStyle,
                 SettingChoice::Palette(_) => Measured::SettingsStyle,
                 SettingChoice::Device(_) => Measured::Device,
             };
@@ -1542,14 +1542,14 @@ impl GuiApp {
                 .relative()
                 .child(self.measurement(Measured::SettingsStyle));
                 let fft = dropdown_button(
-                    "spectrum-fft",
-                    draft.spectrum_fft_size.to_string(),
+                    "analysis-fft",
+                    draft.analysis_fft_size.to_string(),
                     cx,
                     |this, _, _| {
                         let values = [512, 1024, 2048, 4096, 8192, 16384, 32768];
                         let selected = values
                             .iter()
-                            .position(|value| *value == this.settings.draft.spectrum_fft_size)
+                            .position(|value| *value == this.settings.draft.analysis_fft_size)
                             .unwrap_or(0);
                         this.open_setting_dropdown(
                             values
@@ -1565,18 +1565,18 @@ impl GuiApp {
                 .relative()
                 .child(self.measurement(Measured::SettingsFft));
                 let window = dropdown_button(
-                    "spectrum-window",
-                    SettingChoice::Window(draft.spectrum_window).label(),
+                    "analysis-window",
+                    SettingChoice::Window(draft.analysis_window).label(),
                     cx,
                     |this, _, _| {
                         let values = [
-                            SpectrumWindow::Hann,
-                            SpectrumWindow::BlackmanHarris,
-                            SpectrumWindow::None,
+                            AnalysisWindow::Hann,
+                            AnalysisWindow::BlackmanHarris,
+                            AnalysisWindow::None,
                         ];
                         let selected = values
                             .iter()
-                            .position(|value| *value == this.settings.draft.spectrum_window)
+                            .position(|value| *value == this.settings.draft.analysis_window)
                             .unwrap_or(0);
                         this.open_setting_dropdown(
                             values
@@ -1705,29 +1705,29 @@ impl GuiApp {
             VisualPage::AudioVisualizer => {
                 let style = dropdown_button(
                     "audio-visualizer-style",
-                    radial_spectrum_style_label(draft.radial_spectrum_style),
+                    audio_visualizer_style_label(draft.audio_visualizer_style),
                     cx,
                     |this, _, _| {
                         let values = [
-                            RadialSpectrumStyle::Bars,
-                            RadialSpectrumStyle::Rings,
-                            RadialSpectrumStyle::BarsRings,
-                            RadialSpectrumStyle::StereoDensity,
-                            RadialSpectrumStyle::SpatialSpectrum,
-                            RadialSpectrumStyle::FractalBeams,
-                            RadialSpectrumStyle::FractalFlow,
+                            AudioVisualizerStyle::Bars,
+                            AudioVisualizerStyle::Rings,
+                            AudioVisualizerStyle::BarsRings,
+                            AudioVisualizerStyle::StereoDensity,
+                            AudioVisualizerStyle::SpatialSpectrum,
+                            AudioVisualizerStyle::FractalBeams,
+                            AudioVisualizerStyle::FractalFlow,
                         ];
                         let selected = values
                             .iter()
-                            .position(|value| *value == this.settings.draft.radial_spectrum_style)
+                            .position(|value| *value == this.settings.draft.audio_visualizer_style)
                             .unwrap_or(0);
                         this.open_setting_dropdown(
                             values
                                 .into_iter()
                                 .map(|value| {
                                     DropdownItem::new(
-                                        SettingChoice::RadialSpectrumStyle(value),
-                                        radial_spectrum_style_label(value),
+                                        SettingChoice::AudioVisualizerStyle(value),
+                                        audio_visualizer_style_label(value),
                                     )
                                 })
                                 .collect(),
@@ -1737,17 +1737,17 @@ impl GuiApp {
                 )
                 .relative()
                 .child(self.measurement(Measured::SettingsStyle));
-                let hint = match draft.radial_spectrum_style {
-                    RadialSpectrumStyle::StereoDensity => {
+                let hint = match draft.audio_visualizer_style {
+                    AudioVisualizerStyle::StereoDensity => {
                         "Fixed Mid/Side axes. Color shows occupancy, not dBFS."
                     }
-                    RadialSpectrumStyle::SpatialSpectrum => {
+                    AudioVisualizerStyle::SpatialSpectrum => {
                         "Frequency versus left/right energy balance, not source direction. Color shows dBFS."
                     }
-                    RadialSpectrumStyle::FractalBeams => {
+                    AudioVisualizerStyle::FractalBeams => {
                         "Bands deform branches; energy rises send outward pulses."
                     }
-                    RadialSpectrumStyle::FractalFlow => {
+                    AudioVisualizerStyle::FractalFlow => {
                         "Bands steer light filaments; energy rises brighten their trails."
                     }
                     _ => "",
@@ -1762,13 +1762,13 @@ impl GuiApp {
                         .child(row().flex_wrap().gap_2()
                             .child(visual_switch(
                                 "audio-visualizer-grid", "#", "Reference lines",
-                                draft.radial_spectrum_grid, cx,
-                                |draft| draft.radial_spectrum_grid = !draft.radial_spectrum_grid,
+                                draft.audio_visualizer_grid, cx,
+                                |draft| draft.audio_visualizer_grid = !draft.audio_visualizer_grid,
                             ))
                             .child(visual_switch(
                                 "audio-visualizer-labels", "T", "Labels",
-                                draft.radial_spectrum_labels, cx,
-                                |draft| draft.radial_spectrum_labels = !draft.radial_spectrum_labels,
+                                draft.audio_visualizer_labels, cx,
+                                |draft| draft.audio_visualizer_labels = !draft.audio_visualizer_labels,
                             )))
                         .child(caption(if instance {
                             "Only this visualizer changes. These controls are also in its right-click menu."
@@ -1784,24 +1784,24 @@ impl GuiApp {
                     .child(display)
                     .child(caption("Effect parameters below are shared by all instances, regardless of the default style."))
                     .child(settings_group("Response & glow", column().gap_2()
-                        .child(settings.single(Field::RadialSpectrumDb))
-                        .child(settings.pair(Field::RadialSpectrumSensitivity, Field::RadialSpectrumBloomIntensity))
+                        .child(settings.single(Field::AudioVisualizerDb))
+                        .child(settings.pair(Field::AudioVisualizerSensitivity, Field::AudioVisualizerBloomIntensity))
                         .child(caption("Fractal styles: silence fades the light; pause freezes it. Pulses follow energy rises, not detected beats."))))
                     .child(settings_group("Shape & motion", column().gap_2()
-                        .child(settings.pair(Field::RadialSpectrumInnerDiameter, Field::RadialSpectrumRotationSpeed))
-                        .child(row().child(visual_switch("audio-visualizer-fade-idle", "◌", "Fade when idle", draft.radial_spectrum_fade_when_idle, cx, |draft| draft.radial_spectrum_fade_when_idle = !draft.radial_spectrum_fade_when_idle)))
+                        .child(settings.pair(Field::AudioVisualizerInnerDiameter, Field::AudioVisualizerRotationSpeed))
+                        .child(row().child(visual_switch("audio-visualizer-fade-idle", "◌", "Fade when idle", draft.audio_visualizer_fade_when_idle, cx, |draft| draft.audio_visualizer_fade_when_idle = !draft.audio_visualizer_fade_when_idle)))
                         .child(caption("Controls the Bars, Rings and Bars + Rings styles."))))
                     .child(settings_group("Bars & rings", column().gap_2()
-                        .child(settings.pair(Field::RadialSpectrumBarWidth, Field::RadialSpectrumBarGlowLayers))
-                        .child(settings.single(Field::RadialSpectrumRingOpacity))
+                        .child(settings.pair(Field::AudioVisualizerBarWidth, Field::AudioVisualizerBarGlowLayers))
+                        .child(settings.single(Field::AudioVisualizerRingOpacity))
                         .child(caption("Bloom affects bars and rings; bar glow requires bloom above zero."))));
                 content.child(settings_group(
                     "Colors",
                     column()
                         .gap_2()
                         .child(settings.pair(
-                            Field::RadialSpectrumPrimaryColor,
-                            Field::RadialSpectrumSecondaryColor,
+                            Field::AudioVisualizerPrimaryColor,
+                            Field::AudioVisualizerSecondaryColor,
                         ))
                         .child(caption("Independent of the shared color scheme.")),
                 ))

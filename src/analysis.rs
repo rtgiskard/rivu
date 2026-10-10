@@ -1,4 +1,4 @@
-use crate::config::{Config, SpectrumWindow};
+use crate::config::{Config, AnalysisWindow};
 use parking_lot::RwLock;
 use ringbuf::{
     HeapCons, HeapProd, HeapRb,
@@ -154,15 +154,15 @@ pub struct AnalysisFrame {
 pub struct AnalysisSettings {
     pub fps: u32,
     pub fft_size: u32,
-    pub window: SpectrumWindow,
+    pub window: AnalysisWindow,
 }
 
 impl From<&Config> for AnalysisSettings {
     fn from(config: &Config) -> Self {
         Self {
             fps: config.analysis_fps,
-            fft_size: config.spectrum_fft_size,
-            window: config.spectrum_window,
+            fft_size: config.analysis_fft_size,
+            window: config.analysis_window,
         }
     }
 }
@@ -367,12 +367,12 @@ impl SpectrumAnalyzer {
             .map(|i| {
                 let phase = std::f32::consts::TAU * i as f32 / n as f32;
                 match settings.window {
-                    SpectrumWindow::Hann => 0.5 - 0.5 * phase.cos(),
-                    SpectrumWindow::BlackmanHarris => {
+                    AnalysisWindow::Hann => 0.5 - 0.5 * phase.cos(),
+                    AnalysisWindow::BlackmanHarris => {
                         0.35875 - 0.48829 * phase.cos() + 0.14128 * (2.0 * phase).cos()
                             - 0.01168 * (3.0 * phase).cos()
                     }
-                    SpectrumWindow::None => 1.0,
+                    AnalysisWindow::None => 1.0,
                 }
             })
             .collect();
@@ -769,7 +769,7 @@ mod tests {
             AnalysisSettings {
                 fps: 20,
                 fft_size: 512,
-                window: SpectrumWindow::None,
+                window: AnalysisWindow::None,
             },
             5120,
         );
@@ -812,7 +812,7 @@ mod tests {
         let settings = AnalysisSettings {
             fps: 20,
             fft_size: 4096,
-            window: SpectrumWindow::None,
+            window: AnalysisWindow::None,
         };
         let mut combined = SpectrumAnalyzer::new(settings, 32768);
         combined.set_visualizer_demand(ALL_DEMAND);
@@ -932,9 +932,9 @@ mod tests {
     #[test]
     fn band_energy_bands_integrate_power_without_phase_cancellation() {
         for window in [
-            SpectrumWindow::None,
-            SpectrumWindow::Hann,
-            SpectrumWindow::BlackmanHarris,
+            AnalysisWindow::None,
+            AnalysisWindow::Hann,
+            AnalysisWindow::BlackmanHarris,
         ] {
             for (frequency, band) in [(128.0, 0), (1024.0, 1), (8192.0, 2)] {
                 let mut analyzer = SpectrumAnalyzer::new(
@@ -970,7 +970,7 @@ mod tests {
             AnalysisSettings {
                 fps: 20,
                 fft_size: 512,
-                window: SpectrumWindow::None,
+                window: AnalysisWindow::None,
             },
             8000,
         );
@@ -1190,7 +1190,7 @@ mod tests {
         worker.configure(AnalysisSettings {
             fps: 60,
             fft_size: 512,
-            window: SpectrumWindow::None,
+            window: AnalysisWindow::None,
         });
         worker.control.set_visualizer_demand(DENSITY_DEMAND);
         worker.set_enabled(true);
@@ -1243,7 +1243,7 @@ mod tests {
         worker.configure(AnalysisSettings {
             fps: 60,
             fft_size: 512,
-            window: SpectrumWindow::None,
+            window: AnalysisWindow::None,
         });
         worker.control.set_visualizer_demand(DENSITY_DEMAND);
         worker.set_enabled(true);
@@ -1344,7 +1344,7 @@ mod tests {
         let settings = AnalysisSettings {
             fps: 60,
             fft_size: 512,
-            window: SpectrumWindow::None,
+            window: AnalysisWindow::None,
         };
         worker.configure(settings);
         worker.control.set_visualizer_demand(ALL_DEMAND);
@@ -1424,7 +1424,7 @@ mod tests {
         let mut settings = AnalysisSettings {
             fps: 60,
             fft_size: 512,
-            window: SpectrumWindow::None,
+            window: AnalysisWindow::None,
         };
         worker.configure(settings);
         worker.set_enabled(true);
@@ -1438,7 +1438,7 @@ mod tests {
                     worker.set_enabled(true);
                 }
                 4 => {
-                    settings.window = SpectrumWindow::Hann;
+                    settings.window = AnalysisWindow::Hann;
                     worker.configure(settings);
                 }
                 _ => {}
@@ -1519,9 +1519,9 @@ mod tests {
     fn tone_frequency_and_amplitude_are_calibrated_across_fft_windows() {
         for fft_size in [512, 1024, 2048, 4096, 8192, 16384, 32768] {
             for window in [
-                SpectrumWindow::Hann,
-                SpectrumWindow::BlackmanHarris,
-                SpectrumWindow::None,
+                AnalysisWindow::Hann,
+                AnalysisWindow::BlackmanHarris,
+                AnalysisWindow::None,
             ] {
                 let settings = AnalysisSettings {
                     fps: 20,
@@ -1567,7 +1567,7 @@ mod tests {
             let settings = AnalysisSettings {
                 fps: 20,
                 fft_size,
-                window: SpectrumWindow::None,
+                window: AnalysisWindow::None,
             };
             for amplitude in [0.5_f32, 1e-6] {
                 let mut analyzer = SpectrumAnalyzer::new(settings, 48_000);
@@ -1617,7 +1617,7 @@ mod tests {
         let settings = AnalysisSettings {
             fps: 5,
             fft_size: 32768,
-            window: SpectrumWindow::None,
+            window: AnalysisWindow::None,
         };
         worker.configure(settings);
         worker.reset(192_000);

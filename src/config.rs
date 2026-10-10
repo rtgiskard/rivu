@@ -26,7 +26,7 @@ pub enum VisualizationPalette {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RadialSpectrumStyle {
+pub enum AudioVisualizerStyle {
     Bars,
     Rings,
     BarsRings,
@@ -38,7 +38,7 @@ pub enum RadialSpectrumStyle {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AudioVisualizerOptions {
-    pub style: RadialSpectrumStyle,
+    pub style: AudioVisualizerStyle,
     pub reference_lines: bool,
     pub labels: bool,
 }
@@ -46,9 +46,9 @@ pub struct AudioVisualizerOptions {
 impl From<&Config> for AudioVisualizerOptions {
     fn from(config: &Config) -> Self {
         Self {
-            style: config.radial_spectrum_style,
-            reference_lines: config.radial_spectrum_grid,
-            labels: config.radial_spectrum_labels,
+            style: config.audio_visualizer_style,
+            reference_lines: config.audio_visualizer_grid,
+            labels: config.audio_visualizer_labels,
         }
     }
 }
@@ -100,7 +100,7 @@ pub(crate) fn nerd_fonts_available() -> bool {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SpectrumWindow {
+pub enum AnalysisWindow {
     Hann,
     BlackmanHarris,
     None,
@@ -181,8 +181,8 @@ pub struct Config {
     pub visual_background: RgbColor,
     pub visual_palette: VisualizationPalette,
     pub spectrum_style: SpectrumStyle,
-    pub spectrum_fft_size: u32,
-    pub spectrum_window: SpectrumWindow,
+    pub analysis_fft_size: u32,
+    pub analysis_window: AnalysisWindow,
     pub spectrum_interpolate: bool,
     pub spectrum_bar_width: f32,
     pub spectrum_bars: u32,
@@ -197,19 +197,19 @@ pub struct Config {
     pub spectrum_smoothing_ms: u32,
     pub spectrum_grid: bool,
     pub spectrum_labels: bool,
-    pub radial_spectrum_style: RadialSpectrumStyle,
-    pub radial_spectrum_grid: bool,
-    pub radial_spectrum_labels: bool,
-    pub radial_spectrum_sensitivity: f32,
-    pub radial_spectrum_rotation_speed: f32,
-    pub radial_spectrum_bar_width: f32,
-    pub radial_spectrum_bar_glow_layers: u32,
-    pub radial_spectrum_ring_opacity: f32,
-    pub radial_spectrum_bloom_intensity: f32,
-    pub radial_spectrum_inner_diameter: f32,
-    pub radial_spectrum_fade_when_idle: bool,
-    pub radial_spectrum_primary_color: RgbColor,
-    pub radial_spectrum_secondary_color: RgbColor,
+    pub audio_visualizer_style: AudioVisualizerStyle,
+    pub audio_visualizer_grid: bool,
+    pub audio_visualizer_labels: bool,
+    pub audio_visualizer_sensitivity: f32,
+    pub audio_visualizer_rotation_speed: f32,
+    pub audio_visualizer_bar_width: f32,
+    pub audio_visualizer_bar_glow_layers: u32,
+    pub audio_visualizer_ring_opacity: f32,
+    pub audio_visualizer_bloom_intensity: f32,
+    pub audio_visualizer_inner_diameter: f32,
+    pub audio_visualizer_fade_when_idle: bool,
+    pub audio_visualizer_primary_color: RgbColor,
+    pub audio_visualizer_secondary_color: RgbColor,
 
     pub spectrogram_labels: bool,
     pub spectrogram_interpolate: bool,
@@ -226,7 +226,7 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spectrogram_db_range: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub radial_spectrum_db_range: Option<f32>,
+    pub audio_visualizer_db_range: Option<f32>,
     /// Maximum continuous audio history shown by Spectrogram.
     pub spectrogram_history_seconds: u32,
     pub waveform_cursor_color: RgbColor,
@@ -266,8 +266,8 @@ impl Default for Config {
             visual_background: RgbColor(0x08090c),
             visual_palette: VisualizationPalette::Deadbeef,
             spectrum_style: SpectrumStyle::Bars,
-            spectrum_fft_size: 8192,
-            spectrum_window: SpectrumWindow::BlackmanHarris,
+            analysis_fft_size: 8192,
+            analysis_window: AnalysisWindow::BlackmanHarris,
             spectrum_interpolate: true,
             spectrum_bar_width: 3.0,
             spectrum_bars: 0,
@@ -280,19 +280,19 @@ impl Default for Config {
             spectrum_smoothing_ms: 80,
             spectrum_grid: true,
             spectrum_labels: true,
-            radial_spectrum_style: RadialSpectrumStyle::BarsRings,
-            radial_spectrum_grid: false,
-            radial_spectrum_labels: false,
-            radial_spectrum_sensitivity: 1.5,
-            radial_spectrum_rotation_speed: 0.5,
-            radial_spectrum_bar_width: 0.6,
-            radial_spectrum_bar_glow_layers: 2,
-            radial_spectrum_ring_opacity: 0.8,
-            radial_spectrum_bloom_intensity: 0.5,
-            radial_spectrum_inner_diameter: 0.7,
-            radial_spectrum_fade_when_idle: false,
-            radial_spectrum_primary_color: RgbColor(0x7aa2f7),
-            radial_spectrum_secondary_color: RgbColor(0xbb9af7),
+            audio_visualizer_style: AudioVisualizerStyle::BarsRings,
+            audio_visualizer_grid: false,
+            audio_visualizer_labels: false,
+            audio_visualizer_sensitivity: 1.5,
+            audio_visualizer_rotation_speed: 0.5,
+            audio_visualizer_bar_width: 0.6,
+            audio_visualizer_bar_glow_layers: 2,
+            audio_visualizer_ring_opacity: 0.8,
+            audio_visualizer_bloom_intensity: 0.5,
+            audio_visualizer_inner_diameter: 0.7,
+            audio_visualizer_fade_when_idle: false,
+            audio_visualizer_primary_color: RgbColor(0x7aa2f7),
+            audio_visualizer_secondary_color: RgbColor(0xbb9af7),
 
             spectrogram_labels: true,
             spectrogram_interpolate: true,
@@ -303,7 +303,7 @@ impl Default for Config {
             visualization_db_range: 70.0,
             spectrum_db_range: None,
             spectrogram_db_range: None,
-            radial_spectrum_db_range: None,
+            audio_visualizer_db_range: None,
             spectrogram_history_seconds: 20,
             waveform_cursor_color: RgbColor(0x73daca),
             waveform_glow: 1.0,
@@ -330,8 +330,8 @@ impl Config {
             .unwrap_or(self.visualization_db_range)
     }
 
-    pub fn radial_spectrum_db_range(&self) -> f32 {
-        self.radial_spectrum_db_range
+    pub fn audio_visualizer_db_range(&self) -> f32 {
+        self.audio_visualizer_db_range
             .unwrap_or(self.visualization_db_range)
     }
 
@@ -346,37 +346,7 @@ impl Config {
                     .with_context(|| format!("cannot read configuration {}", path.display()));
             }
         };
-        let mut document: toml::Table = toml::from_str(&contents)
-            .with_context(|| format!("cannot parse TOML configuration {}", path.display()))?;
-        // Removed visual controls are discarded so older configurations remain loadable.
-        for key in [
-            "spectrogram_palette",
-            "waveform_palette",
-            "waveform_played_opacity",
-            "spectrum_min_hz",
-            "spectrum_max_hz",
-            "spectrogram_min_hz",
-            "spectrogram_max_hz",
-            "spectrum_bands_per_octave",
-            "spectrum_log_scale",
-            "spectrogram_log_scale",
-            "radial_spectrum_wave_thickness",
-        ] {
-            document.remove(key);
-        }
-        // Constant release speed has no equivalent acceleration. Retire the old
-        // key; absent gravity uses its default, while explicit gravity wins.
-        document.remove("spectrum_peak_release_db_per_second");
-        // The former shared range migrates once on load; saves use only the
-        // independent ranges, and explicit new values take precedence.
-        if let Some(range) = document.remove("analysis_db_range") {
-            document
-                .entry("spectrum_db_range")
-                .or_insert_with(|| range.clone());
-            document.entry("spectrogram_db_range").or_insert(range);
-        }
-        let config: Self = document
-            .try_into()
+        let config: Self = toml::from_str(&contents)
             .with_context(|| format!("cannot parse TOML configuration {}", path.display()))?;
         config
             .validate()
@@ -439,7 +409,7 @@ impl Config {
             ("visualization_db_range", Some(self.visualization_db_range)),
             ("spectrum_db_range", self.spectrum_db_range),
             ("spectrogram_db_range", self.spectrogram_db_range),
-            ("radial_spectrum_db_range", self.radial_spectrum_db_range),
+            ("audio_visualizer_db_range", self.audio_visualizer_db_range),
         ] {
             if let Some(range) = range {
                 ensure!(
@@ -450,10 +420,10 @@ impl Config {
         }
         ensure!(
             matches!(
-                self.spectrum_fft_size,
+                self.analysis_fft_size,
                 512 | 1024 | 2048 | 4096 | 8192 | 16384 | 32768
             ),
-            "spectrum_fft_size must be a power of two from 512 to 32768"
+            "analysis_fft_size must be a power of two from 512 to 32768"
         );
         ensure!(
             self.spectrum_bar_width.is_finite() && (1.0..=20.0).contains(&self.spectrum_bar_width),
@@ -468,38 +438,38 @@ impl Config {
             "spectrum_gap must be between 0 and 8 pixels"
         );
         ensure!(
-            self.radial_spectrum_bar_glow_layers <= 4,
-            "radial_spectrum_bar_glow_layers must be between 0 and 4"
+            self.audio_visualizer_bar_glow_layers <= 4,
+            "audio_visualizer_bar_glow_layers must be between 0 and 4"
         );
         for (name, value, range) in [
             (
-                "radial_spectrum_sensitivity",
-                self.radial_spectrum_sensitivity,
+                "audio_visualizer_sensitivity",
+                self.audio_visualizer_sensitivity,
                 0.0..=5.0,
             ),
             (
-                "radial_spectrum_rotation_speed",
-                self.radial_spectrum_rotation_speed,
+                "audio_visualizer_rotation_speed",
+                self.audio_visualizer_rotation_speed,
                 0.0..=10.0,
             ),
             (
-                "radial_spectrum_bar_width",
-                self.radial_spectrum_bar_width,
+                "audio_visualizer_bar_width",
+                self.audio_visualizer_bar_width,
                 0.0..=2.0,
             ),
             (
-                "radial_spectrum_ring_opacity",
-                self.radial_spectrum_ring_opacity,
+                "audio_visualizer_ring_opacity",
+                self.audio_visualizer_ring_opacity,
                 0.0..=1.0,
             ),
             (
-                "radial_spectrum_bloom_intensity",
-                self.radial_spectrum_bloom_intensity,
+                "audio_visualizer_bloom_intensity",
+                self.audio_visualizer_bloom_intensity,
                 0.0..=2.0,
             ),
             (
-                "radial_spectrum_inner_diameter",
-                self.radial_spectrum_inner_diameter,
+                "audio_visualizer_inner_diameter",
+                self.audio_visualizer_inner_diameter,
                 0.0..=2.0,
             ),
         ] {
@@ -677,7 +647,7 @@ mod tests {
             analysis_fps: 30,
             visualization_db_range: 90.0,
             spectrum_db_range: Some(80.0),
-            radial_spectrum_db_range: Some(60.0),
+            audio_visualizer_db_range: Some(60.0),
             media_read_buffer_mb: 8,
             nerd_symbols: true,
             ffmpeg_enabled: true,
@@ -685,8 +655,8 @@ mod tests {
             spectrum_style: SpectrumStyle::Solid,
             visual_palette: VisualizationPalette::Deadbeef,
             visual_background: "#101820".parse().unwrap(),
-            spectrum_fft_size: 16384,
-            spectrum_window: SpectrumWindow::Hann,
+            analysis_fft_size: 16384,
+            analysis_window: AnalysisWindow::Hann,
             spectrum_interpolate: false,
             spectrum_bar_width: 4.0,
             spectrum_bars: 48,
@@ -699,19 +669,19 @@ mod tests {
             spectrum_smoothing_ms: 120,
             spectrum_grid: false,
             spectrum_labels: false,
-            radial_spectrum_style: RadialSpectrumStyle::BarsRings,
-            radial_spectrum_grid: true,
-            radial_spectrum_labels: true,
-            radial_spectrum_sensitivity: 2.0,
-            radial_spectrum_rotation_speed: 1.0,
-            radial_spectrum_bar_width: 0.8,
-            radial_spectrum_bar_glow_layers: 3,
-            radial_spectrum_ring_opacity: 0.7,
-            radial_spectrum_bloom_intensity: 1.0,
-            radial_spectrum_inner_diameter: 0.8,
-            radial_spectrum_fade_when_idle: true,
-            radial_spectrum_primary_color: "#7aa2f7".parse().unwrap(),
-            radial_spectrum_secondary_color: "#bb9af7".parse().unwrap(),
+            audio_visualizer_style: AudioVisualizerStyle::BarsRings,
+            audio_visualizer_grid: true,
+            audio_visualizer_labels: true,
+            audio_visualizer_sensitivity: 2.0,
+            audio_visualizer_rotation_speed: 1.0,
+            audio_visualizer_bar_width: 0.8,
+            audio_visualizer_bar_glow_layers: 3,
+            audio_visualizer_ring_opacity: 0.7,
+            audio_visualizer_bloom_intensity: 1.0,
+            audio_visualizer_inner_diameter: 0.8,
+            audio_visualizer_fade_when_idle: true,
+            audio_visualizer_primary_color: "#7aa2f7".parse().unwrap(),
+            audio_visualizer_secondary_color: "#bb9af7".parse().unwrap(),
             spectrogram_labels: false,
             spectrogram_interpolate: false,
             spectrogram_interpolation_points: 1024,
@@ -827,10 +797,10 @@ mod tests {
             "spectrum_db_range = 0",
             "spectrum_db_range = 161",
             "spectrogram_db_range = inf",
-            "spectrum_fft_size = 256",
-            "spectrum_fft_size = 65536",
-            "spectrum_fft_size = 1000",
-            "spectrum_window = 'hamming'",
+            "analysis_fft_size = 256",
+            "analysis_fft_size = 65536",
+            "analysis_fft_size = 1000",
+            "analysis_window = 'hamming'",
             "spectrum_bar_width = 0.9",
             "spectrum_bar_width = 21",
             "spectrum_bar_width = nan",
@@ -838,10 +808,10 @@ mod tests {
             "spectrum_gap = -1",
             "spectrum_gap = 9",
             "spectrum_gap = nan",
-            "radial_spectrum_sensitivity = -1",
-            "radial_spectrum_sensitivity = 6",
-            "radial_spectrum_bar_glow_layers = 5",
-            "radial_spectrum_ring_opacity = 2",
+            "audio_visualizer_sensitivity = -1",
+            "audio_visualizer_sensitivity = 6",
+            "audio_visualizer_bar_glow_layers = 5",
+            "audio_visualizer_ring_opacity = 2",
             "spectrum_peak_hold_ms = 2001",
             "spectrum_peak_gravity = -1",
             "spectrum_peak_gravity = 501",
@@ -904,38 +874,18 @@ mod tests {
     }
 
     #[test]
-    fn obsolete_release_is_removed_without_overriding_gravity() {
+    fn analysis_windows_and_fft_sizes_round_trip() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
-        for gravity in [None, Some(75.0)] {
-            let mut contents = "spectrum_peak_release_db_per_second = 42\n".to_owned();
-            if let Some(gravity) = gravity {
-                contents.push_str(&format!("spectrum_peak_gravity = {gravity}\n"));
-            }
-            fs::write(&path, contents).unwrap();
-            let config = Config::load(&path).unwrap();
-            assert_eq!(config.spectrum_peak_gravity, gravity.unwrap_or(50.0));
-            assert_eq!(config.spectrum_peak_hold_ms, 400);
-            config.save(&path).unwrap();
-            let saved = fs::read_to_string(&path).unwrap();
-            assert!(!saved.contains("spectrum_peak_release_db_per_second"));
-            assert_eq!(Config::load(&path).unwrap(), config);
-        }
-    }
-
-    #[test]
-    fn spectrum_windows_and_fft_sizes_round_trip() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("config.toml");
-        for spectrum_window in [
-            SpectrumWindow::Hann,
-            SpectrumWindow::BlackmanHarris,
-            SpectrumWindow::None,
+        for analysis_window in [
+            AnalysisWindow::Hann,
+            AnalysisWindow::BlackmanHarris,
+            AnalysisWindow::None,
         ] {
-            for spectrum_fft_size in [512, 1024, 2048, 4096, 8192, 16384, 32768] {
+            for analysis_fft_size in [512, 1024, 2048, 4096, 8192, 16384, 32768] {
                 let config = Config {
-                    spectrum_window,
-                    spectrum_fft_size,
+                    analysis_window,
+                    analysis_fft_size,
                     ..Config::default()
                 };
                 config.save(&path).unwrap();
@@ -953,13 +903,13 @@ mod tests {
         config.visualization_db_range = 85.0;
         assert_eq!(config.spectrum_db_range(), 85.0);
         assert_eq!(config.spectrogram_db_range(), 85.0);
-        assert_eq!(config.radial_spectrum_db_range(), 85.0);
+        assert_eq!(config.audio_visualizer_db_range(), 85.0);
         config.save(&path).unwrap();
         let saved: toml::Table = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         for key in [
             "spectrum_db_range",
             "spectrogram_db_range",
-            "radial_spectrum_db_range",
+            "audio_visualizer_db_range",
         ] {
             assert!(!saved.contains_key(key));
         }
@@ -967,17 +917,17 @@ mod tests {
 
         fs::write(
             &path,
-            "visualization_db_range = 85\nspectrum_db_range = 70\nspectrogram_db_range = 110\nradial_spectrum_db_range = 85\n",
+            "visualization_db_range = 85\nspectrum_db_range = 70\nspectrogram_db_range = 110\naudio_visualizer_db_range = 85\n",
         )
         .unwrap();
         config = Config::load(&path).unwrap();
         assert_eq!(config.spectrum_db_range, Some(70.0));
         assert_eq!(config.spectrogram_db_range, Some(110.0));
-        assert_eq!(config.radial_spectrum_db_range, Some(85.0));
+        assert_eq!(config.audio_visualizer_db_range, Some(85.0));
         config.visualization_db_range = 95.0;
         assert_eq!(config.spectrum_db_range(), 70.0);
         assert_eq!(config.spectrogram_db_range(), 110.0);
-        assert_eq!(config.radial_spectrum_db_range(), 85.0);
+        assert_eq!(config.audio_visualizer_db_range(), 85.0);
         config.save(&path).unwrap();
         assert_eq!(Config::load(&path).unwrap(), config);
         config.spectrum_db_range = None;
@@ -992,45 +942,13 @@ mod tests {
             "visualization_db_range",
             "spectrum_db_range",
             "spectrogram_db_range",
-            "radial_spectrum_db_range",
+            "audio_visualizer_db_range",
         ] {
             for value in ["nan", "inf", "-inf", "0", "0.99", "160.01", "161"] {
                 fs::write(&path, format!("{key} = {value}\n")).unwrap();
                 assert!(Config::load(&path).is_err(), "accepted {key} = {value}");
             }
         }
-    }
-
-    #[test]
-    fn removed_palette_fields_are_dropped_on_load_and_save() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("config.toml");
-        fs::write(
-            &path,
-            "shuffle = true\nspectrum_style = 'led'\nspectrogram_palette = 'legacy'\nwaveform_palette = 'legacy'\nwaveform_played_opacity = 0.5\n",
-        )
-        .unwrap();
-        let config = Config::load(&path).unwrap();
-        assert!(config.shuffle);
-        assert_eq!(config.spectrum_style, SpectrumStyle::Led);
-        config.save(&path).unwrap();
-        let saved: toml::Table = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(
-            saved.get("shuffle").and_then(toml::Value::as_bool),
-            Some(true)
-        );
-        assert_eq!(
-            saved.get("spectrum_style").and_then(toml::Value::as_str),
-            Some("led")
-        );
-        for key in [
-            "spectrogram_palette",
-            "waveform_palette",
-            "waveform_played_opacity",
-        ] {
-            assert!(!saved.contains_key(key), "obsolete key was saved: {key}");
-        }
-        assert_eq!(Config::load(&path).unwrap(), config);
     }
 
     #[test]
@@ -1042,10 +960,10 @@ mod tests {
                 visualization_db_range: if high { 160.0 } else { 1.0 },
                 spectrum_db_range: Some(if high { 160.0 } else { 1.0 }),
                 spectrogram_db_range: Some(if high { 1.0 } else { 160.0 }),
-                radial_spectrum_db_range: Some(if high { 160.0 } else { 1.0 }),
+                audio_visualizer_db_range: Some(if high { 160.0 } else { 1.0 }),
                 spectrum_gap: if high { 8.0 } else { 0.0 },
                 spectrum_peak_hold_ms: if high { 2000 } else { 0 },
-                spectrum_fft_size: if high { 32768 } else { 512 },
+                analysis_fft_size: if high { 32768 } else { 512 },
                 spectrum_bar_width: if high { 20.0 } else { 1.0 },
                 spectrum_bars: if high { 512 } else { 1 },
                 spectrum_peak_gravity: if high { 500.0 } else { 0.0 },

@@ -1,14 +1,15 @@
-//! Noctalia v5 Fancy Audio Visualizer reference implementation.
+//! AudioVisualizer coordinates all seven audio visualization styles.
 //!
-//! Rivu's RadialSpectrum follows the Noctalia v5 control's Bars/Rings concept
-//! and parameter model, using GPUI-native paths for the local rendering backend.
+//! Its radial Bars, Rings, and Bars + Rings renderers follow the Noctalia v5
+//! control's concept and parameter model using GPUI-native paths. Analysis and
+//! fractal styles are delegated to their respective rendering backends.
 
 use super::{
     analysis_visualizer::AnalysisVisualizer, fractal_visualizer::FractalVisualizer, layout,
 };
 use crate::{
     analysis::{AnalysisFrame, AnalysisSettings},
-    config::{AudioVisualizerOptions, Config, RadialSpectrumStyle},
+    config::{AudioVisualizerOptions, Config, AudioVisualizerStyle},
 };
 use gpui::{
     AnyElement, App, Bounds, PathBuilder, Rgba, TextAlign, Window, canvas, div, point, prelude::*,
@@ -32,17 +33,17 @@ const BAR_GLOW_PASSES: [(f32, f32, f32); 4] = [
     (0.006, 1.2, 0.55),
 ];
 
-const ANALYSIS_STYLES: [RadialSpectrumStyle; 2] = [
-    RadialSpectrumStyle::StereoDensity,
-    RadialSpectrumStyle::SpatialSpectrum,
+const ANALYSIS_STYLES: [AudioVisualizerStyle; 2] = [
+    AudioVisualizerStyle::StereoDensity,
+    AudioVisualizerStyle::SpatialSpectrum,
 ];
-const FRACTAL_STYLES: [RadialSpectrumStyle; 2] = [
-    RadialSpectrumStyle::FractalBeams,
-    RadialSpectrumStyle::FractalFlow,
+const FRACTAL_STYLES: [AudioVisualizerStyle; 2] = [
+    AudioVisualizerStyle::FractalBeams,
+    AudioVisualizerStyle::FractalFlow,
 ];
 
 #[derive(Clone)]
-pub(super) struct RadialSpectrum {
+pub(super) struct AudioVisualizer {
     data: Rc<RefCell<VisualizerData>>,
     analysis: [AnalysisVisualizer; 2],
     fractal: [FractalVisualizer; 2],
@@ -69,7 +70,7 @@ struct VisualizerData {
     time: f32,
     fade_started: Option<Instant>,
 }
-impl RadialSpectrum {
+impl AudioVisualizer {
     pub(super) fn new() -> Self {
         Self {
             analysis: ANALYSIS_STYLES.map(AnalysisVisualizer::new),
@@ -114,13 +115,13 @@ impl RadialSpectrum {
                 }
                 let options = panel.audio_visualizer.unwrap_or_else(|| config.into());
                 match options.style {
-                    RadialSpectrumStyle::Bars
-                    | RadialSpectrumStyle::Rings
-                    | RadialSpectrumStyle::BarsRings => radial_visible = true,
-                    RadialSpectrumStyle::StereoDensity => analysis_visible[0] = true,
-                    RadialSpectrumStyle::SpatialSpectrum => analysis_visible[1] = true,
-                    RadialSpectrumStyle::FractalBeams => fractal_visible[0] = true,
-                    RadialSpectrumStyle::FractalFlow => fractal_visible[1] = true,
+                    AudioVisualizerStyle::Bars
+                    | AudioVisualizerStyle::Rings
+                    | AudioVisualizerStyle::BarsRings => radial_visible = true,
+                    AudioVisualizerStyle::StereoDensity => analysis_visible[0] = true,
+                    AudioVisualizerStyle::SpatialSpectrum => analysis_visible[1] = true,
+                    AudioVisualizerStyle::FractalBeams => fractal_visible[0] = true,
+                    AudioVisualizerStyle::FractalFlow => fractal_visible[1] = true,
                 }
             }
         }
@@ -138,19 +139,19 @@ impl RadialSpectrum {
 
     fn configure(&mut self, config: &Config) -> bool {
         let mut data = self.data.borrow_mut();
-        let db_range = config.radial_spectrum_db_range();
+        let db_range = config.audio_visualizer_db_range();
         let expected_settings = AnalysisSettings::from(config);
         let changed = data.background != config.visual_background.rgb()
-            || data.sensitivity != config.radial_spectrum_sensitivity
-            || data.rotation_speed != config.radial_spectrum_rotation_speed
-            || data.bar_width != config.radial_spectrum_bar_width
-            || data.bar_glow_layers != config.radial_spectrum_bar_glow_layers
-            || data.ring_opacity != config.radial_spectrum_ring_opacity
-            || data.bloom_intensity != config.radial_spectrum_bloom_intensity
-            || data.inner_diameter != config.radial_spectrum_inner_diameter
-            || data.fade_when_idle != config.radial_spectrum_fade_when_idle
-            || data.primary_color != config.radial_spectrum_primary_color.rgb()
-            || data.secondary_color != config.radial_spectrum_secondary_color.rgb()
+            || data.sensitivity != config.audio_visualizer_sensitivity
+            || data.rotation_speed != config.audio_visualizer_rotation_speed
+            || data.bar_width != config.audio_visualizer_bar_width
+            || data.bar_glow_layers != config.audio_visualizer_bar_glow_layers
+            || data.ring_opacity != config.audio_visualizer_ring_opacity
+            || data.bloom_intensity != config.audio_visualizer_bloom_intensity
+            || data.inner_diameter != config.audio_visualizer_inner_diameter
+            || data.fade_when_idle != config.audio_visualizer_fade_when_idle
+            || data.primary_color != config.audio_visualizer_primary_color.rgb()
+            || data.secondary_color != config.audio_visualizer_secondary_color.rgb()
             || data.db_range != db_range
             || data.expected_settings.fft_size != expected_settings.fft_size
             || data.expected_settings.window != expected_settings.window;
@@ -158,16 +159,16 @@ impl RadialSpectrum {
             return false;
         }
         data.background = config.visual_background.rgb();
-        data.sensitivity = config.radial_spectrum_sensitivity;
-        data.rotation_speed = config.radial_spectrum_rotation_speed;
-        data.bar_width = config.radial_spectrum_bar_width;
-        data.bar_glow_layers = config.radial_spectrum_bar_glow_layers;
-        data.ring_opacity = config.radial_spectrum_ring_opacity;
-        data.bloom_intensity = config.radial_spectrum_bloom_intensity;
-        data.inner_diameter = config.radial_spectrum_inner_diameter;
-        data.fade_when_idle = config.radial_spectrum_fade_when_idle;
-        data.primary_color = config.radial_spectrum_primary_color.rgb();
-        data.secondary_color = config.radial_spectrum_secondary_color.rgb();
+        data.sensitivity = config.audio_visualizer_sensitivity;
+        data.rotation_speed = config.audio_visualizer_rotation_speed;
+        data.bar_width = config.audio_visualizer_bar_width;
+        data.bar_glow_layers = config.audio_visualizer_bar_glow_layers;
+        data.ring_opacity = config.audio_visualizer_ring_opacity;
+        data.bloom_intensity = config.audio_visualizer_bloom_intensity;
+        data.inner_diameter = config.audio_visualizer_inner_diameter;
+        data.fade_when_idle = config.audio_visualizer_fade_when_idle;
+        data.primary_color = config.audio_visualizer_primary_color.rgb();
+        data.secondary_color = config.audio_visualizer_secondary_color.rgb();
         data.db_range = db_range;
         data.expected_settings = expected_settings;
         data.displayed.clear();
@@ -274,19 +275,19 @@ impl RadialSpectrum {
         options: AudioVisualizerOptions,
     ) -> AnyElement {
         match options.style {
-            RadialSpectrumStyle::StereoDensity => return self.analysis[0].view(panel_id, options),
-            RadialSpectrumStyle::SpatialSpectrum => {
+            AudioVisualizerStyle::StereoDensity => return self.analysis[0].view(panel_id, options),
+            AudioVisualizerStyle::SpatialSpectrum => {
                 return self.analysis[1].view(panel_id, options);
             }
-            RadialSpectrumStyle::FractalBeams => return self.fractal[0].view(panel_id, options),
-            RadialSpectrumStyle::FractalFlow => return self.fractal[1].view(panel_id, options),
-            RadialSpectrumStyle::Bars
-            | RadialSpectrumStyle::Rings
-            | RadialSpectrumStyle::BarsRings => {}
+            AudioVisualizerStyle::FractalBeams => return self.fractal[0].view(panel_id, options),
+            AudioVisualizerStyle::FractalFlow => return self.fractal[1].view(panel_id, options),
+            AudioVisualizerStyle::Bars
+            | AudioVisualizerStyle::Rings
+            | AudioVisualizerStyle::BarsRings => {}
         }
         let data = Rc::clone(&self.data);
         div()
-            .id(("radial-spectrum", panel_id))
+            .id(("audio-visualizer", panel_id))
             .size_full()
             .min_w_0()
             .min_h_0()
@@ -316,16 +317,16 @@ impl RadialSpectrum {
                             alpha
                         };
                         match options.style {
-                            RadialSpectrumStyle::Bars => paint_bars(bounds, &data, window),
-                            RadialSpectrumStyle::Rings => paint_rings(bounds, &data, window),
-                            RadialSpectrumStyle::BarsRings => {
+                            AudioVisualizerStyle::Bars => paint_bars(bounds, &data, window),
+                            AudioVisualizerStyle::Rings => paint_rings(bounds, &data, window),
+                            AudioVisualizerStyle::BarsRings => {
                                 paint_rings(bounds, &data, window);
                                 paint_bars(bounds, &data, window);
                             }
-                            RadialSpectrumStyle::StereoDensity
-                            | RadialSpectrumStyle::SpatialSpectrum
-                            | RadialSpectrumStyle::FractalBeams
-                            | RadialSpectrumStyle::FractalFlow => {}
+                            AudioVisualizerStyle::StereoDensity
+                            | AudioVisualizerStyle::SpatialSpectrum
+                            | AudioVisualizerStyle::FractalBeams
+                            | AudioVisualizerStyle::FractalFlow => {}
                         }
                         if fade_alpha < 1.0 {
                             window.paint_quad(gpui::fill(
@@ -765,7 +766,7 @@ mod tests {
 
     #[test]
     fn same_rate_new_generation_resets_radial_smoothing() {
-        let mut radial = RadialSpectrum::new();
+        let mut radial = AudioVisualizer::new();
         radial.update(&frame());
         let mut next = frame();
         next.sample_time += Duration::from_millis(1);
@@ -779,15 +780,15 @@ mod tests {
     fn radial_rejects_stale_fft_and_window_configuration() {
         for config in [
             Config {
-                spectrum_fft_size: 16384,
+                analysis_fft_size: 16384,
                 ..Config::default()
             },
             Config {
-                spectrum_window: crate::config::SpectrumWindow::Hann,
+                analysis_window: crate::config::AnalysisWindow::Hann,
                 ..Config::default()
             },
         ] {
-            let mut radial = RadialSpectrum::new();
+            let mut radial = AudioVisualizer::new();
             radial.update(&frame());
             radial.configure(&config);
             radial.update(&frame());
@@ -802,7 +803,7 @@ mod tests {
 
     #[test]
     fn hidden_radial_resumes_directly_from_latest_frame() {
-        let mut radial = RadialSpectrum::new();
+        let mut radial = AudioVisualizer::new();
         radial.update(&frame());
         radial.set_visible(false);
         radial.update(&frame());
@@ -816,7 +817,7 @@ mod tests {
 
     #[test]
     fn other_view_overrides_do_not_reset_radial_display() {
-        let mut radial = RadialSpectrum::new();
+        let mut radial = AudioVisualizer::new();
         radial.update(&frame());
         let mut config = Config::default();
         config.spectrum_db_range = Some(40.0);
@@ -830,9 +831,9 @@ mod tests {
     #[test]
     fn common_range_changes_reset_only_inherited_radial_display() {
         for range_override in [None, Some(70.0)] {
-            let mut radial = RadialSpectrum::new();
+            let mut radial = AudioVisualizer::new();
             let mut config = Config {
-                radial_spectrum_db_range: range_override,
+                audio_visualizer_db_range: range_override,
                 ..Config::default()
             };
             radial.configure(&config);
@@ -858,12 +859,12 @@ mod tests {
 
     #[test]
     fn radial_override_uses_its_own_range_and_reset() {
-        let mut radial = RadialSpectrum::new();
+        let mut radial = AudioVisualizer::new();
         radial.update(&frame());
         radial.configure(&Config {
             visualization_db_range: 100.0,
             spectrum_db_range: Some(40.0),
-            radial_spectrum_db_range: Some(50.0),
+            audio_visualizer_db_range: Some(50.0),
             ..Config::default()
         });
         assert!(radial.data.borrow().displayed.is_empty());

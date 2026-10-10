@@ -10,13 +10,13 @@ mod layout;
 mod library;
 mod paged;
 mod panels;
-mod radial_spectrum;
+mod audio_visualizer;
 mod scrolling;
 mod settings;
 mod visuals;
 mod waveform;
 use crate::{
-    config::{AudioVisualizerOptions, RadialSpectrumStyle},
+    config::{AudioVisualizerOptions, AudioVisualizerStyle},
     core::AppHandle,
     model::{Command, PlaybackStatus, Query, playback_key_command},
     projection::GuiSnapshot,
@@ -534,7 +534,7 @@ pub(super) struct GuiApp {
     library_stats: Option<crate::model::LibraryStats>,
     settings: settings::Settings,
     visuals: visuals::Visuals,
-    radial_spectrum: radial_spectrum::RadialSpectrum,
+    audio_visualizer: audio_visualizer::AudioVisualizer,
     default_album: Entity<artwork::Artwork>,
     catalog_open: bool,
     settings_open: bool,
@@ -927,7 +927,7 @@ impl GuiApp {
             history_sort_desc: true,
             library_stats: None,
             visuals: visuals::Visuals::new(),
-            radial_spectrum: radial_spectrum::RadialSpectrum::new(),
+            audio_visualizer: audio_visualizer::AudioVisualizer::new(),
             default_album: cx.new(|_| artwork::Artwork::new()),
             catalog_open: false,
             settings_open: false,
@@ -964,7 +964,7 @@ impl GuiApp {
         app.layout_focus.focus(window, cx);
         window
             .observe_release(&cx.entity(), cx, |this: &mut Self, window, _| {
-                this.radial_spectrum.release_all_images(window);
+                this.audio_visualizer.release_all_images(window);
             })
             .detach();
         app
@@ -1890,7 +1890,7 @@ impl GuiApp {
             if received {
                 self.analysis_needs_refresh = false;
                 self.visuals.update(&self.analysis_staging);
-                self.radial_spectrum.update(&self.analysis_staging);
+                self.audio_visualizer.update(&self.analysis_staging);
                 changed = true;
             }
         }
@@ -1922,7 +1922,7 @@ impl GuiApp {
         let spectrum_restored = self
             .visuals
             .set_spectrum_visible(self.window_visible && !spectrum_panel_ids.is_empty());
-        let radial_changed = self.radial_spectrum.sync(
+        let audio_visualizer_changed = self.audio_visualizer.sync(
             &self.state.system.config,
             &active_panels,
             self.window_visible,
@@ -1937,9 +1937,9 @@ impl GuiApp {
                     AudioVisualizerOptions::from(self.state.system.config.as_ref())
                 });
                 match options.style {
-                    RadialSpectrumStyle::StereoDensity => demand.stereo_density = true,
-                    RadialSpectrumStyle::SpatialSpectrum => demand.spatial_spectrum = true,
-                    RadialSpectrumStyle::FractalBeams | RadialSpectrumStyle::FractalFlow => {
+                    AudioVisualizerStyle::StereoDensity => demand.stereo_density = true,
+                    AudioVisualizerStyle::SpatialSpectrum => demand.spatial_spectrum = true,
+                    AudioVisualizerStyle::FractalBeams | AudioVisualizerStyle::FractalFlow => {
                         demand.band_energy = true;
                     }
                     _ => {}
@@ -1956,7 +1956,7 @@ impl GuiApp {
             });
         if analysis_visible {
             let spectrum_changed = self.visuals.configure(&self.state.system.config);
-            self.analysis_needs_refresh |= spectrum_restored || spectrum_changed || radial_changed;
+            self.analysis_needs_refresh |= spectrum_restored || spectrum_changed || audio_visualizer_changed;
         }
         if analysis_visible != self.analysis_worker_enabled {
             self.analysis_worker_enabled = analysis_visible;
@@ -2047,7 +2047,7 @@ impl GuiApp {
         let options = panel
             .audio_visualizer
             .unwrap_or_else(|| AudioVisualizerOptions::from(self.state.system.config.as_ref()));
-        self.radial_spectrum.view(
+        self.audio_visualizer.view(
             panel.id,
             self.state.playback.status == PlaybackStatus::Playing,
             options,
@@ -2491,7 +2491,7 @@ impl Render for GuiApp {
         self.scroll_views.begin_frame();
         self.visuals.begin_frame();
         let paint_visuals = self.visuals.clone();
-        let paint_visualizer = self.radial_spectrum.clone();
+        let paint_visualizer = self.audio_visualizer.clone();
         let paint_waveform = self.waveform.read(cx).image_releaser();
         let root = self.layout.root.take();
         let layout_view = root
@@ -2961,30 +2961,30 @@ impl Render for GuiApp {
                         {
                             menu = menu.child(caption("Style").px(gpui::px(UI_INSET)).py_1());
                             for (style, label, selected_label) in [
-                                (RadialSpectrumStyle::Bars, "Bars", "Bars ✓"),
-                                (RadialSpectrumStyle::Rings, "Rings", "Rings ✓"),
+                                (AudioVisualizerStyle::Bars, "Bars", "Bars ✓"),
+                                (AudioVisualizerStyle::Rings, "Rings", "Rings ✓"),
                                 (
-                                    RadialSpectrumStyle::BarsRings,
+                                    AudioVisualizerStyle::BarsRings,
                                     "Bars + Rings",
                                     "Bars + Rings ✓",
                                 ),
                                 (
-                                    RadialSpectrumStyle::StereoDensity,
+                                    AudioVisualizerStyle::StereoDensity,
                                     "Stereo Density",
                                     "Stereo Density ✓",
                                 ),
                                 (
-                                    RadialSpectrumStyle::SpatialSpectrum,
+                                    AudioVisualizerStyle::SpatialSpectrum,
                                     "Spatial Spectrum",
                                     "Spatial Spectrum ✓",
                                 ),
                                 (
-                                    RadialSpectrumStyle::FractalBeams,
+                                    AudioVisualizerStyle::FractalBeams,
                                     "Fractal Beams",
                                     "Fractal Beams ✓",
                                 ),
                                 (
-                                    RadialSpectrumStyle::FractalFlow,
+                                    AudioVisualizerStyle::FractalFlow,
                                     "Fractal Flow",
                                     "Fractal Flow ✓",
                                 ),

@@ -23,7 +23,7 @@ use std::{cell::RefCell, collections::HashMap, ops::Range, rc::Rc, sync::Arc, ti
 
 use crate::{
     analysis::AnalysisFrame,
-    config::{Config, SpectrumStyle, SpectrumWindow, VisualizationPalette},
+    config::{Config, SpectrumStyle, AnalysisWindow, VisualizationPalette},
 };
 
 const HISTORY_GAP_RESET: Duration = Duration::from_secs(1);
@@ -207,8 +207,8 @@ struct VisualData {
     spectrum_bar_width: f32,
     spectrum_interpolate: bool,
     spectrum_show_labels: bool,
-    spectrum_fft_size: u32,
-    spectrum_window: SpectrumWindow,
+    analysis_fft_size: u32,
+    analysis_window: AnalysisWindow,
     spectrum_style: SpectrumStyle,
     spectrum_gap: f32,
     spectrum_peaks: bool,
@@ -285,8 +285,8 @@ impl Visuals {
                 spectrum_bar_width: 3.0,
                 spectrum_interpolate: true,
                 spectrum_show_labels: true,
-                spectrum_fft_size: 8192,
-                spectrum_window: SpectrumWindow::BlackmanHarris,
+                analysis_fft_size: 8192,
+                analysis_window: AnalysisWindow::BlackmanHarris,
                 spectrum_style: SpectrumStyle::Bars,
                 spectrum_gap: 1.0,
                 spectrum_peaks: true,
@@ -386,8 +386,8 @@ impl Visuals {
             || data.spectrum_interpolate != config.spectrum_interpolate
             || data.spectrum_show_labels != config.spectrum_labels
             || data.spectrogram_show_labels != config.spectrogram_labels
-            || data.spectrum_fft_size != config.spectrum_fft_size
-            || data.spectrum_window != config.spectrum_window
+            || data.analysis_fft_size != config.analysis_fft_size
+            || data.analysis_window != config.analysis_window
             || data.spectrogram_interpolate != config.spectrogram_interpolate
             || data.spectrogram_interpolation_points != config.spectrogram_interpolation_points
             || data.spectrogram_sampling_points_scale != config.spectrogram_sampling_points_scale
@@ -402,8 +402,8 @@ impl Visuals {
             || data.spectrogram_history_seconds != config.spectrogram_history_seconds
             || data.analysis_fps != config.analysis_fps
             || data.configured_history_columns != configured_history_columns;
-        let analysis_changed = data.spectrum_fft_size != config.spectrum_fft_size
-            || data.spectrum_window != config.spectrum_window;
+        let analysis_changed = data.analysis_fft_size != config.analysis_fft_size
+            || data.analysis_window != config.analysis_window;
         let heat_changed = palette_changed
             || data.visual_background != config.visual_background.rgb()
             || data.spectrogram_db_range != spectrogram_db_range
@@ -433,8 +433,8 @@ impl Visuals {
         data.spectrogram_interpolate = config.spectrogram_interpolate;
         data.spectrogram_interpolation_points = config.spectrogram_interpolation_points;
         data.spectrogram_sampling_points_scale = config.spectrogram_sampling_points_scale;
-        data.spectrum_fft_size = config.spectrum_fft_size;
-        data.spectrum_window = config.spectrum_window;
+        data.analysis_fft_size = config.analysis_fft_size;
+        data.analysis_window = config.analysis_window;
         data.spectrum_grid = config.spectrum_grid;
         data.spectrogram_db_range = spectrogram_db_range;
         data.visualization_cache = config.visualization_cache;
@@ -473,7 +473,7 @@ impl Visuals {
             return;
         }
         if !frame.settings.is_some_and(|settings| {
-            settings.fft_size == data.spectrum_fft_size && settings.window == data.spectrum_window
+            settings.fft_size == data.analysis_fft_size && settings.window == data.analysis_window
         }) {
             return;
         }
@@ -1925,11 +1925,11 @@ mod tests {
     fn reconfigured_analysis_rejects_old_fft_and_window_frames() {
         for config in [
             Config {
-                spectrum_fft_size: 16384,
+                analysis_fft_size: 16384,
                 ..Config::default()
             },
             Config {
-                spectrum_window: SpectrumWindow::Hann,
+                analysis_window: AnalysisWindow::Hann,
                 ..Config::default()
             },
         ] {
@@ -2253,7 +2253,7 @@ mod tests {
         let revision = visuals.data.borrow().spectrum_geometry_revision;
         visuals.data.borrow_mut().columns[0].image = Some(Arc::clone(&image));
         visuals.configure(&Config {
-            radial_spectrum_db_range: Some(40.0),
+            audio_visualizer_db_range: Some(40.0),
             ..Config::default()
         });
         let data = visuals.data.borrow();

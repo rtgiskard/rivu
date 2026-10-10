@@ -2,7 +2,7 @@
 use super::{fractal_beams, fractal_flow};
 use crate::{
     analysis::{AnalysisFrame, AnalysisSettings},
-    config::{AudioVisualizerOptions, Config, RadialSpectrumStyle},
+    config::{AudioVisualizerOptions, Config, AudioVisualizerStyle},
 };
 use gpui::{
     AnyElement, App, Bounds, PathBuilder, Pixels, TextAlign, Window, canvas, div, fill, point,
@@ -25,10 +25,10 @@ pub(super) struct LightSegment {
     pub tone: usize,
 }
 
-pub(super) fn fractal_style(style: RadialSpectrumStyle) -> bool {
+pub(super) fn fractal_style(style: AudioVisualizerStyle) -> bool {
     matches!(
         style,
-        RadialSpectrumStyle::FractalBeams | RadialSpectrumStyle::FractalFlow
+        AudioVisualizerStyle::FractalBeams | AudioVisualizerStyle::FractalFlow
     )
 }
 
@@ -38,10 +38,10 @@ enum Scene {
 }
 
 impl Scene {
-    fn new(style: RadialSpectrumStyle) -> Option<Self> {
+    fn new(style: AudioVisualizerStyle) -> Option<Self> {
         match style {
-            RadialSpectrumStyle::FractalBeams => Some(Self::Beams(fractal_beams::Scene::new())),
-            RadialSpectrumStyle::FractalFlow => Some(Self::Flow(fractal_flow::Scene::new())),
+            AudioVisualizerStyle::FractalBeams => Some(Self::Beams(fractal_beams::Scene::new())),
+            AudioVisualizerStyle::FractalFlow => Some(Self::Flow(fractal_flow::Scene::new())),
             _ => None,
         }
     }
@@ -74,7 +74,7 @@ pub(super) struct FractalVisualizer {
 }
 
 struct Data {
-    style: RadialSpectrumStyle,
+    style: AudioVisualizerStyle,
     visible: bool,
     background: u32,
     colors: [u32; 2],
@@ -90,7 +90,7 @@ struct Data {
 }
 
 impl FractalVisualizer {
-    pub(super) fn new(style: RadialSpectrumStyle) -> Self {
+    pub(super) fn new(style: AudioVisualizerStyle) -> Self {
         assert!(fractal_style(style));
         let config = Config::default();
         Self {
@@ -99,12 +99,12 @@ impl FractalVisualizer {
                 visible: true,
                 background: config.visual_background.rgb(),
                 colors: [
-                    config.radial_spectrum_primary_color.rgb(),
-                    config.radial_spectrum_secondary_color.rgb(),
+                    config.audio_visualizer_primary_color.rgb(),
+                    config.audio_visualizer_secondary_color.rgb(),
                 ],
-                sensitivity: config.radial_spectrum_sensitivity,
-                db_range: config.radial_spectrum_db_range(),
-                bloom: config.radial_spectrum_bloom_intensity,
+                sensitivity: config.audio_visualizer_sensitivity,
+                db_range: config.audio_visualizer_db_range(),
+                bloom: config.audio_visualizer_bloom_intensity,
                 settings: AnalysisSettings::from(&config),
                 source: None,
                 last_time: None,
@@ -121,21 +121,21 @@ impl FractalVisualizer {
         let reset =
             data.settings.fft_size != settings.fft_size || data.settings.window != settings.window;
         let colors = [
-            config.radial_spectrum_primary_color.rgb(),
-            config.radial_spectrum_secondary_color.rgb(),
+            config.audio_visualizer_primary_color.rgb(),
+            config.audio_visualizer_secondary_color.rgb(),
         ];
         let changed = reset
             || data.colors != colors
             || data.background != config.visual_background.rgb()
-            || data.sensitivity != config.radial_spectrum_sensitivity
-            || data.db_range != config.radial_spectrum_db_range()
-            || data.bloom != config.radial_spectrum_bloom_intensity;
+            || data.sensitivity != config.audio_visualizer_sensitivity
+            || data.db_range != config.audio_visualizer_db_range()
+            || data.bloom != config.audio_visualizer_bloom_intensity;
         data.settings = settings;
         data.colors = colors;
         data.background = config.visual_background.rgb();
-        data.sensitivity = config.radial_spectrum_sensitivity;
-        data.db_range = config.radial_spectrum_db_range();
-        data.bloom = config.radial_spectrum_bloom_intensity;
+        data.sensitivity = config.audio_visualizer_sensitivity;
+        data.db_range = config.audio_visualizer_db_range();
+        data.bloom = config.audio_visualizer_bloom_intensity;
         if reset {
             data.reset();
         }
@@ -238,7 +238,7 @@ impl Data {
         let onset = ((target.energy - self.previous_energy).max(0.0) * 3.0).clamp(0.0, 1.0);
         self.previous_energy = target.energy;
         // Flow needs bounded particle-integration steps; beams only deform geometry.
-        let step_rate = if self.style == RadialSpectrumStyle::FractalFlow {
+        let step_rate = if self.style == AudioVisualizerStyle::FractalFlow {
             120.0
         } else {
             10.0
@@ -438,7 +438,7 @@ mod tests {
     use super::*;
     use crate::analysis::{VisualizerDemand, VisualizerFrame};
 
-    fn plot(style: RadialSpectrumStyle) -> FractalVisualizer {
+    fn plot(style: AudioVisualizerStyle) -> FractalVisualizer {
         let plot = FractalVisualizer::new(style);
         plot.configure(&Config::default());
         plot
@@ -467,8 +467,8 @@ mod tests {
     #[test]
     fn paused_publications_do_not_advance_and_silence_extinguishes_light() {
         for style in [
-            RadialSpectrumStyle::FractalBeams,
-            RadialSpectrumStyle::FractalFlow,
+            AudioVisualizerStyle::FractalBeams,
+            AudioVisualizerStyle::FractalFlow,
         ] {
             let visual = plot(style);
             for t in (50..=1000).step_by(50) {
@@ -503,8 +503,8 @@ mod tests {
     #[test]
     fn discontinuities_and_stale_configuration_never_bridge_scenes() {
         for style in [
-            RadialSpectrumStyle::FractalBeams,
-            RadialSpectrumStyle::FractalFlow,
+            AudioVisualizerStyle::FractalBeams,
+            AudioVisualizerStyle::FractalFlow,
         ] {
             let visual = plot(style);
             for t in (50..=1000).step_by(50) {
@@ -535,8 +535,8 @@ mod tests {
             assert!(visual.data.borrow().last_time.is_none());
             visual.set_visible(true);
             visual.configure(&Config {
-                radial_spectrum_style: style,
-                spectrum_fft_size: 4096,
+                audio_visualizer_style: style,
+                analysis_fft_size: 4096,
                 ..Config::default()
             });
             visual.update(&frame(1150));
@@ -546,8 +546,8 @@ mod tests {
 
     #[test]
     fn concurrent_scenes_ignore_global_style_and_hiding_one_preserves_the_other() {
-        let beams = plot(RadialSpectrumStyle::FractalBeams);
-        let flow = plot(RadialSpectrumStyle::FractalFlow);
+        let beams = plot(AudioVisualizerStyle::FractalBeams);
+        let flow = plot(AudioVisualizerStyle::FractalFlow);
         let mut audio = frame(50);
         audio.visualizer.demand.stereo_density = true;
         audio.visualizer.demand.spatial_spectrum = true;
@@ -562,7 +562,7 @@ mod tests {
         assert!(flow_before.iter().any(|s| s.strength > 0.05));
         assert_ne!(beams_before, flow_before);
         let config = Config {
-            radial_spectrum_style: RadialSpectrumStyle::StereoDensity,
+            audio_visualizer_style: AudioVisualizerStyle::StereoDensity,
             ..Config::default()
         };
         assert!(!beams.configure(&config));
@@ -579,7 +579,7 @@ mod tests {
         assert_ne!(flow.data.borrow().segments(), &flow_before);
         beams.set_visible(true);
         beams.update(&audio);
-        let fresh = plot(RadialSpectrumStyle::FractalBeams);
+        let fresh = plot(AudioVisualizerStyle::FractalBeams);
         fresh.update(&audio);
         assert_eq!(
             beams.data.borrow().segments(),
@@ -590,8 +590,8 @@ mod tests {
     #[test]
     fn hidden_scenes_release_storage_and_only_valid_audio_recreates_them() {
         for style in [
-            RadialSpectrumStyle::FractalBeams,
-            RadialSpectrumStyle::FractalFlow,
+            AudioVisualizerStyle::FractalBeams,
+            AudioVisualizerStyle::FractalFlow,
         ] {
             let visual = plot(style);
             visual.update(&frame(50));
