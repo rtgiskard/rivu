@@ -115,11 +115,6 @@ const PANELS: &[PanelSpec] = &[
         render: |app, panel, window, cx| app.spectrum_panel(panel.id, window, cx),
     },
     PanelSpec {
-        kind: "audio_visualizer",
-        title: "Audio Visualizer",
-        render: GuiApp::audio_visualizer_panel,
-    },
-    PanelSpec {
         kind: "waveform",
         title: "Waveform",
         render: |app, panel, window, cx| app.waveform_panel(panel.id, window, cx),
@@ -128,6 +123,11 @@ const PANELS: &[PanelSpec] = &[
         kind: "spectrogram",
         title: "Spectrogram",
         render: |app, panel, window, cx| app.spectrogram_panel(panel.id, window, cx),
+    },
+    PanelSpec {
+        kind: "audio_visualizer",
+        title: "Audio Visualizer",
+        render: GuiApp::audio_visualizer_panel,
     },
 ];
 fn panel_spec(kind: &str) -> Option<&'static PanelSpec> {
@@ -2769,7 +2769,7 @@ impl Render for GuiApp {
             .child(
                 icon_button(
                     "layout",
-                    if self.layout.locked { "󰌾" } else { "⊞" },
+                    if self.layout.locked { "󰌾" } else { "" },
                     if self.layout.locked {
                         "Layout locked\nRight-click to unlock"
                     } else {
@@ -3421,7 +3421,7 @@ impl Render for GuiApp {
                             .max_w(relative(0.9))
                             .items_center()
                             .gap_6()
-                            .p_6()
+                            .p_12()
                             .bg(rgb(PANEL))
                             .border_1()
                             .border_color(rgb(BORDER))
@@ -3444,9 +3444,32 @@ impl Render for GuiApp {
                                     .gap_3()
                                     .child(div().text_2xl().child("Rivu"))
                                     .child(caption("A local-first music player"))
-                                    .child(caption(env!("RIVU_GIT_VERSION")))
-                                    .child(caption(format!("Built {built}")))
-                                    .child(caption("GPL-3.0-or-later")),
+                                    .children(
+                                        [
+                                            (
+                                                "Version",
+                                                format!(
+                                                    "{} (features: {})",
+                                                    env!("RIVU_GIT_VERSION"),
+                                                    env!("RIVU_BUILD_FEATURES"),
+                                                ),
+                                            ),
+                                            ("Built", built),
+                                            ("License", "GPL-3.0-or-later".to_owned()),
+                                        ]
+                                        .into_iter()
+                                        .map(|(label, value)| {
+                                            row()
+                                                .gap_3()
+                                                .child(
+                                                    div()
+                                                        .w(rems(4.))
+                                                        .flex_shrink_0()
+                                                        .child(caption(label)),
+                                                )
+                                                .child(caption(value))
+                                        }),
+                                    ),
                             )
                             .child(
                                 icon_button("about-close", "", "Close",

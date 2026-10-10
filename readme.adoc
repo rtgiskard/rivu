@@ -19,6 +19,12 @@ CLI, and TUI are different clients of that core.
 * Generated desktop artwork and embedded-cover support for MPRIS; no network
   media or cover fetching
 
+The desktop About dialog shows labeled version, local build time, and license
+information beside the app icon. The version includes enabled Cargo features
+(`none` for the default build); the card uses generous padding around its content.
+The Add panel button uses the `` icon; GUI icons use Nerd Symbols independently of the text font.
+Audio Visualizer is the last entry in its popup.
+
 == Architecture
 
 One core runs per data directory and owns the library, queue, playback, and live
