@@ -774,7 +774,6 @@ mod tests {
         let mut pending = WaveformAccumulator::new(shared.clone());
         let manual = shared.clone();
         let retained = shared.retained_capacity_bytes();
-        eprintln!("waveform {MAX_BINS} bins: shared result capacity {retained} -> 0 bytes");
         assert!(retained > 0);
         let revision = shared.revision;
         shared.set_still_mode(true);

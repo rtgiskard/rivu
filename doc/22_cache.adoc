@@ -19,14 +19,14 @@ resumes. Temporary images still remain alive long enough for their submitted
 scene to render safely.
 
 Still Mode is separate from this cache policy. It discards visualization results
-and derived storage, including base waveform bins, shared analysis frames, FFT
-plans/workspaces, stereo fields, and fractal scenes. It preserves settings and
-source/timeline metadata, not a restorable picture. Decoder and output PCM
-buffers, the bounded tap ring, and audio playback accounting are unchanged.
+and derived storage, including base waveform bins, shared analysis frames,
+stereo fields, and fractal scenes. FFT plans and working buffers remain reusable,
+but their sampling window is reset. Settings, source/timeline metadata, decoder
+and output PCM buffers, the tap ring, and playback accounting are unchanged.
 Submitted images still pass through frame-boundary retirement. The root release
 hook requests the final retirement frame when needed, even with the analysis
 timer stopped and every visualization replaced by a static status. Leaving the
-mode rebuilds storage from new audio on demand; no automatic full-track scan runs.
+mode rebuilds results from new audio; no automatic full-track scan runs.
 
 == Reuse and invalidation
 

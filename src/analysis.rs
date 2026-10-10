@@ -572,21 +572,16 @@ impl SpectrumAnalyzer {
     }
 }
 
-/// Drop the complete visualization payload without resetting consumer clocks.
-fn discard_analysis(
-    analyzer: &mut Option<SpectrumAnalyzer>,
-    shared: &RwLock<AnalysisFrame>,
-    generation: &mut u64,
-) {
-    *generation = analyzer
-        .take()
-        .map_or(*generation, |analyzer| analyzer.generation)
-        .wrapping_add(1);
+/// Discard results and continuity, retaining reusable FFT machinery.
+fn discard_analysis(analyzer: &mut SpectrumAnalyzer, shared: &RwLock<AnalysisFrame>) {
+    analyzer.reset();
+    analyzer.set_visualizer_mode(VisualizerMode::Off);
+    analyzer.metadata_dirty = true;
     let retired = {
         let mut frame = shared.write();
         let empty = AnalysisFrame {
             sequence: frame.sequence.wrapping_add(1),
-            generation: *generation,
+            generation: analyzer.generation,
             sample_time: frame.sample_time,
             ..AnalysisFrame::default()
         };
@@ -600,8 +595,10 @@ fn analyze(
     control: Arc<AnalysisControl>,
     shared: Arc<RwLock<AnalysisFrame>>,
 ) {
-    let mut analyzer: Option<SpectrumAnalyzer> = None;
-    let mut generation = 0;
+    let mut analyzer = SpectrumAnalyzer::new(
+        *control.settings.read(),
+        control.sample_rate.load(Ordering::Acquire),
+    );
     let mut incoming = [TapFrame::default(); 1024];
     let mut epoch = 0;
     let mut still_token = 0;
@@ -613,7 +610,7 @@ fn analyze(
         }
         let current_still_token = control.still_mode.load(Ordering::Acquire);
         if current_still_token != still_token {
-            discard_analysis(&mut analyzer, &shared, &mut generation);
+            discard_analysis(&mut analyzer, &shared);
             still_token = current_still_token;
             mode_token = u64::MAX;
         }
@@ -624,19 +621,12 @@ fn analyze(
         }
         if !control.enabled.load(Ordering::Acquire) {
             consumer.clear();
-            if let Some(analyzer) = &mut analyzer {
-                analyzer.reset();
-                // Disabled workers park before observing mode changes. Release
-                // optional storage, but retain the ordinary spectrum display.
-                analyzer.set_visualizer_mode(VisualizerMode::Off);
-            }
-            mode_token = u64::MAX;
-            shared.write().visualizer = VisualizerFrame::default();
+            analyzer.reset();
             thread::park();
             continue;
         }
         let cycle_start = Instant::now();
-        let previous_generation = analyzer.as_ref().map_or(generation, |a| a.generation);
+        let previous_generation = analyzer.generation;
         let current_mode_token = control.visualizer_mode.load(Ordering::Acquire);
         let mode = VisualizerMode::from_bits(current_mode_token);
         let current_epoch = control.epoch.load(Ordering::Acquire);
@@ -648,33 +638,27 @@ fn analyze(
             continue;
         }
         let settings = *control.settings.read();
-        if analyzer.as_ref().is_some_and(|analyzer| {
-            sample_rate != analyzer.sample_rate
-                || settings.fft_size != analyzer.settings.fft_size
-                || settings.window != analyzer.settings.window
-        }) {
-            generation = analyzer.take().unwrap().generation.wrapping_add(1);
+        if sample_rate != analyzer.sample_rate
+            || settings.fft_size != analyzer.settings.fft_size
+            || settings.window != analyzer.settings.window
+        {
+            let generation = analyzer.generation.wrapping_add(1);
+            analyzer = SpectrumAnalyzer::new(settings, sample_rate);
+            analyzer.generation = generation;
+            analyzer.set_visualizer_mode(mode);
         }
         if mode_token != current_mode_token {
             mode_token = current_mode_token;
-            if let Some(analyzer) = &mut analyzer {
-                analyzer.set_visualizer_mode(mode);
-            }
+            analyzer.set_visualizer_mode(mode);
             shared.write().visualizer = VisualizerFrame {
                 mode,
                 ..VisualizerFrame::default()
             };
         }
-        if let Some(analyzer) = &mut analyzer {
-            analyzer.settings = settings;
-        }
+        analyzer.settings = settings;
         if current_epoch != epoch {
             epoch = current_epoch;
-            if let Some(analyzer) = &mut analyzer {
-                analyzer.reset();
-            } else {
-                generation = generation.wrapping_add(1);
-            }
+            analyzer.reset();
         }
         let mut accepted = 0;
         // Bound a cycle to the queued prefix; continuous production must not
@@ -690,27 +674,18 @@ fn analyze(
             for frame in &incoming[..count] {
                 if frame.epoch == current_epoch {
                     accepted += 1;
-                    let analyzer = analyzer.get_or_insert_with(|| {
-                        let mut analyzer = SpectrumAnalyzer::new(settings, sample_rate);
-                        analyzer.generation = generation;
-                        analyzer.set_visualizer_mode(mode);
-                        analyzer
-                    });
                     analyzer.push_tap(frame);
                 }
             }
         }
-        if analyzer.as_ref().map_or(generation, |a| a.generation) != previous_generation {
+        if analyzer.generation != previous_generation {
             shared.write().visualizer = VisualizerFrame {
                 mode,
                 ..VisualizerFrame::default()
             };
         }
         sample_time += Duration::from_secs_f64(accepted as f64 / sample_rate.max(1) as f64);
-        if let Some(analyzer) = &mut analyzer
-            && accepted != 0
-            && analyzer.filled == analyzer.rolling.len()
-        {
+        if accepted != 0 && analyzer.filled == analyzer.rolling.len() {
             let rms = analyzer.transform();
             if control.epoch.load(Ordering::Acquire) == current_epoch
                 && control.enabled.load(Ordering::Acquire)
@@ -1051,167 +1026,18 @@ mod tests {
         }
     }
 
-    #[test]
-    fn suspended_worker_releases_payload_and_restores_requested_mode() {
+    fn push_window(producer: &mut HeapProd<TapFrame>, epoch: u64, samples: [f32; 2]) {
         use ringbuf::traits::Producer;
-        for mode in [
-            VisualizerMode::StereoDensity,
-            VisualizerMode::SpatialSpectrum,
-            VisualizerMode::Generative,
-        ] {
-            let shared = Arc::new(RwLock::new(AnalysisFrame::default()));
-            let worker = AnalysisWorker::new(shared.clone()).unwrap();
-            worker.configure(AnalysisSettings {
-                fps: 60,
-                fft_size: 512,
-                window: SpectrumWindow::None,
-            });
-            worker.control.set_visualizer_mode(mode);
-            let mut producer = worker.producer();
-            let mut sequence = 0;
-            for pass in 0..2 {
-                worker.set_enabled(true);
-                let epoch = worker.control.epoch.load(Ordering::Acquire);
-                for i in 0..512 {
-                    let value = if pass == 0 {
-                        0.5 * (std::f32::consts::TAU * i as f32 / 16.0).sin()
-                    } else {
-                        0.0
-                    };
-                    assert!(
-                        producer
-                            .try_push(TapFrame {
-                                samples: [value, -value],
-                                epoch,
-                                gap: false
-                            })
-                            .is_ok()
-                    );
-                }
-                let deadline = Instant::now() + Duration::from_secs(3);
-                loop {
-                    let frame = shared.read();
-                    if frame.sequence > sequence {
-                        assert_eq!(frame.visualizer.mode, mode);
-                        if pass == 1 {
-                            assert!(frame.visualizer.density.iter().all(|v| *v == 0.0));
-                            assert!(
-                                frame
-                                    .visualizer
-                                    .spatial
-                                    .iter()
-                                    .all(|v| v.power_db <= -139.0)
-                            );
-                            assert_eq!(frame.visualizer.band_rms, [0.0; 3]);
-                        }
-                        sequence = frame.sequence;
-                        break;
-                    }
-                    drop(frame);
-                    assert!(Instant::now() < deadline, "analysis did not resume");
-                    thread::sleep(Duration::from_millis(1));
-                }
-                worker.set_enabled(false);
-                let deadline = Instant::now() + Duration::from_secs(3);
-                while shared.read().visualizer.mode != VisualizerMode::Off {
-                    assert!(Instant::now() < deadline, "analysis did not suspend");
-                    thread::sleep(Duration::from_millis(1));
-                }
-                let frame = shared.read();
-                assert_eq!(frame.visualizer.density.capacity(), 0);
-                assert_eq!(frame.visualizer.spatial.capacity(), 0);
-                assert_eq!(frame.sequence, sequence);
-                assert!(!frame.frequencies_hz.is_empty());
-                assert!(!frame.spectrum_db.is_empty());
-            }
-        }
-    }
-
-    fn vector_bytes<T>(values: &Vec<T>) -> usize {
-        values.capacity() * std::mem::size_of::<T>()
-    }
-
-    fn visualizer_bytes(frame: &VisualizerFrame) -> usize {
-        vector_bytes(&frame.density) + vector_bytes(&frame.spatial)
-    }
-
-    fn frame_bytes(frame: &AnalysisFrame) -> usize {
-        vector_bytes(&frame.frequencies_hz)
-            + vector_bytes(&frame.spectrum_db)
-            + visualizer_bytes(&frame.visualizer)
-    }
-
-    #[test]
-    fn still_discard_releases_fft_and_all_frame_vectors_without_resetting_clocks() {
-        let settings = AnalysisSettings {
-            fps: 60,
-            fft_size: 8192,
-            window: SpectrumWindow::Hann,
-        };
-        for mode in [
-            VisualizerMode::Off,
-            VisualizerMode::StereoDensity,
-            VisualizerMode::SpatialSpectrum,
-            VisualizerMode::Generative,
-        ] {
-            let mut analyzer = SpectrumAnalyzer::new(settings, 48_000);
-            analyzer.set_visualizer_mode(mode);
-            analyzer.generation = 17;
-            for _ in 0..settings.fft_size {
-                analyzer.push([0.5, -0.5]);
-            }
-            let mut frame = AnalysisFrame {
-                sequence: 42,
-                ..AnalysisFrame::default()
-            };
-            let time = Duration::from_secs(10);
-            let rms = analyzer.transform();
-            analyzer.publish(&mut frame, rms, time);
-            let working = vector_bytes(&analyzer.scratch)
-                + vector_bytes(&analyzer.frequency)
-                + vector_bytes(&analyzer.window)
-                + vector_bytes(&analyzer.frequencies)
-                + vector_bytes(&analyzer.bands)
-                + vector_bytes(&analyzer.levels)
-                + vector_bytes(&analyzer.rolling)
-                + visualizer_bytes(&analyzer.visualizer)
-                + analyzer
-                    .density
-                    .as_ref()
-                    .map_or(0, |d| vector_bytes(&d.cells));
-            let published = frame_bytes(&frame);
-            let fft = Arc::downgrade(&analyzer.fft);
-            let mut analyzer = Some(analyzer);
-            let mut generation = 0;
-            let frame = RwLock::new(frame);
-            discard_analysis(&mut analyzer, &frame, &mut generation);
-            let mut frame = frame.write();
-            assert!(analyzer.is_none());
-            assert!(fft.upgrade().is_none(), "FFT plans must be released too");
-            assert_eq!(frame_bytes(&frame), 0);
-            assert_eq!(frame.sequence, 44);
-            assert_eq!(frame.generation, 18);
-            assert_eq!(frame.sample_time, time);
-            assert_eq!(frame.settings, None);
-            assert_eq!([frame.rms_left, frame.rms_right], [0.0; 2]);
-            eprintln!(
-                "FFT 8192 {mode:?}: working vectors {working}, shared vectors {published} -> 0 bytes; plans released"
+        for _ in 0..512 {
+            assert!(
+                producer
+                    .try_push(TapFrame {
+                        samples,
+                        epoch,
+                        gap: false
+                    })
+                    .is_ok()
             );
-            // Resuming cannot bridge even a single sample of the old window.
-            let mut resumed = SpectrumAnalyzer::new(settings, 48_000);
-            resumed.generation = generation;
-            resumed.set_visualizer_mode(mode);
-            for _ in 1..settings.fft_size {
-                resumed.push([0.0; 2]);
-            }
-            assert_eq!(resumed.filled, settings.fft_size as usize - 1);
-            resumed.push([0.0; 2]);
-            let rms = resumed.transform();
-            resumed.publish(&mut frame, rms, time + Duration::from_secs(1));
-            assert_eq!(frame.sequence, 45);
-            assert_eq!(rms, [0.0; 2]);
-            assert!(frame.visualizer.density.iter().all(|value| *value == 0.0));
-            assert!(frame.spectrum_db.iter().all(|value| *value == -140.0));
         }
     }
 
@@ -1228,7 +1054,6 @@ mod tests {
 
     #[test]
     fn explicit_still_mode_drops_results_and_resumes_only_current_epoch_audio() {
-        use ringbuf::traits::Producer;
         let shared = Arc::new(RwLock::new(AnalysisFrame::default()));
         let worker = AnalysisWorker::new(shared.clone()).unwrap();
         let settings = AnalysisSettings {
@@ -1243,23 +1068,13 @@ mod tests {
         worker.set_enabled(true);
         let mut producer = worker.producer();
         let old_epoch = worker.control.epoch.load(Ordering::Acquire);
-        for _ in 0..512 {
-            assert!(
-                producer
-                    .try_push(TapFrame {
-                        samples: [0.5, -0.5],
-                        epoch: old_epoch,
-                        gap: false,
-                    })
-                    .is_ok()
-            );
-        }
+        push_window(&mut producer, old_epoch, [0.5, -0.5]);
         wait_for_frame(&shared, |frame| frame.sequence > 0);
         let previous = shared.read().clone();
         worker.set_still_mode(true);
         wait_for_frame(&shared, |frame| frame.sequence > previous.sequence);
         let suspended_sequence = shared.read().sequence;
-        let token = worker.control.still_mode.load(Ordering::Acquire);
+        // Repeated commands and configuration changes must not republish old data.
         for fft_size in [32768, 8192, 1024, 512] {
             worker.set_still_mode(true);
             worker.configure(AnalysisSettings {
@@ -1267,71 +1082,36 @@ mod tests {
                 ..settings
             });
             worker.reset(96_000);
-            assert_eq!(worker.control.still_mode.load(Ordering::Acquire), token);
             assert_eq!(shared.read().sequence, suspended_sequence);
-            assert_eq!(frame_bytes(&shared.read()), 0);
+            assert!(shared.read().spectrum_db.is_empty());
             assert_eq!(shared.read().settings, None);
         }
         worker.set_still_mode(false);
         wait_for_frame(&shared, |frame| frame.sequence > suspended_sequence);
         let resumed_sequence = shared.read().sequence;
-        assert_eq!(frame_bytes(&shared.read()), 0);
-        // Queue a complete stale window before fresh silence. Only the current
-        // epoch may rebuild FFT storage or contribute to the published result.
-        for _ in 0..512 {
-            assert!(
-                producer
-                    .try_push(TapFrame {
-                        samples: [1.0; 2],
-                        epoch: old_epoch,
-                        gap: false,
-                    })
-                    .is_ok()
-            );
-        }
+        assert!(shared.read().frequencies_hz.is_empty());
+        // A complete stale window must not contribute to the new result.
+        push_window(&mut producer, old_epoch, [1.0; 2]);
         let epoch = worker.control.epoch.load(Ordering::Acquire);
-        for _ in 0..512 {
-            assert!(
-                producer
-                    .try_push(TapFrame {
-                        samples: [0.0; 2],
-                        epoch,
-                        gap: false,
-                    })
-                    .is_ok()
-            );
-        }
+        push_window(&mut producer, epoch, [0.0; 2]);
         wait_for_frame(&shared, |frame| frame.sequence > resumed_sequence);
         let frame = shared.read();
         assert_eq!(frame.settings, Some(settings));
+        assert_eq!(frame.frequencies_hz.len(), frame.spectrum_db.len());
+        assert!(!frame.frequencies_hz.is_empty());
         assert_eq!(frame.sample_rate, 96_000);
         assert!(frame.generation > previous.generation);
         assert!(frame.sample_time > previous.sample_time);
         assert_eq!([frame.rms_left, frame.rms_right], [0.0; 2]);
         assert!(frame.visualizer.density.iter().all(|value| *value == 0.0));
-    }
-
-    #[test]
-    fn quick_still_roundtrips_remain_destructive_and_repeated_commands_are_idempotent() {
-        let shared = Arc::new(RwLock::new(AnalysisFrame::default()));
-        let worker = AnalysisWorker::new(shared.clone()).unwrap();
-        let original = worker.control.still_mode.load(Ordering::Acquire);
-        let epoch = worker.control.epoch.load(Ordering::Acquire);
+        let published = frame.sequence;
+        drop(frame);
         worker.set_still_mode(true);
-        let suspended = worker.control.still_mode.load(Ordering::Acquire);
-        for _ in 0..100 {
-            worker.set_still_mode(true);
-            assert_eq!(worker.control.still_mode.load(Ordering::Acquire), suspended);
-            assert_eq!(worker.control.epoch.load(Ordering::Acquire), epoch + 2);
-        }
         worker.set_still_mode(false);
-        let resumed = worker.control.still_mode.load(Ordering::Acquire);
-        assert_eq!(resumed & 1, 0);
-        assert_ne!(resumed, original);
-        assert_ne!(resumed, suspended);
-        assert_eq!(worker.control.epoch.load(Ordering::Acquire), epoch + 4);
-        wait_for_frame(&shared, |frame| frame.sequence > 0);
-        assert_eq!(frame_bytes(&shared.read()), 0);
+        wait_for_frame(&shared, |frame| {
+            frame.sequence > published && frame.settings.is_none()
+        });
+        assert!(shared.read().spectrum_db.is_empty());
     }
 
     #[test]

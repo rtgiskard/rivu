@@ -33,10 +33,10 @@ every analysis frame regardless of whether it can be consumed.
 Still Mode overrides visualization demand at both the GUI and audio-worker
 boundaries. The worker ignores effective analysis enablement while the mode is
 active, skips the output tap, and parks the analysis thread without reopening
-playback. Mode entry drops FFT working storage and shared results on their owning
-threads, with sequence/generation invalidation even across a quick on/off switch.
-No fresh FFT storage is allocated until current-epoch audio arrives. On resumption
-the GUI waits for new data rather than reusing the last pre-mode frame.
+playback. One analyzer retains its FFT plan and reusable buffers; mode entry
+resets sample continuity and discards shared results. Sequence/generation
+invalidation covers quick on/off switches. Only sample-rate or FFT configuration
+changes rebuild the analyzer; resumption waits for a new complete audio window.
 
 == Waveform
 
