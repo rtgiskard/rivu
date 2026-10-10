@@ -92,6 +92,11 @@ increase geometry work, and the shared gradient requires renderer submissions
 for its palette intervals. The choice favors batching where the visual model
 allows it, rather than forcing Waveform and Spectrum through one strategy.
 
+Radial styles map and smooth each band directly into the display buffer rather
+than retaining a second target buffer. Density and spatial views reuse their
+field storage across continuity resets, but release it when hidden or inactive;
+one invalidation path owns both policies.
+
 == Spectrogram
 
 Spectrogram maps retained frequency history to colored image columns. Stable

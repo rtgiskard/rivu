@@ -122,10 +122,6 @@ impl AnalysisVisualizer {
         data.db_range = config.radial_spectrum_db_range();
         if reset {
             data.clear();
-            if !data.visible || mode == VisualizerMode::Off {
-                data.field = Vec::new();
-                data.spatial_next = Vec::new();
-            }
         } else if recolor && !data.field.is_empty() {
             data.rasterize();
         }
@@ -137,10 +133,6 @@ impl AnalysisVisualizer {
         if data.visible != visible {
             data.visible = visible;
             data.clear();
-            if !visible {
-                data.field = Vec::new();
-                data.spatial_next = Vec::new();
-            }
         }
     }
 
@@ -214,8 +206,13 @@ impl PlotData {
 
     fn clear(&mut self) {
         self.retire_image();
-        self.field.clear();
-        self.spatial_next.clear();
+        if self.visible && self.mode != VisualizerMode::Off {
+            self.field.clear();
+            self.spatial_next.clear();
+        } else {
+            self.field = Vec::new();
+            self.spatial_next = Vec::new();
+        }
         self.generation = None;
         self.sample_rate = 0;
         self.sample_time = None;

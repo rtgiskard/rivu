@@ -51,7 +51,6 @@ struct VisualizerData {
     primary_color: u32,
     secondary_color: u32,
     db_range: f32,
-    values: Vec<f32>,
     visible: bool,
     displayed: Vec<f32>,
     last_sample_time: Option<Duration>,
@@ -79,7 +78,6 @@ impl RadialSpectrum {
                 primary_color: 0x7aa2f7,
                 secondary_color: 0xbb9af7,
                 db_range: 70.0,
-                values: Vec::with_capacity(FANCY_BANDS),
                 visible: true,
                 displayed: Vec::with_capacity(FANCY_BANDS),
                 last_sample_time: None,
@@ -129,7 +127,6 @@ impl RadialSpectrum {
         data.secondary_color = config.radial_spectrum_secondary_color.rgb();
         data.db_range = db_range;
         data.expected_settings = expected_settings;
-        data.values.clear();
         data.displayed.clear();
         data.last_sample_time = None;
         data.time = 0.0;
@@ -144,7 +141,6 @@ impl RadialSpectrum {
         if data.visible != visible {
             data.visible = visible;
             data.displayed = Vec::new();
-            data.values = Vec::new();
             data.last_sample_time = None;
             data.fade_started = None;
         }
@@ -188,12 +184,19 @@ impl RadialSpectrum {
             return;
         }
         let db_range = data.db_range;
-        let values = std::mem::take(&mut data.values);
-        let mut values = values;
-        values.resize(count, 0.0);
+        let elapsed = data
+            .last_sample_time
+            .map(|last| frame.sample_time.saturating_sub(last).as_secs_f32() * 1000.0)
+            .unwrap_or(SMOOTHING_MS);
+        let alpha = if data.displayed.len() != count || elapsed <= 0.0 {
+            1.0
+        } else {
+            1.0 - (-elapsed / SMOOTHING_MS).exp()
+        };
+        data.displayed.resize(count, 0.0);
         let log_low = low.ln();
         let log_span = high.ln() - log_low;
-        for (band, value) in values.iter_mut().enumerate() {
+        for (band, display) in data.displayed.iter_mut().enumerate() {
             let start = (log_low + log_span * band as f32 / count as f32).exp();
             let end = (log_low + log_span * (band + 1) as f32 / count as f32).exp();
             let first = frame.frequencies_hz.partition_point(|hz| *hz < start);
@@ -206,25 +209,9 @@ impl RadialSpectrum {
                 .copied()
                 .filter(|level| level.is_finite())
                 .fold(f32::NEG_INFINITY, f32::max);
-            *value = ((level + db_range) / db_range).clamp(0.0, 1.0);
+            let target = ((level + db_range) / db_range).clamp(0.0, 1.0);
+            *display += (target - *display) * alpha;
         }
-        let elapsed = data
-            .last_sample_time
-            .map(|last| frame.sample_time.saturating_sub(last).as_secs_f32() * 1000.0)
-            .unwrap_or(SMOOTHING_MS);
-        let alpha = if elapsed <= 0.0 {
-            1.0
-        } else {
-            1.0 - (-elapsed / SMOOTHING_MS).exp()
-        };
-        if data.displayed.len() != values.len() {
-            data.displayed.clone_from(&values);
-        } else {
-            for (display, target) in data.displayed.iter_mut().zip(&values) {
-                *display += (*target - *display) * alpha;
-            }
-        }
-        data.values = values;
         data.last_sample_time = Some(frame.sample_time);
         data.time = (frame.sample_time.as_secs_f32() * data.rotation_speed).rem_euclid(TWO_PI);
     }
@@ -711,7 +698,6 @@ mod tests {
         config.spectrogram_db_range = Some(100.0);
         radial.configure(&config);
         let data = radial.data.borrow();
-        assert_eq!(data.values, vec![0.5; 4]);
         assert_eq!(data.displayed, vec![0.5; 4]);
         assert_eq!(data.last_sample_time, Some(Duration::from_secs(1)));
     }
@@ -734,7 +720,6 @@ mod tests {
                     assert_eq!(data.displayed, vec![0.5; 4]);
                     assert_eq!(data.last_sample_time, Some(Duration::from_secs(1)));
                 } else {
-                    assert!(data.values.is_empty());
                     assert!(data.displayed.is_empty());
                     assert!(data.last_sample_time.is_none());
                 }
@@ -742,7 +727,6 @@ mod tests {
             radial.update(&frame());
             let data = radial.data.borrow();
             let expected = if range_override.is_some() { 0.5 } else { 0.65 };
-            assert_eq!(data.values, vec![expected; 4]);
             assert_eq!(data.displayed, vec![expected; 4]);
         }
     }
@@ -760,7 +744,6 @@ mod tests {
         assert!(radial.data.borrow().displayed.is_empty());
         radial.update(&frame());
         let data = radial.data.borrow();
-        assert_eq!(data.values, vec![0.3; 4]);
         assert_eq!(data.displayed, vec![0.3; 4]);
     }
 }
