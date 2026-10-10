@@ -63,26 +63,37 @@ option in non-editable dropdowns, and Escape closes the dropdown.
 The system tray switch takes effect after restarting the graphical host, not
 merely reopening its window. Media read buffering applies to future source opens,
 including full waveform scans; it does not reopen the current track.
-Still Mode is under General → Interface and takes effect when settings are
-applied, without restarting playback. It is also persisted as `still_mode`.
+Still mode is under Visualizations → Common → Rendering and takes effect when
+settings are applied, without restarting playback. It is persisted as `still_mode`.
+
+General groups controls into Library, Playback, Audio, Interface, Desktop
+integration, and Logging. Labels name the setting and its unit; nearby hints
+give ranges, special values, or when changes take effect. Shared rules appear
+once per group. Configuration keys, defaults, and validation are unchanged.
 
 Visualizations is grouped by view, with shared controls in Common:
 
 * Appearance: background for all views; color scheme for Spectrum, Spectrogram,
   and Waveform. Radial Spectrum has independent primary and secondary colors.
-* Default dB range: `visualization_db_range` supplies the display span for Spectrum,
+* Default display range: `visualization_db_range` supplies the display span for Spectrum,
   Spectrogram, and Radial Spectrum unless a view overrides it. It belongs to
   Appearance, not frequency analysis, and does not affect Waveform gain or volume.
 * Frequency analysis: FFT size, window, and analysis rate for Spectrum,
   Spectrogram, and Radial Spectrum, not Waveform. FFT size defaults to `8192`;
   configuration keys remain `spectrum_fft_size` and `spectrum_window`. Changing
   size or window clears Spectrogram history.
-* Rendering: `visualization_cache` reuses derived graphics in Spectrum,
-  Spectrogram, and Waveform; it is separate from media read buffering.
+* Rendering: Still mode pauses visualization processing. Rendering cache
+  (`visualization_cache`) reuses derived graphics in Spectrum, Spectrogram, and
+  Waveform, trading memory for less CPU work; it is separate from media read buffering.
 
 Each frequency view has a range override; leave it empty to inherit Common,
 or clear an explicit value to restore inheritance. See
 <<_visualization_db_ranges,Visualization dB ranges>> for the configuration contract.
+
+Spectrum groups controls into Appearance, Bar motion, and Peak markers;
+Spectrogram uses Display and Frequency sampling; Waveform uses Appearance &
+interaction and Amplitude display. Radial Spectrum keeps Shape & motion,
+Bars & rings, and Colors.
 
 Style-dependent fields preserve their values while inactive. Hover an inactive
 field for the reason; switch back to a compatible style to resume editing.
@@ -106,7 +117,7 @@ must be available.
 
 `library_tree_lines` defaults to `true`: Library uses thin hierarchy connectors
 instead of disclosure arrows. Set it to `false` for arrows without connectors.
-The same switch is under General → Interface (`Tree lines (off: arrows)`). Apply
+The same switch is under General → Interface (`Library tree lines`). Apply
 updates the tree immediately without changing expansion or selection.
 
 Apply validates and saves all pages together; navigation preserves the draft.

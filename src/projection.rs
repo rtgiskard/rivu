@@ -241,8 +241,8 @@ impl TraySnapshot {
             || self.shuffle != previous.shuffle
             || self.repeat != previous.repeat
     }
-
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
