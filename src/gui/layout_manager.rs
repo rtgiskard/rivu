@@ -131,12 +131,18 @@ impl GuiApp {
         let mut content = column().gap_2().child(
             row()
                 .child(div().flex_1().text_lg().child("Layouts"))
-                .child(button("layouts-close", "Close", cx, |this, window, cx| {
-                    this.layouts_open = false;
-                    this.layout_action = None;
-                    this.focus_layout(window, cx);
-                    cx.notify();
-                })),
+                .child(icon_button(
+                    "layouts-close",
+                    "",
+                    "Close layouts",
+                    cx,
+                    |this, window, cx| {
+                        this.layouts_open = false;
+                        this.layout_action = None;
+                        this.focus_layout(window, cx);
+                        cx.notify();
+                    },
+                )),
         );
         if let Some(action) = self.layout_action.clone() {
             let (title, submit) = match &action {
@@ -156,9 +162,10 @@ impl GuiApp {
             }
             content = content.child(
                 row()
-                    .child(button(
+                    .child(icon_button(
                         "layout-action-cancel",
-                        "Cancel",
+                        "",
+                        "Cancel layout action",
                         cx,
                         |this, window, cx| {
                             this.layout_action = None;
@@ -166,12 +173,19 @@ impl GuiApp {
                             cx.notify();
                         },
                     ))
-                    .child(button(
-                        "layout-action-submit",
-                        submit,
-                        cx,
-                        |this, window, cx| this.finish_layout_action(window, cx),
-                    )),
+                    .child(if matches!(action, Action::Delete(_)) {
+                        button("layout-action-submit", submit, cx, |this, window, cx| {
+                            this.finish_layout_action(window, cx)
+                        })
+                    } else {
+                        icon_button(
+                            "layout-action-submit",
+                            "",
+                            submit,
+                            cx,
+                            |this, window, cx| this.finish_layout_action(window, cx),
+                        )
+                    }),
             );
         } else {
             let mut choices = column().gap_1();
@@ -193,9 +207,10 @@ impl GuiApp {
                 );
                 if !current {
                     let name = name.to_owned();
-                    choice = choice.child(button(
+                    choice = choice.child(icon_button(
                         ("layout-delete", index),
-                        "Delete…",
+                        "󰆴",
+                        format!("Delete layout “{name}”…"),
                         cx,
                         move |this, window, cx| {
                             this.begin_layout_action(Action::Delete(name.clone()), window, cx)
@@ -214,17 +229,19 @@ impl GuiApp {
                 )
                 .child(
                     row()
-                        .child(button(
+                        .child(icon_button(
                             "layout-duplicate",
-                            "Duplicate as…",
+                            "",
+                            "Duplicate current layout as…",
                             cx,
                             |this, window, cx| {
                                 this.begin_layout_action(Action::Duplicate, window, cx)
                             },
                         ))
-                        .child(button(
+                        .child(icon_button(
                             "layout-rename",
-                            "Rename current…",
+                            "󰏫",
+                            "Rename current layout…",
                             cx,
                             |this, window, cx| this.begin_layout_action(Action::Rename, window, cx),
                         )),

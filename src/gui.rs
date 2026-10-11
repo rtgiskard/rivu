@@ -2551,23 +2551,18 @@ impl GuiApp {
                             .child(title)
                             .child(self.measurement(Measured::Tab(panel_id)))
                             .when(!self.layouts.current().locked, |view| {
-                                view.child(
-                                    div()
-                                        .id(("close", panel_id))
-                                        .cursor_pointer()
-                                        .px_1()
-                                        .text_color(rgb(MUTED))
-                                        .hover(|style| style.text_color(rgb(TEXT)))
-                                        .font_family(fonts::SYMBOLS_FAMILY)
-                                        .child("󰅖")
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            cx.stop_propagation();
-                                            if this.layouts.current().locked {
-                                                return;
-                                            }
-                                            this.remove_layout_panel(panel_id, cx);
-                                        })),
-                                )
+                                view.child(components::quiet_icon_button(icon_button(
+                                    ("close", panel_id),
+                                    "",
+                                    "Remove panel",
+                                    cx,
+                                    move |this, _, cx| {
+                                        if this.layouts.current().locked {
+                                            return;
+                                        }
+                                        this.remove_layout_panel(panel_id, cx);
+                                    },
+                                )))
                             }),
                     );
                 }
