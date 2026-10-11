@@ -1,6 +1,21 @@
 use super::*;
 
 impl Core {
+    pub(in crate::core) fn toggle_still_mode(&mut self) -> Result<()> {
+        let mut config = self.state.system.config.as_ref().clone();
+        config.still_mode = !config.still_mode;
+        config.volume = self.state.playback.volume;
+        config.shuffle = self.state.playback.shuffle;
+        config.repeat = self.state.playback.repeat;
+        config.output_device.clone_from(&self.state.system.selected_device);
+        config.save(&self.state.system.config_path)?;
+        self.audio(AudioCommand::StillMode(config.still_mode))?;
+        self.state.system.config = Arc::new(config);
+        self.config_dirty = false;
+        self.config_last_saved = Instant::now();
+        Ok(())
+    }
+
     pub(in crate::core) fn save(&mut self, force_config: bool) -> Result<()> {
         let config_changed = self.state.system.config.volume != self.state.playback.volume
             || self.state.system.config.shuffle != self.state.playback.shuffle

@@ -80,6 +80,9 @@ switches. Sample-rate, FFT-size, or window changes rebuild the analyzer;
 resumption waits for a new complete audio window. Already submitted graphics
 follow link:22_cache.adoc#_resource_boundaries[frame-boundary retirement],
 independently of suspended analysis.
+The application-menu toggle changes only Still Mode in the core's serialized
+request path; pending playback and device settings are preserved rather than
+reapplied from a GUI configuration snapshot.
 
 Waveform coverage is also discarded: prior samples cannot count toward a
 complete envelope, and EOF cannot make a skipped or discarded interval complete.
@@ -87,9 +90,11 @@ Only fresh decoded PCM allocates and fills bins. There is no automatic backfill
 or full-track rescan; an uninterrupted fresh traversal from zero can complete
 the envelope. Explicit full-waveform scans are cancelled by the audio worker on
 entry, without waiting for GUI refresh; quick on/off transitions cannot miss the
-cancellation. Decoder packet boundaries observe the cancellation flag. A shared
-suspension generation also rejects late results, so old scans cannot restore
-discarded data or report a cancelled request as a waveform-load failure.
+cancellation. Decoder packet boundaries observe the cancellation flag. The
+cancellation flag and a shared suspension generation reject late completions,
+including requests registered before the worker has processed resumption, so
+old scans cannot restore discarded data or report an intentional cancellation
+as a waveform-load failure.
 
 == Waveform
 

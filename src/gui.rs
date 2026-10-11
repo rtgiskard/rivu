@@ -3339,9 +3339,10 @@ impl Render for GuiApp {
                     .child(
                         menu_item("app-still-mode", "Still mode", cx, |this, _, cx| {
                             this.app_menu_open = false;
-                            let mut config = this.handle.config_snapshot().as_ref().clone();
-                            config.still_mode = !config.still_mode;
-                            this.send(Command::Configure { config }, cx);
+                            if let Err(error) = this.handle.toggle_still_mode() {
+                                this.error = Some(format!("{error:#}"));
+                            }
+                            cx.notify();
                         })
                         .child(
                             div()

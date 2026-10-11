@@ -35,6 +35,7 @@ enum CoreResponse {
 enum Operation {
     Query(Query),
     Command(Command),
+    ToggleStillMode,
 }
 struct Request {
     operation: Operation,
@@ -120,6 +121,12 @@ impl AppHandle {
     /// Coalesce a GUI consumer frame into at most one pending analysis job.
     pub(crate) fn request_analysis_frame(&self) {
         self.analysis_control.request_frame();
+    }
+
+    pub(crate) fn toggle_still_mode(&self) -> Result<()> {
+        self.sender
+            .try_send(Request { operation: Operation::ToggleStillMode, reply: None })
+            .context("Rivu is busy or stopped")
     }
 
     pub fn send(&self, command: Command) -> Result<()> {
@@ -643,6 +650,30 @@ mod tests {
         };
         core.enqueue(&[1, 2, 2, 3, 4]).unwrap();
         (directory, core)
+    }
+
+    #[test]
+    fn still_mode_toggle_preserves_debounced_playback_and_device_settings() {
+        let (_directory, mut core) = fixture();
+        core.command(Command::Volume { value: 0.25 }).unwrap();
+        core.command(Command::Shuffle { enabled: true }).unwrap();
+        core.command(Command::Repeat { mode: RepeatMode::All }).unwrap();
+        // Model a selected output whose persisted snapshot is still debounced.
+        core.state.system.selected_device = Some("pending-output".into());
+        for enabled in [true, false] {
+            core.toggle_still_mode().unwrap();
+            assert_eq!(core.state.system.config.still_mode, enabled);
+            assert_eq!(core.state.playback.volume, 0.25);
+            assert!(core.state.playback.shuffle);
+            assert_eq!(core.state.playback.repeat, RepeatMode::All);
+            assert_eq!(core.state.system.selected_device.as_deref(), Some("pending-output"));
+            let saved: Config = toml::from_str(&std::fs::read_to_string(&core.state.system.config_path).unwrap()).unwrap();
+            assert_eq!(saved.volume, 0.25);
+            assert!(saved.shuffle);
+            assert_eq!(saved.repeat, RepeatMode::All);
+            assert_eq!(saved.output_device.as_deref(), Some("pending-output"));
+            assert_eq!(saved.still_mode, enabled);
+        }
     }
 
     #[test]

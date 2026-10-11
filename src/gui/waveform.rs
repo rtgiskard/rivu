@@ -704,7 +704,9 @@ impl Waveform {
             let mut shared = self.shared.write();
             // Suspension invalidates both late data and decoder cancellation
             // errors, even if a quick on/off was coalesced by GUI refresh.
-            if request.suspension_generation != shared.suspension_generation() {
+            if request.cancelled.load(Ordering::Relaxed)
+                || request.suspension_generation != shared.suspension_generation()
+            {
                 return Ok(());
             }
             let result = result?;
@@ -1492,6 +1494,28 @@ mod tests {
             if resume_before_completion {
                 waveform.shared.write().set_still_mode(false);
             }
+            let revision = waveform.shared.read().revision;
+            let result = if decoder_cancelled {
+                Err(anyhow::anyhow!("Waveform loading cancelled"))
+            } else {
+                Ok(frame(vec![Some(1.0), Some(1.0)]))
+            };
+            assert!(waveform.finish_full(request, result));
+            assert!(waveform.manual.is_none());
+            assert!(waveform.manual_error.is_none());
+            assert_eq!(waveform.shared.read().peaks.capacity(), 0);
+            assert_eq!(waveform.shared.read().revision, revision);
+        }
+    }
+
+    #[test]
+    fn scan_registered_while_suspended_stays_cancelled_after_resume() {
+        for decoder_cancelled in [false, true] {
+            let mut waveform = preview(frame(vec![Some(0.25), None]));
+            waveform.shared.write().set_still_mode(true);
+            let (request, cancelled) = waveform.start_full();
+            assert!(cancelled.load(Ordering::Relaxed));
+            waveform.shared.write().set_still_mode(false);
             let revision = waveform.shared.read().revision;
             let result = if decoder_cancelled {
                 Err(anyhow::anyhow!("Waveform loading cancelled"))

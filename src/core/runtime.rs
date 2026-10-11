@@ -52,6 +52,12 @@ impl Core {
                             }
                             if shutdown { break; }
                         }
+                        Operation::ToggleStillMode => {
+                            if let Err(error) = self.toggle_still_mode() {
+                                self.state.system.last_error = Some(format!("{error:#}"));
+                            }
+                            self.publish();
+                        }
                     }
                 }
                 recv(self.engine.events) -> event => {
