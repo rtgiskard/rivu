@@ -74,7 +74,7 @@ impl Core {
             return Ok(());
         };
         self.store.increment_play_count(track_id)?;
-        self.update_track_stats(track_id, None, true)?;
+        self.update_track_stats(track_id)?;
         if let Some(playback) = self.playback.as_mut() {
             playback.counted = true;
         }
@@ -104,7 +104,7 @@ impl Core {
             self.playback = None;
             return Err(error);
         }
-        self.update_track_stats(track_id, Some(played_at), false)?;
+        self.update_track_stats(track_id)?;
         let playback = self.playback.as_mut().expect("playback was checked above");
         playback.started = true;
         playback.last_heard_at = Some(played_at);
@@ -221,7 +221,7 @@ impl Core {
             bookkeeping?;
             if let Some((track_id, played_at)) = final_activity {
                 self.store.mark_played(track_id, played_at)?;
-                self.update_track_stats(track_id, Some(played_at), false)?;
+                self.update_track_stats(track_id)?;
                 self.state.library.history = Arc::new(self.store.history(MAX_QUERY_ROWS)?);
             }
             self.count_play()

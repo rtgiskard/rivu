@@ -1232,6 +1232,12 @@ mod tests {
         assert_eq!(play_count(&core, 1), 0);
         progress(&mut core, 9.0, 2.000_001);
         assert_eq!(play_count(&core, 1), 1);
+        assert_eq!(core.state.current_track().unwrap().play_count, 1);
+        assert_eq!(core.state.queue.tracks[0].play_count, 1);
+        progress(&mut core, 9.5, 3.0);
+        assert_eq!(play_count(&core, 1), 1);
+        assert_eq!(core.state.current_track().unwrap().play_count, 1);
+        assert_eq!(core.state.queue.tracks[0].play_count, 1);
     }
     #[test]
     fn reload_refreshes_current_track_activity_and_probe_metadata() {

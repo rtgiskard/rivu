@@ -46,19 +46,8 @@ impl Core {
         Ok(())
     }
 
-    pub(in crate::core) fn update_track_stats(
-        &mut self,
-        track_id: i64,
-        played_at: Option<i64>,
-        increment_play_count: bool,
-    ) -> Result<()> {
-        let mut track = self.store.track(track_id)?.context("Track not found")?;
-        if let Some(played_at) = played_at {
-            track.last_played = Some(played_at);
-        }
-        if increment_play_count {
-            track.play_count = track.play_count.saturating_add(1);
-        }
+    pub(in crate::core) fn update_track_stats(&mut self, track_id: i64) -> Result<()> {
+        let track = self.store.track(track_id)?.context("Track not found")?;
         if let Some(row) = Arc::make_mut(&mut self.state.queue.tracks)
             .iter_mut()
             .find(|row| row.id == track_id)
