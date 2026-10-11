@@ -2,6 +2,8 @@ mod analysis_visualizer;
 mod artwork;
 mod audio_visualizer;
 mod components;
+mod docking;
+mod docking_ui;
 mod fonts;
 mod fractal_beams;
 mod fractal_flow;
@@ -45,7 +47,7 @@ use layout::{Axis, Edge, LayoutSet, Node};
 use library::LibraryNode;
 use paged::PagedRows;
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     rc::{Rc, Weak},
@@ -422,9 +424,48 @@ impl Render for QueueDrag {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct DockRequest {
+    target: docking::Target,
+    index: Option<usize>,
+}
+
+struct DockHover {
+    request: DockRequest,
+    owner: Bounds<Pixels>,
+    preview: Option<Bounds<Pixels>>,
+    prepared: Option<layout::Layout>,
+    unchanged: bool,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct DockGeometry {
+    viewport: Size<Pixels>,
+    ui_scale: f32,
+    scale_factor: f32,
+}
+
+impl DockGeometry {
+    fn current(window: &Window, ui_scale: f32) -> Self {
+        Self {
+            viewport: window.viewport_size(),
+            ui_scale,
+            scale_factor: window.scale_factor(),
+        }
+    }
+}
+
+struct PanelDocking {
+    source: u64,
+    guide: Option<docking::Guide>,
+    hover: Option<DockHover>,
+    geometry: DockGeometry,
+}
+
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 enum Measured {
     Node(u64),
+    Tab(u64),
     Seek(u64),
     Volume(u64),
     Device,
@@ -441,19 +482,27 @@ enum Dragging {
     Volume(u64),
 }
 
-fn dock_edge(position: Point<Pixels>, bounds: Bounds<Pixels>) -> Edge {
+fn dock_edge(position: Point<Pixels>, bounds: Bounds<Pixels>) -> Option<Edge> {
     let x = (position.x - bounds.origin.x) / bounds.size.width;
     let y = (position.y - bounds.origin.y) / bounds.size.height;
-    if x < 0.22 {
-        Edge::Left
+    let horizontal = if x < 0.22 {
+        Some(Edge::Left)
     } else if x > 0.78 {
-        Edge::Right
-    } else if y < 0.22 {
-        Edge::Top
-    } else if y > 0.78 {
-        Edge::Bottom
+        Some(Edge::Right)
     } else {
-        Edge::Center
+        None
+    };
+    let vertical = if y < 0.22 {
+        Some(Edge::Top)
+    } else if y > 0.78 {
+        Some(Edge::Bottom)
+    } else {
+        None
+    };
+    match (horizontal, vertical) {
+        (Some(edge), None) | (None, Some(edge)) => Some(edge),
+        (None, None) => Some(Edge::Center),
+        _ => None,
     }
 }
 
@@ -588,6 +637,7 @@ pub(super) struct GuiApp {
     waveform: Entity<waveform::Waveform>,
     target_group: Option<u64>,
     dragging: Option<Dragging>,
+    panel_docking: Option<PanelDocking>,
     split_references: Vec<f64>,
     layout_scale_factor: f64,
     seek_preview: Option<f64>,
@@ -595,6 +645,7 @@ pub(super) struct GuiApp {
     seek_queue_id: Option<u64>,
     analysis_worker_enabled: bool,
     measured: Rc<RefCell<HashMap<Measured, Bounds<Pixels>>>>,
+    measured_geometry: Rc<Cell<Option<DockGeometry>>>,
     analysis_sequence: u64,
     analysis_staging: crate::analysis::AnalysisFrame,
     analysis_needs_refresh: bool,
@@ -906,12 +957,20 @@ impl GuiApp {
             }));
         }
         subscriptions.push(
-            cx.observe_window_visibility(window, |this, visibility, _, cx| {
+            cx.observe_window_visibility(window, |this, visibility, window, cx| {
                 this.window_visible = matches!(visibility, WindowVisibility::Visible);
+                if !this.window_visible {
+                    this.cancel_panel_docking(window, cx);
+                }
                 this.sync_analysis(cx);
                 cx.notify();
             }),
         );
+        subscriptions.push(cx.observe_window_activation(window, |this, window, cx| {
+            if !window.is_window_active() {
+                this.cancel_panel_docking(window, cx);
+            }
+        }));
         let (wake_sender, mut wake_receiver) = mpsc::channel::<()>(1);
         let wake_sender = parking_lot::Mutex::new(wake_sender);
         handle.set_wakeup(move || {
@@ -996,10 +1055,12 @@ impl GuiApp {
             waveform,
             target_group: None,
             dragging: None,
+            panel_docking: None,
             split_references: Vec::new(),
             layout_scale_factor: 1.,
             analysis_worker_enabled: false,
             measured: Rc::new(RefCell::new(HashMap::new())),
+            measured_geometry: Rc::new(Cell::new(None)),
             analysis_sequence: 0,
             analysis_staging: crate::analysis::AnalysisFrame::default(),
             analysis_needs_refresh: false,
@@ -2072,9 +2133,16 @@ impl GuiApp {
                         collect(child, keys);
                     }
                 }
-                Node::Tabs { id, panels, .. } => {
+                Node::Tabs { id, panels, active } => {
                     keys.insert(Measured::Node(*id));
+                    let show_tab_bar = panels
+                        .iter()
+                        .find(|panel| panel.id == *active)
+                        .is_some_and(|panel| panel.show_tab_bar);
                     for panel in panels {
+                        if show_tab_bar {
+                            keys.insert(Measured::Tab(panel.id));
+                        }
                         keys.insert(Measured::Seek(panel.id));
                         keys.insert(Measured::Volume(panel.id));
                     }
@@ -2090,6 +2158,10 @@ impl GuiApp {
             .retain(|key, _| active.contains(key));
     }
     fn persist_layout(&mut self, cx: &mut Context<Self>) {
+        if let Some(session) = &mut self.panel_docking {
+            session.guide = None;
+            session.hover = None;
+        }
         self.layouts
             .current_mut()
             .initialize_audio_visualizers(AudioVisualizerOptions::from(
@@ -2144,9 +2216,20 @@ impl GuiApp {
     }
     fn measurement(&self, key: Measured) -> AnyElement {
         let measured = self.measured.clone();
+        let measured_geometry = self.measured_geometry.clone();
+        let ui_scale = self.state.system.config.ui_scale;
         canvas(
-            move |bounds, _, _| {
-                measured.borrow_mut().insert(key, bounds);
+            move |bounds, window, _| {
+                let mut measured = measured.borrow_mut();
+                if matches!(key, Measured::Node(_) | Measured::Tab(_)) {
+                    let geometry = DockGeometry::current(window, ui_scale);
+                    if measured_geometry.get() != Some(geometry) {
+                        measured
+                            .retain(|key, _| !matches!(key, Measured::Node(_) | Measured::Tab(_)));
+                        measured_geometry.set(Some(geometry));
+                    }
+                }
+                measured.insert(key, bounds);
             },
             |_, _, _, _| {},
         )
@@ -2288,35 +2371,6 @@ impl GuiApp {
         );
         self.dragging = Some(Dragging::Split(drag));
     }
-    fn dock_drop(
-        &mut self,
-        panel_id: u64,
-        target: u64,
-        edge: Edge,
-        index: Option<usize>,
-        cx: &mut Context<Self>,
-    ) {
-        if self.layouts.current().locked {
-            return;
-        }
-        let no_op = self.layouts.current().root.as_ref()
-            .and_then(|root| layout_geometry::find(root, target))
-            .is_some_and(|node| matches!(node, Node::Tabs { panels, .. } if panels.len() == 1 && panels[0].id == panel_id));
-        if no_op {
-            return;
-        }
-        let tabs_id = self.layouts.current().next_id;
-        let sizes = self.layout_edit_sizes(panel_id, Some((target, edge, tabs_id)));
-        if self
-            .layouts
-            .current_mut()
-            .move_panel(panel_id, target, edge, index)
-        {
-            self.reconcile_layout_sizes(&sizes);
-            self.target_group = Some(target);
-            self.persist_layout(cx);
-        }
-    }
     fn render_node(
         &mut self,
         node: &Node,
@@ -2435,7 +2489,7 @@ impl GuiApp {
                     .gap_1()
                     .border_b_1()
                     .border_color(rgb(BORDER));
-                for (index, panel) in panels.iter().enumerate().filter(|_| show_tab_bar) {
+                for panel in panels.iter().filter(|_| show_tab_bar) {
                     let panel_id = panel.id;
                     let title = panel_spec(&panel.kind)
                         .map_or(panel.kind.as_str(), |spec| spec.title)
@@ -2448,6 +2502,7 @@ impl GuiApp {
                     tabs = tabs.child(
                         div()
                             .id(("tab", panel_id))
+                            .relative()
                             .flex()
                             .items_center()
                             .gap_2()
@@ -2477,18 +2532,23 @@ impl GuiApp {
                                 }),
                             )
                             .when(!self.layouts.current().locked, |view| {
-                                view.on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone()))
+                                let entity = cx.entity().downgrade();
+                                view.on_drag(drag, move |drag, _, window, cx| {
+                                    let _ = entity.update(cx, |this, cx| {
+                                        this.start_panel_docking(drag.panel_id, window);
+                                        if !this.panel_docking_blocked() {
+                                            this.update_panel_docking(
+                                                window.mouse_position(),
+                                                window,
+                                                cx,
+                                            );
+                                        }
+                                    });
+                                    cx.new(|_| drag.clone())
+                                })
                             })
-                            .on_drop(cx.listener(move |this, drag: &PanelDrag, _, cx| {
-                                this.dock_drop(
-                                    drag.panel_id,
-                                    node_id,
-                                    Edge::Center,
-                                    Some(index),
-                                    cx,
-                                )
-                            }))
                             .child(title)
+                            .child(self.measurement(Measured::Tab(panel_id)))
                             .when(!self.layouts.current().locked, |view| {
                                 view.child(
                                     div()
@@ -2562,68 +2622,19 @@ impl GuiApp {
                 if show_tab_bar {
                     panel = panel.child(tabs);
                 }
-                panel = panel
-                    .child(content_area)
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            this.panel_menu = Some(PanelMenu {
-                                panel_id: active,
-                                tab_bar_visible: show_tab_bar,
-                                position: event.position,
-                                page: PanelMenuPage::Main,
-                            });
-                            cx.notify();
-                        }),
-                    )
-                    .on_drop(cx.listener(move |this, drag: &PanelDrag, window, cx| {
-                        let position = window.mouse_position();
-                        let bounds = this
-                            .measured
-                            .borrow()
-                            .get(&Measured::Node(node_id))
-                            .copied();
-                        let edge = bounds
-                            .map(|bounds| dock_edge(position, bounds))
-                            .unwrap_or(Edge::Center);
-                        this.dock_drop(drag.panel_id, node_id, edge, None, cx);
-                    }))
-                    .drag_over::<PanelDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
-                    .on_drag_move::<PanelDrag>(cx.listener(|_, _, _, cx| cx.notify()))
-                    .when(
-                        !self.layouts.current().locked && cx.has_active_drag(),
-                        |view| {
-                            view.child(
-                                canvas(
-                                    |bounds, _, _| bounds,
-                                    |bounds, _, window, _| {
-                                        let position = window.mouse_position();
-                                        if !bounds.contains(&position) {
-                                            return;
-                                        }
-                                        let mut preview = bounds;
-                                        match dock_edge(position, bounds) {
-                                            Edge::Left => preview.size.width *= 0.5,
-                                            Edge::Right => {
-                                                preview.origin.x += preview.size.width * 0.5;
-                                                preview.size.width *= 0.5;
-                                            }
-                                            Edge::Top => preview.size.height *= 0.5,
-                                            Edge::Bottom => {
-                                                preview.origin.y += preview.size.height * 0.5;
-                                                preview.size.height *= 0.5;
-                                            }
-                                            Edge::Center => {}
-                                        }
-                                        window.paint_quad(fill(preview, rgb(ACCENT).alpha(0.18)));
-                                    },
-                                )
-                                .absolute()
-                                .size_full(),
-                            )
-                        },
-                    );
+                panel = panel.child(content_area).on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.panel_menu = Some(PanelMenu {
+                            panel_id: active,
+                            tab_bar_visible: show_tab_bar,
+                            position: event.position,
+                            page: PanelMenuPage::Main,
+                        });
+                        cx.notify();
+                    }),
+                );
                 // Structural edits account for the outer pane, including its border.
                 div()
                     .relative()
@@ -2754,10 +2765,23 @@ impl GuiApp {
 }
 impl Render for GuiApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.panel_docking.is_some() && (!cx.has_active_drag() || self.panel_docking_blocked()) {
+            self.cancel_panel_docking(window, cx);
+        }
+        let geometry = DockGeometry::current(window, self.state.system.config.ui_scale);
+        if self
+            .panel_docking
+            .as_ref()
+            .is_some_and(|session| session.geometry != geometry)
+        {
+            self.panel_docking.as_mut().unwrap().guide = None;
+            self.panel_docking.as_mut().unwrap().hover = None;
+        }
         self.layout_scale_factor = f64::from(window.scale_factor());
         window.set_rem_size(px(16. * self.state.system.config.ui_scale));
         self.scroll_views.begin_frame();
         self.visuals.begin_frame();
+        let docking_view = cx.entity().downgrade();
         let paint_visuals = self.visuals.clone();
         let paint_visualizer = self.audio_visualizer.clone();
         let paint_waveform = self.waveform.read(cx).image_releaser();
@@ -2786,7 +2810,12 @@ impl Render for GuiApp {
             .text_size(px(14. * self.state.system.config.ui_scale))
             .font(self.ui_font.clone())
             .track_focus(&self.layout_focus)
-            .capture_key_down(cx.listener(|_, event: &KeyDownEvent, window, cx| {
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" && this.panel_docking.is_some() {
+                    this.cancel_panel_docking(window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
                 let modifiers = event.keystroke.modifiers;
                 if event.keystroke.key == "f4"
                     && modifiers.alt
@@ -2967,7 +2996,36 @@ impl Render for GuiApp {
                 this.scroll_views.click(event.position, modal);
             }))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                this.drag_position(event.position, event.modifiers.alt, cx)
+                this.drag_position(event.position, event.modifiers.alt, cx);
+            }))
+            .on_drag_move::<PanelDrag>(cx.listener(
+                |this, event: &DragMoveEvent<PanelDrag>, window, cx| {
+                    let source = event.drag(cx).panel_id;
+                    if this
+                        .panel_docking
+                        .as_ref()
+                        .is_none_or(|session| session.source != source)
+                    {
+                        this.start_panel_docking(source, window);
+                    }
+                    this.update_panel_docking(window.mouse_position(), window, cx);
+                },
+            ))
+            .capture_any_mouse_up(cx.listener(|_, event: &MouseUpEvent, window, cx| {
+                if event.button == MouseButton::Left {
+                    let entity = cx.entity().downgrade();
+                    window.defer(cx, move |_, cx| {
+                        let _ = entity.update(cx, |this, cx| {
+                            if this.panel_docking.take().is_some() {
+                                cx.notify();
+                            }
+                        });
+                    });
+                }
+            }))
+            .on_drop(cx.listener(|this, drag: &PanelDrag, window, cx| {
+                this.drop_panel_docking(drag.panel_id, window, cx);
+                cx.stop_propagation();
             }))
             .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
                 if let Some(Dragging::Split(drag)) = this.dragging {
@@ -2980,12 +3038,22 @@ impl Render for GuiApp {
             )
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(|this, _, _, cx| this.finish_drag(cx)),
+                cx.listener(|this, _, _, cx| {
+                    this.panel_docking = None;
+                    this.finish_drag(cx);
+                }),
             )
             .child(
                 canvas(
                     |_, _, _| (),
-                    move |_, _, window, _| {
+                    move |_, _, window, _cx| {
+                        let entity = docking_view.clone();
+                        window.on_mouse_event::<MouseExitEvent>(move |_, phase, window, cx| {
+                            if phase == DispatchPhase::Capture {
+                                let _ = entity
+                                    .update(cx, |this, cx| this.cancel_panel_docking(window, cx));
+                            }
+                        });
                         paint_visuals.release_retired(window);
                         paint_waveform.release_retired(window);
                         paint_visualizer.release_retired_images(window);
@@ -3085,7 +3153,8 @@ impl Render for GuiApp {
                 }))
                 .on_mouse_down(
                     MouseButton::Right,
-                    cx.listener(|this, _, _, cx| {
+                    cx.listener(|this, _, window, cx| {
+                        this.cancel_panel_docking(window, cx);
                         cx.stop_propagation();
                         this.layouts.current_mut().locked = !this.layouts.current().locked;
                         this.catalog_open = false;
@@ -3179,6 +3248,9 @@ impl Render for GuiApp {
         }
 
         app = app.child(footer);
+        if self.panel_docking.is_some() {
+            app = app.child(self.docking_overlay());
+        }
 
         if self.catalog_open && !self.layouts.current().locked {
             let mut choices = row().flex_wrap().gap_1();

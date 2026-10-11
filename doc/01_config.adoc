@@ -183,6 +183,26 @@ to the following neighbor, or the preceding neighbor when the removed region
 was last. Empty and single-region containers collapse; same-direction splits
 merge while preserving their proportions.
 
+During a panel drag, approaching a shared edge shows separate docking strips
+for the panel and its enclosing rows, columns, or entire layout. Hover a strip
+to choose its scope; the label and outline identify the target, and the shaded
+region previews the moved panel's final position, including source removal.
+Release to apply that target. Moving to another edge changes the direction;
+moving away hides the strips and restores ordinary panel docking. A central
+drop merges tabs. Corners and separator gutters do not select an ambiguous edge.
+
+Deeply nested or crowded regions omit the strips entirely and retain ordinary
+panel docking; no container target is silently substituted. An unavailable
+target shows `Cannot dock here`; releasing there leaves the layout unchanged.
+Press Escape to cancel. Leaving or deactivating the window, opening a dialog or
+menu, or locking the layout also cancels the drag. Queue-entry drags do not
+activate panel docking.
+
+Resizing the window or changing interface or display scaling clears the old
+preview. If released before the new geometry is measured, the drag leaves the
+layout unchanged; otherwise docking uses the new geometry. Hidden tab bars do
+not retain tab targets, but their panels still accept ordinary docking.
+
 With Layout snapping enabled, separator dragging considers targets in this
 priority order: aligned separator centers in other visible same-direction splits,
 the equal-content midpoint of the adjacent panes, then the nearest configured
