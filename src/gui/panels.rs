@@ -1557,6 +1557,10 @@ impl GuiApp {
             .px_2()
             .h(gpui::rems(2.25))
             .flex_shrink_0()
+            .min_w_0()
+            .overflow_hidden()
+            .border_b_1()
+            .border_color(rgb(BORDER))
             .child(caption("#").w(px(32.)).flex_shrink_0())
             .child(self.history_sort_button(panel_id, "Track", HistorySort::Title, None, cx))
             .child(self.history_sort_button(
@@ -1577,7 +1581,7 @@ impl GuiApp {
         panel_surface(("history-panel", panel_id))
             .child(panel_header(
                 "Recent tracks",
-                format!("{} tracks · click a column to sort", history_len),
+                format!("{} tracks", history_len),
             ))
             .child(list_viewport(
                 column().size_full().child(header).child(

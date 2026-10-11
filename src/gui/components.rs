@@ -166,13 +166,31 @@ pub(crate) fn sortable_header(
     cx: &mut Context<GuiApp>,
     action: impl Fn(&mut GuiApp, &mut Window, &mut Context<GuiApp>) + 'static,
 ) -> Stateful<Div> {
-    let mut control = active_control(button(id, label, cx, action), active).when(active, |control| {
-        control.gap_1().child(
-            div()
-                .font_family(super::fonts::SYMBOLS_FAMILY)
-                .child(if descending { "󰁅" } else { "󰁝" }),
-        )
-    });
+    let mut control = div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap_1()
+        .h_full()
+        .min_w_0()
+        .overflow_hidden()
+        .text_xs()
+        .text_color(rgb(if active { ACCENT } else { super::MUTED }))
+        .cursor_pointer()
+        .hover(|style| style.bg(rgb(HIGHLIGHT)).text_color(rgb(TEXT)))
+        .on_click(cx.listener(move |this, _, window, cx| {
+            action(this, window, cx);
+            cx.stop_propagation();
+        }))
+        .child(div().min_w_0().truncate().child(label.into()))
+        .when(active, |control| {
+            control.child(
+                div()
+                    .flex_shrink_0()
+                    .font_family(super::fonts::SYMBOLS_FAMILY)
+                    .child(if descending { "󰁅" } else { "󰁝" }),
+            )
+        });
     if let Some(width) = width {
         control = control.w(width).flex_shrink_0();
     } else {
