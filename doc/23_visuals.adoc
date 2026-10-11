@@ -85,9 +85,9 @@ full-track reads merely to display a panel.
 RMS fills extend above and below the centerline for the respective stereo
 channels. Each display column has its own gradient endpoint, preserving color
 differences between adjacent columns with different energy. The gradient starts
-at the palette minimum on the centerline and brightens toward that column's RMS
-edge. Nonlinear color compression keeps warm colors as high-energy accents while
-preserving access to the full palette range. It is a visual choice, not an
+at the visible palette minimum on the centerline and brightens toward that column's
+RMS edge. Nonlinear color compression keeps warm colors as high-energy accents
+while preserving access to the full visible palette range. It is a visual choice, not an
 amplitude or renderer limit.
 Peak is a thin, solid marker at the channel's peak level. Color compression
 does not change the height represented by the amplitude mapping.
@@ -106,9 +106,14 @@ continuous curves and filled areas as well as styles composed of many bars,
 outlines, or LED segments. In dense styles, separate submissions for every
 primitive would add overhead without improving the intended color mapping.
 
-Body gradients and Peak colors use the full palette domain without skipping or
-remapping its low end, including DeaDBeeF's black floor. Waveform uses the same
-palette domain but compresses its color endpoints as described above.
+Waveform and Spectrum exclude DeaDBeeF's initial black-to-deep-blue interval:
+normalized color levels map to `0.06 + 0.94 * level` in the original palette.
+Spectrum's remaining stops are rescaled to fill the plot height; body and Peak
+colors use the same visible domain. Waveform uses that domain for its centerline,
+RMS endpoints, and Peak colors, retaining the color compression described above.
+Tokyo Night is unchanged. Spectrogram continues to use the complete palette,
+including DeaDBeeF's black floor. These color mappings do not alter signal levels
+or amplitude geometry.
 
 Peak markers are discrete, solid-colored markers drawn separately from the
 body. They are not connected into a curve, and the body cache does not own their

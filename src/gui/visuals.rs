@@ -77,8 +77,28 @@ impl PaletteLut {
         self.colors[index]
     }
 
-    pub(super) fn lookup_raw(&self, fraction: f32) -> u32 {
-        stop_color(self.lookup_rgb(fraction))
+    // Waveform and Spectrum exclude DeaDBeeF's black floor; Spectrogram does not.
+    pub(super) fn lookup_mapped_rgb(&self, fraction: f32) -> [u8; 3] {
+        let fraction = fraction.clamp(0.0, 1.0);
+        let mapped = match self.palette {
+            VisualizationPalette::Deadbeef => 0.06 + fraction * 0.94,
+            VisualizationPalette::TokyoNight => fraction,
+        };
+        self.lookup_rgb(mapped)
+    }
+
+    fn visible_stops(&self) -> &'static [(f32, [u8; 3])] {
+        match self.palette {
+            VisualizationPalette::Deadbeef => &DEADBEEF_STOPS[1..],
+            VisualizationPalette::TokyoNight => TOKYO_NIGHT_STOPS,
+        }
+    }
+
+    fn stop_position(&self, raw: f32) -> f32 {
+        match self.palette {
+            VisualizationPalette::Deadbeef => ((raw - 0.06) / 0.94).clamp(0.0, 1.0),
+            VisualizationPalette::TokyoNight => raw,
+        }
     }
 }
 
@@ -1292,7 +1312,9 @@ impl VisualData {
                         .clamp(plot.top(), plot.bottom() - px(1.0));
                     window.paint_quad(fill(
                         Bounds::new(point(peak_x, peak_y), size(peak_width, px(1.0))),
-                        rgb(self.palette_lut.lookup_raw(peak_fraction)),
+                        rgb(stop_color(
+                            self.palette_lut.lookup_mapped_rgb(peak_fraction),
+                        )),
                     ));
                 }
             });
@@ -1607,11 +1629,11 @@ fn paint_spectrum_path(
     palette: &PaletteLut,
 ) {
     path.bounds = plot;
-    let stops = palette_stops(palette.palette);
+    let stops = palette.visible_stops();
     let mut visible = Some(path);
     for (index, pair) in stops.windows(2).enumerate() {
-        let start = pair[0].0;
-        let end = pair[1].0;
+        let start = palette.stop_position(pair[0].0);
+        let end = palette.stop_position(pair[1].0);
         let mask = Bounds::new(
             point(plot.left(), plot.bottom() - plot.size.height * end),
             size(plot.size.width, plot.size.height * (end - start)),
@@ -1893,19 +1915,6 @@ fn paint_aligned_label(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn deadbeef_palettes_have_expected_endpoints() {
-        assert_eq!(
-            active_palette_lut(VisualizationPalette::Deadbeef).lookup_raw(0.0),
-            0x000000
-        );
-        assert_eq!(
-            active_palette_lut(VisualizationPalette::Deadbeef).lookup_raw(1.0),
-            0xff0000
-        );
-        assert_eq!(gradient(0.0, DEADBEEF_STOPS), [0, 0, 0]);
-        assert_eq!(gradient(1.0, DEADBEEF_STOPS), [255, 0, 0]);
-    }
 
     #[test]
     fn smooth_gradient_preserves_palette_stops() {

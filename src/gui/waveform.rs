@@ -335,8 +335,8 @@ impl WaveformPlot {
                 let height_px = (center * level).max(1.0);
                 let start = if upper { center - height_px } else { center };
                 let end = if upper { center } else { center + height_px };
-                let low_color = palette.lookup_rgb(0.0);
-                let rms_color = palette.lookup_rgb(waveform_color_level(level));
+                let low_color = palette.lookup_mapped_rgb(0.0);
+                let rms_color = palette.lookup_mapped_rgb(waveform_color_level(level));
                 for y in (start.floor() as u32)..(end.ceil() as u32).min(height) {
                     let t = ((y as f32 + 0.5 - start) / (end - start)).clamp(0.0, 1.0);
                     let t = if upper { 1.0 - t } else { t };
@@ -363,7 +363,7 @@ impl WaveformPlot {
                 };
                 let y = y.round() as u32;
                 if y < height {
-                    let [red, green, blue] = palette.lookup_rgb(waveform_color_level(level));
+                    let [red, green, blue] = palette.lookup_mapped_rgb(waveform_color_level(level));
                     for x in x0..x1 {
                         pixels.put_pixel(x - x_start, y, image::Rgba([blue, green, red, 255]));
                     }
