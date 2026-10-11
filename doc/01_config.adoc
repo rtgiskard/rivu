@@ -79,7 +79,9 @@ The system tray switch takes effect after restarting the graphical host, not
 merely reopening its window. Media read buffering applies to future source opens,
 including full waveform scans; it does not reopen the current track.
 Still mode is under Visualizations → Common → Rendering and takes effect when
-settings are applied, without restarting playback. It is persisted as `still_mode`.
+settings are applied, without restarting playback. The application menu also
+offers a Still mode toggle below Layouts; it applies and saves immediately.
+Both controls use the persisted `still_mode` setting.
 
 Shuffle and Repeat are playback controls, not desktop settings.
 General → Interface includes Layout snapping and Layout grid spacing. These save

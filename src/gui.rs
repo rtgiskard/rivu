@@ -3242,6 +3242,24 @@ impl Render for GuiApp {
                             cx.notify();
                         },
                     ))
+                    .child(
+                        menu_item("app-still-mode", "Still mode", cx, |this, _, cx| {
+                            this.app_menu_open = false;
+                            let mut config = this.handle.config_snapshot().as_ref().clone();
+                            config.still_mode = !config.still_mode;
+                            this.send(Command::Configure { config }, cx);
+                        })
+                        .child(
+                            div()
+                                .ml_auto()
+                                .text_color(rgb(if self.state.system.config.still_mode {
+                                    ACCENT
+                                } else {
+                                    MUTED
+                                }))
+                                .child(if self.state.system.config.still_mode { "On" } else { "Off" }),
+                        ),
+                    )
                     .child(about)
                     .child(div().h(px(1.)).mx_2().my_1().bg(rgb(BORDER)))
                     .child(menu_item(
