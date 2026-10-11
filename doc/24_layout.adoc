@@ -130,6 +130,12 @@ Every update derives its target from that snapshot, not from a previous rounded
 result. Moving a boundary changes only its adjacent regions. Minimum pane sizes
 restrict the feasible interval; layout locking blocks structural edits.
 
+The window owns one interaction state with layout/geometry epochs. Measurement
+callbacks from an old epoch cannot repopulate the current bounds cache. Escape,
+focus loss, and geometry changes cancel a separator preview and restore its
+original boundary; cancellation never requests persistence. Layout replacement
+discards old interaction state without applying its rollback to the new tree.
+
 Snapping selects feasible candidates in this priority order:
 
 . Separator centers in other visible splits with the same axis, expressed in

@@ -45,19 +45,19 @@ impl Scope {
         Self {
             library: app.state.library.revision,
             structure: app.state.library.structure_revision,
-            projection: if app.library_tree_active {
+            projection: if app.browser.library.tree_active() {
                 Projection::Tree {
-                    favorite: app.favorites_only.then_some(true),
-                    revision: app.directory_tree.projection_revision(),
-                    total: app.directory_tree.row_count(),
+                    favorite: app.browser.library.favorites_only().then_some(true),
+                    revision: app.browser.library.tree.projection_revision(),
+                    total: app.browser.library.tree.row_count(),
                 }
             } else {
                 Projection::Flat {
-                    query: app.library_buffer.query.clone(),
-                    favorite: app.library_buffer.favorite,
-                    missing: app.library_buffer.missing,
-                    sort: app.library_buffer.sort,
-                    total: app.library_buffer.total,
+                    query: app.browser.library.buffer.query.clone(),
+                    favorite: app.browser.library.buffer.favorite,
+                    missing: app.browser.library.buffer.missing,
+                    sort: app.browser.library.buffer.sort,
+                    total: app.browser.library.buffer.total,
                 }
             },
         }
@@ -72,10 +72,10 @@ impl Scope {
                     revision,
                     total,
                 } => {
-                    app.library_tree_active
-                        && *favorite == app.favorites_only.then_some(true)
-                        && *revision == app.directory_tree.projection_revision()
-                        && *total == app.directory_tree.row_count()
+                    app.browser.library.tree_active()
+                        && *favorite == app.browser.library.favorites_only().then_some(true)
+                        && *revision == app.browser.library.tree.projection_revision()
+                        && *total == app.browser.library.tree.row_count()
                 }
                 Projection::Flat {
                     query,
@@ -84,12 +84,12 @@ impl Scope {
                     sort,
                     total,
                 } => {
-                    !app.library_tree_active
-                        && query == &app.library_buffer.query
-                        && *favorite == app.library_buffer.favorite
-                        && *missing == app.library_buffer.missing
-                        && *sort == app.library_buffer.sort
-                        && *total == app.library_buffer.total
+                    !app.browser.library.tree_active()
+                        && query == &app.browser.library.buffer.query
+                        && *favorite == app.browser.library.buffer.favorite
+                        && *missing == app.browser.library.buffer.missing
+                        && *sort == app.browser.library.buffer.sort
+                        && *total == app.browser.library.buffer.total
                 }
             }
     }
@@ -277,7 +277,7 @@ pub(in crate::gui) struct LibrarySelection {
 }
 
 impl LibrarySelection {
-    fn cancel(&mut self, clear_anchor: bool) {
+    pub(in crate::gui) fn cancel(&mut self, clear_anchor: bool) {
         self.token = self.token.wrapping_add(1);
         self.pending = None;
         if clear_anchor {
@@ -300,36 +300,9 @@ impl LibrarySelection {
     }
 }
 
-fn merge_selection(
-    tracks: &mut HashSet<i64>,
-    nodes: &mut HashSet<LibraryNode>,
-    range: HashSet<LibraryNode>,
-    additive: bool,
-) {
-    if !additive {
-        tracks.clear();
-        nodes.clear();
-    }
-    for node in range {
-        match node {
-            LibraryNode::Track(id) => {
-                tracks.insert(id);
-            }
-            LibraryNode::Directory(_) => {
-                nodes.insert(node);
-            }
-        }
-    }
-}
-
 impl GuiApp {
     pub(in crate::gui) fn library_range_pending(&self) -> bool {
-        self.library_selection.pending.is_some()
-    }
-
-    /// Call before changing view/filter/expansion or a non-row selection.
-    pub(in crate::gui) fn invalidate_library_selection(&mut self) {
-        self.library_selection.cancel(true);
+        self.browser.library.range_selection.pending.is_some()
     }
 
     pub(in crate::gui) fn select_library_row(
@@ -344,50 +317,32 @@ impl GuiApp {
         if index >= scope.total() {
             return;
         }
-        self.library_navigation = None;
-        self.directory_tree.cancel_navigation();
-        self.list_focus = Some(ListFocus::Library);
+        self.browser.library.cancel_navigation();
+        self.browser.focus_list(ListFocus::Library);
         if !shift {
-            self.library_selection.cancel(false);
-            if !multi {
-                self.selected.clear();
-                self.library_selected_nodes.clear();
-            }
-            match &node {
-                LibraryNode::Track(id) => {
-                    if multi && !self.selected.insert(*id) {
-                        self.selected.remove(id);
-                    } else if !multi {
-                        self.selected.insert(*id);
-                    }
-                }
-                LibraryNode::Directory(_) => {
-                    if multi && !self.library_selected_nodes.insert(node.clone()) {
-                        self.library_selected_nodes.remove(&node);
-                    } else if !multi {
-                        self.library_selected_nodes.insert(node.clone());
-                    }
-                }
-            }
-            self.library_selection.anchor = Some(Anchor { index, scope });
+            self.browser.library.range_selection.cancel(false);
+            self.browser.library.select_node(&node, multi);
+            self.browser.library.range_selection.anchor = Some(Anchor { index, scope });
             self.finish_library_selection(&node, index, cx);
             return;
         }
 
-        let range = self.library_selection.interval(&scope, index);
+        let range = self.browser.library.range_selection.interval(&scope, index);
         // Shift never moves a valid anchor; the first Shift click anchors itself.
         if !self
-            .library_selection
+            .browser
+            .library
+            .range_selection
             .anchor
             .as_ref()
             .is_some_and(|anchor| anchor.scope == scope)
         {
-            self.library_selection.anchor = Some(Anchor {
+            self.browser.library.range_selection.anchor = Some(Anchor {
                 index,
                 scope: scope.clone(),
             });
         }
-        self.library_selection.cancel(false);
+        self.browser.library.range_selection.cancel(false);
         let slices = match &scope.projection {
             Projection::Flat { total, .. } => VecDeque::from([Slice {
                 source: Source::Flat,
@@ -397,12 +352,14 @@ impl GuiApp {
                 check: None,
             }]),
             Projection::Tree { .. } => {
-                let Some(spans) = self.directory_tree.range_spans(range.clone()) else {
+                let Some(spans) = self.browser.library.tree.range_spans(range.clone()) else {
                     self.error = Some("Library tree is still loading; select the range again when its folders are ready.".into());
                     cx.notify();
                     return;
                 };
-                self.directory_tree
+                self.browser
+                    .library
+                    .tree
                     .range_checks(range)
                     .into_iter()
                     .map(|(span, child)| Slice::tree(span, Some(child)))
@@ -410,8 +367,8 @@ impl GuiApp {
                     .collect()
             }
         };
-        self.library_selection.pending = Some(RangeJob {
-            token: self.library_selection.token,
+        self.browser.library.range_selection.pending = Some(RangeJob {
+            token: self.browser.library.range_selection.token,
             scope,
             slices,
             selected: HashSet::new(),
@@ -431,46 +388,39 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) {
         let focus = match endpoint {
-            LibraryNode::Track(id) if self.selected.contains(id) => Some(*id),
-            _ => self.selected.iter().copied().min(),
+            LibraryNode::Track(id) if self.browser.library.selected().contains(id) => Some(*id),
+            _ => self.browser.library.selected().iter().copied().min(),
         };
         if let Some(id) = focus {
-            self.update_metadata_track(id, cx);
+            self.request_track(id, cx);
         } else {
             self.clear_metadata_selection(cx);
         }
-        if self.library_tree_active {
-            self.directory_tree
-                .remember_selection(&self.library_selected_nodes, &self.selected);
-            if self.library_selected_nodes.contains(endpoint)
-                || matches!(endpoint, LibraryNode::Track(id) if self.selected.contains(id))
+        if self.browser.library.tree_active() {
+            if self.browser.library.selected_nodes().contains(endpoint)
+                || matches!(endpoint, LibraryNode::Track(id) if self.browser.library.selected().contains(id))
             {
-                self.directory_tree.focus_selection(endpoint, index);
+                self.browser.library.tree.focus_selection(endpoint, index);
             }
         } else {
-            self.library_buffer.rows.pin(Some(index));
+            self.browser.library.buffer.rows.pin(Some(index));
         }
         self.sync_waveform(cx);
         cx.notify();
     }
 
     fn apply_library_range(&mut self, job: RangeJob, cx: &mut Context<Self>) {
-        merge_selection(
-            &mut self.selected,
-            &mut self.library_selected_nodes,
-            job.selected,
-            job.additive,
-        );
+        self.browser.library.apply_range(job.selected, job.additive);
         self.finish_library_selection(&job.endpoint, job.endpoint_index, cx);
     }
 
     fn pump_library_range(&mut self, cx: &mut Context<Self>) {
-        if self.library_selection.active.is_some() {
+        if self.browser.library.range_selection.active.is_some() {
             return;
         }
-        while let Some(mut job) = self.library_selection.pending.take() {
+        while let Some(mut job) = self.browser.library.range_selection.pending.take() {
             if !job.scope.matches(self) {
-                self.library_selection.cancel(true);
+                self.browser.library.range_selection.cancel(true);
                 cx.notify();
                 return;
             }
@@ -480,11 +430,13 @@ impl GuiApp {
             };
             let cached = match &slice.source {
                 Source::Flat => (slice.offset..slice.offset + slice.len)
-                    .all(|index| self.library_buffer.rows.get(index).is_some()),
+                    .all(|index| self.browser.library.buffer.rows.get(index).is_some()),
                 Source::Tree(branch) => {
                     branch.is_forest()
                         || self
-                            .directory_tree
+                            .browser
+                            .library
+                            .tree
                             .cached_rows(branch, slice.offset..slice.offset + slice.len)
                             .is_some()
                 }
@@ -495,7 +447,9 @@ impl GuiApp {
                         job.selected
                             .extend((slice.offset..slice.offset + slice.len).map(|index| {
                                 LibraryNode::Track(
-                                    self.library_buffer
+                                    self.browser
+                                        .library
+                                        .buffer
                                         .rows
                                         .get(index)
                                         .expect("cached range row")
@@ -518,26 +472,28 @@ impl GuiApp {
                         }
                     }
                     Source::Tree(branch) => self
-                        .directory_tree
+                        .browser
+                        .library
+                        .tree
                         .cached_rows(branch, slice.offset..slice.offset + slice.len)
                         .expect("cached range rows")
                         .iter()
                         .try_for_each(|row| job.add_row(&slice, row)),
                 };
                 if let Err(error) = result {
-                    self.library_selection.cancel(true);
+                    self.browser.library.range_selection.cancel(true);
                     self.error = Some(error);
                     cx.notify();
                     return;
                 }
                 job.advance(slice.len);
-                self.library_selection.pending = Some(job);
+                self.browser.library.range_selection.pending = Some(job);
                 continue;
             }
             let query = job.query(&slice);
             let token = job.token;
-            self.library_selection.active = Some(token);
-            self.library_selection.pending = Some(job);
+            self.browser.library.range_selection.active = Some(token);
+            self.browser.library.range_selection.pending = Some(job);
             let handle = self.handle.clone();
             cx.spawn(async move |this, cx| {
                 let response = cx
@@ -545,25 +501,32 @@ impl GuiApp {
                     .spawn(async move { handle.query(query) })
                     .await;
                 let _ = this.update(cx, |this, cx| {
-                    if this.library_selection.active == Some(token) {
-                        this.library_selection.active = None;
+                    if this.browser.library.range_selection.active == Some(token) {
+                        this.browser.library.range_selection.active = None;
                     }
-                    if this.library_selection.accepts_completion(token) {
+                    if this
+                        .browser
+                        .library
+                        .range_selection
+                        .accepts_completion(token)
+                    {
                         let mut job = this
-                            .library_selection
+                            .browser
+                            .library
+                            .range_selection
                             .pending
                             .take()
                             .expect("current pending range");
                         if job.scope.matches(this) {
                             match job.accept(&slice, response) {
-                                Ok(()) => this.library_selection.pending = Some(job),
+                                Ok(()) => this.browser.library.range_selection.pending = Some(job),
                                 Err(error) => {
-                                    this.library_selection.cancel(true);
+                                    this.browser.library.range_selection.cancel(true);
                                     this.error = Some(error);
                                 }
                             }
                         } else {
-                            this.library_selection.cancel(true);
+                            this.browser.library.range_selection.cancel(true);
                         }
                     }
                     // A cancelled in-flight batch never applies and cannot overlap its successor.
@@ -580,6 +543,7 @@ impl GuiApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gui::browser::merge_selection;
     use crate::model::{LibraryRow, Page};
 
     fn scope() -> Scope {

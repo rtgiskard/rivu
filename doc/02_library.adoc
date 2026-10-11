@@ -80,6 +80,13 @@ overrides, favorites, counts, and last-played timestamps. `library remove` and
 they never delete media files. Missing rows remain visible in playlist views
 until removed or cleaned.
 
+In Track details, a background refresh preserves unsaved title, artist, and
+album edits. Save updates the library; edits typed while saving remain unsaved.
+Selecting another track discards the previous draft. Changing or deleting a
+playlist, or removing one of its entries, does not discard a track's draft.
+Escape first leaves a focused input; Escape from the layout clears selection
+and restores details for the playing track.
+
 [source,sh]
 ----
 rivu library list --favorites

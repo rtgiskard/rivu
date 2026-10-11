@@ -4,6 +4,10 @@
 //! Only an explicit full-preview request opens a separate decoder; hiding and
 //! metadata/display changes never cancel or restart it. Still Mode cancels that
 //! request and releases display caches; the audio worker discards buffered bins.
+//!
+//! Pointer captures require a live interactive panel, not just cached peaks.
+//! Losing that surface cancels its generation and the matching window seek;
+//! ordinary MouseUp keeps the queued final Seek valid until consumption.
 
 use std::{
     cell::RefCell,
@@ -512,11 +516,27 @@ fn seek_seconds(position: Pixels, left: Pixels, width: Pixels, duration: f64) ->
 struct WaveformInteraction {
     panels: HashMap<u64, (Bounds<Pixels>, Option<f64>)>,
     active_panel: Option<u64>,
+    // Pointer interpretation is fixed at press; playback can change mid-drag.
+    seek_duration: Option<f64>,
+}
+
+impl WaveformInteraction {
+    fn seek_seconds(&self, position: Point<Pixels>, panel_id: Option<u64>) -> Option<f64> {
+        let panel_id = panel_id.or(self.active_panel)?;
+        let (bounds, _) = self.panels.get(&panel_id)?;
+        Some(seek_seconds(
+            position.x,
+            bounds.left(),
+            bounds.size.width,
+            self.seek_duration?,
+        ))
+    }
 }
 
 pub(in crate::gui) enum WaveformEvent {
-    Preview(f64),
-    Seek(f64),
+    Preview { generation: u64, seconds: f64 },
+    Seek { generation: u64, seconds: f64 },
+    Cancelled { generation: u64 },
 }
 impl EventEmitter<WaveformEvent> for Waveform {}
 
@@ -531,6 +551,7 @@ pub(in crate::gui) struct Waveform {
     manual_error: Option<SharedString>,
     interaction: Rc<RefCell<WaveformInteraction>>,
     dragging: bool,
+    seek_generation: u64,
     seek_enabled: bool,
     visualization_cache: bool,
 }
@@ -552,6 +573,7 @@ impl Waveform {
             manual_error: None,
             interaction: Rc::new(RefCell::new(WaveformInteraction::default())),
             dragging: false,
+            seek_generation: 0,
             seek_enabled: true,
             visualization_cache: true,
         }
@@ -576,26 +598,81 @@ impl Waveform {
         plot.paint_tiles = Vec::new();
         let mut scratch = std::mem::take(&mut plot.retire_scratch);
         plot.retired.append(&mut scratch);
+        drop(plot);
         *self.interaction.borrow_mut() = WaveformInteraction::default();
+        self.cancel_seek();
+    }
+
+    fn release_seek_capture(&mut self) {
         self.dragging = false;
+        let mut interaction = self.interaction.borrow_mut();
+        interaction.active_panel = None;
+        interaction.seek_duration = None;
+    }
+
+    pub(in crate::gui) fn cancel_seek(&mut self) {
+        self.seek_generation = self.seek_generation.wrapping_add(1);
+        self.release_seek_capture();
+    }
+
+    pub(in crate::gui) fn accepts_seek_event(&self, generation: u64) -> bool {
+        self.seek_generation == generation
+    }
+
+    /// Called after the window's release dispatch. A normally released capture
+    /// must keep its queued Seek valid; only an unhandled release is cancelled.
+    pub(in crate::gui) fn cancel_unreleased_seek(&mut self) -> Option<u64> {
+        if !self.dragging {
+            return None;
+        }
+        let generation = self.seek_generation;
+        self.cancel_seek();
+        Some(generation)
+    }
+
+    fn cancel_unavailable_capture(&mut self) -> Option<u64> {
+        let unavailable = {
+            let interaction = self.interaction.borrow();
+            interaction
+                .active_panel
+                .is_some_and(|id| !interaction.panels.contains_key(&id))
+        };
+        unavailable.then(|| self.cancel_unreleased_seek()).flatten()
+    }
+
+    fn remove_interaction_panel(&mut self, panel_id: u64) -> Option<u64> {
+        self.interaction.borrow_mut().panels.remove(&panel_id);
+        self.cancel_unavailable_capture()
+    }
+
+    fn retain_interaction_panels(&mut self, mut keep: impl FnMut(u64) -> bool) -> Option<u64> {
+        self.interaction
+            .borrow_mut()
+            .panels
+            .retain(|id, _| keep(*id));
+        self.cancel_unavailable_capture()
     }
 
     pub(in crate::gui) fn set_seek_enabled(&mut self, enabled: bool) {
         self.seek_enabled = enabled;
         if !enabled {
-            self.dragging = false;
-            self.interaction.borrow_mut().active_panel = None;
+            self.cancel_seek();
         }
     }
 
-    pub(in crate::gui) fn retain_panels(&mut self, panels: &[&super::super::layout::Panel]) {
+    pub(in crate::gui) fn retain_panels(
+        &mut self,
+        panels: &[&super::super::layout::Panel],
+        cx: &mut Context<Self>,
+    ) {
         self.plot
             .borrow_mut()
             .retain_panels(|id| panels.iter().any(|panel| panel.id == id));
-        self.interaction
-            .borrow_mut()
-            .panels
-            .retain(|id, _| panels.iter().any(|panel| panel.id == *id));
+        if let Some(generation) =
+            self.retain_interaction_panels(|id| panels.iter().any(|panel| panel.id == id))
+        {
+            cx.emit(WaveformEvent::Cancelled { generation });
+        }
     }
     /// The caller chooses the playing track, or the selected track before play.
     /// Metadata, display settings and visibility do not change source identity.
@@ -754,22 +831,19 @@ impl Waveform {
         if !self.seek_enabled {
             return;
         }
-        let interaction = self.interaction.borrow();
-        let panel_id = panel_id.or(interaction.active_panel);
-        let Some((bounds, Some(duration))) = panel_id.and_then(|id| interaction.panels.get(&id))
-        else {
+        let Some(seconds) = self.interaction.borrow().seek_seconds(position, panel_id) else {
             return;
         };
-        let seconds = seek_seconds(
-            position.x,
-            bounds.left(),
-            bounds.size.width.max(px(1.0)),
-            *duration,
-        );
         cx.emit(if preview {
-            WaveformEvent::Preview(seconds)
+            WaveformEvent::Preview {
+                generation: self.seek_generation,
+                seconds,
+            }
         } else {
-            WaveformEvent::Seek(seconds)
+            WaveformEvent::Seek {
+                generation: self.seek_generation,
+                seconds,
+            }
         });
     }
 
@@ -777,18 +851,24 @@ impl Waveform {
         if !self.seek_enabled {
             return;
         }
-        let panel_id = self
-            .interaction
-            .borrow()
-            .panels
-            .iter()
-            .find(|(_, (bounds, _))| bounds.contains(&event.position))
-            .map(|(panel_id, _)| *panel_id);
-        let Some(panel_id) = panel_id else {
+        let capture =
+            self.interaction
+                .borrow()
+                .panels
+                .iter()
+                .find_map(|(id, (bounds, duration))| {
+                    bounds.contains(&event.position).then_some((*id, *duration))
+                });
+        let Some((panel_id, Some(duration))) = capture else {
             return;
         };
+        self.seek_generation = self.seek_generation.wrapping_add(1);
         self.dragging = true;
-        self.interaction.borrow_mut().active_panel = Some(panel_id);
+        {
+            let mut interaction = self.interaction.borrow_mut();
+            interaction.active_panel = Some(panel_id);
+            interaction.seek_duration = Some(duration);
+        }
         self.seek_from_position(event.position, Some(panel_id), true, cx);
     }
 
@@ -802,8 +882,8 @@ impl Waveform {
         if self.dragging {
             self.seek_from_position(event.position, None, false, cx);
         }
-        self.dragging = false;
-        self.interaction.borrow_mut().active_panel = None;
+        // Keep the just-emitted Seek valid until its subscriber consumes it.
+        self.release_seek_capture();
     }
 
     /// Position and duration are relative to the selected track/CUE segment.
@@ -831,11 +911,17 @@ impl Waveform {
             self.visualization_cache = config.visualization_cache;
         }
         let Some(source) = self.source.as_deref() else {
+            if let Some(generation) = self.remove_interaction_panel(panel_id) {
+                cx.emit(WaveformEvent::Cancelled { generation });
+            }
             return panel.into_any_element();
         };
         let status = self.manual_message();
         let message = preview_message(source, &self.shared.read());
         if let Some(message) = message {
+            if let Some(generation) = self.remove_interaction_panel(panel_id) {
+                cx.emit(WaveformEvent::Cancelled { generation });
+            }
             return panel
                 .child(super::super::components::visualization_status(
                     status.unwrap_or_else(|| message.into()),
@@ -857,10 +943,14 @@ impl Waveform {
         let cache_enabled = config.visualization_cache;
         let label_duration = timeline(&self.shared.read(), duration);
         let interaction = Rc::clone(&self.interaction);
-        interaction
-            .borrow_mut()
-            .panels
-            .insert(panel_id, (Bounds::default(), label_duration));
+        if label_duration.is_some() {
+            interaction
+                .borrow_mut()
+                .panels
+                .insert(panel_id, (Bounds::default(), label_duration));
+        } else if let Some(generation) = self.remove_interaction_panel(panel_id) {
+            cx.emit(WaveformEvent::Cancelled { generation });
+        }
         let prepaint_interaction = Rc::clone(&interaction);
         panel
             .child(
@@ -1099,6 +1189,7 @@ impl Drop for Waveform {
 
 #[cfg(test)]
 mod tests {
+    use crate::gui::layout::interaction::{DragCommit, LayoutInteraction, SeekCommit};
     #[test]
     fn waveform_tiles_preserve_palette_channels_and_dark_center() {
         let palette = super::super::visuals::active_palette_lut(
@@ -1397,6 +1488,119 @@ mod tests {
     }
 
     #[test]
+    fn waveform_seek_keeps_press_duration_and_cancellation_clears_capture() {
+        let mut waveform = preview(WaveformFrame::default());
+        {
+            let mut interaction = waveform.interaction.borrow_mut();
+            let bounds = Bounds::new(
+                gpui::point(px(10.0), px(0.0)),
+                gpui::size(px(100.0), px(20.0)),
+            );
+            interaction.panels.insert(1, (bounds, Some(20.0)));
+            interaction.active_panel = Some(1);
+            interaction.seek_duration = Some(20.0);
+            interaction.panels.insert(1, (bounds, Some(200.0)));
+            assert_eq!(
+                interaction.seek_seconds(gpui::point(px(60.0), px(5.0)), None),
+                Some(10.0)
+            );
+        }
+        waveform.dragging = true;
+        let generation = waveform.seek_generation;
+        assert!(waveform.accepts_seek_event(generation));
+        waveform.cancel_seek();
+        assert!(!waveform.accepts_seek_event(generation));
+        assert!(!waveform.dragging);
+        assert_eq!(
+            waveform
+                .interaction
+                .borrow()
+                .seek_seconds(gpui::point(px(60.0), px(5.0)), None),
+            None
+        );
+    }
+
+    fn captured_seek() -> (Waveform, LayoutInteraction) {
+        let mut waveform = preview(WaveformFrame::default());
+        waveform.seek_generation = 7;
+        waveform.dragging = true;
+        {
+            let mut interaction = waveform.interaction.borrow_mut();
+            interaction
+                .panels
+                .insert(1, (Bounds::default(), Some(20.0)));
+            interaction.active_panel = Some(1);
+            interaction.seek_duration = Some(20.0);
+        }
+        let mut owner = LayoutInteraction::default();
+        owner.waveform_preview(10., Some(11), 7);
+        (waveform, owner)
+    }
+
+    #[test]
+    fn hidden_and_unavailable_surfaces_cancel_both_owners_without_committing() {
+        for hidden in [true, false] {
+            let (mut waveform, mut owner) = captured_seek();
+            waveform
+                .interaction
+                .borrow_mut()
+                .panels
+                .insert(2, (Bounds::default(), Some(40.0)));
+            assert_eq!(waveform.remove_interaction_panel(2), None);
+            assert_eq!(waveform.retain_interaction_panels(|id| id == 1), None);
+            assert!(waveform.accepts_seek_event(7));
+            let cancelled = if hidden {
+                waveform.retain_interaction_panels(|_| false)
+            } else {
+                // This is the same transition used by source/status/timeline early exits.
+                waveform.remove_interaction_panel(1)
+            }
+            .unwrap();
+            assert_eq!(cancelled, 7);
+            assert!(!waveform.accepts_seek_event(7));
+            assert!(!waveform.dragging);
+            assert!(owner.cancel_waveform(cancelled));
+            assert_eq!(owner.seek_preview(), None);
+            assert_eq!(owner.finish_drag(), DragCommit::None);
+            assert_eq!(owner.finish_waveform(12., 7), None);
+            assert_eq!(waveform.remove_interaction_panel(1), None);
+            assert_eq!(waveform.cancel_unreleased_seek(), None);
+            assert!(owner.waveform_preview(20., Some(12), 8));
+            assert!(!owner.cancel_waveform(cancelled));
+            assert_eq!(
+                owner.finish_waveform(21., 8),
+                Some(SeekCommit {
+                    queue_id: 12,
+                    seconds: 21.
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn normal_release_keeps_queued_seek_but_missing_release_is_cancelled() {
+        let (mut waveform, mut owner) = captured_seek();
+        // Root release may run before the entity listener and must not commit it.
+        assert_eq!(owner.finish_drag(), DragCommit::None);
+        waveform.release_seek_capture();
+        assert_eq!(waveform.cancel_unreleased_seek(), None);
+        assert!(waveform.accepts_seek_event(7));
+        assert_eq!(
+            owner.finish_waveform(12., 7),
+            Some(SeekCommit {
+                queue_id: 11,
+                seconds: 12.
+            })
+        );
+        assert_eq!(owner.finish_waveform(12., 7), None);
+        let (mut waveform, mut owner) = captured_seek();
+        let cancelled = waveform.cancel_unreleased_seek().unwrap();
+        assert!(owner.cancel_waveform(cancelled));
+        assert!(!waveform.accepts_seek_event(7));
+        assert_eq!(owner.finish_waveform(12., 7), None);
+    }
+
+    #[test]
     fn unknown_duration_cursor_uses_the_progressive_span_and_clamps_endpoints() {
         let mut frame = frame(vec![Some(0.25), None]);
         frame.duration = None;
@@ -1456,6 +1660,7 @@ mod tests {
                 .panels
                 .insert(1, (Bounds::default(), Some(10.0)));
             interaction.active_panel = Some(1);
+            interaction.seek_duration = Some(10.0);
         }
         waveform.set_enabled(false);
         waveform.set_enabled(false);
@@ -1464,6 +1669,7 @@ mod tests {
         assert!(!waveform.dragging);
         assert!(waveform.interaction.borrow().panels.is_empty());
         assert!(waveform.interaction.borrow().active_panel.is_none());
+        assert!(waveform.interaction.borrow().seek_duration.is_none());
         assert!(waveform.revision.is_none());
         assert!(waveform.source.is_none());
         {

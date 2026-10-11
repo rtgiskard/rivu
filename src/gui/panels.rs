@@ -79,7 +79,10 @@ impl GuiApp {
             .playback
             .duration
             .or_else(|| track.and_then(|track| track.duration));
-        let preview_position = self.seek_preview.unwrap_or(self.state.playback.position);
+        let preview_position = self
+            .interaction
+            .seek_preview()
+            .unwrap_or(self.state.playback.position);
         let progress = duration
             .filter(|duration| *duration > 0.)
             .map_or(0., |duration| (preview_position / duration) as f32);
@@ -296,7 +299,7 @@ impl GuiApp {
         if self.library_range_pending() {
             return Vec::new();
         }
-        let mut tracks: Vec<_> = self.selected.iter().copied().collect();
+        let mut tracks: Vec<_> = self.browser.library.selected().iter().copied().collect();
         // Match library drag ordering instead of exposing HashSet iteration order.
         tracks.sort_unstable();
         tracks
@@ -328,11 +331,19 @@ impl GuiApp {
             return (track.title.clone(), detail);
         }
         if let Some(row) = self
-            .library_buffer
+            .browser
+            .library
+            .buffer
             .rows
             .iter()
             .find(|row| row.id == track_id)
-            .or_else(|| self.ranking_rows.iter().find(|row| row.id == track_id))
+            .or_else(|| {
+                self.browser
+                    .history
+                    .rows()
+                    .iter()
+                    .find(|row| row.id == track_id)
+            })
         {
             return (
                 row.title.clone(),
@@ -350,7 +361,9 @@ impl GuiApp {
             );
         }
         if let Some(row) = self
-            .playlist_entries
+            .browser
+            .playlists
+            .entries
             .rows
             .iter()
             .find(|row| row.track_id == track_id)
@@ -470,20 +483,20 @@ impl GuiApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let total = if self.library_tree_active {
-            self.directory_tree.root_total()
+        let total = if self.browser.library.tree_active() {
+            self.browser.library.tree.root_total()
         } else {
-            self.library_buffer.total
+            self.browser.library.buffer.total
         };
         let tools = panel_toolbar()
             .child(icon_button(
                 ("library-view", panel_id),
-                if self.library_tree_active {
+                if self.browser.library.tree_active() {
                     "󰉋"
                 } else {
                     "󰉢"
                 },
-                if self.library_tree_active {
+                if self.browser.library.tree_active() {
                     "Switch to flat list view"
                 } else {
                     "Switch to directory tree view"
@@ -498,11 +511,10 @@ impl GuiApp {
                     "Toggle favorites filter",
                     cx,
                     |this, _, cx| {
-                        this.favorites_only = !this.favorites_only;
                         this.refresh_favorite_filter(cx);
                     },
                 ),
-                self.favorites_only,
+                self.browser.library.favorites_only(),
             ))
             .child(active_control(
                 icon_button(
@@ -511,11 +523,11 @@ impl GuiApp {
                     "Toggle missing filter",
                     cx,
                     |this, _, cx| {
-                        this.missing_only = !this.missing_only;
+                        this.browser.library.toggle_missing();
                         this.refresh_filter(cx);
                     },
                 ),
-                self.missing_only,
+                self.browser.library.missing_only(),
             ))
             .child(icon_button(
                 ("library-add-root", panel_id),
@@ -528,36 +540,38 @@ impl GuiApp {
                 icon_button(
                     ("library-force-scan", panel_id),
                     "󰑐",
-                    if self.force_scan {
+                    if self.browser.library.force_scan() {
                         "Force rescans: on"
                     } else {
                         "Force rescans: off"
                     },
                     cx,
                     |this, _, cx| {
-                        this.force_scan = !this.force_scan;
+                        this.browser.library.toggle_force_scan();
                         cx.notify();
                     },
                 ),
-                self.force_scan,
+                self.browser.library.force_scan(),
             ));
         let range_pending = self.library_range_pending();
         let selected_directories = self
-            .library_selected_nodes
+            .browser
+            .library
+            .selected_nodes()
             .iter()
             .filter(|node| matches!(node, super::library::LibraryNode::Directory(_)))
             .count();
         let selection_label = if range_pending {
             "Selecting…".to_owned()
-        } else if selected_directories > 0 && self.selected.is_empty() {
+        } else if selected_directories > 0 && self.browser.library.selected().is_empty() {
             format!("{selected_directories} folders selected")
         } else if selected_directories > 0 {
             format!(
                 "{} tracks · {selected_directories} folders selected",
-                self.selected.len()
+                self.browser.library.selected().len()
             )
-        } else if !self.selected.is_empty() {
-            format!("{} tracks selected", self.selected.len())
+        } else if !self.browser.library.selected().is_empty() {
+            format!("{} tracks selected", self.browser.library.selected().len())
         } else {
             String::new()
         };
@@ -566,7 +580,7 @@ impl GuiApp {
             .h(gpui::rems(2.))
             .min_h(gpui::rems(2.))
             .child(caption(selection_label).flex_1().min_w_0().truncate());
-        if !range_pending && !self.selected.is_empty() {
+        if !range_pending && !self.browser.library.selected().is_empty() {
             selection_tools = selection_tools
                 .child(icon_button(
                     ("library-enqueue", panel_id),
@@ -611,16 +625,20 @@ impl GuiApp {
         if self.state.system.scan_progress.is_some() || self.state.system.scanning {
             panel = panel.child(self.library_scan_status(panel_id, cx));
         }
-        if self.library_tree_active {
-            self.scroll_views
-                .register_list(("library-tree", panel_id), &self.directory_tree.scroll);
+        if self.browser.library.tree_active() {
+            self.scroll_views.register_list(
+                ("library-tree", panel_id),
+                &self.browser.library.tree.scroll,
+            );
             panel
                 .child(self.library_directory_list(panel_id, cx))
                 .into_any_element()
         } else {
-            let rows = self.library_buffer.rows.len();
-            self.scroll_views
-                .register_list(("library-flat", panel_id), &self.library_buffer.scroll);
+            let rows = self.browser.library.buffer.rows.len();
+            self.scroll_views.register_list(
+                ("library-flat", panel_id),
+                &self.browser.library.buffer.scroll,
+            );
             panel
                 .child(list_viewport(
                     uniform_list(
@@ -629,7 +647,8 @@ impl GuiApp {
                         cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                             range
                                 .map(|index| {
-                                    let Some(row) = this.library_buffer.rows.get(index).cloned()
+                                    let Some(row) =
+                                        this.browser.library.buffer.rows.get(index).cloned()
                                     else {
                                         return this
                                             .paged_loading_row(ViewRequestKind::Library, index, cx)
@@ -651,7 +670,7 @@ impl GuiApp {
                                     track_row(
                                         ("library-track", id as u64),
                                         ("library-track-text", id as u64),
-                                        this.selected.contains(&id),
+                                        this.browser.library.selected().contains(&id),
                                         row.title,
                                         detail,
                                     )
@@ -665,7 +684,7 @@ impl GuiApp {
                                     .on_click(cx.listener(
                                         move |this, event: &gpui::ClickEvent, window, cx| {
                                             this.focus_layout(window, cx);
-                                            this.list_focus = Some(ListFocus::Library);
+                                            this.browser.focus_list(ListFocus::Library);
                                             this.select_library_row(
                                                 super::library::LibraryNode::Track(id),
                                                 index,
@@ -692,7 +711,7 @@ impl GuiApp {
                     .h_full()
                     .min_h_0()
                     .w_full()
-                    .track_scroll(&self.library_buffer.scroll),
+                    .track_scroll(&self.browser.library.buffer.scroll),
                 ))
                 .into_any_element()
         }
@@ -703,20 +722,20 @@ impl GuiApp {
             .queue
             .entries
             .iter()
-            .filter(|entry| self.selected_queue.contains(&entry.id))
+            .filter(|entry| self.browser.queue.contains(&entry.id))
             .map(|entry| entry.id)
             .collect()
     }
 
     fn selected_queue_single(&self) -> Option<u64> {
-        if self.selected_queue.len() != 1 {
+        if self.browser.queue.len() != 1 {
             return None;
         }
         self.state
             .queue
             .entries
             .iter()
-            .find(|entry| self.selected_queue.contains(&entry.id))
+            .find(|entry| self.browser.queue.contains(&entry.id))
             .map(|entry| entry.id)
     }
 
@@ -768,7 +787,7 @@ impl GuiApp {
         else {
             return;
         };
-        if !self.selected_queue.contains(&source_id) || self.selected_queue.len() == 1 {
+        if !self.browser.queue.contains(&source_id) || self.browser.queue.len() == 1 {
             if source_index != target_index {
                 self.send(
                     Command::MoveQueue {
@@ -780,19 +799,19 @@ impl GuiApp {
             }
             return;
         }
-        if self.selected_queue.contains(&target_id) {
+        if self.browser.queue.contains(&target_id) {
             return;
         }
         let target_after_removal = self.state.queue.entries[..target_index]
             .iter()
-            .filter(|entry| !self.selected_queue.contains(&entry.id))
+            .filter(|entry| !self.browser.queue.contains(&entry.id))
             .count();
         let first_index = self
             .state
             .queue
             .entries
             .iter()
-            .position(|entry| self.selected_queue.contains(&entry.id))
+            .position(|entry| self.browser.queue.contains(&entry.id))
             .unwrap_or(source_index);
         let target = target_after_removal + usize::from(target_index > first_index);
         self.send(
@@ -818,7 +837,7 @@ impl GuiApp {
                 .iter()
                 .position(|entry| entry.id == id)
         });
-        let selection_count = self.selected_queue.len();
+        let selection_count = self.browser.queue.len();
         let mut tools = panel_toolbar().min_h(px(32.));
         if !self.state.queue.entries.is_empty() {
             tools = tools.child(
@@ -860,16 +879,17 @@ impl GuiApp {
                     cx,
                     |this, _, cx| {
                         let queue_id = this
-                            .selected_queue
+                            .browser
+                            .queue
                             .anchor()
                             .copied()
-                            .filter(|id| this.selected_queue.contains(id))
+                            .filter(|id| this.browser.queue.contains(id))
                             .or_else(|| {
                                 this.state
                                     .queue
                                     .entries
                                     .iter()
-                                    .find(|entry| this.selected_queue.contains(&entry.id))
+                                    .find(|entry| this.browser.queue.contains(&entry.id))
                                     .map(|entry| entry.id)
                             });
                         if let Some(queue_id) = queue_id {
@@ -885,8 +905,8 @@ impl GuiApp {
                     |this, _, cx| {
                         let queue_ids = this.selected_queue_ids_in_order();
                         if !queue_ids.is_empty() {
-                            this.selected_queue.clear();
-                            this.selected_queue.clear_anchor();
+                            this.browser.queue.clear();
+
                             this.send(Command::RemoveQueueEntries { queue_ids }, cx);
                             cx.notify();
                         }
@@ -944,66 +964,68 @@ impl GuiApp {
                                 let playing = this.state.queue.current_id == Some(id);
                                 let drag = QueueDrag { queue_id: id };
                                 Some(
-                                    list_row(
-                                        ("queue-entry", id),
-                                        this.selected_queue.contains(&id),
-                                    )
-                                    .child(
-                                        div()
-                                            .w(px(32.0))
-                                            .flex_shrink_0()
-                                            .text_xs()
-                                            .whitespace_nowrap()
-                                            .text_color(rgb(if playing { ACCENT } else { MUTED }))
-                                            .when(playing, |view| {
-                                                view.font_family(super::fonts::SYMBOLS_FAMILY)
-                                            })
-                                            .child(if playing {
-                                                "󰐊".to_owned()
-                                            } else {
-                                                (index + 1).to_string()
+                                    list_row(("queue-entry", id), this.browser.queue.contains(&id))
+                                        .child(
+                                            div()
+                                                .w(px(32.0))
+                                                .flex_shrink_0()
+                                                .text_xs()
+                                                .whitespace_nowrap()
+                                                .text_color(rgb(if playing {
+                                                    ACCENT
+                                                } else {
+                                                    MUTED
+                                                }))
+                                                .when(playing, |view| {
+                                                    view.font_family(super::fonts::SYMBOLS_FAMILY)
+                                                })
+                                                .child(if playing {
+                                                    "󰐊".to_owned()
+                                                } else {
+                                                    (index + 1).to_string()
+                                                }),
+                                        )
+                                        .child(row_text(("queue-entry-text", id), title, detail))
+                                        .on_mouse_down(
+                                            gpui::MouseButton::Right,
+                                            cx.listener(move |this, _, window, cx| {
+                                                this.focus_layout(window, cx);
+                                                this.browser.focus_list(ListFocus::Queue);
+                                                if !this.browser.queue.contains(&id) {
+                                                    this.browser.queue.select(id, false);
+                                                    cx.notify();
+                                                }
                                             }),
-                                    )
-                                    .child(row_text(("queue-entry-text", id), title, detail))
-                                    .on_mouse_down(
-                                        gpui::MouseButton::Right,
-                                        cx.listener(move |this, _, window, cx| {
-                                            this.focus_layout(window, cx);
-                                            this.list_focus = Some(ListFocus::Queue);
-                                            if !this.selected_queue.contains(&id) {
-                                                this.selected_queue.clear();
-                                                this.selected_queue.insert(id);
-                                                this.selected_queue.set_anchor(id);
-                                                cx.notify();
-                                            }
+                                        )
+                                        .on_click(cx.listener(
+                                            move |this, event: &gpui::ClickEvent, window, cx| {
+                                                this.focus_layout(window, cx);
+                                                this.browser.focus_list(ListFocus::Queue);
+                                                let modifiers = event.modifiers();
+                                                this.select_queue_entry(
+                                                    id,
+                                                    modifiers.shift,
+                                                    modifiers.control || modifiers.platform,
+                                                    cx,
+                                                );
+                                                if event.click_count() == 2 {
+                                                    this.send(
+                                                        Command::PlayQueue { queue_id: id },
+                                                        cx,
+                                                    );
+                                                }
+                                            },
+                                        ))
+                                        .on_drag(drag, |drag, _, _, cx| cx.new(|_| *drag))
+                                        .on_drop(cx.listener(
+                                            move |this, drag: &QueueDrag, window, cx| {
+                                                window.prevent_default();
+                                                this.move_queue_entry(drag.queue_id, id, cx);
+                                            },
+                                        ))
+                                        .drag_over::<QueueDrag>(|style, _, _, _| {
+                                            style.bg(rgb(HIGHLIGHT))
                                         }),
-                                    )
-                                    .on_click(cx.listener(
-                                        move |this, event: &gpui::ClickEvent, window, cx| {
-                                            this.focus_layout(window, cx);
-                                            this.list_focus = Some(ListFocus::Queue);
-                                            let modifiers = event.modifiers();
-                                            this.select_queue_entry(
-                                                id,
-                                                modifiers.shift,
-                                                modifiers.control || modifiers.platform,
-                                                cx,
-                                            );
-                                            if event.click_count() == 2 {
-                                                this.send(Command::PlayQueue { queue_id: id }, cx);
-                                            }
-                                        },
-                                    ))
-                                    .on_drag(drag, |drag, _, _, cx| cx.new(|_| *drag))
-                                    .on_drop(cx.listener(
-                                        move |this, drag: &QueueDrag, window, cx| {
-                                            window.prevent_default();
-                                            this.move_queue_entry(drag.queue_id, id, cx);
-                                        },
-                                    ))
-                                    .drag_over::<QueueDrag>(|style, _, _, _| {
-                                        style.bg(rgb(HIGHLIGHT))
-                                    }),
                                 )
                             })
                             .collect::<Vec<_>>()
@@ -1023,11 +1045,13 @@ impl GuiApp {
     }
 
     fn move_selected_playlist_entry(&mut self, down: bool, cx: &mut Context<Self>) {
-        let Some(entry_id) = self.selected_entry else {
+        let Some(entry_id) = self.browser.playlists.selected_entry() else {
             return;
         };
         let Some(index) = self
-            .playlist_entries
+            .browser
+            .playlists
+            .entries
             .rows
             .position(|entry| entry.id == entry_id)
         else {
@@ -1038,7 +1062,7 @@ impl GuiApp {
         } else {
             index.saturating_sub(1)
         };
-        if target != index && target < self.playlist_entries.total {
+        if target != index && target < self.browser.playlists.entries.total {
             self.send(
                 Command::MovePlaylistEntry {
                     entry_id,
@@ -1055,27 +1079,31 @@ impl GuiApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let playlist_id = self.selected_playlist;
+        let playlist_id = self.browser.playlists.selected();
         let selected_name = playlist_id
             .and_then(|id| {
-                self.playlist_buffer
+                self.browser
+                    .playlists
+                    .summaries
                     .rows
                     .iter()
                     .find(|p| p.id == id)
                     .map(|p| p.name.clone())
             })
-            .unwrap_or_else(|| self.selected_playlist_name.clone());
-        let entry_count = if playlist_id == self.playlist_entries.playlist_id {
-            self.playlist_entries.total
+            .unwrap_or_else(|| self.browser.playlists.selected_name().to_owned());
+        let entry_count = if playlist_id == self.browser.playlists.entries.playlist_id {
+            self.browser.playlists.entries.total
         } else {
             0
         };
-        self.scroll_views
-            .register_list(("playlist-catalog", panel_id), &self.playlist_buffer.scroll);
+        self.scroll_views.register_list(
+            ("playlist-catalog", panel_id),
+            &self.browser.playlists.summaries.scroll,
+        );
         let mut panel = panel_surface(("playlists-panel", panel_id))
             .on_drop(cx.listener(|this, drag: &LibraryDrag, window, cx| {
                 window.prevent_default();
-                if let Some(id) = this.selected_playlist {
+                if let Some(id) = this.browser.playlists.selected() {
                     this.resolve_library_drag(
                         &drag.nodes,
                         super::DragDestination::Playlist(id),
@@ -1089,7 +1117,7 @@ impl GuiApp {
                 "Playlists",
                 format!(
                     "{} playlists · select one to manage its tracks",
-                    self.playlist_buffer.total
+                    self.browser.playlists.summaries.total
                 ),
             ))
             .child(
@@ -1125,11 +1153,13 @@ impl GuiApp {
             .child(list_viewport(
                 uniform_list(
                     ("playlist-catalog", panel_id),
-                    self.playlist_buffer.rows.len(),
+                    self.browser.playlists.summaries.rows.len(),
                     cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                         range
                             .map(|index| {
-                                let Some(p) = this.playlist_buffer.rows.get(index).cloned() else {
+                                let Some(p) =
+                                    this.browser.playlists.summaries.rows.get(index).cloned()
+                                else {
                                     return this
                                         .paged_loading_row(
                                             ViewRequestKind::PlaylistSummaries,
@@ -1142,7 +1172,7 @@ impl GuiApp {
                                 let name = p.name.clone();
                                 list_row(
                                     ("playlist", id as u64),
-                                    this.selected_playlist == Some(id),
+                                    this.browser.playlists.selected() == Some(id),
                                 )
                                 .child(row_text(
                                     ("playlist-text", id as u64),
@@ -1150,12 +1180,7 @@ impl GuiApp {
                                     format!("{} tracks", p.entry_count),
                                 ))
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.selected_playlist_name = name.clone();
-                                    this.playlist_buffer.rows.pin(Some(index));
-                                    if this.selected_playlist != Some(id) {
-                                        this.selected_playlist = Some(id);
-                                        this.selected_entry = None;
-                                        this.clear_metadata_selection(cx);
+                                    if this.browser.playlists.select(id, name.clone(), index) {
                                         this.request_playlist_entries(id, 0, cx);
                                     }
                                     cx.notify();
@@ -1173,12 +1198,12 @@ impl GuiApp {
                 .flex_1()
                 .min_h_0()
                 .w_full()
-                .track_scroll(&self.playlist_buffer.scroll),
+                .track_scroll(&self.browser.playlists.summaries.scroll),
             ));
         if let Some(id) = playlist_id {
             self.scroll_views.register_list(
                 ("playlist-entries", panel_id),
-                &self.playlist_entries.scroll,
+                &self.browser.playlists.entries.scroll,
             );
             panel = panel
                 .child(caption(format!("{} · {entry_count} tracks", selected_name)).truncate())
@@ -1241,15 +1266,13 @@ impl GuiApp {
                             "Delete playlist",
                             cx,
                             move |this, _, cx| {
-                                this.selected_playlist = None;
-                                this.selected_playlist_name.clear();
-                                this.selected_entry = None;
+                                this.browser.remove_playlist_selection();
                                 this.send(Command::DeletePlaylist { playlist_id: id }, cx);
                             },
                         ))
                         .child(caption("Playlist").text_xs().text_color(rgb(MUTED)))
                         .child(div().w(px(1.)).h(px(20.)).bg(rgb(BORDER)))
-                        .when(self.selected_entry.is_some(), |bar| {
+                        .when(self.browser.playlists.selected_entry().is_some(), |bar| {
                             bar.child(icon_button(
                                 ("entry-play", panel_id),
                                 "󰐊",
@@ -1257,10 +1280,15 @@ impl GuiApp {
                                 cx,
                                 move |this, _, cx| {
                                     let track_id = this
-                                        .playlist_entries
+                                        .browser
+                                        .playlists
+                                        .entries
                                         .rows
                                         .iter()
-                                        .find(|entry| Some(entry.id) == this.selected_entry)
+                                        .find(|entry| {
+                                            Some(entry.id)
+                                                == this.browser.playlists.selected_entry()
+                                        })
                                         .map(|entry| entry.track_id);
                                     if let Some(track_id) = track_id {
                                         this.send(Command::Play { track_id }, cx);
@@ -1273,9 +1301,8 @@ impl GuiApp {
                                 "Remove selected entry",
                                 cx,
                                 move |this, _, cx| {
-                                    if let Some(entry_id) = this.selected_entry.take() {
+                                    if let Some(entry_id) = this.browser.playlists.take_entry() {
                                         this.send(Command::RemovePlaylistEntry { entry_id }, cx);
-                                        this.clear_metadata_selection(cx);
                                     }
                                 },
                             ))
@@ -1298,11 +1325,12 @@ impl GuiApp {
                 .child(list_viewport(
                     uniform_list(
                         ("playlist-entries", panel_id),
-                        self.playlist_entries.rows.len(),
+                        self.browser.playlists.entries.rows.len(),
                         cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                             range
                                 .map(|index| {
-                                    let Some(e) = this.playlist_entries.rows.get(index).cloned()
+                                    let Some(e) =
+                                        this.browser.playlists.entries.rows.get(index).cloned()
                                     else {
                                         return this
                                             .paged_loading_row(
@@ -1316,7 +1344,7 @@ impl GuiApp {
                                     let track_id = e.track_id;
                                     list_row(
                                         ("playlist-entry", id as u64),
-                                        this.selected_entry == Some(id),
+                                        this.browser.playlists.selected_entry() == Some(id),
                                     )
                                     .child(caption((index + 1).to_string()).w(px(28.)))
                                     .child(row_text(
@@ -1336,9 +1364,8 @@ impl GuiApp {
                                     .on_click(cx.listener(
                                         move |this, event: &gpui::ClickEvent, window, cx| {
                                             this.focus_layout(window, cx);
-                                            this.selected_entry = Some(id);
-                                            this.playlist_entries.rows.pin(Some(index));
-                                            this.update_metadata_track(track_id, cx);
+                                            this.browser.playlists.select_entry(id, index);
+                                            this.request_track(track_id, cx);
                                             if event.click_count() == 2 {
                                                 this.send(Command::Play { track_id }, cx);
                                             }
@@ -1358,7 +1385,7 @@ impl GuiApp {
                     .h_full()
                     .min_h_0()
                     .w_full()
-                    .track_scroll(&self.playlist_entries.scroll),
+                    .track_scroll(&self.browser.playlists.entries.scroll),
                 ));
         }
         panel.into_any_element()
@@ -1371,12 +1398,10 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let mut panel = panel_surface(("metadata-panel", panel_id));
-        if let Some(track) = self.full_track.as_ref() {
+        if let Some(track) = self.metadata.track() {
             let id = track.id;
             let favorite = track.favorite;
-            let metadata_dirty = self.value(Field::Title, cx) != track.title
-                || self.value(Field::Artist, cx) != track.artist
-                || self.value(Field::Album, cx) != track.album;
+            let metadata_dirty = self.metadata_dirty(cx) && !self.metadata.saving();
             let file_path = if track.missing {
                 "Missing".to_owned()
             } else {
@@ -1438,20 +1463,7 @@ impl GuiApp {
                                                 "󰆓",
                                                 "Save metadata. Media files are never modified.",
                                                 cx,
-                                                move |this, _, cx| {
-                                                    if metadata_dirty {
-                                                        this.send(
-                                                            Command::EditTrack {
-                                                                track_id: id,
-                                                                title: this.value(Field::Title, cx),
-                                                                artist: this
-                                                                    .value(Field::Artist, cx),
-                                                                album: this.value(Field::Album, cx),
-                                                            },
-                                                            cx,
-                                                        );
-                                                    }
-                                                },
+                                                |this, _, cx| this.save_metadata(cx),
                                             )
                                             .when(!metadata_dirty, |view| {
                                                 view.opacity(0.4).cursor_default()
@@ -1566,15 +1578,6 @@ impl GuiApp {
         }
         panel.into_any_element()
     }
-    fn set_history_sort(&mut self, sort: HistorySort, cx: &mut Context<Self>) {
-        if self.history_sort == sort {
-            self.history_sort_desc = !self.history_sort_desc;
-        } else {
-            self.history_sort = sort;
-            self.history_sort_desc = matches!(sort, HistorySort::Recent | HistorySort::Plays);
-        }
-        cx.notify();
-    }
 
     fn history_sort_button(
         &self,
@@ -1584,7 +1587,7 @@ impl GuiApp {
         width: Option<gpui::Pixels>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let active = self.history_sort == sort;
+        let active = self.browser.history.sort() == sort;
         let id = match sort {
             HistorySort::Recent => ("history-sort-recent", panel_id),
             HistorySort::Title => ("history-sort-title", panel_id),
@@ -1594,10 +1597,13 @@ impl GuiApp {
             id,
             label,
             active,
-            self.history_sort_desc,
+            self.browser.history.descending(),
             width,
             cx,
-            move |this, _, cx| this.set_history_sort(sort, cx),
+            move |this, _, cx| {
+                this.browser.history.set_sort(sort);
+                cx.notify();
+            },
         )
     }
 
@@ -1608,8 +1614,8 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let mut history = self.state.library.history.as_ref().clone();
-        let sort = self.history_sort;
-        let descending = self.history_sort_desc;
+        let sort = self.browser.history.sort();
+        let descending = self.browser.history.descending();
         history.sort_by(|a, b| {
             let ordering = match sort {
                 HistorySort::Recent => a.played_at.cmp(&b.played_at),
@@ -1678,7 +1684,7 @@ impl GuiApp {
                                     Some(
                                         list_row(
                                             ("history-entry", id as u64),
-                                            this.selected.contains(&id),
+                                            this.browser.library.selected().contains(&id),
                                         )
                                         .child(
                                             caption((index + 1).to_string())

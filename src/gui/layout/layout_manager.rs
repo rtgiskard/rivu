@@ -31,6 +31,8 @@ impl GuiApp {
         if !self.layout_management_allowed(cx) || name == self.layouts.active_name() {
             return;
         }
+        let cancellation = self.interaction.cancel();
+        self.apply_interaction_cancellation(cancellation, cx);
         let old = self.layouts.active_name().to_owned();
         let result = self
             .layouts
@@ -43,6 +45,7 @@ impl GuiApp {
             self.error = Some(format!("Switching layout: {error:#}"));
             cx.notify();
         } else {
+            self.layout_changed(cx);
             self.reload_layout_gui(cx);
         }
     }
@@ -82,6 +85,8 @@ impl GuiApp {
         let name = self.value(Field::LayoutName, cx).trim().to_owned();
         let (result, reload) = match action {
             Action::Duplicate => {
+                let cancellation = self.interaction.cancel();
+                self.apply_interaction_cancellation(cancellation, cx);
                 let result = self.layouts.duplicate(&name).and_then(|_| {
                     if let Err(error) = self.layouts.save(&self.layout_path) {
                         self.layouts
@@ -117,6 +122,7 @@ impl GuiApp {
                 self.layout_action = None;
                 self.error = None;
                 if reload {
+                    self.layout_changed(cx);
                     self.reload_layout_gui(cx);
                 } else {
                     self.focus_layout(window, cx);

@@ -1,10 +1,12 @@
 mod artwork;
+mod browser;
 mod components;
 mod fonts;
 mod host;
 mod input;
 mod layout;
 mod library;
+mod metadata;
 mod paged;
 mod panels;
 mod queries;
@@ -15,11 +17,12 @@ mod visualization;
 use crate::{
     config::{AudioVisualizerOptions, AudioVisualizerStyle},
     core::AppHandle,
-    model::{Command, LibraryRow, LibrarySort, PlaybackStatus},
+    model::{Command, PlaybackStatus},
     projection::GuiSnapshot,
 };
 use anyhow::Result;
 use ashpd::desktop::file_chooser::SelectedFiles;
+use browser::BrowserState;
 pub(super) use components::{
     ButtonTooltip, DropdownItem, DropdownState, POPOVER_MAX_HEIGHT, SelectionModel, StatusKind,
     TRACK_HEIGHT, active_control, artwork_preview, button, caption, context_menu_container,
@@ -33,17 +36,20 @@ use gpui::{prelude::*, *};
 use host::GuiHost;
 pub use host::run;
 use input::{Input, InputEvent};
+use layout::interaction::{
+    Cancellation, DockGeometry, DockHover, DockRequest, DragCommit, Dragging, LayoutInteraction,
+    Measured, PanelDocking,
+};
 use layout::{Axis, Edge, LayoutSet, Node};
 use library::LibraryNode;
-use queries::{
-    LibraryViewBuffer, PlaylistEntriesBuffer, PlaylistSummaryBuffer, ViewRequestKind, ViewRequests,
-};
+use metadata::MetadataSession;
+use queries::ViewRequestKind;
 use shell::{PanelMenu, PanelMenuPage};
 use std::{
-    cell::{Cell, RefCell},
+    cell::RefCell,
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    rc::{Rc, Weak},
+    rc::Weak,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -211,58 +217,6 @@ impl Render for QueueDrag {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct DockRequest {
-    target: layout::docking::Target,
-    index: Option<usize>,
-}
-
-struct DockHover {
-    request: DockRequest,
-    owner: Bounds<Pixels>,
-    preview: Option<Bounds<Pixels>>,
-    prepared: Option<layout::Layout>,
-    unchanged: bool,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-struct DockGeometry {
-    viewport: Size<Pixels>,
-    ui_scale: f32,
-    scale_factor: f32,
-}
-
-impl DockGeometry {
-    fn current(window: &Window, ui_scale: f32) -> Self {
-        Self {
-            viewport: window.viewport_size(),
-            ui_scale,
-            scale_factor: window.scale_factor(),
-        }
-    }
-}
-
-struct PanelDocking {
-    source: u64,
-    guide: Option<layout::docking::Guide>,
-    hover: Option<DockHover>,
-    geometry: DockGeometry,
-}
-
-#[derive(Clone, Copy, Hash, PartialEq, Eq)]
-enum Measured {
-    Node(u64),
-    Tab(u64),
-    Seek(u64),
-    Volume(u64),
-}
-#[derive(Clone, Copy)]
-enum Dragging {
-    Split(layout::layout_geometry::SplitDrag),
-    Seek(u64),
-    Volume(u64),
-}
-
 fn dock_edge(position: Point<Pixels>, bounds: Bounds<Pixels>) -> Option<Edge> {
     let x = (position.x - bounds.origin.x) / bounds.size.width;
     let y = (position.y - bounds.origin.y) / bounds.size.height;
@@ -312,39 +266,16 @@ pub(super) struct GuiApp {
     host: Weak<RefCell<GuiHost>>,
     layout_path: PathBuf,
     inputs: HashMap<Field, Entity<Input>>,
-    selected: HashSet<i64>,
-    selected_queue: SelectionModel<u64>,
-    list_focus: Option<ListFocus>,
+    browser: BrowserState,
+    metadata: MetadataSession,
     layout_focus: FocusHandle,
     scroll_views: scrolling::ScrollViews,
 
-    selected_playlist: Option<i64>,
-    selected_entry: Option<i64>,
-    metadata_track: Option<i64>,
-    full_track: Option<crate::model::Track>,
+    interaction: LayoutInteraction,
     error: Option<String>,
     artwork_manager: Arc<crate::artwork::ArtworkManager>,
     queue_save_pending: bool,
     queue_save_feedback: Option<Result<String, String>>,
-    library_buffer: LibraryViewBuffer,
-    directory_tree: library::DirectoryTree,
-    playlist_buffer: PlaylistSummaryBuffer,
-    playlist_entries: PlaylistEntriesBuffer,
-    selected_playlist_name: String,
-    library_navigation: Option<usize>,
-    library_tree_active: bool,
-    library_selected_nodes: HashSet<LibraryNode>,
-    library_selection: library::LibrarySelection,
-    favorites_only: bool,
-    missing_only: bool,
-    force_scan: bool,
-    view_requests: ViewRequests,
-    ranking_rows: Vec<LibraryRow>,
-    ranking_total: usize,
-    ranking_offset: usize,
-    history_sort: HistorySort,
-    history_sort_desc: bool,
-    library_stats: Option<crate::model::LibraryStats>,
     settings: Entity<settings::Settings>,
     visuals: visualization::Visuals,
     audio_visualizer: visualization::AudioVisualizer,
@@ -357,19 +288,8 @@ pub(super) struct GuiApp {
     layouts_open: bool,
     layout_action: Option<layout::layout_manager::Action>,
     panel_menu: Option<PanelMenu>,
-    playlist_delete_confirm: Option<i64>,
     waveform: Entity<visualization::Waveform>,
-    target_group: Option<u64>,
-    dragging: Option<Dragging>,
-    panel_docking: Option<PanelDocking>,
-    split_references: Vec<f64>,
-    layout_scale_factor: f64,
-    seek_preview: Option<f64>,
-    waveform_preview_active: bool,
-    seek_queue_id: Option<u64>,
     analysis_worker_enabled: bool,
-    measured: Rc<RefCell<HashMap<Measured, Bounds<Pixels>>>>,
-    measured_geometry: Rc<Cell<Option<DockGeometry>>>,
     analysis_sequence: u64,
     analysis_staging: crate::analysis::AnalysisFrame,
     analysis_needs_refresh: bool,
@@ -406,7 +326,7 @@ impl GuiApp {
             .map(|panel| panel.id)
         {
             self.layouts.current_mut().activate(panel_id);
-            self.list_focus = Some(ListFocus::Library);
+            self.browser.focus_list(ListFocus::Library);
             self.catalog_open = false;
             if focus_search {
                 self.input(Field::Search).update(cx, |input, cx| {
@@ -420,9 +340,15 @@ impl GuiApp {
             );
             cx.notify();
         } else {
-            let panel_id = self.layouts.current_mut().add("library", self.target_group);
+            let cancellation = self.interaction.cancel();
+            self.apply_interaction_cancellation(cancellation, cx);
+            let panel_id = self
+                .layouts
+                .current_mut()
+                .add("library", self.interaction.target_group());
             self.layouts.current_mut().activate(panel_id);
-            self.list_focus = Some(ListFocus::Library);
+            self.layout_changed(cx);
+            self.browser.focus_list(ListFocus::Library);
             self.catalog_open = false;
             if focus_search {
                 self.input(Field::Search).update(cx, |input, cx| {
@@ -434,7 +360,7 @@ impl GuiApp {
     }
 
     fn active_list_focus(&self) -> Option<ListFocus> {
-        self.list_focus.or_else(|| {
+        self.browser.focus().or_else(|| {
             self.layouts
                 .current()
                 .active_panels()
@@ -450,45 +376,63 @@ impl GuiApp {
     fn directory_row_selected(&self, row: &crate::model::DirectoryRow) -> bool {
         match row {
             crate::model::DirectoryRow::Directory { path } => {
-                self.library_selected_nodes.iter().any(|node| {
+                self.browser.library.selected_nodes().iter().any(|node| {
                     matches!(node, library::LibraryNode::Directory(selected) if selected.as_ref() == path.as_path())
                 })
             }
-            crate::model::DirectoryRow::Track(row) => self.selected.contains(&row.id),
+            crate::model::DirectoryRow::Track(row) => self.browser.library.selected().contains(&row.id),
         }
     }
 
     fn navigate_list(&mut self, focus: ListFocus, down: bool, cx: &mut Context<Self>) {
         match focus {
             ListFocus::Library => {
-                self.invalidate_library_selection();
-                if self.library_tree_active {
+                self.browser.library.invalidate_selection();
+                if self.browser.library.tree_active() {
                     self.navigate_library_tree(down, cx);
                     return;
                 }
-                let total = self.library_buffer.total;
+                let total = self.browser.library.buffer.total;
                 if total == 0 {
                     return;
                 }
-                let current = self.library_navigation.or_else(|| {
-                    self.library_buffer
+                let current = self.browser.library.navigation().or_else(|| {
+                    self.browser
+                        .library
+                        .buffer
                         .rows
-                        .position(|row| self.selected.contains(&row.id))
+                        .position(|row| self.browser.library.selected().contains(&row.id))
                 });
                 let index = match current {
                     Some(index) if down => (index + 1).min(total - 1),
                     Some(index) => index.saturating_sub(1),
-                    None if down => self.library_buffer.rows.visible().start.min(total - 1),
+                    None if down => self
+                        .browser
+                        .library
+                        .buffer
+                        .rows
+                        .visible()
+                        .start
+                        .min(total - 1),
                     None => total - 1,
                 };
-                self.library_buffer
+                self.browser
+                    .library
+                    .buffer
                     .scroll
                     .scroll_to_item(index, ScrollStrategy::Nearest);
-                if let Some(row) = self.library_buffer.rows.get(index) {
-                    self.library_navigation = None;
-                    self.select_track(row.id, false, cx);
+                if let Some(id) = self
+                    .browser
+                    .library
+                    .buffer
+                    .rows
+                    .get(index)
+                    .map(|row| row.id)
+                {
+                    self.browser.library.cancel_navigation();
+                    self.select_track(id, false, cx);
                 } else {
-                    self.library_navigation = Some(index);
+                    self.browser.library.defer_navigation(index);
                     self.ensure_library_range(index..index + 1, cx);
                 }
             }
@@ -497,10 +441,11 @@ impl GuiApp {
                     return;
                 }
                 let current = self
-                    .selected_queue
+                    .browser
+                    .queue
                     .anchor()
                     .copied()
-                    .filter(|id| self.selected_queue.contains(id))
+                    .filter(|id| self.browser.queue.contains(id))
                     .and_then(|id| {
                         self.state
                             .queue
@@ -513,7 +458,7 @@ impl GuiApp {
                             .queue
                             .entries
                             .iter()
-                            .position(|entry| self.selected_queue.contains(&entry.id))
+                            .position(|entry| self.browser.queue.contains(&entry.id))
                     });
                 let index = match current {
                     Some(index) if down => (index + 1).min(self.state.queue.entries.len() - 1),
@@ -534,15 +479,17 @@ impl GuiApp {
                 if self.library_range_pending() {
                     return;
                 }
-                if self.library_tree_active {
+                if self.browser.library.tree_active() {
                     self.activate_library_tree(cx);
                     return;
                 }
                 let track_id = self
-                    .library_buffer
+                    .browser
+                    .library
+                    .buffer
                     .rows
                     .iter()
-                    .find(|row| self.selected.contains(&row.id))
+                    .find(|row| self.browser.library.selected().contains(&row.id))
                     .map(|row| row.id);
                 if let Some(track_id) = track_id {
                     self.send(Command::Play { track_id }, cx);
@@ -550,16 +497,17 @@ impl GuiApp {
             }
             ListFocus::Queue => {
                 let queue_id = self
-                    .selected_queue
+                    .browser
+                    .queue
                     .anchor()
                     .copied()
-                    .filter(|id| self.selected_queue.contains(id))
+                    .filter(|id| self.browser.queue.contains(id))
                     .or_else(|| {
                         self.state
                             .queue
                             .entries
                             .iter()
-                            .find(|entry| self.selected_queue.contains(&entry.id))
+                            .find(|entry| self.browser.queue.contains(&entry.id))
                             .map(|entry| entry.id)
                     });
                 if let Some(queue_id) = queue_id {
@@ -578,14 +526,14 @@ impl GuiApp {
             .queue
             .entries
             .iter()
-            .filter(|entry| self.selected_queue.contains(&entry.id))
+            .filter(|entry| self.browser.queue.contains(&entry.id))
             .map(|entry| entry.id)
             .collect::<Vec<_>>();
         if queue_ids.is_empty() {
             return;
         }
-        self.selected_queue.clear();
-        self.selected_queue.clear_anchor();
+        self.browser.queue.clear();
+
         self.send(Command::RemoveQueueEntries { queue_ids }, cx);
     }
     fn new(
@@ -684,30 +632,57 @@ impl GuiApp {
         ));
         let waveform = cx.new(|_| visualization::Waveform::new(Arc::clone(&handle.waveform)));
         subscriptions.push(cx.observe(&waveform, |_, _, cx| cx.notify()));
-        subscriptions.push(cx.subscribe(&waveform, |this, _, event, cx| match event {
-            visualization::WaveformEvent::Preview(seconds) => {
-                if this.state.system.config.still_mode
-                    || !this.state.system.config.waveform_seek_enabled
-                {
-                    return;
+        subscriptions.push(
+            cx.subscribe(&waveform, |this, waveform, event, cx| match event {
+                visualization::WaveformEvent::Preview {
+                    generation,
+                    seconds,
+                } => {
+                    if !waveform.read(cx).accepts_seek_event(*generation) {
+                        return;
+                    }
+                    if this.state.system.config.still_mode
+                        || !this.state.system.config.waveform_seek_enabled
+                    {
+                        return;
+                    }
+                    if this.interaction.waveform_preview(
+                        *seconds,
+                        this.state.queue.current_id,
+                        *generation,
+                    ) {
+                        cx.notify();
+                    }
                 }
-                this.waveform_preview_active = true;
-                this.seek_preview = Some(*seconds);
-                cx.notify();
-            }
-            visualization::WaveformEvent::Seek(seconds) => {
-                this.waveform_preview_active = false;
-                this.seek_preview = None;
-                if !this.state.system.config.still_mode
-                    && this.state.system.config.waveform_seek_enabled
-                    && this.state.current_track().is_some()
-                {
-                    this.send(Command::Seek { seconds: *seconds }, cx);
+                visualization::WaveformEvent::Seek {
+                    generation,
+                    seconds,
+                } => {
+                    if !waveform.read(cx).accepts_seek_event(*generation) {
+                        return;
+                    }
+                    if let Some(seek) = this.interaction.finish_waveform(*seconds, *generation)
+                        && !this.state.system.config.still_mode
+                        && this.state.system.config.waveform_seek_enabled
+                    {
+                        this.send(
+                            Command::SeekQueue {
+                                queue_id: seek.queue_id,
+                                seconds: seek.seconds,
+                            },
+                            cx,
+                        );
+                    }
                 }
-            }
-        }));
+                visualization::WaveformEvent::Cancelled { generation } => {
+                    if this.interaction.cancel_waveform(*generation) {
+                        cx.notify();
+                    }
+                }
+            }),
+        );
         subscriptions.push(cx.subscribe(&inputs[&Field::Search], |this, _, event, cx| {
-            if matches!(event, InputEvent::Changed) {
+            if matches!(event, InputEvent::Changed { .. }) {
                 this.refresh_filter(cx);
                 cx.notify();
             }
@@ -725,8 +700,11 @@ impl GuiApp {
             },
         ));
         for field in [Field::Title, Field::Artist, Field::Album] {
-            subscriptions.push(cx.subscribe(&inputs[&field], |_, _, event, cx| {
-                if matches!(event, InputEvent::Changed) {
+            subscriptions.push(cx.subscribe(&inputs[&field], move |this, _, event, cx| {
+                if let InputEvent::Changed { user } = event {
+                    if *user {
+                        this.metadata.edited_before_load(field);
+                    }
                     cx.notify();
                 }
             }));
@@ -736,7 +714,7 @@ impl GuiApp {
                 this.window_visible = matches!(visibility, WindowVisibility::Visible);
                 this.frame_timer.take();
                 if !this.window_visible {
-                    this.cancel_panel_docking(window, cx);
+                    this.invalidate_window_interaction(window, cx);
                 }
                 this.refresh(cx);
                 this.sync_analysis(cx);
@@ -746,7 +724,7 @@ impl GuiApp {
         );
         subscriptions.push(cx.observe_window_activation(window, |this, window, cx| {
             if !window.is_window_active() {
-                this.cancel_panel_docking(window, cx);
+                this.cancel_interaction(window, cx);
             }
         }));
         let (wake_sender, mut wake_receiver) = mpsc::channel::<()>(1);
@@ -776,41 +754,15 @@ impl GuiApp {
             host,
             layout_path,
             inputs,
-            selected: HashSet::new(),
-            selected_queue: SelectionModel::default(),
-            selected_playlist: None,
-            selected_entry: None,
-            list_focus: None,
+            browser: BrowserState::default(),
+            metadata: MetadataSession::default(),
             layout_focus: cx.focus_handle(),
             scroll_views: scrolling::ScrollViews::default(),
-            metadata_track: None,
-            full_track: None,
+            interaction: LayoutInteraction::default(),
             error,
             queue_save_pending: false,
             queue_save_feedback: None,
             artwork_manager,
-            library_buffer: LibraryViewBuffer {
-                sort: LibrarySort::Album,
-                ..Default::default()
-            },
-            directory_tree: library::DirectoryTree::default(),
-            playlist_buffer: PlaylistSummaryBuffer::default(),
-            playlist_entries: PlaylistEntriesBuffer::default(),
-            selected_playlist_name: String::new(),
-            library_navigation: None,
-            library_tree_active: true,
-            library_selected_nodes: HashSet::new(),
-            library_selection: library::LibrarySelection::default(),
-            favorites_only: false,
-            missing_only: false,
-            force_scan: false,
-            view_requests: ViewRequests::default(),
-            ranking_rows: Vec::new(),
-            ranking_total: 0,
-            ranking_offset: 0,
-            history_sort: HistorySort::Recent,
-            history_sort_desc: true,
-            library_stats: None,
             visuals: visualization::Visuals::new(),
             audio_visualizer: visualization::AudioVisualizer::new(),
             default_album: cx.new(|_| artwork::Artwork::new()),
@@ -822,16 +774,8 @@ impl GuiApp {
             layouts_open: false,
             layout_action: None,
             panel_menu: None,
-            playlist_delete_confirm: None,
             waveform,
-            target_group: None,
-            dragging: None,
-            panel_docking: None,
-            split_references: Vec::new(),
-            layout_scale_factor: 1.,
             analysis_worker_enabled: false,
-            measured: Rc::new(RefCell::new(HashMap::new())),
-            measured_geometry: Rc::new(Cell::new(None)),
             analysis_sequence: 0,
             analysis_staging: crate::analysis::AnalysisFrame::default(),
             analysis_needs_refresh: false,
@@ -839,12 +783,11 @@ impl GuiApp {
             frame_pending: false,
             frame_timer: None,
             last_analysis_request: None,
-            seek_preview: None,
-            waveform_preview_active: false,
-            seek_queue_id: None,
             _subscriptions: subscriptions,
             ui_font,
         };
+        app.interaction
+            .retain_layout(app.layouts.current().root.as_ref());
         app.sync_metadata_default(cx);
         app.request_library_page(0, cx);
         app.request_directory_page(library::TreeBranch::default(), 0, cx);
@@ -1003,9 +946,11 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let error = match kind {
-            ViewRequestKind::Library => self.library_buffer.rows.error(index),
-            ViewRequestKind::PlaylistSummaries => self.playlist_buffer.rows.error(index),
-            ViewRequestKind::PlaylistEntries => self.playlist_entries.rows.error(index),
+            ViewRequestKind::Library => self.browser.library.buffer.rows.error(index),
+            ViewRequestKind::PlaylistSummaries => {
+                self.browser.playlists.summaries.rows.error(index)
+            }
+            ViewRequestKind::PlaylistEntries => self.browser.playlists.entries.rows.error(index),
             _ => None,
         };
         list_row(("loading-row", index), false)
@@ -1024,16 +969,25 @@ impl GuiApp {
                 .on_click(cx.listener(move |this, _, _, cx| {
                     match kind {
                         ViewRequestKind::Library => {
-                            this.library_buffer.rows.retry();
-                            this.ensure_library_range(this.library_buffer.rows.visible(), cx);
+                            this.browser.library.buffer.rows.retry();
+                            this.ensure_library_range(
+                                this.browser.library.buffer.rows.visible(),
+                                cx,
+                            );
                         }
                         ViewRequestKind::PlaylistSummaries => {
-                            this.playlist_buffer.rows.retry();
-                            this.ensure_playlist_range(this.playlist_buffer.rows.visible(), cx);
+                            this.browser.playlists.summaries.rows.retry();
+                            this.ensure_playlist_range(
+                                this.browser.playlists.summaries.rows.visible(),
+                                cx,
+                            );
                         }
                         ViewRequestKind::PlaylistEntries => {
-                            this.playlist_entries.rows.retry();
-                            this.ensure_entry_range(this.playlist_entries.rows.visible(), cx);
+                            this.browser.playlists.entries.rows.retry();
+                            this.ensure_entry_range(
+                                this.browser.playlists.entries.rows.visible(),
+                                cx,
+                            );
                         }
                         _ => {}
                     }
@@ -1043,45 +997,42 @@ impl GuiApp {
     }
 
     fn select_track(&mut self, id: i64, multi: bool, cx: &mut Context<Self>) {
-        self.invalidate_library_selection();
-        self.library_navigation = None;
-        self.directory_tree.cancel_navigation();
-        if multi {
-            if !self.selected.insert(id) {
-                self.selected.remove(&id);
-            }
-        } else {
-            self.selected.clear();
-            self.library_selected_nodes.clear();
-            self.selected.insert(id);
-        }
-        self.directory_tree
-            .remember_selection(&self.library_selected_nodes, &self.selected);
-        if !self.library_tree_active
-            && let Some(index) = self.library_buffer.rows.position(|row| row.id == id)
+        self.browser.library.invalidate_selection();
+        self.browser
+            .library
+            .select_node(&LibraryNode::Track(id), multi);
+        if !self.browser.library.tree_active()
+            && let Some(index) = self
+                .browser
+                .library
+                .buffer
+                .rows
+                .position(|row| row.id == id)
         {
-            self.library_buffer.rows.pin(Some(index));
-            self.library_buffer
+            self.browser.library.buffer.rows.pin(Some(index));
+            self.browser
+                .library
+                .buffer
                 .scroll
                 .scroll_to_item(index, gpui::ScrollStrategy::Nearest);
         }
         if let Some(selected) = self
-            .selected
+            .browser
+            .library
+            .selected()
             .contains(&id)
             .then_some(id)
-            .or_else(|| self.selected.iter().copied().min())
+            .or_else(|| self.browser.library.selected().iter().copied().min())
         {
-            self.update_metadata_track(selected, cx);
+            self.request_track(selected, cx);
         } else {
-            self.metadata_track = None;
-            self.full_track = None;
-            self.sync_metadata_default(cx);
+            self.clear_metadata_selection(cx);
         }
         self.sync_waveform(cx);
         cx.notify();
     }
     fn select_queue_entry(&mut self, id: u64, shift: bool, multi: bool, cx: &mut Context<Self>) {
-        self.invalidate_library_selection();
+        self.browser.library.invalidate_selection();
         let Some(index) = self
             .state
             .queue
@@ -1094,7 +1045,8 @@ impl GuiApp {
         let track_id = self.state.queue.entries[index].track_id;
         if shift {
             let anchor = self
-                .selected_queue
+                .browser
+                .queue
                 .anchor()
                 .copied()
                 .filter(|anchor| {
@@ -1119,39 +1071,63 @@ impl GuiApp {
             } else {
                 (index, anchor_index)
             };
-            if !multi {
-                self.selected_queue.clear();
-            }
-            self.selected_queue.extend(
+            self.browser.queue.select_range(
                 self.state.queue.entries[start..=end]
                     .iter()
                     .map(|entry| entry.id),
+                anchor,
+                multi,
             );
-            self.selected_queue.set_anchor(anchor);
-        } else if multi {
-            if !self.selected_queue.insert(id) {
-                self.selected_queue.remove(&id);
-            }
-            self.selected_queue.set_anchor(id);
         } else {
-            self.selected_queue.clear();
-            self.selected_queue.insert(id);
-            self.selected_queue.set_anchor(id);
+            self.browser.queue.select(id, multi);
         }
-        self.update_metadata_track(track_id, cx);
+        self.request_track(track_id, cx);
         self.sync_waveform(cx);
         cx.notify();
     }
-    fn reconcile_playlist_selection(&mut self) {
-        let Some(playlist_id) = self.selected_playlist else {
-            self.selected_entry = None;
-            self.playlist_delete_confirm = None;
-            return;
-        };
-        // Cache absence is not deletion. A selection outlives ordinary scrolling/eviction.
-        if self.playlist_entries.playlist_id != Some(playlist_id) {
-            self.selected_entry = None;
+    fn apply_interaction_cancellation(
+        &mut self,
+        cancellation: Cancellation,
+        cx: &mut Context<Self>,
+    ) {
+        cancellation.restore_split(self.layouts.current_mut());
+        self.waveform
+            .update(cx, |waveform, _| waveform.cancel_seek());
+    }
+
+    fn cancel_interaction(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let cancellation = self.interaction.cancel();
+        if cancellation.docking {
+            cx.stop_active_drag(window);
         }
+        self.apply_interaction_cancellation(cancellation, cx);
+        cx.notify();
+    }
+
+    fn invalidate_window_interaction(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let cancellation = self.interaction.invalidate_window();
+        if cancellation.docking {
+            cx.stop_active_drag(window);
+        }
+        self.apply_interaction_cancellation(cancellation, cx);
+        self.panel_menu = None;
+        cx.notify();
+    }
+
+    fn synchronize_interaction(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let geometry = DockGeometry::current(window, self.state.system.config.ui_scale);
+        if let Some(cancellation) = self.interaction.synchronize_geometry(geometry) {
+            self.apply_interaction_cancellation(cancellation, cx);
+        }
+    }
+
+    fn layout_changed(&mut self, cx: &mut Context<Self>) {
+        let cancellation = self
+            .interaction
+            .layout_changed(self.layouts.current().root.as_ref());
+        self.apply_interaction_cancellation(cancellation, cx);
+        self.panel_menu = None;
+        self.browser.clear_focus();
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -1187,42 +1163,34 @@ impl GuiApp {
             let page_size_changed =
                 self.state.system.config.page_size != state.system.config.page_size;
             if library_changed || library_structure_changed || roots_changed || page_size_changed {
-                self.invalidate_library_selection();
+                self.browser.library.invalidate_selection();
             }
             let waveform_seek_disabled = self.state.system.config.waveform_seek_enabled
                 && !state.system.config.waveform_seek_enabled;
             let still_mode_changed =
                 self.state.system.config.still_mode != state.system.config.still_mode;
-            if !matches!(self.dragging, Some(Dragging::Seek(_)))
-                && !self.waveform_preview_active
-                && self.seek_queue_id != state.queue.current_id
-            {
-                self.seek_preview = None;
-                self.seek_queue_id = None;
-            }
             if self.state.system.config.ui_font != state.system.config.ui_font {
                 self.ui_font = fonts::resolve(&state.system.config.ui_font, cx);
             }
             self.state = state;
             self.sync_metadata_default(cx);
-            self.reconcile_playlist_selection();
+            self.browser.playlists.reconcile_selection();
             if still_mode_changed {
-                self.waveform_preview_active = false;
-                self.seek_preview = None;
+                let cancellation = self.interaction.cancel();
+                self.apply_interaction_cancellation(cancellation, cx);
                 // Resuming must wait for a new publication, not redraw pre-mode audio.
                 self.analysis_staging = crate::analysis::AnalysisFrame::default();
                 self.analysis_sequence = self.handle.analysis.read().sequence;
                 self.analysis_needs_refresh = false;
             }
             if waveform_seek_disabled {
-                self.waveform_preview_active = false;
-                self.seek_preview = None;
+                let cancellation = self.interaction.cancel();
+                self.apply_interaction_cancellation(cancellation, cx);
                 self.waveform
                     .update(cx, |waveform, _| waveform.set_seek_enabled(false));
             }
             if roots_changed {
-                self.directory_tree.clear();
-                self.library_selected_nodes.clear();
+                self.browser.library.roots_changed();
                 if !page_size_changed {
                     self.request_directory_page(library::TreeBranch::default(), 0, cx);
                 }
@@ -1238,28 +1206,30 @@ impl GuiApp {
                     .iter()
                     .map(|entry| entry.id)
                     .collect::<HashSet<_>>();
-                self.selected_queue.retain(|id| valid.contains(id));
-                self.selected_queue.clear_anchor();
+                self.browser.queue.reconcile(|id| valid.contains(id));
             }
             if library_changed || library_structure_changed {
                 if !page_size_changed {
-                    self.request_library_page(self.library_buffer.rows.visible().start, cx);
-                    self.request_ranking(self.ranking_offset, cx);
-                    self.directory_tree.invalidate();
+                    self.request_library_page(self.browser.library.buffer.rows.visible().start, cx);
+                    self.request_ranking(self.browser.history.offset(), cx);
+                    self.browser.library.tree.invalidate();
                     self.request_directory_page(library::TreeBranch::default(), 0, cx);
                 }
-                if let Some(id) = self.metadata_track {
+                if let Some(id) = self.metadata.selected() {
                     self.request_track(id, cx);
                 }
             }
             if !page_size_changed
                 && (library_changed || library_structure_changed || playlist_changed)
             {
-                self.request_playlist_summaries(self.playlist_buffer.rows.visible().start, cx);
-                if let Some(id) = self.playlist_entries.playlist_id {
+                self.request_playlist_summaries(
+                    self.browser.playlists.summaries.rows.visible().start,
+                    cx,
+                );
+                if let Some(id) = self.browser.playlists.entries.playlist_id {
                     self.request_playlist_entries(
                         id,
-                        self.playlist_entries.rows.visible().start,
+                        self.browser.playlists.entries.rows.visible().start,
                         cx,
                     );
                 }
@@ -1300,7 +1270,7 @@ impl GuiApp {
                 }
                 this.refresh(cx);
                 this.consume_analysis(cx);
-                let track = this.state.current_track().or(this.full_track.as_ref());
+                let track = this.state.current_track().or(this.metadata.track());
                 this.waveform
                     .update(cx, |waveform, cx| waveform.sync(track, cx));
                 let Some(interval) = this.analysis_frame_interval() else {
@@ -1445,13 +1415,13 @@ impl GuiApp {
         } else {
             Vec::new()
         };
-        let track = self.state.current_track().or(self.full_track.as_ref());
+        let track = self.state.current_track().or(self.metadata.track());
         self.waveform.update(cx, |waveform, cx| {
             waveform.set_enabled(enabled);
             if !enabled {
                 return;
             }
-            waveform.retain_panels(&panels);
+            waveform.retain_panels(&panels, cx);
             waveform.sync(track, cx);
         });
     }
@@ -1459,55 +1429,20 @@ impl GuiApp {
         if self.state.system.config.still_mode {
             return;
         }
-        let track = self.state.current_track().or(self.full_track.as_ref());
+        let track = self.state.current_track().or(self.metadata.track());
         self.waveform.update(cx, |waveform, cx| {
             waveform.load_full(track, &self.state.system.config, cx);
         });
     }
-    fn prune_measured(&mut self) {
-        fn collect(node: &Node, keys: &mut HashSet<Measured>) {
-            match node {
-                Node::Split { id, children, .. } => {
-                    keys.insert(Measured::Node(*id));
-                    for child in children {
-                        collect(child, keys);
-                    }
-                }
-                Node::Tabs { id, panels, active } => {
-                    keys.insert(Measured::Node(*id));
-                    let show_tab_bar = panels
-                        .iter()
-                        .find(|panel| panel.id == *active)
-                        .is_some_and(|panel| panel.show_tab_bar);
-                    for panel in panels {
-                        if show_tab_bar {
-                            keys.insert(Measured::Tab(panel.id));
-                        }
-                        keys.insert(Measured::Seek(panel.id));
-                        keys.insert(Measured::Volume(panel.id));
-                    }
-                }
-            }
-        }
-        let mut active = HashSet::new();
-        if let Some(root) = &self.layouts.current().root {
-            collect(root, &mut active);
-        }
-        self.measured
-            .borrow_mut()
-            .retain(|key, _| active.contains(key));
-    }
     fn persist_layout(&mut self, cx: &mut Context<Self>) {
-        if let Some(session) = &mut self.panel_docking {
-            session.guide = None;
-            session.hover = None;
-        }
+        self.interaction.clear_docking_preview();
         self.layouts
             .current_mut()
             .initialize_audio_visualizers(AudioVisualizerOptions::from(
                 self.state.system.config.as_ref(),
             ));
-        self.prune_measured();
+        self.interaction
+            .retain_layout(self.layouts.current().root.as_ref());
         if let Err(error) = self.layouts.save(&self.layout_path) {
             self.error = Some(format!("Saving layout: {error:#}"));
         }
@@ -1537,9 +1472,11 @@ impl GuiApp {
     }
     fn waveform_panel(&mut self, id: u64, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let current = self.state.current_track();
-        let track = current.or(self.full_track.as_ref());
+        let track = current.or(self.metadata.track());
         let position = if current.is_some() {
-            self.seek_preview.unwrap_or(self.state.playback.position)
+            self.interaction
+                .seek_preview()
+                .unwrap_or(self.state.playback.position)
         } else {
             0.0
         };
@@ -1555,21 +1492,11 @@ impl GuiApp {
         })
     }
     fn measurement(&self, key: Measured) -> AnyElement {
-        let measured = self.measured.clone();
-        let measured_geometry = self.measured_geometry.clone();
+        let measured = self.interaction.measurement_handle(key);
         let ui_scale = self.state.system.config.ui_scale;
         canvas(
             move |bounds, window, _| {
-                let mut measured = measured.borrow_mut();
-                if matches!(key, Measured::Node(_) | Measured::Tab(_)) {
-                    let geometry = DockGeometry::current(window, ui_scale);
-                    if measured_geometry.get() != Some(geometry) {
-                        measured
-                            .retain(|key, _| !matches!(key, Measured::Node(_) | Measured::Tab(_)));
-                        measured_geometry.set(Some(geometry));
-                    }
-                }
-                measured.insert(key, bounds);
+                measured.record(bounds, DockGeometry::current(window, ui_scale));
             },
             |_, _, _, _| {},
         )
@@ -1580,7 +1507,8 @@ impl GuiApp {
         .into_any_element()
     }
     fn layout_gutter(&self) -> f64 {
-        (f64::from(SPLIT_GUTTER) * self.layout_scale_factor).round() / self.layout_scale_factor
+        (f64::from(SPLIT_GUTTER) * self.interaction.scale_factor()).round()
+            / self.interaction.scale_factor()
     }
     fn layout_edit_sizes(
         &self,
@@ -1588,8 +1516,8 @@ impl GuiApp {
         docking: Option<(u64, Edge, u64)>,
     ) -> HashMap<u64, (f64, f64)> {
         let sizes = self
-            .measured
-            .borrow()
+            .interaction
+            .measurements()
             .iter()
             .filter_map(|(key, bounds)| {
                 let Measured::Node(id) = key else { return None };
@@ -1622,24 +1550,30 @@ impl GuiApp {
         self.layouts
             .current_mut()
             .preserve_region_sizes(sizes, gutter);
-        self.dragging = None;
-        self.split_references.clear();
-        // A subsequent edit must not consume rectangles from the previous tree.
-        self.measured
-            .borrow_mut()
-            .retain(|key, _| !matches!(key, Measured::Node(_)));
+        // Structural callers invalidate through layout_changed after adjusting sizes.
     }
     fn remove_layout_panel(&mut self, panel: u64, cx: &mut Context<Self>) {
         if self.layouts.current().locked {
             return;
         }
+        let cancellation = self.interaction.cancel();
+        self.apply_interaction_cancellation(cancellation, cx);
         let sizes = self.layout_edit_sizes(panel, None);
         if self.layouts.current_mut().remove(panel) {
             self.reconcile_layout_sizes(&sizes);
+            self.layout_changed(cx);
             self.persist_layout(cx);
         }
     }
-    fn begin_split_drag(&mut self, id: u64, index: usize, pointer: Point<Pixels>) {
+    fn begin_split_drag(
+        &mut self,
+        id: u64,
+        index: usize,
+        pointer: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.synchronize_interaction(window, cx);
         if self.layouts.current().locked {
             return;
         }
@@ -1655,7 +1589,7 @@ impl GuiApp {
         else {
             return;
         };
-        let measured = self.measured.borrow();
+        let measured = self.interaction.measurements();
         let Some(bounds) = measured.get(&Measured::Node(id)).copied() else {
             return;
         };
@@ -1707,15 +1641,10 @@ impl GuiApp {
             pointer,
         };
         drag.pointer_offset = drag.pointer_coordinate(pointer) - f64::from(f32::from(center));
-        self.split_references.clear();
-        layout::layout_geometry::reference_centers(
-            root,
-            *axis,
-            (id, index),
-            &|id| measured.get(&Measured::Node(id)).copied(),
-            &mut self.split_references,
-        );
-        self.dragging = Some(Dragging::Split(drag));
+        let original_fraction = boundary(index + 1);
+        drop(measured);
+        let cancellation = self.interaction.begin_split(drag, original_fraction, root);
+        self.apply_interaction_cancellation(cancellation, cx);
     }
     fn render_node(
         &mut self,
@@ -1747,8 +1676,8 @@ impl GuiApp {
                             .when(self.layouts.current().locked, |view| view.cursor_default())
                             .on_mouse_down(
                                 MouseButton::Left,
-                                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                                    this.begin_split_drag(id, index, event.position);
+                                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                    this.begin_split_drag(id, index, event.position, window, cx);
                                     cx.stop_propagation();
                                 }),
                             )
@@ -1861,7 +1790,7 @@ impl GuiApp {
                             .text_color(rgb(if active == panel_id { TEXT } else { MUTED }))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.layouts.current_mut().activate(panel_id);
-                                this.target_group = Some(node_id);
+                                this.interaction.set_target_group(Some(node_id));
                                 this.persist_layout(cx);
                             }))
                             .on_mouse_down(
@@ -1881,7 +1810,7 @@ impl GuiApp {
                                 let entity = cx.entity().downgrade();
                                 view.on_drag(drag, move |drag, _, window, cx| {
                                     let _ = entity.update(cx, |this, cx| {
-                                        this.start_panel_docking(drag.panel_id, window);
+                                        this.start_panel_docking(drag.panel_id, window, cx);
                                         if !this.panel_docking_blocked() {
                                             this.update_panel_docking(
                                                 window.mouse_position(),
@@ -1987,7 +1916,7 @@ impl GuiApp {
         }
     }
     fn drag_position(&mut self, position: Point<Pixels>, alt: bool, cx: &mut Context<Self>) {
-        let Some(dragging) = self.dragging else {
+        let Some(dragging) = self.interaction.dragging() else {
             return;
         };
         let bounds = match dragging {
@@ -1998,42 +1927,33 @@ impl GuiApp {
                 } else {
                     Measured::Volume(id)
                 };
-                let Some(bounds) = self.measured.borrow().get(&key).copied() else {
+                let Some(bounds) = self.interaction.measurements().get(&key).copied() else {
                     return;
                 };
                 bounds
             }
         };
         match dragging {
-            Dragging::Split(mut drag) => {
+            Dragging::Split(_) => {
                 if self.layouts.current().locked {
                     return;
                 }
-                drag.pointer = position;
-                self.dragging = Some(Dragging::Split(drag));
                 let config = &self.state.system.config;
-                let enabled = config.layout_snap_enabled ^ alt;
-                let Some(fraction) = drag.fraction(
-                    &self.split_references,
-                    enabled,
+                let Some((id, index, fraction)) = self.interaction.update_split(
+                    position,
+                    config.layout_snap_enabled ^ alt,
                     f64::from(config.ui_scale),
                     config.layout_snap_grid_px,
                 ) else {
                     return;
                 };
-                if self
-                    .layouts
-                    .current_mut()
-                    .set_boundary(drag.id, drag.index, fraction)
-                {
+                if self.layouts.current_mut().set_boundary(id, index, fraction) {
                     cx.notify();
                 }
             }
             Dragging::Seek(_) => {
-                if let Some(duration) = self.state.playback.duration {
-                    let fraction =
-                        ((position.x - bounds.origin.x) / bounds.size.width).clamp(0., 1.);
-                    self.seek_preview = Some(duration * fraction as f64);
+                let fraction = ((position.x - bounds.origin.x) / bounds.size.width).clamp(0., 1.);
+                if self.interaction.update_slider_seek(f64::from(fraction)) {
                     cx.notify();
                 }
             }
@@ -2044,19 +1964,16 @@ impl GuiApp {
         }
     }
     fn finish_drag(&mut self, cx: &mut Context<Self>) {
-        let dragging = self.dragging.take();
-        if matches!(dragging, Some(Dragging::Seek(_))) {
-            if let (Some(queue_id), Some(seconds)) =
-                (self.seek_queue_id.take(), self.seek_preview.take())
-            {
-                self.send(Command::SeekQueue { queue_id, seconds }, cx);
-            }
-        } else {
-            self.seek_preview = None;
-            self.seek_queue_id = None;
-        }
-        if matches!(dragging, Some(Dragging::Split(..))) {
-            self.persist_layout(cx);
+        match self.interaction.finish_drag() {
+            DragCommit::None => {}
+            DragCommit::Seek(seek) => self.send(
+                Command::SeekQueue {
+                    queue_id: seek.queue_id,
+                    seconds: seek.seconds,
+                },
+                cx,
+            ),
+            DragCommit::PersistSplit => self.persist_layout(cx),
         }
     }
     fn slider(
@@ -2093,11 +2010,17 @@ impl GuiApp {
             .child(self.measurement(key))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                    this.dragging = Some(dragging);
-                    if matches!(dragging, Dragging::Seek(_)) {
-                        this.seek_queue_id = this.state.queue.current_id;
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.synchronize_interaction(window, cx);
+                    let cancellation = this.interaction.begin_slider(
+                        dragging,
+                        this.state.queue.current_id,
+                        this.state.playback.duration,
+                    );
+                    if cancellation.docking {
+                        cx.stop_active_drag(window);
                     }
+                    this.apply_interaction_cancellation(cancellation, cx);
                     this.drag_position(event.position, event.modifiers.alt, cx);
                 }),
             )

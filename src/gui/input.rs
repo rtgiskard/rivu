@@ -37,11 +37,11 @@ actions!(
     ]
 );
 
-/// Notifications emitted by [`Input`] after user editing.
+/// Notifications emitted by [`Input`] after editing or programmatic updates.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InputEvent {
-    /// The value changed through editing or [`Input::set_text`].
-    Changed,
+    /// `user` distinguishes actual editing from [`Input::set_text`] updates.
+    Changed { user: bool },
     /// The user pressed Enter while this input was focused.
     Submit,
 }
@@ -141,7 +141,7 @@ impl Input {
         self.marked_range = None;
         self.last_layout = None;
         self.last_bounds = None;
-        cx.emit(InputEvent::Changed);
+        cx.emit(InputEvent::Changed { user: false });
         cx.notify();
     }
 
@@ -351,7 +351,7 @@ impl Input {
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         self.selection_reversed = false;
         self.marked_range = None;
-        cx.emit(InputEvent::Changed);
+        cx.emit(InputEvent::Changed { user: true });
         cx.notify();
     }
 }
@@ -474,7 +474,7 @@ impl EntityInputHandler for Input {
             range.start,
         );
         self.selection_reversed = false;
-        cx.emit(InputEvent::Changed);
+        cx.emit(InputEvent::Changed { user: true });
         cx.notify();
     }
 

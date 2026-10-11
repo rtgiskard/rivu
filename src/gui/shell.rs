@@ -27,19 +27,12 @@ impl Render for GuiApp {
         {
             self.request_frame(window, cx);
         }
-        if self.panel_docking.is_some() && (!cx.has_active_drag() || self.panel_docking_blocked()) {
+        self.synchronize_interaction(window, cx);
+        if self.interaction.docking().is_some()
+            && (!cx.has_active_drag() || self.panel_docking_blocked())
+        {
             self.cancel_panel_docking(window, cx);
         }
-        let geometry = DockGeometry::current(window, self.state.system.config.ui_scale);
-        if self
-            .panel_docking
-            .as_ref()
-            .is_some_and(|session| session.geometry != geometry)
-        {
-            self.panel_docking.as_mut().unwrap().guide = None;
-            self.panel_docking.as_mut().unwrap().hover = None;
-        }
-        self.layout_scale_factor = f64::from(window.scale_factor());
         window.set_rem_size(px(16. * self.state.system.config.ui_scale));
         self.scroll_views.begin_frame();
         self.visuals.begin_frame();
@@ -73,8 +66,12 @@ impl Render for GuiApp {
             .font(self.ui_font.clone())
             .track_focus(&self.layout_focus)
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                if event.keystroke.key == "escape" && this.panel_docking.is_some() {
-                    this.cancel_panel_docking(window, cx);
+                if event.keystroke.key == "escape"
+                    && (this.interaction.docking().is_some()
+                        || this.interaction.dragging().is_some()
+                        || this.interaction.seek_preview().is_some())
+                {
+                    this.cancel_interaction(window, cx);
                     cx.stop_propagation();
                     return;
                 }
@@ -150,21 +147,8 @@ impl Render for GuiApp {
                 match key {
                     "escape" => {
                         this.focus_layout(window, cx);
-                        this.invalidate_library_selection();
-                        this.library_navigation = None;
-                        this.directory_tree.cancel_navigation();
-                        this.library_selected_nodes.clear();
-                        this.selected.clear();
-                        this.directory_tree
-                            .remember_selection(&this.library_selected_nodes, &this.selected);
-                        this.selected_queue.clear();
-                        this.selected_queue.clear_anchor();
-                        this.selected_playlist = None;
-                        this.selected_entry = None;
-                        this.metadata_track = None;
-                        this.full_track = None;
-                        this.sync_metadata_default(cx);
-                        this.sync_waveform(cx);
+                        this.browser.clear_selection();
+                        this.clear_metadata_selection(cx);
                         cx.notify();
                     }
                     "q" => {
@@ -174,7 +158,7 @@ impl Render for GuiApp {
                     "t" => this.activate_library(window, cx, false),
                     "up" | "down" => {
                         if let Some(focus) = this.active_list_focus() {
-                            this.list_focus = Some(focus);
+                            this.browser.focus_list(focus);
                             this.navigate_list(focus, key == "down", cx);
                         }
                     }
@@ -187,7 +171,7 @@ impl Render for GuiApp {
                         }
                     }
                     "left" | "right" | "space" | " "
-                        if this.library_tree_active
+                        if this.browser.library.tree_active()
                             && this.active_list_focus() == Some(ListFocus::Library) =>
                     {
                         this.library_tree_key(key, cx);
@@ -218,18 +202,19 @@ impl Render for GuiApp {
                     || this.catalog_open;
                 this.scroll_views.click(event.position, modal);
             }))
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                this.synchronize_interaction(window, cx);
                 this.drag_position(event.position, event.modifiers.alt, cx);
             }))
             .on_drag_move::<PanelDrag>(cx.listener(
                 |this, event: &DragMoveEvent<PanelDrag>, window, cx| {
                     let source = event.drag(cx).panel_id;
                     if this
-                        .panel_docking
-                        .as_ref()
+                        .interaction
+                        .docking()
                         .is_none_or(|session| session.source != source)
                     {
-                        this.start_panel_docking(source, window);
+                        this.start_panel_docking(source, window, cx);
                     }
                     this.update_panel_docking(window.mouse_position(), window, cx);
                 },
@@ -239,7 +224,15 @@ impl Render for GuiApp {
                     let entity = cx.entity().downgrade();
                     window.defer(cx, move |_, cx| {
                         let _ = entity.update(cx, |this, cx| {
-                            if this.panel_docking.take().is_some() {
+                            if this.interaction.cancel_docking() {
+                                cx.notify();
+                            }
+                            let cancelled = this
+                                .waveform
+                                .update(cx, |waveform, _| waveform.cancel_unreleased_seek());
+                            if let Some(generation) = cancelled
+                                && this.interaction.cancel_waveform(generation)
+                            {
                                 cx.notify();
                             }
                         });
@@ -250,19 +243,26 @@ impl Render for GuiApp {
                 this.drop_panel_docking(drag.panel_id, window, cx);
                 cx.stop_propagation();
             }))
-            .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
-                if let Some(Dragging::Split(drag)) = this.dragging {
-                    this.drag_position(drag.pointer, event.modifiers.alt, cx);
-                }
-            }))
+            .on_modifiers_changed(
+                cx.listener(|this, event: &ModifiersChangedEvent, window, cx| {
+                    this.synchronize_interaction(window, cx);
+                    if let Some(Dragging::Split(drag)) = this.interaction.dragging() {
+                        this.drag_position(drag.pointer, event.modifiers.alt, cx);
+                    }
+                }),
+            )
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _, _, cx| this.finish_drag(cx)),
+                cx.listener(|this, _, window, cx| {
+                    this.synchronize_interaction(window, cx);
+                    this.finish_drag(cx);
+                }),
             )
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.panel_docking = None;
+                cx.listener(|this, _, window, cx| {
+                    this.synchronize_interaction(window, cx);
+                    this.interaction.cancel_docking();
                     this.finish_drag(cx);
                 }),
             )
@@ -372,14 +372,15 @@ impl Render for GuiApp {
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(|this, _, window, cx| {
-                        this.cancel_panel_docking(window, cx);
+                        let cancellation = this.interaction.lock_layout();
+                        if cancellation.docking {
+                            cx.stop_active_drag(window);
+                        }
+                        cancellation.restore_split(this.layouts.current_mut());
                         cx.stop_propagation();
                         this.layouts.current_mut().locked = !this.layouts.current().locked;
                         this.catalog_open = false;
                         this.panel_menu = None;
-                        if matches!(this.dragging, Some(Dragging::Split(..))) {
-                            this.dragging = None;
-                        }
                         this.persist_layout(cx);
                     }),
                 ),
@@ -493,7 +494,7 @@ impl Render for GuiApp {
         }
 
         app = app.child(footer);
-        if self.panel_docking.is_some() {
+        if self.interaction.docking().is_some() {
             app = app.child(self.docking_overlay());
         }
 
@@ -506,7 +507,12 @@ impl Render for GuiApp {
                     if this.layouts.current().locked {
                         return;
                     }
-                    this.layouts.current_mut().add(kind, this.target_group);
+                    let cancellation = this.interaction.cancel();
+                    this.apply_interaction_cancellation(cancellation, cx);
+                    this.layouts
+                        .current_mut()
+                        .add(kind, this.interaction.target_group());
+                    this.layout_changed(cx);
                     this.catalog_open = false;
                     this.persist_layout(cx);
                 });
@@ -559,7 +565,7 @@ impl Render for GuiApp {
                 .queue
                 .entries
                 .iter()
-                .any(|entry| self.selected_queue.contains(&entry.id));
+                .any(|entry| self.browser.queue.contains(&entry.id));
             let mut menu = context_menu_container("panel-context-menu").on_mouse_down_out(
                 cx.listener(|this, _, _, cx| {
                     this.panel_menu = None;
@@ -898,8 +904,8 @@ impl Render for GuiApp {
                                         cx,
                                         |this, _, cx| {
                                             this.panel_menu = None;
-                                            this.selected_queue.clear();
-                                            this.selected_queue.clear_anchor();
+                                            this.browser.queue.clear();
+
                                             this.send(Command::ClearQueue, cx);
                                             cx.notify();
                                         },
@@ -926,7 +932,7 @@ impl Render for GuiApp {
                                 }
                                 let mut track_ids = Vec::new();
                                 for entry in this.state.queue.entries.iter() {
-                                    if this.selected_queue.contains(&entry.id)
+                                    if this.browser.queue.contains(&entry.id)
                                         && !track_ids.contains(&entry.track_id)
                                     {
                                         track_ids.push(entry.track_id);
@@ -945,8 +951,8 @@ impl Render for GuiApp {
                         .w_full(),
                     );
                     if has_selected_queue {
-                        if !self.playlist_buffer.rows.is_empty() {
-                            let height = (self.playlist_buffer.rows.len() as f32
+                        if !self.browser.playlists.summaries.rows.is_empty() {
+                            let height = (self.browser.playlists.summaries.rows.len() as f32
                                 * panels::TRACK_HEIGHT)
                                 .min(240.)
                                 .min(f32::from(window.viewport_size().height) * 0.5);
@@ -954,13 +960,17 @@ impl Render for GuiApp {
                                 menu.child(
                                     uniform_list(
                                         "queue-playlist-targets",
-                                        self.playlist_buffer.rows.len(),
+                                        self.browser.playlists.summaries.rows.len(),
                                         cx.processor(
                                             move |this, range: std::ops::Range<usize>, _, cx| {
                                                 range
                                                     .map(|index| {
-                                                        let Some(playlist) =
-                                                            this.playlist_buffer.rows.get(index)
+                                                        let Some(playlist) = this
+                                                            .browser
+                                                            .playlists
+                                                            .summaries
+                                                            .rows
+                                                            .get(index)
                                                         else {
                                                             return this.paged_loading_row(
                                                             ViewRequestKind::PlaylistSummaries,
@@ -980,7 +990,8 @@ impl Render for GuiApp {
                                                                     .entries
                                                                     .iter()
                                                                     .filter(|entry| {
-                                                                        this.selected_queue
+                                                                        this.browser
+                                                                            .queue
                                                                             .contains(&entry.id)
                                                                     })
                                                                     .map(|entry| entry.track_id)

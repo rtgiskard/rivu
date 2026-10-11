@@ -212,6 +212,10 @@ preview. If released before the new geometry is measured, the drag leaves the
 layout unchanged; otherwise docking uses the new geometry. Hidden tab bars do
 not retain tab targets, but their panels still accept ordinary docking.
 
+Escape or window deactivation also cancels a separator resize and restores its
+starting proportions. Resizing the window or changing scale cancels an active
+separator resize rather than committing coordinates from its old geometry.
+
 With Layout snapping enabled, separator dragging considers targets in this
 priority order: aligned separator centers in other visible same-direction splits,
 the equal-content midpoint of the adjacent panes, then the nearest configured
@@ -353,6 +357,9 @@ line is peak amplitude. Unknown intervals remain blank. Playback builds the
 preview progressively; `Load full waveform now` requests the complete preview.
 Click or drag to seek the current track; a non-playing selection preview does
 not seek playback.
+Seeking gestures stay bound to the queue entry at press time. If playback moves
+to another entry before release, the old gesture cannot seek the new entry.
+Escape or a geometry change cancels the gesture without seeking.
 To preview a track without starting playback, select it in Library and use
 `Load full waveform now`. A selected track with no decoded samples can also
 build its preview through playback.
