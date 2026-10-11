@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub(super) const PROTOCOL_VERSION: u8 = 3;
+pub(super) const PROTOCOL_VERSION: u8 = 4;
 pub(super) const MAX_REQUEST: usize = 64 * 1024;
 pub(super) const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub(super) const MAX_CLIENTS: usize = 16;
@@ -271,6 +271,7 @@ pub(super) enum WireCommand {
         status: String,
     },
     Shutdown,
+    DismissScanResult,
 }
 
 pub(super) fn wire_usize(value: u64, field: &str) -> Result<usize> {
@@ -568,6 +569,7 @@ impl From<Command> for WireCommand {
             Command::Device { name } => Self::Device { name },
             Command::Analysis { enabled } => Self::Analysis { enabled },
             Command::DismissError => Self::DismissError,
+            Command::DismissScanResult => Self::DismissScanResult,
             Command::Configure { config } => Self::Configure {
                 config: WireConfig::from(&config),
             },
@@ -676,6 +678,7 @@ impl TryFrom<WireCommand> for Command {
             WireCommand::Device { name } => Self::Device { name },
             WireCommand::Analysis { enabled } => Self::Analysis { enabled },
             WireCommand::DismissError => Self::DismissError,
+            WireCommand::DismissScanResult => Self::DismissScanResult,
             WireCommand::Configure { config } => Self::Configure {
                 config: config.into(),
             },

@@ -673,6 +673,33 @@ mod tests {
     }
 
     #[test]
+    fn scan_result_dismissal_preserves_errors_and_active_scans() {
+        let (_directory, mut core) = fixture();
+        for phase in [ScanPhase::Completed, ScanPhase::Failed] {
+            core.state.system.scan_progress = Some(ScanProgress {
+                phase,
+                processed: 2,
+                total: Some(2),
+                errors: usize::from(phase == ScanPhase::Failed),
+                path: None,
+            });
+            core.state.system.scan_message = "Scan result".into();
+            core.state.system.last_error = Some("Unreadable source".into());
+            core.state.system.scanning = true;
+            let progress = core.state.system.scan_progress.clone();
+            core.command(Command::DismissScanResult).unwrap();
+            assert_eq!(core.state.system.scan_progress, progress);
+            assert_eq!(core.state.system.scan_message, "Scan result");
+
+            core.state.system.scanning = false;
+            core.command(Command::DismissScanResult).unwrap();
+            assert!(core.state.system.scan_progress.is_none());
+            assert!(core.state.system.scan_message.is_empty());
+            assert_eq!(core.state.system.last_error.as_deref(), Some("Unreadable source"));
+        }
+    }
+
+    #[test]
     fn batch_continuation_rejects_library_change_but_not_playback_change() {
         let (_directory, mut core) = fixture();
         let expected = core.state.query_revisions();

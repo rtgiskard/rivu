@@ -117,6 +117,9 @@ the same directory shown as another root.
 After a scan saves its results, the tree refreshes automatically, including
 previously empty expanded directories, even if some files failed to import.
 Collapsed directories load updated contents when reopened.
+The scan status row offers a close button after completion or failure. Closing
+it hides the result and progress bar without changing imported tracks or the
+separate error message. A new scan shows progress again.
 
 == Paged views
 

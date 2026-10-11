@@ -377,7 +377,7 @@ impl GuiApp {
         cx.notify();
     }
 
-    fn library_scan_status(&self) -> Div {
+    fn library_scan_status(&self, panel_id: u64, cx: &mut Context<Self>) -> Div {
         use crate::model::ScanPhase;
         let Some(progress) = self.state.system.scan_progress.as_ref() else {
             return column().child(caption(self.state.system.scan_message.clone()));
@@ -393,10 +393,21 @@ impl GuiApp {
             Some(total) => format!("{} / {total} files", progress.processed),
             None => format!("{} files found", progress.processed),
         };
-        let mut status = column().gap_1().flex_shrink_0().child(caption(format!(
-            "{phase} · {count} · {} errors",
-            progress.errors
-        )));
+        let mut header = row().items_center().gap_2().child(
+            caption(format!("{phase} · {count} · {} errors", progress.errors)).flex_1(),
+        );
+        if !self.state.system.scanning
+            && matches!(progress.phase, ScanPhase::Completed | ScanPhase::Failed)
+        {
+            header = header.child(super::components::quiet_icon_button(icon_button(
+                ("dismiss-scan-result", panel_id),
+                "",
+                "Dismiss scan result",
+                cx,
+                |this, _, cx| this.send(Command::DismissScanResult, cx),
+            )));
+        }
+        let mut status = column().gap_1().flex_shrink_0().child(header);
         if let Some(total) = progress.total.filter(|total| *total > 0) {
             let fraction = (progress.processed as f32 / total as f32).clamp(0., 1.);
             status = status.child(div().w_full().h(px(3.)).bg(rgb(BORDER)).child(
@@ -597,7 +608,7 @@ impl GuiApp {
             .child(tools)
             .when(has_selection, |panel| panel.child(selection_tools));
         if self.state.system.scan_progress.is_some() || self.state.system.scanning {
-            panel = panel.child(self.library_scan_status());
+            panel = panel.child(self.library_scan_status(panel_id, cx));
         }
         if self.library_tree_active {
             self.scroll_views

@@ -316,6 +316,13 @@ impl Core {
                 self.state.system.last_error = None;
                 return Ok(());
             }
+            Command::DismissScanResult => {
+                if !self.state.system.scanning {
+                    self.state.system.scan_progress = None;
+                    self.state.system.scan_message.clear();
+                }
+                return Ok(());
+            }
             Command::Configure { mut config } => {
                 config.validate()?;
                 config.library_roots = config

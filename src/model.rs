@@ -547,6 +547,7 @@ pub enum Command {
         status: String,
     },
     Shutdown,
+    DismissScanResult,
 }
 
 #[cfg(test)]
