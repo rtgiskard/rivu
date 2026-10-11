@@ -398,8 +398,11 @@ see <<_visualization_db_ranges,Visualization dB ranges>>.
 === Audio Visualizer
 
 Each Audio Visualizer instance stores its style, reference-line visibility, and
-label visibility in `layout.json`. Right-click the instance to change any of
-these directly, or open Visualizer settings and apply changes to that instance.
+label visibility in `layout.json`. Right-click the instance and open `Style` to
+choose a style; `Back` returns without changing it. The main menu's `Display`
+group independently toggles `Reference lines` and `Labels`, showing `On` or
+`Off`. Choosing a style or toggling an overlay closes the menu. Visualizer
+settings lets you apply these choices together to that instance.
 Moving panels and restarting preserve their choices. Different styles can run
 simultaneously. Global `audio_visualizer_style`, `audio_visualizer_grid`, and
 `audio_visualizer_labels` seed new instances only. Style defaults to `bars_rings`;

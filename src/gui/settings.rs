@@ -278,7 +278,7 @@ fn spectrum_style_label(style: SpectrumStyle) -> &'static str {
         SpectrumStyle::Solid => "Solid",
     }
 }
-fn audio_visualizer_style_label(style: AudioVisualizerStyle) -> &'static str {
+pub(super) fn audio_visualizer_style_label(style: AudioVisualizerStyle) -> &'static str {
     match style {
         AudioVisualizerStyle::Bars => "Bars",
         AudioVisualizerStyle::Rings => "Rings",
