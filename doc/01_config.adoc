@@ -41,12 +41,14 @@ link:02_library.adoc#_paged_views[Library].
 `media_read_buffer_mb` defaults to `2`; accepted sizes are `1`, `2`, `4`, `8`,
 and `16` MiB.
 
-`ffmpeg_enabled` is available only when the binary includes the `ffmpeg` feature;
-see link:../readme.adoc[README] for build variants. In a default build the
-setting remains off and enabling it is rejected with the extension-unavailable
-error; native decoders continue to work.
-Enabling affects future source opens. Disabling stops a track currently decoded
-through FFmpeg; native-decoded playback is unaffected.
+`ffmpeg_enabled` defaults to `false`. The default build includes the `ffmpeg`
+feature; see link:../readme.adoc[README] for a native-only build. Enabling permits
+FFmpeg use on future source opens; it does not load or validate runtime libraries.
+Libraries load on the first native-unsupported source or an explicit
+link:02_library.adoc#_metadata_and_favorites[enhanced probe]. Missing libraries
+are reported when needed; native decoders continue to work. A load failure is
+retained until restart. Disabling stops a track currently decoded through FFmpeg;
+native-decoded playback is unaffected.
 
 `volume` accepts finite values from `0` to `1` and defaults to `0.7`.
 `shuffle` defaults to `false`; `repeat` accepts `off`, `all`, or `one` and defaults

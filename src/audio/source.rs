@@ -27,35 +27,47 @@ use symphonia::{
 
 const PROBE_BUFFER_LEN: usize = 2 * BYTES_PER_MEBIBYTE;
 
-pub fn probe(path: &Path, ffmpeg_enabled: bool) -> Result<MediaInfo> {
-    let detected = super::detector::scan(path)?;
-    if let Some(detection) = detected {
-        if !ffmpeg_enabled {
-            let title = path
-                .file_stem()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned();
-            return Ok(MediaInfo {
-                title,
-                artist: String::new(),
-                album: String::new(),
-                duration: None,
-                bitrate_bps: None,
-                track_number: None,
-                disc_number: None,
-                bits_per_sample: None,
-                release_date: None,
-                codec: detection.codec.into(),
-                channels: detection.channels.unwrap_or(0),
-                sample_rate: detection.sample_rate.unwrap_or(0),
-            });
-        }
-        return Ok(
-            Source::open_with_detection(path, PROBE_BUFFER_LEN, true, Some(detection))?.info,
-        );
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProbeBackend {
+    Native,
+    Ffmpeg,
+}
+
+impl std::fmt::Display for ProbeBackend {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Native => "native",
+            Self::Ffmpeg => "ffmpeg",
+        })
     }
-    Ok(Source::open_with_detection(path, PROBE_BUFFER_LEN, ffmpeg_enabled, None)?.info)
+}
+
+pub struct ProbeResult {
+    pub info: MediaInfo,
+    pub probe_backend: ProbeBackend,
+    pub decoder_backend: ProbeBackend,
+}
+
+pub fn probe(path: &Path, ffmpeg_enabled: bool) -> Result<MediaInfo> {
+    Ok(Source::open(path, PROBE_BUFFER_LEN, ffmpeg_enabled)?.info)
+}
+
+pub fn probe_details(path: &Path, ffmpeg_enabled: bool, enhanced: bool) -> Result<ProbeResult> {
+    if enhanced {
+        super::ffmpeg::ensure_loaded().context("FFmpeg enhanced probing is unavailable")?;
+    }
+    let source = Source::open(path, PROBE_BUFFER_LEN, ffmpeg_enabled || enhanced)?;
+    let decoder_backend = if source.uses_ffmpeg() {
+        ProbeBackend::Ffmpeg
+    } else {
+        ProbeBackend::Native
+    };
+    Ok(ProbeResult {
+        probe_backend: source.probe_backend,
+        decoder_backend,
+        info: source.info,
+    })
 }
 
 fn metadata_tags(mut metadata: Metadata<'_>, track: u32, info: &mut MediaInfo) {
@@ -256,6 +268,7 @@ pub(super) struct Source {
     frame_start: f64,
     layout: Vec<Channel>,
     info: MediaInfo,
+    probe_backend: ProbeBackend,
     range_start: f64,
     range_end: Option<f64>,
     seek_target: Option<f64>,
@@ -264,33 +277,41 @@ pub(super) struct Source {
 }
 impl Source {
     pub(super) fn open(path: &Path, buffer_len: usize, ffmpeg_enabled: bool) -> Result<Self> {
-        let detected = super::detector::scan(path)?;
-        Self::open_with_detection(path, buffer_len, ffmpeg_enabled, detected)
-    }
-
-    fn open_with_detection(
-        path: &Path,
-        buffer_len: usize,
-        ffmpeg_enabled: bool,
-        detected: Option<super::detector::Detection>,
-    ) -> Result<Self> {
-        if detected.is_some() {
-            if !ffmpeg_enabled {
-                bail!("Compressed audio requires the FFmpeg extension decoder");
-            }
-            return Self::open_ffmpeg(path);
+        let input = if ffmpeg_enabled {
+            super::ffmpeg::inspect_wave(path)?
+        } else {
+            None
+        };
+        if input.as_ref().is_some_and(|input| !input.is_pcm()) {
+            return Self::from_ffmpeg(super::ffmpeg::Decoder::from_input(input.unwrap())?);
         }
         match Self::open_native(path, buffer_len) {
-            Ok(source) => Ok(source),
-            Err(native_error) if ffmpeg_enabled && native_error.downcast_ref::<UnsupportedNative>().is_some() => {
-                Self::open_ffmpeg(path).with_context(|| format!("Native decoder rejected the audio ({native_error:#}); FFmpeg extension failed"))
+            Ok(mut source) => {
+                if input.is_some() {
+                    source.probe_backend = ProbeBackend::Ffmpeg;
+                }
+                Ok(source)
+            }
+            Err(native_error)
+                if ffmpeg_enabled && native_error.downcast_ref::<UnsupportedNative>().is_some() =>
+            {
+                let decoded = match input {
+                    Some(input) => super::ffmpeg::Decoder::from_input(input),
+                    None => super::ffmpeg::Decoder::open(path),
+                };
+                decoded.and_then(Self::from_ffmpeg).with_context(|| format!("Native decoder rejected the audio ({native_error:#}); FFmpeg extension failed"))
             }
             Err(error) => Err(error),
         }
     }
 
+    #[cfg(all(test, feature = "ffmpeg"))]
     fn open_ffmpeg(path: &Path) -> Result<Self> {
         let decode = super::ffmpeg::Decoder::open(path)?;
+        Self::from_ffmpeg(decode)
+    }
+
+    fn from_ffmpeg(decode: super::ffmpeg::Decoder) -> Result<Self> {
         let info = decode.info().clone();
         let layout = decode.layout().to_vec();
         if info.sample_rate == 0 || layout.is_empty() {
@@ -306,6 +327,7 @@ impl Source {
             frame_start: 0.0,
             layout,
             info,
+            probe_backend: ProbeBackend::Ffmpeg,
             range_start: 0.0,
             range_end: duration,
             seek_target: None,
@@ -441,6 +463,7 @@ impl Source {
             frame_start: 0.0,
             layout: Vec::new(),
             info,
+            probe_backend: ProbeBackend::Native,
             range_start: 0.0,
             range_end: media_duration,
             seek_target: None,
@@ -1011,6 +1034,48 @@ mod tests {
             file.write_all(&value.to_le_bytes()).unwrap();
         }
         file
+    }
+
+    #[cfg(feature = "ffmpeg")]
+    #[test]
+    fn lazy_wave_probe_preserves_native_pcm() {
+        const CHILD: &str = "RIVU_LAZY_WAVE_PROBE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // Other FFmpeg tests may load the process-wide runtime. Isolate the
+            // cold-to-ready transition rather than depending on test order.
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "audio::source::tests::lazy_wave_probe_preserves_native_pcm",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+
+        let file = pcm_file();
+        assert!(!super::super::ffmpeg::load_attempted());
+        let cold = probe_details(file.path(), true, false).unwrap();
+        assert!(matches!(cold.probe_backend, ProbeBackend::Native));
+        assert!(matches!(cold.decoder_backend, ProbeBackend::Native));
+        assert!(!super::super::ffmpeg::load_attempted());
+
+        let mut reference = Source::open(file.path(), PROBE_BUFFER_LEN, false).unwrap();
+        let expected = decode_remaining(&mut reference);
+        let enhanced = probe_details(file.path(), true, true).unwrap();
+        assert!(super::super::ffmpeg::load_attempted());
+        assert!(matches!(enhanced.probe_backend, ProbeBackend::Ffmpeg));
+        assert!(matches!(enhanced.decoder_backend, ProbeBackend::Native));
+
+        let mut ready = Source::open(file.path(), PROBE_BUFFER_LEN, true).unwrap();
+        assert!(!ready.uses_ffmpeg());
+        assert_eq!(decode_remaining(&mut ready), expected);
+        let disabled = probe_details(file.path(), false, false).unwrap();
+        assert!(matches!(disabled.probe_backend, ProbeBackend::Native));
+        assert!(matches!(disabled.decoder_backend, ProbeBackend::Native));
     }
 
     #[cfg(feature = "ffmpeg")]

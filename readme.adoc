@@ -23,11 +23,11 @@ terminal, and headless modes that share one playback instance.
 == Build and install
 
 Rivu currently targets Linux; the desktop UI uses Wayland. On Arch Linux, install
-the native build and runtime prerequisites:
+the build and runtime prerequisites:
 
 [source,sh]
 ----
-sudo pacman -S --needed rust gcc binutils clang pkgconf libpipewire opus fontconfig libxkbcommon
+sudo pacman -S --needed rust gcc binutils clang pkgconf libpipewire opus fontconfig libxkbcommon ffmpeg
 cargo build --release
 ----
 
@@ -39,22 +39,23 @@ default linker. Install it optionally with `sudo pacman -S --needed mold`.
 Audio output requires PipeWire 1.2 or newer and a running PipeWire server;
 there is no direct ALSA backend. PipeWire performs device-rate conversion.
 
-The default Cargo build has no FFmpeg dependency. The optional extension needs
-FFmpeg development headers (`libavutil` 61.x, `libavcodec` 63.x, `libavformat` 63.x)
-and `libclang`:
+The default Cargo build includes FFmpeg support and needs development headers
+(`libavutil` 61.x, `libavcodec` 63.x, `libavformat` 63.x) and `libclang`.
+FFmpeg libraries are loaded on demand, not during startup or status queries;
+they are not required to start Rivu with native decoding. To build without
+FFmpeg support, omit the FFmpeg package and disable default features:
 
 [source,sh]
 ----
-sudo pacman -S --needed ffmpeg clang
-cargo build --release --features ffmpeg
+cargo build --release --no-default-features
 
-# Build with FFmpeg and install the executable, desktop entry, and icons
+# Build the default variant and install the executable, desktop entry, and icons
 make install PREFIX="$HOME/.local"
 ----
 
-`make build` and `make install` always build with `--features ffmpeg`; they are not
-native-only build/install paths. For a native-only executable, use the first Cargo
-command and install `.cache/target/release/rivu` into a directory on `PATH`.
+`make build` and `make install` use the default features, including FFmpeg.
+For a native-only executable, use `--no-default-features` as above and install
+`.cache/target/release/rivu` into a directory on `PATH`.
 Build outputs default to `.cache/target/`; `CARGO_TARGET_DIR` overrides that path.
 Ensure `~/.local/bin` is on `PATH` when using the install example.
 
@@ -65,8 +66,6 @@ Install Symbols Nerd Font Mono on the machine displaying the GUI (on Arch Linux,
 [source,sh]
 ----
 cargo build --release --features embed-nerd-font
-# Combine with optional decoding:
-cargo build --release --features ffmpeg,embed-nerd-font
 ----
 
 Embedding requires Fontconfig's `fc-list` and an installed Nerd Font on the build

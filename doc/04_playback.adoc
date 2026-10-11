@@ -39,8 +39,22 @@ sink layout without remixing. Unsupported routes report an error.
 == Optional FFmpeg decoder
 
 Native decoding is the default. Enable `ffmpeg_enabled` for additional formats,
-including audio in MKV/MP4. Missing or incompatible runtime libraries are
-reported through decoder status and playback errors.
+including audio in MKV/MP4. FFmpeg loads when a native decoder cannot support a
+source, not during startup or status queries. Decoder status shows `not loaded`
+until a load is attempted; missing or incompatible libraries are reported when
+needed, and the load result is retained until restart.
+
+Once FFmpeg is loaded and enabled, future WAVE opens use its format recognition;
+ordinary PCM still uses the native decoder. Recognition is not proof that a
+file has been fully validated. When FFmpeg is disabled or not loaded, DTS stored
+inside a PCM-labelled WAVE may be treated as PCM, including incorrect metadata
+and noise on playback. An explicit enhanced probe runs in a separate process;
+it does not load FFmpeg in a running playback instance. For DTS-WAV playback,
+FFmpeg must be enabled and already loaded in that instance.
+
+Library rows are not automatically reprobed after FFmpeg loads; use a forced
+rescan to refresh stored metadata. Probe commands and recognition provenance:
+link:02_library.adoc#_metadata_and_favorites[Library].
 
 Build prerequisites and ABI compatibility: link:../readme.adoc[README].
 Enablement, disabling an active decoder, and build-feature restrictions:

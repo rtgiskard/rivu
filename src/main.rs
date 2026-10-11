@@ -26,7 +26,7 @@ use std::{
     name = "rivu",
     version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("RIVU_GIT_VERSION"), ")"),
     about = "A quiet, local-first music player",
-    long_about = "Rivu plays local audio with a shared Rust core. Run without a subcommand for the desktop UI; CLI and TUI control that same instance. Optional FFmpeg extension audio decoding is loaded only when enabled."
+    long_about = "Rivu plays local audio with a shared Rust core. Run without a subcommand for the desktop UI; CLI and TUI control that same instance. Optional FFmpeg audio support is loaded on demand for enabled fallback decoding or explicit enhanced probing."
 )]
 struct Args {
     #[arg(long, global = true, value_name = "DIRECTORY")]
@@ -154,7 +154,12 @@ enum LibraryAction {
         limit: usize,
     },
     /// Read real metadata and check decoder support without starting an instance.
-    Probe { path: PathBuf },
+    Probe {
+        path: PathBuf,
+        /// Explicitly load FFmpeg for enhanced probing, regardless of the saved setting.
+        #[arg(long)]
+        enhanced: bool,
+    },
     /// Reclaim database space and refresh query statistics; stop playback and scans first.
     Optimize,
 }
@@ -258,15 +263,16 @@ fn run() -> Result<()> {
         Action::Gui { paths } => open_gui(data_dir, config_path, paths),
         Action::Serve { paths } => start(data_dir, config_path, paths, false),
         Action::Tui => terminal::run(&socket),
-        Action::Library(LibraryAction::Probe { path }) => {
+        Action::Library(LibraryAction::Probe { path, enhanced }) => {
             let probe_config = config::Config::load(&config_path)?;
-            let ffmpeg_enabled = probe_config.ffmpeg_enabled;
+            let ffmpeg_enabled = probe_config.ffmpeg_enabled || enhanced;
+            let result = audio::probe_details(&path, ffmpeg_enabled, enhanced)?;
+            let info = result.info;
             let decoder_status = if ffmpeg_enabled {
                 audio::ffmpeg_status().unwrap_or_else(|error| format!("unavailable: {error:#}"))
             } else {
                 "disabled".to_owned()
             };
-            let info = audio::probe(&path, ffmpeg_enabled)?;
             if args.json {
                 println!(
                     "{}",
@@ -278,12 +284,14 @@ fn run() -> Result<()> {
                         "track_number": info.track_number, "disc_number": info.disc_number,
                         "release_date": info.release_date,
                         "ffmpeg_status": decoder_status,
+                        "probe_backend": result.probe_backend,
+                        "decoder_backend": result.decoder_backend,
                     }))?
                 );
                 return Ok(());
             }
             println!(
-                "{}\n  title: {}\n  artist: {}\n  album: {}\n  codec: {}\n  channels: {}\n  sample rate: {} Hz\n  duration: {}\n  bitrate: {}\n  source bits/sample: {}\n  track number: {}\n  disc number: {}\n  release date: {}\n  FFmpeg extension audio decoding: {}",
+                "{}\n  title: {}\n  artist: {}\n  album: {}\n  codec: {}\n  channels: {}\n  sample rate: {} Hz\n  duration: {}\n  bitrate: {}\n  source bits/sample: {}\n  track number: {}\n  disc number: {}\n  release date: {}\n  probe backend: {}\n  decoder backend: {}\n  FFmpeg extension audio decoding: {}",
                 path.display(),
                 info.title,
                 info.artist,
@@ -304,6 +312,8 @@ fn run() -> Result<()> {
                 info.disc_number
                     .map_or("—".into(), |value| value.to_string()),
                 info.release_date.as_deref().unwrap_or("—"),
+                result.probe_backend,
+                result.decoder_backend,
                 decoder_status,
             );
             Ok(())

@@ -8,7 +8,7 @@ export CARGO_TARGET_DIR
 .PHONY: build clean install
 
 build:
-	RIVU_GIT_VERSION="$(RIVU_GIT_VERSION)" cargo build --release --features ffmpeg
+	RIVU_GIT_VERSION="$(RIVU_GIT_VERSION)" cargo build --release
 
 clean:
 	cargo clean

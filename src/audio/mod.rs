@@ -17,7 +17,6 @@
 #[cfg(not(target_os = "linux"))]
 compile_error!("Rivu requires Linux and native PipeWire audio output");
 
-mod detector;
 #[cfg(feature = "ffmpeg")]
 mod ffmpeg;
 #[cfg(not(feature = "ffmpeg"))]
@@ -30,11 +29,36 @@ mod ffmpeg {
         bail!("FFmpeg extension is not compiled; rebuild with --features ffmpeg")
     }
 
+    pub(super) fn ensure_loaded() -> Result<()> {
+        availability().map(|_| ())
+    }
+
+    pub(super) fn load_attempted() -> bool {
+        false
+    }
+
+    pub(super) struct Input;
+
+    impl Input {
+        pub(super) fn is_pcm(&self) -> bool {
+            unreachable!("FFmpeg input cannot be opened without the ffmpeg feature")
+        }
+    }
+
+    pub(super) fn inspect_wave(_: &Path) -> Result<Option<Input>> {
+        Ok(None)
+    }
+
     pub(super) struct Decoder;
 
     impl Decoder {
         pub(super) fn open(_: &Path) -> Result<Self> {
             bail!("FFmpeg extension is not compiled; rebuild with --features ffmpeg")
+        }
+
+        pub(super) fn from_input(_: Input) -> Result<Self> {
+            availability()?;
+            unreachable!("FFmpeg input cannot be opened without the ffmpeg feature")
         }
 
         pub(super) fn info(&self) -> &MediaInfo {
@@ -63,11 +87,15 @@ mod worker;
 
 use format::Channel;
 pub use output::devices;
-pub use source::probe;
+pub use source::{probe, probe_details};
 pub use waveform::WaveformFrame;
 
 pub fn ffmpeg_status() -> anyhow::Result<String> {
     ffmpeg::availability()
+}
+
+pub fn ffmpeg_load_attempted() -> bool {
+    ffmpeg::load_attempted()
 }
 
 /// Scan a full envelope only for an explicit user request. Normal playback

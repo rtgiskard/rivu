@@ -5,7 +5,7 @@ edition = "2024"
 description = "A lightweight, local-first Linux music player"
 
 [features]
-default = []
+default = ["ffmpeg"]
 ffmpeg = ["dep:bindgen", "dep:libloading"]
 embed-nerd-font = []
 

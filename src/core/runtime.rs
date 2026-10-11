@@ -108,6 +108,15 @@ impl Core {
                     }
                 }
                 recv(config_ticks) -> _ => {
+                    // Reuse the save tick to publish the one-time load result,
+                    // including loads from GUI waveform work outside the engine.
+                    if self.state.system.ffmpeg_status == "not loaded"
+                        && audio::ffmpeg_load_attempted()
+                    {
+                        self.state.system.ffmpeg_status = audio::ffmpeg_status()
+                            .unwrap_or_else(|error| format!("unavailable: {error:#}"));
+                        self.publish();
+                    }
                     if self.config_dirty
                         && self.config_last_saved.elapsed() >= Duration::from_millis(250)
                         && self.save(false).is_ok()

@@ -8,9 +8,10 @@ use anyhow::{Context, Result, bail};
 use libloading::Library;
 use std::{
     ffi::{CStr, CString, c_char, c_int},
-    path::Path,
+    io::{ErrorKind, Read},
+    path::{Path, PathBuf},
     ptr,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, OnceLock},
 };
 
 #[cfg(not(all(
@@ -120,7 +121,8 @@ struct Runtime {
 }
 unsafe impl Send for Runtime {}
 unsafe impl Sync for Runtime {}
-static RUNTIME: OnceLock<Mutex<Option<Arc<Runtime>>>> = OnceLock::new();
+// OnceLock provides nonblocking snapshots while an explicit load is in progress.
+static RUNTIME: OnceLock<std::result::Result<Arc<Runtime>, String>> = OnceLock::new();
 
 unsafe fn symbol<T: Copy>(library: &Library, name: &[u8]) -> Result<T> {
     // Every caller supplies an extern function pointer. Option preserves its
@@ -256,20 +258,25 @@ fn load_runtime() -> Result<Arc<Runtime>> {
     unsafe { (runtime.f.log_set_level)(-8) } // AV_LOG_QUIET
     Ok(runtime)
 }
-fn runtime() -> Result<Arc<Runtime>> {
-    let lock = RUNTIME.get_or_init(|| Mutex::new(None));
-    let mut guard = lock
-        .lock()
-        .map_err(|_| anyhow::anyhow!("FFmpeg runtime lock poisoned"))?;
-    if let Some(existing) = guard.as_ref() {
-        return Ok(existing.clone());
-    }
-    let loaded = load_runtime()?;
-    *guard = Some(loaded.clone());
-    Ok(loaded)
+fn runtime() -> Result<&'static Arc<Runtime>> {
+    RUNTIME
+        .get_or_init(|| load_runtime().map_err(|error| format!("{error:#}")))
+        .as_ref()
+        .map_err(|error| anyhow::anyhow!("{error}"))
+}
+pub(super) fn ensure_loaded() -> Result<()> {
+    runtime().map(|_| ())
+}
+pub(super) fn load_attempted() -> bool {
+    // get() stays nonblocking and returns None until initialization is published.
+    RUNTIME.get().is_some()
 }
 pub(super) fn availability() -> Result<String> {
-    let rt = runtime()?;
+    let rt = match RUNTIME.get() {
+        None => return Ok("not loaded".to_owned()),
+        Some(Ok(rt)) => rt,
+        Some(Err(error)) => bail!("{error}"),
+    };
     let f = &rt.f;
     Ok(format!(
         "FFmpeg runtime available (libavcodec {}.{}.{} / libavformat {}.{}.{} / libavutil {}.{}.{}; audio)",
@@ -325,6 +332,155 @@ fn rational_seconds(value: i64, q: AVRational) -> Option<f64> {
     }
 }
 
+/// An analyzed input owns its format context until decoding takes it over.
+pub(super) struct Input {
+    rt: Arc<Runtime>,
+    path: PathBuf,
+    format: *mut AVFormatContext,
+    stream: c_int,
+    stream_ptr: *mut AVStream,
+    params: *mut AVCodecParameters,
+}
+unsafe impl Send for Input {}
+impl Input {
+    fn open(path: &Path, rt: Arc<Runtime>) -> Result<Self> {
+        let path = crate::library::logical_path(path)?;
+        let metadata = std::fs::metadata(&path)?;
+        if !metadata.is_file() {
+            bail!("FFmpeg backend only accepts regular local files");
+        }
+        Self::open_validated(path, rt)
+    }
+
+    fn open_validated(path: PathBuf, rt: Arc<Runtime>) -> Result<Self> {
+        let cpath = CString::new(path.as_os_str().as_encoded_bytes())
+            .context("FFmpeg path contains NUL")?;
+        let mut input = Self {
+            rt,
+            path,
+            format: ptr::null_mut(),
+            stream: 0,
+            stream_ptr: ptr::null_mut(),
+            params: ptr::null_mut(),
+        };
+        let rt = &input.rt;
+        let mut options = ptr::null_mut();
+        for (key, value) in [
+            (c"protocol_whitelist", c"file"),
+            (c"codec_whitelist", rt.audio_codecs.as_c_str()),
+            (c"probesize", c"33554432"),
+            (c"analyzeduration", c"5000000"),
+        ] {
+            let ret = unsafe { (rt.f.dict_set)(&mut options, key.as_ptr(), value.as_ptr(), 0) };
+            if ret < 0 {
+                unsafe {
+                    (rt.f.dict_free)(&mut options);
+                }
+                bail!("FFmpeg could not set input option {key:?}");
+            }
+        }
+        let ret = unsafe {
+            (rt.f.open_input)(&mut input.format, cpath.as_ptr(), ptr::null(), &mut options)
+        };
+        unsafe {
+            (rt.f.dict_free)(&mut options);
+        }
+        if ret < 0 {
+            return Err(error_text(rt, ret, "open input"));
+        }
+        // Disable every non-audio stream before stream-info analysis. This prevents
+        // an audio-only player from implicitly opening a video decoder.
+        let ctx = unsafe { &mut *input.format };
+        for index in 0..ctx.nb_streams {
+            let candidate = unsafe { *ctx.streams.add(index as usize) };
+            if !candidate.is_null()
+                && !unsafe { (*candidate).codecpar }.is_null()
+                && unsafe { (*(*candidate).codecpar).codec_type } != AVMediaType_AVMEDIA_TYPE_AUDIO
+            {
+                unsafe {
+                    (*candidate).discard = AVDiscard_AVDISCARD_ALL;
+                }
+            }
+        }
+        let ret = unsafe { (rt.f.find_info)(input.format, ptr::null_mut()) };
+        if ret < 0 {
+            return Err(error_text(rt, ret, "find stream info"));
+        }
+        let ctx = unsafe { &*input.format };
+        for index in 0..ctx.nb_streams {
+            let candidate = unsafe { *ctx.streams.add(index as usize) };
+            if !candidate.is_null()
+                && !unsafe { (*candidate).codecpar }.is_null()
+                && unsafe { (*(*candidate).codecpar).codec_type } != AVMediaType_AVMEDIA_TYPE_AUDIO
+            {
+                unsafe {
+                    (*candidate).discard = AVDiscard_AVDISCARD_ALL;
+                }
+            }
+        }
+        let mut stream = None;
+        for index in 0..ctx.nb_streams {
+            let candidate = unsafe { *ctx.streams.add(index as usize) };
+            if candidate.is_null()
+                || unsafe { (*candidate).codecpar }.is_null()
+                || unsafe { (*(*candidate).codecpar).codec_type } != AVMediaType_AVMEDIA_TYPE_AUDIO
+            {
+                continue;
+            }
+            stream = Some((index as c_int, candidate));
+            break;
+        }
+        let (stream_index, stream_ptr) = stream.context("FFmpeg input has no audio stream")?;
+        let params = unsafe { (*stream_ptr).codecpar };
+        if params.is_null() {
+            bail!("FFmpeg audio stream has no codec parameters");
+        }
+        input.stream = stream_index;
+        input.stream_ptr = stream_ptr;
+        input.params = params;
+        Ok(input)
+    }
+    pub(super) fn is_pcm(&self) -> bool {
+        let name = unsafe { (self.rt.f.codec_name)((*self.params).codec_id) };
+        !name.is_null()
+            && unsafe { CStr::from_ptr(name) }
+                .to_bytes()
+                .starts_with(b"pcm_")
+    }
+}
+impl Drop for Input {
+    fn drop(&mut self) {
+        if !self.format.is_null() {
+            unsafe {
+                (self.rt.f.close_input)(&mut self.format);
+            }
+        }
+    }
+}
+
+/// Inspect WAVE containers only when an explicit operation already loaded FFmpeg.
+pub(super) fn inspect_wave(path: &Path) -> Result<Option<Input>> {
+    let rt = match RUNTIME.get() {
+        Some(Ok(rt)) => rt.clone(),
+        _ => return Ok(None),
+    };
+    let path = crate::library::logical_path(path)?;
+    if !std::fs::metadata(&path)?.is_file() {
+        bail!("FFmpeg backend only accepts regular local files");
+    }
+    let mut file = std::fs::File::open(&path)?;
+    let mut magic = [0; 12];
+    match file.read_exact(&mut magic) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::UnexpectedEof => return Ok(None),
+        Err(error) => return Err(error).context("read WAVE container magic"),
+    }
+    if !matches!(&magic[..4], b"RIFF" | b"RIFX" | b"RF64" | b"BW64") || &magic[8..] != b"WAVE" {
+        return Ok(None);
+    }
+    Input::open_validated(path, rt).map(Some)
+}
+
 pub(super) struct Decoder {
     rt: Arc<Runtime>,
     format: *mut AVFormatContext,
@@ -344,248 +500,160 @@ pub(super) struct Decoder {
 unsafe impl Send for Decoder {}
 impl Decoder {
     pub(super) fn open(path: &Path) -> Result<Self> {
-        let path = crate::library::logical_path(path)?;
-        let metadata = std::fs::metadata(&path)?;
-        if !metadata.is_file() {
-            bail!("FFmpeg backend only accepts regular local files");
+        let input = Input::open(path, runtime()?.clone())?;
+        Self::from_input(input)
+    }
+    pub(super) fn from_input(mut input: Input) -> Result<Self> {
+        let rt = input.rt.clone();
+        let path = &input.path;
+        let format = input.format;
+        let stream_index = input.stream;
+        let stream_ptr = input.stream_ptr;
+        let params = input.params;
+        let decoder = unsafe { (rt.f.find_decoder)((*params).codec_id) };
+        if decoder.is_null() {
+            let name = unsafe { (rt.f.codec_name)((*params).codec_id) };
+            bail!("FFmpeg decoder unavailable for {}", cstr(name));
         }
-        let rt = runtime()?;
-        let cpath = CString::new(path.as_os_str().as_encoded_bytes())
-            .context("FFmpeg path contains NUL")?;
-        let mut format = ptr::null_mut();
-        let mut options = ptr::null_mut();
-        for (key, value) in [
-            (c"protocol_whitelist", c"file"),
-            (c"codec_whitelist", rt.audio_codecs.as_c_str()),
-            (c"probesize", c"33554432"),
-            (c"analyzeduration", c"5000000"),
-        ] {
-            let ret = unsafe { (rt.f.dict_set)(&mut options, key.as_ptr(), value.as_ptr(), 0) };
-            if ret < 0 {
-                unsafe {
-                    (rt.f.dict_free)(&mut options);
-                }
-                bail!("FFmpeg could not set input option {key:?}");
-            }
+        let mut codec = unsafe { (rt.f.alloc_codec)(decoder) };
+        if codec.is_null() {
+            bail!("FFmpeg could not allocate codec context");
         }
-        let ret =
-            unsafe { (rt.f.open_input)(&mut format, cpath.as_ptr(), ptr::null(), &mut options) };
-        unsafe {
-            (rt.f.dict_free)(&mut options);
-        }
-        if ret < 0 {
-            return Err(error_text(&rt, ret, "open input"));
-        }
-        let mut close_on_error = true;
-        let result = (|| {
-            // Disable every non-audio stream before stream-info analysis. This prevents
-            // an audio-only player from implicitly opening a video decoder.
-            let ctx = unsafe { &mut *format };
-            for index in 0..ctx.nb_streams {
-                let candidate = unsafe { *ctx.streams.add(index as usize) };
-                if !candidate.is_null()
-                    && !unsafe { (*candidate).codecpar }.is_null()
-                    && unsafe { (*(*candidate).codecpar).codec_type }
-                        != AVMediaType_AVMEDIA_TYPE_AUDIO
-                {
-                    unsafe {
-                        (*candidate).discard = AVDiscard_AVDISCARD_ALL;
-                    }
-                }
-            }
-            let ret = unsafe { (rt.f.find_info)(format, ptr::null_mut()) };
-            if ret < 0 {
-                return Err(error_text(&rt, ret, "find stream info"));
-            }
-            let ctx = unsafe { &*format };
-            for index in 0..ctx.nb_streams {
-                let candidate = unsafe { *ctx.streams.add(index as usize) };
-                if !candidate.is_null()
-                    && !unsafe { (*candidate).codecpar }.is_null()
-                    && unsafe { (*(*candidate).codecpar).codec_type }
-                        != AVMediaType_AVMEDIA_TYPE_AUDIO
-                {
-                    unsafe {
-                        (*candidate).discard = AVDiscard_AVDISCARD_ALL;
-                    }
-                }
-            }
-            let mut stream = None;
-            for index in 0..ctx.nb_streams {
-                let candidate = unsafe { *ctx.streams.add(index as usize) };
-                if candidate.is_null()
-                    || unsafe { (*candidate).codecpar }.is_null()
-                    || unsafe { (*(*candidate).codecpar).codec_type }
-                        != AVMediaType_AVMEDIA_TYPE_AUDIO
-                {
-                    continue;
-                }
-                stream = Some((index as c_int, candidate));
-                break;
-            }
-            let (stream_index, stream_ptr) = stream.context("FFmpeg input has no audio stream")?;
-            let params = unsafe { (*stream_ptr).codecpar };
-            if params.is_null() {
-                bail!("FFmpeg audio stream has no codec parameters");
-            }
-            let decoder = unsafe { (rt.f.find_decoder)((*params).codec_id) };
-            if decoder.is_null() {
-                let name = unsafe { (rt.f.codec_name)((*params).codec_id) };
-                bail!("FFmpeg decoder unavailable for {}", cstr(name));
-            }
-            let mut codec = unsafe { (rt.f.alloc_codec)(decoder) };
-            if codec.is_null() {
-                bail!("FFmpeg could not allocate codec context");
-            }
-            let mut packet = unsafe { (rt.f.packet_alloc)() };
-            let mut frame = unsafe { (rt.f.frame_alloc)() };
-            if packet.is_null() || frame.is_null() {
-                unsafe {
-                    if !frame.is_null() {
-                        (rt.f.frame_free)(&mut frame);
-                    }
-                    if !packet.is_null() {
-                        (rt.f.packet_free)(&mut packet);
-                    }
-                    (rt.f.free_codec)(&mut codec);
-                }
-                bail!("FFmpeg could not allocate decode buffers");
-            }
-            let ret = unsafe { (rt.f.params_to_context)(codec, params) };
-            if ret < 0 {
-                unsafe {
-                    (rt.f.frame_free)(&mut frame);
-                    (rt.f.packet_free)(&mut packet);
-                    (rt.f.free_codec)(&mut codec);
-                }
-                return Err(error_text(&rt, ret, "copy codec parameters"));
-            }
-            let ret = unsafe { (rt.f.codec_open)(codec, decoder, ptr::null_mut()) };
-            if ret < 0 {
-                unsafe {
-                    (rt.f.frame_free)(&mut frame);
-                    (rt.f.packet_free)(&mut packet);
-                    (rt.f.free_codec)(&mut codec);
-                }
-                return Err(error_text(&rt, ret, "open audio decoder"));
-            }
-            let p = unsafe { &*params };
-            let codec_name = cstr(unsafe { (rt.f.codec_name)(p.codec_id) });
-            let profile = cstr(unsafe { (rt.f.profile_name)(p.codec_id, p.profile) });
-            let codec_text = if profile.is_empty() || profile == "unknown" {
-                codec_name.clone()
-            } else {
-                format!("{codec_name} ({profile})")
-            };
-            let stream_ref = unsafe { &*stream_ptr };
-            let duration =
-                rational_seconds(stream_ref.duration, stream_ref.time_base).or_else(|| {
-                    let d = unsafe { (*format).duration };
-                    if d == NOPTS {
-                        None
-                    } else {
-                        Some(d as f64 / AV_TIME_BASE as f64)
-                    }
-                });
-            let container_metadata = unsafe { (*format).metadata };
-            let title = tag(&rt, stream_ref.metadata, "title")
-                .or_else(|| tag(&rt, container_metadata, "title"))
-                .unwrap_or_else(|| {
-                    path.file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned()
-                });
-            let artist = tag(&rt, stream_ref.metadata, "artist")
-                .or_else(|| tag(&rt, container_metadata, "artist"))
-                .unwrap_or_default();
-            let album = tag(&rt, stream_ref.metadata, "album")
-                .or_else(|| tag(&rt, container_metadata, "album"))
-                .unwrap_or_default();
-            let read_tag = |key| {
-                tag(&rt, stream_ref.metadata, key).or_else(|| tag(&rt, container_metadata, key))
-            };
-            let number_tag = |key| {
-                read_tag(key)
-                    .and_then(|value| value.split('/').next()?.trim().parse::<u32>().ok())
-                    .filter(|value| *value > 0)
-            };
-            let track_number = number_tag("track");
-            let disc_number = number_tag("disc");
-            let release_date = read_tag("date")
-                .filter(|value| !value.trim().is_empty())
-                .or_else(|| read_tag("year").filter(|value| !value.trim().is_empty()));
-            let pcm = codec_name.starts_with("pcm_");
-            let lossless = matches!(
-                codec_name.as_str(),
-                "flac" | "alac" | "ape" | "tta" | "truehd" | "mlp"
-            );
-            let bits_per_sample = if pcm || lossless {
-                u32::try_from(p.bits_per_raw_sample)
-                    .ok()
-                    .filter(|bits| *bits > 0)
-                    .or_else(|| {
-                        pcm.then(|| {
-                            u32::try_from(p.bits_per_coded_sample)
-                                .ok()
-                                .filter(|bits| *bits > 0)
-                        })
-                        .flatten()
-                    })
-            } else {
-                None
-            };
-            let info = MediaInfo {
-                title,
-                artist,
-                album,
-                duration,
-                bitrate_bps: u64::try_from(p.bit_rate)
-                    .ok()
-                    .filter(|bitrate| *bitrate > 0),
-                track_number,
-                disc_number,
-                bits_per_sample,
-                release_date,
-                codec: codec_text,
-                channels: 0,
-                sample_rate: 0,
-            };
-            let mut decoder = Self {
-                rt: rt.clone(),
-                format,
-                codec,
-                packet,
-                frame,
-                stream: stream_index,
-                time_base: stream_ref.time_base,
-                start_time: stream_ref.start_time,
-                draining: false,
-                require_timestamp: false,
-                next_sample: 0,
-                layout: Vec::new(),
-                info,
-                primed: None,
-            };
-            format = ptr::null_mut();
-            close_on_error = false;
-            let mut frames = Vec::new();
-            let timestamp = decoder
-                .next_frames(&mut frames)?
-                .context("FFmpeg audio stream contains no decodable frames")?;
-            decoder.primed = Some((frames, timestamp));
-            Ok(decoder)
-        })();
-        if result.is_err() && close_on_error {
+        let mut packet = unsafe { (rt.f.packet_alloc)() };
+        let mut frame = unsafe { (rt.f.frame_alloc)() };
+        if packet.is_null() || frame.is_null() {
             unsafe {
-                (rt.f.close_input)(&mut format);
+                if !frame.is_null() {
+                    (rt.f.frame_free)(&mut frame);
+                }
+                if !packet.is_null() {
+                    (rt.f.packet_free)(&mut packet);
+                }
+                (rt.f.free_codec)(&mut codec);
             }
+            bail!("FFmpeg could not allocate decode buffers");
         }
-        if result.is_ok() {
-            close_on_error = false;
+        let ret = unsafe { (rt.f.params_to_context)(codec, params) };
+        if ret < 0 {
+            unsafe {
+                (rt.f.frame_free)(&mut frame);
+                (rt.f.packet_free)(&mut packet);
+                (rt.f.free_codec)(&mut codec);
+            }
+            return Err(error_text(&rt, ret, "copy codec parameters"));
         }
-        let _ = close_on_error;
-        result
+        let ret = unsafe { (rt.f.codec_open)(codec, decoder, ptr::null_mut()) };
+        if ret < 0 {
+            unsafe {
+                (rt.f.frame_free)(&mut frame);
+                (rt.f.packet_free)(&mut packet);
+                (rt.f.free_codec)(&mut codec);
+            }
+            return Err(error_text(&rt, ret, "open audio decoder"));
+        }
+        let p = unsafe { &*params };
+        let codec_name = cstr(unsafe { (rt.f.codec_name)(p.codec_id) });
+        let profile = cstr(unsafe { (rt.f.profile_name)(p.codec_id, p.profile) });
+        let codec_text = if profile.is_empty() || profile == "unknown" {
+            codec_name.clone()
+        } else {
+            format!("{codec_name} ({profile})")
+        };
+        let stream_ref = unsafe { &*stream_ptr };
+        let duration = rational_seconds(stream_ref.duration, stream_ref.time_base).or_else(|| {
+            let d = unsafe { (*format).duration };
+            if d == NOPTS {
+                None
+            } else {
+                Some(d as f64 / AV_TIME_BASE as f64)
+            }
+        });
+        let container_metadata = unsafe { (*format).metadata };
+        let title = tag(&rt, stream_ref.metadata, "title")
+            .or_else(|| tag(&rt, container_metadata, "title"))
+            .unwrap_or_else(|| {
+                path.file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned()
+            });
+        let artist = tag(&rt, stream_ref.metadata, "artist")
+            .or_else(|| tag(&rt, container_metadata, "artist"))
+            .unwrap_or_default();
+        let album = tag(&rt, stream_ref.metadata, "album")
+            .or_else(|| tag(&rt, container_metadata, "album"))
+            .unwrap_or_default();
+        let read_tag =
+            |key| tag(&rt, stream_ref.metadata, key).or_else(|| tag(&rt, container_metadata, key));
+        let number_tag = |key| {
+            read_tag(key)
+                .and_then(|value| value.split('/').next()?.trim().parse::<u32>().ok())
+                .filter(|value| *value > 0)
+        };
+        let track_number = number_tag("track");
+        let disc_number = number_tag("disc");
+        let release_date = read_tag("date")
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| read_tag("year").filter(|value| !value.trim().is_empty()));
+        let pcm = codec_name.starts_with("pcm_");
+        let lossless = matches!(
+            codec_name.as_str(),
+            "flac" | "alac" | "ape" | "tta" | "truehd" | "mlp"
+        );
+        let bits_per_sample = if pcm || lossless {
+            u32::try_from(p.bits_per_raw_sample)
+                .ok()
+                .filter(|bits| *bits > 0)
+                .or_else(|| {
+                    pcm.then(|| {
+                        u32::try_from(p.bits_per_coded_sample)
+                            .ok()
+                            .filter(|bits| *bits > 0)
+                    })
+                    .flatten()
+                })
+        } else {
+            None
+        };
+        let info = MediaInfo {
+            title,
+            artist,
+            album,
+            duration,
+            bitrate_bps: u64::try_from(p.bit_rate)
+                .ok()
+                .filter(|bitrate| *bitrate > 0),
+            track_number,
+            disc_number,
+            bits_per_sample,
+            release_date,
+            codec: codec_text,
+            channels: 0,
+            sample_rate: 0,
+        };
+        let mut decoder = Self {
+            rt,
+            format,
+            codec,
+            packet,
+            frame,
+            stream: stream_index,
+            time_base: stream_ref.time_base,
+            start_time: stream_ref.start_time,
+            draining: false,
+            require_timestamp: false,
+            next_sample: 0,
+            layout: Vec::new(),
+            info,
+            primed: None,
+        };
+        input.format = ptr::null_mut();
+        let mut frames = Vec::new();
+        let timestamp = decoder
+            .next_frames(&mut frames)?
+            .context("FFmpeg audio stream contains no decodable frames")?;
+        decoder.primed = Some((frames, timestamp));
+        Ok(decoder)
     }
     pub(super) fn info(&self) -> &MediaInfo {
         &self.info

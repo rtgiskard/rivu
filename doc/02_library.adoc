@@ -53,10 +53,25 @@ Supported formats and playlist exchange: link:03_playlist.adoc#_cue_import[CUE i
 == Metadata and favorites
 
 `rivu library probe PATH` reads audio metadata and decoder support without
-starting a core; it does not create or update a library row. GUI/TUI lists show
-compact display metadata. Track details and `library list --json` expose full
-technical metadata, paths, CUE boundaries, and statistics. Unknown values appear
-as `—` in human output or `null` for nullable JSON fields.
+starting a core; it does not create or update a library row. Add `--enhanced`
+to explicitly load FFmpeg for this command, even when `ffmpeg_enabled` is off.
+Missing libraries or a native-only build make an enhanced probe fail rather
+than silently use native recognition. JSON includes `probe_backend` and
+`decoder_backend` (`native` or `ffmpeg`); these may differ for ordinary PCM.
+Without `--enhanced`, a fresh probe process does not enhance native-supported
+WAVE recognition. Recognition and DTS-WAV limitations:
+link:04_playback.adoc#_optional_ffmpeg_decoder[Playback].
+
+GUI/TUI lists show compact display metadata. Track details and
+`library list --json` expose full technical metadata, paths, CUE boundaries,
+and statistics. Unknown values appear as `—` in human output or `null` for
+nullable JSON fields.
+
+[source,sh]
+----
+rivu library probe album.wav --enhanced
+rivu --json library probe album.wav --enhanced
+----
 
 Title, artist, album, and favorite edits change Rivu's database only; media
 files, tags, and CUE sheets are never rewritten. Rescans preserve matching IDs,

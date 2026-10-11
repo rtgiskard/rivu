@@ -333,15 +333,10 @@ impl Core {
                 {
                     bail!("Output device not found: {device}");
                 }
-                let enabling_ffmpeg =
-                    config.ffmpeg_enabled && !self.state.system.config.ffmpeg_enabled;
                 let ffmpeg_status = if !config.ffmpeg_enabled {
                     "disabled".to_owned()
-                } else if enabling_ffmpeg {
-                    audio::ffmpeg_status()
-                        .context("FFmpeg extension audio decoding is unavailable")?
                 } else {
-                    self.state.system.ffmpeg_status.clone()
+                    audio::ffmpeg_status().unwrap_or_else(|error| format!("unavailable: {error:#}"))
                 };
                 crate::logging::reconfigure(&config)?;
                 config.save(&self.state.system.config_path)?;
