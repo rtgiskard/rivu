@@ -377,7 +377,7 @@ fn copyable_message(
         .min_w_0()
         .overflow_hidden()
         .cursor_pointer()
-        .child(div().flex_1().min_w_0().truncate().child(message.clone()))
+        .child(div().flex_initial().min_w_0().truncate().child(message.clone()))
         .child(div().flex_shrink_0().child("⧉"))
         .tooltip({
             let message: SharedString = message.clone().into();
@@ -3088,12 +3088,12 @@ impl Render for GuiApp {
         if let Some(error) = error {
             footer = footer.child(
                 row()
-                    .flex_1()
+                    .flex_initial()
                     .min_w_0()
                     .px_2()
                     .bg(rgb(ERROR_BG))
                     .text_color(rgb(TEXT))
-                    .child(copyable_message("copy-error", error, cx))
+                    .child(copyable_message("copy-error", error, cx).flex_initial())
                     .child(
                         icon_button(
                             "dismiss-error",
@@ -3108,7 +3108,8 @@ impl Render for GuiApp {
                         .size(px(24.0))
                         .border_0()
                         .bg(rgb(ERROR_BG))
-                        .text_color(rgb(MUTED)),
+                        .text_color(rgb(MUTED))
+                        .hover(|style| style.bg(rgb(ERROR_BG)).text_color(rgb(TEXT))),
                     ),
             );
         } else if self.state.system.scanning {
@@ -3120,10 +3121,9 @@ impl Render for GuiApp {
                 )
                 .text_color(rgb(TEXT)),
             );
-        } else {
-            footer = footer.child(div().flex_1());
         }
         footer = footer
+            .child(div().flex_1())
             .child(
                 icon_button(
                     "layout",
@@ -3147,6 +3147,7 @@ impl Render for GuiApp {
                         cx.notify();
                     },
                 )
+                .ml_4()
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(|this, _, window, cx| {
