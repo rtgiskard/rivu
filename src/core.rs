@@ -577,7 +577,6 @@ impl Core {
         Ok(())
     }
 }
-#[path = "core/engine.rs"]
 mod engine;
 
 fn now() -> i64 {
