@@ -110,6 +110,16 @@ second geometry representation or a renderer fork. Shared renderer geometry or
 a combined Spectrogram texture would change that boundary and should be justified
 by profiling real workloads, not assumed hit rates or submission counts alone.
 
+== Settings view reuse
+
+Settings owns its draft, inputs, navigation, and save feedback in a separate
+GPUI entity. Playback and analysis updates do not invalidate that entity's
+cached element tree. Settings interactions and relevant runtime changes do;
+GPUI also invalidates reuse when bounds or inherited text style change.
+This cache is independent of `visualization_cache`, retains no settings
+bitmap, and does not freeze background visualizations or eliminate window
+composition.
+
 == Artwork lookup retention
 
 Artwork lookup is independent of visualization caching. Each manager retains at

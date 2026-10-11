@@ -144,11 +144,11 @@ pub(crate) fn button_style(
 }
 
 /// Text button with shared application event handling.
-pub(crate) fn button(
+pub(crate) fn button<T: 'static>(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
-    cx: &mut Context<GuiApp>,
-    action: impl Fn(&mut GuiApp, &mut Window, &mut Context<GuiApp>) + 'static,
+    cx: &mut Context<T>,
+    action: impl Fn(&mut T, &mut Window, &mut Context<T>) + 'static,
 ) -> Stateful<Div> {
     button_style(id, label).on_click(cx.listener(move |this, _, window, cx| {
         action(this, window, cx);
@@ -200,12 +200,12 @@ pub(crate) fn sortable_header(
 }
 
 /// Icon button with the Nerd symbol font and shared tooltip behavior.
-pub(crate) fn icon_button(
+pub(crate) fn icon_button<T: 'static>(
     id: impl Into<ElementId>,
     icon: impl Into<SharedString>,
     hint: impl Into<SharedString>,
-    cx: &mut Context<GuiApp>,
-    action: impl Fn(&mut GuiApp, &mut Window, &mut Context<GuiApp>) + 'static,
+    cx: &mut Context<T>,
+    action: impl Fn(&mut T, &mut Window, &mut Context<T>) + 'static,
 ) -> Stateful<Div> {
     let hint = hint.into();
     button(id, icon, cx, action)
@@ -228,13 +228,13 @@ pub(crate) fn quiet_icon_button(control: Stateful<Div>) -> Stateful<Div> {
 }
 
 /// Compact toggle button used by visual and system settings.
-pub(crate) fn toggle_button(
+pub(crate) fn toggle_button<T: 'static>(
     id: impl Into<ElementId>,
     icon: impl Into<SharedString>,
     label: impl Into<SharedString>,
     enabled: bool,
-    cx: &mut Context<GuiApp>,
-    action: impl Fn(&mut GuiApp, &mut Context<GuiApp>) + 'static,
+    cx: &mut Context<T>,
+    action: impl Fn(&mut T, &mut Context<T>) + 'static,
 ) -> Stateful<Div> {
     let label = label.into();
     active_control(

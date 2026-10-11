@@ -1,6 +1,6 @@
 use super::{
-    BORDER, ButtonTooltip, DropdownItem, DropdownState, ERROR, GuiApp, Measured,
-    POPOVER_MAX_HEIGHT, StatusKind, UI_INSET, active_control, button, caption, column,
+    BORDER, ButtonTooltip, DropdownItem, DropdownState, ERROR, POPOVER_MAX_HEIGHT, StatusKind,
+    UI_INSET, active_control, button, caption, column,
     components::DROPDOWN_ROW_REMS,
     copyable_message, dropdown_container, dropdown_row, dropdown_trigger, form_field, icon_button,
     input::{Input, InputEvent},
@@ -11,11 +11,12 @@ use crate::{
         AnalysisWindow, AudioVisualizerOptions, AudioVisualizerStyle, Config, LogLevel, RgbColor,
         SpectrumStyle, VisualizationPalette,
     },
+    core::AppHandle,
     model::Command,
 };
 use anyhow::{Context as _, Result};
 use gpui::{prelude::*, *};
-use std::{collections::HashMap, path::PathBuf, str::FromStr};
+use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc, str::FromStr, sync::Arc};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettingChoice {
@@ -216,12 +217,12 @@ impl Field {
 fn dropdown_button(
     id: &'static str,
     label: impl Into<SharedString>,
-    cx: &mut Context<GuiApp>,
-    action: impl Fn(&mut GuiApp, &mut Window, &mut Context<GuiApp>) + 'static,
+    cx: &mut Context<Settings>,
+    action: impl Fn(&mut Settings, &mut Window, &mut Context<Settings>) + 'static,
 ) -> Stateful<Div> {
     dropdown_trigger(id, label).on_click(cx.listener(move |this, _, window, cx| {
         action(this, window, cx);
-        this.settings_focus.focus(window, cx);
+        this.focus.focus(window, cx);
         cx.notify();
         cx.stop_propagation();
     }))
@@ -231,7 +232,7 @@ fn visual_switch(
     icon: &'static str,
     label: &'static str,
     enabled: bool,
-    cx: &mut Context<GuiApp>,
+    cx: &mut Context<Settings>,
     toggle: impl Fn(&mut Config) + 'static,
 ) -> Stateful<Div> {
     let hint = match id {
@@ -254,7 +255,7 @@ fn visual_switch(
         format!("{label} ({hint})").into()
     };
     toggle_button(id, icon, label, enabled, cx, move |this, _| {
-        toggle(&mut this.settings.draft);
+        toggle(&mut this.draft);
     })
 }
 
@@ -346,8 +347,40 @@ impl FontOption {
     }
 }
 
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+enum Measured {
+    Device,
+    SettingsFont,
+    SettingsStyle,
+    SettingsFft,
+    SettingsLogLevel,
+    SettingsWindow,
+}
+
+pub(super) enum SettingsEvent {
+    Closed,
+    ApplyVisualizer {
+        panel_id: u64,
+        options: AudioVisualizerOptions,
+        session: u64,
+    },
+}
+
+impl EventEmitter<SettingsEvent> for Settings {}
+
 /// Unsaved preferences stay independent from live playback snapshots.
 pub(super) struct Settings {
+    handle: AppHandle,
+    devices: Arc<Vec<String>>,
+    ffmpeg_status: String,
+    mpris_status: String,
+    ui_scale: f32,
+    focus: FocusHandle,
+    active: bool,
+    measured: Rc<RefCell<HashMap<Measured, Bounds<Pixels>>>>,
+    scrolls: HashMap<&'static str, ScrollHandle>,
+    active_scroll: Option<ScrollHandle>,
+    _subscriptions: Vec<Subscription>,
     draft: Config,
     inputs: HashMap<Field, Entity<Input>>,
     initialized: bool,
@@ -356,7 +389,7 @@ pub(super) struct Settings {
     font_value: String,
     device_scroll: UniformListScrollHandle,
     dropdown_anchor: Measured,
-    pub(super) applying: bool,
+    applying: bool,
     session: u64,
     feedback: Option<std::result::Result<(), String>>,
     page: SettingsPage,
@@ -365,9 +398,28 @@ pub(super) struct Settings {
 }
 
 impl Settings {
-    pub(super) fn new(config: &Config) -> Self {
+    pub(super) fn new(
+        handle: AppHandle,
+        devices: Arc<Vec<String>>,
+        ffmpeg_status: String,
+        mpris_status: String,
+        ui_scale: f32,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let config = handle.config_snapshot();
         Self {
-            draft: config.clone(),
+            handle,
+            devices,
+            ffmpeg_status,
+            mpris_status,
+            ui_scale,
+            focus: cx.focus_handle(),
+            active: false,
+            measured: Rc::new(RefCell::new(HashMap::new())),
+            scrolls: HashMap::new(),
+            active_scroll: None,
+            _subscriptions: Vec::new(),
+            draft: config.as_ref().clone(),
             inputs: HashMap::new(),
             initialized: false,
             dropdown: DropdownState::default(),
@@ -382,6 +434,75 @@ impl Settings {
             visual_page: VisualPage::Common,
             visualizer_panel: None,
         }
+    }
+
+    pub(super) fn sync_runtime(
+        &mut self,
+        devices: &Arc<Vec<String>>,
+        ffmpeg_status: &str,
+        mpris_status: &str,
+        ui_scale: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let devices_changed = !Arc::ptr_eq(&self.devices, devices) && self.devices != *devices;
+        let changed = devices_changed
+            || self.ffmpeg_status != ffmpeg_status
+            || self.mpris_status != mpris_status
+            || self.ui_scale != ui_scale;
+        if !changed {
+            return;
+        }
+        self.devices = Arc::clone(devices);
+        self.ffmpeg_status.clear();
+        self.ffmpeg_status.push_str(ffmpeg_status);
+        self.mpris_status.clear();
+        self.mpris_status.push_str(mpris_status);
+        self.ui_scale = ui_scale;
+        if devices_changed && self.dropdown.is_open() && self.dropdown_anchor == Measured::Device {
+            self.dropdown.close();
+        }
+        if self.active {
+            cx.notify();
+        }
+    }
+
+    pub(super) fn complete_visualizer_apply(
+        &mut self,
+        session: u64,
+        result: std::result::Result<(), String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.session != session {
+            return;
+        }
+        self.applying = false;
+        self.feedback = Some(result);
+        cx.notify();
+    }
+
+    fn cancel(&mut self, cx: &mut Context<Self>) {
+        if self.applying {
+            return;
+        }
+        self.active = false;
+        self.dropdown.close();
+        self.reset(&self.handle.config_snapshot(), cx);
+        cx.emit(SettingsEvent::Closed);
+    }
+
+    fn measurement(&self, key: Measured) -> AnyElement {
+        let measured = Rc::clone(&self.measured);
+        canvas(
+            move |bounds, _, _| {
+                measured.borrow_mut().insert(key, bounds);
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .into_any_element()
     }
 
     fn initialize(&mut self, cx: &mut App) {
@@ -878,13 +999,13 @@ impl Settings {
         id: &'static str,
         label: &'static str,
         active: bool,
-        cx: &mut Context<GuiApp>,
+        cx: &mut Context<Settings>,
         select: impl Fn(&mut Settings) + 'static,
     ) -> Stateful<Div> {
         active_control(
             button(id, label, cx, move |this, _, cx| {
-                this.settings.dropdown.close();
-                select(&mut this.settings);
+                this.dropdown.close();
+                select(this);
                 cx.notify();
             }),
             active,
@@ -893,44 +1014,43 @@ impl Settings {
     }
 }
 
-impl GuiApp {
+impl Settings {
     fn initialize_settings(&mut self, cx: &mut Context<Self>) {
-        if self.settings.initialized {
+        if self.initialized {
             return;
         }
-        self.settings.initialize(cx);
-        self._subscriptions.push(cx.subscribe(
-            &self.settings.inputs[&Field::Font],
-            |this, _, event, cx| {
+        self.initialize(cx);
+        self._subscriptions.push(
+            cx.subscribe(&self.inputs[&Field::Font], |this, _, event, cx| {
                 if matches!(event, InputEvent::Submit) {
-                    if this.settings.dropdown.is_open()
-                        && this.settings.dropdown_anchor == Measured::SettingsFont
-                        && let Some(index) = this.settings.dropdown.selected_index()
+                    if this.dropdown.is_open()
+                        && this.dropdown_anchor == Measured::SettingsFont
+                        && let Some(index) = this.dropdown.selected_index()
                     {
                         this.choose_device(index, cx);
                     }
                     return;
                 }
-                let value = this.settings.value(Field::Font, cx);
-                if value == this.settings.font_value {
+                let value = this.value(Field::Font, cx);
+                if value == this.font_value {
                     return;
                 }
-                this.settings.font_value = value;
-                if this.settings_open {
+                this.font_value = value;
+                if this.active {
                     this.open_font_dropdown(true, cx);
                     cx.notify();
                 }
-            },
-        ));
+            }),
+        );
     }
 
     fn open_font_dropdown(&mut self, filtered: bool, cx: &App) {
-        let value = self.settings.value(Field::Font, cx);
-        let items = self.settings.font_items(if filtered { &value } else { "" });
+        let value = self.value(Field::Font, cx);
+        let items = self.font_items(if filtered { &value } else { "" });
         let selected = items
             .iter()
             .position(|item| match item.value {
-                SettingChoice::Font(index) => self.settings.font_options[index]
+                SettingChoice::Font(index) => self.font_options[index]
                     .family
                     .eq_ignore_ascii_case(value.trim()),
                 _ => false,
@@ -939,24 +1059,20 @@ impl GuiApp {
         self.open_setting_dropdown(items, selected);
     }
 
-    pub(super) fn settings_font_input_focused(&self, window: &Window, cx: &App) -> bool {
-        self.settings.dropdown_anchor == Measured::SettingsFont
-            && self.settings.inputs[&Field::Font]
-                .read(cx)
-                .is_focused(window)
+    fn settings_font_input_focused(&self, window: &Window, cx: &App) -> bool {
+        self.dropdown_anchor == Measured::SettingsFont
+            && self.inputs[&Field::Font].read(cx).is_focused(window)
     }
 
     fn font_control(&self, cx: &mut Context<Self>) -> Div {
-        let input = self.settings.inputs[&Field::Font].clone();
+        let input = self.inputs[&Field::Font].clone();
         let control = div()
             .id("settings-font")
             .relative()
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
-                    if !this.settings.dropdown.is_open()
-                        || this.settings.dropdown_anchor != Measured::SettingsFont
-                    {
+                    if !this.dropdown.is_open() || this.dropdown_anchor != Measured::SettingsFont {
                         this.open_font_dropdown(false, cx);
                         cx.notify();
                     }
@@ -973,8 +1089,8 @@ impl GuiApp {
                     return;
                 }
                 let key = event.keystroke.key.as_str();
-                let open = this.settings.dropdown.is_open()
-                    && this.settings.dropdown_anchor == Measured::SettingsFont;
+                let open =
+                    this.dropdown.is_open() && this.dropdown_anchor == Measured::SettingsFont;
                 if !open {
                     if matches!(key, "up" | "down") {
                         this.open_font_dropdown(false, cx);
@@ -982,7 +1098,7 @@ impl GuiApp {
                         cx.notify();
                     }
                 } else if key == "escape" {
-                    this.settings.dropdown.close();
+                    this.dropdown.close();
                     cx.stop_propagation();
                     cx.notify();
                 } else if matches!(key, "up" | "down" | "pageup" | "pagedown") {
@@ -1007,16 +1123,14 @@ impl GuiApp {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, window, cx| {
-                            if this.settings.dropdown.is_open()
-                                && this.settings.dropdown_anchor == Measured::SettingsFont
+                            if this.dropdown.is_open()
+                                && this.dropdown_anchor == Measured::SettingsFont
                             {
-                                this.settings.dropdown.close();
+                                this.dropdown.close();
                             } else {
                                 this.open_font_dropdown(false, cx);
                             }
-                            this.settings.inputs[&Field::Font]
-                                .focus_handle(cx)
-                                .focus(window, cx);
+                            this.inputs[&Field::Font].focus_handle(cx).focus(window, cx);
                             cx.stop_propagation();
                             cx.notify();
                         }),
@@ -1026,65 +1140,52 @@ impl GuiApp {
         Field::Font.form(control)
     }
 
-    pub(super) fn load_settings(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let config = self.handle.config_snapshot();
         self.initialize_settings(cx);
-        self.settings.dropdown.close();
-        self.settings.reset(&config, cx);
+        self.dropdown.close();
+        self.reset(&config, cx);
+        self.active = true;
+        self.focus.focus(window, cx);
         cx.notify();
     }
 
-    pub(super) fn load_visualizer_settings(&mut self, panel_id: u64, cx: &mut Context<Self>) {
-        let Some(options) = self.layouts.current().audio_visualizer_options(panel_id) else {
-            return;
-        };
-        self.load_settings(cx);
-        self.settings.visualizer_panel = Some(panel_id);
-        self.settings.page = SettingsPage::Visualizations;
-        self.settings.visual_page = VisualPage::AudioVisualizer;
-        self.settings.draft.audio_visualizer_style = options.style;
-        self.settings.draft.audio_visualizer_grid = options.reference_lines;
-        self.settings.draft.audio_visualizer_labels = options.labels;
-        self.settings_open = true;
+    pub(super) fn open_visualizer(
+        &mut self,
+        panel_id: u64,
+        options: AudioVisualizerOptions,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open(window, cx);
+        self.visualizer_panel = Some(panel_id);
+        self.page = SettingsPage::Visualizations;
+        self.visual_page = VisualPage::AudioVisualizer;
+        self.draft.audio_visualizer_style = options.style;
+        self.draft.audio_visualizer_grid = options.reference_lines;
+        self.draft.audio_visualizer_labels = options.labels;
         cx.notify();
     }
 
     fn apply_settings(&mut self, cx: &mut Context<Self>) {
-        if self.settings.applying {
+        if self.applying {
             return;
         }
-        if let Some(panel_id) = self.settings.visualizer_panel {
-            let options = AudioVisualizerOptions::from(&self.settings.draft);
-            let previous = self.layouts.current().audio_visualizer_options(panel_id);
-            self.settings.feedback = Some(
-                if self
-                    .layouts
-                    .current_mut()
-                    .set_audio_visualizer_options(panel_id, options)
-                {
-                    match self.layouts.save(&self.layout_path) {
-                        Ok(()) => Ok(()),
-                        Err(error) => {
-                            if let Some(previous) = previous {
-                                self.layouts
-                                    .current_mut()
-                                    .set_audio_visualizer_options(panel_id, previous);
-                            }
-                            Err(format!("Saving layout: {error:#}"))
-                        }
-                    }
-                } else {
-                    Err("This visualizer instance no longer exists".into())
-                },
-            );
-            self.sync_analysis(cx);
+        if let Some(panel_id) = self.visualizer_panel {
+            self.applying = true;
+            self.feedback = None;
+            cx.emit(SettingsEvent::ApplyVisualizer {
+                panel_id,
+                options: AudioVisualizerOptions::from(&self.draft),
+                session: self.session,
+            });
             cx.notify();
             return;
         }
-        let mut config = match self.settings.parse(cx) {
+        let mut config = match self.parse(cx) {
             Ok(config) => config,
             Err(error) => {
-                self.settings.feedback = Some(Err(format!("Invalid settings: {error:#}")));
+                self.feedback = Some(Err(format!("Invalid settings: {error:#}")));
                 cx.notify();
                 return;
             }
@@ -1099,9 +1200,9 @@ impl GuiApp {
             .playback;
         config.shuffle = playback.shuffle;
         config.repeat = playback.repeat;
-        self.settings.applying = true;
-        self.settings.feedback = None;
-        let session = self.settings.session;
+        self.applying = true;
+        self.feedback = None;
+        let session = self.session;
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
             let response = cx
@@ -1109,11 +1210,11 @@ impl GuiApp {
                 .spawn(async move { handle.request_ack(Command::Configure { config }) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if this.settings.session != session {
+                if this.session != session {
                     return;
                 }
-                this.settings.applying = false;
-                this.settings.feedback = Some(if response.ok {
+                this.applying = false;
+                this.feedback = Some(if response.ok {
                     Ok(())
                 } else {
                     Err(response
@@ -1130,50 +1231,48 @@ impl GuiApp {
     fn select_font(&mut self, value: String, cx: &mut Context<Self>) {
         // set_text emits Changed too; remember explicit writes so selecting or
         // resetting a value does not reopen the autocomplete popup.
-        self.settings.font_value = value.clone();
-        self.settings.draft.ui_font = value.clone();
-        self.settings.inputs[&Field::Font].update(cx, |input, cx| input.set_text(value, cx));
+        self.font_value = value.clone();
+        self.draft.ui_font = value.clone();
+        self.inputs[&Field::Font].update(cx, |input, cx| input.set_text(value, cx));
     }
 
     fn choose_device(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some((_, item)) = self.settings.dropdown.filtered_item(index) else {
+        let Some((_, item)) = self.dropdown.filtered_item(index) else {
             return;
         };
         match item.value {
             SettingChoice::Device(device_index) => {
                 if device_index == 0 {
-                    self.settings.draft.output_device = None;
-                } else if let Some(name) = self.state.system.devices.get(device_index - 1) {
-                    self.settings.draft.output_device = Some(name.clone());
+                    self.draft.output_device = None;
+                } else if let Some(name) = self.devices.get(device_index - 1) {
+                    self.draft.output_device = Some(name.clone());
                 } else {
                     return;
                 }
             }
             SettingChoice::Font(index) => {
-                let value = self.settings.font_options[index].family.clone();
+                let value = self.font_options[index].family.clone();
                 self.select_font(value, cx);
             }
             SettingChoice::CustomFont => {
-                let value = self.settings.value(Field::Font, cx).trim().to_owned();
+                let value = self.value(Field::Font, cx).trim().to_owned();
                 self.select_font(value, cx);
             }
-            SettingChoice::SpectrumStyle(value) => self.settings.draft.spectrum_style = value,
-            SettingChoice::AudioVisualizerStyle(value) => {
-                self.settings.draft.audio_visualizer_style = value
-            }
-            SettingChoice::Palette(value) => self.settings.draft.visual_palette = value,
-            SettingChoice::Fft(value) => self.settings.draft.analysis_fft_size = value,
-            SettingChoice::LogLevel(value) => self.settings.draft.log_level = value,
-            SettingChoice::Window(value) => self.settings.draft.analysis_window = value,
+            SettingChoice::SpectrumStyle(value) => self.draft.spectrum_style = value,
+            SettingChoice::AudioVisualizerStyle(value) => self.draft.audio_visualizer_style = value,
+            SettingChoice::Palette(value) => self.draft.visual_palette = value,
+            SettingChoice::Fft(value) => self.draft.analysis_fft_size = value,
+            SettingChoice::LogLevel(value) => self.draft.log_level = value,
+            SettingChoice::Window(value) => self.draft.analysis_window = value,
         }
-        self.settings.dropdown.select_index(index);
-        self.settings.dropdown.close();
+        self.dropdown.select_index(index);
+        self.dropdown.close();
         cx.notify();
     }
 
     fn open_setting_dropdown(&mut self, items: Vec<DropdownItem<SettingChoice>>, selected: usize) {
         if let Some(item) = items.first() {
-            self.settings.dropdown_anchor = match item.value {
+            self.dropdown_anchor = match item.value {
                 SettingChoice::Font(_) | SettingChoice::CustomFont => Measured::SettingsFont,
                 SettingChoice::SpectrumStyle(_) => Measured::SettingsStyle,
                 SettingChoice::Fft(_) => Measured::SettingsFft,
@@ -1184,36 +1283,21 @@ impl GuiApp {
                 SettingChoice::Device(_) => Measured::Device,
             };
         }
-        self.settings.dropdown.open(items);
-        self.settings.dropdown.select_index(selected);
-        if let Some(index) = self.settings.dropdown.selected_index() {
-            self.settings
-                .device_scroll
+        self.dropdown.open(items);
+        self.dropdown.select_index(selected);
+        if let Some(index) = self.dropdown.selected_index() {
+            self.device_scroll
                 .scroll_to_item(index, ScrollStrategy::Nearest);
         }
     }
 
-    pub(super) fn settings_dropdown_is_open(&self) -> bool {
-        self.settings.dropdown.is_open()
-    }
-
-    pub(super) fn close_settings_dropdown(&mut self) {
-        self.settings.dropdown.close();
-    }
-
-    pub(super) fn settings_dropdown_key(
-        &mut self,
-        key: &str,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn settings_dropdown_key(&mut self, key: &str, window: &Window, cx: &mut Context<Self>) {
         match key {
-            "up" => self.settings.dropdown.move_previous(),
-            "down" => self.settings.dropdown.move_next(),
+            "up" => self.dropdown.move_previous(),
+            "down" => self.dropdown.move_next(),
             "pageup" | "pagedown" => {
-                if let Some(index) = self.settings.dropdown.selected_index() {
+                if let Some(index) = self.dropdown.selected_index() {
                     let viewport_height = self
-                        .settings
                         .device_scroll
                         .0
                         .borrow()
@@ -1229,11 +1313,11 @@ impl GuiApp {
                     } else {
                         index.saturating_sub(visible_rows)
                     };
-                    self.settings.dropdown.select_index(next);
+                    self.dropdown.select_index(next);
                 }
             }
             "enter" | "space" => {
-                if let Some(index) = self.settings.dropdown.selected_index() {
+                if let Some(index) = self.dropdown.selected_index() {
                     self.choose_device(index, cx);
                 }
                 cx.stop_propagation();
@@ -1241,9 +1325,8 @@ impl GuiApp {
             }
             _ => return,
         }
-        if let Some(index) = self.settings.dropdown.selected_index() {
-            self.settings
-                .device_scroll
+        if let Some(index) = self.dropdown.selected_index() {
+            self.device_scroll
                 .scroll_to_item(index, ScrollStrategy::Nearest);
         }
         cx.stop_propagation();
@@ -1252,7 +1335,6 @@ impl GuiApp {
 
     fn general_settings(&mut self, cx: &mut Context<Self>) -> Div {
         let chosen_device: SharedString = self
-            .settings
             .draft
             .output_device
             .clone()
@@ -1268,21 +1350,16 @@ impl GuiApp {
                     chosen_device.clone(),
                     cx,
                     |this, _, _| {
-                        let open = this.settings.dropdown.is_open();
+                        let open = this.dropdown.is_open();
                         if open {
-                            this.settings.dropdown.close();
+                            this.dropdown.close();
                         } else {
                             let selected = this
-                                .settings
                                 .draft
                                 .output_device
                                 .as_ref()
                                 .and_then(|name| {
-                                    this.state
-                                        .system
-                                        .devices
-                                        .iter()
-                                        .position(|device| device == name)
+                                    this.devices.iter().position(|device| device == name)
                                 })
                                 .map_or(0, |index| index + 1);
                             let items = std::iter::once(DropdownItem::new(
@@ -1290,21 +1367,19 @@ impl GuiApp {
                                 "System default",
                             ))
                             .chain(
-                                this.state.system.devices.iter().enumerate().map(
-                                    |(index, device)| {
-                                        DropdownItem::new(
-                                            SettingChoice::Device(index + 1),
-                                            device.clone(),
-                                        )
-                                    },
-                                ),
+                                this.devices.iter().enumerate().map(|(index, device)| {
+                                    DropdownItem::new(
+                                        SettingChoice::Device(index + 1),
+                                        device.clone(),
+                                    )
+                                }),
                             );
-                            this.settings.dropdown.open(items);
-                            this.settings.dropdown.select_index(selected);
+                            this.dropdown_anchor = Measured::Device;
+                            this.dropdown.open(items);
+                            this.dropdown.select_index(selected);
                         }
-                        if let Some(index) = this.settings.dropdown.selected_index() {
-                            this.settings
-                                .device_scroll
+                        if let Some(index) = this.dropdown.selected_index() {
+                            this.device_scroll
                                 .scroll_to_item(index, ScrollStrategy::Nearest);
                         }
                     },
@@ -1321,7 +1396,7 @@ impl GuiApp {
                 })
                 .child(self.measurement(Measured::Device)),
             );
-        let draft = &self.settings.draft;
+        let draft = &self.draft;
         let (mpris, tray, ffmpeg, remix) = (
             draft.mpris_enabled,
             draft.tray_enabled,
@@ -1341,7 +1416,7 @@ impl GuiApp {
                 ];
                 let selected = values
                     .iter()
-                    .position(|value| *value == this.settings.draft.log_level)
+                    .position(|value| *value == this.draft.log_level)
                     .unwrap_or(0);
                 this.open_setting_dropdown(
                     values
@@ -1374,8 +1449,7 @@ impl GuiApp {
                         .child(log_level_dropdown),
                 )
                 .child(
-                    self.settings
-                        .field(Field::LogRetentionWeeks)
+                    self.field(Field::LogRetentionWeeks)
                         .flex_1()
                         .min_w(px(180.)),
                 )
@@ -1394,20 +1468,15 @@ impl GuiApp {
                 .items_start()
                 .flex_wrap()
                 .gap_3()
-                .child(self.settings.field(Field::Roots).flex_1().min_w(px(260.)))
-                .child(
-                    self.settings
-                        .field(Field::ScanMaxDepth)
-                        .flex_1()
-                        .min_w(px(220.)),
-                ),
+                .child(self.field(Field::Roots).flex_1().min_w(px(260.)))
+                .child(self.field(Field::ScanMaxDepth).flex_1().min_w(px(220.))),
         );
         let playback = settings_group(
             "Playback",
             column()
                 .gap_2()
-                .child(self.settings.pair(Field::Volume, Field::PlayCountThreshold))
-                .child(self.settings.single(Field::QueueLimit)),
+                .child(self.pair(Field::Volume, Field::PlayCountThreshold))
+                .child(self.single(Field::QueueLimit)),
         );
         let audio = settings_group(
             "Audio",
@@ -1419,12 +1488,7 @@ impl GuiApp {
                         .flex_wrap()
                         .gap_3()
                         .child(device.flex_1().min_w(px(260.)))
-                        .child(
-                            self.settings
-                                .field(Field::MediaReadBuffer)
-                                .flex_1()
-                                .min_w(px(240.)),
-                        ),
+                        .child(self.field(Field::MediaReadBuffer).flex_1().min_w(px(240.))),
                 )
                 .child(
                     row()
@@ -1437,12 +1501,11 @@ impl GuiApp {
                                 format!(
                                     "FFmpeg decoding: {}\n{}",
                                     if ffmpeg { "On" } else { "Off" },
-                                    ffmpeg_hint(&self.state.system.ffmpeg_status)
+                                    ffmpeg_hint(&self.ffmpeg_status)
                                 ),
                                 cx,
                                 |this, _, cx| {
-                                    this.settings.draft.ffmpeg_enabled =
-                                        !this.settings.draft.ffmpeg_enabled;
+                                    this.draft.ffmpeg_enabled = !this.draft.ffmpeg_enabled;
                                     cx.notify();
                                 },
                             )
@@ -1465,18 +1528,18 @@ impl GuiApp {
                 .gap_2()
                 .child(two_column(
                     self.font_control(cx).min_w(px(180.)),
-                    self.settings.field(Field::Scale).min_w(px(180.)),
+                    self.field(Field::Scale).min_w(px(180.)),
                 ))
                 .child(two_column(
                     row().child(visual_switch(
                         "settings-layout-snapping",
                         "󰐃",
                         "Layout snapping",
-                        self.settings.draft.layout_snap_enabled,
+                        self.draft.layout_snap_enabled,
                         cx,
                         |draft| draft.layout_snap_enabled = !draft.layout_snap_enabled,
                     )),
-                    self.settings.field(Field::LayoutSnapGrid).min_w(px(180.)),
+                    self.field(Field::LayoutSnapGrid).min_w(px(180.)),
                 ))
                 .child(
                     row()
@@ -1489,12 +1552,11 @@ impl GuiApp {
                                 format!(
                                     "Media controls (MPRIS): {}\n{}",
                                     if mpris { "On" } else { "Off" },
-                                    self.state.system.mpris_status
+                                    self.mpris_status
                                 ),
                                 cx,
                                 |this, _, cx| {
-                                    this.settings.draft.mpris_enabled =
-                                        !this.settings.draft.mpris_enabled;
+                                    this.draft.mpris_enabled = !this.draft.mpris_enabled;
                                     cx.notify();
                                 },
                             )
@@ -1526,42 +1588,42 @@ impl GuiApp {
     }
 
     fn visual_settings_tabs(&self, cx: &mut Context<Self>) -> Div {
-        let selected = self.settings.visual_page;
+        let selected = self.visual_page;
         row()
             .flex_wrap()
             .flex_shrink_0()
             .gap_1()
             .px(gpui::px(UI_INSET))
             .py_2()
-            .child(self.settings.tab_button(
+            .child(self.tab_button(
                 "visual-common",
                 "Common",
                 selected == VisualPage::Common,
                 cx,
                 |settings| settings.visual_page = VisualPage::Common,
             ))
-            .child(self.settings.tab_button(
+            .child(self.tab_button(
                 "visual-spectrogram",
                 "Spectrogram",
                 selected == VisualPage::Spectrogram,
                 cx,
                 |settings| settings.visual_page = VisualPage::Spectrogram,
             ))
-            .child(self.settings.tab_button(
+            .child(self.tab_button(
                 "visual-spectrum",
                 "Spectrum",
                 selected == VisualPage::Spectrum,
                 cx,
                 |settings| settings.visual_page = VisualPage::Spectrum,
             ))
-            .child(self.settings.tab_button(
+            .child(self.tab_button(
                 "visual-waveform",
                 "Waveform",
                 selected == VisualPage::Waveform,
                 cx,
                 |settings| settings.visual_page = VisualPage::Waveform,
             ))
-            .child(self.settings.tab_button(
+            .child(self.tab_button(
                 "visual-audio-visualizer",
                 "Audio Visualizer",
                 selected == VisualPage::AudioVisualizer,
@@ -1570,8 +1632,8 @@ impl GuiApp {
             ))
     }
 
-    fn visual_settings(&mut self, cx: &mut Context<GuiApp>) -> Div {
-        let settings = &self.settings;
+    fn visual_settings(&mut self, cx: &mut Context<Settings>) -> Div {
+        let settings = &*self;
         let draft = &settings.draft;
         match settings.visual_page {
             VisualPage::Common => {
@@ -1586,7 +1648,7 @@ impl GuiApp {
                         ];
                         let selected = values
                             .iter()
-                            .position(|value| *value == this.settings.draft.visual_palette)
+                            .position(|value| *value == this.draft.visual_palette)
                             .unwrap_or(0);
                         this.open_setting_dropdown(
                             values
@@ -1612,7 +1674,7 @@ impl GuiApp {
                         let values = [512, 1024, 2048, 4096, 8192, 16384, 32768];
                         let selected = values
                             .iter()
-                            .position(|value| *value == this.settings.draft.analysis_fft_size)
+                            .position(|value| *value == this.draft.analysis_fft_size)
                             .unwrap_or(0);
                         this.open_setting_dropdown(
                             values
@@ -1639,7 +1701,7 @@ impl GuiApp {
                         ];
                         let selected = values
                             .iter()
-                            .position(|value| *value == this.settings.draft.analysis_window)
+                            .position(|value| *value == this.draft.analysis_window)
                             .unwrap_or(0);
                         this.open_setting_dropdown(
                             values
@@ -1691,7 +1753,7 @@ impl GuiApp {
                         ];
                         let selected = values
                             .iter()
-                            .position(|value| *value == this.settings.draft.spectrum_style)
+                            .position(|value| *value == this.draft.spectrum_style)
                             .unwrap_or(0);
                         this.open_setting_dropdown(
                             values
@@ -1789,7 +1851,7 @@ impl GuiApp {
                         ];
                         let selected = values
                             .iter()
-                            .position(|value| *value == this.settings.draft.audio_visualizer_style)
+                            .position(|value| *value == this.draft.audio_visualizer_style)
                             .unwrap_or(0);
                         this.open_setting_dropdown(
                             values
@@ -1923,13 +1985,8 @@ impl GuiApp {
         }
     }
 
-    pub(super) fn settings_panel(
-        &mut self,
-        panel_id: u64,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        self.initialize_settings(cx);
+    fn panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let panel_id = u64::MAX;
         let category = row()
             .flex_wrap()
             .flex_shrink_0()
@@ -1938,17 +1995,17 @@ impl GuiApp {
             .py(gpui::px(UI_INSET))
             .border_b_1()
             .border_color(rgb(BORDER))
-            .child(self.settings.tab_button(
+            .child(self.tab_button(
                 "settings-general",
                 "General",
-                self.settings.page == SettingsPage::General,
+                self.page == SettingsPage::General,
                 cx,
                 |settings| settings.page = SettingsPage::General,
             ))
-            .child(self.settings.tab_button(
+            .child(self.tab_button(
                 "settings-visualizations",
                 "Visualizations",
-                self.settings.page == SettingsPage::Visualizations,
+                self.page == SettingsPage::Visualizations,
                 cx,
                 |settings| settings.page = SettingsPage::Visualizations,
             ));
@@ -1959,10 +2016,10 @@ impl GuiApp {
             .flex_1()
             .min_h_0()
             .gap_0()
-            .when(self.settings.visualizer_panel.is_none(), |panel| {
+            .when(self.visualizer_panel.is_none(), |panel| {
                 panel.child(category)
             });
-        let page_id = match (self.settings.page, self.settings.visual_page) {
+        let page_id = match (self.page, self.visual_page) {
             (SettingsPage::General, _) => "settings-general-scroll",
             (_, VisualPage::Common) => "settings-common-scroll",
             (_, VisualPage::Spectrum) => "settings-spectrum-scroll",
@@ -1970,16 +2027,17 @@ impl GuiApp {
             (_, VisualPage::Waveform) => "settings-waveform-scroll",
             (_, VisualPage::AudioVisualizer) => "settings-audio-visualizer-scroll",
         };
-        let content = match self.settings.page {
+        let content = match self.page {
             SettingsPage::General => self.general_settings(cx),
             SettingsPage::Visualizations => {
-                if self.settings.visualizer_panel.is_none() {
+                if self.visualizer_panel.is_none() {
                     panel = panel.child(self.visual_settings_tabs(cx));
                 }
                 self.visual_settings(cx)
             }
         };
-        let scroll = self.scroll_views.content((page_id, panel_id));
+        let scroll = self.scrolls.entry(page_id).or_default().clone();
+        self.active_scroll = Some(scroll.clone());
         panel = panel.child(
             div()
                 .id(page_id)
@@ -1991,10 +2049,10 @@ impl GuiApp {
                 .track_scroll(&scroll)
                 .child(content.flex_shrink_0().p(gpui::px(UI_INSET))),
         );
-        let feedback = if self.settings.applying {
+        let feedback = if self.applying {
             status_message("Applying settings…", StatusKind::Info).into_any_element()
         } else {
-            match &self.settings.feedback {
+            match &self.feedback {
                 Some(Err(error)) => copyable_message("copy-settings-error", error.clone(), cx)
                     .text_color(rgb(ERROR))
                     .into_any_element(),
@@ -2029,7 +2087,7 @@ impl GuiApp {
                         cx,
                         |this, _, cx| this.apply_settings(cx),
                     )
-                    .opacity(if self.settings.applying { 0.4 } else { 1.0 }),
+                    .opacity(if self.applying { 0.4 } else { 1.0 }),
                 )
                 .child(icon_button(
                     "settings-discard",
@@ -2037,27 +2095,21 @@ impl GuiApp {
                     "Discard changes and close",
                     cx,
                     |this, _, cx| {
-                        if this.settings.applying {
+                        if this.applying {
                             return;
                         }
-                        this.load_settings(cx);
-                        this.settings_open = false;
-                        cx.notify();
+                        this.cancel(cx);
                     },
                 )),
         );
-        if self.settings.dropdown.is_open() {
-            let bounds = self
-                .measured
-                .borrow()
-                .get(&self.settings.dropdown_anchor)
-                .copied();
+        if self.dropdown.is_open() {
+            let bounds = self.measured.borrow().get(&self.dropdown_anchor).copied();
             if let Some(bounds) = bounds {
-                let selected = self.settings.dropdown.selected_index().unwrap_or(0);
-                let item_count = self.settings.dropdown.filtered().count();
+                let selected = self.dropdown.selected_index().unwrap_or(0);
+                let item_count = self.dropdown.filtered().count();
                 let row_height = DROPDOWN_ROW_REMS * f32::from(window.rem_size());
                 let height = (item_count as f32 * row_height)
-                    .min(POPOVER_MAX_HEIGHT * self.state.system.config.ui_scale)
+                    .min(POPOVER_MAX_HEIGHT * self.ui_scale)
                     .min(f32::from(window.viewport_size().height) * 0.45);
                 let choices = uniform_list(
                     "settings-dropdown",
@@ -2065,8 +2117,7 @@ impl GuiApp {
                     cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                         range
                             .filter_map(|index| {
-                                let (item_index, item) =
-                                    this.settings.dropdown.filtered_item(index)?;
+                                let (item_index, item) = this.dropdown.filtered_item(index)?;
                                 let label: SharedString = item.label.clone().into();
                                 let hint = label.clone();
                                 Some(
@@ -2086,7 +2137,7 @@ impl GuiApp {
                             .collect()
                     }),
                 )
-                .track_scroll(&self.settings.device_scroll)
+                .track_scroll(&self.device_scroll)
                 .h(px(height))
                 .w_full();
                 panel = panel.child(
@@ -2098,8 +2149,7 @@ impl GuiApp {
                                 dropdown_container("settings-dropdown", bounds.size.width)
                                     .on_mouse_down_out(cx.listener(
                                         |this, event: &MouseDownEvent, _, cx| {
-                                            if this.settings.dropdown_anchor
-                                                == Measured::SettingsFont
+                                            if this.dropdown_anchor == Measured::SettingsFont
                                                 && this
                                                     .measured
                                                     .borrow()
@@ -2110,7 +2160,7 @@ impl GuiApp {
                                             {
                                                 return;
                                             }
-                                            this.settings.dropdown.close();
+                                            this.dropdown.close();
                                             cx.stop_propagation();
                                             cx.notify();
                                         },
@@ -2123,5 +2173,86 @@ impl GuiApp {
             }
         }
         panel.into_any_element()
+    }
+}
+
+impl Render for Settings {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let panel = self.panel(window, cx);
+        div()
+            .id("settings-modal")
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                let key = event.keystroke.key.as_str();
+                if this.dropdown.is_open() {
+                    if this.settings_font_input_focused(window, cx) {
+                        return;
+                    }
+                    if key == "escape" {
+                        this.dropdown.close();
+                        cx.notify();
+                    } else {
+                        this.settings_dropdown_key(key, window, cx);
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
+                let modifiers = event.keystroke.modifiers;
+                if matches!(key, "pageup" | "pagedown")
+                    && !modifiers.control
+                    && !modifiers.platform
+                    && !modifiers.alt
+                    && !modifiers.shift
+                    && !modifiers.function
+                    && this.focus.is_focused(window)
+                {
+                    if let Some(scroll) = &this.active_scroll {
+                        let mut offset = scroll.offset();
+                        let step = scroll.bounds().size.height.max(px(0.));
+                        offset.y = (if key == "pagedown" {
+                            offset.y - step
+                        } else {
+                            offset.y + step
+                        })
+                        .max(-scroll.max_offset().y.max(px(0.)))
+                        .min(px(0.));
+                        scroll.set_offset(offset);
+                        cx.notify();
+                    }
+                    cx.stop_propagation();
+                } else if key == "escape" {
+                    this.cancel(cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .occlude()
+            .absolute()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgb(0x000000).alpha(0.58))
+            .child(
+                column()
+                    .max_w(px(620.))
+                    .w(relative(0.9))
+                    .h((window.viewport_size().height - px(32.))
+                        .max(px(0.))
+                        .min(px(640.)))
+                    .gap_0()
+                    .overflow_hidden()
+                    .bg(rgb(super::PANEL))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .rounded_md()
+                    .child(
+                        row()
+                            .h(rems(2.5))
+                            .flex_shrink_0()
+                            .px(gpui::px(UI_INSET))
+                            .child(div().flex_1().text_lg().child("Settings")),
+                    )
+                    .child(panel),
+            )
     }
 }

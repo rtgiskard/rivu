@@ -122,15 +122,8 @@ impl ScrollViews {
         };
     }
 
-    pub(super) fn page(&self, down: bool, position: Point<Pixels>, settings: bool) -> bool {
-        let target = if settings {
-            self.regions
-                .keys()
-                .find(|target| target.1 == u64::MAX)
-                .copied()
-        } else {
-            self.active.or_else(|| self.under_pointer(position))
-        };
+    pub(super) fn page(&self, down: bool, position: Point<Pixels>) -> bool {
+        let target = self.active.or_else(|| self.under_pointer(position));
         let Some(region) = target.and_then(|target| self.regions.get(&target)) else {
             return false;
         };

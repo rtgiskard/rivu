@@ -366,10 +366,10 @@ fn chooser_path(files: &SelectedFiles) -> Option<PathBuf> {
         .and_then(|uri| uri.to_file_path().ok())
 }
 
-fn copyable_message(
+fn copyable_message<T: 'static>(
     id: impl Into<ElementId>,
     message: String,
-    cx: &mut Context<GuiApp>,
+    cx: &mut Context<T>,
 ) -> Stateful<Div> {
     row()
         .id(id)
@@ -377,7 +377,13 @@ fn copyable_message(
         .min_w_0()
         .overflow_hidden()
         .cursor_pointer()
-        .child(div().flex_initial().min_w_0().truncate().child(message.clone()))
+        .child(
+            div()
+                .flex_initial()
+                .min_w_0()
+                .truncate()
+                .child(message.clone()),
+        )
         .child(div().flex_shrink_0().child("⧉"))
         .tooltip({
             let message: SharedString = message.clone().into();
@@ -468,12 +474,6 @@ enum Measured {
     Tab(u64),
     Seek(u64),
     Volume(u64),
-    Device,
-    SettingsFont,
-    SettingsStyle,
-    SettingsFft,
-    SettingsLogLevel,
-    SettingsWindow,
 }
 #[derive(Clone, Copy)]
 enum Dragging {
@@ -621,7 +621,7 @@ pub(super) struct GuiApp {
     history_sort: HistorySort,
     history_sort_desc: bool,
     library_stats: Option<crate::model::LibraryStats>,
-    settings: settings::Settings,
+    settings: Entity<settings::Settings>,
     visuals: visuals::Visuals,
     audio_visualizer: audio_visualizer::AudioVisualizer,
     default_album: Entity<artwork::Artwork>,
@@ -634,7 +634,6 @@ pub(super) struct GuiApp {
     layout_action: Option<layout_manager::Action>,
     panel_menu: Option<PanelMenu>,
     playlist_delete_confirm: Option<i64>,
-    settings_focus: FocusHandle,
     waveform: Entity<waveform::Waveform>,
     target_group: Option<u64>,
     dragging: Option<Dragging>,
@@ -908,6 +907,58 @@ impl GuiApp {
             inputs.insert(field, cx.new(|cx| Input::new("", placeholder, cx)));
         }
         let mut subscriptions = Vec::new();
+        let settings = cx.new(|cx| {
+            settings::Settings::new(
+                handle.clone(),
+                Arc::clone(&state.system.devices),
+                state.system.ffmpeg_status.clone(),
+                state.system.mpris_status.clone(),
+                state.system.config.ui_scale,
+                cx,
+            )
+        });
+        subscriptions.push(cx.subscribe_in(
+            &settings,
+            window,
+            |this, settings, event, window, cx| match event {
+                settings::SettingsEvent::Closed => {
+                    this.settings_open = false;
+                    this.focus_layout(window, cx);
+                    cx.notify();
+                }
+                settings::SettingsEvent::ApplyVisualizer {
+                    panel_id,
+                    options,
+                    session,
+                } => {
+                    let previous = this.layouts.current().audio_visualizer_options(*panel_id);
+                    let result = if this
+                        .layouts
+                        .current_mut()
+                        .set_audio_visualizer_options(*panel_id, *options)
+                    {
+                        match this.layouts.save(&this.layout_path) {
+                            Ok(()) => Ok(()),
+                            Err(error) => {
+                                if let Some(previous) = previous {
+                                    this.layouts
+                                        .current_mut()
+                                        .set_audio_visualizer_options(*panel_id, previous);
+                                }
+                                Err(format!("Saving layout: {error:#}"))
+                            }
+                        }
+                    } else {
+                        Err("This visualizer instance no longer exists".into())
+                    };
+                    settings.update(cx, |settings, cx| {
+                        settings.complete_visualizer_apply(*session, result, cx)
+                    });
+                    this.sync_analysis(cx);
+                    cx.notify();
+                }
+            },
+        ));
         let waveform = cx.new(|_| waveform::Waveform::new(Arc::clone(&handle.waveform)));
         subscriptions.push(cx.observe(&waveform, |_, _, cx| cx.notify()));
         subscriptions.push(cx.subscribe(&waveform, |this, _, event, cx| match event {
@@ -996,7 +1047,7 @@ impl GuiApp {
             layout_path.parent().unwrap_or_else(|| Path::new(".")),
         ));
         let mut app = Self {
-            settings: settings::Settings::new(&state.system.config),
+            settings,
             handle,
             state,
             layouts,
@@ -1052,7 +1103,6 @@ impl GuiApp {
             layout_action: None,
             panel_menu: None,
             playlist_delete_confirm: None,
-            settings_focus: cx.focus_handle(),
             waveform,
             target_group: None,
             dragging: None,
@@ -1916,6 +1966,21 @@ impl GuiApp {
             .then(|| self.handle.gui_snapshot());
         let mut changed = state.is_some();
         if let Some(state) = state {
+            if !Arc::ptr_eq(&self.state.system.devices, &state.system.devices)
+                || self.state.system.ffmpeg_status != state.system.ffmpeg_status
+                || self.state.system.mpris_status != state.system.mpris_status
+                || self.state.system.config.ui_scale != state.system.config.ui_scale
+            {
+                self.settings.update(cx, |settings, cx| {
+                    settings.sync_runtime(
+                        &state.system.devices,
+                        &state.system.ffmpeg_status,
+                        &state.system.mpris_status,
+                        state.system.config.ui_scale,
+                        cx,
+                    );
+                });
+            }
             let library_changed = self.state.library.revision != state.library.revision;
             let library_structure_changed =
                 self.state.library.structure_revision != state.library.structure_revision;
@@ -2175,7 +2240,7 @@ impl GuiApp {
                 }
             }
         }
-        let mut active = HashSet::from([Measured::Device]);
+        let mut active = HashSet::new();
         if let Some(root) = &self.layouts.current().root {
             collect(root, &mut active);
         }
@@ -2860,47 +2925,8 @@ impl Render for GuiApp {
                     cx.stop_propagation();
                     return;
                 }
-                if this.settings_dropdown_is_open() {
-                    if this.settings_font_input_focused(window, cx) {
-                        return;
-                    }
-                    if key == "escape" {
-                        this.close_settings_dropdown();
-                        cx.notify();
-                    } else {
-                        this.settings_dropdown_key(key, window, cx);
-                    }
-                    cx.stop_propagation();
-                    return;
-                }
                 if this.settings_open {
-                    let modifiers = event.keystroke.modifiers;
-                    if matches!(key, "pageup" | "pagedown")
-                        && !modifiers.control
-                        && !modifiers.platform
-                        && !modifiers.alt
-                        && !modifiers.shift
-                        && !modifiers.function
-                        && this.settings_focus.is_focused(window)
-                    {
-                        if this
-                            .scroll_views
-                            .page(key == "pagedown", window.mouse_position(), true)
-                        {
-                            cx.notify();
-                        }
-                        cx.stop_propagation();
-                        return;
-                    }
-                    if key == "escape" {
-                        if !this.settings.applying {
-                            this.load_settings(cx);
-                            this.settings_open = false;
-                            this.focus_layout(window, cx);
-                            cx.notify();
-                        }
-                        cx.stop_propagation();
-                    }
+                    // Dialog input, dropdown navigation and cancellation belong to its entity.
                     return;
                 }
                 if this.layouts_open {
@@ -2979,7 +3005,7 @@ impl Render for GuiApp {
                     "pageup" | "pagedown" => {
                         if this
                             .scroll_views
-                            .page(key == "pagedown", window.mouse_position(), false)
+                            .page(key == "pagedown", window.mouse_position())
                         {
                             cx.notify();
                         }
@@ -3221,9 +3247,9 @@ impl Render for GuiApp {
                         cx,
                         |this, window, cx| {
                             this.app_menu_open = false;
-                            this.load_settings(cx);
+                            this.settings
+                                .update(cx, |settings, cx| settings.open(window, cx));
                             this.settings_open = true;
-                            this.settings_focus.focus(window, cx);
                             cx.notify();
                         },
                     ))
@@ -3257,7 +3283,11 @@ impl Render for GuiApp {
                                 } else {
                                     MUTED
                                 }))
-                                .child(if self.state.system.config.still_mode { "On" } else { "Off" }),
+                                .child(if self.state.system.config.still_mode {
+                                    "On"
+                                } else {
+                                    "Off"
+                                }),
                         ),
                     )
                     .child(about)
@@ -3490,8 +3520,22 @@ impl Render for GuiApp {
                                     cx,
                                     move |this, window, cx| {
                                         this.panel_menu = None;
-                                        this.load_visualizer_settings(state.panel_id, cx);
-                                        this.settings_focus.focus(window, cx);
+                                        if let Some(options) = this
+                                            .layouts
+                                            .current()
+                                            .audio_visualizer_options(state.panel_id)
+                                        {
+                                            this.settings.update(cx, |settings, cx| {
+                                                settings.open_visualizer(
+                                                    state.panel_id,
+                                                    options,
+                                                    window,
+                                                    cx,
+                                                )
+                                            });
+                                            this.settings_open = true;
+                                            cx.notify();
+                                        }
                                     },
                                 ));
                         }
@@ -3818,40 +3862,10 @@ impl Render for GuiApp {
             app = app.child(self.layouts_panel(window, cx));
         }
         if self.settings_open {
-            let settings = self.settings_panel(u64::MAX, window, cx);
             app = app.child(
-                div()
-                    .id("settings-modal")
-                    .track_focus(&self.settings_focus)
-                    .occlude()
-                    .absolute()
-                    .size_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(rgb(0x000000).alpha(0.58))
-                    .child(
-                        column()
-                            .max_w(px(620.))
-                            .w(relative(0.9))
-                            .h((window.viewport_size().height - px(32.))
-                                .max(px(0.))
-                                .min(px(640.)))
-                            .gap_0()
-                            .overflow_hidden()
-                            .bg(rgb(PANEL))
-                            .border_1()
-                            .border_color(rgb(BORDER))
-                            .rounded_md()
-                            .child(
-                                row()
-                                    .h(rems(2.5))
-                                    .flex_shrink_0()
-                                    .px(gpui::px(UI_INSET))
-                                    .child(div().flex_1().text_lg().child("Settings")),
-                            )
-                            .child(settings),
-                    ),
+                self.settings
+                    .clone()
+                    .cached(gpui::StyleRefinement::default().absolute().size_full()),
             );
         }
         if self.about_open {

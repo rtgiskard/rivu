@@ -9,7 +9,7 @@ pub(super) enum Action {
 
 impl GuiApp {
     pub(super) fn layout_management_allowed(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.settings_open || self.settings.applying {
+        if self.settings_open {
             self.error = Some("Apply or discard settings before changing layouts.".into());
             cx.notify();
             false
