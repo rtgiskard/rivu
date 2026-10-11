@@ -1,9 +1,7 @@
-use crate::{
-    model::{
-        Batch, DirectoryRow, LibraryRow, LibrarySnapshot, LibraryStats, Page, PlaybackState,
-        PlaylistEntryCursor, PlaylistEntryRow, PlaylistSummary, QueueState, SystemState, Track,
-    },
-    projection::ClientSnapshot,
+use crate::model::{
+    Batch, ClientSnapshot, DirectoryRow, LibraryRow, LibrarySnapshot, LibraryStats, Page,
+    PlaybackState, PlaylistEntryCursor, PlaylistEntryRow, PlaylistSummary, QueueState, SystemState,
+    Track,
 };
 use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc};

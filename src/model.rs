@@ -1,6 +1,23 @@
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc};
 
+/// Shared client state assembled from sectioned IPC responses.
+/// UI-specific projections borrow this contract; it contains no view state.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ClientSnapshot {
+    pub library: LibrarySnapshot,
+    pub queue: QueueState,
+    pub current_track: Option<Arc<Track>>,
+    pub playback: PlaybackState,
+    pub system: SystemState,
+}
+
+impl ClientSnapshot {
+    pub fn current_track(&self) -> Option<&Track> {
+        self.current_track.as_deref()
+    }
+}
+
 /// Decoded file metadata shared by scanning, persistence, and playback.
 ///
 /// This value contains no decoder or audio-output state; probing supplies it and

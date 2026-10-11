@@ -2,27 +2,11 @@ use crate::{
     config::Config,
     core::CoreState,
     model::{
-        DatabaseOptimization, HistoryEntry, PlaybackState, PlaybackStatus, QueueState, RepeatMode,
-        Track,
+        ClientSnapshot, DatabaseOptimization, HistoryEntry, PlaybackState, PlaybackStatus,
+        QueueState, RepeatMode, Track,
     },
 };
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct ClientSnapshot {
-    pub library: crate::model::LibrarySnapshot,
-    pub queue: QueueState,
-    pub current_track: Option<Arc<Track>>,
-    pub playback: PlaybackState,
-    pub system: crate::model::SystemState,
-}
-
-impl ClientSnapshot {
-    pub fn current_track(&self) -> Option<&Track> {
-        self.current_track.as_deref()
-    }
-}
 
 #[derive(Clone, Debug, Default)]
 pub struct GuiSnapshot {

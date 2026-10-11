@@ -1,10 +1,10 @@
 use crate::{
     ipc,
     model::{
-        Command, DirectoryRow, LibraryRow, LibrarySort, PlaybackStatus, PlaylistEntryRow,
-        PlaylistSummary, Query, RepeatMode, playback_key_command,
+        ClientSnapshot, Command, DirectoryRow, LibraryRow, LibrarySort, PlaybackStatus,
+        PlaylistEntryRow, PlaylistSummary, Query, RepeatMode, playback_key_command,
     },
-    projection::{ClientSnapshot, TuiSnapshot},
+    projection::TuiSnapshot,
     response::{Ack, StateSections, ViewResponse},
 };
 use anyhow::{Context, Result};
