@@ -103,6 +103,8 @@ Common visualization settings apply as follows:
   from `512` to `32768` and defaults to `8192`. Window accepts `hann`,
   `blackman_harris` (default), or `none`. Changing size or window clears
   visualization history.
+  `analysis_fps` is the maximum analysis rate; actual updates follow window
+  frames and can be slower when the compositor throttles presentation.
 * Still Mode stops visualization processing and discards results; see
   <<_still_mode,Still Mode>>. `visualization_cache` controls rendering reuse,
   separately from media read buffering; see link:22_cache.adoc[Visualization Cache].

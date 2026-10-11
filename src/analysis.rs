@@ -195,12 +195,26 @@ pub(crate) struct AnalysisControl {
     shutdown: AtomicBool,
     // Three demand bits and their transition epoch form one coherent snapshot.
     visualizer_demand: AtomicU64,
+    // One consumer permit, never an accumulating queue of analysis jobs.
+    frame_requested: AtomicBool,
+    // Overflow invalidates the queued prefix before a later gap-marked tap arrives.
+    pub tap_overflow: AtomicBool,
     worker_thread: OnceLock<thread::Thread>,
     // Low bit is Still Mode; upper bits preserve quick destructive transitions.
     still_mode: AtomicU64,
 }
 
 impl AnalysisControl {
+    pub(crate) fn request_frame(&self) {
+        if self.enabled.load(Ordering::Acquire)
+            && self.still_mode.load(Ordering::Acquire) & 1 == 0
+            && !self.frame_requested.swap(true, Ordering::AcqRel)
+            && let Some(worker) = self.worker_thread.get()
+        {
+            worker.unpark();
+        }
+    }
+
     pub(crate) fn set_visualizer_demand(&self, demand: VisualizerDemand) {
         if self
             .visualizer_demand
@@ -227,7 +241,11 @@ pub(crate) struct AnalysisWorker {
 
 impl AnalysisWorker {
     pub fn new(shared: Arc<RwLock<AnalysisFrame>>) -> std::io::Result<Self> {
-        let ring = Arc::new(HeapRb::new(32_768));
+        Self::with_capacity(shared, 32_768)
+    }
+
+    fn with_capacity(shared: Arc<RwLock<AnalysisFrame>>, capacity: usize) -> std::io::Result<Self> {
+        let ring = Arc::new(HeapRb::new(capacity));
         let control = Arc::new(AnalysisControl {
             enabled: AtomicBool::new(false),
             settings: RwLock::new(AnalysisSettings::from(&Config::default())),
@@ -235,6 +253,8 @@ impl AnalysisWorker {
             epoch: AtomicU64::new(0),
             shutdown: AtomicBool::new(false),
             visualizer_demand: AtomicU64::new(0),
+            frame_requested: AtomicBool::new(false),
+            tap_overflow: AtomicBool::new(false),
             worker_thread: OnceLock::new(),
             still_mode: AtomicU64::new(0),
         });
@@ -255,6 +275,7 @@ impl AnalysisWorker {
     }
     pub fn set_enabled(&self, enabled: bool) {
         if self.control.enabled.swap(enabled, Ordering::AcqRel) != enabled {
+            self.control.frame_requested.store(false, Ordering::Release);
             // A quick disable/enable must invalidate queued samples even if the
             // analysis thread never observes the disabled state.
             self.control.epoch.fetch_add(2, Ordering::AcqRel);
@@ -271,6 +292,7 @@ impl AnalysisWorker {
         // Use the same reset barrier as sample-rate changes. The callback sees
         // only atomics; the analysis thread owns every allocation and drop.
         self.control.epoch.fetch_add(1, Ordering::AcqRel);
+        self.control.frame_requested.store(false, Ordering::Release);
         self.control.still_mode.store(
             (current & !1).wrapping_add(2) | u64::from(enabled),
             Ordering::Release,
@@ -282,6 +304,7 @@ impl AnalysisWorker {
     }
     pub fn reset(&self, sample_rate: u32) {
         self.control.epoch.fetch_add(1, Ordering::AcqRel);
+        self.control.frame_requested.store(false, Ordering::Release);
         self.control
             .sample_rate
             .store(sample_rate, Ordering::Release);
@@ -299,6 +322,8 @@ impl AnalysisWorker {
                 return;
             }
             *current = settings;
+            self.control.frame_requested.store(false, Ordering::Release);
+            self.control.epoch.fetch_add(2, Ordering::AcqRel);
             drop(current);
             if self.control.enabled.load(Ordering::Acquire)
                 && let Some(worker) = &self.worker
@@ -636,6 +661,7 @@ fn analyze(
     let mut still_token = 0;
     let mut demand_token = u64::MAX;
     let mut sample_time = Duration::ZERO;
+    let mut last_frame_at: Option<Instant> = None;
     loop {
         if control.shutdown.load(Ordering::Acquire) {
             break;
@@ -673,17 +699,34 @@ fn analyze(
             thread::park();
             continue;
         }
-        let cycle_start = Instant::now();
-        let previous_generation = analyzer.generation;
+        if !control.frame_requested.load(Ordering::Acquire) {
+            thread::park();
+            continue;
+        }
+        let settings = *control.settings.read();
+        let interval = Duration::from_secs_f64(1.0 / settings.fps as f64);
+        if let Some(started) = last_frame_at {
+            let remaining = (started + interval).saturating_duration_since(Instant::now());
+            if !remaining.is_zero() {
+                // Only an outstanding consumer request owns a timed wait.
+                // Control transitions and shutdown can interrupt it immediately.
+                thread::park_timeout(remaining);
+                continue;
+            }
+        }
         let current_epoch = control.epoch.load(Ordering::Acquire);
         let sample_rate = control.sample_rate.load(Ordering::Acquire);
         if !current_epoch.is_multiple_of(2)
             || control.epoch.load(Ordering::Acquire) != current_epoch
         {
-            thread::park_timeout(Duration::from_millis(1));
+            thread::park();
             continue;
         }
-        let settings = *control.settings.read();
+        if !control.frame_requested.swap(false, Ordering::AcqRel) {
+            continue;
+        }
+        last_frame_at = Some(Instant::now());
+        let previous_generation = analyzer.generation;
         if sample_rate != analyzer.sample_rate
             || settings.fft_size != analyzer.settings.fft_size
             || settings.window != analyzer.settings.window
@@ -698,11 +741,48 @@ fn analyze(
             epoch = current_epoch;
             analyzer.reset();
         }
+        let mut recovery_deadline = None;
+        if control.tap_overflow.swap(false, Ordering::AcqRel) {
+            // The full ring contains the oldest prefix, not the latest window.
+            // Never replay it after a stalled consumer. Clearing the flag before
+            // the ring preserves any overflow reported concurrently with clear.
+            consumer.clear();
+            analyzer.reset();
+            // This request must acquire a fresh window now: at low FPS/high
+            // sample rates the next ordinary request can overflow again.
+            // Bound recovery even if playback pauses without disabling analysis.
+            recovery_deadline = Some(
+                Instant::now()
+                    + Duration::from_secs_f64(
+                        2.0 * settings.fft_size as f64 / sample_rate.max(1) as f64 + 0.02,
+                    ),
+            );
+        }
         let mut accepted = 0;
         // Bound a cycle to the queued prefix; continuous production must not
         // postpone publication or shutdown indefinitely.
         let mut remaining = consumer.occupied_len();
-        while remaining != 0 {
+        loop {
+            if remaining == 0 {
+                let Some(deadline) = recovery_deadline else {
+                    break;
+                };
+                if analyzer.filled == analyzer.rolling.len()
+                    || Instant::now() >= deadline
+                    || control.shutdown.load(Ordering::Acquire)
+                    || !control.enabled.load(Ordering::Acquire)
+                    || control.epoch.load(Ordering::Acquire) != current_epoch
+                    || control.visualizer_demand.load(Ordering::Acquire) != current_demand_token
+                    || control.still_mode.load(Ordering::Acquire) != current_still_token
+                {
+                    break;
+                }
+                thread::park_timeout(Duration::from_secs_f64(
+                    (1024.0 / sample_rate.max(1) as f64).min(0.01),
+                ));
+                remaining = consumer.occupied_len();
+                continue;
+            }
             let limit = remaining.min(incoming.len());
             let count = consumer.pop_slice(&mut incoming[..limit]);
             if count == 0 {
@@ -717,25 +797,29 @@ fn analyze(
             }
         }
         if analyzer.generation != previous_generation {
-            shared.write().visualizer = VisualizerFrame {
+            let mut frame = shared.write();
+            frame.visualizer = VisualizerFrame {
                 demand,
                 ..VisualizerFrame::default()
             };
+            frame.generation = analyzer.generation;
+            frame.settings = None;
         }
         sample_time += Duration::from_secs_f64(accepted as f64 / sample_rate.max(1) as f64);
         if accepted != 0 && analyzer.filled == analyzer.rolling.len() {
             let rms = analyzer.transform();
+            let mut frame = shared.write();
             if control.epoch.load(Ordering::Acquire) == current_epoch
                 && control.enabled.load(Ordering::Acquire)
                 && *control.settings.read() == settings
                 && control.visualizer_demand.load(Ordering::Acquire) == current_demand_token
                 && control.still_mode.load(Ordering::Acquire) == current_still_token
+                && !control.tap_overflow.load(Ordering::Acquire)
+                && !control.shutdown.load(Ordering::Acquire)
             {
-                analyzer.publish(&mut shared.write(), rms, sample_time);
+                analyzer.publish(&mut frame, rms, sample_time);
             }
         }
-        let interval = Duration::from_secs_f64(1.0 / settings.fps as f64);
-        thread::park_timeout(interval.saturating_sub(cycle_start.elapsed()));
     }
 }
 
@@ -1215,6 +1299,7 @@ mod tests {
                         .is_ok()
                 );
             }
+            worker.control.request_frame();
             let deadline = Instant::now() + Duration::from_secs(3);
             loop {
                 let frame = shared.read();
@@ -1250,6 +1335,7 @@ mod tests {
         let mut producer = worker.producer();
         let epoch = worker.control.epoch.load(Ordering::Acquire);
         push_window(&mut producer, epoch, [0.7, -0.7]);
+        worker.control.request_frame();
         wait_for_frame(&shared, |frame| frame.settings.is_some());
         let previous = shared.read().clone();
 
@@ -1267,6 +1353,7 @@ mod tests {
                     .is_ok()
             );
         }
+        worker.control.request_frame();
         wait_for_frame(&shared, |_| producer.occupied_len() == 0);
         thread::sleep(Duration::from_millis(50));
         assert_eq!(shared.read().sequence, previous.sequence);
@@ -1279,6 +1366,7 @@ mod tests {
                 })
                 .is_ok()
         );
+        worker.control.request_frame();
         wait_for_frame(&shared, |frame| frame.sequence > previous.sequence);
         {
             let frame = shared.read();
@@ -1327,13 +1415,285 @@ mod tests {
     }
 
     fn wait_for_frame(shared: &RwLock<AnalysisFrame>, ready: impl Fn(&AnalysisFrame) -> bool) {
+        wait_until(|| ready(&shared.read()));
+    }
+
+    fn wait_until(ready: impl Fn() -> bool) {
         let deadline = Instant::now() + Duration::from_secs(3);
-        loop {
-            if ready(&shared.read()) {
-                return;
-            }
+        while !ready() {
             assert!(Instant::now() < deadline, "analysis transition timed out");
             thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn low_fps_high_rate_overflow_recovers_within_the_same_request() {
+        use ringbuf::traits::Producer;
+        let shared = Arc::new(RwLock::new(AnalysisFrame::default()));
+        let worker = AnalysisWorker::new(shared.clone()).unwrap();
+        worker.configure(AnalysisSettings {
+            fps: 5,
+            fft_size: 8192,
+            window: AnalysisWindow::None,
+        });
+        worker.reset(192_000);
+        worker.set_enabled(true);
+        let mut producer = worker.producer();
+        let epoch = worker.control.epoch.load(Ordering::Acquire);
+        push_window(&mut producer, epoch, [0.25; 2]);
+        worker.control.request_frame();
+        wait_until(|| producer.occupied_len() == 0);
+        for _ in 0..32768 {
+            assert!(
+                producer
+                    .try_push(TapFrame {
+                        samples: [1.0; 2],
+                        epoch,
+                        gap: false
+                    })
+                    .is_ok()
+            );
+        }
+        worker.control.tap_overflow.store(true, Ordering::Release);
+        worker.control.request_frame();
+        wait_until(|| producer.occupied_len() == 0);
+        for index in 0..8192 {
+            assert!(
+                producer
+                    .try_push(TapFrame {
+                        samples: [0.0; 2],
+                        epoch,
+                        gap: index == 0
+                    })
+                    .is_ok()
+            );
+        }
+        // A new GUI permit at 5 FPS would overflow again before it was serviced.
+        wait_for_frame(&shared, |frame| frame.settings.is_some());
+        let frame = shared.read();
+        assert_eq!([frame.rms_left, frame.rms_right], [0.0; 2]);
+    }
+
+    #[test]
+    fn worker_requires_consumer_demand_and_coalesces_requests_at_the_fps_cap() {
+        let shared = Arc::new(RwLock::new(AnalysisFrame::default()));
+        let worker = AnalysisWorker::new(shared.clone()).unwrap();
+        worker.configure(AnalysisSettings {
+            fps: 5,
+            fft_size: 512,
+            window: AnalysisWindow::None,
+        });
+        worker.set_enabled(true);
+        let mut producer = worker.producer();
+        let epoch = worker.control.epoch.load(Ordering::Acquire);
+        push_window(&mut producer, epoch, [0.25; 2]);
+        thread::sleep(Duration::from_millis(250));
+        assert_eq!(shared.read().sequence, 0);
+        assert_eq!(producer.occupied_len(), 512);
+
+        worker.control.request_frame();
+        wait_for_frame(&shared, |frame| frame.settings.is_some());
+        let first_sequence = shared.read().sequence;
+        push_window(&mut producer, epoch, [0.5; 2]);
+        for _ in 0..100 {
+            worker.control.request_frame();
+        }
+        thread::sleep(Duration::from_millis(20));
+        assert_eq!(shared.read().sequence, first_sequence);
+        wait_for_frame(&shared, |frame| frame.sequence > first_sequence);
+        assert_eq!(shared.read().sequence, first_sequence + 1);
+
+        // Extra requests must not remain as an accumulating job queue.
+        push_window(&mut producer, epoch, [0.75; 2]);
+        thread::sleep(Duration::from_millis(250));
+        assert_eq!(shared.read().sequence, first_sequence + 1);
+        assert_eq!(producer.occupied_len(), 512);
+    }
+
+    #[test]
+    fn demanded_frames_accumulate_fft_windows_larger_than_the_pcm_ring() {
+        let shared = Arc::new(RwLock::new(AnalysisFrame::default()));
+        let worker = AnalysisWorker::with_capacity(shared.clone(), 512).unwrap();
+        worker.configure(AnalysisSettings {
+            fps: 60,
+            fft_size: 1024,
+            window: AnalysisWindow::None,
+        });
+        worker.control.set_visualizer_demand(DENSITY_DEMAND);
+        worker.set_enabled(true);
+        let mut producer = worker.producer();
+        let epoch = worker.control.epoch.load(Ordering::Acquire);
+        push_window(&mut producer, epoch, [1.0, 0.0]);
+        worker.control.request_frame();
+        wait_until(|| producer.occupied_len() == 0);
+        assert_eq!(shared.read().settings, None);
+        push_window(&mut producer, epoch, [0.0, 1.0]);
+        worker.control.request_frame();
+        wait_for_frame(&shared, |frame| frame.settings.is_some());
+        let frame = shared.read();
+        for rms in [frame.rms_left, frame.rms_right] {
+            assert!((rms - 0.5_f32.sqrt()).abs() < 0.0001);
+        }
+        assert_eq!(
+            frame.sample_time,
+            Duration::from_secs_f64(512.0 / 48_000.0) * 2
+        );
+        assert!(frame.visualizer.density[64 * DENSITY_SIDE + 191] > 0.0);
+        assert!(frame.visualizer.density[64 * DENSITY_SIDE + 64] > 0.0);
+        assert_eq!(frame.visualizer.correlation, Some(0.0));
+    }
+
+    #[test]
+    fn demanded_frame_ingests_density_samples_outside_the_latest_fft_window() {
+        let shared = Arc::new(RwLock::new(AnalysisFrame::default()));
+        let worker = AnalysisWorker::with_capacity(shared.clone(), 2048).unwrap();
+        worker.configure(AnalysisSettings {
+            fps: 60,
+            fft_size: 512,
+            window: AnalysisWindow::None,
+        });
+        worker.control.set_visualizer_demand(DENSITY_DEMAND);
+        worker.set_enabled(true);
+        let mut producer = worker.producer();
+        let epoch = worker.control.epoch.load(Ordering::Acquire);
+        push_window(&mut producer, epoch, [1.0, 0.0]);
+        push_window(&mut producer, epoch, [0.0, 1.0]);
+        worker.control.request_frame();
+        wait_for_frame(&shared, |frame| frame.settings.is_some());
+        let frame = shared.read();
+        assert_eq!([frame.rms_left, frame.rms_right], [0.0, 1.0]);
+        assert_eq!(
+            frame.sample_time,
+            Duration::from_secs_f64(1024.0 / 48_000.0)
+        );
+        assert!(frame.visualizer.density[64 * DENSITY_SIDE + 191] > 0.0);
+        assert!(frame.visualizer.density[64 * DENSITY_SIDE + 64] > 0.0);
+    }
+
+    #[test]
+    fn stalled_consumer_discards_overflowed_prefix_and_restarts_at_the_gap() {
+        use ringbuf::traits::Producer;
+        let shared = Arc::new(RwLock::new(AnalysisFrame::default()));
+        let worker = AnalysisWorker::with_capacity(shared.clone(), 1024).unwrap();
+        worker.configure(AnalysisSettings {
+            fps: 60,
+            fft_size: 512,
+            window: AnalysisWindow::None,
+        });
+        worker.control.set_visualizer_demand(DENSITY_DEMAND);
+        worker.set_enabled(true);
+        let mut producer = worker.producer();
+        let epoch = worker.control.epoch.load(Ordering::Acquire);
+        push_window(&mut producer, epoch, [0.75; 2]);
+        worker.control.request_frame();
+        wait_for_frame(&shared, |frame| frame.settings.is_some());
+        let previous = shared.read().clone();
+        push_window(&mut producer, epoch, [1.0; 2]);
+        push_window(&mut producer, epoch, [1.0; 2]);
+        assert!(producer.try_push(TapFrame::default()).is_err());
+        worker.control.tap_overflow.store(true, Ordering::Release);
+        worker.control.request_frame();
+        wait_for_frame(&shared, |frame| {
+            producer.occupied_len() == 0 && frame.generation > previous.generation
+        });
+        assert_eq!(shared.read().sequence, previous.sequence);
+        assert_eq!(shared.read().settings, None);
+        for index in 0..511 {
+            assert!(
+                producer
+                    .try_push(TapFrame {
+                        samples: [0.0; 2],
+                        epoch,
+                        gap: index == 0,
+                    })
+                    .is_ok()
+            );
+        }
+        worker.control.request_frame();
+        wait_until(|| producer.occupied_len() == 0);
+        assert_eq!(shared.read().sequence, previous.sequence);
+        assert!(
+            producer
+                .try_push(TapFrame {
+                    epoch,
+                    ..TapFrame::default()
+                })
+                .is_ok()
+        );
+        worker.control.request_frame();
+        wait_for_frame(&shared, |frame| frame.sequence > previous.sequence);
+        let frame = shared.read();
+        assert_eq!([frame.rms_left, frame.rms_right], [0.0; 2]);
+        assert!(frame.visualizer.density.iter().all(|value| *value == 0.0));
+    }
+
+    #[test]
+    fn quick_disable_enable_cancels_in_flight_publication_and_pending_demand() {
+        let shared = Arc::new(RwLock::new(AnalysisFrame::default()));
+        let worker = AnalysisWorker::new(shared.clone()).unwrap();
+        worker.configure(AnalysisSettings {
+            fps: 60,
+            fft_size: 512,
+            window: AnalysisWindow::None,
+        });
+        worker.set_enabled(true);
+        let mut producer = worker.producer();
+        let epoch = worker.control.epoch.load(Ordering::Acquire);
+        push_window(&mut producer, epoch, [0.25; 2]);
+        worker.control.request_frame();
+        wait_for_frame(&shared, |frame| frame.settings.is_some());
+        let sequence = shared.read().sequence;
+        let held_frame = shared.write();
+        push_window(&mut producer, epoch, [1.0; 2]);
+        worker.control.request_frame();
+        wait_until(|| producer.occupied_len() == 0);
+        worker.control.request_frame();
+        worker.set_enabled(false);
+        worker.set_enabled(true);
+        drop(held_frame);
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(shared.read().sequence, sequence);
+        assert!(!worker.control.frame_requested.load(Ordering::Acquire));
+        push_window(&mut producer, epoch, [1.0; 2]);
+        let current_epoch = worker.control.epoch.load(Ordering::Acquire);
+        push_window(&mut producer, current_epoch, [0.0; 2]);
+        worker.control.request_frame();
+        wait_for_frame(&shared, |frame| frame.sequence > sequence);
+        assert_eq!(shared.read().rms_left, 0.0);
+        assert_eq!(shared.read().rms_right, 0.0);
+    }
+
+    #[test]
+    fn parked_and_pending_workers_shutdown_without_consumer_assistance() {
+        for pending in [false, true] {
+            let shared = Arc::new(RwLock::new(AnalysisFrame::default()));
+            let worker = AnalysisWorker::new(shared.clone()).unwrap();
+            worker.configure(AnalysisSettings {
+                fps: 5,
+                fft_size: 512,
+                window: AnalysisWindow::None,
+            });
+            worker.set_enabled(true);
+            let mut producer = worker.producer();
+            push_window(
+                &mut producer,
+                worker.control.epoch.load(Ordering::Acquire),
+                [0.0; 2],
+            );
+            worker.control.request_frame();
+            wait_for_frame(&shared, |frame| frame.settings.is_some());
+            if pending {
+                worker.control.request_frame();
+            }
+            // Let the no-demand path park (or the pending path reach its cap).
+            thread::sleep(Duration::from_millis(20));
+            let (done, completed) = std::sync::mpsc::channel();
+            let closer = thread::spawn(move || {
+                drop(worker);
+                done.send(()).unwrap();
+            });
+            completed.recv_timeout(Duration::from_secs(2)).unwrap();
+            closer.join().unwrap();
         }
     }
 
@@ -1352,6 +1712,7 @@ mod tests {
         let mut producer = worker.producer();
         let old_epoch = worker.control.epoch.load(Ordering::Acquire);
         push_window(&mut producer, old_epoch, [0.5, -0.5]);
+        worker.control.request_frame();
         wait_for_frame(&shared, |frame| frame.sequence > 0);
         let previous = shared.read().clone();
         worker.set_still_mode(true);
@@ -1382,6 +1743,7 @@ mod tests {
         push_window(&mut producer, old_epoch, [1.0; 2]);
         let epoch = worker.control.epoch.load(Ordering::Acquire);
         push_window(&mut producer, epoch, [0.0; 2]);
+        worker.control.request_frame();
         wait_for_frame(&shared, |frame| frame.sequence > resumed_sequence);
         let frame = shared.read();
         assert_eq!(frame.settings, Some(settings));
@@ -1456,6 +1818,7 @@ mod tests {
                         .is_ok()
                 );
             }
+            worker.control.request_frame();
             let deadline = Instant::now() + Duration::from_secs(2);
             let current = loop {
                 let frame = shared.read();

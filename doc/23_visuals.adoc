@@ -21,12 +21,22 @@ channel energy rather than averaging signed channels, so opposite-phase stereo
 does not cancel. Optional spatial analysis retains the channels' relationship.
 
 The tap holds at most 32,768 frames. Analysis backpressure never blocks playback:
-dropped samples mark a discontinuity in the next accepted input. Each processing
-cycle consumes only the queued prefix present at its start, so continued
-production cannot postpone publication or shutdown indefinitely. One latest
+dropped samples mark a discontinuity in the next accepted input. Ordinary
+processing consumes only the queued prefix present at its start; overflow
+recovery has a finite acquisition deadline, so continued production cannot
+postpone publication or shutdown indefinitely. One latest
 shared frame is published rather than an unbounded queue of analysis results.
 The priority is reliable playback and coherent displays, not collecting every
 frame regardless of whether it can be consumed.
+
+The worker parks until a consumer requests another frame. Requests coalesce
+into one pending permit, and `analysis_fps` remains an upper bound, not an
+independent production clock. If the ring overflows, the worker discards the
+stale queued prefix and acquires a fresh sampling window within that request,
+with a deadline of twice the FFT window duration plus 20 ms. This also covers
+normal low-FPS/high-sample-rate operation where every ordinary request interval
+can exceed the ring capacity. Recovery is cancelable, never replays the backlog,
+and does not keep polling after the request ends.
 
 Stream resets, analysis restarts, dropped samples, FFT/window changes, and
 optional-payload demand transitions break signal continuity. Views reject
@@ -42,6 +52,19 @@ one accepted audio window and stereo FFT supply all requested payloads. This
 avoids separate analyzers for different views while allowing unused result
 storage to be released. A demand transition invalidates the sampling window,
 including a quick hide/show that the worker did not observe as a steady state.
+
+GUI consumption follows window frames. Native callbacks, local redraws, and
+core wakeups share one pending frame or deadline; they do not create parallel
+analysis loops. A frame consumes the latest published result and requests the
+next one. A redraw can bootstrap initial display or recovery without waiting
+for an analysis result. Playback, commands, and shutdown remain independent of
+presentation.
+
+A reliable Hidden notification cancels frame scheduling and disables analysis.
+Without that notification, compositor-throttled frames reduce analysis demand
+rather than declaring the window hidden. Loss of focus alone never disables
+analysis, and a compositor that still delivers occasional offscreen frames
+does not imply zero analysis work.
 
 == Still Mode
 

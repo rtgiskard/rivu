@@ -40,7 +40,7 @@ pub(super) use components::{
     row_text, section_group, sortable_header, status_message, toggle_button, track_row, tree_row,
     two_column,
 };
-use futures::{FutureExt, StreamExt, channel::mpsc};
+use futures::{StreamExt, channel::mpsc};
 use gpui::{prelude::*, *};
 use input::{Input, InputEvent};
 use layout::{Axis, Edge, LayoutSet, Node};
@@ -52,7 +52,7 @@ use std::{
     path::{Path, PathBuf},
     rc::{Rc, Weak},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use url::Url;
 
@@ -650,6 +650,9 @@ pub(super) struct GuiApp {
     analysis_staging: crate::analysis::AnalysisFrame,
     analysis_needs_refresh: bool,
     window_visible: bool,
+    frame_pending: bool,
+    frame_timer: Option<Task<()>>,
+    last_analysis_request: Option<Instant>,
     ui_font: Font,
     _subscriptions: Vec<Subscription>,
 }
@@ -1011,10 +1014,13 @@ impl GuiApp {
         subscriptions.push(
             cx.observe_window_visibility(window, |this, visibility, window, cx| {
                 this.window_visible = matches!(visibility, WindowVisibility::Visible);
+                this.frame_timer.take();
                 if !this.window_visible {
                     this.cancel_panel_docking(window, cx);
                 }
+                this.refresh(cx);
                 this.sync_analysis(cx);
+                this.request_frame(window, cx);
                 cx.notify();
             }),
         );
@@ -1028,21 +1034,17 @@ impl GuiApp {
         handle.set_wakeup(move || {
             let _ = wake_sender.lock().try_send(());
         });
-        cx.spawn(async move |this, cx| {
-            loop {
-                let Ok(interval) = this.update(cx, |this, _| {
-                    (this.window_visible && this.analysis_worker_enabled && this.state.playback.status == PlaybackStatus::Playing)
-                        .then(|| Duration::from_secs_f64(1. / this.state.system.config.analysis_fps as f64))
-                }) else { break; };
-                if let Some(interval) = interval {
-                    let timer = cx.background_executor().timer(interval).fuse();
-                    let changed = wake_receiver.next().fuse();
-                    futures::pin_mut!(timer, changed);
-                    futures::select! { _ = timer => {}, message = changed => if message.is_none() { break; } }
-                } else if wake_receiver.next().await.is_none() { break; }
-                if this.update(cx, |this, cx| this.refresh(cx)).is_err() { break; }
+        cx.spawn_in(window, async move |this, cx| {
+            while wake_receiver.next().await.is_some() {
+                if this
+                    .update_in(cx, |this, window, cx| this.request_frame(window, cx))
+                    .is_err()
+                {
+                    break;
+                }
             }
-        }).detach();
+        })
+        .detach();
         let artwork_manager = Arc::new(crate::artwork::ArtworkManager::new(
             layout_path.parent().unwrap_or_else(|| Path::new(".")),
         ));
@@ -1115,7 +1117,10 @@ impl GuiApp {
             analysis_sequence: 0,
             analysis_staging: crate::analysis::AnalysisFrame::default(),
             analysis_needs_refresh: false,
-            window_visible: true,
+            window_visible: window.is_visible(),
+            frame_pending: false,
+            frame_timer: None,
+            last_analysis_request: None,
             seek_preview: None,
             waveform_preview_active: false,
             seek_queue_id: None,
@@ -1964,8 +1969,10 @@ impl GuiApp {
     fn refresh(&mut self, cx: &mut Context<Self>) {
         let state = (self.handle.revision() != self.state.system.revision)
             .then(|| self.handle.gui_snapshot());
-        let mut changed = state.is_some();
+        let changed = state.is_some();
+        let mut config_changed = false;
         if let Some(state) = state {
+            config_changed = !Arc::ptr_eq(&self.state.system.config, &state.system.config);
             if !Arc::ptr_eq(&self.state.system.devices, &state.system.devices)
                 || self.state.system.ffmpeg_status != state.system.ffmpeg_status
                 || self.state.system.mpris_status != state.system.mpris_status
@@ -2074,47 +2081,102 @@ impl GuiApp {
         if self.state.system.shutting_down {
             return;
         }
-        if changed {
+        if config_changed {
             self.sync_analysis(cx);
-        }
-        if self.analysis_worker_enabled {
-            let received = {
-                let frame = self.handle.analysis.read();
-                if frame.sequence != self.analysis_sequence
-                    || (self.analysis_needs_refresh && self.analysis_staging.settings.is_some())
-                {
-                    self.analysis_staging
-                        .frequencies_hz
-                        .clone_from(&frame.frequencies_hz);
-                    self.analysis_staging
-                        .spectrum_db
-                        .clone_from(&frame.spectrum_db);
-                    self.analysis_staging.sequence = frame.sequence;
-                    self.analysis_staging.sample_rate = frame.sample_rate;
-                    self.analysis_staging.sample_time = frame.sample_time;
-                    self.analysis_staging.generation = frame.generation;
-                    self.analysis_staging.settings = frame.settings;
-                    self.analysis_staging.rms_left = frame.rms_left;
-                    self.analysis_staging.rms_right = frame.rms_right;
-                    self.analysis_staging
-                        .visualizer
-                        .clone_from(&frame.visualizer);
-                    self.analysis_sequence = frame.sequence;
-                    true
-                } else {
-                    false
-                }
-            };
-            if received {
-                self.analysis_needs_refresh = false;
-                self.visuals.update(&self.analysis_staging);
-                self.audio_visualizer.update(&self.analysis_staging);
-                changed = true;
-            }
         }
         if changed {
             cx.notify();
         }
+    }
+
+    fn analysis_frame_interval(&self) -> Option<Duration> {
+        (self.window_visible
+            && self.analysis_worker_enabled
+            && self.state.playback.status == PlaybackStatus::Playing
+            && !self.state.system.shutting_down)
+            .then(|| Duration::from_secs_f64(1. / self.state.system.config.analysis_fps as f64))
+    }
+
+    fn request_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.window_visible || self.frame_pending || self.frame_timer.is_some() {
+            return;
+        }
+        // Native callbacks, core changes and local redraws share one consumer.
+        // An existing deadline is also pending work, not another clock to race.
+        self.frame_pending = true;
+        let view = cx.weak_entity();
+        window.on_next_frame(move |window, cx| {
+            let _ = view.update(cx, |this, cx| {
+                this.frame_pending = false;
+                if !this.window_visible {
+                    return;
+                }
+                this.refresh(cx);
+                this.consume_analysis(cx);
+                let track = this.state.current_track().or(this.full_track.as_ref());
+                this.waveform
+                    .update(cx, |waveform, cx| waveform.sync(track, cx));
+                let Some(interval) = this.analysis_frame_interval() else {
+                    this.last_analysis_request = None;
+                    return;
+                };
+                let now = Instant::now();
+                if this
+                    .last_analysis_request
+                    .is_none_or(|last| now - last >= interval)
+                {
+                    this.last_analysis_request = Some(now);
+                    this.handle.request_analysis_frame();
+                }
+                let delay = interval.saturating_sub(this.last_analysis_request.unwrap().elapsed());
+                let timer = cx.background_executor().timer(delay);
+                this.frame_timer = Some(cx.spawn_in(window, async move |this, cx| {
+                    timer.await;
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        this.frame_timer = None;
+                        this.request_frame(window, cx);
+                    });
+                }));
+            });
+        });
+        // A real draw keeps Wayland's outstanding native callback authoritative.
+        // A clean local callback must not become a free-running analysis clock.
+        cx.notify();
+    }
+
+    fn consume_analysis(&mut self, cx: &mut Context<Self>) {
+        if !self.analysis_worker_enabled {
+            return;
+        }
+        {
+            let frame = self.handle.analysis.read();
+            if frame.sequence == self.analysis_sequence
+                && !(self.analysis_needs_refresh && self.analysis_staging.settings.is_some())
+            {
+                return;
+            }
+            self.analysis_staging
+                .frequencies_hz
+                .clone_from(&frame.frequencies_hz);
+            self.analysis_staging
+                .spectrum_db
+                .clone_from(&frame.spectrum_db);
+            self.analysis_staging.sequence = frame.sequence;
+            self.analysis_staging.sample_rate = frame.sample_rate;
+            self.analysis_staging.sample_time = frame.sample_time;
+            self.analysis_staging.generation = frame.generation;
+            self.analysis_staging.settings = frame.settings;
+            self.analysis_staging.rms_left = frame.rms_left;
+            self.analysis_staging.rms_right = frame.rms_right;
+            self.analysis_staging
+                .visualizer
+                .clone_from(&frame.visualizer);
+            self.analysis_sequence = frame.sequence;
+        }
+        self.analysis_needs_refresh = false;
+        self.visuals.update(&self.analysis_staging);
+        self.audio_visualizer.update(&self.analysis_staging);
+        cx.notify();
     }
     fn sync_analysis(&mut self, cx: &mut Context<Self>) {
         let enabled = !self.state.system.config.still_mode;
@@ -2851,6 +2913,12 @@ impl GuiApp {
 }
 impl Render for GuiApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.analysis_frame_interval().is_some()
+            && !self.frame_pending
+            && self.frame_timer.is_none()
+        {
+            self.request_frame(window, cx);
+        }
         if self.panel_docking.is_some() && (!cx.has_active_drag() || self.panel_docking_blocked()) {
             self.cancel_panel_docking(window, cx);
         }

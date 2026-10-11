@@ -90,7 +90,7 @@ Spectrogram images retire at a subsequent window-frame boundary; transient
 uncached images and uploaded stereo-analysis images survive a complete
 intervening frame. Retirement runs from the root window independently of panel
 visibility. Final cleanup uses a frame callback without invalidating content,
-including in Still Mode with the analysis timer stopped. Uncached image creation
+including in Still Mode with analysis frame scheduling inactive. Uncached image creation
 therefore cannot drive its own redraw loop. The last submitted scene retains its
 images until replacement or window closure. This retains temporary memory longer
 than immediate release, but keeps scene ownership valid.

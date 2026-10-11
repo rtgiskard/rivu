@@ -446,6 +446,9 @@ impl OutputCallback {
                         ));
                 // A partial block leaves a discontinuity for the next accepted frame.
                 self.tap_gap = accepted < samples / source_channels;
+                if self.tap_gap {
+                    self.control.tap_overflow.store(true, Ordering::Release);
+                }
             }
             for (output, frame) in block
                 .chunks_exact_mut(self.channels)
@@ -598,10 +601,12 @@ mod tests {
         callback.render(&mut [0.0_f32; 6], timestamp(0, 20));
         assert!(!samples.try_pop().unwrap().gap);
         assert!(callback.tap_gap);
+        assert!(callback.control.tap_overflow.swap(false, Ordering::AcqRel));
         output.push(&[0.25; 2]);
         callback.render(&mut [0.0_f32; 2], timestamp(1, 21));
         assert!(samples.try_pop().unwrap().gap);
         assert!(!callback.tap_gap);
+        assert!(!callback.control.tap_overflow.load(Ordering::Acquire));
         output.push(&[0.0; 2]);
         callback.render(&mut [0.0_f32; 2], timestamp(2, 22));
         assert!(!samples.try_pop().unwrap().gap);

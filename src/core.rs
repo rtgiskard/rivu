@@ -117,6 +117,11 @@ impl AppHandle {
         self.analysis_control.set_visualizer_demand(demand);
     }
 
+    /// Coalesce a GUI consumer frame into at most one pending analysis job.
+    pub(crate) fn request_analysis_frame(&self) {
+        self.analysis_control.request_frame();
+    }
+
     pub fn send(&self, command: Command) -> Result<()> {
         self.sender
             .try_send(Request {
