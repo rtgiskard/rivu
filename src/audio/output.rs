@@ -17,10 +17,8 @@ use std::{
     time::Duration,
 };
 
-#[path = "output_layout.rs"]
 mod layout;
 
-#[path = "output_pipewire.rs"]
 mod pipewire;
 
 pub fn devices() -> Result<Vec<String>> {
