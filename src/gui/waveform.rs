@@ -161,7 +161,18 @@ pub(super) struct WaveformImageRelease(Rc<RefCell<WaveformPlot>>);
 
 impl WaveformImageRelease {
     pub(super) fn release_retired(&self, window: &mut Window) {
-        self.0.borrow_mut().release_retired(window);
+        let mut plot = self.0.borrow_mut();
+        plot.release_images(|image| {
+            let _ = window.drop_image(image);
+        });
+        if !plot.retired.is_empty() {
+            let plot = Rc::clone(&self.0);
+            window.on_next_frame(move |window, _| {
+                plot.borrow_mut().release_images(|image| {
+                    let _ = window.drop_image(image);
+                });
+            });
+        }
     }
 
     pub(super) fn release_all_images(&self, window: &mut Window) {
@@ -221,15 +232,6 @@ impl WaveformPlot {
             for tile in columns.tiles.drain(..) {
                 self.retired.push(tile.image);
             }
-        }
-    }
-
-    fn release_retired(&mut self, window: &mut Window) {
-        self.release_images(|image| {
-            let _ = window.drop_image(image);
-        });
-        if !self.retired.is_empty() {
-            window.request_animation_frame();
         }
     }
 
@@ -666,7 +668,8 @@ impl Waveform {
     fn start_full(&mut self) -> (u64, Arc<AtomicBool>) {
         self.generation = self.generation.wrapping_add(1);
         let cancelled = Arc::new(AtomicBool::new(false));
-        let shared = self.shared.read();
+        let mut shared = self.shared.write();
+        shared.cancel_scan_on_suspend(&cancelled);
         self.manual = Some(ManualRequest {
             source: Rc::clone(
                 self.source
@@ -697,16 +700,18 @@ impl Waveform {
             return false;
         }
         let mut installed_revision = None;
-        let result = result.and_then(|result| {
+        let result = (|| {
+            let mut shared = self.shared.write();
+            // Suspension invalidates both late data and decoder cancellation
+            // errors, even if a quick on/off was coalesced by GUI refresh.
+            if request.suspension_generation != shared.suspension_generation() {
+                return Ok(());
+            }
+            let result = result?;
             if self.source.as_deref() != Some(request.source.as_ref())
                 || !request.source.matches(&result)
             {
                 anyhow::bail!("Full waveform source changed before completion");
-            }
-            let mut shared = self.shared.write();
-            // The worker can purge before GUI cancellation, even across a quick on/off.
-            if request.suspension_generation != shared.suspension_generation() {
-                return Ok(());
             }
             let previous_unchanged = match &request.previous_source {
                 Some(previous) => previous.matches(&shared),
@@ -718,7 +723,7 @@ impl Waveform {
             shared.install_full(result);
             installed_revision = Some(shared.revision);
             Ok(())
-        });
+        })();
         if let Some(revision) = installed_revision {
             self.revision = Some(revision);
         }
@@ -1477,15 +1482,23 @@ mod tests {
 
     #[test]
     fn backend_still_transition_rejects_manual_results_before_gui_cancellation() {
-        for resume_before_completion in [false, true] {
+        for (resume_before_completion, decoder_cancelled) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
             let mut waveform = preview(frame(vec![Some(0.25), None]));
-            let (request, _) = waveform.start_full();
+            let (request, cancelled) = waveform.start_full();
             waveform.shared.write().set_still_mode(true);
+            assert!(cancelled.load(Ordering::Relaxed));
             if resume_before_completion {
                 waveform.shared.write().set_still_mode(false);
             }
             let revision = waveform.shared.read().revision;
-            assert!(waveform.finish_full(request, Ok(frame(vec![Some(1.0), Some(1.0)]))));
+            let result = if decoder_cancelled {
+                Err(anyhow::anyhow!("Waveform loading cancelled"))
+            } else {
+                Ok(frame(vec![Some(1.0), Some(1.0)]))
+            };
+            assert!(waveform.finish_full(request, result));
             assert!(waveform.manual.is_none());
             assert!(waveform.manual_error.is_none());
             assert_eq!(waveform.shared.read().peaks.capacity(), 0);

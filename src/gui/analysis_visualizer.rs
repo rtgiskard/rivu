@@ -4,7 +4,7 @@ use crate::{
     config::{AudioVisualizerOptions, AudioVisualizerStyle, Config},
 };
 use gpui::{
-    AnyElement, App, Bounds, Pixels, Point, RenderImage, SharedString, TextAlign, Window, canvas,
+    AnyElement, App, Bounds, Hsla, Pixels, Point, RenderImage, SharedString, TextAlign, Window, canvas,
     div, fill, point, prelude::*, px, rgb, size,
 };
 use std::{cell::RefCell, rc::Rc, sync::Arc, time::Duration};
@@ -12,6 +12,7 @@ use std::{cell::RefCell, rc::Rc, sync::Arc, time::Duration};
 const SPATIAL_WIDTH: usize = 256;
 const SPATIAL_HEIGHT: usize = 128;
 const SPATIAL_DECAY_SECONDS: f32 = 0.5;
+const FIELD_COLOR_COUNT: usize = 256;
 
 #[derive(Clone)]
 pub(super) struct AnalysisVisualizer {
@@ -24,6 +25,7 @@ struct PlotData {
     background: u32,
     primary: u32,
     secondary: u32,
+    colors: [[u8; 4]; FIELD_COLOR_COUNT],
     db_range: f32,
     settings: AnalysisSettings,
     generation: Option<u64>,
@@ -62,6 +64,11 @@ impl AnalysisVisualizer {
                 background: config.visual_background.rgb(),
                 primary: config.audio_visualizer_primary_color.rgb(),
                 secondary: config.audio_visualizer_secondary_color.rgb(),
+                colors: field_colors(
+                    style,
+                    config.audio_visualizer_primary_color.rgb(),
+                    config.audio_visualizer_secondary_color.rgb(),
+                ),
                 db_range: config.audio_visualizer_db_range(),
                 settings: AnalysisSettings::from(&config),
                 generation: None,
@@ -88,9 +95,9 @@ impl AnalysisVisualizer {
         let settings = AnalysisSettings::from(config);
         let reset =
             settings.fft_size != data.settings.fft_size || settings.window != data.settings.window;
-        let recolor = data.primary != config.audio_visualizer_primary_color.rgb()
-            || data.secondary != config.audio_visualizer_secondary_color.rgb()
-            || data.db_range != config.audio_visualizer_db_range();
+        let colors_changed = data.primary != config.audio_visualizer_primary_color.rgb()
+            || data.secondary != config.audio_visualizer_secondary_color.rgb();
+        let recolor = colors_changed || data.db_range != config.audio_visualizer_db_range();
         let changed = reset || recolor || data.background != config.visual_background.rgb();
         if data.db_range != config.audio_visualizer_db_range() {
             data.range_label = "".into();
@@ -98,6 +105,9 @@ impl AnalysisVisualizer {
         data.settings = settings;
         data.primary = config.audio_visualizer_primary_color.rgb();
         data.secondary = config.audio_visualizer_secondary_color.rgb();
+        if colors_changed {
+            data.colors = field_colors(data.style, data.primary, data.secondary);
+        }
         data.background = config.visual_background.rgb();
         data.db_range = config.audio_visualizer_db_range();
         if reset {
@@ -124,19 +134,12 @@ impl AnalysisVisualizer {
 
     pub(super) fn release_retired_images(&self, window: &mut Window) {
         let mut data = self.data.borrow_mut();
-        for image in data.retired.drain(..) {
-            if let Err(error) = window.drop_image(image) {
-                eprintln!("rivu analysis visualizer image release: {error}");
-            }
-        }
-        // Keep images for one complete intervening frame, as waveform tiles do.
-        let PlotData {
-            retired, pending, ..
-        } = &mut *data;
-        retired.append(pending);
-        if !retired.is_empty() {
-            // Still Mode has no analysis timer to supply the final retirement frame.
-            window.request_animation_frame();
+        data.release_images(window);
+        if !data.retired.is_empty() {
+            let data = Rc::clone(&self.data);
+            window.on_next_frame(move |window, _| {
+                data.borrow_mut().release_images(window);
+            });
         }
     }
 
@@ -175,6 +178,17 @@ impl AnalysisVisualizer {
 }
 
 impl PlotData {
+    fn release_images(&mut self, window: &mut Window) {
+        for image in self.retired.drain(..) {
+            if let Err(error) = window.drop_image(image) {
+                eprintln!("rivu analysis visualizer image release: {error}");
+            }
+        }
+        // Advance pending images without requesting a content redraw. The image
+        // in the last submitted scene remains retained until it is replaced.
+        self.retired.append(&mut self.pending);
+    }
+
     fn retire_image(&mut self) {
         if let Some(image) = self.image.take() {
             // Images never painted have no GPU allocation to release.
@@ -306,13 +320,8 @@ impl PlotData {
         let mut pixels = image::RgbaImage::new(width as u32, height as u32);
         for (pixel, value) in pixels.pixels_mut().zip(&self.field) {
             let strength = field_strength(*value, self.db_range);
-            let color = mix_color(self.primary, self.secondary, strength);
-            *pixel = image::Rgba([
-                (color >> 16) as u8,
-                (color >> 8) as u8,
-                color as u8,
-                (strength * 255.0).round() as u8,
-            ]);
+            let index = (strength * (FIELD_COLOR_COUNT - 1) as f32).round() as usize;
+            *pixel = image::Rgba(self.colors[index]);
         }
         self.retire_image();
         self.image = Some(Arc::new(RenderImage::new([image::Frame::new(pixels)])));
@@ -644,6 +653,52 @@ fn mix_color(first: u32, second: u32, fraction: f32) -> u32 {
     (channel(16) << 16) | (channel(8) << 8) | channel(0)
 }
 
+fn field_colors(
+    style: AudioVisualizerStyle,
+    primary: u32,
+    secondary: u32,
+) -> [[u8; 4]; FIELD_COLOR_COUNT] {
+    // Keep configured hues, with a cyanward shoulder for density. Lightness
+    // separates occupancy/power levels; only the very strongest cells go pale.
+    let shade = |color: u32, lightness: f32, hue_shift: f32| {
+        let mut color = Hsla::from(rgb(color));
+        color.h = (color.h + hue_shift).rem_euclid(1.0);
+        color.l = lightness;
+        u32::from(color.to_rgb()) >> 8
+    };
+    let stops = if style == AudioVisualizerStyle::StereoDensity {
+        [
+            (0.0, shade(primary, 0.18, 0.0)),
+            (0.25, shade(primary, 0.40, 0.0)),
+            (0.65, shade(primary, 0.58, -1.0 / 12.0)),
+            (0.88, shade(primary, 0.80, -1.0 / 12.0)),
+            (1.0, shade(secondary, 0.95, 0.0)),
+        ]
+    } else {
+        [
+            (0.0, shade(primary, 0.14, 0.0)),
+            (0.30, shade(primary, 0.38, 0.0)),
+            (0.65, shade(secondary, 0.62, 0.0)),
+            (0.88, shade(secondary, 0.80, 0.0)),
+            (1.0, shade(secondary, 0.95, 0.0)),
+        ]
+    };
+    // Build only on color changes, not per frame or per cell. GPUI consumes
+    // BGRA bytes; image::RgbaImage does not perform the channel conversion.
+    std::array::from_fn(|index| {
+        let strength = index as f32 / (FIELD_COLOR_COUNT - 1) as f32;
+        let interval = stops.windows(2).find(|pair| strength <= pair[1].0).unwrap();
+        let t = (strength - interval[0].0) / (interval[1].0 - interval[0].0);
+        let color = mix_color(interval[0].1, interval[1].1, t);
+        [
+            color as u8,
+            (color >> 8) as u8,
+            (color >> 16) as u8,
+            (strength.sqrt() * 255.0).round() as u8,
+        ]
+    })
+}
+
 fn label(
     text: SharedString,
     anchor: Point<Pixels>,
@@ -712,6 +767,48 @@ mod tests {
         let plot = AnalysisVisualizer::new(style);
         plot.configure(&Config::default());
         plot
+    }
+
+    #[test]
+    fn rasterized_fields_preserve_channels_silence_and_fixed_brightness() {
+        for style in [
+            AudioVisualizerStyle::StereoDensity,
+            AudioVisualizerStyle::SpatialSpectrum,
+        ] {
+            let plot = plot(style);
+            let mut config = Config {
+                audio_visualizer_primary_color: "#ff3300".parse().unwrap(),
+                audio_visualizer_secondary_color: "#ff7700".parse().unwrap(),
+                ..Config::default()
+            };
+            plot.configure(&config);
+            let mut data = plot.data.borrow_mut();
+            let cells = if style == AudioVisualizerStyle::StereoDensity {
+                DENSITY_SIDE * DENSITY_SIDE
+            } else {
+                SPATIAL_WIDTH * SPATIAL_HEIGHT
+            };
+            data.field = vec![0.0; cells];
+            data.field[1] = 0.001;
+            data.rasterize();
+            let image = data.image.as_ref().unwrap();
+            let bytes = image.as_bytes(0).unwrap();
+            assert_eq!(bytes[3], 0, "silence must remain transparent");
+            assert!(bytes[6] > bytes[4], "red tint must be red in GPUI's BGRA texture");
+            let moderate: [u8; 4] = bytes[4..8].try_into().unwrap();
+            data.field[2] = 1.0;
+            data.rasterize();
+            let bytes = data.image.as_ref().unwrap().as_bytes(0).unwrap();
+            assert_eq!(&bytes[4..8], &moderate, "another peak cannot renormalize this cell");
+            drop(data);
+            config.audio_visualizer_primary_color = "#0033ff".parse().unwrap();
+            config.audio_visualizer_secondary_color = "#0077ff".parse().unwrap();
+            plot.configure(&config);
+            let data = plot.data.borrow();
+            assert_eq!(data.field[1], 0.001, "recoloring must preserve measured power");
+            let bytes = data.image.as_ref().unwrap().as_bytes(0).unwrap();
+            assert!(bytes[4] > bytes[6], "blue tint must remain blue after recoloring");
+        }
     }
 
     #[test]

@@ -62,9 +62,11 @@ Waveform coverage is also discarded: prior samples cannot count toward a
 complete envelope, and EOF cannot make a skipped or discarded interval complete.
 Only fresh decoded PCM allocates and fills bins. There is no automatic backfill
 or full-track rescan; an uninterrupted fresh traversal from zero can complete
-the envelope. Explicit full-waveform scans are cancelled on entry. A shared
-suspension generation rejects late results before GUI cancellation and across
-quick on/off transitions, so old scans cannot restore discarded data.
+the envelope. Explicit full-waveform scans are cancelled by the audio worker on
+entry, without waiting for GUI refresh; quick on/off transitions cannot miss the
+cancellation. Decoder packet boundaries observe the cancellation flag. A shared
+suspension generation also rejects late results, so old scans cannot restore
+discarded data or report a cancelled request as a waveform-load failure.
 
 == Waveform
 

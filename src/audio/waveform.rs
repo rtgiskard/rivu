@@ -1,7 +1,13 @@
 //! A bounded, progressively filled envelope of the PCM already decoded for playback.
 
 use super::PlaybackRange;
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::{
+        Arc, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 const MAX_BINS: usize = 1600;
 const INITIAL_UNKNOWN_SPAN: f64 = 60.0;
@@ -82,6 +88,7 @@ pub struct WaveformFrame {
     pub(crate) rms_prefixes: Vec<Option<RmsPrefix>>,
     pub(crate) suspended: bool,
     pub(crate) suspension_generation: u64,
+    pub(crate) full_scan_cancelled: Weak<AtomicBool>,
 }
 
 impl Default for WaveformFrame {
@@ -108,6 +115,7 @@ impl Default for WaveformFrame {
             rms_prefixes: Vec::new(),
             suspended: false,
             suspension_generation: 0,
+            full_scan_cancelled: Weak::new(),
         }
     }
 }
@@ -272,6 +280,14 @@ impl WaveformFrame {
     pub(crate) fn suspension_generation(&self) -> u64 {
         self.suspension_generation
     }
+
+    pub(crate) fn cancel_scan_on_suspend(&mut self, cancelled: &Arc<AtomicBool>) {
+        if self.suspended {
+            cancelled.store(true, Ordering::Relaxed);
+        } else {
+            self.full_scan_cancelled = Arc::downgrade(cancelled);
+        }
+    }
     #[cfg(test)]
     pub(super) fn retained_capacity_bytes(&self) -> usize {
         fn bytes<T>(values: &Vec<T>) -> usize {
@@ -298,6 +314,9 @@ impl WaveformFrame {
         }
         self.suspended = suspended;
         if suspended {
+            if let Some(cancelled) = self.full_scan_cancelled.upgrade() {
+                cancelled.store(true, Ordering::Relaxed);
+            }
             *self = Self {
                 revision: self.revision.wrapping_add(1),
                 path: self.path.take(),

@@ -4,7 +4,7 @@
 use crate::model::Track;
 use parking_lot::Mutex;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     fs::{self, File},
     io::{self, Write},
     path::{Path, PathBuf},
@@ -21,9 +21,17 @@ use symphonia::{
 
 pub(crate) static DEFAULT_IMAGE: &[u8] = include_bytes!("../assets/rivu.png");
 
+const MAX_ARTWORK_ENTRIES: usize = 64;
+
 struct CachedArtwork {
     fingerprint: Option<String>,
     uri: OnceLock<Option<String>>,
+}
+
+#[derive(Default)]
+struct ArtworkCache {
+    items: HashMap<i64, Arc<CachedArtwork>>,
+    insertion_order: VecDeque<i64>,
 }
 
 pub struct ArtworkManager {
@@ -31,7 +39,7 @@ pub struct ArtworkManager {
     default_uri: Option<String>,
     // The lookup key is exactly (track ID, fingerprint). Index by ID and compare
     // the fingerprint in place, avoiding a fingerprint allocation on cache hits.
-    entries: Mutex<HashMap<i64, Arc<CachedArtwork>>>,
+    entries: Mutex<ArtworkCache>,
 }
 
 impl ArtworkManager {
@@ -41,29 +49,43 @@ impl ArtworkManager {
         Self {
             directory,
             default_uri,
-            entries: Mutex::new(HashMap::new()),
+            entries: Mutex::new(ArtworkCache::default()),
         }
     }
 
     pub fn uri_for(&self, track: &Track) -> Option<String> {
         let cached = {
-            let mut entries = self.entries.lock();
-            let cached = entries.entry(track.id).or_insert_with(|| {
-                Arc::new(CachedArtwork {
-                    fingerprint: track.fingerprint.clone(),
-                    uri: OnceLock::new(),
-                })
-            });
-            if cached.fingerprint != track.fingerprint {
-                *cached = Arc::new(CachedArtwork {
+            let mut cache = self.entries.lock();
+            let ArtworkCache {
+                items: entries,
+                insertion_order: order,
+            } = &mut *cache;
+            if let Some(cached) = entries.get(&track.id)
+                && cached.fingerprint == track.fingerprint
+            {
+                Arc::clone(cached)
+            } else {
+                // Fingerprint replacement keeps its existing FIFO position.
+                if !entries.contains_key(&track.id) {
+                    if entries.len() == MAX_ARTWORK_ENTRIES {
+                        if let Some(oldest) = order.pop_front() {
+                            entries.remove(&oldest);
+                        }
+                    }
+                    order.push_back(track.id);
+                }
+                let cached = Arc::new(CachedArtwork {
                     fingerprint: track.fingerprint.clone(),
                     uri: OnceLock::new(),
                 });
+                entries.insert(track.id, Arc::clone(&cached));
+                cached
             }
-            Arc::clone(cached)
         };
         // Same-key requests share one probe without holding the map lock. An
         // older fingerprint may finish later but cannot replace its successor.
+        // Eviction drops only the manager's Arc; in-flight callers stay valid.
+        // Revisiting an evicted key starts a new probe, never reinserts old work.
         cached
             .uri
             .get_or_init(|| {
@@ -294,17 +316,61 @@ mod tests {
             fingerprint: track.fingerprint.clone(),
             uri: OnceLock::new(),
         });
-        manager.entries.lock().insert(track.id, old.clone());
+        manager.entries.lock().items.insert(track.id, old.clone());
+        manager.entries.lock().insertion_order.push_back(track.id);
         track.fingerprint = Some("new".into());
         let current_uri = manager.uri_for(&track);
         old.uri.set(Some("file:///old.png".into())).unwrap();
         assert_eq!(manager.uri_for(&track), current_uri);
         let entries = manager.entries.lock();
+        let entries = &entries.items;
         assert!(!Arc::ptr_eq(entries.get(&track.id).unwrap(), &old));
         assert_eq!(
             entries.get(&track.id).unwrap().fingerprint,
             track.fingerprint
         );
+    }
+
+    #[test]
+    fn eviction_bounds_retention_and_keeps_outstanding_entries_valid() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = ArtworkManager::new(directory.path());
+        let mut track = track(directory.path().join("missing.wav"));
+        let first_id = track.id;
+        let pending = Arc::new(CachedArtwork {
+            fingerprint: track.fingerprint.clone(),
+            uri: OnceLock::new(),
+        });
+        manager
+            .entries
+            .lock()
+            .items
+            .insert(first_id, Arc::clone(&pending));
+        manager.entries.lock().insertion_order.push_back(first_id);
+
+        for offset in 1..=MAX_ARTWORK_ENTRIES * 2 {
+            track.id = first_id + offset as i64;
+            manager.uri_for(&track);
+            let cache = manager.entries.lock();
+            assert!(cache.items.len() <= MAX_ARTWORK_ENTRIES);
+            assert!(cache.insertion_order.len() <= MAX_ARTWORK_ENTRIES);
+        }
+        assert!(!manager.entries.lock().items.contains_key(&first_id));
+        pending.uri.set(Some("file:///old.png".into())).unwrap();
+        assert_eq!(
+            pending.uri.get().unwrap().as_deref(),
+            Some("file:///old.png")
+        );
+
+        track.id = first_id;
+        track.fingerprint = Some("replacement".into());
+        assert_eq!(manager.uri_for(&track), manager.default_uri);
+        let entries = manager.entries.lock();
+        let entries = &entries.items;
+        assert_eq!(entries.len(), MAX_ARTWORK_ENTRIES);
+        let replacement = entries.get(&first_id).unwrap();
+        assert!(!Arc::ptr_eq(replacement, &pending));
+        assert_eq!(replacement.fingerprint, track.fingerprint);
     }
 
     #[test]

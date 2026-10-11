@@ -186,8 +186,18 @@ struct SpectrumGeometryKey {
     revision: u64,
 }
 
+#[derive(PartialEq)]
+struct SpectrumGroupingKey {
+    bars: usize,
+    generation: u64,
+    low: f32,
+    high: f32,
+}
+
 struct SpectrumGeometry {
-    key: SpectrumGeometryKey,
+    key: Option<SpectrumGeometryKey>,
+    grouping_key: SpectrumGroupingKey,
+    bins: Vec<Range<usize>>,
     body: Option<Path<Pixels>>,
 }
 
@@ -201,7 +211,6 @@ struct VisualData {
     spectrum_labels: [SharedString; 2],
     db_labels: [SharedString; 4],
     spectrum_bins: Vec<Range<usize>>,
-    spectrum_bins_generation: u64,
     heat_samples: Vec<HeatSample>,
     heat_sample_generation: u64,
     spectrogram_image_height: usize,
@@ -278,7 +287,6 @@ impl Visuals {
                 spectrum_labels: ["20 Hz".into(), "20 kHz".into()],
                 db_labels: std::array::from_fn(|step| db_label(-70.0 * step as f32 / 3.0)),
                 spectrum_bins: Vec::new(),
-                spectrum_bins_generation: 0,
                 heat_samples: Vec::new(),
                 spectrogram_panel_sizes: HashMap::new(),
                 spectrogram_panel_height: 0,
@@ -365,7 +373,6 @@ impl Visuals {
         data.bar_deadlines = Vec::new();
         data.smoothed_levels = Vec::new();
         data.spectrum_bins = Vec::new();
-        data.spectrum_bins_generation = 0;
         data.spectrum_points = Vec::new();
         data.spectrum_geometry = HashMap::new();
         data.heat_samples = Vec::new();
@@ -641,7 +648,15 @@ impl Visuals {
                 .map_err(|error| format!("Cannot release spectrogram image: {error}"))
         });
         if !data.retired.is_empty() {
-            window.request_animation_frame();
+            let visuals = self.clone();
+            // Retirement needs a frame boundary, not another content redraw.
+            window.on_next_frame(move |window, _| {
+                visuals.data.borrow_mut().release_images(|image| {
+                    window
+                        .drop_image(image)
+                        .map_err(|error| format!("Cannot release spectrogram image: {error}"))
+                });
+            });
         }
     }
 
@@ -922,7 +937,6 @@ impl VisualData {
     }
     fn clear_derived_caches(&mut self) {
         self.spectrum_bins.clear();
-        self.spectrum_bins_generation = 0;
         self.spectrum_points.clear();
         self.spectrum_geometry.clear();
         self.heat_samples.clear();
@@ -993,7 +1007,7 @@ impl VisualData {
     }
 
     fn refresh_frequency_labels(&mut self) {
-        self.spectrum_bins.clear();
+        self.spectrum_geometry.clear();
         if let Some((_, _, low, high)) = self.visible_range() {
             self.frequency_labels = [frequency_label(low), frequency_label(high)];
         }
@@ -1020,6 +1034,68 @@ impl VisualData {
         self.retired.append(&mut self.pending_images);
     }
 
+    fn spectrum_render_range(&self) -> Option<(usize, usize, f32, f32)> {
+        // Hidden views keep history current but do not advance envelopes. A
+        // restored view must wait for a real frame before indexing those arrays.
+        if !self.spectrum_visible
+            || !self.envelope_initialized
+            || self.bar_levels.len() != self.frequencies.len()
+            || self.smoothed_levels.len() != self.frequencies.len()
+            || self.peaks.len() != self.frequencies.len()
+        {
+            return None;
+        }
+        self.spectrum_range()
+    }
+
+    fn prepare_spectrum_bins(&mut self, panel_id: u64, bars: usize, low: f32, high: f32) {
+        if !self.visualization_cache {
+            group_bands(
+                &self.frequencies,
+                low,
+                high,
+                bars,
+                true,
+                &mut self.spectrum_bins,
+            );
+            return;
+        }
+        let key = SpectrumGroupingKey {
+            bars,
+            generation: self.stream_generation,
+            low,
+            high,
+        };
+        let geometry = self
+            .spectrum_geometry
+            .entry(panel_id)
+            .or_insert_with(|| SpectrumGeometry {
+                key: None,
+                grouping_key: SpectrumGroupingKey {
+                    bars: 0,
+                    generation: 0,
+                    low: 0.0,
+                    high: 0.0,
+                },
+                bins: Vec::new(),
+                body: None,
+            });
+        if geometry.grouping_key != key {
+            group_bands(&self.frequencies, low, high, bars, true, &mut geometry.bins);
+            geometry.grouping_key = key;
+            geometry.key = None;
+            geometry.body = None;
+        }
+    }
+
+    fn spectrum_bin(&self, panel_id: u64, bar: usize) -> Range<usize> {
+        if self.visualization_cache {
+            self.spectrum_geometry[&panel_id].bins[bar].clone()
+        } else {
+            self.spectrum_bins[bar].clone()
+        }
+    }
+
     fn paint_spectrum(
         &mut self,
         panel_id: u64,
@@ -1036,7 +1112,7 @@ impl VisualData {
                 (bounds.size.height - px(bottom_margin + 8.0)).max(px(1.0)),
             ),
         );
-        let Some((_, _, low, high)) = self.spectrum_range() else {
+        let Some((_, _, low, high)) = self.spectrum_render_range() else {
             return Ok(());
         };
         if plot.size.width <= px(2.0) || plot.size.height <= px(2.0) {
@@ -1051,19 +1127,7 @@ impl VisualData {
             self.spectrum_bar_width,
             self.spectrum_gap,
         );
-        if self.spectrum_bins.len() != bars
-            || self.spectrum_bins_generation != self.stream_generation
-        {
-            group_bands(
-                &self.frequencies,
-                low,
-                high,
-                bars,
-                true,
-                &mut self.spectrum_bins,
-            );
-            self.spectrum_bins_generation = self.stream_generation;
-        }
+        self.prepare_spectrum_bins(panel_id, bars, low, high);
         let mut grid_path = PathBuilder::stroke(px(1.0));
         let mut has_grid = false;
         for step in 0..self.db_labels.len() {
@@ -1113,7 +1177,7 @@ impl VisualData {
             |window| -> Result<(), String> {
                 if self.visualization_cache
                     && let Some(geometry) = self.spectrum_geometry.get(&panel_id)
-                    && geometry.key == geometry_key
+                    && geometry.key.as_ref() == Some(&geometry_key)
                 {
                     if let Some(path) = geometry.body.clone() {
                         paint_spectrum_path(path, plot, window, self.palette_lut.as_ref());
@@ -1142,7 +1206,7 @@ impl VisualData {
                 for bar in 0..bars {
                     let left_t = bar as f32 / bars as f32;
                     let right_t = (bar + 1) as f32 / bars as f32;
-                    let range = self.spectrum_bins[bar].clone();
+                    let range = self.spectrum_bin(panel_id, bar);
                     let mut level = f32::NEG_INFINITY;
                     for index in range.clone() {
                         level = level.max(self.display_level(index));
@@ -1255,13 +1319,9 @@ impl VisualData {
                     None
                 };
                 if self.visualization_cache {
-                    self.spectrum_geometry.insert(
-                        panel_id,
-                        SpectrumGeometry {
-                            key: geometry_key,
-                            body: body.clone(),
-                        },
-                    );
+                    let geometry = self.spectrum_geometry.get_mut(&panel_id).unwrap();
+                    geometry.key = Some(geometry_key);
+                    geometry.body = body.clone();
                 } else {
                     self.spectrum_geometry.remove(&panel_id);
                 }
@@ -1277,7 +1337,7 @@ impl VisualData {
                     let left_t = bar as f32 / bars as f32;
                     let right_t = (bar + 1) as f32 / bars as f32;
                     let mut peak = f32::NEG_INFINITY;
-                    for index in self.spectrum_bins[bar].clone() {
+                    for index in self.spectrum_bin(panel_id, bar) {
                         peak = peak.max(finite_level(self.peaks[index]));
                     }
                     if self.spectrum_interpolate {
@@ -1321,7 +1381,6 @@ impl VisualData {
         }
         if !self.visualization_cache {
             self.spectrum_bins.clear();
-            self.spectrum_bins_generation = 0;
         }
         if self.spectrum_show_labels {
             let labels_y = plot.bottom() + px(3.0);
@@ -2038,6 +2097,106 @@ mod tests {
         assert_eq!(data.bar_levels, vec![-60.0; 4]);
         assert_eq!(data.smoothed_levels, vec![-60.0; 4]);
         assert_eq!(data.len, 2);
+    }
+
+    #[test]
+    fn hidden_frequency_shape_change_withholds_rendering_until_real_envelopes_return() {
+        for count in [2, 8] {
+            let mut visuals = configured_visuals();
+            visuals.update(&frame(1.0, -10.0));
+            visuals.set_spectrum_visible(false);
+            let mut changed = frame(1.1, -60.0);
+            changed.frequencies_hz = (0..count)
+                .map(|index| 20.0 * 1000.0_f32.powf(index as f32 / (count - 1) as f32))
+                .collect();
+            changed.spectrum_db = vec![-60.0; count];
+            visuals.update(&changed);
+            assert!(visuals.set_spectrum_visible(true));
+            {
+                let data = visuals.data.borrow();
+                assert_eq!(data.latest_levels, changed.spectrum_db);
+                assert_eq!(data.len, 2);
+                assert_eq!(data.columns[0].levels, vec![-10.0; 4]);
+                assert_eq!(data.columns[1].levels, changed.spectrum_db);
+                // This is the paint consumer's boundary, before pooled levels,
+                // interpolated levels, or peaks may index an envelope.
+                assert!(data.spectrum_render_range().is_none());
+            }
+            changed.sample_time = Duration::from_secs_f64(1.2);
+            visuals.update(&changed);
+            let data = visuals.data.borrow();
+            let (first, end, low, high) = data.spectrum_render_range().unwrap();
+            for index in first..end {
+                assert_eq!(data.display_level(index), -60.0);
+                assert_eq!(data.peaks[index], -60.0);
+            }
+            assert_eq!(data.interpolate_level(high, low, high, false), -60.0);
+            assert_eq!(data.interpolate_level(high, low, high, true), -60.0);
+            assert_eq!(data.bar_levels.len(), count);
+            assert_eq!(data.smoothed_levels.len(), count);
+        }
+    }
+
+    #[test]
+    fn differently_sized_spectrum_panels_keep_independent_bands_and_release_them() {
+        let mut visuals = configured_visuals();
+        visuals.update(&frame(1.0, -30.0));
+        {
+            let mut data = visuals.data.borrow_mut();
+            let (_, _, low, high) = data.spectrum_render_range().unwrap();
+            let narrow = spectrum_bar_count(120.0, false, 0, 8.0, 2.0);
+            let wide = spectrum_bar_count(800.0, false, 0, 8.0, 2.0);
+            assert_ne!(narrow, wide);
+            data.prepare_spectrum_bins(1, narrow, low, high);
+            let narrow_bins: Vec<_> = (0..narrow).map(|bar| data.spectrum_bin(1, bar)).collect();
+            data.prepare_spectrum_bins(2, wide, low, high);
+            let wide_bins: Vec<_> = (0..wide).map(|bar| data.spectrum_bin(2, bar)).collect();
+            for (bins, bars) in [(&narrow_bins, narrow), (&wide_bins, wide)] {
+                for (bar, range) in bins.iter().enumerate() {
+                    let left = axis_frequency(low, high, bar as f32 / bars as f32, true);
+                    let right = axis_frequency(low, high, (bar + 1) as f32 / bars as f32, true);
+                    for index in range.clone() {
+                        assert!(data.frequencies[index] >= left * (1.0 - 1e-6));
+                        assert!(data.frequencies[index] <= right * (1.0 + 1e-6));
+                    }
+                }
+                let included: Vec<_> = bins.iter().flat_map(|range| range.clone()).collect();
+                let expected: Vec<_> = data
+                    .frequencies
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, hz)| (*hz >= low && *hz <= high).then_some(index))
+                    .collect();
+                assert_eq!(included, expected);
+            }
+            data.prepare_spectrum_bins(1, narrow, low, high);
+            assert_eq!(
+                (0..narrow)
+                    .map(|bar| data.spectrum_bin(1, bar))
+                    .collect::<Vec<_>>(),
+                narrow_bins
+            );
+            assert_eq!(
+                (0..wide)
+                    .map(|bar| data.spectrum_bin(2, bar))
+                    .collect::<Vec<_>>(),
+                wide_bins
+            );
+        }
+        visuals.retain_spectrum_panels(&[2]);
+        assert_eq!(visuals.data.borrow().spectrum_geometry.len(), 1);
+        visuals.configure(&Config {
+            visualization_cache: false,
+            ..Config::default()
+        });
+        {
+            let mut data = visuals.data.borrow_mut();
+            assert!(data.spectrum_geometry.is_empty());
+            let (_, _, low, high) = data.spectrum_range().unwrap();
+            data.prepare_spectrum_bins(3, 12, low, high);
+            assert!(data.spectrum_geometry.is_empty());
+            assert!((0..12).any(|bar| !data.spectrum_bin(3, bar).is_empty()));
+        }
     }
 
     #[test]

@@ -1521,7 +1521,10 @@ fn draw_queue(
         } else {
             "  "
         };
-        ListItem::new(format!("{marker}{title}"))
+        ListItem::new(Line::from(vec![
+            Span::raw(marker),
+            Span::raw(title.as_str()),
+        ]))
     });
     let title = if state.queue.entries.is_empty() {
         "Queue — empty; / to search, t to browse"
