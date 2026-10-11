@@ -3218,6 +3218,7 @@ impl Render for GuiApp {
                         },
                     ))
                     .child(about)
+                    .child(div().h(px(1.)).mx_2().my_1().bg(rgb(BORDER)))
                     .child(menu_item(
                         "app-close-window",
                         "Close window",
