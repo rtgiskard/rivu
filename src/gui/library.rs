@@ -397,7 +397,15 @@ impl GuiApp {
                                     .flex_shrink_0()
                                     .text_sm()
                                     .font_family(super::fonts::SYMBOLS_FAMILY)
-                                    .child(if path.is_some() { "󰉋" } else { "󰈙" }),
+                                    .child(if let Some(branch) = &visible.branch {
+                                        if this.directory_tree.expanded(branch) {
+                                            "󰝰"
+                                        } else {
+                                            "󰉋"
+                                        }
+                                    } else {
+                                        "󰈙"
+                                    }),
                             )
                             .child(
                                 row()

@@ -3146,11 +3146,6 @@ impl Render for GuiApp {
                         cx.notify();
                     },
                 )
-                .text_color(rgb(if self.layouts.current().locked {
-                    ACCENT
-                } else {
-                    MUTED
-                }))
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(|this, _, window, cx| {
