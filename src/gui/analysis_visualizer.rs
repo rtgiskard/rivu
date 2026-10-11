@@ -4,8 +4,8 @@ use crate::{
     config::{AudioVisualizerOptions, AudioVisualizerStyle, Config},
 };
 use gpui::{
-    AnyElement, App, Bounds, Hsla, Pixels, Point, RenderImage, SharedString, TextAlign, Window, canvas,
-    div, fill, point, prelude::*, px, rgb, size,
+    AnyElement, App, Bounds, Hsla, Pixels, Point, RenderImage, SharedString, TextAlign, Window,
+    canvas, div, fill, point, prelude::*, px, rgb, size,
 };
 use std::{cell::RefCell, rc::Rc, sync::Arc, time::Duration};
 
@@ -794,20 +794,33 @@ mod tests {
             let image = data.image.as_ref().unwrap();
             let bytes = image.as_bytes(0).unwrap();
             assert_eq!(bytes[3], 0, "silence must remain transparent");
-            assert!(bytes[6] > bytes[4], "red tint must be red in GPUI's BGRA texture");
+            assert!(
+                bytes[6] > bytes[4],
+                "red tint must be red in GPUI's BGRA texture"
+            );
             let moderate: [u8; 4] = bytes[4..8].try_into().unwrap();
             data.field[2] = 1.0;
             data.rasterize();
             let bytes = data.image.as_ref().unwrap().as_bytes(0).unwrap();
-            assert_eq!(&bytes[4..8], &moderate, "another peak cannot renormalize this cell");
+            assert_eq!(
+                &bytes[4..8],
+                &moderate,
+                "another peak cannot renormalize this cell"
+            );
             drop(data);
             config.audio_visualizer_primary_color = "#0033ff".parse().unwrap();
             config.audio_visualizer_secondary_color = "#0077ff".parse().unwrap();
             plot.configure(&config);
             let data = plot.data.borrow();
-            assert_eq!(data.field[1], 0.001, "recoloring must preserve measured power");
+            assert_eq!(
+                data.field[1], 0.001,
+                "recoloring must preserve measured power"
+            );
             let bytes = data.image.as_ref().unwrap().as_bytes(0).unwrap();
-            assert!(bytes[4] > bytes[6], "blue tint must remain blue after recoloring");
+            assert!(
+                bytes[4] > bytes[6],
+                "blue tint must remain blue after recoloring"
+            );
         }
     }
 

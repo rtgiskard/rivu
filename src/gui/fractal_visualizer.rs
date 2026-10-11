@@ -278,6 +278,8 @@ impl Data {
             bounds.top() + bounds.size.height * 0.5,
         );
         let scale = side * 0.47;
+        let tone_colors: [u32; 3] =
+            std::array::from_fn(|tone| blend(self.colors[0], self.colors[1], tone as f32 * 0.5));
         // Three color groups and three intensity buckets, independent of branch count.
         // Wide translucent strokes approximate a halo without image feedback buffers.
         for pass in 0..3 {
@@ -311,7 +313,12 @@ impl Data {
             }
             for (index, path) in paths.into_iter().enumerate() {
                 if used[index] {
-                    let color = blend(self.colors[0], self.colors[1], (index / 3) as f32 * 0.5);
+                    let mut color = tone_colors[index / 3];
+                    if self.style != AudioVisualizerStyle::FractalFlow && pass == 2 {
+                        // Bright cores contrast with the saturated halo. Leave
+                        // Flow's accepted trail colors and alpha buckets intact.
+                        color = blend(color, 0xffffff, [0.0, 0.28, 0.62][index % 3]);
+                    }
                     if let Ok(path) = path.build() {
                         window.paint_path(
                             path,

@@ -163,6 +163,14 @@ for visible styles; hiding a style releases it. Recoloring uses retained fields
 rather than another FFT. This trades fixed display resolution for predictable
 storage and coherent reuse across differently sized panels.
 
+Color ramps derive from the configured visualizer colors, with increasing
+lightness and pale highlights reserved for the strongest cells. Density has a
+cyanward intermediate hue; Spatial Spectrum retains the primary-to-secondary
+hue progression. A bounded lookup table supplies BGRA pixels and is rebuilt
+only when the configured colors change. Opacity lifts faint cells without
+renormalizing the field: occupancy and spectral power retain their fixed dB
+references, and empty cells remain transparent.
+
 == Spectrogram
 
 Spectrogram maps retained frequency history to colored image columns. Stable
