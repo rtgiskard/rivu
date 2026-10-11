@@ -116,7 +116,8 @@ the core and playback running. Activate the tray icon, use `rivu gui`, or invoke
 MPRIS `Raise` to reopen or focus the window. CLI and MPRIS reopening work with
 the tray disabled or unavailable; a headless core has no graphical host to raise.
 Use the application menu's Quit application action, tray Quit, or `rivu quit`
-to stop the core.
+to stop the core. Quitting also removes the tray item and releases desktop media
+controls; closing only the window does not.
 
 `tray_enabled` controls tray startup and takes effect after restarting the
 graphical host, not merely reopening its window. The tray requires a session

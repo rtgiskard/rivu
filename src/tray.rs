@@ -6,6 +6,7 @@ use crate::{
 };
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender, bounded, select_biased};
+use futures::{FutureExt, StreamExt, channel::oneshot};
 use parking_lot::RwLock;
 use serde::Serialize;
 use std::{
@@ -17,7 +18,8 @@ use std::{
     thread::{self, JoinHandle},
 };
 use zbus::{
-    blocking::{Connection, Proxy, connection::Builder, fdo::DBusProxy},
+    AsyncDrop, Proxy,
+    blocking::{Connection, connection::Builder},
     fdo,
     zvariant::{ObjectPath, OwnedValue, StructureBuilder, Type, Value},
 };
@@ -58,7 +60,6 @@ struct TrayData {
 
 pub(crate) struct TrayController {
     stop: Option<Sender<()>>,
-    connection: Option<Connection>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -82,9 +83,8 @@ impl TrayController {
         };
 
         match ready_receiver.recv() {
-            Ok(Ok(connection)) => Ok(Some(Self {
+            Ok(Ok(())) => Ok(Some(Self {
                 stop: Some(stop),
-                connection: Some(connection),
                 worker: Some(worker),
             })),
             Ok(Err(error)) => {
@@ -106,9 +106,6 @@ impl Drop for TrayController {
         if let Some(stop) = self.stop.take() {
             let _ = stop.try_send(());
         }
-        if let Some(connection) = self.connection.take() {
-            let _ = connection.close();
-        }
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -119,7 +116,7 @@ fn run_bus(
     handle: AppHandle,
     data: Arc<RwLock<TrayData>>,
     stop: Receiver<()>,
-    ready: Sender<std::result::Result<Connection, String>>,
+    ready: Sender<std::result::Result<(), String>>,
 ) {
     let service_name = format!(
         "org.freedesktop.StatusNotifierItem-{}-{}",
@@ -152,42 +149,25 @@ fn run_bus(
         .unique_name()
         .map(|name| format!("{}{SNI_PATH}", name.as_str()))
         .unwrap_or_else(|| service_name.clone());
-    if let Err(error) = register_with_watcher(&connection, &item_address) {
+    if let Err(error) =
+        futures::executor::block_on(register_with_watcher(&connection, &item_address))
+    {
         tracing::warn!(error = %error, "tray_watcher_unavailable");
     }
 
     let updates = handle.subscribe();
-    let updater_connection = connection.clone();
-    let updater_data = Arc::clone(&data);
-    let updater_handle = handle.clone();
-    let updater = match thread::Builder::new()
-        .name("rivu-tray-updates".into())
-        .spawn(move || {
-            update_loop(
-                updater_handle,
-                updater_data,
-                updater_connection,
-                updates,
-                stop,
-            )
-        }) {
-        Ok(updater) => updater,
-        Err(error) => {
-            let _ = ready.send(Err(format!("Starting tray update thread: {error}")));
-            let _ = connection.close();
-            return;
-        }
-    };
 
     let watcher_connection = connection.clone();
-    let watcher_item_address = connection
-        .unique_name()
-        .map(|name| format!("{}{SNI_PATH}", name.as_str()))
-        .unwrap_or(service_name);
+    let (watcher_stop, watcher_stopped) = oneshot::channel();
     let watcher = match thread::Builder::new()
         .name("rivu-tray-watcher".into())
-        .spawn(move || watch_watcher(watcher_connection, watcher_item_address))
-    {
+        .spawn(move || {
+            futures::executor::block_on(watch_watcher(
+                watcher_connection,
+                item_address,
+                watcher_stopped,
+            ))
+        }) {
         Ok(watcher) => Some(watcher),
         Err(error) => {
             tracing::warn!(error = %error, "tray_watcher_monitor_unavailable");
@@ -195,57 +175,77 @@ fn run_bus(
         }
     };
 
-    if ready.send(Ok(connection.clone())).is_err() {
-        let _ = connection.close();
-        let _ = updater.join();
-        if let Some(watcher) = watcher {
-            let _ = watcher.join();
-        }
-        return;
+    if ready.send(Ok(())).is_ok() {
+        update_loop(handle, data, connection.clone(), updates, stop);
     }
-    connection.closed();
-    let _ = updater.join();
+    // Remove signal subscriptions while the socket is still usable. Closing it
+    // to wake the watcher races zbus's NameLost and RemoveMatch cleanup.
+    let _ = watcher_stop.send(());
     if let Some(watcher) = watcher {
         let _ = watcher.join();
     }
+    if let Err(error) = connection.release_name(service_name.as_str()) {
+        tracing::warn!(error = %error, "tray_name_release_failed");
+    }
+    connection.graceful_shutdown();
 }
 
-fn watch_watcher(connection: Connection, service_name: String) {
-    let proxy = match DBusProxy::new(&connection) {
-        Ok(proxy) => proxy,
-        Err(error) => {
-            tracing::warn!(error = %error, "tray_watcher_monitor_unavailable");
-            return;
-        }
-    };
-    let owner_changes = match proxy.receive_name_owner_changed_with_args(&[(0, WATCHER_SERVICE)]) {
-        Ok(changes) => changes,
-        Err(error) => {
-            tracing::warn!(error = %error, "tray_watcher_monitor_unavailable");
-            return;
-        }
-    };
-
-    // The watcher may have appeared between the initial registration attempt and
-    // signal subscription. Retry once before waiting for future owner changes.
-    if let Err(error) = register_with_watcher(&connection, &service_name) {
-        tracing::warn!(error = %error, "tray_watcher_not_registered");
-    }
-    for signal in owner_changes {
-        let Ok(args) = signal.args() else {
-            continue;
+async fn watch_watcher(connection: Connection, service_name: String, stop: oneshot::Receiver<()>) {
+    let monitor = async {
+        let proxy = match fdo::DBusProxy::new(connection.inner()).await {
+            Ok(proxy) => proxy,
+            Err(error) => {
+                tracing::warn!(error = %error, "tray_watcher_monitor_unavailable");
+                return;
+            }
         };
-        if args.new_owner().is_some()
-            && let Err(error) = register_with_watcher(&connection, &service_name)
+        let mut owner_changes = match proxy
+            .receive_name_owner_changed_with_args(&[(0, WATCHER_SERVICE)])
+            .await
         {
-            tracing::warn!(error = %error, "tray_watcher_reregistration_failed");
+            Ok(changes) => changes,
+            Err(error) => {
+                tracing::warn!(error = %error, "tray_watcher_monitor_unavailable");
+                return;
+            }
+        };
+
+        // The watcher may have appeared between initial registration and signal
+        // subscription. Retry once before waiting for future owner changes.
+        if let Err(error) = register_with_watcher(&connection, &service_name).await {
+            tracing::warn!(error = %error, "tray_watcher_not_registered");
         }
+        while let Some(signal) = owner_changes.next().await {
+            let Ok(args) = signal.args() else {
+                continue;
+            };
+            if args.new_owner().is_some()
+                && let Err(error) = register_with_watcher(&connection, &service_name).await
+            {
+                tracing::warn!(error = %error, "tray_watcher_reregistration_failed");
+            }
+        }
+        owner_changes.async_drop().await;
+    };
+    // Cancellation covers setup and pending registration replies, not just the
+    // idle signal wait. Dropping the stream queues RemoveMatch before shutdown.
+    futures::select_biased! {
+        _ = stop.fuse() => {},
+        _ = monitor.fuse() => {},
     }
 }
 
-fn register_with_watcher(connection: &Connection, service_name: &str) -> zbus::Result<()> {
-    let watcher = Proxy::new(connection, WATCHER_SERVICE, WATCHER_PATH, WATCHER_INTERFACE)?;
-    let _: () = watcher.call("RegisterStatusNotifierItem", &(service_name,))?;
+async fn register_with_watcher(connection: &Connection, service_name: &str) -> zbus::Result<()> {
+    let watcher = Proxy::new(
+        connection.inner(),
+        WATCHER_SERVICE,
+        WATCHER_PATH,
+        WATCHER_INTERFACE,
+    )
+    .await?;
+    let _: () = watcher
+        .call("RegisterStatusNotifierItem", &(service_name,))
+        .await?;
     Ok(())
 }
 
