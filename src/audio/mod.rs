@@ -23,7 +23,7 @@ mod ffmpeg;
 mod ffmpeg {
     use super::{Channel, MediaInfo};
     use anyhow::{Result, bail};
-    use std::path::Path;
+    use std::{fs::File, path::Path};
 
     pub(super) fn availability() -> Result<String> {
         bail!("FFmpeg extension is not compiled; rebuild with --features ffmpeg")
@@ -45,7 +45,7 @@ mod ffmpeg {
         }
     }
 
-    pub(super) fn inspect_wave(_: &Path) -> Result<Option<Input>> {
+    pub(super) fn inspect_wave(_: &Path) -> Result<Option<(File, Option<Input>)>> {
         Ok(None)
     }
 

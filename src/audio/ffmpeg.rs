@@ -8,10 +8,12 @@ use anyhow::{Context, Result, bail};
 use libloading::Library;
 use std::{
     ffi::{CStr, CString, c_char, c_int},
-    io::{ErrorKind, Read},
+    fs::File,
+    io::ErrorKind,
+    os::unix::fs::FileExt,
     path::{Path, PathBuf},
     ptr,
-    sync::{Arc, OnceLock},
+    sync::LazyLock,
 };
 
 #[cfg(not(all(
@@ -121,8 +123,10 @@ struct Runtime {
 }
 unsafe impl Send for Runtime {}
 unsafe impl Sync for Runtime {}
-// OnceLock provides nonblocking snapshots while an explicit load is in progress.
-static RUNTIME: OnceLock<std::result::Result<Arc<Runtime>, String>> = OnceLock::new();
+// Successful libraries stay loaded for the process lifetime; clients only borrow.
+// Non-forcing snapshots remain available while an explicit load is in progress.
+static RUNTIME: LazyLock<std::result::Result<Runtime, String>> =
+    LazyLock::new(|| load_runtime().map_err(|error| format!("{error:#}")));
 
 unsafe fn symbol<T: Copy>(library: &Library, name: &[u8]) -> Result<T> {
     // Every caller supplies an extern function pointer. Option preserves its
@@ -151,7 +155,7 @@ fn load_library(names: &[&str], component: &str) -> Result<Library> {
         errors.join(", ")
     )
 }
-fn load_runtime() -> Result<Arc<Runtime>> {
+fn load_runtime() -> Result<Runtime> {
     let expected = (
         LIBAVUTIL_VERSION_MAJOR,
         LIBAVCODEC_VERSION_MAJOR,
@@ -246,21 +250,20 @@ fn load_runtime() -> Result<Arc<Runtime>> {
         bail!("FFmpeg runtime has no audio decoders");
     }
     let audio_codecs = CString::new(names)?;
-    let runtime = Arc::new(Runtime {
+    let runtime = Runtime {
         _util: util,
         _codec: codec,
         _format: format,
         f,
         audio_codecs,
-    });
+    };
     // FFmpeg's default logger writes codec probe failures directly to stderr.
     // Rivu returns the structured error to the scan result instead.
     unsafe { (runtime.f.log_set_level)(-8) } // AV_LOG_QUIET
     Ok(runtime)
 }
-fn runtime() -> Result<&'static Arc<Runtime>> {
-    RUNTIME
-        .get_or_init(|| load_runtime().map_err(|error| format!("{error:#}")))
+fn runtime() -> Result<&'static Runtime> {
+    LazyLock::force(&RUNTIME)
         .as_ref()
         .map_err(|error| anyhow::anyhow!("{error}"))
 }
@@ -269,10 +272,10 @@ pub(super) fn ensure_loaded() -> Result<()> {
 }
 pub(super) fn load_attempted() -> bool {
     // get() stays nonblocking and returns None until initialization is published.
-    RUNTIME.get().is_some()
+    LazyLock::get(&RUNTIME).is_some()
 }
 pub(super) fn availability() -> Result<String> {
-    let rt = match RUNTIME.get() {
+    let rt = match LazyLock::get(&RUNTIME) {
         None => return Ok("not loaded".to_owned()),
         Some(Ok(rt)) => rt,
         Some(Err(error)) => bail!("{error}"),
@@ -334,7 +337,7 @@ fn rational_seconds(value: i64, q: AVRational) -> Option<f64> {
 
 /// An analyzed input owns its format context until decoding takes it over.
 pub(super) struct Input {
-    rt: Arc<Runtime>,
+    rt: &'static Runtime,
     path: PathBuf,
     format: *mut AVFormatContext,
     stream: c_int,
@@ -343,7 +346,7 @@ pub(super) struct Input {
 }
 unsafe impl Send for Input {}
 impl Input {
-    fn open(path: &Path, rt: Arc<Runtime>) -> Result<Self> {
+    fn open(path: &Path, rt: &'static Runtime) -> Result<Self> {
         let path = crate::library::logical_path(path)?;
         let metadata = std::fs::metadata(&path)?;
         if !metadata.is_file() {
@@ -352,7 +355,7 @@ impl Input {
         Self::open_validated(path, rt)
     }
 
-    fn open_validated(path: PathBuf, rt: Arc<Runtime>) -> Result<Self> {
+    fn open_validated(path: PathBuf, rt: &'static Runtime) -> Result<Self> {
         let cpath = CString::new(path.as_os_str().as_encoded_bytes())
             .context("FFmpeg path contains NUL")?;
         let mut input = Self {
@@ -363,7 +366,7 @@ impl Input {
             stream_ptr: ptr::null_mut(),
             params: ptr::null_mut(),
         };
-        let rt = &input.rt;
+        let rt = input.rt;
         let mut options = ptr::null_mut();
         for (key, value) in [
             (c"protocol_whitelist", c"file"),
@@ -458,31 +461,32 @@ impl Drop for Input {
     }
 }
 
-/// Inspect WAVE containers only when an explicit operation already loaded FFmpeg.
-pub(super) fn inspect_wave(path: &Path) -> Result<Option<Input>> {
-    let rt = match RUNTIME.get() {
-        Some(Ok(rt)) => rt.clone(),
+/// Inspect WAVE only with a loaded runtime, preserving the file for native decoding.
+pub(super) fn inspect_wave(path: &Path) -> Result<Option<(File, Option<Input>)>> {
+    let rt = match LazyLock::get(&RUNTIME) {
+        Some(Ok(rt)) => rt,
         _ => return Ok(None),
     };
     let path = crate::library::logical_path(path)?;
     if !std::fs::metadata(&path)?.is_file() {
         bail!("FFmpeg backend only accepts regular local files");
     }
-    let mut file = std::fs::File::open(&path)?;
+    let file = File::open(&path)?;
     let mut magic = [0; 12];
-    match file.read_exact(&mut magic) {
+    // Positional reading leaves native decoding at byte zero without a seek.
+    match file.read_exact_at(&mut magic, 0) {
         Ok(()) => {}
-        Err(error) if error.kind() == ErrorKind::UnexpectedEof => return Ok(None),
+        Err(error) if error.kind() == ErrorKind::UnexpectedEof => return Ok(Some((file, None))),
         Err(error) => return Err(error).context("read WAVE container magic"),
     }
     if !matches!(&magic[..4], b"RIFF" | b"RIFX" | b"RF64" | b"BW64") || &magic[8..] != b"WAVE" {
-        return Ok(None);
+        return Ok(Some((file, None)));
     }
-    Input::open_validated(path, rt).map(Some)
+    Ok(Some((file, Some(Input::open_validated(path, rt)?))))
 }
 
 pub(super) struct Decoder {
-    rt: Arc<Runtime>,
+    rt: &'static Runtime,
     format: *mut AVFormatContext,
     codec: *mut AVCodecContext,
     packet: *mut AVPacket,
@@ -500,11 +504,11 @@ pub(super) struct Decoder {
 unsafe impl Send for Decoder {}
 impl Decoder {
     pub(super) fn open(path: &Path) -> Result<Self> {
-        let input = Input::open(path, runtime()?.clone())?;
+        let input = Input::open(path, runtime()?)?;
         Self::from_input(input)
     }
     pub(super) fn from_input(mut input: Input) -> Result<Self> {
-        let rt = input.rt.clone();
+        let rt = input.rt;
         let path = &input.path;
         let format = input.format;
         let stream_index = input.stream;
@@ -540,7 +544,7 @@ impl Decoder {
                 (rt.f.packet_free)(&mut packet);
                 (rt.f.free_codec)(&mut codec);
             }
-            return Err(error_text(&rt, ret, "copy codec parameters"));
+            return Err(error_text(rt, ret, "copy codec parameters"));
         }
         let ret = unsafe { (rt.f.codec_open)(codec, decoder, ptr::null_mut()) };
         if ret < 0 {
@@ -549,7 +553,7 @@ impl Decoder {
                 (rt.f.packet_free)(&mut packet);
                 (rt.f.free_codec)(&mut codec);
             }
-            return Err(error_text(&rt, ret, "open audio decoder"));
+            return Err(error_text(rt, ret, "open audio decoder"));
         }
         let p = unsafe { &*params };
         let codec_name = cstr(unsafe { (rt.f.codec_name)(p.codec_id) });
@@ -569,22 +573,22 @@ impl Decoder {
             }
         });
         let container_metadata = unsafe { (*format).metadata };
-        let title = tag(&rt, stream_ref.metadata, "title")
-            .or_else(|| tag(&rt, container_metadata, "title"))
+        let title = tag(rt, stream_ref.metadata, "title")
+            .or_else(|| tag(rt, container_metadata, "title"))
             .unwrap_or_else(|| {
                 path.file_stem()
                     .unwrap_or_default()
                     .to_string_lossy()
                     .into_owned()
             });
-        let artist = tag(&rt, stream_ref.metadata, "artist")
-            .or_else(|| tag(&rt, container_metadata, "artist"))
+        let artist = tag(rt, stream_ref.metadata, "artist")
+            .or_else(|| tag(rt, container_metadata, "artist"))
             .unwrap_or_default();
-        let album = tag(&rt, stream_ref.metadata, "album")
-            .or_else(|| tag(&rt, container_metadata, "album"))
+        let album = tag(rt, stream_ref.metadata, "album")
+            .or_else(|| tag(rt, container_metadata, "album"))
             .unwrap_or_default();
         let read_tag =
-            |key| tag(&rt, stream_ref.metadata, key).or_else(|| tag(&rt, container_metadata, key));
+            |key| tag(rt, stream_ref.metadata, key).or_else(|| tag(rt, container_metadata, key));
         let number_tag = |key| {
             read_tag(key)
                 .and_then(|value| value.split('/').next()?.trim().parse::<u32>().ok())
@@ -678,11 +682,10 @@ impl Decoder {
                 }
                 if self.layout.is_empty() {
                     for index in 0..channels as u32 {
-                        self.layout.push(
-                            frame_channel(&self.rt, &frame.ch_layout, index).context(
+                        self.layout
+                            .push(frame_channel(self.rt, &frame.ch_layout, index).context(
                                 "FFmpeg returned an unknown or unsupported audio channel layout",
-                            )?,
-                        );
+                            )?);
                     }
                     self.info.channels = channels as u16;
                 }
@@ -695,7 +698,7 @@ impl Decoder {
                     bail!("FFmpeg audio sample rate changed during decode");
                 }
                 for index in 0..channels as u32 {
-                    if frame_channel(&self.rt, &frame.ch_layout, index)
+                    if frame_channel(self.rt, &frame.ch_layout, index)
                         != Some(self.layout[index as usize])
                     {
                         bail!("FFmpeg audio channel layout changed during decode");
@@ -728,7 +731,7 @@ impl Decoder {
                 if ret == ERR_EOF {
                     return Ok(None);
                 }
-                bail!("{}", error_text(&self.rt, ret, "receive audio frame"));
+                bail!("{}", error_text(self.rt, ret, "receive audio frame"));
             }
             if self.draining {
                 bail!("FFmpeg decoder requested input while draining");
@@ -738,10 +741,10 @@ impl Decoder {
                 self.draining = true;
                 let sent = unsafe { (self.rt.f.send_packet)(self.codec, ptr::null()) };
                 if sent < 0 && sent != ERR_EOF {
-                    bail!("{}", error_text(&self.rt, sent, "drain decoder"));
+                    bail!("{}", error_text(self.rt, sent, "drain decoder"));
                 }
             } else if read < 0 {
-                bail!("{}", error_text(&self.rt, read, "read audio packet"));
+                bail!("{}", error_text(self.rt, read, "read audio packet"));
             } else {
                 let packet = unsafe { &*self.packet };
                 if packet.stream_index != self.stream {
@@ -754,7 +757,7 @@ impl Decoder {
                 }
                 unsafe { (self.rt.f.packet_unref)(self.packet) };
                 if sent < 0 {
-                    bail!("{}", error_text(&self.rt, sent, "send audio packet"));
+                    bail!("{}", error_text(self.rt, sent, "send audio packet"));
                 }
             }
         }
@@ -776,7 +779,7 @@ impl Decoder {
         let ret =
             unsafe { (self.rt.f.seek_file)(self.format, self.stream, i64::MIN, target, target, 0) };
         if ret < 0 {
-            return Err(error_text(&self.rt, ret, "seek audio stream"));
+            return Err(error_text(self.rt, ret, "seek audio stream"));
         }
         unsafe {
             (self.rt.f.flush)(self.codec);

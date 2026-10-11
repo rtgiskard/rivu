@@ -277,15 +277,24 @@ pub(super) struct Source {
 }
 impl Source {
     pub(super) fn open(path: &Path, buffer_len: usize, ffmpeg_enabled: bool) -> Result<Self> {
-        let input = if ffmpeg_enabled {
+        let inspected = if ffmpeg_enabled {
             super::ffmpeg::inspect_wave(path)?
         } else {
             None
         };
+        let (file, input) = match inspected {
+            Some((file, input)) => (Some(file), input),
+            None => (None, None),
+        };
         if input.as_ref().is_some_and(|input| !input.is_pcm()) {
+            drop(file);
             return Self::from_ffmpeg(super::ffmpeg::Decoder::from_input(input.unwrap())?);
         }
-        match Self::open_native(path, buffer_len) {
+        let file = match file {
+            Some(file) => file,
+            None => File::open(path).with_context(|| format!("Opening {}", path.display()))?,
+        };
+        match Self::open_native(path, buffer_len, file) {
             Ok(mut source) => {
                 if input.is_some() {
                     source.probe_backend = ProbeBackend::Ffmpeg;
@@ -341,8 +350,7 @@ impl Source {
         Ok(source)
     }
 
-    fn open_native(path: &Path, buffer_len: usize) -> Result<Self> {
-        let file = File::open(path).with_context(|| format!("Opening {}", path.display()))?;
+    fn open_native(path: &Path, buffer_len: usize, file: File) -> Result<Self> {
         let mut hint = Hint::new();
         if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
             hint.with_extension(extension);
