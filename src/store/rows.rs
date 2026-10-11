@@ -1,0 +1,82 @@
+use crate::model::{CueSegment, Track};
+use std::path::PathBuf;
+
+pub(super) fn cue_from_row(
+    row: &rusqlite::Row<'_>,
+    offset: usize,
+) -> rusqlite::Result<Option<CueSegment>> {
+    let sheet: Option<String> = row.get(offset)?;
+    sheet
+        .map(|sheet| {
+            Ok(CueSegment {
+                sheet: sheet.into(),
+                number: row.get(offset + 1)?,
+                start_frame: {
+                    let value: i64 = row.get(offset + 2)?;
+                    u64::try_from(value)
+                        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(offset + 2, value))?
+                },
+                end_frame: row
+                    .get::<_, Option<i64>>(offset + 3)?
+                    .map(|value| {
+                        u64::try_from(value).map_err(|_| {
+                            rusqlite::Error::IntegralValueOutOfRange(offset + 3, value)
+                        })
+                    })
+                    .transpose()?,
+            })
+        })
+        .transpose()
+}
+
+pub(super) const TRACK_COLUMNS: &str = "id,path,COALESCE(title_override,raw_title),COALESCE(artist_override,raw_artist),COALESCE(album_override,raw_album),duration,codec,channels,sample_rate,missing,play_count,last_played,cue_sheet,cue_number,cue_start_frame,cue_end_frame,bitrate_bps,track_number,disc_number,bits_per_sample,release_date,favorite,fingerprint";
+
+pub(super) fn track_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
+    Ok(Track {
+        id: r.get(0)?,
+        path: PathBuf::from(r.get::<_, String>(1)?),
+        fingerprint: r.get(22)?,
+        title: r.get(2)?,
+        artist: r.get(3)?,
+        album: r.get(4)?,
+        duration: r.get(5)?,
+        codec: r.get(6)?,
+        channels: r.get::<_, i64>(7)? as u16,
+        sample_rate: r.get::<_, i64>(8)? as u32,
+        bitrate_bps: r.get::<_, Option<i64>>(16)?.map(|value| value as u64),
+        track_number: r.get(17)?,
+        disc_number: r.get(18)?,
+        bits_per_sample: r.get(19)?,
+        release_date: r.get(20)?,
+        favorite: r.get(21)?,
+        missing: r.get::<_, i64>(9)? != 0,
+        play_count: r.get::<_, i64>(10)? as u64,
+        last_played: r.get(11)?,
+        cue: cue_from_row(r, 12)?,
+    })
+}
+
+pub(super) const LIBRARY_ROW_COLUMNS: &str = "id,COALESCE(title_override,raw_title),COALESCE(artist_override,raw_artist),COALESCE(album_override,raw_album),duration,favorite,missing,play_count";
+pub(super) const LIBRARY_ROW_COLUMNS_QUALIFIED: &str = "t.id,COALESCE(t.title_override,t.raw_title),COALESCE(t.artist_override,t.raw_artist),COALESCE(t.album_override,t.raw_album),t.duration,t.favorite,t.missing,t.play_count";
+
+pub(super) fn library_row_at(
+    row: &rusqlite::Row<'_>,
+    offset: usize,
+) -> rusqlite::Result<crate::model::LibraryRow> {
+    Ok(crate::model::LibraryRow {
+        id: row.get(offset)?,
+        title: row.get(offset + 1)?,
+        artist: row.get(offset + 2)?,
+        album: row.get(offset + 3)?,
+        duration: row.get(offset + 4)?,
+        favorite: row.get(offset + 5)?,
+        missing: row.get(offset + 6)?,
+        play_count: row.get::<_, i64>(offset + 7)? as u64,
+    })
+}
+
+pub(super) fn library_row_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<crate::model::LibraryRow> {
+    library_row_at(row, 0)
+}
