@@ -378,6 +378,7 @@ pub enum Query {
     },
     DirectoryPage {
         path: PathBuf,
+        favorite: Option<bool>,
         offset: usize,
         limit: usize,
     },

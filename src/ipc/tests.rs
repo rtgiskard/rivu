@@ -6,6 +6,36 @@ use crate::{
 use std::sync::Arc;
 
 #[test]
+fn directory_query_wire_round_trip_preserves_filter_and_page() {
+    use std::path::Path;
+    for favorite in [None, Some(true), Some(false)] {
+        let request = WireRequest::Query(WireQuery::from(Query::DirectoryPage {
+            path: "/music".into(),
+            favorite,
+            offset: 7,
+            limit: 11,
+        }));
+        let mut encoded = Vec::new();
+        encode_request_frame_into(&request, &mut encoded).unwrap();
+        let WireRequest::Query(wire) = decode_request_frame(&encoded[4..]).unwrap() else {
+            panic!("expected query");
+        };
+        let Query::DirectoryPage {
+            path,
+            favorite: decoded_favorite,
+            offset,
+            limit,
+        } = Query::try_from(wire).unwrap()
+        else {
+            panic!("expected directory query");
+        };
+        assert_eq!(path, Path::new("/music"));
+        assert_eq!(decoded_favorite, favorite);
+        assert_eq!((offset, limit), (7, 11));
+    }
+}
+
+#[test]
 fn ack_wire_round_trip_has_explicit_response_type() {
     let ack = Ack {
         ok: false,
@@ -196,9 +226,9 @@ fn request_encoding_rejects_oversized_body_before_completion() {
 fn postcard_frame_headers_and_bodies_preserve_wire_contract() {
     let mut encoded = Vec::new();
     encode_request_frame_into(&WireRequest::Hello(StateSections::ALL), &mut encoded).unwrap();
-    assert_eq!(encoded, [6, 0, 0, 0, 2, 0, 1, 1, 1, 1]);
+    assert_eq!(encoded, [6, 0, 0, 0, PROTOCOL_VERSION, 0, 1, 1, 1, 1]);
     encode_response_frame_into(&WireResponse::Error("x".into()), &mut encoded).unwrap();
-    assert_eq!(encoded, [4, 0, 0, 0, 2, 255, 1, b'x']);
+    assert_eq!(encoded, [4, 0, 0, 0, PROTOCOL_VERSION, 255, 1, b'x']);
 }
 
 #[tokio::test]

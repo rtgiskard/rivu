@@ -1486,6 +1486,7 @@ impl GuiApp {
             return;
         }
         let handle = self.handle.clone();
+        let favorite = self.favorites_only.then_some(true);
         cx.spawn(async move |this, cx| {
             let request_path = branch.path().to_path_buf();
             let response = cx
@@ -1493,6 +1494,7 @@ impl GuiApp {
                 .spawn(async move {
                     handle.query(Query::DirectoryPage {
                         path: request_path,
+                        favorite,
                         offset,
                         limit: page_size,
                     })
@@ -1511,7 +1513,10 @@ impl GuiApp {
                         return;
                     }
                 };
-                if response.revisions.structure != this.state.library.structure_revision {
+                if response.revisions.structure != this.state.library.structure_revision
+                    || (favorite.is_some()
+                        && response.revisions.library != this.state.library.revision)
+                {
                     this.request_directory_page(branch, offset, cx);
                     return;
                 }
@@ -1691,12 +1696,32 @@ impl GuiApp {
             {
                 self.request_directory_page(library::TreeBranch::default(), 0, cx);
             }
+        } else if !self
+            .request_generations
+            .contains_key(&ViewRequestKind::Library)
+        {
+            self.request_library_page(0, cx);
         }
         cx.notify();
     }
 
+    fn refresh_favorite_filter(&mut self, cx: &mut Context<Self>) {
+        self.invalidate_library_selection();
+        self.library_navigation = None;
+        self.directory_tree.invalidate();
+        self.request_directory_page(library::TreeBranch::default(), 0, cx);
+        if self.library_tree_active {
+            // Drop stale flat payloads and tokens; query only when that view is opened.
+            self.request_generations.remove(&ViewRequestKind::Library);
+            self.library_buffer.rows.clear();
+            self.library_buffer.total = 0;
+        } else {
+            self.refresh_filter(cx);
+        }
+    }
+
     fn refresh_filter(&mut self, cx: &mut Context<Self>) {
-        // Filters apply to SQL track queries, not locally reconstructed folders.
+        // Search and missing filters use the flat track view.
         self.library_tree_active = false;
         self.library_navigation = None;
         self.library_buffer.rows.clear();

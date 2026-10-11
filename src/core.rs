@@ -894,7 +894,10 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        let page = core.store.directory_page(&link, 0, MAX_QUERY_ROWS).unwrap();
+        let page = core
+            .store
+            .directory_page(&link, None, 0, MAX_QUERY_ROWS)
+            .unwrap();
         assert_eq!(page.total, 1);
         assert!(matches!(&page.rows[0], DirectoryRow::Track(row) if row.id == id));
     }
@@ -928,7 +931,7 @@ mod tests {
             assert_eq!(core.track(id).unwrap().path, path);
             assert_eq!(
                 core.store
-                    .directory_page(alias, 0, MAX_QUERY_ROWS)
+                    .directory_page(alias, None, 0, MAX_QUERY_ROWS)
                     .unwrap()
                     .total,
                 1
@@ -1083,7 +1086,7 @@ mod tests {
         assert_eq!(entries.rows[0].track_id, logical_id);
         let page = core
             .store
-            .directory_page(&alias.join("unused/.."), 0, MAX_QUERY_ROWS)
+            .directory_page(&alias.join("unused/.."), None, 0, MAX_QUERY_ROWS)
             .unwrap();
         assert_eq!(page.total, 1);
         assert!(matches!(&page.rows[0], DirectoryRow::Track(row) if row.id == logical_id));

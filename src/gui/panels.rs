@@ -487,7 +487,7 @@ impl GuiApp {
                     cx,
                     |this, _, cx| {
                         this.favorites_only = !this.favorites_only;
-                        this.refresh_filter(cx);
+                        this.refresh_favorite_filter(cx);
                     },
                 ),
                 self.favorites_only,

@@ -94,6 +94,15 @@ rivu library clean-missing
 Hover a track to access its favorite toggle. Toggling a favorite does not change
 the selection or start playback; double-click a track to play it.
 
+The favorites filter applies to both the flat list and directory tree. In tree
+mode it keeps the current view and shows favorite tracks and their ancestor
+directories; configured roots remain visible even when they have no matches.
+Changing a track's favorite state refreshes the filtered tree. Search and the
+missing filter switch to the flat list.
+
+Dragging a directory adds its full contents, not only tracks matching the
+display filter. To add only favorite tracks, select and drag the track rows.
+
 Click selects one row; Ctrl/Command-click toggles it. Shift-click selects the
 inclusive range from the original anchor, and Ctrl/Command-Shift-click adds that
 range. Changing the endpoint keeps the original anchor. Range selection includes

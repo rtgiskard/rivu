@@ -27,6 +27,7 @@ enum Projection {
         total: usize,
     },
     Tree {
+        favorite: Option<bool>,
         revision: u64,
         total: usize,
     },
@@ -46,6 +47,7 @@ impl Scope {
             structure: app.state.library.structure_revision,
             projection: if app.library_tree_active {
                 Projection::Tree {
+                    favorite: app.favorites_only.then_some(true),
                     revision: app.directory_tree.projection_revision(),
                     total: app.directory_tree.row_count(),
                 }
@@ -65,8 +67,13 @@ impl Scope {
         self.library == app.state.library.revision
             && self.structure == app.state.library.structure_revision
             && match &self.projection {
-                Projection::Tree { revision, total } => {
+                Projection::Tree {
+                    favorite,
+                    revision,
+                    total,
+                } => {
                     app.library_tree_active
+                        && *favorite == app.favorites_only.then_some(true)
                         && *revision == app.directory_tree.projection_revision()
                         && *total == app.directory_tree.row_count()
                 }
@@ -225,11 +232,17 @@ impl RangeJob {
 
     fn query(&self, slice: &Slice) -> Query {
         match &slice.source {
-            Source::Tree(branch) => Query::DirectoryPage {
-                path: branch.path().to_path_buf(),
-                offset: slice.offset,
-                limit: slice.len,
-            },
+            Source::Tree(branch) => {
+                let Projection::Tree { favorite, .. } = self.scope.projection else {
+                    unreachable!("tree ranges have a tree projection")
+                };
+                Query::DirectoryPage {
+                    path: branch.path().to_path_buf(),
+                    favorite,
+                    offset: slice.offset,
+                    limit: slice.len,
+                }
+            }
             Source::Flat => {
                 let Projection::Flat {
                     query,
@@ -616,6 +629,128 @@ mod tests {
     }
 
     #[test]
+    fn tree_range_selects_only_favorites_across_query_batches() {
+        use crate::{
+            library::{ScanRecord, ScanResult},
+            model::MediaInfo,
+            store::Store,
+        };
+        use std::path::Path;
+
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        store
+            .apply_scan(&ScanResult {
+                roots: vec!["/music".into()],
+                records: (0..6)
+                    .map(|index| ScanRecord {
+                        path: format!("/music/{index}.wav").into(),
+                        size: 1,
+                        modified_ns: 0,
+                        fingerprint: None,
+                        cue: None,
+                        media: MediaInfo {
+                            title: index.to_string(),
+                            artist: String::new(),
+                            album: String::new(),
+                            duration: Some(1.0),
+                            bitrate_bps: None,
+                            track_number: None,
+                            disc_number: None,
+                            bits_per_sample: None,
+                            release_date: None,
+                            codec: "PCM_S16LE".into(),
+                            channels: 1,
+                            sample_rate: 8000,
+                        },
+                    })
+                    .collect(),
+                ..Default::default()
+            })
+            .unwrap();
+        let favorites: Vec<_> = [1, 3, 5]
+            .into_iter()
+            .map(|index| {
+                store
+                    .track_id_for_source(Path::new(&format!("/music/{index}.wav")), None)
+                    .unwrap()
+                    .unwrap()
+            })
+            .collect();
+        store.set_favorite(&favorites, true).unwrap();
+        let mut tree = crate::gui::library::DirectoryTree::default();
+        let forest = TreeBranch::default();
+        tree.begin(forest.clone(), 0, 1);
+        tree.accept(
+            &forest,
+            1,
+            Page {
+                total: 1,
+                rows: vec![DirectoryRow::Directory {
+                    path: "/music".into(),
+                }],
+            },
+        );
+        let Some(crate::gui::library::tree::TreeItem::Entry(entry)) = tree.item(0) else {
+            panic!("expected library root")
+        };
+        let branch = entry.branch.unwrap();
+        let mut job = RangeJob {
+            token: 1,
+            scope: Scope {
+                library: 7,
+                structure: 3,
+                projection: Projection::Tree {
+                    favorite: Some(true),
+                    revision: tree.projection_revision(),
+                    total: 3,
+                },
+            },
+            slices: VecDeque::from([Slice {
+                source: Source::Tree(branch),
+                offset: 0,
+                len: 3,
+                total: 3,
+                check: None,
+            }]),
+            selected: HashSet::new(),
+            endpoint: LibraryNode::Track(favorites[2]),
+            endpoint_index: 2,
+            additive: false,
+            batch_size: 1,
+        };
+        while let Some(slice) = job.next() {
+            let Query::DirectoryPage {
+                path,
+                favorite,
+                offset,
+                limit,
+            } = job.query(&slice)
+            else {
+                panic!("expected directory range query")
+            };
+            let page = store
+                .directory_page(&path, favorite, offset, limit)
+                .unwrap();
+            job.accept(
+                &slice,
+                QueryResponse {
+                    revisions: QueryRevisions {
+                        library: 7,
+                        structure: 3,
+                        playlist: 0,
+                    },
+                    result: Ok(ViewResponse::DirectoryPage(page)),
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            job.selected,
+            favorites.into_iter().map(LibraryNode::Track).collect()
+        );
+    }
+
+    #[test]
     fn range_endpoints_reverse_and_repeated_shift_keep_click_anchor() {
         let scope = scope();
         let mut selection = LibrarySelection::default();
@@ -817,6 +952,7 @@ mod tests {
                 library: 7,
                 structure: 3,
                 projection: Projection::Tree {
+                    favorite: None,
                     revision: tree.projection_revision(),
                     total: tree.row_count(),
                 },
@@ -847,7 +983,7 @@ mod tests {
                     .collect()
             } else {
                 assert!(
-                    matches!(job.query(&slice), Query::DirectoryPage { path, offset, limit }
+                    matches!(job.query(&slice), Query::DirectoryPage { path, offset, limit, .. }
                     if path == branch.path() && offset == slice.offset && limit == slice.len)
                 );
                 queries += 1;
@@ -920,6 +1056,7 @@ mod tests {
                 library: 7,
                 structure: 3,
                 projection: Projection::Tree {
+                    favorite: None,
                     revision: tree.projection_revision(),
                     total: 1,
                 },
@@ -961,6 +1098,7 @@ mod tests {
             library: 7,
             structure: 3,
             projection: Projection::Tree {
+                favorite: None,
                 revision: tree.projection_revision() + 1,
                 total: 1,
             },

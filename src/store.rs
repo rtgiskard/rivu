@@ -452,6 +452,7 @@ impl Store {
     pub fn directory_page(
         &self,
         path: &Path,
+        favorite: Option<bool>,
         offset: usize,
         limit: usize,
     ) -> Result<Page<crate::model::DirectoryRow>> {
@@ -459,17 +460,47 @@ impl Store {
         let prefix = directory_prefix(path)?;
         // SQLite derives immediate children; Rust retains only the requested page.
         // Group directories but preserve distinct CUE tracks sharing a source path.
-        let children = "WITH sources AS (SELECT id,path,substr(path,length(?1)+1) AS rest FROM tracks WHERE substr(path,1,length(?1))=?1), children AS (SELECT 0 AS kind,CASE WHEN ?1='' AND instr(rest,'/')=1 THEN '/' ELSE ?1||substr(rest,1,instr(rest,'/')-1) END AS child,MIN(id) AS track_id FROM sources WHERE instr(rest,'/')>0 GROUP BY child UNION ALL SELECT 1,path,id FROM sources WHERE instr(rest,'/')=0)";
-        let total = self.conn.query_row(
-            &format!("{children} SELECT COUNT(*) FROM children"),
-            [&prefix],
-            |row| row.get::<_, i64>(0),
-        )? as usize;
-        let mut stmt = self.conn.prepare(&format!("{children} SELECT c.kind,c.child,{LIBRARY_ROW_COLUMNS_QUALIFIED} FROM children c JOIN tracks t ON t.id=c.track_id ORDER BY c.kind,c.child,t.id LIMIT ?2 OFFSET ?3"))?;
+        let sources = "WITH sources AS (SELECT id,path,substr(path,length(?1)+1) AS rest FROM tracks WHERE substr(path,1,length(?1))=?1";
+        let filter = if favorite.is_some() {
+            " AND favorite=?2"
+        } else {
+            ""
+        };
+        let children = "), children AS (SELECT 0 AS kind,CASE WHEN ?1='' AND instr(rest,'/')=1 THEN '/' ELSE ?1||substr(rest,1,instr(rest,'/')-1) END AS child,MIN(id) AS track_id FROM sources WHERE instr(rest,'/')>0 GROUP BY child UNION ALL SELECT 1,path,id FROM sources WHERE instr(rest,'/')=0)";
+        let page_columns = " SELECT c.kind,c.child,";
+        let page_tail = " FROM children c JOIN tracks t ON t.id=c.track_id ORDER BY c.kind,c.child,t.id LIMIT ?3 OFFSET ?4";
+        // Reuse one SQL buffer for count and payload; the unfiltered source stays unchanged.
+        let mut sql = String::with_capacity(
+            sources.len()
+                + filter.len()
+                + children.len()
+                + page_columns.len()
+                + LIBRARY_ROW_COLUMNS_QUALIFIED.len()
+                + page_tail.len(),
+        );
+        sql.push_str(sources);
+        sql.push_str(filter);
+        sql.push_str(children);
+        let children_end = sql.len();
+        sql.push_str(" SELECT COUNT(*) FROM children");
+        let count_params: &[&dyn rusqlite::ToSql] = if favorite.is_some() {
+            &[&prefix, &favorite]
+        } else {
+            &[&prefix]
+        };
+        let total =
+            self.conn
+                .query_row(&sql, count_params, |row| row.get::<_, i64>(0))? as usize;
+        sql.truncate(children_end);
+        sql.push_str(page_columns);
+        sql.push_str(LIBRARY_ROW_COLUMNS_QUALIFIED);
+        sql.push_str(page_tail);
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
             .query_map(
                 params![
                     prefix,
+                    favorite,
                     limit.min(crate::model::MAX_QUERY_ROWS) as i64,
                     offset.min(i64::MAX as usize) as i64
                 ],
@@ -2237,6 +2268,103 @@ mod tests {
     }
 
     #[test]
+    fn directory_favorites_filter_before_grouping_and_paging() {
+        use crate::model::DirectoryRow;
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        store
+            .apply_scan(&scan(vec![
+                rec("/music/mixed/deep/yes.wav", "yes", "Yes", 60.0),
+                rec("/music/mixed/no.wav", "no", "No", 60.0),
+                rec("/music/empty/deep/no.wav", "empty", "Empty", 60.0),
+                rec("/music/direct.wav", "direct", "Direct", 60.0),
+                segment("/music/cue/sheet.cue", 1, 0, Some(750)),
+                segment("/music/cue/sheet.cue", 2, 750, None),
+            ]))
+            .unwrap();
+        let ids = [
+            store
+                .track_id_for_source(Path::new("/music/mixed/deep/yes.wav"), None)
+                .unwrap()
+                .unwrap(),
+            store
+                .track_id_for_source(Path::new("/music/direct.wav"), None)
+                .unwrap()
+                .unwrap(),
+            store
+                .track_id_for_source(Path::new("/music/cue/sheet.cue"), Some(1))
+                .unwrap()
+                .unwrap(),
+        ];
+        store.set_favorite(&ids, true).unwrap();
+        let page = store
+            .directory_page(Path::new("/music"), Some(true), 0, 1)
+            .unwrap();
+        assert_eq!(page.total, 3);
+        assert_eq!(
+            page.rows,
+            [DirectoryRow::Directory {
+                path: "/music/mixed".into()
+            }]
+        );
+        let page = store
+            .directory_page(Path::new("/music"), Some(true), 1, 1)
+            .unwrap();
+        assert_eq!(page.total, 3);
+        assert!(matches!(&page.rows[..], [DirectoryRow::Track(row)] if row.id == ids[1]));
+        let page = store
+            .directory_page(Path::new("/music"), Some(true), 3, 1)
+            .unwrap();
+        assert_eq!(page.total, 3);
+        assert!(page.rows.is_empty());
+        let page = store
+            .directory_page(Path::new("/music/mixed"), Some(true), 0, 10)
+            .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(
+            page.rows,
+            [DirectoryRow::Directory {
+                path: "/music/mixed/deep".into()
+            }]
+        );
+        let page = store
+            .directory_page(Path::new("/music/mixed/deep"), Some(true), 0, 10)
+            .unwrap();
+        assert!(matches!(&page.rows[..], [DirectoryRow::Track(row)] if row.id == ids[0]));
+        let page = store
+            .directory_page(Path::new("/music/empty"), Some(true), 0, 10)
+            .unwrap();
+        assert_eq!(page.total, 0);
+        assert!(page.rows.is_empty());
+        let page = store
+            .directory_page(Path::new("/music"), Some(false), 0, 10)
+            .unwrap();
+        assert_eq!(page.total, 3);
+        assert!(
+            matches!(&page.rows[0], DirectoryRow::Directory { path } if path == Path::new("/music/empty"))
+        );
+        assert!(
+            matches!(&page.rows[1], DirectoryRow::Directory { path } if path == Path::new("/music/mixed"))
+        );
+        assert!(
+            matches!(&page.rows[2], DirectoryRow::Track(row) if !row.favorite && row.id != ids[2])
+        );
+        let page = store
+            .directory_page(Path::new("/music"), None, 0, 10)
+            .unwrap();
+        assert_eq!(page.total, 5);
+        let cue_rows = page
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                DirectoryRow::Track(row) if row.id != ids[1] => Some(row.id),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(cue_rows.len(), 2);
+        assert_ne!(cue_rows[0], cue_rows[1]);
+    }
+
+    #[test]
     fn directory_pages_preserve_boundaries_and_duplicate_cue_sources() {
         use crate::model::{DirectoryRow, MAX_QUERY_ROWS};
         let store = Store::open(Path::new(":memory:")).unwrap();
@@ -2255,28 +2383,33 @@ mod tests {
         records.push(segment("/music/Album/sheet.cue", 2, 750, None));
         store.apply_scan(&scan(records)).unwrap();
         let root = store
-            .directory_page(Path::new(""), 0, MAX_QUERY_ROWS)
+            .directory_page(Path::new(""), None, 0, MAX_QUERY_ROWS)
             .unwrap();
         assert_eq!(root.rows, [DirectoryRow::Directory { path: "/".into() }]);
         let music = store
-            .directory_page(Path::new("/music"), 0, MAX_QUERY_ROWS)
+            .directory_page(Path::new("/music"), None, 0, MAX_QUERY_ROWS)
             .unwrap();
         assert_eq!(music.total, 4);
         assert!(
             matches!(&music.rows[0], DirectoryRow::Directory { path } if path == Path::new("/music/Album"))
         );
         let first = store
-            .directory_page(Path::new("/music/Album/"), 0, usize::MAX)
+            .directory_page(Path::new("/music/Album/"), None, 0, usize::MAX)
             .unwrap();
         assert_eq!(first.total, 300);
         assert_eq!(first.rows.len(), MAX_QUERY_ROWS);
         let last = store
-            .directory_page(Path::new("/music/Album"), MAX_QUERY_ROWS, MAX_QUERY_ROWS)
+            .directory_page(
+                Path::new("/music/Album"),
+                None,
+                MAX_QUERY_ROWS,
+                MAX_QUERY_ROWS,
+            )
             .unwrap();
         assert_eq!(last.rows.len(), 44);
         assert!(matches!(&last.rows[43], DirectoryRow::Track(row) if row.title == "Track 299"));
         let cue_sources = store
-            .directory_page(Path::new("/music"), 2, MAX_QUERY_ROWS)
+            .directory_page(Path::new("/music"), None, 2, MAX_QUERY_ROWS)
             .unwrap();
         assert_eq!(cue_sources.rows.len(), 2);
         assert!(

@@ -263,6 +263,7 @@ impl QueryRequest {
             },
             QueryKind::Directory(path) => Query::DirectoryPage {
                 path: path.clone(),
+                favorite: None,
                 offset,
                 limit,
             },
@@ -270,6 +271,7 @@ impl QueryRequest {
                 let local_count = roots.len().saturating_sub(offset).min(limit);
                 Query::DirectoryPage {
                     path: PathBuf::new(),
+                    favorite: None,
                     offset: offset.saturating_sub(roots.len()),
                     limit: (limit - local_count).max(1),
                 }
