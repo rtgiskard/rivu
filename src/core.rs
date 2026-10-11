@@ -563,7 +563,7 @@ fn now() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::library::{MediaInfo, ScanRecord};
+    use crate::library::ScanRecord;
 
     // An idle real audio worker handles stop/snapshot, but these tests never load
     // audio. Missing-file errors expose the selected entry without opening output.

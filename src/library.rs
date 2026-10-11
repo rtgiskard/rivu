@@ -1,5 +1,5 @@
 use crate::audio::probe;
-use crate::model::{CueSegment, ScanPhase, Track};
+use crate::model::{CueSegment, MediaInfo, ScanPhase, Track};
 use anyhow::{Context, Result, anyhow, bail};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -7,29 +7,6 @@ use std::io::{BufReader, BufWriter, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use walkdir::WalkDir;
-
-/// Decoded file metadata shared by scanning, persistence, and playback.
-///
-/// This value contains no decoder or audio-output state; probing supplies it and
-/// the library caches it independently of the playback engine.
-#[derive(Clone, Debug)]
-pub struct MediaInfo {
-    pub title: String,
-    pub artist: String,
-    pub album: String,
-    pub duration: Option<f64>,
-    /// Encoded audio bitrate in bits/s, when stream metadata supplies it.
-    pub bitrate_bps: Option<u64>,
-    pub track_number: Option<u32>,
-    pub disc_number: Option<u32>,
-    /// Source PCM/lossless precision, never the decoder's output sample width.
-    pub bits_per_sample: Option<u32>,
-    /// Original date precision is retained (e.g. year, year-month, or full date).
-    pub release_date: Option<String>,
-    pub codec: String,
-    pub channels: u16,
-    pub sample_rate: u32,
-}
 
 /// The filesystem information and cached probe result known to the database.
 #[derive(Clone, Debug)]

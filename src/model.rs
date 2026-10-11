@@ -1,6 +1,30 @@
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc};
 
+/// Decoded file metadata shared by scanning, persistence, and playback.
+///
+/// This value contains no decoder or audio-output state; probing supplies it and
+/// the library caches it independently of the playback engine.
+/// Unlike [`Track`], this carries no library identity or user-maintained state.
+#[derive(Clone, Debug)]
+pub struct MediaInfo {
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub duration: Option<f64>,
+    /// Encoded audio bitrate in bits/s, when stream metadata supplies it.
+    pub bitrate_bps: Option<u64>,
+    pub track_number: Option<u32>,
+    pub disc_number: Option<u32>,
+    /// Source PCM/lossless precision, never the decoder's output sample width.
+    pub bits_per_sample: Option<u32>,
+    /// Original date precision is retained (e.g. year, year-month, or full date).
+    pub release_date: Option<String>,
+    pub codec: String,
+    pub channels: u16,
+    pub sample_rate: u32,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CueSegment {
     pub sheet: PathBuf,

@@ -111,7 +111,7 @@ pub fn waveform(
 }
 
 use crate::analysis::{AnalysisControl, AnalysisFrame, AnalysisSettings, AnalysisWorker};
-use crate::library::MediaInfo;
+use crate::model::MediaInfo;
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use parking_lot::{Mutex, RwLock};

@@ -80,7 +80,7 @@ impl Core {
         }
         Ok(())
     }
-    pub(in crate::core) fn playback_started(&mut self, info: library::MediaInfo) -> Result<()> {
+    pub(in crate::core) fn playback_started(&mut self, info: MediaInfo) -> Result<()> {
         let track_id = self.playback.as_ref().map(|playback| playback.track_id);
         let Some(track_id) = track_id else {
             return Ok(());

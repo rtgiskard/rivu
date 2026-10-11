@@ -1,6 +1,6 @@
-use crate::library::{KnownFile, MediaInfo, ScanResult};
+use crate::library::{KnownFile, ScanResult};
 use crate::model::{
-    Batch, CueSegment, DatabaseOptimization, HistoryEntry, Page, PlaylistEntryCursor,
+    Batch, CueSegment, DatabaseOptimization, HistoryEntry, MediaInfo, Page, PlaylistEntryCursor,
     PlaylistEntryRow, PlaylistSummary, Track,
 };
 use anyhow::{Context, Result, anyhow, bail};
