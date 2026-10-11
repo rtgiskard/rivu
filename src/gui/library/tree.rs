@@ -304,7 +304,7 @@ impl DirectoryTree {
         self.invalidate();
     }
 
-    /// Release revision-specific payloads and tokens, not logical geometry.
+    /// Release revision-specific payloads and tokens, retaining nonempty geometry.
     pub(in crate::gui) fn invalidate(&mut self) {
         self.projection_revision = self.projection_revision.wrapping_add(1);
         self.pages.clear();
@@ -313,6 +313,11 @@ impl DirectoryTree {
         self.focused = None;
         for branch in self.branches.values_mut() {
             branch.pending = None;
+            // An empty branch has no viewport rows to demand a fresh page.
+            // Restore an unloaded placeholder so newly added children can appear.
+            if branch.total == Some(0) {
+                branch.total = None;
+            }
             branch.stale_children = branch.children.keys().copied().collect();
         }
         self.refresh_visible();
@@ -981,6 +986,50 @@ mod tests {
         tree.clear();
         assert_eq!(tree.row_count(), 1);
         assert!(!tree.expanded(&branch("/a/b")));
+    }
+
+    #[test]
+    fn invalidated_empty_branches_reload_on_visibility_and_settle_without_requerying() {
+        for collapsed in [false, true] {
+            let mut tree = DirectoryTree::default();
+            let forest = branch("");
+            let root = branch("/a");
+            accept(&mut tree, &forest, 0, 1, &["/a"], 1);
+            tree.expand(&root);
+            accept(&mut tree, &root, 0, 2, &[], 0);
+            if collapsed {
+                tree.collapse(&root);
+            }
+
+            tree.invalidate();
+            accept(&mut tree, &forest, 0, 3, &["/a"], 1);
+            assert_eq!(tree.status(&root), BranchStatus::Unloaded);
+            assert_eq!(tree.expanded(&root), !collapsed);
+            if collapsed {
+                assert!(tree.requests_for_range(0..tree.row_count()).is_empty());
+                tree.expand(&root);
+            }
+            assert_eq!(
+                tree.requests_for_range(0..tree.row_count()),
+                vec![(root.clone(), 0)]
+            );
+            accept(&mut tree, &root, 0, 4, &[], 0);
+            assert_eq!(tree.status(&root), BranchStatus::Empty);
+            assert_eq!(tree.row_count(), 1);
+            assert!(tree.requests_for_range(0..tree.row_count()).is_empty());
+
+            tree.invalidate();
+            accept(&mut tree, &forest, 0, 5, &["/a"], 1);
+            assert_eq!(
+                tree.requests_for_range(0..tree.row_count()),
+                vec![(root.clone(), 0)]
+            );
+            accept(&mut tree, &root, 0, 6, &["/a/new-album"], 1);
+            assert!(tree.expanded(&root));
+            assert!(matches!(tree.item(1), Some(TreeItem::Entry(row))
+                if matches!(&row.row, DirectoryRow::Directory { path } if path == Path::new("/a/new-album"))));
+            assert!(tree.requests_for_range(0..tree.row_count()).is_empty());
+        }
     }
 
     #[test]
