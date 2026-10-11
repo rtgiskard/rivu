@@ -3359,8 +3359,7 @@ impl Render for GuiApp {
                                         cx.notify();
                                     },
                                 ))
-                                .child(div().h(px(1.)).mx_2().my_1().bg(rgb(BORDER)))
-                                .child(caption("Display").px(gpui::px(UI_INSET)).py_1());
+                                .child(div().h(px(1.)).mx_2().my_1().bg(rgb(BORDER)));
                             menu = menu
                                 .child(
                                     menu_item(
@@ -3547,8 +3546,7 @@ impl Render for GuiApp {
                                 cx.notify();
                             },
                         ))
-                        .child(div().h(px(1.)).mx_2().my_1().bg(rgb(BORDER)))
-                        .child(caption("Style").px(gpui::px(UI_INSET)).py_1());
+                        .child(div().h(px(1.)).mx_2().my_1().bg(rgb(BORDER)));
                     if let Some(options) = self
                         .layouts
                         .current()
