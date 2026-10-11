@@ -35,7 +35,14 @@ enum CoreResponse {
 enum Operation {
     Query(Query),
     Command(Command),
+    GuiConfig(GuiConfigChange),
+}
+
+pub(crate) enum GuiConfigChange {
     ToggleStillMode,
+    ToggleWaveformSeek,
+    AddLibraryRoot(std::path::PathBuf),
+    Settings(Config),
 }
 struct Request {
     operation: Operation,
@@ -123,10 +130,14 @@ impl AppHandle {
         self.analysis_control.request_frame();
     }
 
-    pub(crate) fn toggle_still_mode(&self) -> Result<()> {
+    pub(crate) fn update_gui_config(&self, change: GuiConfigChange) -> Result<()> {
         self.sender
-            .try_send(Request { operation: Operation::ToggleStillMode, reply: None })
+            .try_send(Request { operation: Operation::GuiConfig(change), reply: None })
             .context("Rivu is busy or stopped")
+    }
+
+    pub(crate) fn apply_gui_settings(&self, config: Config) -> Ack {
+        self.operation_ack(Operation::GuiConfig(GuiConfigChange::Settings(config)), Duration::from_secs(12))
     }
 
     pub fn send(&self, command: Command) -> Result<()> {
@@ -258,9 +269,13 @@ impl AppHandle {
         } else {
             Duration::from_secs(12)
         };
+        self.operation_ack(Operation::Command(command), duration)
+    }
+
+    fn operation_ack(&self, operation: Operation, duration: Duration) -> Ack {
         let (tx, rx) = bounded(1);
         let request = Request {
-            operation: Operation::Command(command),
+            operation,
             reply: Some(tx),
         };
         let response = self
@@ -661,7 +676,7 @@ mod tests {
         // Model a selected output whose persisted snapshot is still debounced.
         core.state.system.selected_device = Some("pending-output".into());
         for enabled in [true, false] {
-            core.toggle_still_mode().unwrap();
+            core.update_gui_config(GuiConfigChange::ToggleStillMode).unwrap();
             assert_eq!(core.state.system.config.still_mode, enabled);
             assert_eq!(core.state.playback.volume, 0.25);
             assert!(core.state.playback.shuffle);
@@ -674,6 +689,49 @@ mod tests {
             assert_eq!(saved.output_device.as_deref(), Some("pending-output"));
             assert_eq!(saved.still_mode, enabled);
         }
+    }
+
+    #[test]
+    fn desktop_config_edits_preserve_live_playback_and_merge_roots() {
+        let (directory, mut core) = fixture();
+        core.command(Command::Volume { value: 0.25 }).unwrap();
+        core.command(Command::Shuffle { enabled: true }).unwrap();
+        core.command(Command::Repeat { mode: RepeatMode::All }).unwrap();
+        core.state.system.selected_device = Some("pending-output".into());
+        let root = directory.path().join("added");
+        let seek = core.state.system.config.waveform_seek_enabled;
+        core.update_gui_config(GuiConfigChange::ToggleWaveformSeek).unwrap();
+        core.update_gui_config(GuiConfigChange::AddLibraryRoot(root.clone())).unwrap();
+        core.update_gui_config(GuiConfigChange::AddLibraryRoot(root)).unwrap();
+        assert_eq!(core.state.system.config.library_roots.len(), 2);
+        assert_eq!(core.state.system.config.waveform_seek_enabled, !seek);
+        assert_eq!(core.state.playback.volume, 0.25);
+        assert!(core.state.playback.shuffle);
+        assert_eq!(core.state.playback.repeat, RepeatMode::All);
+        assert_eq!(core.state.system.selected_device.as_deref(), Some("pending-output"));
+        let saved: Config = toml::from_str(&std::fs::read_to_string(&core.state.system.config_path).unwrap()).unwrap();
+        assert_eq!(saved.volume, 0.25);
+        assert!(saved.shuffle);
+        assert_eq!(saved.repeat, RepeatMode::All);
+        assert_eq!(saved.output_device.as_deref(), Some("pending-output"));
+        assert_eq!(saved.library_roots.len(), 2);
+    }
+
+    #[test]
+    fn settings_apply_resolves_unedited_playback_fields_at_execution() {
+        let (_directory, mut core) = fixture();
+        let mut draft = core.state.system.config.as_ref().clone();
+        draft.volume = 0.4;
+        core.command(Command::Shuffle { enabled: true }).unwrap();
+        core.command(Command::Repeat { mode: RepeatMode::One }).unwrap();
+        core.update_gui_config(GuiConfigChange::Settings(draft)).unwrap();
+        assert!(core.state.playback.shuffle);
+        assert_eq!(core.state.playback.repeat, RepeatMode::One);
+        assert_eq!(core.state.playback.volume, 0.4);
+        let saved: Config = toml::from_str(&std::fs::read_to_string(&core.state.system.config_path).unwrap()).unwrap();
+        assert!(saved.shuffle);
+        assert_eq!(saved.repeat, RepeatMode::One);
+        assert_eq!(saved.volume, 0.4);
     }
 
     #[test]

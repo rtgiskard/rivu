@@ -12,7 +12,6 @@ use crate::{
         SpectrumStyle, VisualizationPalette,
     },
     core::AppHandle,
-    model::Command,
 };
 use anyhow::{Context as _, Result};
 use gpui::{prelude::*, *};
@@ -1182,7 +1181,7 @@ impl Settings {
             cx.notify();
             return;
         }
-        let mut config = match self.parse(cx) {
+        let config = match self.parse(cx) {
             Ok(config) => config,
             Err(error) => {
                 self.feedback = Some(Err(format!("Invalid settings: {error:#}")));
@@ -1190,16 +1189,6 @@ impl Settings {
                 return;
             }
         };
-        let live = self.handle.state(crate::response::StateSections {
-            playback: true,
-            ..Default::default()
-        });
-        let playback = &live
-            .playback
-            .expect("playback section was requested")
-            .playback;
-        config.shuffle = playback.shuffle;
-        config.repeat = playback.repeat;
         self.applying = true;
         self.feedback = None;
         let session = self.session;
@@ -1207,7 +1196,7 @@ impl Settings {
         cx.spawn(async move |this, cx| {
             let response = cx
                 .background_executor()
-                .spawn(async move { handle.request_ack(Command::Configure { config }) })
+                .spawn(async move { handle.apply_gui_settings(config) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.session != session {

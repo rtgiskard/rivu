@@ -1254,10 +1254,8 @@ impl GuiApp {
                 match result {
                     Ok(files) => {
                         if let Some(path) = chooser_path(&files) {
-                            let mut config = this.handle.config_snapshot().as_ref().clone();
-                            if !config.library_roots.iter().any(|root| root == &path) {
-                                config.library_roots.push(path);
-                                this.send(Command::Configure { config }, cx);
+                            if let Err(error) = this.handle.update_gui_config(crate::core::GuiConfigChange::AddLibraryRoot(path)) {
+                                this.error = Some(format!("{error:#}"));
                             }
                         }
                     }
@@ -3339,7 +3337,7 @@ impl Render for GuiApp {
                     .child(
                         menu_item("app-still-mode", "Still mode", cx, |this, _, cx| {
                             this.app_menu_open = false;
-                            if let Err(error) = this.handle.toggle_still_mode() {
+                            if let Err(error) = this.handle.update_gui_config(crate::core::GuiConfigChange::ToggleStillMode) {
                                 this.error = Some(format!("{error:#}"));
                             }
                             cx.notify();
@@ -3480,9 +3478,10 @@ impl Render for GuiApp {
                             cx,
                             |this, _, cx| {
                                 this.panel_menu = None;
-                                let mut config = this.handle.config_snapshot().as_ref().clone();
-                                config.waveform_seek_enabled = !config.waveform_seek_enabled;
-                                this.send(Command::Configure { config }, cx);
+                                if let Err(error) = this.handle.update_gui_config(crate::core::GuiConfigChange::ToggleWaveformSeek) {
+                                    this.error = Some(format!("{error:#}"));
+                                }
+                                cx.notify();
                             },
                         ));
                     }

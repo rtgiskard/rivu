@@ -83,7 +83,10 @@ settings are applied, without restarting playback. The application menu also
 offers a Still mode toggle below Layouts; it applies and saves immediately.
 Both controls use the persisted `still_mode` setting.
 
-Shuffle and Repeat are playback controls, not desktop settings.
+Shuffle and Repeat are playback controls, not desktop settings. Applying settings
+preserves their values at the time the core executes the request, including
+changes made while the dialog was open or waiting to save. Adding a library root
+or toggling waveform seeking does not overwrite playback or output-device settings.
 General → Interface includes Layout snapping and Layout grid spacing. These save
 `layout_snap_enabled` (default `true`) and `layout_snap_grid_px` (default `8`,
 integer `1`–`64` logical pixels before interface scaling) in `config.toml`.

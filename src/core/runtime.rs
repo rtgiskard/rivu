@@ -52,11 +52,19 @@ impl Core {
                             }
                             if shutdown { break; }
                         }
-                        Operation::ToggleStillMode => {
-                            if let Err(error) = self.toggle_still_mode() {
+                        Operation::GuiConfig(change) => {
+                            let result = self.update_gui_config(change);
+                            if let Err(error) = &result {
                                 self.state.system.last_error = Some(format!("{error:#}"));
                             }
                             self.publish();
+                            if let Some(reply) = request.reply {
+                                let _ = reply.send(CoreResponse::Ack(Ack {
+                                    ok: result.is_ok(),
+                                    error: result.err().map(|error| format!("{error:#}")),
+                                    revision: self.state.system.revision,
+                                }));
+                            }
                         }
                     }
                 }

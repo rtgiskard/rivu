@@ -1,15 +1,34 @@
 use super::*;
 
 impl Core {
-    pub(in crate::core) fn toggle_still_mode(&mut self) -> Result<()> {
+    pub(in crate::core) fn update_gui_config(&mut self, change: GuiConfigChange) -> Result<()> {
+        if let GuiConfigChange::Settings(mut config) = change {
+            // These controls are not edited by the Settings dialog. Resolve at
+            // execution, not before enqueueing behind pending playback commands.
+            config.shuffle = self.state.playback.shuffle;
+            config.repeat = self.state.playback.repeat;
+            return self.command(Command::Configure { config });
+        }
         let mut config = self.state.system.config.as_ref().clone();
-        config.still_mode = !config.still_mode;
+        let still_mode = matches!(change, GuiConfigChange::ToggleStillMode);
+        match change {
+            GuiConfigChange::ToggleStillMode => config.still_mode = !config.still_mode,
+            GuiConfigChange::ToggleWaveformSeek => config.waveform_seek_enabled = !config.waveform_seek_enabled,
+            GuiConfigChange::AddLibraryRoot(path) => {
+                let path = library::logical_path(&path)?;
+                if config.library_roots.contains(&path) { return Ok(()); }
+                config.library_roots.push(path);
+            }
+            GuiConfigChange::Settings(_) => unreachable!(),
+        }
         config.volume = self.state.playback.volume;
         config.shuffle = self.state.playback.shuffle;
         config.repeat = self.state.playback.repeat;
         config.output_device.clone_from(&self.state.system.selected_device);
         config.save(&self.state.system.config_path)?;
-        self.audio(AudioCommand::StillMode(config.still_mode))?;
+        if still_mode {
+            self.audio(AudioCommand::StillMode(config.still_mode))?;
+        }
         self.state.system.config = Arc::new(config);
         self.config_dirty = false;
         self.config_last_saved = Instant::now();
