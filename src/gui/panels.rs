@@ -1336,25 +1336,54 @@ impl GuiApp {
                                         .text_lg()
                                         .text_color(rgb(TEXT)),
                                 )
-                                .child(icon_button(
-                                    ("metadata-favorite", panel_id),
-                                    if favorite { "󰓎" } else { "󰓐" },
-                                    if favorite {
-                                        "Remove from favorites"
-                                    } else {
-                                        "Add to favorites"
-                                    },
-                                    cx,
-                                    move |this, _, cx| {
-                                        this.send(
-                                            Command::SetFavorite {
-                                                track_ids: vec![id],
-                                                favorite: !favorite,
+                                .child(
+                                    row()
+                                        .gap_2()
+                                        .child(icon_button(
+                                            ("metadata-favorite", panel_id),
+                                            if favorite { "󰓎" } else { "󰓐" },
+                                            if favorite {
+                                                "Remove from favorites"
+                                            } else {
+                                                "Add to favorites"
                                             },
                                             cx,
-                                        );
-                                    },
-                                )),
+                                            move |this, _, cx| {
+                                                this.send(
+                                                    Command::SetFavorite {
+                                                        track_ids: vec![id],
+                                                        favorite: !favorite,
+                                                    },
+                                                    cx,
+                                                );
+                                            },
+                                        ))
+                                        .child(
+                                            icon_button(
+                                                ("metadata-save", panel_id),
+                                                "󰆓",
+                                                "Save metadata. Media files are never modified.",
+                                                cx,
+                                                move |this, _, cx| {
+                                                    if metadata_dirty {
+                                                        this.send(
+                                                            Command::EditTrack {
+                                                                track_id: id,
+                                                                title: this.value(Field::Title, cx),
+                                                                artist: this
+                                                                    .value(Field::Artist, cx),
+                                                                album: this.value(Field::Album, cx),
+                                                            },
+                                                            cx,
+                                                        );
+                                                    }
+                                                },
+                                            )
+                                            .when(!metadata_dirty, |view| {
+                                                view.opacity(0.4).cursor_default()
+                                            }),
+                                        ),
+                                ),
                         )
                         .child(metadata_group(
                             "File",
@@ -1456,38 +1485,7 @@ impl GuiApp {
                                 ))
                                 .when_some(self.artwork_manager.uri_for(track), |tags, uri| {
                                     tags.child(artwork_preview(uri))
-                                })
-                                .child(
-                                    row()
-                                        .justify_end()
-                                        .gap_2()
-                                        .child(
-                                            icon_button(
-                                                ("metadata-save", panel_id),
-                                                "󰆓",
-                                                "Save metadata",
-                                                cx,
-                                                move |this, _, cx| {
-                                                    if metadata_dirty {
-                                                        this.send(
-                                                            Command::EditTrack {
-                                                                track_id: id,
-                                                                title: this.value(Field::Title, cx),
-                                                                artist: this
-                                                                    .value(Field::Artist, cx),
-                                                                album: this.value(Field::Album, cx),
-                                                            },
-                                                            cx,
-                                                        );
-                                                    }
-                                                },
-                                            )
-                                            .when(!metadata_dirty, |view| {
-                                                view.opacity(0.4).cursor_default()
-                                            }),
-                                        )
-                                        .child(caption("Media files are never modified.")),
-                                ),
+                                }),
                         )),
                 );
             panel = panel.child(details);

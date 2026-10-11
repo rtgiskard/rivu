@@ -120,14 +120,14 @@ const PANELS: &[PanelSpec] = &[
         render: |app, panel, window, cx| app.spectrum_panel(panel.id, window, cx),
     },
     PanelSpec {
-        kind: "waveform",
-        title: "Waveform",
-        render: |app, panel, window, cx| app.waveform_panel(panel.id, window, cx),
-    },
-    PanelSpec {
         kind: "spectrogram",
         title: "Spectrogram",
         render: |app, panel, window, cx| app.spectrogram_panel(panel.id, window, cx),
+    },
+    PanelSpec {
+        kind: "waveform",
+        title: "Waveform",
+        render: |app, panel, window, cx| app.waveform_panel(panel.id, window, cx),
     },
     PanelSpec {
         kind: "audio_visualizer",
@@ -3249,17 +3249,26 @@ impl Render for GuiApp {
         }
 
         if self.catalog_open && !self.layouts.current().locked {
-            let mut choices = row().flex_wrap().gap_1();
+            let mut choices = row().gap_1();
+            let mut visualizations = row().gap_1();
             for spec in PANELS {
                 let kind = spec.kind;
-                choices = choices.child(button(kind, spec.title, cx, move |this, _, cx| {
+                let choice = button(kind, spec.title, cx, move |this, _, cx| {
                     if this.layouts.current().locked {
                         return;
                     }
                     this.layouts.current_mut().add(kind, this.target_group);
                     this.catalog_open = false;
                     this.persist_layout(cx);
-                }));
+                });
+                if matches!(
+                    kind,
+                    "spectrum" | "waveform" | "spectrogram" | "audio_visualizer"
+                ) {
+                    visualizations = visualizations.child(choice);
+                } else {
+                    choices = choices.child(choice);
+                }
             }
             app = app.child(
                 column()
@@ -3273,14 +3282,15 @@ impl Render for GuiApp {
                     .absolute()
                     .bottom(rems(3.0))
                     .right(gpui::px(UI_INSET))
-                    .max_w(px(560.))
+                    .max_w_full()
                     .p(gpui::px(UI_INSET))
                     .gap_1()
                     .bg(rgb(PANEL))
                     .border_1()
                     .border_color(rgb(BORDER))
                     .child(div().text_xs().text_color(rgb(MUTED)).child("Add panel"))
-                    .child(choices),
+                    .child(choices)
+                    .child(visualizations),
             );
         }
 
