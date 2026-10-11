@@ -20,19 +20,63 @@ pub(super) enum LibraryNode {
 #[derive(Clone)]
 pub(super) struct LibraryDrag {
     pub(super) nodes: Vec<LibraryNode>,
+    label: gpui::SharedString,
+    icon: &'static str,
+}
+
+impl LibraryDrag {
+    fn new(nodes: Vec<LibraryNode>, title: gpui::SharedString) -> Self {
+        let directories = nodes
+            .iter()
+            .filter(|node| matches!(node, LibraryNode::Directory(_)))
+            .count();
+        let (icon, label) = if nodes.len() == 1 {
+            match &nodes[0] {
+                LibraryNode::Directory(path) => (
+                    "󰉋",
+                    path.file_name()
+                        .unwrap_or(path.as_os_str())
+                        .to_string_lossy()
+                        .into_owned()
+                        .into(),
+                ),
+                LibraryNode::Track(_) => ("󰈙", title),
+            }
+        } else if directories == nodes.len() {
+            ("󰉋", format!("{} folders", nodes.len()).into())
+        } else if directories == 0 {
+            ("󰈙", format!("{} tracks", nodes.len()).into())
+        } else {
+            ("󰉓", format!("{} items", nodes.len()).into())
+        };
+        Self { nodes, label, icon }
+    }
 }
 
 impl Render for LibraryDrag {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let label = if self.nodes.len() == 1 {
-            match &self.nodes[0] {
-                LibraryNode::Directory(path) => path.to_string_lossy().into_owned(),
-                LibraryNode::Track(_) => "Track".to_owned(),
-            }
-        } else {
-            format!("{} library entries", self.nodes.len())
-        };
-        super::drag_preview(label)
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        // Window coordinates avoid the source row's grab offset; GPUI fits actual bounds.
+        gpui::anchored()
+            .position(window.mouse_position() + gpui::point(px(10.), px(10.)))
+            .child(
+                row()
+                    .px_2()
+                    .py_1()
+                    .gap_2()
+                    .max_w(px(260.))
+                    .bg(gpui::rgb(super::PANEL))
+                    .border_1()
+                    .border_color(gpui::rgb(super::ACCENT))
+                    .rounded_md()
+                    .text_color(gpui::rgb(super::TEXT))
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .font_family(super::fonts::SYMBOLS_FAMILY)
+                            .child(self.icon),
+                    )
+                    .child(div().min_w_0().truncate().child(self.label.clone())),
+            )
     }
 }
 
@@ -384,6 +428,11 @@ impl GuiApp {
                                     },
                                 ))
                             });
+                            let drag = LibraryDrag {
+                                nodes: drag_nodes,
+                                label: title.into(),
+                                icon: "",
+                            };
                             let row_view = super::tree_row(
                                 gpui::ElementId::named_usize("library-node", index),
                                 visible.depth,
@@ -411,7 +460,7 @@ impl GuiApp {
                                 row()
                                     .flex_1()
                                     .min_w_0()
-                                    .child(div().min_w_0().truncate().child(title))
+                                    .child(div().min_w_0().truncate().child(drag.label.clone()))
                                     .when(!detail.is_empty(), |v| {
                                         v.child(
                                             div()
@@ -444,8 +493,10 @@ impl GuiApp {
                                 },
                             )
                             .when(!this.library_range_pending(), |view| {
-                                view.on_drag(LibraryDrag { nodes: drag_nodes }, |drag, _, _, cx| {
-                                    cx.new(|_| drag.clone())
+                                view.on_drag(drag, |drag, _, _, cx| {
+                                    cx.new(|_| {
+                                        LibraryDrag::new(drag.nodes.clone(), drag.label.clone())
+                                    })
                                 })
                             })
                             .on_click(cx.listener(

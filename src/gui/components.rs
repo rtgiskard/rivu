@@ -394,7 +394,7 @@ pub(crate) fn dropdown_container(id: impl Into<ElementId>, width: gpui::Pixels) 
         .occlude()
 }
 
-/// Shared drag preview used by panel and library drag sources.
+/// Shared drag preview used by panel and queue drag sources.
 pub(crate) fn drag_preview(label: impl Into<SharedString>) -> Div {
     div()
         .px_4()
