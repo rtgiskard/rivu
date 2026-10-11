@@ -1,24 +1,14 @@
-mod analysis_visualizer;
 mod artwork;
-mod audio_visualizer;
 mod components;
-mod docking;
-mod docking_ui;
 mod fonts;
-mod fractal_beams;
-mod fractal_flow;
-mod fractal_visualizer;
 mod input;
 mod layout;
-mod layout_geometry;
-mod layout_manager;
 mod library;
 mod paged;
 mod panels;
 mod scrolling;
 mod settings;
-mod visuals;
-mod waveform;
+mod visualization;
 use crate::{
     config::{AudioVisualizerOptions, AudioVisualizerStyle},
     core::AppHandle,
@@ -432,7 +422,7 @@ impl Render for QueueDrag {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct DockRequest {
-    target: docking::Target,
+    target: layout::docking::Target,
     index: Option<usize>,
 }
 
@@ -463,7 +453,7 @@ impl DockGeometry {
 
 struct PanelDocking {
     source: u64,
-    guide: Option<docking::Guide>,
+    guide: Option<layout::docking::Guide>,
     hover: Option<DockHover>,
     geometry: DockGeometry,
 }
@@ -477,7 +467,7 @@ enum Measured {
 }
 #[derive(Clone, Copy)]
 enum Dragging {
-    Split(layout_geometry::SplitDrag),
+    Split(layout::layout_geometry::SplitDrag),
     Seek(u64),
     Volume(u64),
 }
@@ -622,8 +612,8 @@ pub(super) struct GuiApp {
     history_sort_desc: bool,
     library_stats: Option<crate::model::LibraryStats>,
     settings: Entity<settings::Settings>,
-    visuals: visuals::Visuals,
-    audio_visualizer: audio_visualizer::AudioVisualizer,
+    visuals: visualization::Visuals,
+    audio_visualizer: visualization::AudioVisualizer,
     default_album: Entity<artwork::Artwork>,
     catalog_open: bool,
     settings_open: bool,
@@ -631,10 +621,10 @@ pub(super) struct GuiApp {
     about_focus: FocusHandle,
     app_menu_open: bool,
     layouts_open: bool,
-    layout_action: Option<layout_manager::Action>,
+    layout_action: Option<layout::layout_manager::Action>,
     panel_menu: Option<PanelMenu>,
     playlist_delete_confirm: Option<i64>,
-    waveform: Entity<waveform::Waveform>,
+    waveform: Entity<visualization::Waveform>,
     target_group: Option<u64>,
     dragging: Option<Dragging>,
     panel_docking: Option<PanelDocking>,
@@ -962,10 +952,10 @@ impl GuiApp {
                 }
             },
         ));
-        let waveform = cx.new(|_| waveform::Waveform::new(Arc::clone(&handle.waveform)));
+        let waveform = cx.new(|_| visualization::Waveform::new(Arc::clone(&handle.waveform)));
         subscriptions.push(cx.observe(&waveform, |_, _, cx| cx.notify()));
         subscriptions.push(cx.subscribe(&waveform, |this, _, event, cx| match event {
-            waveform::WaveformEvent::Preview(seconds) => {
+            visualization::WaveformEvent::Preview(seconds) => {
                 if this.state.system.config.still_mode
                     || !this.state.system.config.waveform_seek_enabled
                 {
@@ -975,7 +965,7 @@ impl GuiApp {
                 this.seek_preview = Some(*seconds);
                 cx.notify();
             }
-            waveform::WaveformEvent::Seek(seconds) => {
+            visualization::WaveformEvent::Seek(seconds) => {
                 this.waveform_preview_active = false;
                 this.seek_preview = None;
                 if !this.state.system.config.still_mode
@@ -1093,8 +1083,8 @@ impl GuiApp {
             history_sort: HistorySort::Recent,
             history_sort_desc: true,
             library_stats: None,
-            visuals: visuals::Visuals::new(),
-            audio_visualizer: audio_visualizer::AudioVisualizer::new(),
+            visuals: visualization::Visuals::new(),
+            audio_visualizer: visualization::AudioVisualizer::new(),
             default_album: cx.new(|_| artwork::Artwork::new()),
             catalog_open: false,
             settings_open: false,
@@ -1254,7 +1244,9 @@ impl GuiApp {
                 match result {
                     Ok(files) => {
                         if let Some(path) = chooser_path(&files) {
-                            if let Err(error) = this.handle.update_gui_config(crate::core::GuiConfigChange::AddLibraryRoot(path)) {
+                            if let Err(error) = this.handle.update_gui_config(
+                                crate::core::GuiConfigChange::AddLibraryRoot(path),
+                            ) {
                                 this.error = Some(format!("{error:#}"));
                             }
                         }
@@ -2418,7 +2410,13 @@ impl GuiApp {
             .root
             .as_ref()
             .map(|root| {
-                layout_geometry::edit_sizes(root, sizes, panel, docking, self.layout_gutter())
+                layout::layout_geometry::edit_sizes(
+                    root,
+                    sizes,
+                    panel,
+                    docking,
+                    self.layout_gutter(),
+                )
             })
             .unwrap_or_default()
     }
@@ -2456,7 +2454,7 @@ impl GuiApp {
             children,
             boundaries,
             ..
-        }) = layout_geometry::find(root, id)
+        }) = layout::layout_geometry::find(root, id)
         else {
             return;
         };
@@ -2466,13 +2464,13 @@ impl GuiApp {
         };
         let Some(first) = children
             .get(index)
-            .and_then(|node| measured.get(&Measured::Node(layout_geometry::node_id(node))))
+            .and_then(|node| measured.get(&Measured::Node(layout::layout_geometry::node_id(node))))
         else {
             return;
         };
         let Some(second) = children
             .get(index + 1)
-            .and_then(|node| measured.get(&Measured::Node(layout_geometry::node_id(node))))
+            .and_then(|node| measured.get(&Measured::Node(layout::layout_geometry::node_id(node))))
         else {
             return;
         };
@@ -2498,7 +2496,7 @@ impl GuiApp {
         } else {
             (first.origin.y + first.size.height + second.origin.y) * 0.5
         };
-        let mut drag = layout_geometry::SplitDrag {
+        let mut drag = layout::layout_geometry::SplitDrag {
             id,
             index,
             axis: *axis,
@@ -2513,7 +2511,7 @@ impl GuiApp {
         };
         drag.pointer_offset = drag.pointer_coordinate(pointer) - f64::from(f32::from(center));
         self.split_references.clear();
-        layout_geometry::reference_centers(
+        layout::layout_geometry::reference_centers(
             root,
             *axis,
             (id, index),
@@ -3337,7 +3335,10 @@ impl Render for GuiApp {
                     .child(
                         menu_item("app-still-mode", "Still mode", cx, |this, _, cx| {
                             this.app_menu_open = false;
-                            if let Err(error) = this.handle.update_gui_config(crate::core::GuiConfigChange::ToggleStillMode) {
+                            if let Err(error) = this
+                                .handle
+                                .update_gui_config(crate::core::GuiConfigChange::ToggleStillMode)
+                            {
                                 this.error = Some(format!("{error:#}"));
                             }
                             cx.notify();
@@ -3478,7 +3479,9 @@ impl Render for GuiApp {
                             cx,
                             |this, _, cx| {
                                 this.panel_menu = None;
-                                if let Err(error) = this.handle.update_gui_config(crate::core::GuiConfigChange::ToggleWaveformSeek) {
+                                if let Err(error) = this.handle.update_gui_config(
+                                    crate::core::GuiConfigChange::ToggleWaveformSeek,
+                                ) {
                                     this.error = Some(format!("{error:#}"));
                                 }
                                 cx.notify();

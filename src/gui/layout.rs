@@ -9,6 +9,11 @@
 //! another. Normalization collapses empty/singleton containers and affinely
 //! flattens same-axis splits, without integral sizing or quantization.
 
+pub(super) mod docking;
+mod docking_ui;
+pub(super) mod layout_geometry;
+pub(super) mod layout_manager;
+
 use std::{
     collections::{BTreeMap, HashSet},
     fs::{self, File, OpenOptions},

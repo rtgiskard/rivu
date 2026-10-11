@@ -1,4 +1,5 @@
-use super::*;
+use super::super::*;
+use super::{docking, layout_geometry};
 
 const DOCK_COLORS: [u32; 4] = [0x7aa2f7, 0x9ece6a, 0xbb9af7, 0xe0af68];
 
@@ -13,7 +14,7 @@ fn panel_group(node: &Node, panel: u64) -> Option<(u64, usize)> {
 }
 
 impl GuiApp {
-    pub(super) fn panel_docking_blocked(&self) -> bool {
+    pub(in crate::gui) fn panel_docking_blocked(&self) -> bool {
         self.layouts.current().locked
             || self.settings_open
             || self.about_open
@@ -23,7 +24,7 @@ impl GuiApp {
             || self.catalog_open
     }
 
-    pub(super) fn start_panel_docking(&mut self, source: u64, window: &Window) {
+    pub(in crate::gui) fn start_panel_docking(&mut self, source: u64, window: &Window) {
         self.panel_docking = Some(PanelDocking {
             source,
             guide: None,
@@ -32,14 +33,18 @@ impl GuiApp {
         });
     }
 
-    pub(super) fn cancel_panel_docking(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn cancel_panel_docking(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.panel_docking.take().is_some() {
             cx.stop_active_drag(window);
             cx.notify();
         }
     }
 
-    pub(super) fn update_panel_docking(
+    pub(in crate::gui) fn update_panel_docking(
         &mut self,
         pointer: Point<Pixels>,
         window: &mut Window,
@@ -211,7 +216,7 @@ impl GuiApp {
         Some(hover)
     }
 
-    pub(super) fn drop_panel_docking(
+    pub(in crate::gui) fn drop_panel_docking(
         &mut self,
         source: u64,
         window: &mut Window,
@@ -252,7 +257,7 @@ impl GuiApp {
         cx.notify();
     }
 
-    pub(super) fn docking_overlay(&self) -> AnyElement {
+    pub(in crate::gui) fn docking_overlay(&self) -> AnyElement {
         let Some(session) = &self.panel_docking else {
             return div().into_any_element();
         };

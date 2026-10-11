@@ -157,10 +157,10 @@ fn tile_columns(x_start: u32, x_end: u32, width: u32, count: usize) -> std::ops:
 /// Uncached images survive a full subsequent frame in the pending queue.
 /// Removed cached tiles are released at the next window-frame boundary.
 #[derive(Clone)]
-pub(super) struct WaveformImageRelease(Rc<RefCell<WaveformPlot>>);
+pub(in crate::gui) struct WaveformImageRelease(Rc<RefCell<WaveformPlot>>);
 
 impl WaveformImageRelease {
-    pub(super) fn release_retired(&self, window: &mut Window) {
+    pub(in crate::gui) fn release_retired(&self, window: &mut Window) {
         let mut plot = self.0.borrow_mut();
         plot.release_images(|image| {
             let _ = window.drop_image(image);
@@ -175,7 +175,7 @@ impl WaveformImageRelease {
         }
     }
 
-    pub(super) fn release_all_images(&self, window: &mut Window) {
+    pub(in crate::gui) fn release_all_images(&self, window: &mut Window) {
         let mut plot = self.0.borrow_mut();
         plot.paint_tiles.clear();
         let WaveformPlot {
@@ -514,13 +514,13 @@ struct WaveformInteraction {
     active_panel: Option<u64>,
 }
 
-pub(super) enum WaveformEvent {
+pub(in crate::gui) enum WaveformEvent {
     Preview(f64),
     Seek(f64),
 }
 impl EventEmitter<WaveformEvent> for Waveform {}
 
-pub(super) struct Waveform {
+pub(in crate::gui) struct Waveform {
     enabled: bool,
     shared: Arc<RwLock<WaveformFrame>>,
     source: Option<Rc<Source>>,
@@ -536,11 +536,11 @@ pub(super) struct Waveform {
 }
 
 impl Waveform {
-    pub(super) fn image_releaser(&self) -> WaveformImageRelease {
+    pub(in crate::gui) fn image_releaser(&self) -> WaveformImageRelease {
         WaveformImageRelease(Rc::clone(&self.plot))
     }
 
-    pub(super) fn new(shared: Arc<RwLock<WaveformFrame>>) -> Self {
+    pub(in crate::gui) fn new(shared: Arc<RwLock<WaveformFrame>>) -> Self {
         Self {
             enabled: true,
             shared,
@@ -559,7 +559,7 @@ impl Waveform {
 
     /// Suspend display work and cancel explicit scans. The audio worker discards
     /// shared results; resuming ordinary sync never starts a decoder scan.
-    pub(super) fn set_enabled(&mut self, enabled: bool) {
+    pub(in crate::gui) fn set_enabled(&mut self, enabled: bool) {
         if self.enabled == enabled {
             return;
         }
@@ -580,7 +580,7 @@ impl Waveform {
         self.dragging = false;
     }
 
-    pub(super) fn set_seek_enabled(&mut self, enabled: bool) {
+    pub(in crate::gui) fn set_seek_enabled(&mut self, enabled: bool) {
         self.seek_enabled = enabled;
         if !enabled {
             self.dragging = false;
@@ -588,7 +588,7 @@ impl Waveform {
         }
     }
 
-    pub(super) fn retain_panels(&mut self, panels: &[&super::layout::Panel]) {
+    pub(in crate::gui) fn retain_panels(&mut self, panels: &[&super::super::layout::Panel]) {
         self.plot
             .borrow_mut()
             .retain_panels(|id| panels.iter().any(|panel| panel.id == id));
@@ -599,7 +599,7 @@ impl Waveform {
     }
     /// The caller chooses the playing track, or the selected track before play.
     /// Metadata, display settings and visibility do not change source identity.
-    pub(super) fn sync(&mut self, track: Option<&Track>, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn sync(&mut self, track: Option<&Track>, cx: &mut Context<Self>) {
         if !self.enabled {
             return;
         }
@@ -627,7 +627,7 @@ impl Waveform {
     }
 
     /// Explicit context-menu action; ordinary sync never opens a decoder.
-    pub(super) fn load_full(
+    pub(in crate::gui) fn load_full(
         &mut self,
         track: Option<&Track>,
         config: &Config,
@@ -809,7 +809,7 @@ impl Waveform {
     /// Position and duration are relative to the selected track/CUE segment.
     /// Pass position zero for a selection preview rather than another track's
     /// playback position. The caller observes this entity for data changes.
-    pub(super) fn view(
+    pub(in crate::gui) fn view(
         &mut self,
         panel_id: u64,
         position: f64,
@@ -837,7 +837,7 @@ impl Waveform {
         let message = preview_message(source, &self.shared.read());
         if let Some(message) = message {
             return panel
-                .child(super::components::visualization_status(
+                .child(super::super::components::visualization_status(
                     status.unwrap_or_else(|| message.into()),
                 ))
                 .into_any_element();
@@ -1068,21 +1068,21 @@ impl Waveform {
             )
             .when(labels, |panel| {
                 panel.child(
-                    super::row()
+                    super::super::row()
                         .absolute()
                         .bottom_0()
                         .left_0()
                         .w_full()
                         .px_2()
                         .justify_between()
-                        .child(super::panels::caption("0:00"))
-                        .child(super::panels::caption(
-                            label_duration.map_or_else(|| "—".into(), super::format_time),
+                        .child(super::super::panels::caption("0:00"))
+                        .child(super::super::panels::caption(
+                            label_duration.map_or_else(|| "—".into(), super::super::format_time),
                         )),
                 )
             })
             .children(status.map(|message| {
-                super::components::visualization_status(message)
+                super::super::components::visualization_status(message)
                     .absolute()
                     .top_0()
                     .left_0()

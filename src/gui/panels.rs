@@ -393,9 +393,10 @@ impl GuiApp {
             Some(total) => format!("{} / {total} files", progress.processed),
             None => format!("{} files found", progress.processed),
         };
-        let mut header = row().items_center().gap_2().child(
-            caption(format!("{phase} · {count} · {} errors", progress.errors)).flex_1(),
-        );
+        let mut header = row()
+            .items_center()
+            .gap_2()
+            .child(caption(format!("{phase} · {count} · {} errors", progress.errors)).flex_1());
         if !self.state.system.scanning
             && matches!(progress.phase, ScanPhase::Completed | ScanPhase::Failed)
         {

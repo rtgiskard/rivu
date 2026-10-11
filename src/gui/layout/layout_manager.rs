@@ -1,14 +1,14 @@
-use super::*;
+use super::super::*;
 
 #[derive(Clone)]
-pub(super) enum Action {
+pub(in crate::gui) enum Action {
     Duplicate,
     Rename,
     Delete(String),
 }
 
 impl GuiApp {
-    pub(super) fn layout_management_allowed(&mut self, cx: &mut Context<Self>) -> bool {
+    pub(in crate::gui) fn layout_management_allowed(&mut self, cx: &mut Context<Self>) -> bool {
         if self.settings_open {
             self.error = Some("Apply or discard settings before changing layouts.".into());
             cx.notify();
@@ -67,7 +67,11 @@ impl GuiApp {
         cx.notify();
     }
 
-    pub(super) fn finish_layout_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn finish_layout_action(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.layout_management_allowed(cx) {
             return;
         }
@@ -123,7 +127,7 @@ impl GuiApp {
         cx.notify();
     }
 
-    pub(super) fn layouts_panel(
+    pub(in crate::gui) fn layouts_panel(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,

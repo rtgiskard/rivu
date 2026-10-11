@@ -1,15 +1,15 @@
 //! Pixel-space edit reconciliation and separator drag snapshots.
-use super::layout::{Axis, Edge, Node};
+use super::{Axis, Edge, Node};
 use gpui::{Bounds, Pixels, Point};
 use std::collections::HashMap;
 
-pub(super) fn node_id(node: &Node) -> u64 {
+pub(in crate::gui) fn node_id(node: &Node) -> u64 {
     match node {
         Node::Split { id, .. } | Node::Tabs { id, .. } => *id,
     }
 }
 
-pub(super) fn find(node: &Node, id: u64) -> Option<&Node> {
+pub(in crate::gui) fn find(node: &Node, id: u64) -> Option<&Node> {
     if node_id(node) == id {
         return Some(node);
     }
@@ -19,7 +19,7 @@ pub(super) fn find(node: &Node, id: u64) -> Option<&Node> {
     None
 }
 
-pub(super) fn reference_centers(
+pub(in crate::gui) fn reference_centers(
     node: &Node,
     axis: Axis,
     excluded: (u64, usize),
@@ -157,7 +157,7 @@ fn remove_region(
     }
 }
 
-pub(super) fn edit_sizes(
+pub(in crate::gui) fn edit_sizes(
     root: &Node,
     mut sizes: HashMap<u64, (f64, f64)>,
     panel: u64,
@@ -182,7 +182,7 @@ pub(super) fn edit_sizes(
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct SplitDrag {
+pub(in crate::gui) struct SplitDrag {
     pub id: u64,
     pub index: usize,
     pub axis: Axis,
@@ -331,7 +331,7 @@ mod tests {
             active: panels[0],
             panels: panels
                 .iter()
-                .map(|id| super::super::layout::Panel {
+                .map(|id| super::super::Panel {
                     id: *id,
                     kind: "library".into(),
                     show_tab_bar: true,
@@ -350,7 +350,7 @@ mod tests {
         }
     }
 
-    fn spans(layout: &super::super::layout::Layout, width: f64) -> Vec<f64> {
+    fn spans(layout: &super::super::Layout, width: f64) -> Vec<f64> {
         let Node::Split {
             boundaries,
             children,
@@ -359,7 +359,7 @@ mod tests {
         else {
             panic!("expected split")
         };
-        super::super::layout::split_geometry(boundaries, children.len(), width, 4., 1.)
+        super::super::split_geometry(boundaries, children.len(), width, 4., 1.)
             .map(|(_, width)| width)
             .collect()
     }
@@ -374,7 +374,7 @@ mod tests {
             (7, (200., 400.)),
         ]);
         let sizes = edit_sizes(&root, measured, 4, Some((5, Edge::Right, 100)), 4.);
-        let mut layout = super::super::layout::Layout {
+        let mut layout = super::super::Layout {
             root: Some(root),
             next_id: 100,
             locked: false,
@@ -399,7 +399,7 @@ mod tests {
                 (7, (200., 400.)),
             ]);
             let sizes = edit_sizes(&root, measured, panel, None, 4.);
-            let mut layout = super::super::layout::Layout {
+            let mut layout = super::super::Layout {
                 root: Some(root),
                 next_id: 100,
                 locked: false,
@@ -429,7 +429,7 @@ mod tests {
         let sizes = edit_sizes(&root, measured, 4, Some((5, Edge::Right, 100)), 4.);
         assert_eq!(sizes[&6], (198., 200.));
         assert_eq!(sizes[&8], (198., 200.));
-        let mut layout = super::super::layout::Layout {
+        let mut layout = super::super::Layout {
             root: Some(root),
             next_id: 100,
             locked: false,

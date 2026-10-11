@@ -1,6 +1,6 @@
 //! Measured, bounded docking strips; layout edits remain in the layout model.
-use super::layout::{Axis, Edge, Node, split_geometry};
 use super::layout_geometry::node_id;
+use super::{Axis, Edge, Node, split_geometry};
 use gpui::{Bounds, Pixels, Point, point, px, size};
 
 const MAX_BARS: usize = 4;
@@ -12,20 +12,20 @@ const GAP: f32 = 4.;
 const THICKNESS: [f32; MAX_BARS] = [22., 20., 18., 16.];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct Target {
+pub(in crate::gui) struct Target {
     pub node: u64,
     pub edge: Edge,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(super) struct Bar {
+pub(in crate::gui) struct Bar {
     pub target: Target,
     pub bounds: Bounds<Pixels>,
     pub depth: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(super) struct Guide {
+pub(in crate::gui) struct Guide {
     pub bars: [Option<Bar>; MAX_BARS],
     pub leaf: u64,
     pub edge: Edge,
@@ -314,7 +314,7 @@ pub(super) fn node_bounds(
         depth: usize,
     ) -> Option<Bounds<Pixels>> {
         // The layout model permits at most 32 split levels.
-        if depth > super::layout::MAX_SPLIT_DEPTH {
+        if depth > super::MAX_SPLIT_DEPTH {
             return None;
         }
         if node_id(node) == target {
@@ -365,7 +365,7 @@ pub(super) fn node_bounds(
 
 #[cfg(test)]
 mod tests {
-    use super::super::layout::{Axis, Panel};
+    use super::super::{Axis, Panel};
     use super::*;
 
     fn tabs(id: u64) -> Node {
@@ -648,7 +648,7 @@ mod tests {
 
     #[test]
     fn preview_projects_new_tabs_after_source_collapse_and_gutter_reconciliation() {
-        use super::super::layout::Layout;
+        use super::super::Layout;
         use super::super::layout_geometry::{edit_sizes, find};
         use std::collections::HashMap;
 

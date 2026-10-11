@@ -4,9 +4,8 @@
 //! control's concept and parameter model using GPUI-native paths. Analysis and
 //! fractal styles are delegated to their respective rendering backends.
 
-use super::{
-    analysis_visualizer::AnalysisVisualizer, fractal_visualizer::FractalVisualizer, layout,
-};
+use super::super::layout;
+use super::{analysis_visualizer::AnalysisVisualizer, fractal_visualizer::FractalVisualizer};
 use crate::{
     analysis::{AnalysisFrame, AnalysisSettings},
     config::{AudioVisualizerOptions, AudioVisualizerStyle, Config},
@@ -43,7 +42,7 @@ const FRACTAL_STYLES: [AudioVisualizerStyle; 2] = [
 ];
 
 #[derive(Clone)]
-pub(super) struct AudioVisualizer {
+pub(in crate::gui) struct AudioVisualizer {
     data: Rc<RefCell<VisualizerData>>,
     analysis: [AnalysisVisualizer; 2],
     fractal: [FractalVisualizer; 2],
@@ -71,7 +70,7 @@ struct VisualizerData {
     fade_started: Option<Instant>,
 }
 impl AudioVisualizer {
-    pub(super) fn new() -> Self {
+    pub(in crate::gui) fn new() -> Self {
         Self {
             analysis: ANALYSIS_STYLES.map(AnalysisVisualizer::new),
             fractal: FRACTAL_STYLES.map(FractalVisualizer::new),
@@ -99,7 +98,7 @@ impl AudioVisualizer {
         }
     }
 
-    pub(super) fn sync(
+    pub(in crate::gui) fn sync(
         &mut self,
         config: &Config,
         panels: &[&layout::Panel],
@@ -189,7 +188,7 @@ impl AudioVisualizer {
         restored
     }
 
-    pub(super) fn update(&mut self, frame: &AnalysisFrame) {
+    pub(in crate::gui) fn update(&mut self, frame: &AnalysisFrame) {
         for renderer in &self.analysis {
             renderer.update(frame);
         }
@@ -256,19 +255,19 @@ impl AudioVisualizer {
         data.time = (frame.sample_time.as_secs_f32() * data.rotation_speed).rem_euclid(TWO_PI);
     }
 
-    pub(super) fn release_retired_images(&self, window: &mut Window) {
+    pub(in crate::gui) fn release_retired_images(&self, window: &mut Window) {
         for renderer in &self.analysis {
             renderer.release_retired_images(window);
         }
     }
 
-    pub(super) fn release_all_images(&self, window: &mut Window) {
+    pub(in crate::gui) fn release_all_images(&self, window: &mut Window) {
         for renderer in &self.analysis {
             renderer.release_all_images(window);
         }
     }
 
-    pub(super) fn view(
+    pub(in crate::gui) fn view(
         &self,
         panel_id: u64,
         playing: bool,

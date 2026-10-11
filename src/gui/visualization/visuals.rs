@@ -13,7 +13,7 @@
 //! Spectrogram image rows use half the active panel height, never fewer than
 //! the visible source frequency points, and remain capped by configuration.
 
-use super::{ERROR, ERROR_BG};
+use super::super::{ERROR, ERROR_BG};
 use gpui::{
     AnyElement, App, Bounds, Path, PathBuilder, Pixels, Point, RenderImage, SharedString,
     TextAlign, Window, canvas, div, fill, linear_color_stop, linear_gradient, point, prelude::*,
@@ -269,14 +269,14 @@ struct VisualData {
 }
 
 #[derive(Clone)]
-pub(super) struct Visuals {
+pub(in crate::gui) struct Visuals {
     // GPUI prepaint/paint closures are 'static. Share the UI-thread state rather
     // than copying the full history into each panel's render closure.
     data: Rc<RefCell<VisualData>>,
 }
 
 impl Visuals {
-    pub(super) fn new() -> Self {
+    pub(in crate::gui) fn new() -> Self {
         // History is initialized by configure when an analysis panel becomes visible.
         Self {
             data: Rc::new(RefCell::new(VisualData {
@@ -350,7 +350,7 @@ impl Visuals {
 
     /// Suspend analysis views without changing their settings. Image release
     /// still runs at frame boundaries, including while no views are rendered.
-    pub(super) fn set_enabled(&mut self, enabled: bool) {
+    pub(in crate::gui) fn set_enabled(&mut self, enabled: bool) {
         let mut data = self.data.borrow_mut();
         if data.enabled == enabled {
             return;
@@ -385,7 +385,7 @@ impl Visuals {
         data.refresh_db_labels();
     }
 
-    pub(super) fn configure(&mut self, config: &Config) -> bool {
+    pub(in crate::gui) fn configure(&mut self, config: &Config) -> bool {
         let mut data = self.data.borrow_mut();
         let spectrum_db_range = config.spectrum_db_range();
         let spectrogram_db_range = config.spectrogram_db_range();
@@ -494,7 +494,7 @@ impl Visuals {
         true
     }
 
-    pub(super) fn update(&mut self, frame: &AnalysisFrame) {
+    pub(in crate::gui) fn update(&mut self, frame: &AnalysisFrame) {
         let mut data = self.data.borrow_mut();
         if !data.enabled {
             return;
@@ -596,14 +596,14 @@ impl Visuals {
         }
     }
 
-    pub(super) fn spectrum(&self, panel_id: u64) -> AnyElement {
+    pub(in crate::gui) fn spectrum(&self, panel_id: u64) -> AnyElement {
         self.view(panel_id, VisualMode::Spectrum)
     }
 
-    pub(super) fn spectrogram(&self, panel_id: u64) -> AnyElement {
+    pub(in crate::gui) fn spectrogram(&self, panel_id: u64) -> AnyElement {
         self.view(panel_id, VisualMode::Spectrogram)
     }
-    pub(super) fn retain_spectrogram_panels(&mut self, panel_ids: &[u64]) {
+    pub(in crate::gui) fn retain_spectrogram_panels(&mut self, panel_ids: &[u64]) {
         let mut data = self.data.borrow_mut();
         data.spectrogram_panel_sizes
             .retain(|panel_id, _| panel_ids.contains(panel_id));
@@ -612,7 +612,7 @@ impl Visuals {
         }
     }
 
-    pub(super) fn set_spectrum_visible(&self, visible: bool) -> bool {
+    pub(in crate::gui) fn set_spectrum_visible(&self, visible: bool) -> bool {
         let mut data = self.data.borrow_mut();
         let restored = visible && !data.spectrum_visible;
         if data.spectrum_visible != visible {
@@ -623,24 +623,24 @@ impl Visuals {
         restored
     }
 
-    pub(super) fn retain_spectrum_panels(&mut self, panel_ids: &[u64]) {
+    pub(in crate::gui) fn retain_spectrum_panels(&mut self, panel_ids: &[u64]) {
         self.data
             .borrow_mut()
             .spectrum_geometry
             .retain(|panel_id, _| panel_ids.contains(panel_id));
     }
 
-    pub(super) fn begin_frame(&self) {
+    pub(in crate::gui) fn begin_frame(&self) {
         self.data.borrow_mut().spectrogram_panel_sizes.clear();
     }
 
     // The root's first paint runs after every panel's prepaint. Size shared
     // history once here, never while individual panels are painting it.
-    pub(super) fn finish_prepaint(&self) {
+    pub(in crate::gui) fn finish_prepaint(&self) {
         self.data.borrow_mut().finish_prepaint();
     }
 
-    pub(super) fn release_retired(&self, window: &mut Window) {
+    pub(in crate::gui) fn release_retired(&self, window: &mut Window) {
         let mut data = self.data.borrow_mut();
         data.release_images(|image| {
             window
@@ -660,7 +660,7 @@ impl Visuals {
         }
     }
 
-    pub(super) fn release_all_images(&self, window: &mut Window) {
+    pub(in crate::gui) fn release_all_images(&self, window: &mut Window) {
         let mut data = self.data.borrow_mut();
         let mut failure = None;
         let VisualData {
@@ -773,7 +773,7 @@ impl Visuals {
                 .size_full(),
             )
             .children(message.map(|message| {
-                super::components::visualization_status(message)
+                super::super::components::visualization_status(message)
                     .absolute()
                     .top_0()
                     .left_0()
