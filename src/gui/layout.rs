@@ -2,6 +2,12 @@
 //!
 //! IDs are runtime-only. Persistence borrows the collection, writes one strict
 //! format, and atomically replaces the caller-selected file.
+//!
+//! Split children are direct nodes. Empty boundary vectors mean equal content
+//! spans; explicit boundaries are strictly increasing cumulative fractions in
+//! `(0, 1)`, excluding separator gutters. Editing one boundary never changes
+//! another. Normalization collapses empty/singleton containers and affinely
+//! flattens same-axis splits, without integral sizing or quantization.
 
 use std::{
     collections::{BTreeMap, HashSet},
@@ -15,6 +21,8 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{AudioVisualizerOptions, AudioVisualizerStyle};
+
+pub const MAX_SPLIT_DEPTH: usize = 32;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Panel {
@@ -51,17 +59,12 @@ impl Edge {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct Child {
-    pub weight: f32,
-    pub node: Node,
-}
-
-#[derive(Clone, Debug, PartialEq)]
 pub enum Node {
     Split {
         id: u64,
         axis: Axis,
-        children: Vec<Child>,
+        children: Vec<Node>,
+        boundaries: Vec<f64>,
     },
     Tabs {
         id: u64,
@@ -106,7 +109,7 @@ mod persistence {
 
     struct LayoutsRef<'a>(&'a BTreeMap<String, Layout>);
     struct NodeRef<'a>(&'a Node);
-    struct ChildrenRef<'a>(&'a [Child]);
+    struct ChildrenRef<'a>(&'a [Node]);
     struct PanelsRef<'a>(&'a [Panel]);
 
     #[derive(Serialize)]
@@ -122,19 +125,14 @@ mod persistence {
         Split {
             axis: Axis,
             children: ChildrenRef<'a>,
+            #[serde(skip_serializing_if = "boundaries_empty")]
+            boundaries: &'a [f64],
         },
         Tabs {
             panels: PanelsRef<'a>,
             #[serde(skip_serializing_if = "is_zero")]
             active: usize,
         },
-    }
-
-    #[derive(Serialize)]
-    struct ChildView<'a> {
-        #[serde(skip_serializing_if = "is_one")]
-        weight: f32,
-        node: NodeRef<'a>,
     }
 
     #[derive(Serialize)]
@@ -159,14 +157,11 @@ mod persistence {
     fn is_zero(value: &usize) -> bool {
         *value == 0
     }
-    fn is_one(value: &f32) -> bool {
-        *value == 1.0
+    fn boundaries_empty(value: &&[f64]) -> bool {
+        value.is_empty()
     }
     fn default_true() -> bool {
         true
-    }
-    fn default_weight() -> f32 {
-        1.0
     }
 
     impl Serialize for LayoutsRef<'_> {
@@ -188,9 +183,15 @@ mod persistence {
     impl Serialize for NodeRef<'_> {
         fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
             let view = match self.0 {
-                Node::Split { axis, children, .. } => NodeView::Split {
+                Node::Split {
+                    axis,
+                    children,
+                    boundaries,
+                    ..
+                } => NodeView::Split {
                     axis: *axis,
                     children: ChildrenRef(children),
+                    boundaries,
                 },
                 Node::Tabs { panels, active, .. } => NodeView::Tabs {
                     panels: PanelsRef(panels),
@@ -210,10 +211,7 @@ mod persistence {
         fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
             let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
             for child in self.0 {
-                sequence.serialize_element(&ChildView {
-                    weight: child.weight,
-                    node: NodeRef(&child.node),
-                })?;
+                sequence.serialize_element(&NodeRef(child))?;
             }
             sequence.end()
         }
@@ -292,21 +290,15 @@ mod persistence {
     enum NodeInput {
         Split {
             axis: Axis,
-            children: Vec<ChildInput>,
+            children: Vec<NodeInput>,
+            #[serde(default)]
+            boundaries: Vec<f64>,
         },
         Tabs {
             panels: Vec<PanelInput>,
             #[serde(default)]
             active: usize,
         },
-    }
-
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct ChildInput {
-        #[serde(default = "default_weight")]
-        weight: f32,
-        node: NodeInput,
     }
 
     #[derive(Deserialize)]
@@ -338,22 +330,30 @@ mod persistence {
     }
 
     impl NodeInput {
-        fn into_node(self, next_id: &mut u64) -> Result<Node> {
+        fn into_node(self, next_id: &mut u64, depth: usize) -> Result<Node> {
+            if matches!(&self, Self::Split { .. }) && depth >= MAX_SPLIT_DEPTH {
+                return Err(anyhow!("split depth exceeds {MAX_SPLIT_DEPTH}"));
+            }
             let id = allocate(next_id)?;
             Ok(match self {
-                Self::Split { axis, children } => Node::Split {
-                    id,
+                Self::Split {
                     axis,
-                    children: children
-                        .into_iter()
-                        .map(|child| {
-                            Ok(Child {
-                                weight: child.weight,
-                                node: child.node.into_node(next_id)?,
-                            })
-                        })
-                        .collect::<Result<_>>()?,
-                },
+                    children,
+                    boundaries,
+                } => {
+                    if !valid_boundaries(&boundaries, children.len()) {
+                        return Err(anyhow!("invalid split boundaries"));
+                    }
+                    Node::Split {
+                        id,
+                        axis,
+                        children: children
+                            .into_iter()
+                            .map(|child| child.into_node(next_id, depth + 1))
+                            .collect::<Result<_>>()?,
+                        boundaries,
+                    }
+                }
                 Self::Tabs { panels, active } => {
                     let panels = panels.into_iter().map(|panel| {
                         let audio_visualizer = match (panel.style, panel.reference_lines, panel.labels) {
@@ -383,7 +383,7 @@ mod persistence {
                 let mut next_id = 1;
                 let root = input
                     .root
-                    .map(|root| root.into_node(&mut next_id))
+                    .map(|root| root.into_node(&mut next_id, 0))
                     .transpose()?;
                 let layout = Layout {
                     root,
@@ -411,134 +411,169 @@ fn checked_name(name: &str) -> Result<&str> {
     Ok(name)
 }
 
-fn weight_sum(weights: impl IntoIterator<Item = f32>) -> Result<f64> {
-    let mut sum = 0.0_f64;
-    for weight in weights {
-        if !weight.is_finite() || weight <= 0.0 {
-            return Err(anyhow!("split weights must be finite and positive"));
-        }
-        sum += f64::from(weight);
-    }
-    if sum <= 0.0 || sum > f64::from(f32::MAX) {
-        return Err(anyhow!("split weight sum is not representable"));
-    }
-    Ok(sum)
+fn valid_boundaries(boundaries: &[f64], count: usize) -> bool {
+    boundaries.is_empty()
+        || (boundaries.len() == count.saturating_sub(1)
+            && boundaries.iter().enumerate().all(|(index, &value)| {
+                value.is_finite()
+                    && value > 0.0
+                    && value < 1.0
+                    && (index == 0 || value > boundaries[index - 1])
+            }))
 }
 
-fn scaled_weight(outer: f32, inner: f32, sum: f64) -> Result<f32> {
-    let weight = (f64::from(outer) * f64::from(inner) / sum) as f32;
-    if !weight.is_finite() || weight <= 0.0 {
-        return Err(anyhow!("normalized weight is not representable"));
-    }
-    Ok(weight)
-}
-
-// Raw edits keep every original container until preflight passes. This borrowed
-// projection checks the exact post-collapse/flatten weights without allocating
-// a second tree, so even floating-point limits can roll back losslessly.
-fn effective_node(node: &Node) -> Option<&Node> {
-    match node {
-        Node::Tabs { panels, .. } => (!panels.is_empty()).then_some(node),
-        Node::Split { children, .. } => {
-            let mut survivor = None;
-            for child in children {
-                if let Some(effective) = effective_node(&child.node) {
-                    if survivor.is_some() {
-                        return Some(node);
-                    }
-                    survivor = Some(effective);
-                }
-            }
-            survivor
-        }
+fn boundary_at(boundaries: &[f64], count: usize, index: usize) -> f64 {
+    if index == count {
+        1.0
+    } else if boundaries.is_empty() {
+        index as f64 / count as f64
+    } else if index == 0 {
+        0.0
+    } else {
+        boundaries[index - 1]
     }
 }
 
-fn visit_normalized_weights(node: &Node, visitor: &mut dyn FnMut(f32) -> Result<()>) -> Result<()> {
-    let Node::Split { axis, children, .. } = node else {
-        unreachable!("effective split");
+/// Content spans in logical pixels. Pane edges and gutters are rounded
+/// cumulatively in physical pixels, so no rounding error accumulates.
+pub fn split_geometry(
+    boundaries: &[f64],
+    count: usize,
+    length: f64,
+    gutter: f64,
+    scale: f64,
+) -> impl ExactSizeIterator<Item = (f64, f64)> + '_ {
+    let length = length.max(0.0);
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
     };
+    let gutter = (if count > 1 {
+        (gutter.max(0.0) * scale).round() / scale
+    } else {
+        0.0
+    })
+    .min(length / count.saturating_sub(1).max(1) as f64);
+    let content = (length - gutter * count.saturating_sub(1) as f64).max(0.0);
+    (0..count).map(move |index| {
+        let start = ((content * boundary_at(boundaries, count, index) * scale).round() / scale)
+            .min(content)
+            + gutter * index as f64;
+        let end = if index + 1 == count {
+            length
+        } else {
+            ((content * boundary_at(boundaries, count, index + 1) * scale).round() / scale)
+                .min(content)
+                + gutter * index as f64
+        };
+        (start, (end - start).max(0.0))
+    })
+}
+
+// Project collapse and same-axis flattening before consuming any containers.
+// Tabs have depth zero; a singleton split inherits its surviving child's shape.
+fn normalized_shape(node: &Node) -> Option<(Option<Axis>, usize)> {
+    let Node::Split { axis, children, .. } = node else {
+        return match node {
+            Node::Tabs { panels, .. } if panels.is_empty() => None,
+            _ => Some((None, 0)),
+        };
+    };
+    let mut first = None;
+    let mut multiple = false;
+    let mut max_depth = 0;
     for child in children {
-        let Some(effective) = effective_node(&child.node) else {
+        let Some((child_axis, depth)) = normalized_shape(child) else {
             continue;
         };
-        if matches!(effective, Node::Split { axis: child_axis, .. } if child_axis == axis) {
-            let sum = normalized_weight_sum(effective)?;
-            visit_normalized_weights(effective, &mut |inner| {
-                visitor(scaled_weight(child.weight, inner, sum)?)
-            })?;
+        if first.is_some() {
+            multiple = true;
         } else {
-            visitor(child.weight)?;
+            first = Some((child_axis, depth));
         }
+        let depth = if child_axis == Some(*axis) {
+            depth - 1
+        } else {
+            depth
+        };
+        max_depth = max_depth.max(depth);
     }
-    Ok(())
+    if multiple {
+        Some((Some(*axis), max_depth + 1))
+    } else {
+        first
+    }
 }
 
-fn normalized_weight_sum(node: &Node) -> Result<f64> {
-    let mut sum = 0.0;
-    visit_normalized_weights(node, &mut |weight| {
-        if !weight.is_finite() || weight <= 0.0 {
-            return Err(anyhow!("split weights must be finite and positive"));
-        }
-        sum += f64::from(weight);
-        Ok(())
-    })?;
-    if sum <= 0.0 || sum > f64::from(f32::MAX) {
-        return Err(anyhow!("normalized weight sum is not representable"));
+// Stream normalized pane ends using the same bottom-up affine arithmetic as
+// normalize. No temporary tree or child list is needed for this preflight.
+fn normalized_ends(node: &Node, wanted_axis: Axis, emit: &mut dyn FnMut(f64) -> bool) -> bool {
+    let Node::Split {
+        axis,
+        children,
+        boundaries,
+        ..
+    } = node
+    else {
+        return emit(1.0);
+    };
+    let mut surviving = children
+        .iter()
+        .enumerate()
+        .filter(|(_, child)| normalized_shape(child).is_some());
+    let Some((first_index, first)) = surviving.next() else {
+        return true;
+    };
+    if surviving.next().is_none() {
+        return normalized_ends(first, wanted_axis, emit);
     }
-    Ok(sum)
+    if *axis != wanted_axis {
+        return emit(1.0);
+    }
+    let last = children
+        .iter()
+        .rposition(|child| normalized_shape(child).is_some())
+        .expect("surviving child");
+    let mut start = 0.0;
+    for (index, child) in children.iter().enumerate().skip(first_index) {
+        if normalized_shape(child).is_none() {
+            continue;
+        }
+        let end = if index == last {
+            1.0
+        } else {
+            boundary_at(boundaries, children.len(), index + 1)
+        };
+        if !normalized_ends(child, wanted_axis, &mut |fraction| {
+            emit(if fraction == 1.0 {
+                end
+            } else {
+                start + (end - start) * fraction
+            })
+        }) {
+            return false;
+        }
+        start = end;
+    }
+    true
 }
 
-fn check_normalization(node: &Node) -> Result<()> {
-    // Normalized subtrees need one visit. Only same-axis flattening needs to
-    // inspect projected weights again to preserve the exact f32 rounding.
-    fn summarize(node: &Node) -> Result<Option<(&Node, f64)>> {
-        let Node::Split { axis, children, .. } = node else {
-            return Ok(match node {
-                Node::Tabs { panels, .. } if panels.is_empty() => None,
-                _ => Some((node, 0.0)),
-            });
-        };
-        let mut first: Option<((&Node, f64), f32)> = None;
-        let mut multiple = false;
-        let mut sum = 0.0;
-        let mut add = |effective: &Node, inner_sum: f64, outer: f32| -> Result<()> {
-            if !outer.is_finite() || outer <= 0.0 {
-                return Err(anyhow!("split weights must be finite and positive"));
-            }
-            if matches!(effective, Node::Split { axis: child_axis, .. } if child_axis == axis) {
-                visit_normalized_weights(effective, &mut |inner| {
-                    sum += f64::from(scaled_weight(outer, inner, inner_sum)?);
-                    Ok(())
-                })?;
-            } else {
-                sum += f64::from(outer);
-            }
-            Ok(())
-        };
-        for child in children {
-            let Some(summary) = summarize(&child.node)? else {
-                continue;
-            };
-            if let Some((previous, weight)) = first {
-                if !multiple {
-                    add(previous.0, previous.1, weight)?;
-                    multiple = true;
-                }
-                add(summary.0, summary.1, child.weight)?;
-            } else {
-                first = Some((summary, child.weight));
-            }
+fn normalized_boundaries_representable(node: &Node) -> bool {
+    if let Node::Split { children, .. } = node {
+        if !children.iter().all(normalized_boundaries_representable) {
+            return false;
         }
-        if !multiple {
-            return Ok(first.map(|(summary, _)| summary));
-        }
-        if sum <= 0.0 || sum > f64::from(f32::MAX) {
-            return Err(anyhow!("normalized weight sum is not representable"));
-        }
-        Ok(Some((node, sum)))
     }
-    summarize(node).map(|_| ())
+    let Some((Some(axis), _)) = normalized_shape(node) else {
+        return true;
+    };
+    let mut previous = 0.0;
+    normalized_ends(node, axis, &mut |end| {
+        let valid = end.is_finite() && end > previous && end <= 1.0;
+        previous = end;
+        valid
+    })
 }
 
 impl Node {
@@ -553,9 +588,7 @@ impl Node {
             return Some(self);
         }
         match self {
-            Self::Split { children, .. } => {
-                children.iter().find_map(|child| child.node.find(target))
-            }
+            Self::Split { children, .. } => children.iter().find_map(|child| child.find(target)),
             Self::Tabs { .. } => None,
         }
     }
@@ -565,9 +598,9 @@ impl Node {
             return Some(self);
         }
         match self {
-            Self::Split { children, .. } => children
-                .iter_mut()
-                .find_map(|child| child.node.find_mut(target)),
+            Self::Split { children, .. } => {
+                children.iter_mut().find_map(|child| child.find_mut(target))
+            }
             Self::Tabs { .. } => None,
         }
     }
@@ -580,14 +613,14 @@ impl Node {
                 .then_some(self),
             Self::Split { children, .. } => children
                 .iter()
-                .find_map(|child| child.node.panel_group(panel_id)),
+                .find_map(|child| child.panel_group(panel_id)),
         }
     }
 
     fn first_tabs(&self) -> u64 {
         match self {
             Self::Tabs { id, .. } => *id,
-            Self::Split { children, .. } => children[0].node.first_tabs(),
+            Self::Split { children, .. } => children[0].first_tabs(),
         }
     }
 
@@ -600,7 +633,7 @@ impl Node {
             ),
             Self::Split { children, .. } => {
                 for child in children {
-                    child.node.collect_panels(output, active_only);
+                    child.collect_panels(output, active_only);
                 }
             }
         }
@@ -621,8 +654,7 @@ impl Node {
                     panels: Vec::new(),
                     active: 0,
                 };
-                child.node =
-                    std::mem::replace(&mut child.node, placeholder).map_node(target, update);
+                *child = std::mem::replace(child, placeholder).map_node(target, update);
                 if update.is_none() {
                     break;
                 }
@@ -639,30 +671,42 @@ impl Node {
                 id,
                 axis,
                 mut children,
+                mut boundaries,
             } => {
-                children.retain_mut(|child| {
+                let count = children.len();
+                // Remove the boundary immediately after an empty child. This
+                // gives its span to the following child, or the preceding last
+                // child, without moving any other surviving separator.
+                let mut index = 0;
+                while index < children.len() {
                     let placeholder = Self::Tabs {
                         id: 0,
                         panels: Vec::new(),
                         active: 0,
                     };
-                    let node = std::mem::replace(&mut child.node, placeholder);
+                    let node = std::mem::replace(&mut children[index], placeholder);
                     if let Some(node) = node.normalize() {
-                        child.node = node;
-                        true
+                        children[index] = node;
+                        index += 1;
                     } else {
-                        false
+                        if boundaries.is_empty() && children.len() > 1 {
+                            boundaries.extend((1..count).map(|i| i as f64 / count as f64));
+                        }
+                        children.remove(index);
+                        if !boundaries.is_empty() {
+                            boundaries.remove(index.min(boundaries.len() - 1));
+                        }
                     }
-                });
+                }
                 if children.is_empty() {
                     return None;
                 }
                 if children.len() == 1 {
-                    return Some(children.pop().expect("one child").node);
+                    return children.pop();
                 }
-                let flattened_len = children
+                let flattened_len: usize = children
                     .iter()
-                    .map(|child| match &child.node {
+                    .map(|child| match child {
                         Self::Split {
                             axis: child_axis,
                             children,
@@ -672,36 +716,46 @@ impl Node {
                     })
                     .sum();
                 if flattened_len == children.len() {
-                    return Some(Self::Split { id, axis, children });
+                    return Some(Self::Split {
+                        id,
+                        axis,
+                        children,
+                        boundaries,
+                    });
                 }
+                let count = children.len();
                 let mut flattened = Vec::with_capacity(flattened_len);
-                for child in children {
-                    match child.node {
+                let mut transformed = Vec::with_capacity(flattened_len - 1);
+                for (index, child) in children.into_iter().enumerate() {
+                    let start = boundary_at(&boundaries, count, index);
+                    let end = boundary_at(&boundaries, count, index + 1);
+                    match child {
                         Self::Split {
                             axis: child_axis,
                             children: inner,
+                            boundaries: inner_bounds,
                             ..
                         } if child_axis == axis => {
-                            let sum = weight_sum(inner.iter().map(|child| child.weight))
-                                .expect("preflight weights");
-                            for inner in inner {
-                                flattened.push(Child {
-                                    weight: scaled_weight(child.weight, inner.weight, sum)
-                                        .expect("preflight scaling"),
-                                    node: inner.node,
-                                });
+                            for inner_index in 1..inner.len() {
+                                transformed.push(
+                                    start
+                                        + (end - start)
+                                            * boundary_at(&inner_bounds, inner.len(), inner_index),
+                                );
                             }
+                            flattened.extend(inner);
                         }
-                        node => flattened.push(Child {
-                            weight: child.weight,
-                            node,
-                        }),
+                        node => flattened.push(node),
+                    }
+                    if index + 1 < count {
+                        transformed.push(end);
                     }
                 }
                 Some(Self::Split {
                     id,
                     axis,
                     children: flattened,
+                    boundaries: transformed,
                 })
             }
         }
@@ -720,16 +774,8 @@ impl Node {
         Self::Split {
             id: split_id,
             axis: edge.axis(),
-            children: vec![
-                Child {
-                    weight: 1.0,
-                    node: first,
-                },
-                Child {
-                    weight: 1.0,
-                    node: second,
-                },
-            ],
+            children: vec![first, second],
+            boundaries: Vec::new(),
         }
     }
 }
@@ -752,44 +798,26 @@ impl Default for Layout {
             root: Some(Node::Split {
                 id: 1,
                 axis: Axis::Vertical,
+                boundaries: Vec::new(),
                 children: vec![
-                    Child {
-                        weight: 1.0,
-                        node: tabs(2, 3, "transport"),
-                    },
-                    Child {
-                        weight: 3.0,
-                        node: Node::Split {
-                            id: 4,
-                            axis: Axis::Horizontal,
-                            children: vec![
-                                Child {
-                                    weight: 0.65,
-                                    node: tabs(5, 6, "library"),
-                                },
-                                Child {
-                                    weight: 0.35,
-                                    node: Node::Split {
-                                        id: 7,
-                                        axis: Axis::Vertical,
-                                        children: vec![
-                                            Child {
-                                                weight: 0.45,
-                                                node: tabs(8, 9, "queue"),
-                                            },
-                                            Child {
-                                                weight: 0.275,
-                                                node: tabs(10, 11, "spectrum"),
-                                            },
-                                            Child {
-                                                weight: 0.275,
-                                                node: tabs(12, 13, "spectrogram"),
-                                            },
-                                        ],
-                                    },
-                                },
-                            ],
-                        },
+                    tabs(2, 3, "transport"),
+                    Node::Split {
+                        id: 4,
+                        axis: Axis::Horizontal,
+                        boundaries: Vec::new(),
+                        children: vec![
+                            tabs(5, 6, "library"),
+                            Node::Split {
+                                id: 7,
+                                axis: Axis::Vertical,
+                                boundaries: Vec::new(),
+                                children: vec![
+                                    tabs(8, 9, "queue"),
+                                    tabs(10, 11, "spectrum"),
+                                    tabs(12, 13, "spectrogram"),
+                                ],
+                            },
+                        ],
                     },
                 ],
             }),
@@ -873,7 +901,7 @@ impl Layout {
             return false;
         };
         let (panel, index, active) = self.take_panel(group, panel_id);
-        if check_normalization(self.root.as_ref().expect("source root")).is_err() {
+        if !normalized_boundaries_representable(self.root.as_ref().expect("source root")) {
             self.insert_panel(group, panel, Some(index), active);
             return false;
         }
@@ -884,6 +912,8 @@ impl Layout {
     /// Center indices refer to the destination after source removal and clamp
     /// to its end. Split targets accept edge drops. A lone self-drop is a no-op.
     /// All invalid edits preserve both the tree and allocator exactly.
+    /// Finite-resolution boundaries may reject a structural edit when its
+    /// normalized panes cannot have distinct representable f64 boundaries.
     pub fn move_panel(
         &mut self,
         panel_id: u64,
@@ -916,13 +946,15 @@ impl Layout {
             };
             next_id
         };
-        let destination_active = match target {
-            Node::Tabs { active, .. } => *active,
-            _ => 0,
-        };
         let (panel, old_index, old_active) = self.take_panel(group, panel_id);
         let tabs_id = self.next_id;
         let split_id = tabs_id.saturating_add(1);
+        if edge == Edge::Center
+            && !normalized_boundaries_representable(self.root.as_ref().expect("source root"))
+        {
+            self.insert_panel(group, panel, Some(old_index), old_active);
+            return false;
+        }
         if edge == Edge::Center {
             self.insert_panel(target_node, panel, index, panel_id);
         } else {
@@ -935,42 +967,35 @@ impl Layout {
                 )
             });
         }
-        if check_normalization(self.root.as_ref().expect("destination root")).is_err() {
-            let panel = if edge == Edge::Center {
-                let (panel, _, _) = self.take_panel(target_node, panel_id);
-                if let Some(Node::Tabs { active, .. }) = self
-                    .root
-                    .as_mut()
-                    .and_then(|root| root.find_mut(target_node))
-                {
-                    *active = destination_active;
-                }
-                panel
-            } else {
-                let mut recovered = None;
-                self.root = self.root.take().map(|root| {
-                    root.map_node(
-                        split_id,
-                        &mut Some(|wrapper: Node| {
-                            let Node::Split { mut children, .. } = wrapper else {
-                                unreachable!("new docking split");
-                            };
-                            let incoming = if matches!(edge, Edge::Left | Edge::Top) {
-                                0
-                            } else {
-                                1
-                            };
-                            let Node::Tabs { mut panels, .. } = children.remove(incoming).node
-                            else {
-                                unreachable!("incoming tabs");
-                            };
-                            recovered = panels.pop();
-                            children.pop().expect("original target").node
-                        }),
-                    )
-                });
-                recovered.expect("incoming panel")
-            };
+        if edge != Edge::Center
+            && (normalized_shape(self.root.as_ref().expect("destination root"))
+                .is_some_and(|(_, depth)| depth > MAX_SPLIT_DEPTH)
+                || !normalized_boundaries_representable(
+                    self.root.as_ref().expect("destination root"),
+                ))
+        {
+            let mut recovered = None;
+            self.root = self.root.take().map(|root| {
+                root.map_node(
+                    split_id,
+                    &mut Some(|wrapper: Node| {
+                        let Node::Split { mut children, .. } = wrapper else {
+                            unreachable!("new docking split");
+                        };
+                        let incoming = if matches!(edge, Edge::Left | Edge::Top) {
+                            0
+                        } else {
+                            1
+                        };
+                        let Node::Tabs { mut panels, .. } = children.remove(incoming) else {
+                            unreachable!("incoming tabs");
+                        };
+                        recovered = panels.pop();
+                        children.pop().expect("original target")
+                    }),
+                )
+            });
+            let panel = recovered.expect("incoming panel");
             self.insert_panel(group, panel, Some(old_index), old_active);
             return false;
         }
@@ -979,45 +1004,107 @@ impl Layout {
         true
     }
 
-    /// Resize only the adjacent pair. The fraction is measured within that
-    /// pair, and neither the other weights nor the allocator change.
-    pub fn set_boundary(&mut self, split_id: u64, index: usize, fraction: f32) -> bool {
-        if !fraction.is_finite() || fraction <= 0.0 || fraction >= 1.0 {
+    /// Move one absolute cumulative content boundary. Neighboring boundaries
+    /// and the allocator remain exactly unchanged; equal defaults materialize
+    /// only after a valid edit.
+    pub fn set_boundary(&mut self, split_id: u64, index: usize, fraction: f64) -> bool {
+        if !fraction.is_finite() {
             return false;
         }
-        let Some(Node::Split { children, .. }) =
-            self.root.as_mut().and_then(|root| root.find_mut(split_id))
+        let Some(Node::Split {
+            children,
+            boundaries,
+            ..
+        }) = self.root.as_mut().and_then(|root| root.find_mut(split_id))
         else {
             return false;
         };
-        let Some(right) = index.checked_add(1).filter(|right| *right < children.len()) else {
-            return false;
-        };
-        let sum = f64::from(children[index].weight) + f64::from(children[right].weight);
-        let first = (sum * f64::from(fraction)) as f32;
-        let second = (sum - f64::from(first)) as f32;
-        if !first.is_finite() || !second.is_finite() || first <= 0.0 || second <= 0.0 {
+        let count = children.len();
+        if index >= count.saturating_sub(1)
+            || fraction <= boundary_at(boundaries, count, index)
+            || fraction >= boundary_at(boundaries, count, index + 2)
+        {
             return false;
         }
-        let total: f64 = children
-            .iter()
-            .enumerate()
-            .map(|(i, child)| {
-                f64::from(if i == index {
-                    first
-                } else if i == right {
-                    second
-                } else {
-                    child.weight
-                })
-            })
-            .sum();
-        if total > f64::from(f32::MAX) {
-            return false;
+        if boundaries.is_empty() {
+            boundaries.extend((1..count).map(|i| i as f64 / count as f64));
         }
-        children[index].weight = first;
-        children[right].weight = second;
+        boundaries[index] = fraction;
         true
+    }
+
+    /// Reconcile intended post-edit outer node sizes with the normalized tree.
+    /// The caller adjusts captured measurements for the edit's new/removed
+    /// gutters. Absent nodes are ignored; incompletely measured splits retain
+    /// their proportions. This runs after edits, never during rendering.
+    pub fn preserve_region_sizes(
+        &mut self,
+        sizes: &std::collections::HashMap<u64, (f64, f64)>,
+        gutter: f64,
+    ) {
+        fn reconcile(
+            node: &mut Node,
+            sizes: &std::collections::HashMap<u64, (f64, f64)>,
+            gutter: f64,
+        ) {
+            let Node::Split {
+                id,
+                axis,
+                children,
+                boundaries,
+            } = node
+            else {
+                return;
+            };
+            let dimension = |size: &(f64, f64)| {
+                if *axis == Axis::Horizontal {
+                    size.0
+                } else {
+                    size.1
+                }
+            };
+            let content = sizes
+                .get(id)
+                .map(|size| dimension(size) - gutter * children.len().saturating_sub(1) as f64);
+            if content.is_some_and(|length| length.is_finite() && length > 0.0) {
+                let total = children.iter().try_fold(0.0, |sum, child| {
+                    let length = dimension(sizes.get(&child.id())?);
+                    (length.is_finite() && length > 0.0).then_some(sum + length)
+                });
+                if let Some(total) = total.filter(|total| total.is_finite() && *total > 0.0) {
+                    let mut cumulative = 0.0;
+                    let mut previous = 0.0;
+                    let representable =
+                        children
+                            .iter()
+                            .take(children.len().saturating_sub(1))
+                            .all(|child| {
+                                cumulative += dimension(&sizes[&child.id()]);
+                                let fraction = cumulative / total;
+                                let valid = fraction > previous && fraction < 1.0;
+                                previous = fraction;
+                                valid
+                            });
+                    // Normalize the intended spans together to absorb rounding
+                    // differences between parent and measured child extents.
+                    if representable {
+                        boundaries.clear();
+                        boundaries.reserve(children.len().saturating_sub(1));
+                        cumulative = 0.0;
+                        for child in children.iter().take(children.len().saturating_sub(1)) {
+                            cumulative += dimension(&sizes[&child.id()]);
+                            boundaries.push(cumulative / total);
+                        }
+                    }
+                }
+            }
+            for child in children {
+                reconcile(child, sizes, gutter);
+            }
+        }
+        if let Some(root) = &mut self.root {
+            reconcile(root, sizes, gutter);
+        }
     }
 
     pub fn activate(&mut self, panel_id: u64) -> bool {
@@ -1060,7 +1147,7 @@ impl Layout {
                 Node::Split { children, .. } => {
                     let mut changed = false;
                     for child in children {
-                        changed |= initialize(&mut child.node, defaults);
+                        changed |= initialize(child, defaults);
                     }
                     changed
                 }
@@ -1138,23 +1225,33 @@ impl Layout {
         }
         fn visit(
             node: &Node,
+            depth: usize,
             next_id: u64,
             ids: &mut HashSet<u64>,
         ) -> std::result::Result<(), String> {
             record(node.id(), next_id, ids)?;
             match node {
-                Node::Split { axis, children, .. } => {
+                Node::Split {
+                    axis,
+                    children,
+                    boundaries,
+                    ..
+                } => {
+                    if depth >= MAX_SPLIT_DEPTH {
+                        return Err(format!("split depth exceeds {MAX_SPLIT_DEPTH}"));
+                    }
                     if children.len() < 2 {
                         return Err("split must have at least two children".into());
                     }
-                    weight_sum(children.iter().map(|child| child.weight))
-                        .map_err(|error| error.to_string())?;
+                    if !valid_boundaries(boundaries, children.len()) {
+                        return Err("invalid split boundaries".into());
+                    }
                     for child in children {
-                        if matches!(&child.node, Node::Split { axis: child_axis, .. } if child_axis == axis)
+                        if matches!(child, Node::Split { axis: child_axis, .. } if child_axis == axis)
                         {
                             return Err("same-axis split children must be flattened".into());
                         }
-                        visit(&child.node, next_id, ids)?;
+                        visit(child, depth + 1, next_id, ids)?;
                     }
                 }
                 Node::Tabs { panels, active, .. } => {
@@ -1178,7 +1275,7 @@ impl Layout {
             return Err("next_id must be nonzero".into());
         }
         if let Some(root) = &self.root {
-            visit(root, self.next_id, &mut HashSet::new())?;
+            visit(root, 0, self.next_id, &mut HashSet::new())?;
         }
         Ok(())
     }
@@ -1384,8 +1481,13 @@ mod tests {
         }
     }
 
-    fn child(weight: f32, node: Node) -> Child {
-        Child { weight, node }
+    fn split(id: u64, axis: Axis, children: Vec<Node>, boundaries: &[f64]) -> Node {
+        Node::Split {
+            id,
+            axis,
+            children,
+            boundaries: boundaries.to_vec(),
+        }
     }
 
     fn group(layout: &Layout, panel: u64) -> u64 {
@@ -1398,11 +1500,58 @@ mod tests {
             .id()
     }
 
-    fn weights(layout: &Layout) -> Vec<f32> {
-        let Some(Node::Split { children, .. }) = &layout.root else {
+    fn boundaries(layout: &Layout) -> &[f64] {
+        let Some(Node::Split { boundaries, .. }) = &layout.root else {
             panic!("expected split");
         };
-        children.iter().map(|child| child.weight).collect()
+        boundaries
+    }
+
+    fn assert_proportions(layout: &Layout, expected: &[u32]) {
+        let Some(Node::Split {
+            children,
+            boundaries,
+            ..
+        }) = &layout.root
+        else {
+            panic!("expected split");
+        };
+        assert_eq!(children.len(), expected.len());
+        let total: u32 = expected.iter().sum();
+        for (index, &expected) in expected.iter().enumerate() {
+            let actual = boundary_at(boundaries, children.len(), index + 1)
+                - boundary_at(boundaries, children.len(), index);
+            assert!((actual - f64::from(expected) / f64::from(total)).abs() < 1e-14);
+        }
+    }
+
+    fn nested_layout(depth: usize) -> Layout {
+        let mut node = tabs(1, "destination");
+        for level in 0..depth {
+            let id = 3 + 3 * level as u64;
+            node = Node::Split {
+                id,
+                axis: if level % 2 == 0 {
+                    Axis::Horizontal
+                } else {
+                    Axis::Vertical
+                },
+                children: vec![node, tabs(id + 1, "side")],
+                boundaries: Vec::new(),
+            };
+        }
+        Layout {
+            root: Some(node),
+            next_id: 3 + 3 * depth as u64,
+            locked: false,
+        }
+    }
+
+    fn split_depth(node: &Node) -> usize {
+        match node {
+            Node::Tabs { .. } => 0,
+            Node::Split { children, .. } => 1 + children.iter().map(split_depth).max().unwrap(),
+        }
     }
 
     fn encoded(set: &LayoutSet) -> Value {
@@ -1452,15 +1601,23 @@ mod tests {
         assert!(layout.set_boundary(split, 0, 0.75));
         let third = layout.add("third", Some(group(&layout, second)));
         assert!(layout.move_panel(third, group(&layout, second), Edge::Left, None));
-        assert_eq!(weights(&layout), vec![1.5, 0.25, 0.25]);
+        assert_proportions(&layout, &[6, 1, 1]);
         let fourth = layout.add("fourth", Some(group(&layout, third)));
         assert!(layout.move_panel(fourth, group(&layout, third), Edge::Top, None));
-        assert_eq!(weights(&layout), vec![1.5, 0.25, 0.25]);
+        assert_proportions(&layout, &[6, 1, 1]);
+        assert_eq!(
+            layout
+                .panels()
+                .iter()
+                .map(|panel| panel.id)
+                .collect::<Vec<_>>(),
+            vec![first, fourth, third, second]
+        );
         let Some(Node::Split { children, .. }) = &layout.root else {
             unreachable!();
         };
         assert!(matches!(
-            children[1].node,
+            children[1],
             Node::Split {
                 axis: Axis::Vertical,
                 ..
@@ -1470,45 +1627,41 @@ mod tests {
     }
 
     #[test]
-    fn removal_flattens_exposed_same_axis_children_proportionally() {
+    fn removal_collapses_and_affinely_flattens_without_quantization() {
         let mut layout = Layout {
             next_id: 100,
             locked: false,
-            root: Some(Node::Split {
-                id: 1,
-                axis: Axis::Horizontal,
-                children: vec![
-                    child(
-                        6.0,
-                        Node::Split {
-                            id: 2,
-                            axis: Axis::Vertical,
-                            children: vec![
-                                child(1.0, tabs(3, "remove")),
-                                child(
-                                    1.0,
-                                    Node::Split {
-                                        id: 5,
-                                        axis: Axis::Horizontal,
-                                        children: vec![
-                                            child(2.0, tabs(6, "left")),
-                                            child(1.0, tabs(8, "middle")),
-                                        ],
-                                    },
-                                ),
-                            ],
-                        },
+            root: Some(split(
+                1,
+                Axis::Horizontal,
+                vec![
+                    split(
+                        2,
+                        Axis::Vertical,
+                        vec![
+                            tabs(3, "remove"),
+                            split(
+                                5,
+                                Axis::Horizontal,
+                                vec![tabs(6, "left"), tabs(8, "middle")],
+                                &[2.0 / 3.0],
+                            ),
+                        ],
+                        &[],
                     ),
-                    child(4.0, tabs(10, "right")),
+                    tabs(10, "right"),
                 ],
-            }),
+                &[0.6],
+            )),
         };
         layout.validate().unwrap();
         assert!(layout.remove(4));
-        assert_eq!(weights(&layout), vec![4.0, 2.0, 4.0]);
+        assert_proportions(&layout, &[2, 1, 2]);
+        assert_eq!(boundaries(&layout)[1], 0.6);
         assert_eq!(layout.root.as_ref().unwrap().id(), 1);
         layout.validate().unwrap();
         assert!(layout.remove(7));
+        assert_eq!(boundaries(&layout), &[0.6]);
         assert!(layout.remove(9));
         assert_eq!(layout.root.as_ref().unwrap().id(), 10);
         assert!(layout.remove(11));
@@ -1519,25 +1672,71 @@ mod tests {
     }
 
     #[test]
-    fn boundary_resize_only_changes_its_adjacent_pair() {
+    fn deletion_gives_span_to_following_or_preceding_last_without_moving_other_boundaries() {
+        let original = Layout {
+            next_id: 20,
+            locked: false,
+            root: Some(split(
+                1,
+                Axis::Horizontal,
+                vec![tabs(2, "a"), tabs(4, "b"), tabs(6, "c"), tabs(8, "d")],
+                &[0.1, 0.3, 0.7],
+            )),
+        };
+        for (panel, expected) in [
+            (3, vec![0.3, 0.7]),
+            (5, vec![0.1, 0.7]),
+            (7, vec![0.1, 0.3]),
+            (9, vec![0.1, 0.3]),
+        ] {
+            let mut layout = original.clone();
+            assert!(layout.remove(panel));
+            assert_eq!(boundaries(&layout), expected);
+            assert_eq!(layout.next_id, original.next_id);
+            layout.validate().unwrap();
+        }
+        let mut equal = Layout {
+            root: Some(split(
+                1,
+                Axis::Horizontal,
+                vec![tabs(2, "a"), tabs(4, "b"), tabs(6, "c")],
+                &[],
+            )),
+            ..empty()
+        };
+        equal.next_id = 8;
+        assert!(equal.remove(5));
+        assert_eq!(boundaries(&equal), &[1.0 / 3.0]);
+        equal.validate().unwrap();
+    }
+
+    #[test]
+    fn boundary_resize_is_absolute_and_rejected_edits_are_exact_noops() {
         let mut layout = Layout {
             next_id: 20,
             locked: false,
-            root: Some(Node::Split {
-                id: 1,
-                axis: Axis::Horizontal,
-                children: vec![
-                    child(2.0, tabs(2, "a")),
-                    child(3.0, tabs(4, "b")),
-                    child(5.0, tabs(6, "c")),
-                    child(7.0, tabs(8, "d")),
-                ],
-            }),
+            root: Some(split(
+                1,
+                Axis::Horizontal,
+                vec![tabs(2, "a"), tabs(4, "b"), tabs(6, "c"), tabs(8, "d")],
+                &[0.1, 0.3, 0.7],
+            )),
         };
         assert!(layout.set_boundary(1, 1, 0.25));
-        assert_eq!(weights(&layout), vec![2.0, 2.0, 6.0, 7.0]);
+        assert_eq!(boundaries(&layout), &[0.1, 0.25, 0.7]);
+        assert_eq!(layout.next_id, 20);
         let before = layout.clone();
-        for fraction in [0.0, 1.0, -0.1, 1.1, f32::NAN, f32::INFINITY] {
+        for fraction in [
+            0.0,
+            1.0,
+            -0.1,
+            1.1,
+            0.1,
+            0.7,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
             assert!(!layout.set_boundary(1, 1, fraction));
             assert_eq!(layout, before);
         }
@@ -1545,6 +1744,8 @@ mod tests {
             assert!(!layout.set_boundary(split, index, 0.5));
             assert_eq!(layout, before);
         }
+        assert!(layout.set_boundary(1, 0, f64::MIN_POSITIVE));
+        assert_eq!(boundaries(&layout), &[f64::MIN_POSITIVE, 0.25, 0.7]);
         layout.validate().unwrap();
     }
 
@@ -1636,7 +1837,7 @@ mod tests {
                     .collect::<Vec<_>>(),
                 vec![b, a]
             );
-            assert_eq!(weights(&layout), vec![1.0, 1.0]);
+            assert_proportions(&layout, &[1, 1]);
             let Some(Node::Split { axis, .. }) = &layout.root else {
                 unreachable!();
             };
@@ -1650,24 +1851,23 @@ mod tests {
         let mut layout = Layout {
             next_id: 30,
             locked: false,
-            root: Some(Node::Split {
-                id: 1,
-                axis: Axis::Vertical,
-                children: vec![
-                    child(1.0, tabs(2, "source")),
-                    child(
-                        3.0,
-                        Node::Split {
-                            id: 4,
-                            axis: Axis::Horizontal,
-                            children: vec![child(3.0, tabs(5, "a")), child(1.0, tabs(7, "b"))],
-                        },
+            root: Some(split(
+                1,
+                Axis::Vertical,
+                vec![
+                    tabs(2, "source"),
+                    split(
+                        4,
+                        Axis::Horizontal,
+                        vec![tabs(5, "a"), tabs(7, "b")],
+                        &[0.75],
                     ),
                 ],
-            }),
+                &[0.25],
+            )),
         };
         assert!(layout.move_panel(3, 4, Edge::Right, None));
-        assert_eq!(weights(&layout), vec![0.75, 0.25, 1.0]);
+        assert_proportions(&layout, &[3, 1, 4]);
         assert_eq!(
             layout
                 .panels()
@@ -1680,67 +1880,282 @@ mod tests {
     }
 
     #[test]
-    fn unrepresentable_edits_and_exhausted_ids_roll_back_exactly() {
-        let tiny = f32::from_bits(1);
+    fn exhausted_ids_roll_back_exactly() {
+        let mut layout = empty();
+        let source = layout.add("source", None);
+        let other = layout.add("other", None);
+        let target = group(&layout, other);
+        layout.next_id = u64::MAX;
+        let before = layout.clone();
+        assert!(!layout.move_panel(source, target, Edge::Bottom, None));
+        assert_eq!(layout, before);
+    }
+
+    #[test]
+    fn depth_33_docking_rolls_back_and_same_axis_depth_32_docking_succeeds() {
+        let mut layout = nested_layout(32);
+        let source_group = 4 + 3 * 31;
+        let source = layout.add("audio_visualizer", Some(source_group));
+        layout.add("spare", Some(source_group));
+        let destination = layout.add("audio_visualizer", Some(1));
+        let options = AudioVisualizerOptions {
+            style: AudioVisualizerStyle::Rings,
+            reference_lines: false,
+            labels: true,
+        };
+        assert!(layout.set_audio_visualizer_options(source, options));
+        assert!(layout.set_tab_bar_visible(source, false));
+        assert!(layout.set_audio_visualizer_options(destination, options));
+        assert!(layout.activate(source));
+        assert!(layout.activate(2));
+        layout.validate().unwrap();
+        let before = layout.clone();
+        assert!(!layout.move_panel(source, 1, Edge::Bottom, None));
+        assert_eq!(layout, before);
+        assert!(layout.move_panel(source, 1, Edge::Right, None));
+        assert_eq!(split_depth(layout.root.as_ref().unwrap()), 32);
+        assert_eq!(layout.audio_visualizer_options(source), Some(options));
+        assert!(
+            !layout
+                .panels()
+                .iter()
+                .find(|panel| panel.id == source)
+                .unwrap()
+                .show_tab_bar
+        );
+        let Node::Split { children, .. } = layout.root.as_ref().unwrap().find(3).unwrap() else {
+            unreachable!();
+        };
+        assert_eq!(children.len(), 3);
+        assert_eq!(children[0].id(), 1);
+        let Node::Tabs { panels, active, .. } = &children[1] else {
+            unreachable!();
+        };
+        assert_eq!(
+            panels.iter().map(|panel| panel.id).collect::<Vec<_>>(),
+            vec![source]
+        );
+        assert_eq!(*active, source);
+        assert_eq!(children[2].id(), 4);
+        layout.validate().unwrap();
+    }
+
+    #[test]
+    fn depth_32_persists_and_depth_33_is_rejected_without_replacing_saved_bytes() {
+        let directory = TemporaryDirectory::new();
+        let path = directory.0.join("layout.json");
+        let mut set = LayoutSet::default();
+        *set.current_mut() = nested_layout(32);
+        set.current().validate().unwrap();
+        set.save(&path).unwrap();
+        let reopened = LayoutSet::load(&path).unwrap();
+        assert_eq!(split_depth(reopened.current().root.as_ref().unwrap()), 32);
+        assert_eq!(encoded(&reopened), encoded(&set));
+        let previous_bytes = fs::read(&path).unwrap();
+
+        *set.current_mut() = nested_layout(33);
+        assert!(set.current().validate().is_err());
+        assert!(set.save(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), previous_bytes);
+        let invalid_path = directory.0.join("too-deep.json");
+        fs::write(&invalid_path, serde_json::to_vec(&encoded(&set)).unwrap()).unwrap();
+        assert!(LayoutSet::load(&invalid_path).is_err());
+    }
+
+    #[test]
+    fn invalid_runtime_boundaries_never_replace_saved_bytes() {
+        let directory = TemporaryDirectory::new();
+        let path = directory.0.join("layout.json");
+        let mut set = LayoutSet::default();
+        *set.current_mut() = Layout {
+            next_id: 8,
+            locked: false,
+            root: Some(split(
+                1,
+                Axis::Horizontal,
+                vec![tabs(2, "a"), tabs(4, "b"), tabs(6, "c")],
+                &[0.2, 0.7],
+            )),
+        };
+        set.save(&path).unwrap();
+        let previous = fs::read(&path).unwrap();
+        for invalid in [
+            vec![0.5],
+            vec![0.0, 0.7],
+            vec![0.2, 1.0],
+            vec![0.5, 0.5],
+            vec![0.8, 0.2],
+            vec![f64::NAN, 0.7],
+            vec![0.2, f64::INFINITY],
+            vec![f64::NEG_INFINITY, 0.7],
+        ] {
+            let Some(Node::Split { boundaries, .. }) = &mut set.current_mut().root else {
+                unreachable!();
+            };
+            *boundaries = invalid;
+            assert!(set.save(&path).is_err());
+            assert_eq!(fs::read(&path).unwrap(), previous);
+        }
+        assert_eq!(
+            boundaries(LayoutSet::load(&path).unwrap().current()),
+            &[0.2, 0.7]
+        );
+    }
+
+    #[test]
+    fn more_than_1024_equal_siblings_persist_without_a_sibling_limit() {
+        let count = 1025_u64;
+        let layout = Layout {
+            root: Some(Node::Split {
+                id: 1,
+                axis: Axis::Horizontal,
+                boundaries: Vec::new(),
+                children: (0..count)
+                    .map(|index| tabs(2 + 2 * index, "panel"))
+                    .collect(),
+            }),
+            next_id: 2 + 2 * count,
+            locked: false,
+        };
+        layout.validate().unwrap();
+        let directory = TemporaryDirectory::new();
+        let path = directory.0.join("wide.json");
+        let mut set = LayoutSet::default();
+        *set.current_mut() = layout;
+        set.save(&path).unwrap();
+        let reopened = LayoutSet::load(&path).unwrap();
+        assert!(boundaries(reopened.current()).is_empty());
+        assert_eq!(reopened.current().panels().len(), count as usize);
+        assert_eq!(encoded(&reopened), encoded(&set));
+    }
+
+    #[test]
+    fn equal_boundaries_materialize_only_for_valid_edits() {
         let mut layout = Layout {
             next_id: 20,
             locked: false,
-            root: Some(Node::Split {
-                id: 1,
-                axis: Axis::Horizontal,
-                children: vec![
-                    child(tiny, tabs(2, "target")),
-                    child(tiny, tabs(4, "other")),
-                    child(1.0, tabs(6, "source")),
-                ],
-            }),
+            root: Some(split(
+                1,
+                Axis::Horizontal,
+                vec![tabs(2, "a"), tabs(4, "b"), tabs(6, "c")],
+                &[],
+            )),
         };
         let before = layout.clone();
-        assert!(!layout.move_panel(7, 2, Edge::Right, None));
+        assert!(!layout.set_boundary(1, 0, 2.0 / 3.0));
         assert_eq!(layout, before);
-        assert!(!layout.set_boundary(1, 0, tiny));
-        assert_eq!(layout, before);
-        layout.next_id = u64::MAX;
-        let before = layout.clone();
-        assert!(!layout.move_panel(7, 2, Edge::Bottom, None));
-        assert_eq!(layout, before);
+        assert!(layout.set_boundary(1, 0, 0.123456789012345));
+        assert_eq!(boundaries(&layout), &[0.123456789012345, 2.0 / 3.0]);
+        let mut set = LayoutSet::default();
+        *set.current_mut() = layout;
+        assert_eq!(encoded(&decoded(encoded(&set)).unwrap()), encoded(&set));
+    }
 
-        let mut layout = Layout {
-            next_id: 30,
+    #[test]
+    fn unrepresentable_flattening_rejects_structural_edits_with_exact_rollback() {
+        let upper = f64::from_bits(0.5_f64.to_bits() + 1);
+        let mut docking = Layout {
+            next_id: 20,
             locked: false,
-            root: Some(Node::Split {
-                id: 1,
-                axis: Axis::Horizontal,
-                children: vec![
-                    child(
-                        tiny,
-                        Node::Split {
-                            id: 2,
-                            axis: Axis::Vertical,
-                            children: vec![
-                                child(1.0, tabs(3, "remove")),
-                                child(
-                                    1.0,
-                                    Node::Split {
-                                        id: 5,
-                                        axis: Axis::Horizontal,
-                                        children: vec![
-                                            child(1.0, tabs(6, "a")),
-                                            child(1.0, tabs(8, "b")),
-                                        ],
-                                    },
-                                ),
-                            ],
-                        },
-                    ),
-                    child(1.0, tabs(10, "other")),
-                ],
-            }),
+            root: Some(split(
+                1,
+                Axis::Horizontal,
+                vec![tabs(2, "left"), tabs(4, "target"), tabs(6, "right")],
+                &[0.5, upper],
+            )),
         };
+        let incoming = docking.add("incoming", Some(4));
+        let before = docking.clone();
+        assert!(!docking.move_panel(incoming, 4, Edge::Right, None));
+        assert_eq!(docking, before);
+        docking.validate().unwrap();
+
+        let mut collapse = Layout {
+            next_id: 20,
+            locked: false,
+            root: Some(split(
+                1,
+                Axis::Horizontal,
+                vec![
+                    tabs(2, "left"),
+                    split(
+                        4,
+                        Axis::Vertical,
+                        vec![
+                            tabs(5, "remove"),
+                            split(7, Axis::Horizontal, vec![tabs(8, "a"), tabs(10, "b")], &[]),
+                        ],
+                        &[],
+                    ),
+                    tabs(12, "right"),
+                ],
+                &[0.5, upper],
+            )),
+        };
+        collapse.validate().unwrap();
+        let before = collapse.clone();
+        assert!(!collapse.remove(6));
+        assert_eq!(collapse, before);
+        assert!(!collapse.move_panel(6, 12, Edge::Center, None));
+        assert_eq!(collapse, before);
+    }
+
+    #[test]
+    fn geometry_rounds_cumulative_content_and_covers_the_container() {
+        for scale in [1.0, 1.25, 2.0] {
+            for count in [2, 3, 7, 1025] {
+                let length = 4107.0 / scale;
+                let gutter = 2.0 / scale;
+                let spans: Vec<_> = split_geometry(&[], count, length, gutter, scale).collect();
+                let minimum = spans
+                    .iter()
+                    .map(|span| span.1)
+                    .fold(f64::INFINITY, f64::min);
+                let maximum = spans.iter().map(|span| span.1).fold(0.0, f64::max);
+                assert!((maximum - minimum) * scale <= 1.0 + 1e-10);
+                assert_eq!(spans[0].0, 0.0);
+                assert!((spans.last().unwrap().0 + spans.last().unwrap().1 - length).abs() < 1e-10);
+                for pair in spans.windows(2) {
+                    assert!((pair[1].0 - pair[0].0 - pair[0].1 - gutter).abs() < 1e-10);
+                }
+            }
+        }
+        assert_eq!(
+            split_geometry(&[0.2, 0.7], 3, 1010.0, 5.0, 1.0).collect::<Vec<_>>(),
+            vec![(0.0, 200.0), (205.0, 500.0), (710.0, 300.0)]
+        );
+        assert_eq!(split_geometry(&[], 0, 100.0, 5.0, 1.0).len(), 0);
+    }
+
+    #[test]
+    fn measured_reconciliation_preserves_untouched_sibling_pixels_after_local_insertion() {
+        let mut layout = Layout {
+            next_id: 20,
+            locked: false,
+            root: Some(split(
+                1,
+                Axis::Horizontal,
+                vec![tabs(2, "a"), tabs(4, "b"), tabs(6, "c")],
+                &[0.6, 0.8],
+            )),
+        };
+        let incoming = layout.add("incoming", Some(4));
+        let incoming_tabs = layout.next_id;
+        assert!(layout.move_panel(incoming, 4, Edge::Right, None));
+        let sizes = std::collections::HashMap::from([
+            (1, (1010.0, 500.0)),
+            (2, (600.0, 500.0)),
+            (4, (97.5, 500.0)),
+            (incoming_tabs, (97.5, 500.0)),
+            (6, (200.0, 500.0)),
+        ]);
+        layout.preserve_region_sizes(&sizes, 5.0);
+        let spans: Vec<_> = split_geometry(boundaries(&layout), 4, 1010.0, 5.0, 2.0).collect();
+        assert_eq!(
+            spans.iter().map(|span| span.1).collect::<Vec<_>>(),
+            vec![600.0, 97.5, 97.5, 200.0]
+        );
         layout.validate().unwrap();
-        let before = layout.clone();
-        assert!(!layout.remove(4));
-        assert_eq!(layout, before);
     }
 
     #[test]
@@ -1819,9 +2234,8 @@ mod tests {
     #[test]
     fn strict_format_rejects_unknown_fields_and_malformed_structures() {
         let leaf = wire_tabs("a");
-        let split = json!({"type":"split", "axis":"horizontal", "children":[
-            {"node":leaf.clone()}, {"node":wire_tabs("b")}
-        ]});
+        let split =
+            json!({"type":"split", "axis":"horizontal", "children":[leaf.clone(), wire_tabs("b")]});
         for root in [
             json!({"type":"unknown"}),
             json!({"type":"tabs", "panels":[]}),
@@ -1832,32 +2246,43 @@ mod tests {
             json!({"type":"tabs", "panels":[{"kind":"audio_visualizer", "style":"bars"}]}),
             json!({"type":"tabs", "panels":[{"kind":"a", "style":"bars", "reference_lines":true, "labels":true}]}),
             json!({"type":"tabs", "panels":[{"kind":"audio_visualizer", "style":null}]}),
-            json!({"type":"split", "axis":"horizontal", "children":[{"node":leaf.clone()}]}),
-            json!({"type":"split", "axis":"Horizontal", "children":[{"node":leaf.clone()}, {"node":leaf.clone()}]}),
-            json!({"type":"split", "axis":"horizontal", "children":[{"node":split}, {"node":leaf.clone()}]}),
-            json!({"type":"split", "axis":"vertical", "children":[{"weigth":2, "node":leaf.clone()}, {"node":leaf.clone()}]}),
+            json!({"type":"split", "axis":"horizontal", "children":[leaf.clone()]}),
+            json!({"type":"split", "axis":"Horizontal", "children":[leaf.clone(), leaf.clone()]}),
+            json!({"type":"split", "axis":"horizontal", "children":[split, leaf.clone()]}),
+            json!({"type":"split", "axis":"vertical", "children":[{"weight":1, "node":leaf.clone()}, leaf.clone()]}),
         ] {
             assert!(
                 decoded(one_layout(root.clone())).is_err(),
                 "accepted {root}"
             );
         }
-        for weight in [
-            json!(0),
-            json!(-1),
+        for bounds in [
+            json!([0]),
+            json!([1]),
+            json!([-0.1]),
+            json!([1.1]),
+            json!([0.2, 0.3]),
+            json!([null]),
+            json!(["0.5"]),
             json!(null),
-            json!("1"),
-            json!(f64::MAX),
         ] {
-            let root = json!({"type":"split", "axis":"horizontal", "children":[
-                {"weight":weight, "node":leaf.clone()}, {"node":leaf.clone()}
-            ]});
+            let root = json!({"type":"split", "axis":"horizontal", "children":[leaf.clone(), leaf.clone()], "boundaries":bounds});
             assert!(decoded(one_layout(root)).is_err());
         }
-        let overflowing = json!({"type":"split", "axis":"horizontal", "children":[
-            {"weight":f32::MAX, "node":leaf.clone()}, {"weight":f32::MAX, "node":leaf}
-        ]});
-        assert!(decoded(one_layout(overflowing)).is_err());
+        for bounds in [json!([0.5, 0.5]), json!([0.7, 0.2])] {
+            let root = json!({"type":"split", "axis":"horizontal", "children":[leaf.clone(), leaf.clone(), leaf.clone()], "boundaries":bounds});
+            assert!(decoded(one_layout(root)).is_err());
+        }
+        let precise = one_layout(
+            json!({"type":"split", "axis":"horizontal", "children":[leaf.clone(), leaf], "boundaries":[0.123456789012345]}),
+        );
+        assert_eq!(encoded(&decoded(precise.clone()).unwrap()), precise);
+        let equal = decoded(one_layout(json!({"type":"split", "axis":"horizontal", "children":[wire_tabs("a"), wire_tabs("b")]}))).unwrap();
+        assert!(
+            encoded(&equal)["layouts"]["Work"]["root"]
+                .get("boundaries")
+                .is_none()
+        );
         for value in [
             json!({"layouts":{"Work":{"root":null}}}),
             json!({"active":"Work", "layouts":{}}),

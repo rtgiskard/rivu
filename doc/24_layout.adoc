@@ -1,0 +1,135 @@
+= Desktop Layout Design
+
+== Scope and ownership
+
+The desktop owns a collection of named docking trees. The playback core owns
+playback, queue state, global configuration, and audio analysis; layout edits
+must not replace that ownership. User operations and file syntax are documented
+in link:01_config.adoc#_layout[Configuration and layout].
+
+Switching or duplicating a saved layout rebuilds the GUI root inside the existing
+native window. It intentionally discards GUI-only inputs, selections, scrolling,
+measurements, and visualization history. Before replacement, the host clears the
+old wakeup and visualization demand and releases retained render images. The
+new root installs its own subscriptions and reconciles demand with its active
+panels. Renaming and deleting an inactive layout do not rebuild the root.
+
+== Normalized trees and resource boundaries
+
+Leaves are nonempty tab groups with a valid active panel. Splits have two or more
+ordered children and a horizontal or vertical axis. Empty containers disappear,
+single-child containers collapse, and directly nested same-axis splits flatten.
+Panel and container IDs share a runtime allocator; persistence never stores IDs.
+
+A root-to-leaf path contains at most 32 splits; tab groups do not count toward
+that depth. Loading, saving, and editing enforce the same limit. There is no
+fixed sibling-count budget. Depth bounds recursive model and rendering work and
+keeps accepted layouts within the JSON reader's nesting allowance.
+
+Structural edits retain original containers until their normalized shape has
+passed depth and boundary preflight. This keeps ancestor destinations reachable
+and lets a rejected move restore panel order, active tabs, instance preferences,
+and the allocator without cloning the tree. Only successful edits consume the
+temporary structure through normalization. A mathematically nonempty interval
+can be too narrow to hold another distinct floating-point boundary; edits that
+would violate strict boundary ordering must be rejected, not silently rounded
+into duplicate boundaries.
+
+== Boundary coordinates
+
+A split stores either no explicit boundaries, meaning equal division, or one
+cumulative boundary per adjacent pair. Explicit boundaries are finite, strictly
+increasing fractions inside `(0, 1)`. Their coordinate space is total child
+content length, excluding separator gutters. Child nodes carry no weights.
+
+For a container length `L`, effective gutter `G`, and `N` children, the available
+content length is `L - (N - 1) * G`. A cumulative fraction maps into that content
+length; preceding gutters then place it in container coordinates. This keeps
+proportions independent of the number of separators while making their space
+cost explicit.
+
+Equal division uses cumulative endpoints rather than independently rounding
+each child's size. Endpoints are rounded in physical pixels, then adjacent
+endpoints determine actual content sizes. Equal areas can differ by one physical
+pixel when the available length is indivisible; there are no accumulated gaps
+or overlapping areas. Fractional boundaries use the same calculation.
+
+The renderer places regions and separators from these computed bounds rather
+than asking flex layout to redistribute relative weights. Dragging, snap
+selection, and rendering therefore share the same geometry.
+
+== Local editing
+
+An edge drop divides its target region, not every region in the parent. New
+containers default to equal content division. Same-axis docking promotes the
+new regions into their parent's child list; different-axis docking nests a new
+container. The GUI reconciles the edit against pre-edit measurements so added
+gutters are charged to the target area rather than shrinking unrelated panes.
+Measurements cover each region's outer rectangle, including tab-group borders.
+Measuring only the bordered content would undercount its span and redistribute
+the missing pixels into unrelated regions during reconciliation.
+
+Deleting a region gives its freed space to the following neighbor, or the
+preceding neighbor if the deleted region was last. Collapsing and flattening
+map descendant boundaries into the surviving parent's coordinate range rather
+than independently rebalancing all regions.
+
+The model preserves ratios without depending on a windowing toolkit. The GUI
+adds current-size reconciliation because inserting a gutter changes the
+available content length. Stored fractions preserve proportions after a window
+resize; they do not promise immutable pixel coordinates across different window
+sizes.
+
+== Dragging and snapping
+
+A separator drag snapshots the relevant geometry and mouse-to-separator offset.
+Every update derives its target from that snapshot, not from a previous rounded
+result. Moving a boundary changes only its adjacent regions. Minimum pane sizes
+restrict the feasible interval; layout locking blocks structural edits.
+
+Snapping selects feasible candidates in this priority order:
+
+. Separator centers in other visible splits with the same axis, expressed in
+  common window coordinates
+. The equal-content midpoint of the adjacent regions
+. The nearest configured grid line relative to the container origin
+
+Reference and midpoint capture distance is 4 logical pixels before interface
+scaling; grid spacing is configured in the same coordinate system. The grid
+candidate is the nearest line, without a separate capture distance. Candidates
+outside the feasible interval are ignored rather than clamped and misrepresented
+as exact alignment. Physical
+pixel rounding remains the final limit of precision.
+
+The global switch defaults to enabled. Holding Alt temporarily reverses it for
+the current drag; releasing Alt restores it. Modifier changes do not alter the
+configuration draft or saved file. Snapping aligns the current geometry only:
+no persistent cross-container constraint or general constraint solver is stored.
+
+== Persistence and failure semantics
+
+`layout.json` contains the selected name and a nonempty map of named layouts.
+Serialization borrows runtime data and writes one strict format. Unknown fields,
+duplicate layout names, invalid boundaries, malformed trees, and excess depth
+are errors. There is no legacy weight or wrapper compatibility path.
+
+Saving validates before writing a unique sibling temporary file and renaming it
+over the destination. This prevents failed writes from replacing the existing
+file; it is atomic replacement, not a claim of power-loss durability. Layout
+management persists before rebuilding the interface and restores its in-memory
+selection or owned entry if saving fails. Ordinary panel edits remain visible
+when persistence fails and report the error.
+
+== Rationale and alternatives
+
+Boundaries follow the object users manipulate: a separator position. Integer
+weights require rescaling and quantization to represent arbitrary positions and
+can perturb unrelated regions. Floating weights remove the integer range but
+still leave final placement to a separate flex allocation. Explicit boundaries
+avoid both issues and make gutter accounting testable.
+
+Absolute saved pixels would preserve one window size but need a separate policy
+for resizing. A full constraint graph could maintain alignment across containers
+and window sizes, but introduces conflict resolution and coupled edits. Relative
+boundaries plus transient snapping retain a small tree model while meeting the
+current interaction contract.

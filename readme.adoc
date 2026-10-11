@@ -12,7 +12,8 @@ terminal, and headless modes that share one playback instance.
 * PipeWire playback, multichannel routing, seek, volume, shuffle, and repeat
 * Optional FFmpeg decoding for additional formats, including audio in MKV/MP4
 * Desktop GUI, CLI, TUI, and headless mode; optional MPRIS and StatusNotifier tray
-* Named, editable desktop layouts with weighted rows and columns and configurable appearance
+* Named, editable desktop layouts with boundary-based rows and columns, snapping,
+  and configurable appearance
 * Waveform, Spectrum, Spectrogram, and Audio Visualizer with radial, stereo-density,
   spatial-spectrum, fractal-beam, and fractal-flow styles
 * Generated desktop artwork and embedded-cover support for MPRIS; no network
@@ -181,8 +182,9 @@ database maintenance and reset behavior.
 . link:doc/04_playback.adoc[Playback, audio output, queue, TUI, and desktop integration]
 
 Design notes: link:doc/21_ipc.adoc[IPC],
-link:doc/22_cache.adoc[Visualization caching], and
-link:doc/23_visuals.adoc[Visual analysis].
+link:doc/22_cache.adoc[Visualization caching],
+link:doc/23_visuals.adoc[Visual analysis], and
+link:doc/24_layout.adoc[Desktop layout].
 
 == License
 

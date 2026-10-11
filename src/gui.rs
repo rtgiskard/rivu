@@ -8,6 +8,7 @@ mod fractal_flow;
 mod fractal_visualizer;
 mod input;
 mod layout;
+mod layout_geometry;
 mod layout_manager;
 mod library;
 mod paged;
@@ -32,10 +33,10 @@ use ashpd::desktop::file_chooser::SelectedFiles;
 pub(super) use components::{
     ButtonTooltip, DropdownItem, DropdownState, POPOVER_MAX_HEIGHT, SelectionModel, StatusKind,
     TRACK_HEIGHT, active_control, artwork_preview, button, caption, context_menu_container,
-    drag_preview, dropdown_container, dropdown_row, dropdown_trigger, form_field,
-    icon_button, list_row, list_viewport, menu_item, metadata_item, panel_header, panel_surface,
-    panel_toolbar, row_text, section_group, sortable_header, status_message, toggle_button,
-    track_row, tree_row, two_column,
+    drag_preview, dropdown_container, dropdown_row, dropdown_trigger, form_field, icon_button,
+    list_row, list_viewport, menu_item, metadata_item, panel_header, panel_surface, panel_toolbar,
+    row_text, section_group, sortable_header, status_message, toggle_button, track_row, tree_row,
+    two_column,
 };
 use futures::{FutureExt, StreamExt, channel::mpsc};
 use gpui::{prelude::*, *};
@@ -435,7 +436,7 @@ enum Measured {
 }
 #[derive(Clone, Copy)]
 enum Dragging {
-    Split(u64, usize, Axis, Bounds<Pixels>),
+    Split(layout_geometry::SplitDrag),
     Seek(u64),
     Volume(u64),
 }
@@ -587,6 +588,8 @@ pub(super) struct GuiApp {
     waveform: Entity<waveform::Waveform>,
     target_group: Option<u64>,
     dragging: Option<Dragging>,
+    split_references: Vec<f64>,
+    layout_scale_factor: f64,
     seek_preview: Option<f64>,
     waveform_preview_active: bool,
     seek_queue_id: Option<u64>,
@@ -993,6 +996,8 @@ impl GuiApp {
             waveform,
             target_group: None,
             dragging: None,
+            split_references: Vec::new(),
+            layout_scale_factor: 1.,
             analysis_worker_enabled: false,
             measured: Rc::new(RefCell::new(HashMap::new())),
             analysis_sequence: 0,
@@ -2064,7 +2069,7 @@ impl GuiApp {
                 Node::Split { id, children, .. } => {
                     keys.insert(Measured::Node(*id));
                     for child in children {
-                        collect(&child.node, keys);
+                        collect(child, keys);
                     }
                 }
                 Node::Tabs { id, panels, .. } => {
@@ -2151,6 +2156,138 @@ impl GuiApp {
         .size_full()
         .into_any_element()
     }
+    fn layout_gutter(&self) -> f64 {
+        (f64::from(SPLIT_GUTTER) * self.layout_scale_factor).round() / self.layout_scale_factor
+    }
+    fn layout_edit_sizes(
+        &self,
+        panel: u64,
+        docking: Option<(u64, Edge, u64)>,
+    ) -> HashMap<u64, (f64, f64)> {
+        let sizes = self
+            .measured
+            .borrow()
+            .iter()
+            .filter_map(|(key, bounds)| {
+                let Measured::Node(id) = key else { return None };
+                Some((
+                    *id,
+                    (
+                        f64::from(f32::from(bounds.size.width)),
+                        f64::from(f32::from(bounds.size.height)),
+                    ),
+                ))
+            })
+            .collect();
+        self.layouts
+            .current()
+            .root
+            .as_ref()
+            .map(|root| {
+                layout_geometry::edit_sizes(root, sizes, panel, docking, self.layout_gutter())
+            })
+            .unwrap_or_default()
+    }
+    fn reconcile_layout_sizes(&mut self, sizes: &HashMap<u64, (f64, f64)>) {
+        let gutter = self.layout_gutter();
+        self.layouts
+            .current_mut()
+            .preserve_region_sizes(sizes, gutter);
+        self.dragging = None;
+        self.split_references.clear();
+        // A subsequent edit must not consume rectangles from the previous tree.
+        self.measured
+            .borrow_mut()
+            .retain(|key, _| !matches!(key, Measured::Node(_)));
+    }
+    fn remove_layout_panel(&mut self, panel: u64, cx: &mut Context<Self>) {
+        if self.layouts.current().locked {
+            return;
+        }
+        let sizes = self.layout_edit_sizes(panel, None);
+        if self.layouts.current_mut().remove(panel) {
+            self.reconcile_layout_sizes(&sizes);
+            self.persist_layout(cx);
+        }
+    }
+    fn begin_split_drag(&mut self, id: u64, index: usize, pointer: Point<Pixels>) {
+        if self.layouts.current().locked {
+            return;
+        }
+        let Some(root) = self.layouts.current().root.as_ref() else {
+            return;
+        };
+        let Some(Node::Split {
+            axis,
+            children,
+            boundaries,
+            ..
+        }) = layout_geometry::find(root, id)
+        else {
+            return;
+        };
+        let measured = self.measured.borrow();
+        let Some(bounds) = measured.get(&Measured::Node(id)).copied() else {
+            return;
+        };
+        let Some(first) = children
+            .get(index)
+            .and_then(|node| measured.get(&Measured::Node(layout_geometry::node_id(node))))
+        else {
+            return;
+        };
+        let Some(second) = children
+            .get(index + 1)
+            .and_then(|node| measured.get(&Measured::Node(layout_geometry::node_id(node))))
+        else {
+            return;
+        };
+        let boundary = |index: usize| {
+            if index == 0 {
+                0.
+            } else if index == children.len() {
+                1.
+            } else {
+                boundaries
+                    .get(index - 1)
+                    .copied()
+                    .unwrap_or(index as f64 / children.len() as f64)
+            }
+        };
+        let length = if *axis == Axis::Horizontal {
+            bounds.size.width
+        } else {
+            bounds.size.height
+        };
+        let center = if *axis == Axis::Horizontal {
+            (first.origin.x + first.size.width + second.origin.x) * 0.5
+        } else {
+            (first.origin.y + first.size.height + second.origin.y) * 0.5
+        };
+        let mut drag = layout_geometry::SplitDrag {
+            id,
+            index,
+            axis: *axis,
+            bounds,
+            content_length: f64::from(f32::from(length))
+                - self.layout_gutter() * children.len().saturating_sub(1) as f64,
+            gutter: self.layout_gutter(),
+            before: boundary(index),
+            after: boundary(index + 2),
+            pointer_offset: 0.,
+            pointer,
+        };
+        drag.pointer_offset = drag.pointer_coordinate(pointer) - f64::from(f32::from(center));
+        self.split_references.clear();
+        layout_geometry::reference_centers(
+            root,
+            *axis,
+            (id, index),
+            &|id| measured.get(&Measured::Node(id)).copied(),
+            &mut self.split_references,
+        );
+        self.dragging = Some(Dragging::Split(drag));
+    }
     fn dock_drop(
         &mut self,
         panel_id: u64,
@@ -2162,11 +2299,20 @@ impl GuiApp {
         if self.layouts.current().locked {
             return;
         }
+        let no_op = self.layouts.current().root.as_ref()
+            .and_then(|root| layout_geometry::find(root, target))
+            .is_some_and(|node| matches!(node, Node::Tabs { panels, .. } if panels.len() == 1 && panels[0].id == panel_id));
+        if no_op {
+            return;
+        }
+        let tabs_id = self.layouts.current().next_id;
+        let sizes = self.layout_edit_sizes(panel_id, Some((target, edge, tabs_id)));
         if self
             .layouts
             .current_mut()
             .move_panel(panel_id, target, edge, index)
         {
+            self.reconcile_layout_sizes(&sizes);
             self.target_group = Some(target);
             self.persist_layout(cx);
         }
@@ -2178,83 +2324,102 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match node {
-            Node::Split { id, axis, children } => {
+            Node::Split {
+                id,
+                axis,
+                children,
+                boundaries,
+            } => {
                 let id = *id;
                 let axis = *axis;
-                let total: f32 = children.iter().map(|child| child.weight).sum();
-                let mut split = div()
-                    .id(("node", id))
-                    .relative()
-                    .size_full()
-                    .flex()
-                    .min_w_0()
-                    .min_h_0()
-                    .when(axis == Axis::Vertical, |view| view.flex_col());
+                let boundaries = boundaries.clone();
+                let mut panes = Vec::with_capacity(children.len());
                 for (index, child) in children.iter().enumerate() {
-                    let content = self.render_node(&child.node, window, cx);
-                    split = split.child(
+                    let content = self.render_node(child, window, cx);
+                    let gutter = (index + 1 < children.len()).then(|| {
                         div()
+                            .id(("split", index))
+                            .absolute()
+                            .bg(rgb(BG))
+                            .hover(|style| style.bg(rgb(ACCENT)))
+                            .when(axis == Axis::Horizontal, |view| view.cursor_col_resize())
+                            .when(axis == Axis::Vertical, |view| view.cursor_row_resize())
+                            .when(self.layouts.current().locked, |view| view.cursor_default())
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                    this.begin_split_drag(id, index, event.position);
+                                    cx.stop_propagation();
+                                }),
+                            )
+                    });
+                    panes.push((content, gutter));
+                }
+                let measurement = self.measurement(Measured::Node(id));
+                container_query(move |size, window, _| {
+                    let length = if axis == Axis::Horizontal {
+                        size.width
+                    } else {
+                        size.height
+                    };
+                    let mut geometry = layout::split_geometry(
+                        &boundaries,
+                        panes.len(),
+                        f64::from(f32::from(length)),
+                        f64::from(SPLIT_GUTTER),
+                        f64::from(window.scale_factor()),
+                    )
+                    .peekable();
+                    let mut split = div()
+                        .id(("node", id))
+                        .relative()
+                        .size_full()
+                        .min_w_0()
+                        .min_h_0();
+                    for (content, gutter) in panes {
+                        let Some((start, length)) = geometry.next() else {
+                            break;
+                        };
+                        let pane = div()
+                            .absolute()
                             .min_w_0()
                             .min_h_0()
-                            .flex_basis(px(0.))
-                            .flex_grow(child.weight / total * children.len() as f32)
                             .overflow_hidden()
-                            .when(axis == Axis::Horizontal, |view| view.h_full())
-                            .when(axis == Axis::Vertical, |view| view.w_full())
-                            .child(content),
-                    );
-                    if let Some(next) = children.get(index + 1) {
-                        let node_id = |node: &Node| match node {
-                            Node::Split { id, .. } | Node::Tabs { id, .. } => *id,
-                        };
-                        let first = node_id(&child.node);
-                        let second = node_id(&next.node);
-                        split = split.child(
-                            div()
-                                .id(("split", index))
-                                .flex_shrink_0()
-                                .bg(rgb(BG))
-                                .hover(|style| style.bg(rgb(ACCENT)))
+                            .when(axis == Axis::Horizontal, |view| {
+                                view.left(px(start as f32))
+                                    .top_0()
+                                    .w(px(length as f32))
+                                    .h_full()
+                            })
+                            .when(axis == Axis::Vertical, |view| {
+                                view.top(px(start as f32))
+                                    .left_0()
+                                    .h(px(length as f32))
+                                    .w_full()
+                            })
+                            .child(content);
+                        split = split.child(pane);
+                        if let (Some(gutter), Some(&(next, _))) = (gutter, geometry.peek()) {
+                            let end = start + length;
+                            let gutter = gutter
                                 .when(axis == Axis::Horizontal, |view| {
-                                    view.w(px(SPLIT_GUTTER)).h_full().cursor_col_resize()
+                                    view.left(px(end as f32))
+                                        .top_0()
+                                        .w(px((next - end) as f32))
+                                        .h_full()
                                 })
                                 .when(axis == Axis::Vertical, |view| {
-                                    view.h(px(SPLIT_GUTTER)).w_full().cursor_row_resize()
-                                })
-                                .when(self.layouts.current().locked, |view| view.cursor_default())
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |this, _, _, cx| {
-                                        if this.layouts.current().locked {
-                                            return;
-                                        }
-                                        let measured = this.measured.borrow();
-                                        let pair = measured
-                                            .get(&Measured::Node(first))
-                                            .zip(measured.get(&Measured::Node(second)))
-                                            .map(|(a, b)| {
-                                                Bounds::new(
-                                                    a.origin,
-                                                    size(
-                                                        b.origin.x + b.size.width - a.origin.x,
-                                                        b.origin.y + b.size.height - a.origin.y,
-                                                    ),
-                                                )
-                                            });
-                                        drop(measured);
-                                        if let Some(pair) = pair {
-                                            this.dragging =
-                                                Some(Dragging::Split(id, index, axis, pair));
-                                        }
-                                        cx.stop_propagation();
-                                    }),
-                                ),
-                        );
+                                    view.top(px(end as f32))
+                                        .left_0()
+                                        .h(px((next - end) as f32))
+                                        .w_full()
+                                });
+                            split = split.child(gutter);
+                        }
                     }
-                }
-                split
-                    .child(self.measurement(Measured::Node(id)))
-                    .into_any_element()
+                    split.child(measurement)
+                })
+                .into_any_element()
             }
             Node::Tabs { id, panels, active } => {
                 let node_id = *id;
@@ -2339,8 +2504,7 @@ impl GuiApp {
                                             if this.layouts.current().locked {
                                                 return;
                                             }
-                                            this.layouts.current_mut().remove(panel_id);
-                                            this.persist_layout(cx);
+                                            this.remove_layout_panel(panel_id, cx);
                                         })),
                                 )
                             }),
@@ -2459,18 +2623,23 @@ impl GuiApp {
                                 .size_full(),
                             )
                         },
-                    )
-                    .child(self.measurement(Measured::Node(node_id)));
-                panel.into_any_element()
+                    );
+                // Structural edits account for the outer pane, including its border.
+                div()
+                    .relative()
+                    .size_full()
+                    .child(panel)
+                    .child(self.measurement(Measured::Node(node_id)))
+                    .into_any_element()
             }
         }
     }
-    fn drag_position(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+    fn drag_position(&mut self, position: Point<Pixels>, alt: bool, cx: &mut Context<Self>) {
         let Some(dragging) = self.dragging else {
             return;
         };
         let bounds = match dragging {
-            Dragging::Split(_, _, _, bounds) => bounds,
+            Dragging::Split(drag) => drag.bounds,
             Dragging::Seek(id) | Dragging::Volume(id) => {
                 let key = if matches!(dragging, Dragging::Seek(_)) {
                     Measured::Seek(id)
@@ -2484,24 +2653,27 @@ impl GuiApp {
             }
         };
         match dragging {
-            Dragging::Split(id, index, axis, _) => {
+            Dragging::Split(mut drag) => {
                 if self.layouts.current().locked {
                     return;
                 }
-                let (offset, length) = if axis == Axis::Horizontal {
-                    (position.x - bounds.origin.x, bounds.size.width)
-                } else {
-                    (position.y - bounds.origin.y, bounds.size.height)
-                };
-                let length = f32::from(length) - SPLIT_GUTTER;
-                if length <= 0. {
+                drag.pointer = position;
+                self.dragging = Some(Dragging::Split(drag));
+                let config = &self.state.system.config;
+                let enabled = config.layout_snap_enabled ^ alt;
+                let Some(fraction) = drag.fraction(
+                    &self.split_references,
+                    enabled,
+                    f64::from(config.ui_scale),
+                    config.layout_snap_grid_px,
+                ) else {
                     return;
-                }
-                let minimum = if axis == Axis::Horizontal { 160. } else { 100. };
-                let lower = (minimum / length).min(0.5);
-                let fraction =
-                    ((f32::from(offset) - SPLIT_GUTTER * 0.5) / length).clamp(lower, 1. - lower);
-                if self.layouts.current_mut().set_boundary(id, index, fraction) {
+                };
+                if self
+                    .layouts
+                    .current_mut()
+                    .set_boundary(drag.id, drag.index, fraction)
+                {
                     cx.notify();
                 }
             }
@@ -2574,7 +2746,7 @@ impl GuiApp {
                     if matches!(dragging, Dragging::Seek(_)) {
                         this.seek_queue_id = this.state.queue.current_id;
                     }
-                    this.drag_position(event.position, cx);
+                    this.drag_position(event.position, event.modifiers.alt, cx);
                 }),
             )
             .into_any_element()
@@ -2582,6 +2754,7 @@ impl GuiApp {
 }
 impl Render for GuiApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.layout_scale_factor = f64::from(window.scale_factor());
         window.set_rem_size(px(16. * self.state.system.config.ui_scale));
         self.scroll_views.begin_frame();
         self.visuals.begin_frame();
@@ -2794,7 +2967,12 @@ impl Render for GuiApp {
                 this.scroll_views.click(event.position, modal);
             }))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                this.drag_position(event.position, cx)
+                this.drag_position(event.position, event.modifiers.alt, cx)
+            }))
+            .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
+                if let Some(Dragging::Split(drag)) = this.dragging {
+                    this.drag_position(drag.pointer, event.modifiers.alt, cx);
+                }
             }))
             .on_mouse_up(
                 MouseButton::Left,

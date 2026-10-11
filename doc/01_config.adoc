@@ -17,6 +17,8 @@ media_read_buffer_mb = 2
 ffmpeg_enabled = false
 pipewire_auto_mix = true
 still_mode = false
+layout_snap_enabled = true
+layout_snap_grid_px = 8
 tray_enabled = true
 mpris_enabled = true
 log_level = "warning"
@@ -78,6 +80,10 @@ Still mode is under Visualizations → Common → Rendering and takes effect whe
 settings are applied, without restarting playback. It is persisted as `still_mode`.
 
 Shuffle and Repeat are playback controls, not desktop settings.
+General → Interface includes Layout snapping and Layout grid spacing. These save
+`layout_snap_enabled` (default `true`) and `layout_snap_grid_px` (default `8`,
+integer `1`–`64` logical pixels before interface scaling) in `config.toml`.
+
 Hover settings fields for accepted ranges and input syntax.
 
 Common visualization settings apply as follows:
@@ -168,11 +174,28 @@ Right-click a panel to toggle its tab bar; right-click the bottom-right layout
 button to toggle the lock, or left-click it to add a panel. Playback, tab
 selection, and layout management remain available while locked.
 
-Rows and columns contain two or more ordered regions. Docking at an edge splits
-the target region; matching directions become siblings rather than nested
-splits. Dragging a separator resizes only its two neighboring regions. Removing
-panels collapses empty and single-region containers and merges same-direction
-splits while preserving relative proportions.
+Rows and columns contain two or more ordered regions. New containers divide
+their content equally. Docking at an edge splits the target region while
+preserving unrelated pane sizes; matching directions become siblings rather
+than nested splits. Dragging a separator resizes only its two neighboring
+regions, leaving other boundaries unchanged. Removing a region gives its space
+to the following neighbor, or the preceding neighbor when the removed region
+was last. Empty and single-region containers collapse; same-direction splits
+merge while preserving their proportions.
+
+With Layout snapping enabled, separator dragging considers targets in this
+priority order: aligned separator centers in other visible same-direction splits,
+the equal-content midpoint of the adjacent panes, then the nearest configured
+grid line rooted at the container origin.
+Reference separators and midpoints capture within 4 logical pixels before
+interface scaling; grid snapping selects the nearest grid line.
+Targets that violate minimum pane sizes are skipped. Hold Alt to invert the global
+setting: it disables snapping when enabled and enables it when disabled.
+Releasing Alt restores the configured behavior without changing saved settings.
+
+Layouts support up to 32 nested rows or columns along any path; tab groups do
+not add to this depth. Docking that would exceed this limit leaves the layout
+unchanged. This is not a limit on the number of sibling regions or tabs.
 
 If `layout.json` cannot be read or validated, Rivu reports the load error and
 opens the default collection. Panel edits remain visible when saving fails.
@@ -180,6 +203,9 @@ Failed layout-management operations leave the current selection and saved
 collection unchanged; a failed switch does not rebuild the interface.
 Errors and scan progress appear in the footer. Click a message or its copy icon
 to copy the complete text.
+
+See link:24_layout.adoc[Desktop Layout Design] for geometry, ownership, and
+editing invariants.
 
 
 === Layout file
@@ -198,9 +224,9 @@ means an empty layout. `locked` defaults to `false`.
         "type": "split",
         "axis": "horizontal",
         "children": [
-          {"weight": 2, "node": {"type": "tabs", "panels": [{"kind": "library"}]}},
-          {"node": {"type": "tabs", "panels": [{"kind": "queue"}]}},
-          {"node": {"type": "tabs", "panels": [{"kind": "waveform"}]}}
+          {"type": "tabs", "panels": [{"kind": "library"}]},
+          {"type": "tabs", "panels": [{"kind": "queue"}]},
+          {"type": "tabs", "panels": [{"kind": "waveform"}]}
         ]
       }
     }
@@ -209,10 +235,17 @@ means an empty layout. `locked` defaults to `false`.
 ----
 
 `horizontal` orders children left to right; `vertical` orders them top to bottom.
-Each child has a finite positive `weight`, defaulting to `1`; weights divide the
-space remaining after separators and need not sum to one. Weight sums must be
-representable. Splits require at least two children and cannot directly contain
-a split in the same direction.
+Children are direct node objects, not wrappers. An omitted or empty `boundaries`
+array divides the content equally, as in the example. To give the first pane
+half the content and each remaining pane a quarter, add
+`"boundaries": [0.5, 0.75]` beside `children`. Explicit boundaries must contain
+exactly one fewer value than children, all finite, strictly increasing, and
+strictly between `0` and `1`. They are cumulative fractions of pane content
+length, excluding separator gutters, not weights or fractions of adjacent panes.
+Splits require at least two children and cannot directly contain a split in the
+same direction. At most 32 splits may occur along any root-to-leaf path; tabs
+do not count toward this limit. Legacy child wrappers and weights are rejected.
+Configuration remains TOML; layout persistence remains JSON.
 
 `tabs` requires a nonempty `panels` array. Its optional `active` is a zero-based
 index, defaulting to `0`. Panel objects require `kind`; `show_tab_bar` defaults to

@@ -62,6 +62,7 @@ enum Field {
     MediaReadBuffer,
     Font,
     Scale,
+    LayoutSnapGrid,
     Fps,
     Background,
     VisualizationDb,
@@ -106,6 +107,7 @@ impl Field {
             Self::MediaReadBuffer => "Media read buffer (MiB)",
             Self::Font => "Font family",
             Self::Scale => "Interface scale",
+            Self::LayoutSnapGrid => "Layout grid spacing (px)",
             Self::Fps => "Analysis rate (Hz)",
             Self::Background => "Background color",
             Self::VisualizationDb => "Default display range (dB)",
@@ -150,6 +152,9 @@ impl Field {
             Self::MediaReadBuffer => "1, 2, 4, 8, or 16. Applies when media is next opened.",
             Self::Font => "",
             Self::Scale => "0.75–2.",
+            Self::LayoutSnapGrid => {
+                "1–64 logical pixels before interface scaling. Hold Alt while dragging to invert snapping temporarily."
+            }
             Self::Fps => "5–60. Applies to Spectrum, Spectrogram, and Audio Visualizer.",
             Self::Background => "#RRGGBB. Applies to all views.",
             Self::AudioVisualizerPrimaryColor | Self::AudioVisualizerSecondaryColor => {
@@ -393,6 +398,7 @@ impl Settings {
             Field::MediaReadBuffer,
             Field::Font,
             Field::Scale,
+            Field::LayoutSnapGrid,
             Field::Fps,
             Field::Background,
             Field::VisualizationDb,
@@ -629,6 +635,11 @@ impl Settings {
         self.font_value = self.draft.ui_font.clone();
         self.set_value(Field::Font, self.draft.ui_font.clone(), cx);
         self.set_value(Field::Scale, self.draft.ui_scale.to_string(), cx);
+        self.set_value(
+            Field::LayoutSnapGrid,
+            self.draft.layout_snap_grid_px.to_string(),
+            cx,
+        );
         self.set_value(Field::Fps, self.draft.analysis_fps.to_string(), cx);
         self.set_value(
             Field::Background,
@@ -803,6 +814,7 @@ impl Settings {
             config.ui_font = "sans-serif".to_owned();
         }
         config.ui_scale = self.number(Field::Scale, cx)?;
+        config.layout_snap_grid_px = self.number(Field::LayoutSnapGrid, cx)?;
         config.analysis_fps = self.number(Field::Fps, cx)?;
         config.visualization_db_range = self.number(Field::VisualizationDb, cx)?;
         config.visual_background = self
@@ -1454,6 +1466,17 @@ impl GuiApp {
                 .child(two_column(
                     self.font_control(cx).min_w(px(180.)),
                     self.settings.field(Field::Scale).min_w(px(180.)),
+                ))
+                .child(two_column(
+                    row().child(visual_switch(
+                        "settings-layout-snapping",
+                        "󰐃",
+                        "Layout snapping",
+                        self.settings.draft.layout_snap_enabled,
+                        cx,
+                        |draft| draft.layout_snap_enabled = !draft.layout_snap_enabled,
+                    )),
+                    self.settings.field(Field::LayoutSnapGrid).min_w(px(180.)),
                 ))
                 .child(
                     row()

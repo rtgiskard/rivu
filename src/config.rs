@@ -148,6 +148,9 @@ pub struct Config {
     /// UI font family; defaults to sans-serif, including empty saved values.
     pub ui_font: String,
     pub ui_scale: f32,
+    pub layout_snap_enabled: bool,
+    /// Layout snap grid spacing in logical pixels before interface scaling.
+    pub layout_snap_grid_px: u32,
     /// Stop audio visualizations and their analysis without changing playback.
     pub still_mode: bool,
     pub analysis_fps: u32,
@@ -233,6 +236,8 @@ impl Default for Config {
             page_size: DEFAULT_PAGE_SIZE,
             ui_font: "sans-serif".to_owned(),
             ui_scale: 1.0,
+            layout_snap_enabled: true,
+            layout_snap_grid_px: 8,
             still_mode: false,
             analysis_fps: 20,
             visual_background: RgbColor(0x08090c),
@@ -353,6 +358,11 @@ impl Config {
             self.ui_scale.is_finite() && (0.75..=2.0).contains(&self.ui_scale),
             "ui_scale must be finite and between 0.75 and 2.0 (inclusive); got {}",
             self.ui_scale
+        );
+        ensure!(
+            (1..=64).contains(&self.layout_snap_grid_px),
+            "layout_snap_grid_px must be between 1 and 64 (inclusive); got {}",
+            self.layout_snap_grid_px
         );
         ensure!(
             matches!(self.media_read_buffer_mb, 1 | 2 | 4 | 8 | 16),
@@ -617,6 +627,8 @@ mod tests {
             queue_limit: 128,
             ui_font: "sans-serif".to_owned(),
             ui_scale: 1.5,
+            layout_snap_enabled: false,
+            layout_snap_grid_px: 12,
             still_mode: true,
             analysis_fps: 30,
             visualization_db_range: 90.0,
@@ -738,6 +750,38 @@ mod tests {
         assert!(format!("{error:#}").contains("scan_max_depth"));
         assert!(format!("{error:#}").contains("got 0"));
         directory.close().unwrap();
+    }
+
+    #[test]
+    fn layout_snapping_round_trips_limits_and_rejects_invalid_values_without_overwriting() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        for (enabled, spacing) in [(false, 1), (true, 64)] {
+            let config = Config {
+                layout_snap_enabled: enabled,
+                layout_snap_grid_px: spacing,
+                ..Config::default()
+            };
+            config.save(&path).unwrap();
+            assert_eq!(Config::load(&path).unwrap(), config);
+            let saved = fs::read_to_string(&path).unwrap();
+            for invalid_spacing in [0, 65, u32::MAX] {
+                let invalid = Config {
+                    layout_snap_grid_px: invalid_spacing,
+                    ..config.clone()
+                };
+                let error = invalid.save(&path).unwrap_err();
+                assert!(format!("{error:#}").contains("layout_snap_grid_px"));
+                assert_eq!(fs::read_to_string(&path).unwrap(), saved);
+            }
+        }
+
+        for value in ["0", "65", "-1", "1.5", "'8'"] {
+            fs::write(&path, format!("layout_snap_grid_px = {value}\n")).unwrap();
+            assert!(Config::load(&path).is_err(), "accepted spacing {value}");
+        }
+        fs::write(&path, "layout_snap_enabled = 'true'\n").unwrap();
+        assert!(Config::load(&path).is_err());
     }
 
     #[test]
