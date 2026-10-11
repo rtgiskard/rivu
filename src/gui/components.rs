@@ -116,6 +116,7 @@ pub(crate) fn active_control(control: Stateful<Div>, active: bool) -> Stateful<D
 }
 
 /// Shared geometry and interaction surface for buttons and select triggers.
+/// Owns the hover style; callers must not register a second GPUI hover style.
 fn control_surface(id: impl Into<ElementId>) -> Stateful<Div> {
     div()
         .id(id)

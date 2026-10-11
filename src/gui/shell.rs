@@ -330,8 +330,7 @@ impl Render for GuiApp {
                         .size(px(24.0))
                         .border_0()
                         .bg(rgb(ERROR_BG))
-                        .text_color(rgb(MUTED))
-                        .hover(|style| style.bg(rgb(ERROR_BG)).text_color(rgb(TEXT))),
+                        .text_color(rgb(MUTED)),
                     ),
             );
         } else if self.state.system.scanning {
