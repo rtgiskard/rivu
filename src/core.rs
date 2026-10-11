@@ -132,12 +132,18 @@ impl AppHandle {
 
     pub(crate) fn update_gui_config(&self, change: GuiConfigChange) -> Result<()> {
         self.sender
-            .try_send(Request { operation: Operation::GuiConfig(change), reply: None })
+            .try_send(Request {
+                operation: Operation::GuiConfig(change),
+                reply: None,
+            })
             .context("Rivu is busy or stopped")
     }
 
     pub(crate) fn apply_gui_settings(&self, config: Config) -> Ack {
-        self.operation_ack(Operation::GuiConfig(GuiConfigChange::Settings(config)), Duration::from_secs(12))
+        self.operation_ack(
+            Operation::GuiConfig(GuiConfigChange::Settings(config)),
+            Duration::from_secs(12),
+        )
     }
 
     pub fn send(&self, command: Command) -> Result<()> {
@@ -671,17 +677,26 @@ mod tests {
         let (_directory, mut core) = fixture();
         core.command(Command::Volume { value: 0.25 }).unwrap();
         core.command(Command::Shuffle { enabled: true }).unwrap();
-        core.command(Command::Repeat { mode: RepeatMode::All }).unwrap();
+        core.command(Command::Repeat {
+            mode: RepeatMode::All,
+        })
+        .unwrap();
         // Model a selected output whose persisted snapshot is still debounced.
         core.state.system.selected_device = Some("pending-output".into());
         for enabled in [true, false] {
-            core.update_gui_config(GuiConfigChange::ToggleStillMode).unwrap();
+            core.update_gui_config(GuiConfigChange::ToggleStillMode)
+                .unwrap();
             assert_eq!(core.state.system.config.still_mode, enabled);
             assert_eq!(core.state.playback.volume, 0.25);
             assert!(core.state.playback.shuffle);
             assert_eq!(core.state.playback.repeat, RepeatMode::All);
-            assert_eq!(core.state.system.selected_device.as_deref(), Some("pending-output"));
-            let saved: Config = toml::from_str(&std::fs::read_to_string(&core.state.system.config_path).unwrap()).unwrap();
+            assert_eq!(
+                core.state.system.selected_device.as_deref(),
+                Some("pending-output")
+            );
+            let saved: Config =
+                toml::from_str(&std::fs::read_to_string(&core.state.system.config_path).unwrap())
+                    .unwrap();
             assert_eq!(saved.volume, 0.25);
             assert!(saved.shuffle);
             assert_eq!(saved.repeat, RepeatMode::All);
@@ -695,20 +710,31 @@ mod tests {
         let (directory, mut core) = fixture();
         core.command(Command::Volume { value: 0.25 }).unwrap();
         core.command(Command::Shuffle { enabled: true }).unwrap();
-        core.command(Command::Repeat { mode: RepeatMode::All }).unwrap();
+        core.command(Command::Repeat {
+            mode: RepeatMode::All,
+        })
+        .unwrap();
         core.state.system.selected_device = Some("pending-output".into());
         let root = directory.path().join("added");
         let seek = core.state.system.config.waveform_seek_enabled;
-        core.update_gui_config(GuiConfigChange::ToggleWaveformSeek).unwrap();
-        core.update_gui_config(GuiConfigChange::AddLibraryRoot(root.clone())).unwrap();
-        core.update_gui_config(GuiConfigChange::AddLibraryRoot(root)).unwrap();
+        core.update_gui_config(GuiConfigChange::ToggleWaveformSeek)
+            .unwrap();
+        core.update_gui_config(GuiConfigChange::AddLibraryRoot(root.clone()))
+            .unwrap();
+        core.update_gui_config(GuiConfigChange::AddLibraryRoot(root))
+            .unwrap();
         assert_eq!(core.state.system.config.library_roots.len(), 2);
         assert_eq!(core.state.system.config.waveform_seek_enabled, !seek);
         assert_eq!(core.state.playback.volume, 0.25);
         assert!(core.state.playback.shuffle);
         assert_eq!(core.state.playback.repeat, RepeatMode::All);
-        assert_eq!(core.state.system.selected_device.as_deref(), Some("pending-output"));
-        let saved: Config = toml::from_str(&std::fs::read_to_string(&core.state.system.config_path).unwrap()).unwrap();
+        assert_eq!(
+            core.state.system.selected_device.as_deref(),
+            Some("pending-output")
+        );
+        let saved: Config =
+            toml::from_str(&std::fs::read_to_string(&core.state.system.config_path).unwrap())
+                .unwrap();
         assert_eq!(saved.volume, 0.25);
         assert!(saved.shuffle);
         assert_eq!(saved.repeat, RepeatMode::All);
@@ -722,12 +748,18 @@ mod tests {
         let mut draft = core.state.system.config.as_ref().clone();
         draft.volume = 0.4;
         core.command(Command::Shuffle { enabled: true }).unwrap();
-        core.command(Command::Repeat { mode: RepeatMode::One }).unwrap();
-        core.update_gui_config(GuiConfigChange::Settings(draft)).unwrap();
+        core.command(Command::Repeat {
+            mode: RepeatMode::One,
+        })
+        .unwrap();
+        core.update_gui_config(GuiConfigChange::Settings(draft))
+            .unwrap();
         assert!(core.state.playback.shuffle);
         assert_eq!(core.state.playback.repeat, RepeatMode::One);
         assert_eq!(core.state.playback.volume, 0.4);
-        let saved: Config = toml::from_str(&std::fs::read_to_string(&core.state.system.config_path).unwrap()).unwrap();
+        let saved: Config =
+            toml::from_str(&std::fs::read_to_string(&core.state.system.config_path).unwrap())
+                .unwrap();
         assert!(saved.shuffle);
         assert_eq!(saved.repeat, RepeatMode::One);
         assert_eq!(saved.volume, 0.4);
@@ -788,7 +820,10 @@ mod tests {
             core.command(Command::DismissScanResult).unwrap();
             assert!(core.state.system.scan_progress.is_none());
             assert!(core.state.system.scan_message.is_empty());
-            assert_eq!(core.state.system.last_error.as_deref(), Some("Unreadable source"));
+            assert_eq!(
+                core.state.system.last_error.as_deref(),
+                Some("Unreadable source")
+            );
         }
     }
 

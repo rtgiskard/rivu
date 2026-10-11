@@ -13,10 +13,14 @@ impl Core {
         let still_mode = matches!(change, GuiConfigChange::ToggleStillMode);
         match change {
             GuiConfigChange::ToggleStillMode => config.still_mode = !config.still_mode,
-            GuiConfigChange::ToggleWaveformSeek => config.waveform_seek_enabled = !config.waveform_seek_enabled,
+            GuiConfigChange::ToggleWaveformSeek => {
+                config.waveform_seek_enabled = !config.waveform_seek_enabled
+            }
             GuiConfigChange::AddLibraryRoot(path) => {
                 let path = library::logical_path(&path)?;
-                if config.library_roots.contains(&path) { return Ok(()); }
+                if config.library_roots.contains(&path) {
+                    return Ok(());
+                }
                 config.library_roots.push(path);
             }
             GuiConfigChange::Settings(_) => unreachable!(),
@@ -24,7 +28,9 @@ impl Core {
         config.volume = self.state.playback.volume;
         config.shuffle = self.state.playback.shuffle;
         config.repeat = self.state.playback.repeat;
-        config.output_device.clone_from(&self.state.system.selected_device);
+        config
+            .output_device
+            .clone_from(&self.state.system.selected_device);
         config.save(&self.state.system.config_path)?;
         if still_mode {
             self.audio(AudioCommand::StillMode(config.still_mode))?;
