@@ -9,7 +9,7 @@ use super::{
 };
 use crate::{
     analysis::{AnalysisFrame, AnalysisSettings},
-    config::{AudioVisualizerOptions, Config, AudioVisualizerStyle},
+    config::{AudioVisualizerOptions, AudioVisualizerStyle, Config},
 };
 use gpui::{
     AnyElement, App, Bounds, PathBuilder, Rgba, TextAlign, Window, canvas, div, point, prelude::*,

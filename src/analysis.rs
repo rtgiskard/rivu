@@ -1,4 +1,4 @@
-use crate::config::{Config, AnalysisWindow};
+use crate::config::{AnalysisWindow, Config};
 use parking_lot::RwLock;
 use ringbuf::{
     HeapCons, HeapProd, HeapRb,

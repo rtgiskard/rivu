@@ -1,7 +1,7 @@
 //! Fixed-scale, analysis-backed stereo plots. Texture storage is independent of panel size.
 use crate::{
     analysis::{AnalysisFrame, AnalysisSettings, DENSITY_SIDE},
-    config::{AudioVisualizerOptions, Config, AudioVisualizerStyle},
+    config::{AudioVisualizerOptions, AudioVisualizerStyle, Config},
 };
 use gpui::{
     AnyElement, App, Bounds, Pixels, Point, RenderImage, SharedString, TextAlign, Window, canvas,

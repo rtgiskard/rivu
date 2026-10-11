@@ -1,7 +1,10 @@
 use crate::{
     config::Config,
     core::CoreState,
-    model::{DatabaseOptimization, HistoryEntry, PlaybackState, PlaybackStatus, QueueState, RepeatMode, Track},
+    model::{
+        DatabaseOptimization, HistoryEntry, PlaybackState, PlaybackStatus, QueueState, RepeatMode,
+        Track,
+    },
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

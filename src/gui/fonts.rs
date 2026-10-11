@@ -7,15 +7,20 @@ pub(super) const SYMBOLS_FAMILY: &str = env!("RIVU_EMBEDDED_SYMBOLS_FAMILY");
 
 #[cfg(feature = "embed-nerd-font")]
 pub(super) fn register_symbols(cx: &App) -> anyhow::Result<()> {
-    cx.text_system().add_fonts(vec![std::borrow::Cow::Borrowed(
-        include_bytes!(env!("RIVU_EMBEDDED_SYMBOLS_FONT")),
-    )])
+    cx.text_system()
+        .add_fonts(vec![std::borrow::Cow::Borrowed(include_bytes!(env!(
+            "RIVU_EMBEDDED_SYMBOLS_FONT"
+        )))])
 }
 
 /// Resolve only at startup or when the saved setting changes, never while painting.
 pub(super) fn resolve(requested: &str, cx: &App) -> Font {
     let requested = requested.trim();
-    let requested = if requested.is_empty() { "sans-serif" } else { requested };
+    let requested = if requested.is_empty() {
+        "sans-serif"
+    } else {
+        requested
+    };
     match system_family(requested) {
         Ok(primary) => {
             // Only select the primary family. Explicit fallback lists make GPUI

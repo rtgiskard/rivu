@@ -2,7 +2,7 @@
 use super::{fractal_beams, fractal_flow};
 use crate::{
     analysis::{AnalysisFrame, AnalysisSettings},
-    config::{AudioVisualizerOptions, Config, AudioVisualizerStyle},
+    config::{AudioVisualizerOptions, AudioVisualizerStyle, Config},
 };
 use gpui::{
     AnyElement, App, Bounds, PathBuilder, Pixels, TextAlign, Window, canvas, div, fill, point,

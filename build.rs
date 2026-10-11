@@ -39,7 +39,11 @@ fn main() {
     .join(", ");
     println!(
         "cargo:rustc-env=RIVU_BUILD_FEATURES={}",
-        if features.is_empty() { "none" } else { &features }
+        if features.is_empty() {
+            "none"
+        } else {
+            &features
+        }
     );
 
     #[cfg(feature = "embed-nerd-font")]

@@ -1357,12 +1357,8 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
     match &mut ui.view {
         View::Search(search) => draw_search(frame, columns[0], search),
         View::Tree(tree) => draw_tree(frame, columns[0], tree),
-        View::PlaylistDetail { detail, .. } => {
-            draw_playlist_detail(frame, columns[0], detail)
-        }
-        View::Playlists(playlists) => {
-            draw_playlists(frame, columns[0], playlists)
-        }
+        View::PlaylistDetail { detail, .. } => draw_playlist_detail(frame, columns[0], detail),
+        View::Playlists(playlists) => draw_playlists(frame, columns[0], playlists),
         View::Queue => draw_queue(frame, columns[0], state, &mut ui.queue, &mut ui.queue_cache),
     }
     let position = state.playback.position.max(0.0);
@@ -1585,11 +1581,7 @@ fn draw_paged_list<T>(
     );
 }
 
-fn draw_playlist_detail(
-    frame: &mut ratatui::Frame<'_>,
-    area: Rect,
-    detail: &mut PlaylistDetail,
-) {
+fn draw_playlist_detail(frame: &mut ratatui::Frame<'_>, area: Rect, detail: &mut PlaylistDetail) {
     let marker = "󰎆 ";
     draw_paged_list(
         frame,
@@ -1654,11 +1646,7 @@ fn draw_search(frame: &mut ratatui::Frame<'_>, area: Rect, search: &mut LibraryS
     });
 }
 
-fn draw_tree(
-    frame: &mut ratatui::Frame<'_>,
-    area: Rect,
-    tree: &mut LibraryTree,
-) {
+fn draw_tree(frame: &mut ratatui::Frame<'_>, area: Rect, tree: &mut LibraryTree) {
     let title = if tree.directory.as_os_str().is_empty() {
         "Library tree".into()
     } else {
