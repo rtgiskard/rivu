@@ -507,6 +507,7 @@ fn source_record<'a>(
                 ffmpeg_enabled,
                 cancellation,
             )
+            .map_err(|error| format!("{error:#}"))
         })
         .as_ref()
         .map_err(|error| anyhow!("{error}"))
@@ -541,7 +542,10 @@ fn scan_cue(
             .duration
             .filter(|duration| duration.is_finite() && *duration > 0.0)
             .with_context(|| {
-                format!("CUE source {} has no finite duration", source.path.display())
+                format!(
+                    "CUE source {} has no finite duration",
+                    source.path.display()
+                )
             })?;
         let start = track.start_frame as f64 / 75.0;
         let end = track
