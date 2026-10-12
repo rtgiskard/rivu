@@ -445,14 +445,13 @@ impl GuiApp {
         range: std::ops::Range<usize>,
         cx: &mut Context<Self>,
     ) {
-        if let Some(id) = self.browser.playlists.entries().playlist_id {
-            if let Some(offset) =
+        if let Some(id) = self.browser.playlists.entries().playlist_id
+            && let Some(offset) =
                 self.browser
                     .playlists
                     .demand_page(true, range, self.view_page_size())
-            {
-                self.load_playlist_entries(id, offset, cx);
-            }
+        {
+            self.load_playlist_entries(id, offset, cx);
         }
     }
 

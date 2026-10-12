@@ -350,7 +350,7 @@ impl GuiApp {
                                     )
                                     .h(px(48.0 * ui_scale.max(0.5)))
                                     .relative()
-                                    .child(tree_guides(&this.browser.library.tree(), index))
+                                    .child(tree_guides(this.browser.library.tree(), index))
                                     .child(
                                         div().text_color(gpui::rgb(super::MUTED)).child(
                                             if failed { "Unavailable" } else { "Loading…" },
@@ -436,7 +436,7 @@ impl GuiApp {
                             )
                             .h(px(48.0 * ui_scale.max(0.5)))
                             .relative()
-                            .child(tree_guides(&this.browser.library.tree(), index))
+                            .child(tree_guides(this.browser.library.tree(), index))
                             .when(visible.branch.is_some(), |view| {
                                 view.child(
                                     div()

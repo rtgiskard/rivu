@@ -917,9 +917,9 @@ impl VisualData {
         let mut columns = (0..new_columns)
             .map(|_| Column::default())
             .collect::<Vec<_>>();
-        for offset in 0..keep {
+        for (offset, column) in columns.iter_mut().take(keep).enumerate() {
             let index = (oldest + skip + offset) % old_capacity;
-            columns[offset] = std::mem::take(&mut old_columns[index]);
+            *column = std::mem::take(&mut old_columns[index]);
         }
         for mut column in old_columns {
             if let Some(image) = column.image.take() {

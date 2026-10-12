@@ -604,128 +604,123 @@ impl Render for GuiApp {
                             },
                         ));
                     }
-                    if is_audio_visualizer {
-                        if let Some(options) = self
+                    if is_audio_visualizer
+                        && let Some(options) = self
                             .layouts
                             .current()
                             .audio_visualizer_options(state.panel_id)
-                        {
-                            menu = menu
-                                .child(menu_item(
-                                    "audio-visualizer-style-menu",
-                                    format!(
-                                        "Style: {}  ›",
-                                        settings::audio_visualizer_style_label(options.style)
-                                    ),
+                    {
+                        menu = menu
+                            .child(menu_item(
+                                "audio-visualizer-style-menu",
+                                format!(
+                                    "Style: {}  ›",
+                                    settings::audio_visualizer_style_label(options.style)
+                                ),
+                                cx,
+                                move |this, _, cx| {
+                                    this.panel_menu = Some(PanelMenu {
+                                        page: PanelMenuPage::AudioVisualizerStyle,
+                                        ..state
+                                    });
+                                    cx.notify();
+                                },
+                            ))
+                            .child(div().h(px(1.)).mx_2().my_1().bg(rgb(BORDER)));
+                        menu = menu
+                            .child(
+                                menu_item(
+                                    "audio-visualizer-grid",
+                                    "Reference lines",
                                     cx,
                                     move |this, _, cx| {
-                                        this.panel_menu = Some(PanelMenu {
-                                            page: PanelMenuPage::AudioVisualizerStyle,
-                                            ..state
-                                        });
-                                        cx.notify();
-                                    },
-                                ))
-                                .child(div().h(px(1.)).mx_2().my_1().bg(rgb(BORDER)));
-                            menu = menu
-                                .child(
-                                    menu_item(
-                                        "audio-visualizer-grid",
-                                        "Reference lines",
-                                        cx,
-                                        move |this, _, cx| {
-                                            this.panel_menu = None;
-                                            if let Some(mut options) = this
-                                                .layouts
-                                                .current()
-                                                .audio_visualizer_options(state.panel_id)
-                                            {
-                                                options.reference_lines = !options.reference_lines;
-                                                this.layouts
-                                                    .current_mut()
-                                                    .set_audio_visualizer_options(
-                                                        state.panel_id,
-                                                        options,
-                                                    );
-                                                this.persist_layout(cx);
-                                            }
-                                        },
-                                    )
-                                    .child(
-                                        div()
-                                            .ml_auto()
-                                            .text_color(rgb(if options.reference_lines {
-                                                ACCENT
-                                            } else {
-                                                MUTED
-                                            }))
-                                            .child(if options.reference_lines {
-                                                "On"
-                                            } else {
-                                                "Off"
-                                            }),
-                                    ),
-                                )
-                                .child(
-                                    menu_item(
-                                        "audio-visualizer-labels",
-                                        "Labels",
-                                        cx,
-                                        move |this, _, cx| {
-                                            this.panel_menu = None;
-                                            if let Some(mut options) = this
-                                                .layouts
-                                                .current()
-                                                .audio_visualizer_options(state.panel_id)
-                                            {
-                                                options.labels = !options.labels;
-                                                this.layouts
-                                                    .current_mut()
-                                                    .set_audio_visualizer_options(
-                                                        state.panel_id,
-                                                        options,
-                                                    );
-                                                this.persist_layout(cx);
-                                            }
-                                        },
-                                    )
-                                    .child(
-                                        div()
-                                            .ml_auto()
-                                            .text_color(rgb(if options.labels {
-                                                ACCENT
-                                            } else {
-                                                MUTED
-                                            }))
-                                            .child(if options.labels { "On" } else { "Off" }),
-                                    ),
-                                )
-                                .child(div().h(px(1.)).mx_2().my_1().bg(rgb(BORDER)))
-                                .child(menu_item(
-                                    "audio-visualizer-settings",
-                                    "Visualizer settings…",
-                                    cx,
-                                    move |this, window, cx| {
                                         this.panel_menu = None;
-                                        if let Some(options) = this
+                                        if let Some(mut options) = this
                                             .layouts
                                             .current()
                                             .audio_visualizer_options(state.panel_id)
                                         {
-                                            this.settings.update(cx, |settings, cx| {
-                                                settings.open_visualizer(
+                                            options.reference_lines = !options.reference_lines;
+                                            this.layouts
+                                                .current_mut()
+                                                .set_audio_visualizer_options(
                                                     state.panel_id,
                                                     options,
-                                                    window,
-                                                    cx,
-                                                )
-                                            });
-                                            this.settings_open = true;
-                                            cx.notify();
+                                                );
+                                            this.persist_layout(cx);
                                         }
                                     },
-                                ));
-                        }
+                                )
+                                .child(
+                                    div()
+                                        .ml_auto()
+                                        .text_color(rgb(if options.reference_lines {
+                                            ACCENT
+                                        } else {
+                                            MUTED
+                                        }))
+                                        .child(if options.reference_lines { "On" } else { "Off" }),
+                                ),
+                            )
+                            .child(
+                                menu_item(
+                                    "audio-visualizer-labels",
+                                    "Labels",
+                                    cx,
+                                    move |this, _, cx| {
+                                        this.panel_menu = None;
+                                        if let Some(mut options) = this
+                                            .layouts
+                                            .current()
+                                            .audio_visualizer_options(state.panel_id)
+                                        {
+                                            options.labels = !options.labels;
+                                            this.layouts
+                                                .current_mut()
+                                                .set_audio_visualizer_options(
+                                                    state.panel_id,
+                                                    options,
+                                                );
+                                            this.persist_layout(cx);
+                                        }
+                                    },
+                                )
+                                .child(
+                                    div()
+                                        .ml_auto()
+                                        .text_color(rgb(if options.labels {
+                                            ACCENT
+                                        } else {
+                                            MUTED
+                                        }))
+                                        .child(if options.labels { "On" } else { "Off" }),
+                                ),
+                            )
+                            .child(div().h(px(1.)).mx_2().my_1().bg(rgb(BORDER)))
+                            .child(menu_item(
+                                "audio-visualizer-settings",
+                                "Visualizer settings…",
+                                cx,
+                                move |this, window, cx| {
+                                    this.panel_menu = None;
+                                    if let Some(options) = this
+                                        .layouts
+                                        .current()
+                                        .audio_visualizer_options(state.panel_id)
+                                    {
+                                        this.settings.update(cx, |settings, cx| {
+                                            settings.open_visualizer(
+                                                state.panel_id,
+                                                options,
+                                                window,
+                                                cx,
+                                            )
+                                        });
+                                        this.settings_open = true;
+                                        cx.notify();
+                                    }
+                                },
+                            ));
                     }
                     if is_queue {
                         menu = menu

@@ -243,19 +243,19 @@ impl GuiApp {
         let Some(session) = self.interaction.take_docking() else {
             return;
         };
-        if let Some(hover) = session.hover {
-            if let Some(prepared) = hover.prepared {
-                *self.layouts.current_mut() = prepared;
-                self.layout_changed(cx);
-                self.interaction.set_target_group(
-                    self.layouts
-                        .current()
-                        .root
-                        .as_ref()
-                        .and_then(|root| panel_group(root, source).map(|group| group.0)),
-                );
-                self.persist_layout(cx);
-            }
+        if let Some(hover) = session.hover
+            && let Some(prepared) = hover.prepared
+        {
+            *self.layouts.current_mut() = prepared;
+            self.layout_changed(cx);
+            self.interaction.set_target_group(
+                self.layouts
+                    .current()
+                    .root
+                    .as_ref()
+                    .and_then(|root| panel_group(root, source).map(|group| group.0)),
+            );
+            self.persist_layout(cx);
         }
         cx.notify();
     }
@@ -265,91 +265,91 @@ impl GuiApp {
             return div().into_any_element();
         };
         let mut overlay = div().absolute().top_0().left_0().size_full();
-        if let Some(hover) = &session.hover {
-            if !hover.unchanged {
-                let owner = hover.owner;
-                let preview = hover.preview;
-                let selected_bar = session.guide.as_ref().and_then(|guide| {
-                    guide
-                        .bars
-                        .iter()
-                        .flatten()
-                        .find(|bar| bar.target == hover.request.target)
-                });
-                let color = if preview.is_some() {
-                    selected_bar.map_or(ACCENT, |bar| DOCK_COLORS[bar.depth % DOCK_COLORS.len()])
-                } else {
-                    0xf7768e
-                };
-                overlay = overlay.child(
-                    div()
-                        .absolute()
-                        .left(owner.origin.x)
-                        .top(owner.origin.y)
-                        .w(owner.size.width)
-                        .h(owner.size.height)
-                        .border_2()
-                        .border_color(rgb(color)),
-                );
-                overlay = overlay.child(
-                    canvas(
-                        |_, _, _| (),
-                        move |_, _, window, _| {
-                            if let Some(preview) = preview {
-                                window.paint_quad(fill(preview, rgb(color).alpha(0.22)));
-                            }
-                        },
-                    )
+        if let Some(hover) = &session.hover
+            && !hover.unchanged
+        {
+            let owner = hover.owner;
+            let preview = hover.preview;
+            let selected_bar = session.guide.as_ref().and_then(|guide| {
+                guide
+                    .bars
+                    .iter()
+                    .flatten()
+                    .find(|bar| bar.target == hover.request.target)
+            });
+            let color = if preview.is_some() {
+                selected_bar.map_or(ACCENT, |bar| DOCK_COLORS[bar.depth % DOCK_COLORS.len()])
+            } else {
+                0xf7768e
+            };
+            overlay = overlay.child(
+                div()
                     .absolute()
-                    .size_full(),
-                );
-                let root = self.layouts.current().root.as_ref().unwrap();
-                let label = if layout_geometry::node_id(root) == hover.request.target.node {
-                    "Layout"
-                } else {
-                    layout_geometry::find(root, hover.request.target.node)
-                        .map(|node| match node {
-                            Node::Split {
-                                axis: Axis::Horizontal,
-                                ..
-                            } => "Row",
-                            Node::Split {
-                                axis: Axis::Vertical,
-                                ..
-                            } => "Column",
-                            Node::Tabs { .. } => "Panel",
-                        })
-                        .unwrap_or("Region")
-                };
-                let direction = match hover.request.target.edge {
-                    Edge::Left => "left",
-                    Edge::Right => "right",
-                    Edge::Top => "above",
-                    Edge::Bottom => "below",
-                    Edge::Center => "tab",
-                };
-                let text = if preview.is_none() {
-                    "Cannot dock here".to_owned()
-                } else if let Some(bar) = selected_bar {
-                    format!("{label} · level {} · {direction}", bar.depth + 1)
-                } else {
-                    format!("{label} · {direction}")
-                };
-                overlay = overlay.child(
-                    div()
-                        .absolute()
-                        .left(owner.origin.x + px(6.))
-                        .top(owner.origin.y + px(6.))
-                        .px_2()
-                        .py_1()
-                        .bg(rgb(PANEL))
-                        .border_1()
-                        .border_color(rgb(color))
-                        .text_color(rgb(TEXT))
-                        .text_xs()
-                        .child(text),
-                );
-            }
+                    .left(owner.origin.x)
+                    .top(owner.origin.y)
+                    .w(owner.size.width)
+                    .h(owner.size.height)
+                    .border_2()
+                    .border_color(rgb(color)),
+            );
+            overlay = overlay.child(
+                canvas(
+                    |_, _, _| (),
+                    move |_, _, window, _| {
+                        if let Some(preview) = preview {
+                            window.paint_quad(fill(preview, rgb(color).alpha(0.22)));
+                        }
+                    },
+                )
+                .absolute()
+                .size_full(),
+            );
+            let root = self.layouts.current().root.as_ref().unwrap();
+            let label = if layout_geometry::node_id(root) == hover.request.target.node {
+                "Layout"
+            } else {
+                layout_geometry::find(root, hover.request.target.node)
+                    .map(|node| match node {
+                        Node::Split {
+                            axis: Axis::Horizontal,
+                            ..
+                        } => "Row",
+                        Node::Split {
+                            axis: Axis::Vertical,
+                            ..
+                        } => "Column",
+                        Node::Tabs { .. } => "Panel",
+                    })
+                    .unwrap_or("Region")
+            };
+            let direction = match hover.request.target.edge {
+                Edge::Left => "left",
+                Edge::Right => "right",
+                Edge::Top => "above",
+                Edge::Bottom => "below",
+                Edge::Center => "tab",
+            };
+            let text = if preview.is_none() {
+                "Cannot dock here".to_owned()
+            } else if let Some(bar) = selected_bar {
+                format!("{label} · level {} · {direction}", bar.depth + 1)
+            } else {
+                format!("{label} · {direction}")
+            };
+            overlay = overlay.child(
+                div()
+                    .absolute()
+                    .left(owner.origin.x + px(6.))
+                    .top(owner.origin.y + px(6.))
+                    .px_2()
+                    .py_1()
+                    .bg(rgb(PANEL))
+                    .border_1()
+                    .border_color(rgb(color))
+                    .text_color(rgb(TEXT))
+                    .text_xs()
+                    .child(text),
+            );
         }
         if let Some(guide) = &session.guide {
             for bar in guide.bars.iter().flatten() {

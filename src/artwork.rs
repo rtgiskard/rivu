@@ -134,10 +134,10 @@ impl ArtworkManager {
             } else {
                 // Fingerprint replacement keeps its existing FIFO position.
                 if !entries.contains_key(&track.id) {
-                    if entries.len() == MAX_ARTWORK_ENTRIES {
-                        if let Some(oldest) = order.pop_front() {
-                            entries.remove(&oldest);
-                        }
+                    if entries.len() == MAX_ARTWORK_ENTRIES
+                        && let Some(oldest) = order.pop_front()
+                    {
+                        entries.remove(&oldest);
                     }
                     order.push_back(track.id);
                 }

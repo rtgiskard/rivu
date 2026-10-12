@@ -165,18 +165,18 @@ pub(in crate::gui) fn edit_sizes(
     gutter: f64,
 ) -> HashMap<u64, (f64, f64)> {
     remove_region(root, panel, &mut sizes, gutter);
-    if let Some((target, edge, tabs_id)) = docking.filter(|(_, edge, _)| *edge != Edge::Center) {
-        if let (Some(node), Some(outer)) = (find(root, target), sizes.get(&target).copied()) {
-            let mut half = outer;
-            if matches!(edge, Edge::Left | Edge::Right) {
-                half.0 = (outer.0 - gutter).max(0.) * 0.5;
-            } else {
-                half.1 = (outer.1 - gutter).max(0.) * 0.5;
-            }
-            resize(node, half, &mut sizes, gutter);
-            sizes.insert(tabs_id, half);
-            sizes.insert(tabs_id + 1, outer);
+    if let Some((target, edge, tabs_id)) = docking.filter(|(_, edge, _)| *edge != Edge::Center)
+        && let (Some(node), Some(outer)) = (find(root, target), sizes.get(&target).copied())
+    {
+        let mut half = outer;
+        if matches!(edge, Edge::Left | Edge::Right) {
+            half.0 = (outer.0 - gutter).max(0.) * 0.5;
+        } else {
+            half.1 = (outer.1 - gutter).max(0.) * 0.5;
         }
+        resize(node, half, &mut sizes, gutter);
+        sizes.insert(tabs_id, half);
+        sizes.insert(tabs_id + 1, outer);
     }
     sizes
 }

@@ -500,10 +500,9 @@ impl GuiApp {
             .initialize_audio_visualizers(AudioVisualizerOptions::from(
                 state.system.config.as_ref(),
             ))
+            && let Err(save_error) = layouts.save(&layout_path)
         {
-            if let Err(save_error) = layouts.save(&layout_path) {
-                error = Some(format!("Saving layouts: {save_error:#}"));
-            }
+            error = Some(format!("Saving layouts: {save_error:#}"));
         }
         let ui_font = fonts::resolve(&state.system.config.ui_font, cx);
         let mut inputs = HashMap::new();
@@ -852,12 +851,12 @@ impl GuiApp {
             let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok(files) => {
-                        if let Some(path) = chooser_path(&files) {
-                            if let Err(error) = this.handle.update_gui_config(
+                        if let Some(path) = chooser_path(&files)
+                            && let Err(error) = this.handle.update_gui_config(
                                 crate::core::GuiConfigChange::AddLibraryRoot(path),
-                            ) {
-                                this.error = Some(format!("{error:#}"));
-                            }
+                            )
+                        {
+                            this.error = Some(format!("{error:#}"));
                         }
                     }
                     Err(error) => this.error = Some(format!("Opening library folder: {error}")),

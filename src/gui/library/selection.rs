@@ -380,10 +380,10 @@ impl LibraryBrowser {
             .collect();
         if !self.tree_active {
             for slice in &mut slices {
-                if let Source::Tree(branch) = &slice.source {
-                    if !branch.is_forest() {
-                        slice.source = Source::Flat(branch.clone());
-                    }
+                if let Source::Tree(branch) = &slice.source
+                    && !branch.is_forest()
+                {
+                    slice.source = Source::Flat(branch.clone());
                 }
             }
         }

@@ -442,11 +442,12 @@ fn run_loop(socket_path: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>
             redraw = true;
             immediate_redraw = true;
         }
-        if let Some((request, result)) = queries.latest.lock().take() {
-            if tui.ui.apply_query(&tui.snapshot, &request, result) {
-                redraw = true;
-                immediate_redraw = true;
-            }
+        let latest = queries.latest.lock().take();
+        if let Some((request, result)) = latest
+            && tui.ui.apply_query(&tui.snapshot, &request, result)
+        {
+            redraw = true;
+            immediate_redraw = true;
         }
         match tui.ui.query_request(&tui.snapshot) {
             Some(request) if tui.ui.requested.as_ref() != Some(&request) => {
@@ -542,12 +543,12 @@ impl TuiState {
         {
             self.ui.invalidate_views();
         }
-        if self.snapshot.system.library_roots != next.system.library_roots {
-            if let View::Tree(tree) = &mut self.ui.view {
-                tree.roots = LibraryTree::roots(&next.system.library_roots);
-                tree.entries.clear();
-                self.ui.requested = None;
-            }
+        if self.snapshot.system.library_roots != next.system.library_roots
+            && let View::Tree(tree) = &mut self.ui.view
+        {
+            tree.roots = LibraryTree::roots(&next.system.library_roots);
+            tree.entries.clear();
+            self.ui.requested = None;
         }
         self.ui.sync_queue(&self.snapshot, &next);
         if let Some(message) = snapshot_message(&self.snapshot, &next) {
@@ -582,7 +583,9 @@ struct Notice {
     expires_at: Instant,
 }
 
+#[derive(Default)]
 enum View {
+    #[default]
     Queue,
     Search(LibrarySearch),
     Tree(LibraryTree),
@@ -591,12 +594,6 @@ enum View {
         playlists: (ListState, usize),
         detail: PlaylistDetail,
     },
-}
-
-impl Default for View {
-    fn default() -> Self {
-        Self::Queue
-    }
 }
 
 #[derive(Default)]

@@ -558,10 +558,10 @@ fn normalized_ends(node: &Node, wanted_axis: Axis, emit: &mut dyn FnMut(f64) -> 
 }
 
 fn normalized_boundaries_representable(node: &Node) -> bool {
-    if let Node::Split { children, .. } = node {
-        if !children.iter().all(normalized_boundaries_representable) {
-            return false;
-        }
+    if let Node::Split { children, .. } = node
+        && !children.iter().all(normalized_boundaries_representable)
+    {
+        return false;
     }
     let Some((Some(axis), _)) = normalized_shape(node) else {
         return true;
