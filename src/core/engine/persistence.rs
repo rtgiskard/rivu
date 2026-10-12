@@ -87,23 +87,31 @@ impl Core {
 
     pub(in crate::core) fn update_track_stats(&mut self, track_id: i64) -> Result<()> {
         let track = self.store.track(track_id)?.context("Track not found")?;
-        if let Some(row) = Arc::make_mut(&mut self.state.queue.tracks)
-            .iter_mut()
-            .find(|row| row.id == track_id)
-        {
-            row.title.clone_from(&track.title);
-            row.artist.clone_from(&track.artist);
-            row.album.clone_from(&track.album);
-            row.duration = track.duration;
-            row.favorite = track.favorite;
-            row.missing = track.missing;
-            row.play_count = track.play_count;
+        if let Ok(index) = self.state.queue.tracks.binary_search_by_key(&track_id, |row| row.id) {
+            let row = &self.state.queue.tracks[index];
+            if row.title != track.title
+                || row.artist != track.artist
+                || row.album != track.album
+                || row.duration != track.duration
+                || row.favorite != track.favorite
+                || row.missing != track.missing
+                || row.play_count != track.play_count
+            {
+                let row = &mut Arc::make_mut(&mut self.state.queue.tracks)[index];
+                row.title.clone_from(&track.title);
+                row.artist.clone_from(&track.artist);
+                row.album.clone_from(&track.album);
+                row.duration = track.duration;
+                row.favorite = track.favorite;
+                row.missing = track.missing;
+                row.play_count = track.play_count;
+            }
         }
         if self
             .state
             .current_track
             .as_ref()
-            .is_some_and(|current| current.id == track_id)
+            .is_some_and(|current| current.id == track_id && current.as_ref() != &track)
         {
             self.state.current_track = Some(Arc::new(track));
         }

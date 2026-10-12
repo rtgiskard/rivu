@@ -270,6 +270,37 @@ impl Core {
             .map(Arc::new);
         Ok(())
     }
+    /// Metadata edits keep unrelated queue rows and playback projections intact.
+    /// Queue rows remain ID-sorted and distinct even when entries repeat a track.
+    pub(in crate::core) fn refresh_affected_queue_tracks(&mut self, track_ids: &[i64]) -> Result<()> {
+        let mut queued_ids = track_ids
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.state.queue.tracks.binary_search_by_key(id, |row| row.id).is_ok()
+            })
+            .collect::<Vec<_>>();
+        queued_ids.sort_unstable();
+        queued_ids.dedup();
+        if !queued_ids.is_empty() {
+            for row in self.store.queue_rows(&queued_ids)? {
+                let index = self.state.queue.tracks.binary_search_by_key(&row.id, |row| row.id)
+                    .expect("affected row is already queued");
+                if self.state.queue.tracks[index] != row {
+                    Arc::make_mut(&mut self.state.queue.tracks)[index] = row;
+                }
+            }
+        }
+        if let Some(current) = self.state.current_track.as_ref()
+            && track_ids.contains(&current.id)
+        {
+            let track = self.store.track(current.id)?;
+            if track.as_ref() != Some(current.as_ref()) {
+                self.state.current_track = track.map(Arc::new);
+            }
+        }
+        Ok(())
+    }
     pub(in crate::core) fn view(&self, query: &Query) -> Result<ViewResponse> {
         let current = self.state.query_revisions();
         let (expected, playlist) = match query {

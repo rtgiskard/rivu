@@ -672,6 +672,132 @@ mod tests {
     }
 
     #[test]
+    fn unrelated_metadata_edits_preserve_queue_and_playback_sections() {
+        let (_directory, mut core) = fixture();
+        core.remove_queue_entries(&[5]).unwrap();
+        core.state.queue.current_id = Some(1);
+        core.refresh_queue_tracks().unwrap();
+        core.publish();
+        let queue = core.state.queue.clone();
+        let current = core.state.current_track.clone().unwrap();
+        for command in [
+            Command::EditTrack {
+                track_id: 4,
+                title: "Unqueued edit".into(),
+                artist: "Artist".into(),
+                album: "Album".into(),
+            },
+            Command::SetFavorite {
+                track_ids: vec![4],
+                favorite: true,
+            },
+        ] {
+            let before = core.state.revisions;
+            core.command(command).unwrap();
+            core.publish();
+            assert_eq!(
+                core.state.revisions.changed_since(before),
+                StateSections { library: true, ..StateSections::default() }
+            );
+            assert!(Arc::ptr_eq(&queue.entries, &core.state.queue.entries));
+            assert!(Arc::ptr_eq(&queue.tracks, &core.state.queue.tracks));
+            assert!(Arc::ptr_eq(&current, core.state.current_track.as_ref().unwrap()));
+        }
+        let edited = core.store.track(4).unwrap().unwrap();
+        assert_eq!(edited.title, "Unqueued edit");
+        assert!(edited.favorite);
+    }
+
+    #[test]
+    fn queued_metadata_edits_update_distinct_rows_and_only_affected_sections() {
+        let (_directory, mut core) = fixture();
+        core.state.queue.current_id = Some(1);
+        core.refresh_queue_tracks().unwrap();
+        core.publish();
+        let entries = core.state.queue.entries.clone();
+        let current = core.state.current_track.clone().unwrap();
+        let before = core.state.revisions;
+        core.command(Command::EditTrack {
+            track_id: 2,
+            title: "Edited duplicate".into(),
+            artist: "Artist".into(),
+            album: "Album".into(),
+        }).unwrap();
+        core.publish();
+        assert_eq!(
+            core.state.revisions.changed_since(before),
+            StateSections { queue: true, library: true, ..StateSections::default() }
+        );
+        assert!(Arc::ptr_eq(&entries, &core.state.queue.entries));
+        assert!(Arc::ptr_eq(&current, core.state.current_track.as_ref().unwrap()));
+        assert_eq!(core.state.queue.tracks.iter().map(|row| row.id).collect::<Vec<_>>(), [1, 2, 3, 4]);
+        assert_eq!(core.state.queue.entries.iter().filter(|entry| entry.track_id == 2).count(), 2);
+        let duplicate = &core.state.queue.tracks[1];
+        assert_eq!((&*duplicate.title, &*duplicate.artist, &*duplicate.album), ("Edited duplicate", "Artist", "Album"));
+
+        let before = core.state.revisions;
+        core.command(Command::SetFavorite { track_ids: vec![3, 2, 2], favorite: true }).unwrap();
+        core.publish();
+        assert_eq!(
+            core.state.revisions.changed_since(before),
+            StateSections { queue: true, library: true, ..StateSections::default() }
+        );
+        assert!(core.state.queue.tracks[1].favorite);
+        assert!(core.state.queue.tracks[2].favorite);
+        assert!(!core.state.queue.tracks[0].favorite);
+
+        for command in [
+            Command::EditTrack { track_id: 1, title: "Current edit".into(), artist: "Now".into(), album: "Playing".into() },
+            Command::SetFavorite { track_ids: vec![1], favorite: true },
+        ] {
+            let before = core.state.revisions;
+            core.command(command).unwrap();
+            core.publish();
+            assert_eq!(
+                core.state.revisions.changed_since(before),
+                StateSections { playback: true, queue: true, library: true, ..StateSections::default() }
+            );
+        }
+        let current = core.state.current_track().unwrap();
+        assert_eq!((&*current.title, &*current.artist, &*current.album), ("Current edit", "Now", "Playing"));
+        assert!(current.favorite);
+        let before = core.state.revisions;
+        core.command(Command::SetFavorite { track_ids: vec![1, 2], favorite: true }).unwrap();
+        core.publish();
+        assert_eq!(core.state.revisions.changed_since(before), StateSections { library: true, ..StateSections::default() });
+    }
+
+    #[test]
+    fn activity_only_updates_playback_without_invalidating_queue_rows() {
+        let (_directory, mut core) = fixture();
+        core.state.queue.current_id = Some(1);
+        core.refresh_queue_tracks().unwrap();
+        core.publish();
+        let rows = core.state.queue.tracks.clone();
+        let before = core.state.revisions;
+        core.store.mark_played(1, 7).unwrap();
+        core.update_track_stats(1).unwrap();
+        core.publish();
+        assert_eq!(core.state.current_track().unwrap().last_played, Some(7));
+        assert!(Arc::ptr_eq(&rows, &core.state.queue.tracks));
+        assert_eq!(
+            core.state.revisions.changed_since(before),
+            StateSections { playback: true, library: true, ..StateSections::default() }
+        );
+
+        let before = core.state.revisions;
+        core.store.increment_play_count(1).unwrap();
+        core.update_track_stats(1).unwrap();
+        core.publish();
+        assert_eq!(core.state.queue.tracks[0].play_count, 1);
+        assert_eq!(core.state.current_track().unwrap().play_count, 1);
+        assert_eq!(
+            core.state.revisions.changed_since(before),
+            StateSections { playback: true, queue: true, library: true, ..StateSections::default() }
+        );
+    }
+
+    #[test]
     fn playlist_mutations_preserve_track_traversal_and_playback_sections() {
         let (_directory, mut core) = fixture();
         core.publish();

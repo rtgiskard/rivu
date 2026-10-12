@@ -115,6 +115,13 @@ previous values; the client advances tokens only for sections actually read,
 otherwise it could acknowledge an unseen change. Notifications coalesce to the
 latest state. A server restart requires a fresh Hello and state read.
 
+Track metadata edits invalidate Queue only when a queued display row changes,
+and Playback only when the current track changes. Unrelated edits still advance
+Library, without forcing either section to be re-read. Queue rows contain one
+ID-sorted display record per distinct track, shared by duplicate queue entries.
+Last-played activity updates the current track and Library but does not invalidate
+Queue unless a displayed field, such as play count, also changes.
+
 Watch has no fixed expiry. A complete new request on that connection supersedes
 a pending Watch without a Watch response. The preserved input then becomes the
 next request; disconnect or server shutdown terminates the wait.

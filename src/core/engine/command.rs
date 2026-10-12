@@ -239,7 +239,7 @@ impl Core {
                 album,
             } => {
                 self.store.edit_track(track_id, &title, &artist, &album)?;
-                self.refresh_queue_tracks()?;
+                self.refresh_affected_queue_tracks(&[track_id])?;
                 self.state.library.revision = self.state.library.revision.wrapping_add(1);
             }
             Command::RemoveTracks { track_ids } => {
@@ -268,7 +268,7 @@ impl Core {
             } => {
                 self.store.set_favorite(&track_ids, favorite)?;
                 self.state.library.revision = self.state.library.revision.wrapping_add(1);
-                self.refresh_queue_tracks()?;
+                self.refresh_affected_queue_tracks(&track_ids)?;
             }
             Command::RemoveMissingTracks => {
                 let mut missing_ids = self
