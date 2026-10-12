@@ -937,7 +937,7 @@ impl GuiApp {
         panel_surface(("queue-panel", panel_id))
             .on_drop(cx.listener(|this, drag: &LibraryDrag, window, cx| {
                 window.prevent_default();
-                this.resolve_library_drag(&drag.nodes, super::DragDestination::Queue, cx);
+                this.resolve_library_drag(drag.nodes(), super::DragDestination::Queue, cx);
             }))
             .drag_over::<LibraryDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
             .child(panel_header(
@@ -1033,7 +1033,7 @@ impl GuiApp {
                 )
                 .on_drop(cx.listener(|this, drag: &LibraryDrag, window, cx| {
                     window.prevent_default();
-                    this.resolve_library_drag(&drag.nodes, super::DragDestination::Queue, cx);
+                    this.resolve_library_drag(drag.nodes(), super::DragDestination::Queue, cx);
                 }))
                 .drag_over::<LibraryDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
                 .h_full()
@@ -1105,7 +1105,7 @@ impl GuiApp {
                 window.prevent_default();
                 if let Some(id) = this.browser.playlists.selected() {
                     this.resolve_library_drag(
-                        &drag.nodes,
+                        drag.nodes(),
                         super::DragDestination::Playlist(id),
                         cx,
                     );

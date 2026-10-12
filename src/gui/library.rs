@@ -17,15 +17,26 @@ pub(super) enum LibraryNode {
     Track(i64),
 }
 
-#[derive(Clone)]
 pub(super) struct LibraryDrag {
-    pub(super) nodes: Vec<LibraryNode>,
+    source: LibraryNode,
+    nodes: std::cell::OnceCell<Vec<LibraryNode>>,
+}
+
+impl LibraryDrag {
+    pub(super) fn nodes(&self) -> &[LibraryNode] {
+        self.nodes
+            .get()
+            .expect("drag nodes initialized at drag start")
+    }
+}
+
+struct LibraryDragPreview {
     label: gpui::SharedString,
     icon: &'static str,
 }
 
-impl LibraryDrag {
-    fn new(nodes: Vec<LibraryNode>, title: gpui::SharedString) -> Self {
+impl LibraryDragPreview {
+    fn new(nodes: &[LibraryNode], title: gpui::SharedString) -> Self {
         let directories = nodes
             .iter()
             .filter(|node| matches!(node, LibraryNode::Directory(_)))
@@ -49,11 +60,11 @@ impl LibraryDrag {
         } else {
             ("󰉓", format!("{} items", nodes.len()).into())
         };
-        Self { nodes, label, icon }
+        Self { label, icon }
     }
 }
 
-impl Render for LibraryDrag {
+impl Render for LibraryDragPreview {
     fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         // Window coordinates avoid the source row's grab offset; GPUI fits actual bounds.
         gpui::anchored()
@@ -408,25 +419,6 @@ impl GuiApp {
                             };
                             let selected = this.directory_row_selected(entry);
                             let id = node.clone();
-                            let drag_nodes = if selected && !this.library_range_pending() {
-                                let mut selected_nodes =
-                                    this.browser.library.selected_nodes().clone();
-                                selected_nodes.extend(
-                                    this.browser
-                                        .library
-                                        .selected()
-                                        .iter()
-                                        .copied()
-                                        .map(LibraryNode::Track),
-                                );
-                                if selected_nodes.is_empty() {
-                                    vec![id.clone()]
-                                } else {
-                                    selected_nodes.into_iter().collect()
-                                }
-                            } else {
-                                vec![id.clone()]
-                            };
                             let scan = path.clone().filter(|_| selected).map(|scan_path| {
                                 let hint = format!("Rescan {}", scan_path.display());
                                 super::components::quiet_icon_button(icon_button(
@@ -445,11 +437,7 @@ impl GuiApp {
                                     },
                                 ))
                             });
-                            let drag = LibraryDrag {
-                                nodes: drag_nodes,
-                                label: title.into(),
-                                icon: "",
-                            };
+                            let title = gpui::SharedString::from(title);
                             let row_view = super::tree_row(
                                 gpui::ElementId::named_usize("library-node", index),
                                 visible.depth,
@@ -477,7 +465,7 @@ impl GuiApp {
                                 row()
                                     .flex_1()
                                     .min_w_0()
-                                    .child(div().min_w_0().truncate().child(drag.label.clone()))
+                                    .child(div().min_w_0().truncate().child(title.clone()))
                                     .when(!detail.is_empty(), |v| {
                                         v.child(
                                             div()
@@ -510,11 +498,23 @@ impl GuiApp {
                                 },
                             )
                             .when(!this.library_range_pending(), |view| {
-                                view.on_drag(drag, |drag, _, _, cx| {
-                                    cx.new(|_| {
-                                        LibraryDrag::new(drag.nodes.clone(), drag.label.clone())
-                                    })
-                                })
+                                let app = cx.entity();
+                                view.on_drag(
+                                    LibraryDrag {
+                                        source: id.clone(),
+                                        nodes: std::cell::OnceCell::new(),
+                                    },
+                                    move |drag, _, _, cx| {
+                                        app.update(cx, |this, cx| {
+                                            let nodes = drag.nodes.get_or_init(|| {
+                                                this.browser.library.drag_nodes(&drag.source)
+                                            });
+                                            cx.new(|_| {
+                                                LibraryDragPreview::new(nodes, title.clone())
+                                            })
+                                        })
+                                    },
+                                )
                             })
                             .on_click(cx.listener(
                                 move |this, event: &gpui::ClickEvent, window, cx| {

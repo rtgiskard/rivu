@@ -124,6 +124,21 @@ impl LibraryBrowser {
     pub(super) fn selected_nodes(&self) -> &HashSet<LibraryNode> {
         &self.selected_nodes
     }
+    pub(super) fn drag_nodes(&self, source: &LibraryNode) -> Vec<LibraryNode> {
+        let selected = match source {
+            LibraryNode::Track(id) => self.selected.contains(id),
+            LibraryNode::Directory(_) => self.selected_nodes.contains(source),
+        };
+        if !selected {
+            return vec![source.clone()];
+        }
+        self.selected_nodes
+            .iter()
+            .cloned()
+            .chain(self.selected.iter().copied().map(LibraryNode::Track))
+            .collect()
+    }
+
     pub(super) fn tree_active(&self) -> bool {
         self.tree_active
     }
@@ -479,6 +494,40 @@ impl HistoryBrowser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drag_source_resolves_current_mixed_selection_without_duplicates() {
+        let mut library = LibraryBrowser::default();
+        let folder =
+            LibraryNode::Directory(std::sync::Arc::from(std::path::Path::new("/music/album")));
+        library.apply_range(
+            HashSet::from([folder.clone(), LibraryNode::Track(1), LibraryNode::Track(2)]),
+            false,
+        );
+        for source in [&folder, &LibraryNode::Track(1)] {
+            let nodes = library.drag_nodes(source);
+            assert_eq!(nodes.len(), 3);
+            assert_eq!(
+                nodes.into_iter().collect::<HashSet<_>>(),
+                HashSet::from([folder.clone(), LibraryNode::Track(1), LibraryNode::Track(2)])
+            );
+        }
+        assert_eq!(
+            library.drag_nodes(&LibraryNode::Track(3)),
+            [LibraryNode::Track(3)]
+        );
+        library.select_node(&LibraryNode::Track(2), false);
+        assert_eq!(
+            library.drag_nodes(&LibraryNode::Track(1)),
+            [LibraryNode::Track(1)]
+        );
+        assert_eq!(
+            library.drag_nodes(&LibraryNode::Track(2)),
+            [LibraryNode::Track(2)]
+        );
+        library.clear_selection();
+        assert_eq!(library.drag_nodes(&folder), [folder]);
+    }
 
     #[test]
     fn filter_and_view_changes_cancel_deferred_navigation_without_losing_identity() {
