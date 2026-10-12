@@ -24,19 +24,34 @@ Bulk queue moves rewrite the affected interval rather than the full queue;
 reorders skip rows whose position is already correct. Entry identities and the
 current occurrence remain stable, and no-op moves leave queue content valid.
 
-Scan-backed metadata and user overrides use null-safe change predicates, so
-identical values do not rewrite tracks or invalidate queue content. Track-ID
-mutations serialize each input list once and validate it inside the mutation's
-transaction before writing. Count-only pages omit row projection; queue and
-playlist totals do not join track metadata. Equivalent normalized root prefixes
-are counted once per request, then expanded to the original paths and order.
-Root aggregation state is request-local and bounded by the 256-root query limit.
+Scan-backed metadata and user overrides skip writes when their stored values are
+unchanged. Setting an override equal to its raw value still records that editing
+intent; an omitted field continues to follow rescanned metadata. No-op edits
+succeed for existing tracks and still reject unknown IDs. Queue-content validity
+is described in <<_revisions_and_watching,Revisions and watching>>.
+
+Track-ID mutations serialize each input list once. Library deletion validates
+before playback-side effects, then consumes the prepared input in the same
+serialized core dispatch. Stopping playback can update statistics, not catalog
+identities; reference deletion and gap compaction remain transactional.
+Count-only pages omit row projection; queue and playlist totals do not join
+track metadata. Equivalent normalized root prefixes are counted once per request,
+then expanded to the original paths and order. Root aggregation state is
+request-local and bounded by the 256-root query limit.
+
+Directory and root queries use BINARY path ranges: a normalized nonempty prefix
+ends in `/`, and replacing that delimiter with `0` gives its exclusive upper
+bound. These ranges preserve literal characters, case, Unicode, and component
+boundaries. A full path index includes ordinary files and CUE segments alongside
+the separate identity constraints. It avoids full table scans per distinct root,
+at the cost of index storage and maintenance during library writes.
 
 Playlist deletion-reference lookup has an additional index on
-`(track_id,playlist_id,position)`. It avoids scanning unrelated playlist entries
-for sparse library deletions, at the cost of extra storage and index maintenance
-on insertion, movement, and deletion. Dense deletion still processes its affected
-references and can be slower with this index.
+`(track_id,playlist_id)`. It avoids scanning unrelated playlist entries for sparse
+library deletions. Position is deliberately excluded: capturing removed positions
+needs table lookups, but moving or compacting entries does not rewrite the reverse
+index in addition to the ordering index. Dense capture alone can be slower; the
+choice reduces storage and favors complete deletion/compaction and movement.
 
 The GUI, tray, and MPRIS service use in-process handles and purpose-specific
 projections. CLI and TUI clients use the local IPC socket. Both paths reach the
@@ -191,6 +206,8 @@ content pages. Unrelated track edits advance Library only. Last-played activity
 does not invalidate Queue unless a displayed field, such as play count, changes.
 Reapplying identical metadata or favorites, including a forced scan that keeps
 the same displayed values, does not advance the queue content revision.
+Raw title, artist, or album changes hidden by overrides also leave queue content
+valid when their effective display values are unchanged.
 
 Watch has no fixed expiry. A complete new request on that connection supersedes
 a pending Watch without a Watch response. The preserved input then becomes the
@@ -236,9 +253,10 @@ directory normalization and component boundary: `/home/a` never includes
 `/home/ab`; `/` includes the whole absolute-path library.
 
 `LibraryRootCounts` accepts up to 256 root paths and returns one `{path, total}`
-per input, in input order, using a single batched aggregate query. Larger input
-batches return a query error. Counts include all scanned tracks, including missing
-ones, regardless of view filters; an empty root returns zero. Overlapping roots
+per input, in input order, using a single batched query. Larger input batches
+return a query error. Counts include all scanned tracks, including missing ones,
+regardless of view filters; a root without scanned tracks returns zero. An empty
+path requests the entire library. Overlapping roots
 each count their own subtree independently. Clients keep unavailable counts
 distinct from zero, split larger root sets into bounded requests, and discard
 results when their roots, request generation, or library revision have changed.

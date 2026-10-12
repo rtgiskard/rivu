@@ -199,7 +199,7 @@ impl Core {
             Command::RemoveTracks { mut track_ids } => {
                 track_ids.sort_unstable();
                 track_ids.dedup();
-                self.store.validate_tracks(&track_ids)?;
+                let removal = self.store.prepare_track_removal(&track_ids)?;
                 if self
                     .state
                     .current_track()
@@ -209,7 +209,7 @@ impl Core {
                     self.state.queue.current_id = None;
                     self.state.current_track = None;
                 }
-                self.store.remove_tracks(&track_ids)?;
+                self.store.remove_prepared_tracks(removal)?;
                 self.reload_queue()?;
                 self.refresh_queue_tracks()?;
                 self.reload_catalog(true)?;

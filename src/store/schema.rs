@@ -29,6 +29,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
         );
         CREATE INDEX tracks_fingerprint ON tracks(fingerprint);
         CREATE UNIQUE INDEX tracks_path ON tracks(path) WHERE cue_sheet IS NULL;
+        CREATE INDEX tracks_directory ON tracks(path);
         CREATE UNIQUE INDEX tracks_cue ON tracks(cue_sheet,cue_number) WHERE cue_sheet IS NOT NULL;
         CREATE INDEX tracks_recent ON tracks(last_played DESC,id DESC) WHERE last_played IS NOT NULL;
         CREATE TABLE playlists(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL);
@@ -39,7 +40,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
         );
         CREATE INDEX playlist_order ON playlist_entries(playlist_id,position,id);
         CREATE UNIQUE INDEX playlist_track ON playlist_entries(playlist_id,track_id);
-        CREATE INDEX playlist_track_lookup ON playlist_entries(track_id,playlist_id,position);
+        CREATE INDEX playlist_track_lookup ON playlist_entries(track_id,playlist_id);
         CREATE TABLE queue_entries(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
@@ -66,10 +67,10 @@ fn create_schema(conn: &Connection) -> Result<()> {
         CREATE TRIGGER queue_metadata AFTER UPDATE OF raw_title,raw_artist,raw_album,
             title_override,artist_override,album_override,duration,favorite,missing,
             play_count,codec,bitrate_bps ON tracks
-        WHEN (old.raw_title IS NOT new.raw_title OR old.raw_artist IS NOT new.raw_artist
-            OR old.raw_album IS NOT new.raw_album OR old.title_override IS NOT new.title_override
-            OR old.artist_override IS NOT new.artist_override
-            OR old.album_override IS NOT new.album_override OR old.duration IS NOT new.duration
+        WHEN (COALESCE(old.title_override,old.raw_title) IS NOT COALESCE(new.title_override,new.raw_title)
+            OR COALESCE(old.artist_override,old.raw_artist) IS NOT COALESCE(new.artist_override,new.raw_artist)
+            OR COALESCE(old.album_override,old.raw_album) IS NOT COALESCE(new.album_override,new.raw_album)
+            OR old.duration IS NOT new.duration
             OR old.favorite IS NOT new.favorite OR old.missing IS NOT new.missing
             OR old.play_count IS NOT new.play_count OR old.codec IS NOT new.codec
             OR old.bitrate_bps IS NOT new.bitrate_bps)

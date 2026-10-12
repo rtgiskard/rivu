@@ -265,6 +265,10 @@ Rivu accepts version 7 library databases only; other schemas are not upgraded
 automatically. Stop the core and back up the database before replacing it or
 switching to a build with a different database schema.
 
+Version 7 is still unreleased. Development builds that change its index or
+trigger definitions require rebuilding experimental version-7 databases; the
+version check does not upgrade those definitions in existing databases.
+
 Stop the core before removing `library.db` and its `-wal`/`-shm` sidecars, then scan
 the music files again. This resets playlists, saved queue, favorites, metadata
 overrides, and playback statistics; audio files, `config.toml`, and

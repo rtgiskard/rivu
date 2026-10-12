@@ -451,26 +451,89 @@ mod tests {
     }
 
     #[test]
-    fn raw_metadata_changes_invalidate_even_under_an_override() {
+    fn raw_metadata_changes_under_overrides_persist_without_invalidating_queue() {
         let (store, mut scan, id) = queued(record());
-        store.edit_track(id, Some("Override"), None, None).unwrap();
+        store
+            .edit_track(
+                id,
+                Some("Custom title"),
+                Some("Custom artist"),
+                Some("Custom album"),
+            )
+            .unwrap();
         let page = store.queue_page(0, 10).unwrap();
         let state = store.queue_state().unwrap();
-        store.edit_track(id, Some("Override"), None, None).unwrap();
+        scan.records[0].media.title = "New raw title".into();
+        scan.records[0].media.artist = "New raw artist".into();
+        scan.records[0].media.album = "New raw album".into();
+        store.apply_scan(&scan).unwrap();
         assert_eq!(store.queue_state().unwrap(), state);
         assert_eq!(store.queue_page(0, 10).unwrap(), page);
-        scan.records[0].media.title = "New raw title".into();
+        let known = store.known_files().unwrap();
+        let raw = known[0].media.as_ref().unwrap();
+        assert_eq!(raw.title, "New raw title");
+        assert_eq!(raw.artist, "New raw artist");
+        assert_eq!(raw.album, "New raw album");
+        let track = store.track(id).unwrap().unwrap();
+        assert_eq!(track.title, "Custom title");
+        assert_eq!(track.artist, "Custom artist");
+        assert_eq!(track.album, "Custom album");
+    }
+
+    #[test]
+    fn equal_to_raw_and_repeated_overrides_keep_queue_revision_stable() {
+        let (store, mut scan, id) = queued(record());
+        let page = store.queue_page(0, 10).unwrap();
+        let state = store.queue_state().unwrap();
+        for (title, artist, album) in [
+            (Some("Title"), None, None),
+            (None, Some("Artist"), None),
+            (None, None, Some("Album")),
+            (Some("Title"), Some("Artist"), Some("Album")),
+        ] {
+            for _ in 0..2 {
+                store.edit_track(id, title, artist, album).unwrap();
+                assert_eq!(store.queue_state().unwrap(), state);
+                assert_eq!(store.queue_page(0, 10).unwrap(), page);
+            }
+        }
+        // A later rescan proves equal overrides were retained, not discarded.
+        scan.records[0].media.title = "Changed raw title".into();
+        scan.records[0].media.artist = "Changed raw artist".into();
+        scan.records[0].media.album = "Changed raw album".into();
         store.apply_scan(&scan).unwrap();
-        assert!(store.queue_state().unwrap().revision > state.revision);
+        assert_eq!(store.queue_state().unwrap(), state);
         assert_eq!(store.queue_page(0, 10).unwrap(), page);
-        assert_eq!(
-            store.known_files().unwrap()[0]
-                .media
-                .as_ref()
-                .unwrap()
-                .title,
-            "New raw title"
-        );
+    }
+
+    #[test]
+    fn displayed_overrides_invalidate_queue_including_empty_strings() {
+        let (store, _, id) = queued(record());
+        for (title, artist, album) in [
+            (Some("Custom title"), None, None),
+            (None, Some("Custom artist"), None),
+            (None, None, Some("Custom album")),
+            (Some(""), None, None),
+            (None, Some(""), None),
+            (None, None, Some("")),
+        ] {
+            let before = store.queue_page(0, 10).unwrap().rows.remove(0);
+            let state = store.queue_state().unwrap();
+            store.edit_track(id, title, artist, album).unwrap();
+            assert!(store.queue_state().unwrap().revision > state.revision);
+            let after = store.queue_page(0, 10).unwrap().rows.remove(0);
+            assert_eq!(
+                (after.id, after.track_id, after.position),
+                (before.id, id, before.position)
+            );
+            assert_eq!(after.track.title, title.unwrap_or(&before.track.title));
+            assert_eq!(after.track.artist, artist.unwrap_or(&before.track.artist));
+            assert_eq!(after.track.album, album.unwrap_or(&before.track.album));
+            let state = store.queue_state().unwrap();
+            store.edit_track(id, title, artist, album).unwrap();
+            assert_eq!(store.queue_state().unwrap(), state);
+            assert_eq!(store.queue_page(0, 10).unwrap().rows[0], after);
+        }
     }
 
     #[test]

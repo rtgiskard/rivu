@@ -12,6 +12,9 @@ use std::path::{Path, PathBuf};
 
 const TRACK_SEARCH_FILTER: &str = "WHERE (?1 IS NULL OR instr(lower(COALESCE(tracks.title_override,tracks.raw_title) || ' ' || COALESCE(tracks.artist_override,tracks.raw_artist) || ' ' || tracks.path),?1)>0) AND (?2 IS NULL OR tracks.favorite=?2) AND (?3 IS NULL OR tracks.missing=?3)";
 pub(super) const SOURCE_FILTER: &str = "tracks.id IN (SELECT value FROM json_each(?2)) OR EXISTS (SELECT 1 FROM json_each(?1) AS directory WHERE substr(tracks.path,1,length(directory.value))=directory.value)";
+// Normalized nonempty prefixes end in ASCII '/'; replacing that final byte with
+// '0' gives the exclusive BINARY upper bound, including every Unicode suffix.
+const DIRECTORY_SCOPE: &str = " AND tracks.path>=?4 AND tracks.path<(rtrim(?4,'/')||'0')";
 
 fn directory_prefix(path: &Path) -> Result<String> {
     if path.as_os_str().is_empty() {
@@ -32,6 +35,13 @@ fn library_order(sort: crate::model::LibrarySort) -> &'static str {
         }
         crate::model::LibrarySort::MostPlayed => "play_count DESC,id",
     }
+}
+
+/// Consumed immediately by the same core dispatch; stopping playback cannot
+/// change the validated catalog identities. The JSON and cache IDs stay paired.
+pub(crate) struct PreparedTrackRemoval<'a> {
+    ids: &'a [i64],
+    encoded: String,
 }
 
 impl Store {
@@ -93,10 +103,13 @@ impl Store {
         limit: usize,
     ) -> Result<Page<crate::model::LibraryRow>> {
         let prefix = directory_prefix(path)?;
+        if prefix.is_empty() {
+            return self.library_view_page(query, favorite, missing, sort, offset, limit);
+        }
         let query = query
             .filter(|query| !query.is_empty())
             .map(str::to_lowercase);
-        let scope = " AND substr(tracks.path,1,length(?4))=?4";
+        let scope = DIRECTORY_SCOPE;
         let total = self.conn.query_row(
             &format!("SELECT COUNT(*) FROM tracks {TRACK_SEARCH_FILTER}{scope}"),
             params![query, favorite, missing, prefix],
@@ -143,13 +156,14 @@ impl Store {
         let mut unique = Vec::with_capacity(prefixes.len());
         let mut indices = HashMap::with_capacity(prefixes.len());
         for prefix in &prefixes {
-            if !indices.contains_key(prefix.as_str()) {
-                indices.insert(prefix.as_str(), unique.len());
+            if let std::collections::hash_map::Entry::Vacant(entry) = indices.entry(prefix.as_str())
+            {
+                entry.insert(unique.len());
                 unique.push(prefix.as_str());
             }
         }
         let mut stmt = self.conn.prepare(
-            "SELECT roots.key,COUNT(tracks.id) FROM json_each(?1) AS roots LEFT JOIN tracks ON substr(tracks.path,1,length(roots.value))=roots.value GROUP BY roots.key ORDER BY roots.key"
+            "SELECT roots.key,CASE WHEN roots.value='' THEN (SELECT COUNT(*) FROM tracks) ELSE (SELECT COUNT(*) FROM tracks WHERE tracks.path>=roots.value AND tracks.path<(rtrim(roots.value,'/')||'0')) END FROM json_each(?1) AS roots ORDER BY roots.key"
         )?;
         let totals = stmt
             .query_map([serde_json::to_string(&unique)?], |row| {
@@ -200,17 +214,23 @@ impl Store {
         let query = query
             .filter(|query| !query.is_empty())
             .map(str::to_lowercase);
+        let scope = if prefix.is_empty() {
+            ""
+        } else {
+            DIRECTORY_SCOPE
+        };
         // SQLite derives immediate children; Rust retains only the requested page.
         // Group directories but preserve distinct CUE tracks sharing a source path.
         let sources =
             "WITH sources AS (SELECT id,path,substr(path,length(?4)+1) AS rest FROM tracks ";
-        let children = " AND substr(path,1,length(?4))=?4), children AS (SELECT 0 AS kind,CASE WHEN ?4='' AND instr(rest,'/')=1 THEN '/' ELSE ?4||substr(rest,1,instr(rest,'/')-1) END AS child,MIN(id) AS track_id FROM sources WHERE instr(rest,'/')>0 GROUP BY child UNION ALL SELECT 1,path,id FROM sources WHERE instr(rest,'/')=0)";
+        let children = "), children AS (SELECT 0 AS kind,CASE WHEN ?4='' AND instr(rest,'/')=1 THEN '/' ELSE ?4||substr(rest,1,instr(rest,'/')-1) END AS child,MIN(id) AS track_id FROM sources WHERE instr(rest,'/')>0 GROUP BY child UNION ALL SELECT 1,path,id FROM sources WHERE instr(rest,'/')=0)";
         let page_columns = " SELECT c.kind,c.child,";
         let page_tail = " FROM children c JOIN tracks t ON t.id=c.track_id ORDER BY c.kind,c.child,t.id LIMIT ?5 OFFSET ?6";
         // Reuse the library search predicate and one SQL buffer for count and payload.
         let mut sql = String::with_capacity(
             sources.len()
                 + TRACK_SEARCH_FILTER.len()
+                + scope.len()
                 + children.len()
                 + page_columns.len()
                 + LIBRARY_ROW_COLUMNS_QUALIFIED.len()
@@ -218,6 +238,7 @@ impl Store {
         );
         sql.push_str(sources);
         sql.push_str(TRACK_SEARCH_FILTER);
+        sql.push_str(scope);
         sql.push_str(children);
         let children_end = sql.len();
         sql.push_str(" SELECT COUNT(*) FROM children");
@@ -267,9 +288,14 @@ impl Store {
             .collect::<Result<Vec<_>>>()?;
         Ok((serde_json::to_string(&prefixes)?, ids))
     }
-    pub(crate) fn validate_tracks(&self, ids: &[i64]) -> Result<()> {
-        self.validated_track_ids(ids)?;
-        Ok(())
+    pub(crate) fn prepare_track_removal<'a>(
+        &self,
+        ids: &'a [i64],
+    ) -> Result<PreparedTrackRemoval<'a>> {
+        Ok(PreparedTrackRemoval {
+            ids,
+            encoded: self.validated_track_ids(ids)?,
+        })
     }
 
     pub(super) fn validated_track_ids(&self, ids: &[i64]) -> Result<String> {
@@ -399,31 +425,56 @@ impl Store {
         artist: Option<&str>,
         album: Option<&str>,
     ) -> Result<()> {
-        self.track_cache.borrow_mut().entries.remove(&id);
-        changed(
-            self.conn.execute(
-                "UPDATE tracks SET title_override=COALESCE(?1,title_override),
-                 artist_override=COALESCE(?2,artist_override),
-                 album_override=COALESCE(?3,album_override) WHERE id=?4",
-                params![title, artist, album, id],
-            )?,
-            "track",
-            id,
-        )
+        let updated = self.conn.execute(
+            "UPDATE tracks SET title_override=COALESCE(?1,title_override),
+             artist_override=COALESCE(?2,artist_override),
+             album_override=COALESCE(?3,album_override) WHERE id=?4 AND
+             ((?1 IS NOT NULL AND title_override IS NOT ?1) OR
+              (?2 IS NOT NULL AND artist_override IS NOT ?2) OR
+              (?3 IS NOT NULL AND album_override IS NOT ?3))",
+            params![title, artist, album, id],
+        )?;
+        if updated != 0 {
+            self.track_cache.borrow_mut().entries.remove(&id);
+            return Ok(());
+        }
+        let exists: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tracks WHERE id=?1)",
+            [id],
+            |row| row.get(0),
+        )?;
+        changed(usize::from(exists), "track", id)
     }
     pub fn remove_tracks(&self, ids: &[i64]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
-        let encoded_ids = self.validated_track_ids(ids)?;
-        for id in ids {
+        let removal = self.prepare_track_removal(ids)?;
+        self.remove_track_rows(&tx, removal)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn remove_prepared_tracks(&self, removal: PreparedTrackRemoval<'_>) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        self.remove_track_rows(&tx, removal)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn remove_track_rows(
+        &self,
+        tx: &Transaction<'_>,
+        removal: PreparedTrackRemoval<'_>,
+    ) -> Result<()> {
+        for id in removal.ids {
             self.track_cache.borrow_mut().entries.remove(id);
         }
-        let ids = encoded_ids;
+        let ids = removal.encoded;
         let queue_positions = tx
             .prepare("SELECT position FROM queue_entries WHERE track_id IN (SELECT value FROM json_each(?1)) ORDER BY position")?
             .query_map([&ids], |row| row.get(0))?
             .collect::<rusqlite::Result<Vec<i64>>>()?;
         let playlist_positions = removed_playlist_positions(
-            &tx,
+            tx,
             "SELECT playlist_id,position FROM playlist_entries WHERE track_id IN (SELECT value FROM json_each(?1)) ORDER BY playlist_id,position",
             [&ids],
         )?;
@@ -435,11 +486,10 @@ impl Store {
             "DELETE FROM tracks WHERE id IN (SELECT value FROM json_each(?1))",
             [&ids],
         )?;
-        close_gaps(&tx, &queue_positions, PositionScope::Queue)?;
+        close_gaps(tx, &queue_positions, PositionScope::Queue)?;
         for (playlist_id, positions) in playlist_positions {
-            close_gaps(&tx, &positions, PositionScope::Playlist(playlist_id))?;
+            close_gaps(tx, &positions, PositionScope::Playlist(playlist_id))?;
         }
-        tx.commit()?;
         Ok(())
     }
 
@@ -599,9 +649,13 @@ mod deletion_tests {
     }
 
     #[test]
-    fn remove_tracks_compacts_disjoint_and_consecutive_gaps_with_duplicate_inputs() -> Result<()> {
+    fn prepared_deletion_compacts_gaps_after_playback_statistics_change() -> Result<()> {
         let store = fixture()?;
-        store.remove_tracks(&[5, 2, 3, 2, 5])?;
+        let ids = [5, 2, 3, 2, 5];
+        let removal = store.prepare_track_removal(&ids)?;
+        store.mark_played(2, 123)?;
+        store.increment_play_count(2)?;
+        store.remove_prepared_tracks(removal)?;
         assert_compacted(&store)?;
         assert_eq!(current(&store)?, Some(106));
         Ok(())
@@ -664,6 +718,35 @@ mod request_tests {
     use super::*;
 
     #[test]
+    fn no_op_edits_preserve_existing_tracks_but_reject_unknown_ids() -> Result<()> {
+        let store = Store::open(Path::new(":memory:"))?;
+        store.conn.execute(
+            "INSERT INTO tracks(id,path,raw_title,raw_artist,raw_album) VALUES(1,'one','Title','Artist','Album')",
+            [],
+        )?;
+        let original = store.track(1)?.unwrap();
+        store.edit_track(1, None, None, None)?;
+        assert_eq!(store.track(1)?.unwrap(), original);
+        assert!(store.edit_track(999, None, None, None).is_err());
+        assert!(store.edit_track(999, Some("Title"), None, None).is_err());
+        store.edit_track(1, Some(""), Some("Override"), None)?;
+        let edited = store.track(1)?.unwrap();
+        assert_eq!(
+            (&*edited.title, &*edited.artist, &*edited.album),
+            ("", "Override", "Album")
+        );
+        store.edit_track(1, Some(""), Some("Override"), None)?;
+        assert_eq!(store.track(1)?.unwrap(), edited);
+        store.edit_track(1, None, None, Some("New album"))?;
+        let edited = store.track(1)?.unwrap();
+        assert_eq!(
+            (&*edited.title, &*edited.artist, &*edited.album),
+            ("", "Override", "New album")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn invalid_track_requests_have_no_effect_and_duplicate_ids_are_accepted() -> Result<()> {
         let store = Store::open(Path::new(":memory:"))?;
         store
@@ -684,6 +767,50 @@ mod request_tests {
         assert_eq!(favorites, 0);
         store.set_favorite(&[2, 1, 2], true)?;
         assert_eq!(store.library_stats()?.total, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn indexed_directory_ranges_preserve_literal_unicode_and_case_boundaries() -> Result<()> {
+        use crate::model::{DirectoryRow, LibrarySort};
+        let store = Store::open(Path::new(":memory:"))?;
+        for root in ["/m%_usic", "/音楽🎵", "/a\\b", "/Upper"] {
+            let included: i64 = store.conn.query_row(
+                "INSERT INTO tracks(path) VALUES(?1) RETURNING id",
+                [format!("{root}/one.wav")],
+                |row| row.get(0),
+            )?;
+            for path in [
+                format!("{root}0/outside.wav"),
+                format!("{root}al/outside.wav"),
+            ] {
+                store
+                    .conn
+                    .execute("INSERT INTO tracks(path) VALUES(?1)", [path])?;
+            }
+            let path = Path::new(root);
+            assert_eq!(
+                store.library_root_counts(&[path.to_path_buf()])?[0].total,
+                1
+            );
+            let page = store.library_root_page(path, None, None, None, LibrarySort::Id, 0, 10)?;
+            assert_eq!(page.total, 1);
+            assert_eq!(
+                page.rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+                [included]
+            );
+            let tree = store.directory_page(path, None, None, 0, 10)?;
+            assert_eq!(tree.total, 1);
+            assert!(matches!(&tree.rows[..], [DirectoryRow::Track(row)] if row.id == included));
+        }
+        store.conn.execute(
+            "INSERT INTO tracks(path) VALUES('/upper/not-capitalized.wav')",
+            [],
+        )?;
+        assert_eq!(
+            store.library_root_counts(&[PathBuf::from("/Upper")])?[0].total,
+            1
+        );
         Ok(())
     }
 
