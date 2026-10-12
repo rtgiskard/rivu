@@ -513,4 +513,3 @@ pub(crate) fn row_text(
             .into()
         })
 }
-

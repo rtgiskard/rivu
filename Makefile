@@ -5,10 +5,14 @@ CARGO_TARGET_DIR ?= .cache/target
 
 export CARGO_TARGET_DIR
 
-.PHONY: build clean install
+.PHONY: build lint clean install
 
 build:
 	RIVU_GIT_VERSION="$(RIVU_GIT_VERSION)" cargo build --release
+
+lint:
+	cargo fmt --all -- --check
+	cargo clippy --all-targets --all-features -- -D warnings
 
 clean:
 	cargo clean
