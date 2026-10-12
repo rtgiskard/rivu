@@ -729,7 +729,7 @@ impl GuiApp {
         app.request_root_counts(cx);
         app.request_directory_page(library::TreeBranch::default(), 0, cx);
         app.request_playlist_summaries(0, cx);
-        app.request_ranking(0, cx);
+        app.browser.history.sync(&app.state.library.history);
         app.sync_analysis(cx);
         // Initialization may have completed before the wakeup callback was
         // installed. Reconcile once so the first frame never keeps the empty snapshot.
@@ -1077,6 +1077,7 @@ impl GuiApp {
                 self.ui_font = fonts::resolve(&state.system.config.ui_font, cx);
             }
             self.state = state;
+            self.browser.history.sync(&self.state.library.history);
             self.sync_metadata_default(cx);
             self.browser.playlists.reconcile_selection();
             if playlist_changed || page_size_changed {
@@ -1119,7 +1120,6 @@ impl GuiApp {
             if library_changed || library_structure_changed {
                 self.request_root_counts(cx);
                 if !page_size_changed {
-                    self.request_ranking(self.browser.history.offset(), cx);
                     self.browser.library.refresh_tree(self.view_page_size());
                     self.request_directory_page(library::TreeBranch::default(), 0, cx);
                 }

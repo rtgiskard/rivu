@@ -58,6 +58,24 @@ struct TrayData {
     menu_revision: u32,
 }
 
+impl TrayData {
+    fn publish(&mut self, current: &TraySnapshot) -> Option<(TraySnapshot, u32, bool)> {
+        if !current.changed_from(&self.snapshot) {
+            return None;
+        }
+        let menu_changed = current.menu_changed_from(&self.snapshot);
+        if menu_changed {
+            self.menu_revision = self.menu_revision.wrapping_add(1);
+        }
+        let previous = std::mem::replace(&mut self.snapshot, current.clone());
+        Some((previous, self.menu_revision, menu_changed))
+    }
+
+    fn layout_snapshot(&self) -> (TraySnapshot, u32) {
+        (self.snapshot.clone(), self.menu_revision)
+    }
+}
+
 pub(crate) struct TrayController {
     stop: Option<Sender<()>>,
     worker: Option<JoinHandle<()>>,
@@ -118,6 +136,9 @@ fn run_bus(
     stop: Receiver<()>,
     ready: Sender<std::result::Result<(), String>>,
 ) {
+    // The published baseline already exists. Subscribe before bus setup, then
+    // reconcile once even when no later publication wakes this worker.
+    let updates = handle.subscribe();
     let service_name = format!(
         "org.freedesktop.StatusNotifierItem-{}-{}",
         std::process::id(),
@@ -155,8 +176,6 @@ fn run_bus(
         tracing::warn!(error = %error, "tray_watcher_unavailable");
     }
 
-    let updates = handle.subscribe();
-
     let watcher_connection = connection.clone();
     let (watcher_stop, watcher_stopped) = oneshot::channel();
     let watcher = match thread::Builder::new()
@@ -175,7 +194,8 @@ fn run_bus(
         }
     };
 
-    if ready.send(Ok(())).is_ok() {
+    let shutting_down = apply_update(&data, &connection, handle.tray_snapshot());
+    if ready.send(Ok(())).is_ok() && !shutting_down {
         update_loop(handle, data, connection.clone(), updates, stop);
     }
     // Remove signal subscriptions while the socket is still usable. Closing it
@@ -256,19 +276,6 @@ fn update_loop(
     updates: Receiver<()>,
     stop: Receiver<()>,
 ) {
-    let mut previous = handle.tray_snapshot();
-    select_biased! {
-        recv(stop) -> _ => return,
-        recv(updates) -> update => {
-            if update.is_err() {
-                return;
-            }
-            let current = handle.tray_snapshot();
-            if apply_update(&data, &connection, &mut previous, current) {
-                return;
-            }
-        }
-    }
     loop {
         select_biased! {
             recv(stop) -> _ => return,
@@ -277,7 +284,7 @@ fn update_loop(
                     return;
                 }
                 let current = handle.tray_snapshot();
-                if apply_update(&data, &connection, &mut previous, current) {
+                if apply_update(&data, &connection, current) {
                     return;
                 }
             }
@@ -288,23 +295,13 @@ fn update_loop(
 fn apply_update(
     data: &Arc<RwLock<TrayData>>,
     connection: &Connection,
-    previous: &mut TraySnapshot,
     current: TraySnapshot,
 ) -> bool {
-    if current.changed_from(previous) {
-        let menu_changed = current.menu_changed_from(previous);
-        let revision = {
-            let mut state = data.write();
-            state.snapshot = current.clone();
-            if menu_changed {
-                state.menu_revision = state.menu_revision.wrapping_add(1);
-            }
-            state.menu_revision
-        };
-        emit_update(connection, previous, &current, revision, menu_changed);
-        *previous = current;
+    let update = data.write().publish(&current);
+    if let Some((previous, revision, menu_changed)) = update {
+        emit_update(connection, &previous, &current, revision, menu_changed);
     }
-    previous.shutting_down
+    current.shutting_down
 }
 
 fn emit_update(
@@ -464,6 +461,19 @@ struct MenuLayout {
 }
 
 impl MenuLayout {
+    fn root(snapshot: &TraySnapshot, recursion_depth: i32) -> Self {
+        let children = if recursion_depth == 0 {
+            Vec::new()
+        } else {
+            menu_items(snapshot).into_iter().map(Value::from).collect()
+        };
+        Self {
+            id: 0,
+            properties: HashMap::new(),
+            children,
+        }
+    }
+
     fn item(id: i32, label: impl Into<String>) -> Self {
         let mut properties = HashMap::new();
         properties.insert("label".to_owned(), owned_value(label.into()));
@@ -521,20 +531,8 @@ impl DbusMenu {
         if parent_id != 0 {
             return Err(fdo::Error::InvalidArgs("Unknown menu parent".into()));
         }
-        let snapshot = self.data.read().snapshot.clone();
-        let children = if recursion_depth == 0 {
-            Vec::new()
-        } else {
-            menu_items(&snapshot).into_iter().map(Value::from).collect()
-        };
-        Ok((
-            self.data.read().menu_revision,
-            MenuLayout {
-                id: 0,
-                properties: HashMap::new(),
-                children,
-            },
-        ))
+        let (snapshot, revision) = self.data.read().layout_snapshot();
+        Ok((revision, MenuLayout::root(&snapshot, recursion_depth)))
     }
 
     fn get_group_properties(
@@ -726,6 +724,52 @@ fn menu_properties(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_sync_uses_published_baseline_and_layout_revision_stays_paired() {
+        let baseline = TraySnapshot {
+            current_track: None,
+            current_track_id: None,
+            status: PlaybackStatus::Stopped,
+            shuffle: false,
+            repeat: RepeatMode::Off,
+            shutting_down: false,
+        };
+        let mut data = TrayData {
+            snapshot: baseline.clone(),
+            menu_revision: 1,
+        };
+        // Playback may change during bus setup, before another wakeup arrives.
+        let mut latest = baseline;
+        latest.status = PlaybackStatus::Playing;
+        let (previous, revision, menu_changed) = data.publish(&latest).unwrap();
+        assert_eq!(previous.status, PlaybackStatus::Stopped);
+        assert!(menu_changed);
+        assert_eq!(revision, 2);
+        let (layout_snapshot, layout_revision) = data.layout_snapshot();
+        assert_eq!(layout_revision, revision);
+        // A newer publication cannot alter the already captured layout/revision.
+        latest.status = PlaybackStatus::Paused;
+        assert_eq!(data.publish(&latest).unwrap().1, 3);
+        let layout = MenuLayout::root(&layout_snapshot, -1);
+        assert_eq!(layout.children.len(), 8);
+        assert_eq!(
+            menu_properties(&layout_snapshot, 2, &[]).unwrap()["label"],
+            owned_value("Pause".into())
+        );
+        assert!(data.publish(&latest).is_none());
+        latest.shutting_down = true;
+        let (_, revision, menu_changed) = data.publish(&latest).unwrap();
+        assert!(!menu_changed);
+        assert_eq!(revision, 3);
+        data.menu_revision = u32::MAX;
+        latest.shuffle = true;
+        assert_eq!(data.publish(&latest).unwrap().1, 0);
+        let (snapshot, revision) = data.layout_snapshot();
+        let root_only = MenuLayout::root(&snapshot, 0);
+        assert_eq!(revision, 0);
+        assert!(root_only.children.is_empty());
+    }
 
     #[test]
     fn menu_labels_follow_playback_status() {

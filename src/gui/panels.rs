@@ -305,12 +305,12 @@ impl GuiApp {
         tracks
     }
     pub(super) fn panel_track_text(&self, track_id: i64) -> (String, String) {
-        if let Some(track) = self
+        if let Ok(index) = self
             .state
             .queue
             .tracks
-            .iter()
-            .find(|track| track.id == track_id)
+            .binary_search_by_key(&track_id, |track| track.id)
+            && let Some(track) = self.state.queue.tracks.get(index)
         {
             let detail = format!(
                 "{}{}{} · {}{}",
@@ -329,56 +329,6 @@ impl GuiApp {
                 }
             );
             return (track.title.clone(), detail);
-        }
-        if let Some(row) = self
-            .browser
-            .library
-            .tree()
-            .cached_track(track_id)
-            .or_else(|| {
-                self.browser
-                    .history
-                    .rows()
-                    .iter()
-                    .find(|row| row.id == track_id)
-            })
-        {
-            return (
-                row.title.clone(),
-                format!(
-                    "{}{}{} · {}",
-                    row.artist,
-                    if row.artist.is_empty() || row.album.is_empty() {
-                        ""
-                    } else {
-                        " / "
-                    },
-                    row.album,
-                    format_time(row.duration.unwrap_or(0.))
-                ),
-            );
-        }
-        if let Some(row) = self
-            .browser
-            .playlists
-            .entries()
-            .rows
-            .iter()
-            .find(|row| row.track_id == track_id)
-        {
-            return (
-                row.title.clone(),
-                format!(
-                    "{}{}{}",
-                    row.artist,
-                    if row.artist.is_empty() || row.album.is_empty() {
-                        ""
-                    } else {
-                        " / "
-                    },
-                    row.album
-                ),
-            );
         }
         ("Track".into(), format!("Track #{track_id}"))
     }
@@ -1530,22 +1480,7 @@ impl GuiApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut history = self.state.library.history.as_ref().clone();
-        let sort = self.browser.history.sort();
-        let descending = self.browser.history.descending();
-        history.sort_by(|a, b| {
-            let ordering = match sort {
-                HistorySort::Recent => a.played_at.cmp(&b.played_at),
-                HistorySort::Title => a.title.to_lowercase().cmp(&b.title.to_lowercase()),
-                HistorySort::Plays => a.play_count.cmp(&b.play_count),
-            };
-            if descending {
-                ordering.reverse()
-            } else {
-                ordering
-            }
-        });
-        let history_len = history.len();
+        let history_len = self.browser.history.len();
         let header = row()
             .items_center()
             .gap_2()
@@ -1586,7 +1521,7 @@ impl GuiApp {
                         cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                             range
                                 .filter_map(|index| {
-                                    let item = history.get(index)?;
+                                    let item = this.browser.history.get(index)?;
                                     let id = item.track_id;
                                     let title = if item.title.is_empty() {
                                         "Untitled".to_owned()

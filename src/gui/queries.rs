@@ -2,31 +2,21 @@
 //! GuiApp retains the entity and the single frame scheduler.
 
 use super::*;
-use crate::{
-    model::{LibrarySort, Query},
-    response::ViewResponse,
-};
+use crate::{model::Query, response::ViewResponse};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum ViewRequestKind {
-    Ranking,
     PlaylistSummaries,
     PlaylistEntries,
     PlaylistSelection,
-    Stats,
 }
 
 impl ViewRequestKind {
     fn for_query(query: &Query) -> Option<Self> {
         Some(match query {
-            Query::LibraryPage {
-                sort: LibrarySort::MostPlayed,
-                ..
-            } => Self::Ranking,
             Query::PlaylistSummaries { .. } => Self::PlaylistSummaries,
             Query::PlaylistEntries { .. } => Self::PlaylistEntries,
             Query::PlaylistSummaryBatch { .. } => Self::PlaylistSelection,
-            Query::LibraryStats => Self::Stats,
             _ => return None,
         })
     }
@@ -118,15 +108,12 @@ impl GuiApp {
         };
         self.browser.requests.begin(kind, generation);
         let selected_playlist = self.browser.playlists.selected();
-        let delay = if matches!(&query, Query::LibraryPage { query: Some(_), .. }) {
-            crate::model::SEARCH_DEBOUNCE
-        } else {
-            Duration::from_millis(80)
-        };
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
-            // Search waits for a quiet interval; generations reject superseded queries.
-            cx.background_executor().timer(delay).await;
+            // Coalesce quick changes; generations reject superseded queries.
+            cx.background_executor()
+                .timer(Duration::from_millis(80))
+                .await;
             if !this
                 .update(cx, |this, _| {
                     this.browser.requests.is_current(kind, generation)
@@ -163,25 +150,7 @@ impl GuiApp {
                         return;
                     }
                 };
-                if matches!(kind, ViewRequestKind::Ranking | ViewRequestKind::Stats)
-                    && revisions.library != this.state.library.revision
-                {
-                    match kind {
-                        ViewRequestKind::Ranking => {
-                            this.request_ranking_page(this.browser.history.offset(), cx)
-                        }
-                        ViewRequestKind::Stats => this.request_stats(cx),
-                        _ => {}
-                    }
-                    return;
-                }
-                if matches!(
-                    kind,
-                    ViewRequestKind::PlaylistSummaries
-                        | ViewRequestKind::PlaylistEntries
-                        | ViewRequestKind::PlaylistSelection
-                ) && revisions.playlist != this.state.library.playlist_revision
-                {
+                if revisions.playlist != this.state.library.playlist_revision {
                     match kind {
                         ViewRequestKind::PlaylistSummaries => this.request_playlist_summaries(
                             this.browser.playlists.summaries().offset,
@@ -197,22 +166,10 @@ impl GuiApp {
                             }
                         }
                         ViewRequestKind::PlaylistSelection => this.request_playlist_selection(cx),
-                        _ => {}
                     }
                     return;
                 }
                 match result {
-                    ViewResponse::LibraryPage(page) if kind == ViewRequestKind::Ranking => {
-                        if this.browser.history.offset() > 0
-                            && this.browser.history.offset() >= page.total
-                        {
-                            let last = page.total.saturating_sub(1) / this.view_page_size()
-                                * this.view_page_size();
-                            this.request_ranking_page(last, cx);
-                            return;
-                        }
-                        this.browser.history.accept(page);
-                    }
                     ViewResponse::PlaylistSummaries(page)
                         if kind == ViewRequestKind::PlaylistSummaries =>
                     {
@@ -230,9 +187,6 @@ impl GuiApp {
                             this.browser
                                 .accept_playlist_lookup(id, batch.rows.into_iter().next());
                         }
-                    }
-                    ViewResponse::LibraryStats(stats) if kind == ViewRequestKind::Stats => {
-                        this.browser.history.accept_stats(stats)
                     }
                     _ => {}
                 }
@@ -498,34 +452,6 @@ impl GuiApp {
         self.browser.library.prepare_query(query);
         self.request_directory_page(library::TreeBranch::default(), 0, cx);
     }
-    pub(super) fn request_ranking(&mut self, offset: usize, cx: &mut Context<Self>) {
-        self.request_ranking_page(offset, cx);
-        self.request_stats(cx);
-    }
-
-    fn request_ranking_page(&mut self, offset: usize, cx: &mut Context<Self>) {
-        let page_size = self.view_page_size();
-        let offset = offset / page_size * page_size;
-        self.browser.history.begin(offset);
-        let generation = self.browser.requests.next_generation();
-        self.request_view(
-            Query::LibraryPage {
-                query: None,
-                favorite: None,
-                missing: None,
-                sort: LibrarySort::MostPlayed,
-                offset,
-                limit: page_size,
-            },
-            generation,
-            cx,
-        );
-    }
-
-    fn request_stats(&mut self, cx: &mut Context<Self>) {
-        let generation = self.browser.requests.next_generation();
-        self.request_view(Query::LibraryStats, generation, cx);
-    }
 
     pub(super) fn refresh_page_size(&mut self, cx: &mut Context<Self>) {
         // Invalidate query tokens and payload, not identity, metadata drafts, or scroll position.
@@ -543,6 +469,5 @@ impl GuiApp {
                 cx,
             );
         }
-        self.request_ranking(0, cx);
     }
 }

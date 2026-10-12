@@ -425,7 +425,7 @@ fn run_loop(socket_path: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>
         while updates.receiver.try_recv().is_ok() {}
         if let Some(update) = updates.latest.lock().take() {
             let state = update.map_err(anyhow::Error::msg)?;
-            let next = TuiSnapshot::from_client(&state);
+            let next = TuiSnapshot::from_client(&state, tui.as_ref().map(|tui| &tui.snapshot));
             match &mut tui {
                 Some(tui) => tui.apply_snapshot(next),
                 None => tui = Some(TuiState::new(next)),
@@ -552,7 +552,8 @@ struct TuiState {
 impl TuiState {
     fn new(snapshot: TuiSnapshot) -> Self {
         let mut ui = UiState::default();
-        ui.sync_queue(&snapshot, &snapshot);
+        ui.queue
+            .select((!snapshot.queue.entries.is_empty()).then_some(0));
         Self { snapshot, ui }
     }
 
@@ -622,7 +623,6 @@ struct UiState {
     queue: ListState,
     show_help: bool,
     message: Option<Notice>,
-    queue_cache: QueueViewCache,
     requested: Option<QueryRequest>,
     query_revision: u64,
     failed_request: Option<QueryRequest>,
@@ -780,6 +780,9 @@ impl UiState {
     }
 
     fn sync_queue(&mut self, previous: &TuiSnapshot, next: &TuiSnapshot) {
+        if Arc::ptr_eq(&previous.queue.entries, &next.queue.entries) {
+            return;
+        }
         let selected = self.queue.selected().unwrap_or(0);
         let queue_id = previous.queue.entries.get(selected).map(|entry| entry.id);
         let index = next
@@ -1406,7 +1409,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
         View::Tree(tree) => draw_tree(frame, columns[0], tree),
         View::PlaylistDetail { detail, .. } => draw_playlist_detail(frame, columns[0], detail),
         View::Playlists(playlists) => draw_playlists(frame, columns[0], playlists),
-        View::Queue => draw_queue(frame, columns[0], state, &mut ui.queue, &mut ui.queue_cache),
+        View::Queue => draw_queue(frame, columns[0], state, &mut ui.queue),
     }
     let position = state.playback.position.max(0.0);
     let duration = state.playback.duration.unwrap_or(0.0).max(position + 0.001);
@@ -1480,76 +1483,18 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
     );
 }
 
-#[derive(Default)]
-struct QueueViewCache {
-    queue: Vec<(u64, i64)>,
-    tracks: Vec<QueueTrackKey>,
-    rows: Vec<String>,
-}
-
-struct QueueTrackKey {
-    id: i64,
-    title: String,
-    artist: String,
-}
-
-impl QueueViewCache {
-    fn matches(&self, state: &TuiSnapshot) -> bool {
-        self.queue.len() == state.queue.entries.len()
-            && self
-                .queue
-                .iter()
-                .zip(state.queue.entries.iter())
-                .all(|(&(id, track_id), entry)| id == entry.id && track_id == entry.track_id)
-            && self.tracks.len() == state.queue.tracks.len()
-            && self
-                .tracks
-                .iter()
-                .zip(state.queue.tracks.iter())
-                .all(|(cached, track)| {
-                    cached.id == track.id
-                        && cached.title == track.title
-                        && cached.artist == track.artist
-                })
-    }
-
-    fn sync(&mut self, state: &TuiSnapshot) {
-        if self.matches(state) {
-            return;
+// Keep occurrence selection and scroll global; ratatui sees only the visible slice.
+fn queue_viewport(selection: &mut ListState, total: usize, rows: usize) -> std::ops::Range<usize> {
+    let mut offset = selection.offset().min(total.saturating_sub(rows));
+    if let Some(selected) = selection.selected() {
+        if selected < offset {
+            offset = selected;
+        } else if selected >= offset.saturating_add(rows) {
+            offset = selected.saturating_sub(rows.saturating_sub(1));
         }
-        self.queue = state
-            .queue
-            .entries
-            .iter()
-            .map(|entry| (entry.id, entry.track_id))
-            .collect();
-        self.tracks = state
-            .queue
-            .tracks
-            .iter()
-            .map(|track| QueueTrackKey {
-                id: track.id,
-                title: track.title.clone(),
-                artist: track.artist.clone(),
-            })
-            .collect();
-        let mut track_index = HashMap::with_capacity(state.queue.tracks.len());
-        for (index, track) in state.queue.tracks.iter().enumerate() {
-            track_index.insert(track.id, index);
-        }
-        self.rows = state
-            .queue
-            .entries
-            .iter()
-            .map(|entry| {
-                track_index
-                    .get(&entry.track_id)
-                    .and_then(|&index| state.queue.tracks.get(index))
-                    .map(|track| format!("{} — {}", track.artist, track.title))
-                    .unwrap_or_else(|| "Missing track".into())
-            })
-            .collect();
     }
+    *selection.offset_mut() = offset;
+    offset..offset.saturating_add(rows).min(total)
 }
 
 fn draw_queue(
@@ -1557,19 +1502,30 @@ fn draw_queue(
     area: Rect,
     state: &TuiSnapshot,
     selection: &mut ListState,
-    cache: &mut QueueViewCache,
 ) {
-    cache.sync(state);
-    let items = cache.rows.iter().enumerate().map(|(index, title)| {
-        let marker = if state.queue.current_id == Some(state.queue.entries[index].id) {
+    let viewport_rows = area.height.saturating_sub(2) as usize;
+    let range = queue_viewport(selection, state.queue.entries.len(), viewport_rows);
+    let mut visible_selection = ListState::default().with_selected(
+        selection
+            .selected()
+            .and_then(|index| index.checked_sub(range.start)),
+    );
+    let items = range.map(|index| {
+        let entry = &state.queue.entries[index];
+        let marker = if state.queue.current_id == Some(entry.id) {
             "▶ "
         } else {
             "  "
         };
-        ListItem::new(Line::from(vec![
-            Span::raw(marker),
-            Span::raw(title.as_str()),
-        ]))
+        let title = state
+            .queue
+            .tracks
+            .binary_search_by_key(&entry.track_id, |track| track.id)
+            .ok()
+            .map(|index| &state.queue.tracks[index])
+            .map(|track| format!("{} — {}", track.artist, track.title))
+            .unwrap_or_else(|| "Missing track".into());
+        ListItem::new(Line::from(vec![Span::raw(marker), Span::raw(title)]))
     });
     let title = if state.queue.entries.is_empty() {
         "Queue — empty; / to search, t to browse"
@@ -1586,7 +1542,7 @@ fn draw_queue(
             )
             .highlight_symbol("> "),
         area,
-        selection,
+        &mut visible_selection,
     );
 }
 fn draw_paged_list<T>(
@@ -1781,6 +1737,48 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .unwrap();
         assert!(matches!(watcher.latest.lock().take(), Some(Err(_))));
+    }
+
+    #[test]
+    fn long_queue_renders_only_viewport_and_preserves_occurrence_on_updates() {
+        let mut state = TuiSnapshot::default();
+        state.queue.entries = Arc::new(
+            (0..100_000)
+                .map(|id| crate::model::QueueEntry { id, track_id: 7 })
+                .collect(),
+        );
+        state.queue.tracks = Arc::new(vec![track(7)]);
+        let mut tui = TuiState::new(state.clone());
+        tui.ui.queue.select(Some(50_000));
+        *tui.ui.queue.offset_mut() = 49_999;
+        state.playback.position = 42.;
+        tui.apply_snapshot(state.clone());
+        assert_eq!(tui.ui.queue.selected(), Some(50_000));
+        assert_eq!(tui.ui.queue.offset(), 49_999);
+        assert_eq!(
+            queue_viewport(&mut tui.ui.queue, 100_000, 4),
+            49_999..50_003
+        );
+        state.queue.current_id = Some(50_000);
+        let mut terminal = Terminal::new(TestBackend::new(60, 6)).unwrap();
+        terminal
+            .draw(|frame| draw_queue(frame, frame.area(), &state, &mut tui.ui.queue))
+            .unwrap();
+        assert_eq!(tui.ui.queue.selected(), Some(50_000));
+        assert_eq!(tui.ui.queue.offset(), 49_999);
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("▶ artist — row-7"));
+        Arc::make_mut(&mut state.queue.entries).remove(0);
+        tui.apply_snapshot(state);
+        assert_eq!(tui.ui.queue.selected(), Some(49_999));
+        assert_eq!(tui.snapshot.queue.entries[49_999].id, 50_000);
+        assert_eq!(queue_viewport(&mut tui.ui.queue, 99_999, 4).len(), 4);
     }
 
     fn track(index: usize) -> LibraryRow {

@@ -16,12 +16,11 @@ use super::{
     queries::ViewRequests,
 };
 use crate::model::{
-    DirectoryRow, LibraryRow, LibrarySort, LibraryStats, Page, PlaylistEntryRow, PlaylistSummary,
-    Query,
+    DirectoryRow, HistoryEntry, LibrarySort, Page, PlaylistEntryRow, PlaylistSummary, Query,
 };
 use gpui::ScrollStrategy;
 use selection::LibrarySelection;
-use std::{collections::HashSet, ops::Range};
+use std::{collections::HashSet, ops::Range, sync::Arc};
 
 pub(in crate::gui) fn merge_selection(
     tracks: &mut HashSet<i64>,
@@ -287,6 +286,7 @@ impl LibraryBrowser {
         if self.tree.projection_revision() != projection {
             self.invalidate_selection();
         }
+        self.remember_selection();
     }
 
     pub(super) fn fail_directory(&mut self, branch: &TreeBranch, generation: u64) {
@@ -312,7 +312,6 @@ impl LibraryBrowser {
     }
 
     pub(super) fn demand_directories(&mut self, range: Range<usize>) -> Vec<(TreeBranch, usize)> {
-        self.remember_selection();
         self.tree.requests_for_range(range)
     }
 
@@ -724,50 +723,68 @@ impl QueueSelection {
 }
 
 pub(super) struct HistoryBrowser {
-    rows: Vec<LibraryRow>,
-    total: usize,
-    offset: usize,
+    source: Arc<Vec<HistoryEntry>>,
+    indices: Vec<usize>,
+    title_keys: Vec<String>,
     sort: HistorySort,
     descending: bool,
-    stats: Option<LibraryStats>,
 }
 
 impl Default for HistoryBrowser {
     fn default() -> Self {
         Self {
-            rows: Vec::new(),
-            total: 0,
-            offset: 0,
+            source: Arc::default(),
+            indices: Vec::new(),
+            title_keys: Vec::new(),
             sort: HistorySort::Recent,
             descending: true,
-            stats: None,
         }
     }
 }
 
 impl HistoryBrowser {
-    pub(super) fn rows(&self) -> &[LibraryRow] {
-        &self.rows
+    pub(super) fn sync(&mut self, source: &Arc<Vec<HistoryEntry>>) {
+        if Arc::ptr_eq(&self.source, source) {
+            return;
+        }
+        self.source = Arc::clone(source);
+        self.title_keys = source
+            .iter()
+            .map(|entry| entry.title.to_lowercase())
+            .collect();
+        self.rebuild();
     }
-    pub(super) fn offset(&self) -> usize {
-        self.offset
+
+    fn rebuild(&mut self) {
+        self.indices.clear();
+        self.indices.extend(0..self.source.len());
+        self.indices.sort_by(|&a, &b| {
+            let ordering = match self.sort {
+                HistorySort::Recent => self.source[a].played_at.cmp(&self.source[b].played_at),
+                HistorySort::Title => self.title_keys[a].cmp(&self.title_keys[b]),
+                HistorySort::Plays => self.source[a].play_count.cmp(&self.source[b].play_count),
+            };
+            if self.descending {
+                ordering.reverse()
+            } else {
+                ordering
+            }
+        });
     }
+
+    pub(super) fn len(&self) -> usize {
+        self.indices.len()
+    }
+
+    pub(super) fn get(&self, index: usize) -> Option<&HistoryEntry> {
+        self.indices.get(index).map(|&index| &self.source[index])
+    }
+
     pub(super) fn sort(&self) -> HistorySort {
         self.sort
     }
     pub(super) fn descending(&self) -> bool {
         self.descending
-    }
-    pub(super) fn begin(&mut self, offset: usize) {
-        self.offset = offset;
-        self.rows.clear();
-    }
-    pub(super) fn accept(&mut self, page: Page<LibraryRow>) {
-        self.total = page.total;
-        self.rows = page.rows;
-    }
-    pub(super) fn accept_stats(&mut self, stats: LibraryStats) {
-        self.stats = Some(stats);
     }
     pub(super) fn set_sort(&mut self, sort: HistorySort) {
         if self.sort == sort {
@@ -776,12 +793,88 @@ impl HistoryBrowser {
             self.sort = sort;
             self.descending = matches!(sort, HistorySort::Recent | HistorySort::Plays);
         }
+        self.rebuild();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_sort_survives_reopening_and_tracks_source_replacement() {
+        let source = Arc::new(vec![
+            HistoryEntry {
+                track_id: 1,
+                title: "beta".into(),
+                play_count: 2,
+                played_at: 30,
+            },
+            HistoryEntry {
+                track_id: 2,
+                title: "ALPHA".into(),
+                play_count: 4,
+                played_at: 10,
+            },
+            HistoryEntry {
+                track_id: 3,
+                title: "alpha".into(),
+                play_count: 1,
+                played_at: 20,
+            },
+        ]);
+        let mut history = HistoryBrowser::default();
+        history.sync(&source);
+        let ids = |history: &HistoryBrowser| {
+            (0..history.len())
+                .map(|index| history.get(index).unwrap().track_id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&history), [1, 3, 2]);
+        history.set_sort(HistorySort::Title);
+        assert_eq!(ids(&history), [2, 3, 1]);
+        history.sync(&source);
+        assert_eq!(ids(&history), [2, 3, 1]);
+        history.set_sort(HistorySort::Title);
+        assert_eq!(ids(&history), [1, 2, 3]);
+        history.set_sort(HistorySort::Plays);
+        assert_eq!(ids(&history), [2, 1, 3]);
+        let replacement = Arc::new(vec![source[2].clone(), source[0].clone()]);
+        history.sync(&replacement);
+        assert_eq!(ids(&history), [1, 3]);
+        history.sync(&Arc::default());
+        assert_eq!(history.len(), 0);
+    }
+
+    #[test]
+    fn accepted_tree_page_locates_selected_track_without_viewport_repair() {
+        let mut library = LibraryBrowser::default();
+        library.select_node(&LibraryNode::Track(41), false);
+        let forest = TreeBranch::default();
+        library.prepare_directory(forest.clone(), 0, 20, 1);
+        library.accept_directory(
+            &forest,
+            1,
+            Page {
+                total: 1,
+                rows: vec![DirectoryRow::Track(crate::model::LibraryRow {
+                    id: 41,
+                    title: "selected".into(),
+                    artist: String::new(),
+                    album: String::new(),
+                    duration: None,
+                    codec: String::new(),
+                    bitrate_bps: None,
+                    favorite: false,
+                    missing: false,
+                    play_count: 0,
+                })],
+            },
+        );
+        assert_eq!(library.tree().selected_index(), Some(0));
+        library.refresh_tree(10);
+        assert!(library.selected().contains(&41));
+    }
     #[test]
     fn page_retry_preserves_unknown_count_until_an_empty_response_arrives() {
         let mut library = LibraryBrowser::default();

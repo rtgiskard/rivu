@@ -580,15 +580,6 @@ impl DirectoryTree {
             child = parent;
         }
     }
-    pub(in crate::gui) fn cached_track(&self, id: i64) -> Option<&crate::model::LibraryRow> {
-        self.pages
-            .values()
-            .flat_map(|page| &page.rows)
-            .find_map(|row| match row {
-                DirectoryRow::Track(track) if track.id == id => Some(track),
-                _ => None,
-            })
-    }
 
     #[cfg(test)]
     pub(in crate::gui) fn cached_row(

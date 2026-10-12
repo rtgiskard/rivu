@@ -20,6 +20,19 @@ projections can share immutable data, whereas socket responses serialize it.
 This avoids a second control implementation without making every consumer pay
 for a universal snapshot.
 
+Queue displays resolve metadata only from the snapshot's ID-sorted queue rows;
+unrelated library pages cannot substitute stale values. GUI history retains one
+sorting index for the current immutable history and sort choice, rebuilding it
+on source or sort changes rather than during painting. Tree selection locations
+are updated when selection or accepted pages change, not on each viewport demand.
+The TUI builds queue widgets only for visible rows, retaining global occurrence
+selection and scroll position; position-only updates do not rescan the queue.
+Configured TUI roots reuse their immutable storage until the paths change.
+
+The tray subscribes after establishing its published baseline and reconciles
+the latest state before reporting startup readiness. Menu layout and revision
+are read together from that publication; unchanged menus retain their revision.
+
 Startup and single-instance operation are documented in
 link:../readme.adoc[README]. Socket clients and the core must use compatible builds.
 

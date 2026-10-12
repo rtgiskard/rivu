@@ -122,7 +122,7 @@ impl Default for TuiSystemSnapshot {
 }
 
 impl TuiSnapshot {
-    pub(crate) fn from_client(state: &ClientSnapshot) -> Self {
+    pub(crate) fn from_client(state: &ClientSnapshot, previous: Option<&Self>) -> Self {
         Self {
             library: TuiLibrarySnapshot {
                 track_total: state.library.track_total,
@@ -140,7 +140,12 @@ impl TuiSnapshot {
                 last_error: state.system.last_error.clone(),
                 revision: state.system.revision,
                 shutting_down: state.system.shutting_down,
-                library_roots: Arc::new(state.system.config.library_roots.clone()),
+                library_roots: previous
+                    .filter(|previous| {
+                        previous.system.library_roots.as_ref() == &state.system.config.library_roots
+                    })
+                    .map(|previous| Arc::clone(&previous.system.library_roots))
+                    .unwrap_or_else(|| Arc::new(state.system.config.library_roots.clone())),
                 page_size: state.system.config.page_size,
             },
         }
