@@ -1,4 +1,5 @@
-use super::{
+use super::LibraryBrowser;
+use crate::gui::library::{
     LibraryNode,
     tree::{TreeBranch, TreeRangeSpan},
 };
@@ -41,41 +42,43 @@ struct Scope {
 }
 
 impl Scope {
-    fn capture(app: &GuiApp) -> Self {
+    fn capture(browser: &LibraryBrowser, revisions: (u64, u64)) -> Self {
+        let view = browser.buffer();
         Self {
-            library: app.state.library.revision,
-            structure: app.state.library.structure_revision,
-            projection: if app.browser.library.tree_active() {
+            library: revisions.0,
+            structure: revisions.1,
+            projection: if browser.tree_active() {
                 Projection::Tree {
-                    favorite: app.browser.library.favorites_only().then_some(true),
-                    revision: app.browser.library.tree.projection_revision(),
-                    total: app.browser.library.tree.row_count(),
+                    favorite: browser.favorites_only().then_some(true),
+                    revision: browser.tree().projection_revision(),
+                    total: browser.tree().row_count(),
                 }
             } else {
                 Projection::Flat {
-                    query: app.browser.library.buffer.query.clone(),
-                    favorite: app.browser.library.buffer.favorite,
-                    missing: app.browser.library.buffer.missing,
-                    sort: app.browser.library.buffer.sort,
-                    total: app.browser.library.buffer.total,
+                    query: view.query.clone(),
+                    favorite: view.favorite,
+                    missing: view.missing,
+                    sort: view.sort,
+                    total: view.total,
                 }
             },
         }
     }
 
-    fn matches(&self, app: &GuiApp) -> bool {
-        self.library == app.state.library.revision
-            && self.structure == app.state.library.structure_revision
+    fn matches(&self, browser: &LibraryBrowser, revisions: (u64, u64)) -> bool {
+        let view = browser.buffer();
+        self.library == revisions.0
+            && self.structure == revisions.1
             && match &self.projection {
                 Projection::Tree {
                     favorite,
                     revision,
                     total,
                 } => {
-                    app.browser.library.tree_active()
-                        && *favorite == app.browser.library.favorites_only().then_some(true)
-                        && *revision == app.browser.library.tree.projection_revision()
-                        && *total == app.browser.library.tree.row_count()
+                    browser.tree_active()
+                        && *favorite == browser.favorites_only().then_some(true)
+                        && *revision == browser.tree().projection_revision()
+                        && *total == browser.tree().row_count()
                 }
                 Projection::Flat {
                     query,
@@ -84,12 +87,12 @@ impl Scope {
                     sort,
                     total,
                 } => {
-                    !app.browser.library.tree_active()
-                        && query == &app.browser.library.buffer.query
-                        && *favorite == app.browser.library.buffer.favorite
-                        && *missing == app.browser.library.buffer.missing
-                        && *sort == app.browser.library.buffer.sort
-                        && *total == app.browser.library.buffer.total
+                    !browser.tree_active()
+                        && query == &view.query
+                        && *favorite == view.favorite
+                        && *missing == view.missing
+                        && *sort == view.sort
+                        && *total == view.total
                 }
             }
     }
@@ -268,7 +271,7 @@ impl RangeJob {
 }
 
 #[derive(Default)]
-pub(in crate::gui) struct LibrarySelection {
+pub(super) struct LibrarySelection {
     anchor: Option<Anchor>,
     token: u64,
     pending: Option<RangeJob>,
@@ -277,7 +280,7 @@ pub(in crate::gui) struct LibrarySelection {
 }
 
 impl LibrarySelection {
-    pub(in crate::gui) fn cancel(&mut self, clear_anchor: bool) {
+    pub(super) fn cancel(&mut self, clear_anchor: bool) {
         self.token = self.token.wrapping_add(1);
         self.pending = None;
         if clear_anchor {
@@ -300,49 +303,57 @@ impl LibrarySelection {
     }
 }
 
-impl GuiApp {
-    pub(in crate::gui) fn library_range_pending(&self) -> bool {
-        self.browser.library.range_selection.pending.is_some()
+/// Range state stays behind the browser owner; the window only dispatches work.
+enum RangeStep {
+    Idle,
+    Selected(LibraryNode),
+    Query {
+        token: u64,
+        slice: Slice,
+        query: Query,
+    },
+}
+
+impl LibraryBrowser {
+    pub(in crate::gui) fn range_pending(&self) -> bool {
+        self.range_selection.pending.is_some()
     }
 
-    pub(in crate::gui) fn select_library_row(
+    fn start_selection(
         &mut self,
-        node: LibraryNode,
+        node: &LibraryNode,
         index: usize,
         shift: bool,
         multi: bool,
-        cx: &mut Context<Self>,
-    ) {
-        let scope = Scope::capture(self);
+        revisions: (u64, u64),
+        page_size: usize,
+    ) -> Result<bool, String> {
+        let scope = Scope::capture(self, revisions);
         if index >= scope.total() {
-            return;
+            return Ok(false);
         }
-        self.browser.library.cancel_navigation();
-        self.browser.focus_list(ListFocus::Library);
+        self.cancel_navigation();
         if !shift {
-            self.browser.library.range_selection.cancel(false);
-            self.browser.library.select_node(&node, multi);
-            self.browser.library.range_selection.anchor = Some(Anchor { index, scope });
-            self.finish_library_selection(&node, index, cx);
-            return;
+            self.range_selection.cancel(false);
+            self.select_node(node, multi);
+            self.range_selection.anchor = Some(Anchor { index, scope });
+            self.pin_selection(node, index);
+            return Ok(true);
         }
-
-        let range = self.browser.library.range_selection.interval(&scope, index);
+        let range = self.range_selection.interval(&scope, index);
         // Shift never moves a valid anchor; the first Shift click anchors itself.
         if !self
-            .browser
-            .library
             .range_selection
             .anchor
             .as_ref()
             .is_some_and(|anchor| anchor.scope == scope)
         {
-            self.browser.library.range_selection.anchor = Some(Anchor {
+            self.range_selection.anchor = Some(Anchor {
                 index,
                 scope: scope.clone(),
             });
         }
-        self.browser.library.range_selection.cancel(false);
+        self.range_selection.cancel(false);
         let slices = match &scope.projection {
             Projection::Flat { total, .. } => VecDeque::from([Slice {
                 source: Source::Flat,
@@ -352,14 +363,10 @@ impl GuiApp {
                 check: None,
             }]),
             Projection::Tree { .. } => {
-                let Some(spans) = self.browser.library.tree.range_spans(range.clone()) else {
-                    self.error = Some("Library tree is still loading; select the range again when its folders are ready.".into());
-                    cx.notify();
-                    return;
-                };
-                self.browser
-                    .library
-                    .tree
+                let spans = self.tree.range_spans(range.clone()).ok_or_else(|| {
+                    "Library tree is still loading; select the range again when its folders are ready.".to_owned()
+                })?;
+                self.tree
                     .range_checks(range)
                     .into_iter()
                     .map(|(span, child)| Slice::tree(span, Some(child)))
@@ -367,75 +374,55 @@ impl GuiApp {
                     .collect()
             }
         };
-        self.browser.library.range_selection.pending = Some(RangeJob {
-            token: self.browser.library.range_selection.token,
+        self.range_selection.pending = Some(RangeJob {
+            token: self.range_selection.token,
             scope,
             slices,
             selected: HashSet::new(),
-            endpoint: node,
+            endpoint: node.clone(),
             endpoint_index: index,
             additive: multi,
-            batch_size: self.view_page_size().clamp(1, MAX_RANGE_BATCH),
+            batch_size: page_size.clamp(1, MAX_RANGE_BATCH),
         });
-        self.pump_library_range(cx);
-        cx.notify();
+        Ok(true)
     }
 
-    fn finish_library_selection(
-        &mut self,
-        endpoint: &LibraryNode,
-        index: usize,
-        cx: &mut Context<Self>,
-    ) {
-        let focus = match endpoint {
-            LibraryNode::Track(id) if self.browser.library.selected().contains(id) => Some(*id),
-            _ => self.browser.library.selected().iter().copied().min(),
-        };
-        if let Some(id) = focus {
-            self.request_track(id, cx);
-        } else {
-            self.clear_metadata_selection(cx);
-        }
-        if self.browser.library.tree_active() {
-            if self.browser.library.selected_nodes().contains(endpoint)
-                || matches!(endpoint, LibraryNode::Track(id) if self.browser.library.selected().contains(id))
+    fn pin_selection(&mut self, endpoint: &LibraryNode, index: usize) {
+        if self.tree_active {
+            if self.selected_nodes.contains(endpoint)
+                || matches!(endpoint, LibraryNode::Track(id) if self.selected.contains(id))
             {
-                self.browser.library.tree.focus_selection(endpoint, index);
+                self.tree.focus_selection(endpoint, index);
             }
         } else {
-            self.browser.library.buffer.rows.pin(Some(index));
+            self.buffer.rows.pin(Some(index));
         }
-        self.sync_waveform(cx);
-        cx.notify();
     }
 
-    fn apply_library_range(&mut self, job: RangeJob, cx: &mut Context<Self>) {
-        self.browser.library.apply_range(job.selected, job.additive);
-        self.finish_library_selection(&job.endpoint, job.endpoint_index, cx);
-    }
-
-    fn pump_library_range(&mut self, cx: &mut Context<Self>) {
-        if self.browser.library.range_selection.active.is_some() {
-            return;
+    fn advance_range(
+        &mut self,
+        revisions: (u64, u64),
+        roots: &[std::path::PathBuf],
+    ) -> Result<RangeStep, String> {
+        if self.range_selection.active.is_some() {
+            return Ok(RangeStep::Idle);
         }
-        while let Some(mut job) = self.browser.library.range_selection.pending.take() {
-            if !job.scope.matches(self) {
-                self.browser.library.range_selection.cancel(true);
-                cx.notify();
-                return;
+        while let Some(mut job) = self.range_selection.pending.take() {
+            if !job.scope.matches(self, revisions) {
+                self.range_selection.cancel(true);
+                return Ok(RangeStep::Idle);
             }
             let Some(slice) = job.next() else {
-                self.apply_library_range(job, cx);
-                return;
+                self.apply_range(job.selected, job.additive);
+                self.pin_selection(&job.endpoint, job.endpoint_index);
+                return Ok(RangeStep::Selected(job.endpoint));
             };
             let cached = match &slice.source {
                 Source::Flat => (slice.offset..slice.offset + slice.len)
-                    .all(|index| self.browser.library.buffer.rows.get(index).is_some()),
+                    .all(|index| self.buffer.rows.get(index).is_some()),
                 Source::Tree(branch) => {
                     branch.is_forest()
                         || self
-                            .browser
-                            .library
                             .tree
                             .cached_rows(branch, slice.offset..slice.offset + slice.len)
                             .is_some()
@@ -447,19 +434,12 @@ impl GuiApp {
                         job.selected
                             .extend((slice.offset..slice.offset + slice.len).map(|index| {
                                 LibraryNode::Track(
-                                    self.browser
-                                        .library
-                                        .buffer
-                                        .rows
-                                        .get(index)
-                                        .expect("cached range row")
-                                        .id,
+                                    self.buffer.rows.get(index).expect("cached range row").id,
                                 )
                             }));
                         Ok(())
                     }
                     Source::Tree(branch) if branch.is_forest() => {
-                        let roots = &self.state.system.config.library_roots;
                         if roots.len() != slice.total || slice.offset + slice.len > roots.len() {
                             Err(
                                 "Library roots changed while selecting; select the range again."
@@ -472,8 +452,6 @@ impl GuiApp {
                         }
                     }
                     Source::Tree(branch) => self
-                        .browser
-                        .library
                         .tree
                         .cached_rows(branch, slice.offset..slice.offset + slice.len)
                         .expect("cached range rows")
@@ -481,61 +459,154 @@ impl GuiApp {
                         .try_for_each(|row| job.add_row(&slice, row)),
                 };
                 if let Err(error) = result {
-                    self.browser.library.range_selection.cancel(true);
-                    self.error = Some(error);
-                    cx.notify();
-                    return;
+                    self.range_selection.cancel(true);
+                    return Err(error);
                 }
                 job.advance(slice.len);
-                self.browser.library.range_selection.pending = Some(job);
+                self.range_selection.pending = Some(job);
                 continue;
             }
             let query = job.query(&slice);
             let token = job.token;
-            self.browser.library.range_selection.active = Some(token);
-            self.browser.library.range_selection.pending = Some(job);
-            let handle = self.handle.clone();
-            cx.spawn(async move |this, cx| {
-                let response = cx
-                    .background_executor()
-                    .spawn(async move { handle.query(query) })
-                    .await;
-                let _ = this.update(cx, |this, cx| {
-                    if this.browser.library.range_selection.active == Some(token) {
-                        this.browser.library.range_selection.active = None;
-                    }
-                    if this
-                        .browser
-                        .library
-                        .range_selection
-                        .accepts_completion(token)
-                    {
-                        let mut job = this
+            self.range_selection.active = Some(token);
+            self.range_selection.pending = Some(job);
+            return Ok(RangeStep::Query {
+                token,
+                slice,
+                query,
+            });
+        }
+        Ok(RangeStep::Idle)
+    }
+
+    fn complete_range(
+        &mut self,
+        token: u64,
+        slice: &Slice,
+        response: QueryResponse,
+        revisions: (u64, u64),
+    ) -> Result<(), String> {
+        if self.range_selection.active == Some(token) {
+            self.range_selection.active = None;
+        }
+        if !self.range_selection.accepts_completion(token) {
+            return Ok(());
+        }
+        let mut job = self
+            .range_selection
+            .pending
+            .take()
+            .expect("current pending range");
+        if !job.scope.matches(self, revisions) {
+            self.range_selection.cancel(true);
+            return Ok(());
+        }
+        if let Err(error) = job.accept(slice, response) {
+            self.range_selection.cancel(true);
+            return Err(error);
+        }
+        self.range_selection.pending = Some(job);
+        Ok(())
+    }
+}
+
+impl GuiApp {
+    pub(in crate::gui) fn library_range_pending(&self) -> bool {
+        self.browser.library.range_pending()
+    }
+
+    pub(in crate::gui) fn select_library_row(
+        &mut self,
+        node: LibraryNode,
+        index: usize,
+        shift: bool,
+        multi: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let revisions = (
+            self.state.library.revision,
+            self.state.library.structure_revision,
+        );
+        let page_size = self.view_page_size();
+        match self
+            .browser
+            .library
+            .start_selection(&node, index, shift, multi, revisions, page_size)
+        {
+            Ok(false) => return,
+            Err(error) => self.error = Some(error),
+            Ok(true) => {
+                self.browser.focus_list(ListFocus::Library);
+                if shift {
+                    self.pump_library_range(cx);
+                } else {
+                    self.finish_library_selection(&node, cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn finish_library_selection(&mut self, endpoint: &LibraryNode, cx: &mut Context<Self>) {
+        let focus = match endpoint {
+            LibraryNode::Track(id) if self.browser.library.selected().contains(id) => Some(*id),
+            _ => self.browser.library.selected().iter().copied().min(),
+        };
+        if let Some(id) = focus {
+            self.request_track(id, cx);
+        } else {
+            self.clear_metadata_selection(cx);
+        }
+        self.sync_waveform(cx);
+        cx.notify();
+    }
+
+    fn pump_library_range(&mut self, cx: &mut Context<Self>) {
+        let revisions = (
+            self.state.library.revision,
+            self.state.library.structure_revision,
+        );
+        match self
+            .browser
+            .library
+            .advance_range(revisions, &self.state.system.config.library_roots)
+        {
+            Err(error) => {
+                self.error = Some(error);
+                cx.notify();
+            }
+            Ok(RangeStep::Idle) => {}
+            Ok(RangeStep::Selected(endpoint)) => self.finish_library_selection(&endpoint, cx),
+            Ok(RangeStep::Query {
+                token,
+                slice,
+                query,
+            }) => {
+                let handle = self.handle.clone();
+                cx.spawn(async move |this, cx| {
+                    let response = cx
+                        .background_executor()
+                        .spawn(async move { handle.query(query) })
+                        .await;
+                    let _ = this.update(cx, |this, cx| {
+                        let revisions = (
+                            this.state.library.revision,
+                            this.state.library.structure_revision,
+                        );
+                        if let Err(error) = this
                             .browser
                             .library
-                            .range_selection
-                            .pending
-                            .take()
-                            .expect("current pending range");
-                        if job.scope.matches(this) {
-                            match job.accept(&slice, response) {
-                                Ok(()) => this.browser.library.range_selection.pending = Some(job),
-                                Err(error) => {
-                                    this.browser.library.range_selection.cancel(true);
-                                    this.error = Some(error);
-                                }
-                            }
-                        } else {
-                            this.browser.library.range_selection.cancel(true);
+                            .complete_range(token, &slice, response, revisions)
+                        {
+                            this.error = Some(error);
                         }
-                    }
-                    // A cancelled in-flight batch never applies and cannot overlap its successor.
-                    this.pump_library_range(cx);
-                    cx.notify();
-                });
-            })
-            .detach();
-            return;
+                        // A cancelled batch cannot apply or overlap its successor.
+                        this.pump_library_range(cx);
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
         }
     }
 }
@@ -571,6 +642,132 @@ mod tests {
             missing: false,
             play_count: 0,
         }
+    }
+    #[test]
+    fn cancelled_owner_range_releases_its_batch_before_loading_the_replacement() {
+        let mut library = LibraryBrowser::default();
+        library.refresh_filter();
+        library.prepare_page(0, 20);
+        library.accept_page(Page {
+            total: 100,
+            rows: (0..20).map(row).collect(),
+        });
+        library
+            .start_selection(&LibraryNode::Track(1), 1, false, false, (7, 3), 20)
+            .unwrap();
+        library
+            .start_selection(&LibraryNode::Track(30), 30, true, false, (7, 3), 20)
+            .unwrap();
+        let RangeStep::Query { token, slice, .. } = library.advance_range((7, 3), &[]).unwrap()
+        else {
+            panic!("uncached range needs a batch")
+        };
+        library.prepare_query("replacement".into());
+        library
+            .start_selection(&LibraryNode::Track(50), 50, true, false, (7, 3), 20)
+            .unwrap();
+        assert!(matches!(
+            library.advance_range((7, 3), &[]).unwrap(),
+            RangeStep::Idle
+        ));
+        library
+            .complete_range(
+                token,
+                &slice,
+                QueryResponse {
+                    revisions: QueryRevisions {
+                        library: 7,
+                        structure: 3,
+                        playlist: 0,
+                    },
+                    result: Ok(ViewResponse::LibraryPage(Page {
+                        total: 100,
+                        rows: (slice.offset..slice.offset + slice.len)
+                            .map(|id| row(id as i64))
+                            .collect(),
+                    })),
+                },
+                (7, 3),
+            )
+            .unwrap();
+        assert_eq!(library.selected(), &HashSet::from([1]));
+        let RangeStep::Query {
+            token,
+            slice,
+            query,
+        } = library.advance_range((7, 3), &[]).unwrap()
+        else {
+            panic!("replacement starts only after the old batch returns")
+        };
+        assert!(
+            matches!(query, Query::LibraryPage { query: Some(query), offset: 50, limit: 1, .. } if query == "replacement")
+        );
+        library
+            .complete_range(
+                token,
+                &slice,
+                QueryResponse {
+                    revisions: QueryRevisions {
+                        library: 7,
+                        structure: 3,
+                        playlist: 0,
+                    },
+                    result: Ok(ViewResponse::LibraryPage(Page {
+                        total: 100,
+                        rows: vec![row(50)],
+                    })),
+                },
+                (7, 3),
+            )
+            .unwrap();
+        assert!(matches!(
+            library.advance_range((7, 3), &[]).unwrap(),
+            RangeStep::Selected(LibraryNode::Track(50))
+        ));
+        assert_eq!(library.selected(), &HashSet::from([50]));
+    }
+
+    #[test]
+    fn owner_range_selection_keeps_evicted_identities_and_rejects_changed_scope() {
+        let mut library = LibraryBrowser::default();
+        library.refresh_filter();
+        for offset in [0, 20] {
+            library.prepare_page(offset, 20);
+            library.accept_page(Page {
+                total: 1000,
+                rows: (offset..offset + 20).map(|id| row(id as i64)).collect(),
+            });
+        }
+        library
+            .start_selection(&LibraryNode::Track(1), 1, false, false, (7, 3), 20)
+            .unwrap();
+        library
+            .start_selection(&LibraryNode::Track(21), 21, true, false, (7, 3), 20)
+            .unwrap();
+        assert!(matches!(
+            library.advance_range((7, 3), &[]).unwrap(),
+            RangeStep::Selected(LibraryNode::Track(21))
+        ));
+        for offset in (100..400).step_by(20) {
+            library.demand_page(offset..offset + 10, 20);
+            library.prepare_page(offset, 20);
+            library.accept_page(Page {
+                total: 1000,
+                rows: (offset..offset + 20).map(|id| row(id as i64)).collect(),
+            });
+        }
+        assert!(library.buffer().rows.get(1).is_some());
+        assert!(library.buffer().rows.get(21).is_none());
+        assert_eq!(library.selected(), &(1..=21).collect::<HashSet<_>>());
+        library
+            .start_selection(&LibraryNode::Track(50), 50, true, false, (7, 3), 20)
+            .unwrap();
+        assert!(matches!(
+            library.advance_range((8, 3), &[]).unwrap(),
+            RangeStep::Idle
+        ));
+        assert!(!library.range_pending());
+        assert_eq!(library.selected(), &(1..=21).collect::<HashSet<_>>());
     }
 
     fn job(start: usize, end: usize, additive: bool) -> RangeJob {
@@ -831,7 +1028,7 @@ mod tests {
 
     #[test]
     fn sparse_tree_range_crosses_evicted_batches_and_deduplicates_overlapping_roots() {
-        use super::super::tree::{DirectoryTree, TreeItem};
+        use crate::gui::library::tree::{DirectoryTree, TreeItem};
         use std::path::Path;
         let mut tree = DirectoryTree::default();
         tree.configure_page_size(2);
@@ -991,7 +1188,7 @@ mod tests {
 
     #[test]
     fn retained_tree_ancestor_validation_rejects_relocated_identity() {
-        use super::super::tree::{DirectoryTree, TreeItem};
+        use crate::gui::library::tree::{DirectoryTree, TreeItem};
         let mut tree = DirectoryTree::default();
         let forest = TreeBranch::default();
         tree.begin(forest.clone(), 0, 1);

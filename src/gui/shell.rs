@@ -951,8 +951,8 @@ impl Render for GuiApp {
                         .w_full(),
                     );
                     if has_selected_queue {
-                        if !self.browser.playlists.summaries.rows.is_empty() {
-                            let height = (self.browser.playlists.summaries.rows.len() as f32
+                        if !self.browser.playlists.summaries().rows.is_empty() {
+                            let height = (self.browser.playlists.summaries().rows.len() as f32
                                 * panels::TRACK_HEIGHT)
                                 .min(240.)
                                 .min(f32::from(window.viewport_size().height) * 0.5);
@@ -960,7 +960,7 @@ impl Render for GuiApp {
                                 menu.child(
                                     uniform_list(
                                         "queue-playlist-targets",
-                                        self.browser.playlists.summaries.rows.len(),
+                                        self.browser.playlists.summaries().rows.len(),
                                         cx.processor(
                                             move |this, range: std::ops::Range<usize>, _, cx| {
                                                 range
@@ -968,7 +968,7 @@ impl Render for GuiApp {
                                                         let Some(playlist) = this
                                                             .browser
                                                             .playlists
-                                                            .summaries
+                                                            .summaries()
                                                             .rows
                                                             .get(index)
                                                         else {

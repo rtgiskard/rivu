@@ -330,10 +330,7 @@ impl GuiApp {
             );
             return (track.title.clone(), detail);
         }
-        if let Some(row) = self
-            .browser
-            .library
-            .buffer
+        if let Some(row) = self.browser.library.buffer()
             .rows
             .iter()
             .find(|row| row.id == track_id)
@@ -360,10 +357,7 @@ impl GuiApp {
                 ),
             );
         }
-        if let Some(row) = self
-            .browser
-            .playlists
-            .entries
+        if let Some(row) = self.browser.playlists.entries()
             .rows
             .iter()
             .find(|row| row.track_id == track_id)
@@ -484,9 +478,9 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let total = if self.browser.library.tree_active() {
-            self.browser.library.tree.root_total()
+            self.browser.library.tree().root_total()
         } else {
-            self.browser.library.buffer.total
+            self.browser.library.buffer().total
         };
         let tools = panel_toolbar()
             .child(icon_button(
@@ -628,16 +622,16 @@ impl GuiApp {
         if self.browser.library.tree_active() {
             self.scroll_views.register_list(
                 ("library-tree", panel_id),
-                &self.browser.library.tree.scroll,
+                &self.browser.library.tree().scroll,
             );
             panel
                 .child(self.library_directory_list(panel_id, cx))
                 .into_any_element()
         } else {
-            let rows = self.browser.library.buffer.rows.len();
+            let rows = self.browser.library.buffer().rows.len();
             self.scroll_views.register_list(
                 ("library-flat", panel_id),
-                &self.browser.library.buffer.scroll,
+                &self.browser.library.buffer().scroll,
             );
             panel
                 .child(list_viewport(
@@ -648,7 +642,7 @@ impl GuiApp {
                             range
                                 .map(|index| {
                                     let Some(row) =
-                                        this.browser.library.buffer.rows.get(index).cloned()
+                                        this.browser.library.buffer().rows.get(index).cloned()
                                     else {
                                         return this
                                             .paged_loading_row(ViewRequestKind::Library, index, cx)
@@ -711,7 +705,7 @@ impl GuiApp {
                     .h_full()
                     .min_h_0()
                     .w_full()
-                    .track_scroll(&self.browser.library.buffer.scroll),
+                    .track_scroll(&self.browser.library.buffer().scroll),
                 ))
                 .into_any_element()
         }
@@ -1048,10 +1042,7 @@ impl GuiApp {
         let Some(entry_id) = self.browser.playlists.selected_entry() else {
             return;
         };
-        let Some(index) = self
-            .browser
-            .playlists
-            .entries
+        let Some(index) = self.browser.playlists.entries()
             .rows
             .position(|entry| entry.id == entry_id)
         else {
@@ -1062,7 +1053,7 @@ impl GuiApp {
         } else {
             index.saturating_sub(1)
         };
-        if target != index && target < self.browser.playlists.entries.total {
+        if target != index && target < self.browser.playlists.entries().total {
             self.send(
                 Command::MovePlaylistEntry {
                     entry_id,
@@ -1082,23 +1073,21 @@ impl GuiApp {
         let playlist_id = self.browser.playlists.selected();
         let selected_name = playlist_id
             .and_then(|id| {
-                self.browser
-                    .playlists
-                    .summaries
+                self.browser.playlists.summaries()
                     .rows
                     .iter()
                     .find(|p| p.id == id)
                     .map(|p| p.name.clone())
             })
             .unwrap_or_else(|| self.browser.playlists.selected_name().to_owned());
-        let entry_count = if playlist_id == self.browser.playlists.entries.playlist_id {
-            self.browser.playlists.entries.total
+        let entry_count = if playlist_id == self.browser.playlists.entries().playlist_id {
+            self.browser.playlists.entries().total
         } else {
             0
         };
         self.scroll_views.register_list(
             ("playlist-catalog", panel_id),
-            &self.browser.playlists.summaries.scroll,
+            &self.browser.playlists.summaries().scroll,
         );
         let mut panel = panel_surface(("playlists-panel", panel_id))
             .on_drop(cx.listener(|this, drag: &LibraryDrag, window, cx| {
@@ -1117,7 +1106,7 @@ impl GuiApp {
                 "Playlists",
                 format!(
                     "{} playlists · select one to manage its tracks",
-                    self.browser.playlists.summaries.total
+                    self.browser.playlists.summaries().total
                 ),
             ))
             .child(
@@ -1153,12 +1142,12 @@ impl GuiApp {
             .child(list_viewport(
                 uniform_list(
                     ("playlist-catalog", panel_id),
-                    self.browser.playlists.summaries.rows.len(),
+                    self.browser.playlists.summaries().rows.len(),
                     cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                         range
                             .map(|index| {
                                 let Some(p) =
-                                    this.browser.playlists.summaries.rows.get(index).cloned()
+                                    this.browser.playlists.summaries().rows.get(index).cloned()
                                 else {
                                     return this
                                         .paged_loading_row(
@@ -1198,12 +1187,12 @@ impl GuiApp {
                 .flex_1()
                 .min_h_0()
                 .w_full()
-                .track_scroll(&self.browser.playlists.summaries.scroll),
+                .track_scroll(&self.browser.playlists.summaries().scroll),
             ));
         if let Some(id) = playlist_id {
             self.scroll_views.register_list(
                 ("playlist-entries", panel_id),
-                &self.browser.playlists.entries.scroll,
+                &self.browser.playlists.entries().scroll,
             );
             panel = panel
                 .child(caption(format!("{} · {entry_count} tracks", selected_name)).truncate())
@@ -1279,10 +1268,7 @@ impl GuiApp {
                                 "Play selected track",
                                 cx,
                                 move |this, _, cx| {
-                                    let track_id = this
-                                        .browser
-                                        .playlists
-                                        .entries
+                                    let track_id = this.browser.playlists.entries()
                                         .rows
                                         .iter()
                                         .find(|entry| {
@@ -1325,12 +1311,12 @@ impl GuiApp {
                 .child(list_viewport(
                     uniform_list(
                         ("playlist-entries", panel_id),
-                        self.browser.playlists.entries.rows.len(),
+                        self.browser.playlists.entries().rows.len(),
                         cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                             range
                                 .map(|index| {
                                     let Some(e) =
-                                        this.browser.playlists.entries.rows.get(index).cloned()
+                                        this.browser.playlists.entries().rows.get(index).cloned()
                                     else {
                                         return this
                                             .paged_loading_row(
@@ -1385,7 +1371,7 @@ impl GuiApp {
                     .h_full()
                     .min_h_0()
                     .w_full()
-                    .track_scroll(&self.browser.playlists.entries.scroll),
+                    .track_scroll(&self.browser.playlists.entries().scroll),
                 ));
         }
         panel.into_any_element()

@@ -2,18 +2,26 @@
 //!
 //! Selection identities outlive page eviction. Projection changes cancel range
 //! selection and deferred navigation before replacing payloads; only explicit
-//! selection/cancellation changes identities. Rendering borrows these owners.
+//! selection/cancellation changes identities. Rendering and scope capture borrow
+//! read-only buffers and tree state. Only the owners prepare, accept, retry, and
+//! pin payloads or start and complete range selection.
+
+#[path = "library/selection.rs"]
+mod selection;
 
 use super::{
     HistorySort, ListFocus, SelectionModel,
-    library::{DirectoryTree, LibraryNode, LibrarySelection},
-    queries::{LibraryViewBuffer, PlaylistEntriesBuffer, PlaylistSummaryBuffer, ViewRequests},
+    library::{DirectoryTree, LibraryNode, TreeBranch},
+    paged::PagedRows,
+    queries::ViewRequests,
 };
 use crate::model::{
-    LibraryRow, LibrarySort, LibraryStats, Page, PlaylistEntryRow, PlaylistSummary,
+    DirectoryRow, LibraryRow, LibrarySort, LibraryStats, Page, PlaylistEntryRow, PlaylistSummary,
+    Query,
 };
 use gpui::ScrollStrategy;
-use std::collections::HashSet;
+use selection::LibrarySelection;
+use std::{collections::HashSet, ops::Range};
 
 pub(in crate::gui) fn merge_selection(
     tracks: &mut HashSet<i64>,
@@ -84,10 +92,22 @@ impl BrowserState {
     }
 }
 
+#[derive(Default)]
+pub(super) struct LibraryViewBuffer {
+    pub(super) query: Option<String>,
+    pub(super) favorite: Option<bool>,
+    pub(super) missing: Option<bool>,
+    pub(super) sort: LibrarySort,
+    pub(super) offset: usize,
+    pub(super) total: usize,
+    pub(super) rows: PagedRows<LibraryRow>,
+    pub(super) scroll: gpui::UniformListScrollHandle,
+}
+
 pub(super) struct LibraryBrowser {
-    pub(super) buffer: LibraryViewBuffer,
-    pub(super) tree: DirectoryTree,
-    pub(super) range_selection: LibrarySelection,
+    buffer: LibraryViewBuffer,
+    tree: DirectoryTree,
+    range_selection: LibrarySelection,
     navigation: Option<usize>,
     selected: HashSet<i64>,
     selected_nodes: HashSet<LibraryNode>,
@@ -118,6 +138,134 @@ impl Default for LibraryBrowser {
 }
 
 impl LibraryBrowser {
+    pub(super) fn buffer(&self) -> &LibraryViewBuffer {
+        &self.buffer
+    }
+
+    pub(super) fn tree(&self) -> &DirectoryTree {
+        &self.tree
+    }
+
+    pub(super) fn take_ready_selection(&mut self) -> Option<usize> {
+        self.tree.ready_selection()
+    }
+
+    pub(super) fn prepare_page(&mut self, offset: usize, page_size: usize) -> Query {
+        let offset = offset / page_size * page_size;
+        self.buffer.offset = offset;
+        self.buffer.rows.begin(offset, page_size);
+        Query::LibraryPage {
+            query: self.buffer.query.clone(),
+            favorite: self.buffer.favorite,
+            missing: self.buffer.missing,
+            sort: self.buffer.sort,
+            offset,
+            limit: page_size,
+        }
+    }
+
+    pub(super) fn demand_page(&mut self, range: Range<usize>, page_size: usize) -> Option<usize> {
+        self.buffer.rows.demand(range, page_size)
+    }
+
+    pub(super) fn retry_page(&mut self, page_size: usize) -> Option<usize> {
+        self.buffer.rows.retry();
+        self.demand_page(self.buffer.rows.visible(), page_size)
+    }
+
+    pub(super) fn fail_page(&mut self, message: String) {
+        self.buffer.rows.fail(message);
+    }
+
+    pub(super) fn focus_track(&mut self, id: i64) {
+        if !self.tree_active
+            && let Some(index) = self.buffer.rows.position(|row| row.id == id)
+        {
+            self.buffer.rows.pin(Some(index));
+            self.buffer
+                .scroll
+                .scroll_to_item(index, ScrollStrategy::Nearest);
+        }
+    }
+
+    pub(super) fn refresh_tree(&mut self, page_size: usize) {
+        self.invalidate_projection();
+        if !self.tree.configure_page_size(page_size) {
+            self.tree.invalidate();
+        }
+    }
+
+    pub(super) fn prepare_directory(
+        &mut self,
+        branch: TreeBranch,
+        offset: usize,
+        page_size: usize,
+        generation: u64,
+    ) -> usize {
+        if self.tree.configure_page_size(page_size) {
+            self.invalidate_projection();
+        }
+        let offset = offset / page_size * page_size;
+        self.tree.begin(branch, offset, generation);
+        offset
+    }
+
+    pub(super) fn accept_directory(
+        &mut self,
+        branch: &TreeBranch,
+        generation: u64,
+        page: Page<DirectoryRow>,
+    ) {
+        let projection = self.tree.projection_revision();
+        self.tree.accept(branch, generation, page);
+        if self.tree.projection_revision() != projection {
+            self.invalidate_selection();
+        }
+    }
+
+    pub(super) fn fail_directory(&mut self, branch: &TreeBranch, generation: u64) {
+        self.tree.fail(branch, generation);
+    }
+
+    pub(super) fn retry_directory(&mut self, branch: &TreeBranch) {
+        self.tree.retry(branch);
+    }
+
+    pub(super) fn expand_directory(&mut self, branch: &TreeBranch, expanded: bool) -> bool {
+        self.invalidate_selection();
+        if expanded {
+            self.tree.expand(branch);
+            matches!(
+                self.tree.status(branch),
+                super::library::BranchStatus::Unloaded | super::library::BranchStatus::Error
+            )
+        } else {
+            self.tree.collapse(branch);
+            false
+        }
+    }
+
+    pub(super) fn demand_directories(&mut self, range: Range<usize>) -> Vec<(TreeBranch, usize)> {
+        self.remember_selection();
+        self.tree.requests_for_range(range)
+    }
+
+    pub(super) fn navigate_tree_row(&mut self, index: usize) -> Option<LibraryNode> {
+        self.invalidate_selection();
+        self.tree
+            .scroll
+            .scroll_to_item(index, ScrollStrategy::Nearest);
+        let Some(super::library::tree::TreeItem::Entry(visible)) = self.tree.item(index) else {
+            self.tree.defer_selection(index);
+            return None;
+        };
+        self.tree.cancel_navigation();
+        Some(match visible.row {
+            DirectoryRow::Directory { path } => LibraryNode::Directory(std::sync::Arc::from(path)),
+            DirectoryRow::Track(track) => LibraryNode::Track(track.id),
+        })
+    }
+
     pub(super) fn selected(&self) -> &HashSet<i64> {
         &self.selected
     }
@@ -285,15 +433,99 @@ impl LibraryBrowser {
 }
 
 #[derive(Default)]
+pub(super) struct PlaylistSummaryBuffer {
+    pub(super) offset: usize,
+    pub(super) total: usize,
+    pub(super) rows: PagedRows<PlaylistSummary>,
+    pub(super) scroll: gpui::UniformListScrollHandle,
+}
+
+#[derive(Default)]
+pub(super) struct PlaylistEntriesBuffer {
+    pub(super) playlist_id: Option<i64>,
+    pub(super) offset: usize,
+    pub(super) total: usize,
+    pub(super) rows: PagedRows<PlaylistEntryRow>,
+    pub(super) scroll: gpui::UniformListScrollHandle,
+}
+
+#[derive(Default)]
 pub(super) struct PlaylistBrowser {
-    pub(super) summaries: PlaylistSummaryBuffer,
-    pub(super) entries: PlaylistEntriesBuffer,
+    summaries: PlaylistSummaryBuffer,
+    entries: PlaylistEntriesBuffer,
     selected: Option<i64>,
     selected_entry: Option<i64>,
     selected_name: String,
 }
 
 impl PlaylistBrowser {
+    pub(super) fn summaries(&self) -> &PlaylistSummaryBuffer {
+        &self.summaries
+    }
+
+    pub(super) fn entries(&self) -> &PlaylistEntriesBuffer {
+        &self.entries
+    }
+
+    pub(super) fn invalidate_summaries(&mut self) {
+        self.summaries.rows.invalidate();
+    }
+
+    pub(super) fn prepare_page(&mut self, entries: bool, offset: usize, page_size: usize) -> Query {
+        let offset = offset / page_size * page_size;
+        if entries {
+            self.entries.offset = offset;
+            self.entries.rows.begin(offset, page_size);
+            Query::PlaylistEntries {
+                playlist_id: self
+                    .entries
+                    .playlist_id
+                    .expect("entries prepared for a playlist"),
+                offset,
+                limit: page_size,
+            }
+        } else {
+            self.summaries.offset = offset;
+            self.summaries.rows.begin(offset, page_size);
+            Query::PlaylistSummaries {
+                offset,
+                limit: page_size,
+            }
+        }
+    }
+
+    pub(super) fn demand_page(
+        &mut self,
+        entries: bool,
+        range: Range<usize>,
+        page_size: usize,
+    ) -> Option<usize> {
+        if entries {
+            self.entries.rows.demand(range, page_size)
+        } else {
+            self.summaries.rows.demand(range, page_size)
+        }
+    }
+
+    pub(super) fn retry_page(&mut self, entries: bool, page_size: usize) -> Option<usize> {
+        let range = if entries {
+            self.entries.rows.retry();
+            self.entries.rows.visible()
+        } else {
+            self.summaries.rows.retry();
+            self.summaries.rows.visible()
+        };
+        self.demand_page(entries, range, page_size)
+    }
+
+    pub(super) fn fail_page(&mut self, entries: bool, message: String) {
+        if entries {
+            self.entries.rows.fail(message);
+        } else {
+            self.summaries.rows.fail(message);
+        }
+    }
+
     pub(super) fn selected(&self) -> Option<i64> {
         self.selected
     }
@@ -498,6 +730,40 @@ impl HistoryBrowser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn page_retry_preserves_unknown_count_until_an_empty_response_arrives() {
+        let mut library = LibraryBrowser::default();
+        assert_eq!(library.buffer().rows.len(), 1);
+        assert_eq!(library.demand_page(0..1, 20), Some(0));
+        library.prepare_page(0, 20);
+        library.fail_page("unavailable".into());
+        assert_eq!(library.demand_page(0..1, 20), None);
+        assert_eq!(library.retry_page(20), Some(0));
+        library.prepare_page(0, 20);
+        library.accept_page(Page {
+            total: 0,
+            rows: Vec::new(),
+        });
+        assert!(library.buffer().rows.is_empty());
+        assert_eq!(library.retry_page(20), None);
+
+        let mut playlists = PlaylistBrowser::default();
+        playlists.select(41, "empty".into(), 0);
+        playlists.prepare_entries(41);
+        assert_eq!(playlists.entries().rows.len(), 1);
+        playlists.prepare_page(true, 0, 20);
+        playlists.fail_page(true, "unavailable".into());
+        assert_eq!(playlists.demand_page(true, 0..1, 20), None);
+        assert_eq!(playlists.retry_page(true, 20), Some(0));
+        playlists.prepare_page(true, 0, 20);
+        playlists.accept_entries(Page {
+            total: 0,
+            rows: Vec::new(),
+        });
+        assert!(playlists.entries().rows.is_empty());
+        assert_eq!(playlists.selected(), Some(41));
+        assert_eq!(playlists.retry_page(true, 20), None);
+    }
 
     #[test]
     fn drag_source_resolves_current_mixed_selection_without_duplicates() {
@@ -573,7 +839,7 @@ mod tests {
         let mut browser = BrowserState::default();
         browser.playlists.select(41, "selected".into(), 40);
         browser.playlists.prepare_entries(41);
-        browser.playlists.summaries.rows.begin(0, 20);
+        browser.playlists.prepare_page(false, 0, 20);
         browser.playlists.accept_summaries(Page {
             total: 100,
             rows: (1..=20).map(|id| summary(id, 0)).collect(),
@@ -585,7 +851,7 @@ mod tests {
         browser.accept_playlist_lookup(41, Some(summary(42, 1)));
         assert_eq!(browser.playlists.selected(), None);
         assert_eq!(browser.playlists.selected_entry(), None);
-        assert_eq!(browser.playlists.entries.playlist_id, None);
+        assert_eq!(browser.playlists.entries().playlist_id, None);
         assert!(browser.playlists.selected_name().is_empty());
     }
 
@@ -602,7 +868,7 @@ mod tests {
         browser.accept_playlist_lookup(2, None);
         assert_eq!(browser.playlists.selected(), None);
         assert_eq!(browser.playlists.selected_entry(), None);
-        assert_eq!(browser.playlists.entries.playlist_id, None);
+        assert_eq!(browser.playlists.entries().playlist_id, None);
     }
 
     #[test]
@@ -618,7 +884,7 @@ mod tests {
         playlists.remove_selected();
         assert_eq!(playlists.selected(), None);
         assert_eq!(playlists.selected_entry(), None);
-        assert_eq!(playlists.entries.playlist_id, None);
+        assert_eq!(playlists.entries().playlist_id, None);
     }
 
     #[test]

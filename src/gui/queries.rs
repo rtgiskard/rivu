@@ -1,10 +1,9 @@
 //! View queries and paged buffers, including stale-response rejection and cancellation.
 //! GuiApp retains the entity and the single frame scheduler.
 
-use super::paged::PagedRows;
 use super::*;
 use crate::{
-    model::{LibraryRow, LibrarySort, PlaylistEntryRow, PlaylistSummary, Query},
+    model::{LibrarySort, Query},
     response::ViewResponse,
 };
 
@@ -70,35 +69,6 @@ impl ViewRequests {
     }
 }
 
-#[derive(Default)]
-pub(super) struct LibraryViewBuffer {
-    pub(super) query: Option<String>,
-    pub(super) favorite: Option<bool>,
-    pub(super) missing: Option<bool>,
-    pub(super) sort: LibrarySort,
-    pub(super) offset: usize,
-    pub(super) total: usize,
-    pub(super) rows: PagedRows<LibraryRow>,
-    pub(super) scroll: gpui::UniformListScrollHandle,
-}
-
-#[derive(Default)]
-pub(super) struct PlaylistSummaryBuffer {
-    pub(super) offset: usize,
-    pub(super) total: usize,
-    pub(super) rows: PagedRows<PlaylistSummary>,
-    pub(super) scroll: gpui::UniformListScrollHandle,
-}
-
-#[derive(Default)]
-pub(super) struct PlaylistEntriesBuffer {
-    pub(super) playlist_id: Option<i64>,
-    pub(super) offset: usize,
-    pub(super) total: usize,
-    pub(super) rows: PagedRows<PlaylistEntryRow>,
-    pub(super) scroll: gpui::UniformListScrollHandle,
-}
-
 impl GuiApp {
     pub(super) fn view_page_size(&self) -> usize {
         self.state.system.config.page_size as usize
@@ -143,13 +113,13 @@ impl GuiApp {
                         let message = error.to_string();
                         match kind {
                             ViewRequestKind::Library => {
-                                this.browser.library.buffer.rows.fail(message.clone())
+                                this.browser.library.fail_page(message.clone())
                             }
                             ViewRequestKind::PlaylistSummaries => {
-                                this.browser.playlists.summaries.rows.fail(message.clone())
+                                this.browser.playlists.fail_page(false, message.clone())
                             }
                             ViewRequestKind::PlaylistEntries => {
-                                this.browser.playlists.entries.rows.fail(message.clone())
+                                this.browser.playlists.fail_page(true, message.clone())
                             }
                             _ => {}
                         }
@@ -165,7 +135,7 @@ impl GuiApp {
                 {
                     match kind {
                         ViewRequestKind::Library => {
-                            this.request_library_page(this.browser.library.buffer.offset, cx);
+                            this.request_library_page(this.browser.library.buffer().offset, cx);
                         }
                         ViewRequestKind::Ranking => {
                             this.request_ranking_page(this.browser.history.offset(), cx)
@@ -184,14 +154,14 @@ impl GuiApp {
                 {
                     match kind {
                         ViewRequestKind::PlaylistSummaries => this.request_playlist_summaries(
-                            this.browser.playlists.summaries.offset,
+                            this.browser.playlists.summaries().offset,
                             cx,
                         ),
                         ViewRequestKind::PlaylistEntries => {
-                            if let Some(id) = this.browser.playlists.entries.playlist_id {
+                            if let Some(id) = this.browser.playlists.entries().playlist_id {
                                 this.request_playlist_entries(
                                     id,
-                                    this.browser.playlists.entries.offset,
+                                    this.browser.playlists.entries().offset,
                                     cx,
                                 );
                             }
@@ -219,14 +189,14 @@ impl GuiApp {
                             if let Some(id) = this
                                 .browser
                                 .library
-                                .buffer
+                                .buffer()
                                 .rows
                                 .get(index)
                                 .map(|row| row.id)
                             {
                                 this.browser.library.cancel_navigation();
                                 this.select_track(id, false, cx);
-                            } else if index >= this.browser.library.buffer.total {
+                            } else if index >= this.browser.library.buffer().total {
                                 this.browser.library.cancel_navigation();
                             } else {
                                 this.ensure_library_range(index..index + 1, cx);
@@ -270,22 +240,9 @@ impl GuiApp {
 
     fn load_library_page(&mut self, offset: usize, cx: &mut Context<Self>) {
         let page_size = self.view_page_size();
-        let offset = offset / page_size * page_size;
-        self.browser.library.buffer.offset = offset;
-        self.browser.library.buffer.rows.begin(offset, page_size);
+        let query = self.browser.library.prepare_page(offset, page_size);
         let generation = self.browser.requests.next_generation();
-        self.request_view(
-            Query::LibraryPage {
-                query: self.browser.library.buffer.query.clone(),
-                favorite: self.browser.library.buffer.favorite,
-                missing: self.browser.library.buffer.missing,
-                sort: self.browser.library.buffer.sort,
-                offset,
-                limit: page_size,
-            },
-            generation,
-            cx,
-        );
+        self.request_view(query, generation, cx);
     }
 
     pub(super) fn request_directory_page(
@@ -295,13 +252,11 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) {
         let page_size = self.view_page_size();
-        self.browser.library.tree.configure_page_size(page_size);
-        let offset = offset / page_size * page_size;
         let generation = self.browser.requests.next_generation();
-        self.browser
-            .library
-            .tree
-            .begin(branch.clone(), offset, generation);
+        let offset =
+            self.browser
+                .library
+                .prepare_directory(branch.clone(), offset, page_size, generation);
         if branch.is_forest() {
             let roots = &self.state.system.config.library_roots;
             let page = crate::model::Page::<crate::model::DirectoryRow> {
@@ -313,7 +268,9 @@ impl GuiApp {
                     .map(|path| crate::model::DirectoryRow::Directory { path: path.clone() })
                     .collect(),
             };
-            self.browser.library.tree.accept(&branch, generation, page);
+            self.browser
+                .library
+                .accept_directory(&branch, generation, page);
             cx.notify();
             return;
         }
@@ -336,7 +293,7 @@ impl GuiApp {
                 if !this
                     .browser
                     .library
-                    .tree
+                    .tree()
                     .request_pending(&branch, generation)
                 {
                     return;
@@ -344,7 +301,7 @@ impl GuiApp {
                 let result = match response.result {
                     Ok(result) => result,
                     Err(error) => {
-                        this.browser.library.tree.fail(&branch, generation);
+                        this.browser.library.fail_directory(&branch, generation);
                         this.error = Some(error.to_string());
                         cx.notify();
                         return;
@@ -358,11 +315,9 @@ impl GuiApp {
                     return;
                 }
                 if let ViewResponse::DirectoryPage(page) = result {
-                    let projection = this.browser.library.tree.projection_revision();
-                    this.browser.library.tree.accept(&branch, generation, page);
-                    if this.browser.library.tree.projection_revision() != projection {
-                        this.browser.library.invalidate_selection();
-                    }
+                    this.browser
+                        .library
+                        .accept_directory(&branch, generation, page);
                 }
                 cx.notify();
             });
@@ -388,28 +343,18 @@ impl GuiApp {
     }
 
     pub(super) fn request_playlist_summaries(&mut self, offset: usize, cx: &mut Context<Self>) {
-        self.browser.playlists.summaries.rows.invalidate();
+        self.browser.playlists.invalidate_summaries();
         self.load_playlist_summaries(offset, cx);
     }
 
     fn load_playlist_summaries(&mut self, offset: usize, cx: &mut Context<Self>) {
         let page_size = self.view_page_size();
-        let offset = offset / page_size * page_size;
-        self.browser.playlists.summaries.offset = offset;
-        self.browser
+        let query = self
+            .browser
             .playlists
-            .summaries
-            .rows
-            .begin(offset, page_size);
+            .prepare_page(false, offset, page_size);
         let generation = self.browser.requests.next_generation();
-        self.request_view(
-            Query::PlaylistSummaries {
-                offset,
-                limit: page_size,
-            },
-            generation,
-            cx,
-        );
+        self.request_view(query, generation, cx);
     }
 
     pub(super) fn request_playlist_entries(
@@ -424,19 +369,13 @@ impl GuiApp {
 
     fn load_playlist_entries(&mut self, playlist_id: i64, offset: usize, cx: &mut Context<Self>) {
         let page_size = self.view_page_size();
-        let offset = offset / page_size * page_size;
-        self.browser.playlists.entries.offset = offset;
-        self.browser.playlists.entries.rows.begin(offset, page_size);
-        let generation = self.browser.requests.next_generation();
-        self.request_view(
-            Query::PlaylistEntries {
-                playlist_id,
-                offset,
-                limit: page_size,
-            },
-            generation,
-            cx,
+        debug_assert_eq!(
+            self.browser.playlists.entries().playlist_id,
+            Some(playlist_id)
         );
+        let query = self.browser.playlists.prepare_page(true, offset, page_size);
+        let generation = self.browser.requests.next_generation();
+        self.request_view(query, generation, cx);
     }
 
     pub(super) fn ensure_library_range(
@@ -447,9 +386,7 @@ impl GuiApp {
         if let Some(offset) = self
             .browser
             .library
-            .buffer
-            .rows
-            .demand(range, self.view_page_size())
+            .demand_page(range, self.view_page_size())
         {
             self.load_library_page(offset, cx);
         }
@@ -459,12 +396,10 @@ impl GuiApp {
         range: std::ops::Range<usize>,
         cx: &mut Context<Self>,
     ) {
-        if let Some(offset) = self
-            .browser
-            .playlists
-            .summaries
-            .rows
-            .demand(range, self.view_page_size())
+        if let Some(offset) =
+            self.browser
+                .playlists
+                .demand_page(false, range, self.view_page_size())
         {
             self.load_playlist_summaries(offset, cx);
         }
@@ -474,16 +409,38 @@ impl GuiApp {
         range: std::ops::Range<usize>,
         cx: &mut Context<Self>,
     ) {
-        if let Some(id) = self.browser.playlists.entries.playlist_id {
-            if let Some(offset) = self
-                .browser
-                .playlists
-                .entries
-                .rows
-                .demand(range, self.view_page_size())
+        if let Some(id) = self.browser.playlists.entries().playlist_id {
+            if let Some(offset) =
+                self.browser
+                    .playlists
+                    .demand_page(true, range, self.view_page_size())
             {
                 self.load_playlist_entries(id, offset, cx);
             }
+        }
+    }
+
+    pub(super) fn retry_view_page(&mut self, kind: ViewRequestKind, cx: &mut Context<Self>) {
+        let page_size = self.view_page_size();
+        match kind {
+            ViewRequestKind::Library => {
+                if let Some(offset) = self.browser.library.retry_page(page_size) {
+                    self.load_library_page(offset, cx);
+                }
+            }
+            ViewRequestKind::PlaylistSummaries => {
+                if let Some(offset) = self.browser.playlists.retry_page(false, page_size) {
+                    self.load_playlist_summaries(offset, cx);
+                }
+            }
+            ViewRequestKind::PlaylistEntries => {
+                if let Some(id) = self.browser.playlists.entries().playlist_id
+                    && let Some(offset) = self.browser.playlists.retry_page(true, page_size)
+                {
+                    self.load_playlist_entries(id, offset, cx);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -493,7 +450,7 @@ impl GuiApp {
             if self
                 .browser
                 .library
-                .tree
+                .tree()
                 .generation(&library::TreeBranch::default())
                 .is_none()
             {
@@ -554,16 +511,17 @@ impl GuiApp {
     pub(super) fn refresh_page_size(&mut self, cx: &mut Context<Self>) {
         // Invalidate query tokens and payload, not identity, metadata drafts, or scroll position.
         self.browser.requests.invalidate_pages();
-        self.request_library_page(self.browser.library.buffer.rows.visible().start, cx);
-        if !self.browser.library.tree.configure_page_size(self.view_page_size()) {
-            self.browser.library.tree.invalidate();
-        }
+        self.request_library_page(self.browser.library.buffer().rows.visible().start, cx);
+        self.browser.library.refresh_tree(self.view_page_size());
         self.request_directory_page(library::TreeBranch::default(), 0, cx);
-        self.request_playlist_summaries(self.browser.playlists.summaries.rows.visible().start, cx);
-        if let Some(id) = self.browser.playlists.entries.playlist_id {
+        self.request_playlist_summaries(
+            self.browser.playlists.summaries().rows.visible().start,
+            cx,
+        );
+        if let Some(id) = self.browser.playlists.entries().playlist_id {
             self.request_playlist_entries(
                 id,
-                self.browser.playlists.entries.rows.visible().start,
+                self.browser.playlists.entries().rows.visible().start,
                 cx,
             );
         }

@@ -391,39 +391,29 @@ impl GuiApp {
                     self.navigate_library_tree(down, cx);
                     return;
                 }
-                let total = self.browser.library.buffer.total;
+                let total = self.browser.library.buffer().total;
                 if total == 0 {
                     return;
                 }
                 let current = self.browser.library.navigation().or_else(|| {
-                    self.browser
-                        .library
-                        .buffer
+                    self.browser.library.buffer()
                         .rows
                         .position(|row| self.browser.library.selected().contains(&row.id))
                 });
                 let index = match current {
                     Some(index) if down => (index + 1).min(total - 1),
                     Some(index) => index.saturating_sub(1),
-                    None if down => self
-                        .browser
-                        .library
-                        .buffer
+                    None if down => self.browser.library.buffer()
                         .rows
                         .visible()
                         .start
                         .min(total - 1),
                     None => total - 1,
                 };
-                self.browser
-                    .library
-                    .buffer
+                self.browser.library.buffer()
                     .scroll
                     .scroll_to_item(index, ScrollStrategy::Nearest);
-                if let Some(id) = self
-                    .browser
-                    .library
-                    .buffer
+                if let Some(id) = self.browser.library.buffer()
                     .rows
                     .get(index)
                     .map(|row| row.id)
@@ -482,10 +472,7 @@ impl GuiApp {
                     self.activate_library_tree(cx);
                     return;
                 }
-                let track_id = self
-                    .browser
-                    .library
-                    .buffer
+                let track_id = self.browser.library.buffer()
                     .rows
                     .iter()
                     .find(|row| self.browser.library.selected().contains(&row.id))
@@ -945,11 +932,11 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let error = match kind {
-            ViewRequestKind::Library => self.browser.library.buffer.rows.error(index),
+            ViewRequestKind::Library => self.browser.library.buffer().rows.error(index),
             ViewRequestKind::PlaylistSummaries => {
-                self.browser.playlists.summaries.rows.error(index)
+                self.browser.playlists.summaries().rows.error(index)
             }
-            ViewRequestKind::PlaylistEntries => self.browser.playlists.entries.rows.error(index),
+            ViewRequestKind::PlaylistEntries => self.browser.playlists.entries().rows.error(index),
             _ => None,
         };
         list_row(("loading-row", index), false)
@@ -966,30 +953,7 @@ impl GuiApp {
                     .into()
                 })
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    match kind {
-                        ViewRequestKind::Library => {
-                            this.browser.library.buffer.rows.retry();
-                            this.ensure_library_range(
-                                this.browser.library.buffer.rows.visible(),
-                                cx,
-                            );
-                        }
-                        ViewRequestKind::PlaylistSummaries => {
-                            this.browser.playlists.summaries.rows.retry();
-                            this.ensure_playlist_range(
-                                this.browser.playlists.summaries.rows.visible(),
-                                cx,
-                            );
-                        }
-                        ViewRequestKind::PlaylistEntries => {
-                            this.browser.playlists.entries.rows.retry();
-                            this.ensure_entry_range(
-                                this.browser.playlists.entries.rows.visible(),
-                                cx,
-                            );
-                        }
-                        _ => {}
-                    }
+                    this.retry_view_page(kind, cx);
                     cx.notify();
                 }))
             })
@@ -1000,21 +964,7 @@ impl GuiApp {
         self.browser
             .library
             .select_node(&LibraryNode::Track(id), multi);
-        if !self.browser.library.tree_active()
-            && let Some(index) = self
-                .browser
-                .library
-                .buffer
-                .rows
-                .position(|row| row.id == id)
-        {
-            self.browser.library.buffer.rows.pin(Some(index));
-            self.browser
-                .library
-                .buffer
-                .scroll
-                .scroll_to_item(index, gpui::ScrollStrategy::Nearest);
-        }
+        self.browser.library.focus_track(id);
         if let Some(selected) = self
             .browser
             .library
@@ -1212,9 +1162,9 @@ impl GuiApp {
             }
             if library_changed || library_structure_changed {
                 if !page_size_changed {
-                    self.request_library_page(self.browser.library.buffer.rows.visible().start, cx);
+                    self.request_library_page(self.browser.library.buffer().rows.visible().start, cx);
                     self.request_ranking(self.browser.history.offset(), cx);
-                    self.browser.library.tree.invalidate();
+                    self.browser.library.refresh_tree(self.view_page_size());
                     self.request_directory_page(library::TreeBranch::default(), 0, cx);
                 }
                 if let Some(id) = self.metadata.selected() {
@@ -1225,13 +1175,13 @@ impl GuiApp {
                 && (library_changed || library_structure_changed || playlist_changed)
             {
                 self.request_playlist_summaries(
-                    self.browser.playlists.summaries.rows.visible().start,
+                    self.browser.playlists.summaries().rows.visible().start,
                     cx,
                 );
-                if let Some(id) = self.browser.playlists.entries.playlist_id {
+                if let Some(id) = self.browser.playlists.entries().playlist_id {
                     self.request_playlist_entries(
                         id,
-                        self.browser.playlists.entries.rows.visible().start,
+                        self.browser.playlists.entries().rows.visible().start,
                         cx,
                     );
                 }

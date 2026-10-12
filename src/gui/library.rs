@@ -1,7 +1,4 @@
-mod selection;
-mod tree;
-
-pub(super) use selection::LibrarySelection;
+pub(super) mod tree;
 
 use super::{GuiApp, ListFocus, icon_button, list_viewport, row};
 use crate::model::{Command, DirectoryRow};
@@ -177,33 +174,16 @@ impl GuiApp {
     }
 
     fn selected_tree_index(&self) -> Option<usize> {
-        self.browser.library.tree.selected_index()
+        self.browser.library.tree().selected_index()
     }
 
     fn select_tree_row(&mut self, index: usize, cx: &mut Context<Self>) {
-        self.browser.library.invalidate_selection();
-        self.browser
-            .library
-            .tree
-            .scroll
-            .scroll_to_item(index, gpui::ScrollStrategy::Nearest);
-        let Some(TreeItem::Entry(visible)) = self.browser.library.tree.item(index) else {
-            self.browser.library.tree.defer_selection(index);
-            for (branch, offset) in self
-                .browser
-                .library
-                .tree
-                .requests_for_range(index..index + 1)
-            {
+        let Some(node) = self.browser.library.navigate_tree_row(index) else {
+            for (branch, offset) in self.browser.library.demand_directories(index..index + 1) {
                 self.request_directory_page(branch, offset, cx);
             }
             cx.notify();
             return;
-        };
-        self.browser.library.tree.cancel_navigation();
-        let node = match visible.row {
-            DirectoryRow::Directory { path } => LibraryNode::Directory(Arc::from(path)),
-            DirectoryRow::Track(track) => LibraryNode::Track(track.id),
         };
         self.select_library_row(node, index, false, false, cx);
     }
@@ -214,23 +194,14 @@ impl GuiApp {
         expanded: bool,
         cx: &mut Context<Self>,
     ) {
-        self.browser.library.invalidate_selection();
-        if expanded {
-            self.browser.library.tree.expand(branch);
-            if matches!(
-                self.browser.library.tree.status(branch),
-                BranchStatus::Unloaded | BranchStatus::Error
-            ) {
-                self.request_directory_page(branch.clone(), 0, cx);
-            }
-        } else {
-            self.browser.library.tree.collapse(branch);
+        if self.browser.library.expand_directory(branch, expanded) {
+            self.request_directory_page(branch.clone(), 0, cx);
         }
         cx.notify();
     }
 
     pub(super) fn navigate_library_tree(&mut self, down: bool, cx: &mut Context<Self>) {
-        let count = self.browser.library.tree.row_count();
+        let count = self.browser.library.tree().row_count();
         if count == 0 {
             return;
         }
@@ -250,7 +221,7 @@ impl GuiApp {
         let Some(index) = self.selected_tree_index() else {
             return;
         };
-        let Some(TreeItem::Entry(visible)) = self.browser.library.tree.item(index) else {
+        let Some(TreeItem::Entry(visible)) = self.browser.library.tree().item(index) else {
             return;
         };
         match visible.row {
@@ -258,7 +229,7 @@ impl GuiApp {
                 let branch = visible.branch.expect("directory has an occurrence");
                 self.set_directory_expanded(
                     &branch,
-                    !self.browser.library.tree.expanded(&branch),
+                    !self.browser.library.tree().expanded(&branch),
                     cx,
                 );
             }
@@ -270,7 +241,7 @@ impl GuiApp {
         let Some(index) = self.selected_tree_index() else {
             return;
         };
-        let Some(TreeItem::Entry(visible)) = self.browser.library.tree.item(index) else {
+        let Some(TreeItem::Entry(visible)) = self.browser.library.tree().item(index) else {
             return;
         };
         let depth = visible.depth;
@@ -280,7 +251,7 @@ impl GuiApp {
                     && let Some(branch) = &visible.branch
                 {
                     self.set_directory_expanded(branch, false, cx);
-                } else if let Some(parent) = self.browser.library.tree.parent_index(index) {
+                } else if let Some(parent) = self.browser.library.tree().parent_index(index) {
                     self.select_tree_row(parent, cx);
                 }
             }
@@ -288,9 +259,9 @@ impl GuiApp {
                 if let Some(branch) = &visible.branch {
                     if !visible.expanded {
                         self.set_directory_expanded(branch, true, cx);
-                    } else if matches!(&self.browser.library.tree.item(index + 1),
+                    } else if matches!(&self.browser.library.tree().item(index + 1),
                         Some(TreeItem::Entry(next)) if next.depth > depth)
-                        || matches!(&self.browser.library.tree.item(index + 1),
+                        || matches!(&self.browser.library.tree().item(index + 1),
                             Some(TreeItem::Placeholder { depth: next_depth, .. }) if *next_depth > depth)
                     {
                         self.select_tree_row(index + 1, cx);
@@ -301,7 +272,7 @@ impl GuiApp {
                 if let Some(branch) = &visible.branch {
                     self.set_directory_expanded(
                         branch,
-                        !self.browser.library.tree.expanded(branch),
+                        !self.browser.library.tree().expanded(branch),
                         cx,
                     );
                 }
@@ -317,9 +288,9 @@ impl GuiApp {
         panel_id: u64,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let row_count = self.browser.library.tree.row_count();
+        let row_count = self.browser.library.tree().row_count();
         let ui_scale = self.state.system.config.ui_scale;
-        let scroll = &self.browser.library.tree.scroll;
+        let scroll = &self.browser.library.tree().scroll;
         let view = list_viewport(
             uniform_list(
                 ("library-directory-tree", panel_id),
@@ -327,7 +298,7 @@ impl GuiApp {
                 cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                     range
                         .filter_map(|index| {
-                            let item = this.browser.library.tree.item(index)?;
+                            let item = this.browser.library.tree().item(index)?;
                             let visible = match item {
                                 TreeItem::Entry(visible) => visible,
                                 TreeItem::Placeholder {
@@ -344,7 +315,7 @@ impl GuiApp {
                                     )
                                     .h(px(32.0 * ui_scale.max(0.5)))
                                     .relative()
-                                    .child(tree_guides(&this.browser.library.tree, index))
+                                    .child(tree_guides(&this.browser.library.tree(), index))
                                     .child(
                                         div().text_color(gpui::rgb(super::MUTED)).child(
                                             if failed { "Unavailable" } else { "Loading…" },
@@ -357,7 +328,7 @@ impl GuiApp {
                                             "Retry loading folder",
                                             cx,
                                             move |this, _, cx| {
-                                                this.browser.library.tree.retry(&branch);
+                                                this.browser.library.retry_directory(&branch);
                                                 this.request_directory_page(
                                                     branch.clone(),
                                                     offset,
@@ -445,14 +416,14 @@ impl GuiApp {
                             )
                             .h(px(32.0 * ui_scale.max(0.5)))
                             .relative()
-                            .child(tree_guides(&this.browser.library.tree, index))
+                            .child(tree_guides(&this.browser.library.tree(), index))
                             .child(
                                 div()
                                     .flex_shrink_0()
                                     .text_sm()
                                     .font_family(super::fonts::SYMBOLS_FAMILY)
                                     .child(if let Some(branch) = &visible.branch {
-                                        if this.browser.library.tree.expanded(branch) {
+                                        if this.browser.library.tree().expanded(branch) {
                                             "󰝰"
                                         } else {
                                             "󰉋"
@@ -518,7 +489,7 @@ impl GuiApp {
                             })
                             .on_click(cx.listener(
                                 move |this, event: &gpui::ClickEvent, window, cx| {
-                                    this.browser.library.tree.cancel_navigation();
+                                    this.browser.library.cancel_navigation();
                                     this.focus_layout(window, cx);
                                     this.browser.focus_list(ListFocus::Library);
                                     match id.clone() {
@@ -545,7 +516,7 @@ impl GuiApp {
                                                     .expect("directory occurrence");
                                                 this.set_directory_expanded(
                                                     branch,
-                                                    !this.browser.library.tree.expanded(branch),
+                                                    !this.browser.library.tree().expanded(branch),
                                                     cx,
                                                 );
                                             }
@@ -568,11 +539,10 @@ impl GuiApp {
             )
             .with_decoration(super::paged::viewport_demand(cx.processor(
                 |this, range: std::ops::Range<usize>, _, cx| {
-                    this.browser.library.remember_selection();
-                    for (path, offset) in this.browser.library.tree.requests_for_range(range) {
+                    for (path, offset) in this.browser.library.demand_directories(range) {
                         this.request_directory_page(path, offset, cx);
                     }
-                    if let Some(index) = this.browser.library.tree.ready_selection() {
+                    if let Some(index) = this.browser.library.take_ready_selection() {
                         this.select_tree_row(index, cx);
                     }
                 },
