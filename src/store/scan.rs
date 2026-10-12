@@ -256,6 +256,8 @@ impl Store {
                 m.bits_per_sample,
                 m.release_date,
             ])?;
+            // Missing detection visits only pre-scan IDs. New inserts cannot
+            // belong to that set; resolved old IDs are already accounted for.
             if let Some(id) = id {
                 seen.insert(id);
             }
@@ -284,29 +286,6 @@ impl Store {
              FROM temp.scan_stage WHERE resolved_id IS NULL",
             [],
         )?;
-        let mut current_stmt = tx.prepare(
-            "SELECT id,path,fingerprint,cue_sheet,cue_number,cue_start_frame,cue_end_frame FROM tracks",
-        )?;
-        let current: Vec<Existing> = current_stmt
-            .query_map([], |r| {
-                Ok(Existing {
-                    id: r.get(0)?,
-                    path: PathBuf::from(r.get::<_, String>(1)?),
-                    hash: r.get(2)?,
-                    cue: cue_from_row(r, 3)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        drop(current_stmt);
-        let mut current_by_identity = HashMap::new();
-        for record in &current {
-            current_by_identity.insert(identity(&record.path, record.cue.as_ref()), record.id);
-        }
-        for r in &result.records {
-            if let Some(id) = current_by_identity.get(&identity(&r.path, r.cue.as_ref())) {
-                seen.insert(*id);
-            }
-        }
         tx.execute_batch("DROP TABLE temp.scan_stage")?;
         let mut mark_missing = tx.prepare("UPDATE tracks SET missing=1 WHERE id=?1")?;
         for o in &old {
@@ -326,7 +305,6 @@ impl Store {
             }
         }
         drop(mark_missing);
-        drop(current);
         tx.commit()?;
         Ok(())
     }
