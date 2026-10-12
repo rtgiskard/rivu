@@ -65,6 +65,18 @@ impl BrowserState {
         self.playlists.remove_selected();
     }
 
+    /// The first row after `id - 1` proves existence without scanning other pages.
+    pub(super) fn accept_playlist_lookup(&mut self, id: i64, first: Option<PlaylistSummary>) {
+        if self.playlists.selected() != Some(id) {
+            return;
+        }
+        if let Some(summary) = first.filter(|summary| summary.id == id) {
+            self.playlists.selected_name = summary.name;
+        } else {
+            self.remove_playlist_selection();
+        }
+    }
+
     pub(super) fn clear_selection(&mut self) {
         self.library.clear_selection();
         self.queue.clear();
@@ -139,7 +151,7 @@ impl LibraryBrowser {
         self.range_selection.cancel(true);
     }
 
-    fn invalidate_projection(&mut self) {
+    pub(super) fn invalidate_projection(&mut self) {
         self.invalidate_selection();
         self.navigation = None;
         self.tree.cancel_navigation();
@@ -233,7 +245,7 @@ impl LibraryBrowser {
     }
 
     pub(super) fn prepare_query(&mut self, query: String) {
-        self.invalidate_selection();
+        self.invalidate_projection();
         self.buffer.query = (!query.is_empty()).then_some(query);
         self.buffer.favorite = self.favorites_only.then_some(true);
         self.buffer.missing = self.missing_only.then_some(true);
@@ -483,6 +495,61 @@ mod tests {
         assert!(library.tree_active());
         library.clear_selection();
         assert!(library.selected().is_empty());
+    }
+
+    #[test]
+    fn refreshed_projection_cancels_old_index_navigation_but_keeps_track_identity() {
+        let mut library = LibraryBrowser::default();
+        library.select_node(&LibraryNode::Track(41), false);
+        library.defer_navigation(123);
+        library.prepare_query(String::new());
+        assert_eq!(library.navigation(), None);
+        assert!(library.selected().contains(&41));
+    }
+
+    fn summary(id: i64, entry_count: usize) -> PlaylistSummary {
+        PlaylistSummary {
+            id,
+            name: format!("playlist {id}"),
+            entry_count,
+        }
+    }
+
+    #[test]
+    fn playlist_lookup_distinguishes_unloaded_empty_and_deleted_playlists() {
+        let mut browser = BrowserState::default();
+        browser.playlists.select(41, "selected".into(), 40);
+        browser.playlists.prepare_entries(41);
+        browser.playlists.summaries.rows.begin(0, 20);
+        browser.playlists.accept_summaries(Page {
+            total: 100,
+            rows: (1..=20).map(|id| summary(id, 0)).collect(),
+        });
+        assert_eq!(browser.playlists.selected(), Some(41));
+        browser.accept_playlist_lookup(41, Some(summary(41, 0)));
+        assert_eq!(browser.playlists.selected(), Some(41));
+        browser.playlists.select_entry(99, 0);
+        browser.accept_playlist_lookup(41, Some(summary(42, 1)));
+        assert_eq!(browser.playlists.selected(), None);
+        assert_eq!(browser.playlists.selected_entry(), None);
+        assert_eq!(browser.playlists.entries.playlist_id, None);
+        assert!(browser.playlists.selected_name().is_empty());
+    }
+
+    #[test]
+    fn stale_playlist_lookup_cannot_clear_another_selection() {
+        let mut browser = BrowserState::default();
+        browser.playlists.select(1, "one".into(), 0);
+        browser.playlists.select(2, "two".into(), 1);
+        browser.playlists.prepare_entries(2);
+        browser.playlists.select_entry(20, 0);
+        browser.accept_playlist_lookup(1, None);
+        assert_eq!(browser.playlists.selected(), Some(2));
+        assert_eq!(browser.playlists.selected_entry(), Some(20));
+        browser.accept_playlist_lookup(2, None);
+        assert_eq!(browser.playlists.selected(), None);
+        assert_eq!(browser.playlists.selected_entry(), None);
+        assert_eq!(browser.playlists.entries.playlist_id, None);
     }
 
     #[test]

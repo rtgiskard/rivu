@@ -35,6 +35,8 @@ load rows automatically while scrolling. Entry numbering and move actions use
 absolute playlist positions. Scrolling away from the selected playlist preserves
 its name and selected entry. See link:02_library.adoc#_paged_views[Library] for
 scrolling and query failure behavior.
+Deleting the selected playlist from another client clears its playlist and entry
+selection on refresh. Empty playlists and unloaded pages do not imply deletion.
 
 == Import and export
 

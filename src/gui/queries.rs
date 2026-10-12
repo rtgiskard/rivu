@@ -14,6 +14,7 @@ pub(super) enum ViewRequestKind {
     Ranking,
     PlaylistSummaries,
     PlaylistEntries,
+    PlaylistSelection,
     Stats,
 }
 
@@ -27,6 +28,7 @@ impl ViewRequestKind {
             Query::LibraryPage { .. } => Self::Library,
             Query::PlaylistSummaries { .. } => Self::PlaylistSummaries,
             Query::PlaylistEntries { .. } => Self::PlaylistEntries,
+            Query::PlaylistSummaryBatch { .. } => Self::PlaylistSelection,
             Query::LibraryStats => Self::Stats,
             _ => return None,
         })
@@ -62,7 +64,9 @@ impl ViewRequests {
     }
 
     fn invalidate_pages(&mut self) {
-        self.generations.clear();
+        // Existence lookups are not pages; changing page size cannot supersede them.
+        self.generations
+            .retain(|kind, _| *kind == ViewRequestKind::PlaylistSelection);
     }
 }
 
@@ -105,6 +109,7 @@ impl GuiApp {
             return;
         };
         self.browser.requests.begin(kind, generation);
+        let selected_playlist = self.browser.playlists.selected();
         let delay = if matches!(&query, Query::LibraryPage { query: Some(_), .. }) {
             crate::model::SEARCH_DEBOUNCE
         } else {
@@ -171,7 +176,9 @@ impl GuiApp {
                 }
                 if matches!(
                     kind,
-                    ViewRequestKind::PlaylistSummaries | ViewRequestKind::PlaylistEntries
+                    ViewRequestKind::PlaylistSummaries
+                        | ViewRequestKind::PlaylistEntries
+                        | ViewRequestKind::PlaylistSelection
                 ) && revisions.playlist != this.state.library.playlist_revision
                 {
                     match kind {
@@ -188,6 +195,7 @@ impl GuiApp {
                                 );
                             }
                         }
+                        ViewRequestKind::PlaylistSelection => this.request_playlist_selection(cx),
                         _ => {}
                     }
                     return;
@@ -233,6 +241,14 @@ impl GuiApp {
                         if kind == ViewRequestKind::PlaylistEntries =>
                     {
                         this.browser.playlists.accept_entries(page);
+                    }
+                    ViewResponse::PlaylistSummaryBatch(batch)
+                        if kind == ViewRequestKind::PlaylistSelection =>
+                    {
+                        if let Some(id) = selected_playlist {
+                            this.browser
+                                .accept_playlist_lookup(id, batch.rows.into_iter().next());
+                        }
                     }
                     ViewResponse::LibraryStats(stats) if kind == ViewRequestKind::Stats => {
                         this.browser.history.accept_stats(stats)
@@ -352,6 +368,22 @@ impl GuiApp {
         })
         .detach();
         cx.notify();
+    }
+
+    pub(super) fn request_playlist_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.browser.playlists.selected() else {
+            return;
+        };
+        let generation = self.browser.requests.next_generation();
+        self.request_view(
+            Query::PlaylistSummaryBatch {
+                after: id.checked_sub(1),
+                limit: 1,
+                expected: None,
+            },
+            generation,
+            cx,
+        );
     }
 
     pub(super) fn request_playlist_summaries(&mut self, offset: usize, cx: &mut Context<Self>) {

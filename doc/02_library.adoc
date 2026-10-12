@@ -135,6 +135,8 @@ there are no page numbers or manual load-more controls. Expand a GUI directory
 to browse its children. Collapsing it preserves descendant expansion choices
 for reopening. Loading more rows does not clear selections or metadata drafts.
 Failed GUI loads offer a retry action; press `R` in the TUI to retry.
+Pending keyboard navigation is cancelled when library data, filters, or batch
+size change; an old row index is never applied to the refreshed collection.
 
 In the GUI, unmodified `PageUp` / `PageDown` scroll one viewport height without
 changing selected rows. They target the last-clicked visible scroll viewport;

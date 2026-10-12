@@ -135,6 +135,8 @@ callbacks from an old epoch cannot repopulate the current bounds cache. Escape,
 focus loss, and geometry changes cancel a separator preview and restore its
 original boundary; cancellation never requests persistence. Layout replacement
 discards old interaction state without applying its rollback to the new tree.
+Activating Library cancels the current pointer interaction before saving the
+active tab, so its shortcut cannot persist a separator preview.
 
 Snapping selects feasible candidates in this priority order:
 

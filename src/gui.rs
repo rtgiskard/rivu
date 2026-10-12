@@ -317,6 +317,7 @@ impl GuiApp {
         cx: &mut Context<Self>,
         focus_search: bool,
     ) {
+        self.cancel_interaction(window, cx);
         if let Some(panel_id) = self
             .layouts
             .current()
@@ -340,8 +341,6 @@ impl GuiApp {
             );
             cx.notify();
         } else {
-            let cancellation = self.interaction.cancel();
-            self.apply_interaction_cancellation(cancellation, cx);
             let panel_id = self
                 .layouts
                 .current_mut()
@@ -1163,7 +1162,7 @@ impl GuiApp {
             let page_size_changed =
                 self.state.system.config.page_size != state.system.config.page_size;
             if library_changed || library_structure_changed || roots_changed || page_size_changed {
-                self.browser.library.invalidate_selection();
+                self.browser.library.invalidate_projection();
             }
             let waveform_seek_disabled = self.state.system.config.waveform_seek_enabled
                 && !state.system.config.waveform_seek_enabled;
@@ -1175,6 +1174,9 @@ impl GuiApp {
             self.state = state;
             self.sync_metadata_default(cx);
             self.browser.playlists.reconcile_selection();
+            if playlist_changed || page_size_changed {
+                self.request_playlist_selection(cx);
+            }
             if still_mode_changed {
                 let cancellation = self.interaction.cancel();
                 self.apply_interaction_cancellation(cancellation, cx);
