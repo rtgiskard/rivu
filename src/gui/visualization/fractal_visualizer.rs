@@ -255,6 +255,9 @@ impl Data {
                 scene.advance(dt, self.drive);
             }
         }
+        if let Some(Scene::Flow(scene)) = &mut self.scene {
+            scene.rebuild_segments();
+        }
         self.last_time = Some(frame.sample_time);
     }
 
@@ -469,6 +472,42 @@ mod tests {
             },
             ..AnalysisFrame::default()
         }
+    }
+
+    #[test]
+    fn flow_refresh_preserves_state_and_discontinuities_reset() {
+        let visual = plot(AudioVisualizerStyle::FractalFlow);
+        visual.update(&frame(50));
+        // 500 ms requires all 60 bounded integration steps, but one publication.
+        visual.update(&frame(550));
+        let before = visual.data.borrow().segments().to_vec();
+        let accepted_time = visual.data.borrow().last_time;
+        let config = Config {
+            audio_visualizer_primary_color: "#ff0000".parse().unwrap(),
+            ..Config::default()
+        };
+        assert!(visual.configure(&config));
+        visual.update(&frame(550));
+        assert_eq!(visual.data.borrow().last_time, accepted_time);
+        assert_eq!(visual.data.borrow().segments(), before);
+        let mut gap = frame(1100);
+        visual.update(&gap);
+        let fresh = plot(AudioVisualizerStyle::FractalFlow);
+        fresh.configure(&config);
+        fresh.update(&gap);
+        assert_eq!(
+            visual.data.borrow().segments(),
+            fresh.data.borrow().segments()
+        );
+        gap.sample_time = Duration::from_millis(100);
+        visual.update(&gap);
+        let rewound = plot(AudioVisualizerStyle::FractalFlow);
+        rewound.configure(&config);
+        rewound.update(&gap);
+        assert_eq!(
+            visual.data.borrow().segments(),
+            rewound.data.borrow().segments()
+        );
     }
 
     #[test]

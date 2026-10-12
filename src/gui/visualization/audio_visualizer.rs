@@ -39,13 +39,14 @@ struct RadialMapping {
 }
 
 impl RadialMapping {
-    fn prepare(&mut self, sample_rate: u32, fft_size: u32, frequencies: &[f32]) -> bool {
+    // None rejects an unusable axis; Some reports whether the display mapping changed.
+    fn prepare(&mut self, sample_rate: u32, fft_size: u32, frequencies: &[f32]) -> Option<bool> {
         let low = 20.0_f32.max(*frequencies.first().unwrap_or(&20.0));
         let high = 20_000.0_f32
             .min(sample_rate as f32 * 0.5)
             .min(*frequencies.last().unwrap_or(&20_000.0));
         if frequencies.is_empty() || low >= high {
-            return false;
+            return None;
         }
         if self.sample_rate == sample_rate
             && self.fft_size == fft_size
@@ -56,7 +57,7 @@ impl RadialMapping {
                 .zip(frequencies)
                 .all(|(cached, frequency)| *cached == frequency.to_bits())
         {
-            return true;
+            return Some(false);
         }
         self.sample_rate = sample_rate;
         self.fft_size = fft_size;
@@ -67,11 +68,12 @@ impl RadialMapping {
             self.frequencies
                 .extend(frequencies.iter().map(|frequency| frequency.to_bits()));
         }
-        self.ranges.clear();
+        let mut changed = self.ranges.len() != FANCY_BANDS.min(frequencies.len());
         let count = FANCY_BANDS.min(frequencies.len());
+        self.ranges.reserve(count.saturating_sub(self.ranges.len()));
         let log_low = low.ln();
         let log_span = high.ln() - log_low;
-        self.ranges.extend((0..count).map(|band| {
+        for band in 0..count {
             let start = (log_low + log_span * band as f32 / count as f32).exp();
             let end = (log_low + log_span * (band + 1) as f32 / count as f32).exp();
             let first = frequencies.partition_point(|hz| *hz < start);
@@ -79,13 +81,20 @@ impl RadialMapping {
             let end = last
                 .max(first + usize::from(first < frequencies.len()))
                 .min(frequencies.len());
-            first.min(end.saturating_sub(1))..end
-        }));
+            let range = first.min(end.saturating_sub(1))..end;
+            changed |= self.ranges.get(band) != Some(&range);
+            if let Some(cached) = self.ranges.get_mut(band) {
+                *cached = range;
+            } else {
+                self.ranges.push(range);
+            }
+        }
+        self.ranges.truncate(count);
         #[cfg(test)]
         {
             self.rebuilds += 1;
         }
-        true
+        Some(changed)
     }
 }
 const TWO_PI: f32 = PI * 2.0;
@@ -283,10 +292,15 @@ impl AudioVisualizer {
             data.fade_started = None;
         }
         let fft_size = data.expected_settings.fft_size;
-        if !data
-            .mapping
-            .prepare(frame.sample_rate, fft_size, &frame.frequencies_hz)
-        {
+        let Some(mapping_changed) =
+            data.mapping
+                .prepare(frame.sample_rate, fft_size, &frame.frequencies_hz)
+        else {
+            return;
+        };
+        // Repainting the latest accepted window must not finish a partial decay.
+        // Resets clear last_sample_time; an altered mapping can remap the same time.
+        if !mapping_changed && data.last_sample_time == Some(frame.sample_time) {
             return;
         }
         let count = data.mapping.ranges.len();
@@ -937,27 +951,87 @@ mod tests {
             .collect();
         let mut mapping = RadialMapping::default();
         for _ in 0..120 {
-            assert!(mapping.prepare(48_000, 8192, &frequencies));
+            assert!(mapping.prepare(48_000, 8192, &frequencies).is_some());
         }
         assert_eq!(mapping.rebuilds, 1);
         assert_eq!(mapping.ranges.len(), 32);
         frequencies[10] += 1.0;
-        mapping.prepare(48_000, 8192, &frequencies);
+        mapping.prepare(48_000, 8192, &frequencies).unwrap();
         assert_eq!(mapping.rebuilds, 2);
-        mapping.prepare(8_000, 8192, &frequencies);
+        mapping.prepare(8_000, 8192, &frequencies).unwrap();
         assert_eq!(mapping.rebuilds, 3);
-        mapping.prepare(8_000, 16384, &frequencies);
+        mapping.prepare(8_000, 16384, &frequencies).unwrap();
         assert_eq!(mapping.rebuilds, 4);
         frequencies[10] = f32::NAN;
-        mapping.prepare(8_000, 16384, &frequencies);
-        mapping.prepare(8_000, 16384, &frequencies);
+        mapping.prepare(8_000, 16384, &frequencies).unwrap();
+        mapping.prepare(8_000, 16384, &frequencies).unwrap();
         assert_eq!(mapping.rebuilds, 5);
         frequencies = (0..=MAX_RADIAL_AXIS)
             .map(|bin| bin as f32 * 48_000.0 / (MAX_RADIAL_AXIS - 1) as f32)
             .collect();
-        mapping.prepare(48_000, 32768, &frequencies);
+        mapping.prepare(48_000, 32768, &frequencies).unwrap();
         assert!(mapping.frequencies.is_empty());
         assert_eq!(mapping.ranges.len(), FANCY_BANDS);
+    }
+
+    #[test]
+    fn repeated_falling_frame_preserves_partial_decay_until_new_audio() {
+        for oversized in [false, true] {
+            let mut radial = AudioVisualizer::new();
+            let mut audio = frame();
+            if oversized {
+                audio.frequencies_hz = (0..=MAX_RADIAL_AXIS)
+                    .map(|bin| bin as f32 * 48_000.0 / (MAX_RADIAL_AXIS - 1) as f32)
+                    .collect();
+                audio.spectrum_db = vec![-35.0; audio.frequencies_hz.len()];
+            }
+            radial.update(&audio);
+            audio.sample_time += Duration::from_millis(10);
+            audio.spectrum_db.fill(-70.0);
+            radial.update(&audio);
+            let displayed = radial.data.borrow().displayed.clone();
+            assert!(displayed.iter().all(|level| *level > 0.0 && *level < 0.5));
+            let rotation = radial.data.borrow().time;
+            for _ in 0..10 {
+                audio.sequence += 1;
+                radial.update(&audio);
+                assert_eq!(radial.data.borrow().displayed, displayed);
+                assert_eq!(radial.data.borrow().time, rotation);
+            }
+            audio.sample_time += Duration::from_millis(10);
+            radial.update(&audio);
+            assert!(
+                radial
+                    .data
+                    .borrow()
+                    .displayed
+                    .iter()
+                    .zip(&displayed)
+                    .all(|(next, previous)| next < previous)
+            );
+        }
+    }
+
+    #[test]
+    fn same_time_can_remap_after_configuration_or_axis_change() {
+        let mut radial = AudioVisualizer::new();
+        let mut audio = frame();
+        radial.update(&audio);
+        assert!(radial.configure(&Config {
+            audio_visualizer_db_range: Some(50.0),
+            ..Config::default()
+        }));
+        assert!(radial.data.borrow().last_sample_time.is_none());
+        radial.update(&audio);
+        assert_eq!(radial.data.borrow().displayed, vec![0.3; 4]);
+        audio.frequencies_hz = vec![20.0, 100.0, 20_000.0];
+        audio.spectrum_db = vec![-50.0; 3];
+        radial.update(&audio);
+        assert_eq!(radial.data.borrow().displayed, vec![0.0; 3]);
+        assert_eq!(
+            radial.data.borrow().last_sample_time,
+            Some(audio.sample_time)
+        );
     }
 
     #[test]
@@ -965,7 +1039,7 @@ mod tests {
         let mut radial = AudioVisualizer::new();
         radial.update(&frame());
         let mut next = frame();
-        next.sample_time += Duration::from_millis(1);
+        // A reset must accept the same time, not just a later publication.
         next.generation = 2;
         next.spectrum_db.fill(-70.0);
         radial.update(&next);

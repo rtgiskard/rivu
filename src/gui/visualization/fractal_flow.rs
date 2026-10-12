@@ -110,6 +110,8 @@ impl Scene {
         self.segments.clear();
     }
 
+    // Integrate every bounded substep; the accepted-frame owner publishes geometry
+    // with rebuild_segments only after the final step. No substep reads segments.
     pub(super) fn advance(&mut self, dt: f32, drive: Drive) {
         if dt <= 0.0 {
             return;
@@ -170,14 +172,13 @@ impl Scene {
                 particle.append(self.head_light);
             }
         }
-        self.rebuild_segments();
     }
 
     pub(super) fn segments(&self) -> &[LightSegment] {
         &self.segments
     }
 
-    fn rebuild_segments(&mut self) {
+    pub(super) fn rebuild_segments(&mut self) {
         self.segments.clear();
         for particle in self.particles.iter() {
             let mut from = particle.history[particle.first];
@@ -277,6 +278,34 @@ mod tests {
     }
 
     #[test]
+    fn frame_batches_preserve_every_substep_and_final_segments() {
+        let mut batched = Scene::new();
+        let mut eager = Scene::new();
+        // Vary batch length and inputs, retaining enough motion to exercise respawns.
+        for frame in 0..360 {
+            let steps = [1, 2, 6, 30, 60][frame % 5];
+            for step in 0..steps {
+                let drive = Drive {
+                    bands: [0.8, (frame % 73) as f32 / 72.0, 0.9],
+                    energy: if frame % 11 == 0 { 0.0 } else { 0.75 },
+                    onset: if step == 0 { 0.35 } else { 0.0 },
+                };
+                batched.advance(STEP, drive);
+                eager.advance(STEP, drive);
+                eager.rebuild_segments();
+            }
+            batched.rebuild_segments();
+            assert_same(&batched, &eager);
+        }
+        assert!(
+            batched
+                .particles
+                .iter()
+                .any(|particle| particle.generation > 0)
+        );
+    }
+
+    #[test]
     fn zero_time_preserves_entire_scene_even_with_changed_drive() {
         let mut scene = Scene::new();
         let mut reference = Scene::new();
@@ -284,6 +313,8 @@ mod tests {
             scene.advance(STEP, active());
             reference.advance(STEP, active());
         }
+        scene.rebuild_segments();
+        reference.rebuild_segments();
         scene.advance(0.0, Drive::default());
         scene.advance(
             0.0,
@@ -303,6 +334,7 @@ mod tests {
         for _ in 0..480 {
             scene.advance(STEP, active());
         }
+        scene.rebuild_segments();
         scene.reset();
         assert_same(&scene, &reference);
         assert_eq!(scene.segments.as_ptr(), storage);
@@ -314,6 +346,8 @@ mod tests {
             };
             scene.advance(STEP, drive);
             reference.advance(STEP, drive);
+            scene.rebuild_segments();
+            reference.rebuild_segments();
             assert_same(&scene, &reference);
         }
         assert_eq!(scene.segments.as_ptr(), storage);
@@ -335,6 +369,7 @@ mod tests {
                 onset: if step % 137 == 0 { 1.0 } else { 0.0 },
             };
             scene.advance(STEP, drive);
+            scene.rebuild_segments();
             assert!(scene.segments.len() <= MAX_SEGMENTS);
             for particle in scene.particles.iter() {
                 assert!((1..=HISTORY_POINTS).contains(&particle.count));
@@ -382,6 +417,7 @@ mod tests {
                 onset: 0.0,
             },
         );
+        scene.rebuild_segments();
         let particle = &scene.particles[0];
         assert_eq!(particle.generation, 1);
         assert_eq!(particle.count, 1);
@@ -400,6 +436,7 @@ mod tests {
         for _ in 0..240 {
             scene.advance(STEP, active());
         }
+        scene.rebuild_segments();
         assert!(!scene.segments().is_empty());
         let before = scene
             .segments()
@@ -409,6 +446,7 @@ mod tests {
         for _ in 0..60 {
             scene.advance(STEP, Drive::default());
         }
+        scene.rebuild_segments();
         let after = scene
             .segments()
             .iter()
@@ -418,6 +456,7 @@ mod tests {
         for _ in 0..720 {
             scene.advance(STEP, Drive::default());
         }
+        scene.rebuild_segments();
         assert!(scene.segments().is_empty());
     }
 
