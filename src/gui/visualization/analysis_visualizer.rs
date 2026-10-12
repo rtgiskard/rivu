@@ -1,6 +1,6 @@
 //! Fixed-scale, analysis-backed stereo plots. Texture storage is independent of panel size.
 use crate::{
-    analysis::{AnalysisFrame, AnalysisSettings, DENSITY_SIDE},
+    analysis::{AnalysisFrame, AnalysisSettings, DENSITY_SIDE, SpatialBin},
     config::{AudioVisualizerOptions, AudioVisualizerStyle, Config},
 };
 use gpui::{
@@ -13,6 +13,49 @@ const SPATIAL_WIDTH: usize = 256;
 const SPATIAL_HEIGHT: usize = 128;
 const SPATIAL_DECAY_SECONDS: f32 = 0.5;
 const FIELD_COLOR_COUNT: usize = 256;
+// The analysis backend supports FFTs up to 32768 samples. Retain one axis,
+// shared by every spatial panel, never a history of axes or panel-local copies.
+const MAX_SPATIAL_BINS: usize = 32768 / 2;
+
+#[derive(Default)]
+struct SpatialMapping {
+    sample_rate: u32,
+    fft_size: u32,
+    rows: Vec<(u32, Option<u8>)>,
+    #[cfg(test)]
+    rebuilds: usize,
+}
+
+impl SpatialMapping {
+    fn prepare(&mut self, sample_rate: u32, fft_size: u32, bins: &[SpatialBin]) {
+        let bins = &bins[..bins.len().min(MAX_SPATIAL_BINS)];
+        if self.sample_rate == sample_rate
+            && self.fft_size == fft_size
+            && self.rows.len() == bins.len()
+            && self
+                .rows
+                .iter()
+                .zip(bins)
+                .all(|((frequency, _), bin)| *frequency == bin.frequency_hz.to_bits())
+        {
+            return;
+        }
+        self.sample_rate = sample_rate;
+        self.fft_size = fft_size;
+        self.rows.clear();
+        let high = high_frequency(sample_rate);
+        self.rows.extend(bins.iter().map(|bin| {
+            (
+                bin.frequency_hz.to_bits(),
+                spatial_row(bin.frequency_hz, high).map(|row| row as u8),
+            )
+        }));
+        #[cfg(test)]
+        {
+            self.rebuilds += 1;
+        }
+    }
+}
 
 #[derive(Clone)]
 pub(super) struct AnalysisVisualizer {
@@ -35,6 +78,7 @@ struct PlotData {
     // Density is the backend's fixed-scale field; spatial is linear spectral power.
     field: Vec<f32>,
     spatial_next: Vec<f32>,
+    spatial_mapping: SpatialMapping,
     image: Option<Arc<RenderImage>>,
     image_painted: bool,
     image_error_reported: bool,
@@ -77,6 +121,7 @@ impl AnalysisVisualizer {
                 sequence: None,
                 field: Vec::new(),
                 spatial_next: Vec::new(),
+                spatial_mapping: SpatialMapping::default(),
                 image: None,
                 image_painted: false,
                 image_error_reported: false,
@@ -208,6 +253,7 @@ impl PlotData {
         } else {
             self.field = Vec::new();
             self.spatial_next = Vec::new();
+            self.spatial_mapping = SpatialMapping::default();
         }
         self.generation = None;
         self.sample_rate = 0;
@@ -284,8 +330,24 @@ impl PlotData {
                     .map(|last| frame.sample_time.saturating_sub(last).as_secs_f32())
                     .unwrap_or(0.0);
                 decay_spatial(&self.field, &mut self.spatial_next, elapsed);
-                for bin in &frame.visualizer.spatial {
-                    let Some((x, y)) = spatial_cell(bin.frequency_hz, bin.pan, high) else {
+                self.spatial_mapping.prepare(
+                    frame.sample_rate,
+                    self.settings.fft_size,
+                    &frame.visualizer.spatial,
+                );
+                for (index, bin) in frame.visualizer.spatial.iter().enumerate() {
+                    // Oversized, non-backend axes still retain the old numeric behavior
+                    // without growing the cache beyond the largest supported FFT.
+                    let y = self
+                        .spatial_mapping
+                        .rows
+                        .get(index)
+                        .map(|(_, row)| row.map(usize::from))
+                        .unwrap_or_else(|| spatial_row(bin.frequency_hz, high));
+                    let Some(y) = y else {
+                        continue;
+                    };
+                    let Some(x) = spatial_column(bin.pan) else {
                         continue;
                     };
                     if !bin.power_db.is_finite() {
@@ -586,6 +648,25 @@ fn high_frequency(sample_rate: u32) -> f32 {
     (sample_rate as f32 * 0.5).min(20_000.0)
 }
 
+fn spatial_column(pan: f32) -> Option<usize> {
+    pan.is_finite().then(|| {
+        (((pan.clamp(-1.0, 1.0) + 1.0) * 0.5) * (SPATIAL_WIDTH - 1) as f32).round() as usize
+    })
+}
+
+fn spatial_row(frequency: f32, high: f32) -> Option<usize> {
+    if !frequency.is_finite() || high <= 20.0 || frequency < 20.0 || frequency > high {
+        return None;
+    }
+    Some(
+        ((1.0 - (frequency / 20.0).ln() / (high / 20.0).ln()).clamp(0.0, 1.0)
+            * (SPATIAL_HEIGHT - 1) as f32)
+            .round() as usize,
+    )
+}
+
+// Keep the original combined transform as an independent numeric reference.
+#[cfg(test)]
 fn spatial_cell(frequency: f32, pan: f32, high: f32) -> Option<(usize, usize)> {
     if !frequency.is_finite()
         || !pan.is_finite()
@@ -767,6 +848,109 @@ mod tests {
         let plot = AnalysisVisualizer::new(style);
         plot.configure(&Config::default());
         plot
+    }
+    #[test]
+    fn cached_spatial_rows_match_original_transform_at_edges_and_fft_axes() {
+        for sample_rate in [0, 40, 41, 8_000, 44_100, 48_000, 192_000] {
+            let high = high_frequency(sample_rate);
+            for fft_size in [512, 8192, 32768] {
+                let mut bins: Vec<_> = (1..=fft_size / 2)
+                    .map(|bin| SpatialBin {
+                        frequency_hz: bin as f32 * sample_rate as f32 / fft_size as f32,
+                        pan: 0.0,
+                        power_db: -30.0,
+                    })
+                    .collect();
+                let mut mapping = SpatialMapping::default();
+                mapping.prepare(sample_rate, fft_size, &bins);
+                for (bin, (_, row)) in bins.iter().zip(&mapping.rows) {
+                    for pan in [-2.0, -1.0, -0.0, 0.0, 1.0, 2.0, f32::NAN, f32::INFINITY] {
+                        assert_eq!(
+                            spatial_column(pan).zip(row.map(usize::from)),
+                            spatial_cell(bin.frequency_hz, pan, high),
+                            "rate={sample_rate}, FFT={fft_size}, hz={}, pan={pan}",
+                            bin.frequency_hz,
+                        );
+                    }
+                }
+                bins.clear();
+                bins.extend(
+                    [
+                        f32::NAN,
+                        f32::NEG_INFINITY,
+                        f32::INFINITY,
+                        -20.0,
+                        -0.0,
+                        f32::from_bits(20.0_f32.to_bits() - 1),
+                        20.0,
+                        f32::from_bits(20.0_f32.to_bits() + 1),
+                        high,
+                        f32::from_bits(high.to_bits() + 1),
+                    ]
+                    .map(|frequency_hz| SpatialBin {
+                        frequency_hz,
+                        pan: 0.0,
+                        power_db: -30.0,
+                    }),
+                );
+                // Include logarithmic row-rounding boundaries and their adjacent floats.
+                if high > 20.0 {
+                    for row in 0..SPATIAL_HEIGHT - 1 {
+                        let frequency = 20.0
+                            * ((1.0 - (row as f32 + 0.5) / (SPATIAL_HEIGHT - 1) as f32)
+                                * (high / 20.0).ln())
+                            .exp();
+                        bins.extend([-1_i32, 0, 1].map(|offset| SpatialBin {
+                            frequency_hz: f32::from_bits(
+                                (frequency.to_bits() as i64 + offset as i64) as u32,
+                            ),
+                            pan: 0.0,
+                            power_db: -30.0,
+                        }));
+                    }
+                }
+                mapping.prepare(sample_rate, fft_size, &bins);
+                for (bin, (_, row)) in bins.iter().zip(&mapping.rows) {
+                    assert_eq!(
+                        spatial_column(bin.pan).zip(row.map(usize::from)),
+                        spatial_cell(bin.frequency_hz, bin.pan, high)
+                    );
+                }
+                mapping.prepare(sample_rate, fft_size, &bins);
+                assert_eq!(
+                    mapping.rebuilds, 2,
+                    "unchanged NaN bits must reuse the axis"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn spatial_mapping_reuses_static_axis_and_bounds_retained_rows() {
+        let mut bins: Vec<_> = (1..=4096)
+            .map(|bin| SpatialBin {
+                frequency_hz: bin as f32 * 48_000.0 / 8192.0,
+                pan: 0.0,
+                power_db: -30.0,
+            })
+            .collect();
+        let mut mapping = SpatialMapping::default();
+        for tick in 0..120 {
+            bins[0].pan = tick as f32 / 120.0;
+            bins[0].power_db = -(tick as f32);
+            mapping.prepare(48_000, 8192, &bins);
+        }
+        assert_eq!(mapping.rebuilds, 1);
+        bins[0].frequency_hz = 1000.0;
+        mapping.prepare(48_000, 8192, &bins);
+        assert_eq!(mapping.rebuilds, 2);
+        mapping.prepare(44_100, 8192, &bins);
+        assert_eq!(mapping.rebuilds, 3);
+        mapping.prepare(44_100, 16384, &bins);
+        assert_eq!(mapping.rebuilds, 4);
+        bins.resize(MAX_SPATIAL_BINS + 1, bins[0]);
+        mapping.prepare(44_100, 16384, &bins);
+        assert_eq!(mapping.rows.len(), MAX_SPATIAL_BINS);
     }
 
     #[test]
@@ -973,6 +1157,7 @@ mod tests {
             plot.set_visible(false);
             assert_eq!(plot.data.borrow().field.capacity(), 0);
             assert_eq!(plot.data.borrow().spatial_next.capacity(), 0);
+            assert_eq!(plot.data.borrow().spatial_mapping.rows.capacity(), 0);
             plot.configure(&Config {
                 audio_visualizer_style: style,
                 audio_visualizer_db_range: Some(50.0),

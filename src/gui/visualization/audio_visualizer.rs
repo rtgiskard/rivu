@@ -17,12 +17,77 @@ use gpui::{
 use std::{
     cell::RefCell,
     f32::consts::PI,
+    ops::Range,
     rc::Rc,
     time::{Duration, Instant},
 };
 
 const FANCY_BANDS: usize = 32;
 const SMOOTHING_MS: f32 = 60.0;
+const MAX_RADIAL_AXIS: usize = 32768 / 2 + 1;
+
+// All radial styles and panels consume the same <=32 groups. Keep only the
+// current axis, including its exact float bits so NaNs do not rebuild forever.
+#[derive(Default)]
+struct RadialMapping {
+    sample_rate: u32,
+    fft_size: u32,
+    frequencies: Vec<u32>,
+    ranges: Vec<Range<usize>>,
+    #[cfg(test)]
+    rebuilds: usize,
+}
+
+impl RadialMapping {
+    fn prepare(&mut self, sample_rate: u32, fft_size: u32, frequencies: &[f32]) -> bool {
+        let low = 20.0_f32.max(*frequencies.first().unwrap_or(&20.0));
+        let high = 20_000.0_f32
+            .min(sample_rate as f32 * 0.5)
+            .min(*frequencies.last().unwrap_or(&20_000.0));
+        if frequencies.is_empty() || low >= high {
+            return false;
+        }
+        if self.sample_rate == sample_rate
+            && self.fft_size == fft_size
+            && self.frequencies.len() == frequencies.len()
+            && self
+                .frequencies
+                .iter()
+                .zip(frequencies)
+                .all(|(cached, frequency)| *cached == frequency.to_bits())
+        {
+            return true;
+        }
+        self.sample_rate = sample_rate;
+        self.fft_size = fft_size;
+        self.frequencies.clear();
+        // Backend axes fit this bound. An oversized axis keeps the old numeric
+        // behavior, rebuilding the <=32 ranges rather than retaining that axis.
+        if frequencies.len() <= MAX_RADIAL_AXIS {
+            self.frequencies
+                .extend(frequencies.iter().map(|frequency| frequency.to_bits()));
+        }
+        self.ranges.clear();
+        let count = FANCY_BANDS.min(frequencies.len());
+        let log_low = low.ln();
+        let log_span = high.ln() - log_low;
+        self.ranges.extend((0..count).map(|band| {
+            let start = (log_low + log_span * band as f32 / count as f32).exp();
+            let end = (log_low + log_span * (band + 1) as f32 / count as f32).exp();
+            let first = frequencies.partition_point(|hz| *hz < start);
+            let last = frequencies.partition_point(|hz| *hz < end);
+            let end = last
+                .max(first + usize::from(first < frequencies.len()))
+                .min(frequencies.len());
+            first.min(end.saturating_sub(1))..end
+        }));
+        #[cfg(test)]
+        {
+            self.rebuilds += 1;
+        }
+        true
+    }
+}
 const TWO_PI: f32 = PI * 2.0;
 const IDLE_FADE_DURATION: Duration = Duration::from_secs(2);
 const BAR_GLOW_PASSES: [(f32, f32, f32); 4] = [
@@ -63,6 +128,7 @@ struct VisualizerData {
     db_range: f32,
     visible: bool,
     displayed: Vec<f32>,
+    mapping: RadialMapping,
     last_sample_time: Option<Duration>,
     source_generation: Option<u64>,
     expected_settings: AnalysisSettings,
@@ -89,6 +155,7 @@ impl AudioVisualizer {
                 db_range: 70.0,
                 visible: true,
                 displayed: Vec::with_capacity(FANCY_BANDS),
+                mapping: RadialMapping::default(),
                 last_sample_time: None,
                 source_generation: None,
                 expected_settings: AnalysisSettings::from(&Config::default()),
@@ -182,6 +249,7 @@ impl AudioVisualizer {
         if data.visible != visible {
             data.visible = visible;
             data.displayed = Vec::new();
+            data.mapping = RadialMapping::default();
             data.last_sample_time = None;
             data.fade_started = None;
         }
@@ -214,14 +282,14 @@ impl AudioVisualizer {
             data.last_sample_time = None;
             data.fade_started = None;
         }
-        let count = FANCY_BANDS.min(frame.spectrum_db.len()).max(1);
-        let low = 20.0_f32.max(*frame.frequencies_hz.first().unwrap_or(&20.0));
-        let high = 20_000.0_f32
-            .min(frame.sample_rate as f32 * 0.5)
-            .min(*frame.frequencies_hz.last().unwrap_or(&20_000.0));
-        if low >= high {
+        let fft_size = data.expected_settings.fft_size;
+        if !data
+            .mapping
+            .prepare(frame.sample_rate, fft_size, &frame.frequencies_hz)
+        {
             return;
         }
+        let count = data.mapping.ranges.len();
         let db_range = data.db_range;
         let elapsed = data
             .last_sample_time
@@ -233,17 +301,11 @@ impl AudioVisualizer {
             1.0 - (-elapsed / SMOOTHING_MS).exp()
         };
         data.displayed.resize(count, 0.0);
-        let log_low = low.ln();
-        let log_span = high.ln() - log_low;
-        for (band, display) in data.displayed.iter_mut().enumerate() {
-            let start = (log_low + log_span * band as f32 / count as f32).exp();
-            let end = (log_low + log_span * (band + 1) as f32 / count as f32).exp();
-            let first = frame.frequencies_hz.partition_point(|hz| *hz < start);
-            let last = frame.frequencies_hz.partition_point(|hz| *hz < end);
-            let end = last
-                .max(first + usize::from(first < frame.spectrum_db.len()))
-                .min(frame.spectrum_db.len());
-            let level = frame.spectrum_db[first.min(end.saturating_sub(1))..end]
+        let VisualizerData {
+            displayed, mapping, ..
+        } = &mut *data;
+        for (range, display) in mapping.ranges.iter().zip(displayed) {
+            let level = frame.spectrum_db[range.clone()]
                 .iter()
                 .copied()
                 .filter(|level| level.is_finite())
@@ -762,6 +824,141 @@ mod tests {
             ..AnalysisFrame::default()
         }
     }
+    // Original per-frame grouping, independent of the cached range builder.
+    fn reference_levels(frame: &AnalysisFrame, db_range: f32) -> Option<Vec<f32>> {
+        if frame.spectrum_db.is_empty() || frame.frequencies_hz.is_empty() {
+            return None;
+        }
+        let count = FANCY_BANDS.min(frame.spectrum_db.len()).max(1);
+        let low = 20.0_f32.max(*frame.frequencies_hz.first().unwrap_or(&20.0));
+        let high = 20_000.0_f32
+            .min(frame.sample_rate as f32 * 0.5)
+            .min(*frame.frequencies_hz.last().unwrap_or(&20_000.0));
+        if low >= high {
+            return None;
+        }
+        let log_low = low.ln();
+        let log_span = high.ln() - log_low;
+        Some(
+            (0..count)
+                .map(|band| {
+                    let start = (log_low + log_span * band as f32 / count as f32).exp();
+                    let end = (log_low + log_span * (band + 1) as f32 / count as f32).exp();
+                    let first = frame.frequencies_hz.partition_point(|hz| *hz < start);
+                    let last = frame.frequencies_hz.partition_point(|hz| *hz < end);
+                    let end = last
+                        .max(first + usize::from(first < frame.spectrum_db.len()))
+                        .min(frame.spectrum_db.len());
+                    let level = frame.spectrum_db[first.min(end.saturating_sub(1))..end]
+                        .iter()
+                        .copied()
+                        .filter(|level| level.is_finite())
+                        .fold(f32::NEG_INFINITY, f32::max);
+                    ((level + db_range) / db_range).clamp(0.0, 1.0)
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn cached_radial_groups_match_original_levels_and_smoothing_at_numeric_edges() {
+        for sample_rate in [0, 40, 41, 8_000, 44_100, 48_000, 192_000] {
+            let high = (sample_rate as f32 * 0.5).min(20_000.0);
+            let mut axes = vec![
+                Vec::new(),
+                vec![20.0],
+                vec![20.0, 21.0],
+                vec![20.0, 200.0, 2000.0, 20_000.0],
+                vec![f32::NAN, 20.0, 200.0, 2000.0, f32::NAN],
+                vec![f32::NEG_INFINITY, -0.0, 20.0, 2000.0, f32::INFINITY],
+            ];
+            axes.push(
+                (0..=256)
+                    .map(|bin| bin as f32 * sample_rate as f32 / 512.0)
+                    .collect(),
+            );
+            if high > 20.0 {
+                let mut boundaries = Vec::new();
+                for band in 0..=FANCY_BANDS {
+                    let frequency = (20.0_f32.ln()
+                        + (high.ln() - 20.0_f32.ln()) * band as f32 / FANCY_BANDS as f32)
+                        .exp();
+                    boundaries.extend([-1_i32, 0, 1].map(|offset| {
+                        f32::from_bits((frequency.to_bits() as i64 + offset as i64) as u32)
+                    }));
+                }
+                axes.push(boundaries);
+            }
+            for frequencies_hz in axes {
+                let mut radial = AudioVisualizer::new();
+                let mut next = frame();
+                next.sample_rate = sample_rate;
+                next.frequencies_hz = frequencies_hz;
+                next.spectrum_db = (0..next.frequencies_hz.len())
+                    .map(|bin| {
+                        [
+                            f32::NAN,
+                            f32::NEG_INFINITY,
+                            -100.0,
+                            -35.0,
+                            0.0,
+                            10.0,
+                            f32::INFINITY,
+                        ][bin % 7]
+                    })
+                    .collect();
+                let expected = reference_levels(&next, 70.0);
+                radial.update(&next);
+                let first: Vec<_> = expected
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|target| 0.0 + (*target - 0.0) * 1.0)
+                    .collect();
+                assert_eq!(radial.data.borrow().displayed, first);
+                next.sample_time += Duration::from_millis(10);
+                next.spectrum_db.fill(-20.0);
+                let expected = reference_levels(&next, 70.0);
+                radial.update(&next);
+                let alpha = 1.0 - (-10.0_f32 / SMOOTHING_MS).exp();
+                let smoothed: Vec<_> = first
+                    .iter()
+                    .zip(expected.unwrap_or_default())
+                    .map(|(display, target)| *display + (target - *display) * alpha)
+                    .collect();
+                assert_eq!(radial.data.borrow().displayed, smoothed);
+            }
+        }
+    }
+
+    #[test]
+    fn radial_mapping_reuses_axis_and_rebuilds_changed_axes_with_bounded_storage() {
+        let mut frequencies: Vec<_> = (0..=4096)
+            .map(|bin| bin as f32 * 48_000.0 / 8192.0)
+            .collect();
+        let mut mapping = RadialMapping::default();
+        for _ in 0..120 {
+            assert!(mapping.prepare(48_000, 8192, &frequencies));
+        }
+        assert_eq!(mapping.rebuilds, 1);
+        assert_eq!(mapping.ranges.len(), 32);
+        frequencies[10] += 1.0;
+        mapping.prepare(48_000, 8192, &frequencies);
+        assert_eq!(mapping.rebuilds, 2);
+        mapping.prepare(8_000, 8192, &frequencies);
+        assert_eq!(mapping.rebuilds, 3);
+        mapping.prepare(8_000, 16384, &frequencies);
+        assert_eq!(mapping.rebuilds, 4);
+        frequencies[10] = f32::NAN;
+        mapping.prepare(8_000, 16384, &frequencies);
+        mapping.prepare(8_000, 16384, &frequencies);
+        assert_eq!(mapping.rebuilds, 5);
+        frequencies = (0..=MAX_RADIAL_AXIS)
+            .map(|bin| bin as f32 * 48_000.0 / (MAX_RADIAL_AXIS - 1) as f32)
+            .collect();
+        mapping.prepare(48_000, 32768, &frequencies);
+        assert!(mapping.frequencies.is_empty());
+        assert_eq!(mapping.ranges.len(), FANCY_BANDS);
+    }
 
     #[test]
     fn same_rate_new_generation_resets_radial_smoothing() {
@@ -807,6 +1004,8 @@ mod tests {
         radial.set_visible(false);
         radial.update(&frame());
         assert!(radial.data.borrow().displayed.is_empty());
+        assert_eq!(radial.data.borrow().mapping.frequencies.capacity(), 0);
+        assert_eq!(radial.data.borrow().mapping.ranges.capacity(), 0);
         radial.set_visible(true);
         let mut latest = frame();
         latest.spectrum_db.fill(-70.0);
