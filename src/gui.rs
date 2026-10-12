@@ -772,7 +772,12 @@ impl GuiApp {
         self.queue_save_feedback = None;
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
-            let ack = handle.request_ack(Command::CreatePlaylistWithTracks { name, track_ids });
+            let ack = cx
+                .background_executor()
+                .spawn(async move {
+                    handle.request_ack(Command::CreatePlaylistWithTracks { name, track_ids })
+                })
+                .await;
             let _ = this.update(cx, |this, cx| {
                 this.queue_save_pending = false;
                 this.queue_save_feedback = Some(if ack.ok {

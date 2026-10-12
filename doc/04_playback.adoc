@@ -110,6 +110,8 @@ track. In Queue, `d` or Delete removes the selected occurrence.
 Left/Backspace goes to the parent directory; Left/Esc leaves playlist details.
 Esc returns from search, the tree, or the playlist catalog to Queue. `q` exits
 outside Search without stopping the core.
+While initially connecting, `q` also exits the loading screen. Connection errors
+and normal exits restore the terminal's input mode, screen, and cursor.
 
 == Desktop tray and window lifecycle
 

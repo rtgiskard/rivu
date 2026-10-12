@@ -32,6 +32,8 @@ the existing queue unchanged. See link:04_playback.adoc#_queue[Playback queue].
 Use the Queue panel's Save queue as playlist control to save a non-empty queue.
 The playlist name is generated from the current date and time; duplicate queue
 occurrences become one playlist entry.
+Saving runs in the background; the control stays unavailable until its result
+arrives. Closing the window does not cancel a save already submitted to the core.
 
 Playlist catalogs, entries, and the Queue panel's playlist-destination menu
 load rows automatically while scrolling. Entry numbering and move actions use

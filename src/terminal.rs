@@ -414,11 +414,10 @@ fn spawn_query_worker(socket_path: &Path) -> QueryWorker {
 }
 
 fn run_loop(socket_path: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
-    let snapshot = request_state(socket_path)?;
     let updates = spawn_watcher(socket_path);
     let commands = spawn_command_worker(socket_path);
     let mut queries = spawn_query_worker(socket_path);
-    let mut tui = TuiState::new(snapshot);
+    let mut tui = None::<TuiState>;
     let mut redraw = true;
     let mut immediate_redraw = true;
     let mut last_draw = Instant::now() - Duration::from_millis(100);
@@ -427,9 +426,30 @@ fn run_loop(socket_path: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>
         if let Some(update) = updates.latest.lock().take() {
             let state = update.map_err(anyhow::Error::msg)?;
             let next = TuiSnapshot::from_client(&state);
-            tui.apply_snapshot(next);
+            match &mut tui {
+                Some(tui) => tui.apply_snapshot(next),
+                None => tui = Some(TuiState::new(next)),
+            }
             redraw = true;
         }
+        let Some(tui) = &mut tui else {
+            if redraw {
+                terminal.draw(draw_loading)?;
+                redraw = false;
+            }
+            if event::poll(Duration::from_millis(50))? {
+                match event::read()? {
+                    Event::Key(key)
+                        if key.kind != KeyEventKind::Release && key.code == KeyCode::Char('q') =>
+                    {
+                        break;
+                    }
+                    Event::Resize(_, _) => redraw = true,
+                    _ => {}
+                }
+            }
+            continue;
+        };
         while let Ok(result) = commands.results.try_recv() {
             match result {
                 Ok(ack) if !ack.ok => {
@@ -1324,11 +1344,12 @@ fn key_action(key: KeyEvent, state: &TuiSnapshot) -> KeyAction {
     playback_key_command(key_name, &state.playback).map_or(KeyAction::Ignored, KeyAction::Command)
 }
 
-fn request_state(socket_path: &Path) -> Result<TuiSnapshot> {
-    let response = ipc::get_state(socket_path, StateSections::ALL)?;
-    let mut state = ClientSnapshot::default();
-    response.apply_to(&mut state);
-    Ok(TuiSnapshot::from_client(&state))
+fn draw_loading(frame: &mut ratatui::Frame<'_>) {
+    frame.render_widget(
+        Paragraph::new("Connecting to core…\nq to quit")
+            .block(Block::default().title("Rivu").borders(Borders::ALL)),
+        frame.area(),
+    );
 }
 
 fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
@@ -1721,6 +1742,46 @@ mod tests {
     use super::*;
     use crate::{model::Page, response::QueryRevisions};
     use ratatui::backend::TestBackend;
+
+    #[test]
+    fn watcher_shutdown_closes_stalled_initial_handshake() {
+        use std::{io::Read, os::unix::net::UnixListener};
+
+        let directory = ipc::tests::socket_test_directory();
+        let socket = directory.path().join("stalled-hello.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let watcher = spawn_watcher(&socket);
+        let mut stream = listener.accept().unwrap().0;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut prefix = [0; 4];
+        stream.read_exact(&mut prefix).unwrap();
+        let length = u32::from_le_bytes(prefix) as usize;
+        assert!(length <= 4096);
+        stream.read_exact(&mut vec![0; length]).unwrap();
+        // Hello has reached the peer, which deliberately never replies. The
+        // loading screen's exit must join the watcher without its 120s timeout.
+        let (finished, completion) = bounded(1);
+        let shutdown = std::thread::spawn(move || {
+            drop(watcher);
+            finished.send(()).unwrap();
+        });
+        completion.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+        shutdown.join().unwrap();
+    }
+
+    #[test]
+    fn watcher_reports_initial_connection_failure_to_loading_consumer() {
+        let directory = ipc::tests::socket_test_directory();
+        let watcher = spawn_watcher(&directory.path().join("absent.sock"));
+        watcher
+            .receiver
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        assert!(matches!(watcher.latest.lock().take(), Some(Err(_))));
+    }
 
     fn track(index: usize) -> LibraryRow {
         LibraryRow {
