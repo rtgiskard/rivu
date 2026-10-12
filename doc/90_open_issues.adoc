@@ -1,0 +1,48 @@
+= Open issues
+
+== Portal file chooser cache warning
+
+Status: deferred, 2026-10-12. Keep the published `ashpd` 0.13.13 dependency;
+no vendor backport, upstream Git replacement, or log filtering.
+
+Clicking the Library `+` button prints the following warning on each invocation:
+
+[source,text]
+----
+zbus::proxy: Failed to populate properties cache via GetAll: org.freedesktop.DBus.Error.UnknownMethod: Object does not exist at path “/org/freedesktop/portal/desktop/request/…”. Property change streams will not produce values.
+----
+
+The user confirmed that the folder chooser opens and adding a library root
+succeeds. The warning comes from ashpd constructing a transient Request proxy
+with property caching enabled before sending `OpenFile`. The Request object
+has not yet been created, so the cache's `GetAll` fails; selection results use
+an independent `Response` signal. Playlist import/export use the same request
+mechanism and can be affected as well.
+
+Upstream fix:
+https://github.com/bilelmoussaoui/ashpd/commit/e9e38113ad075042fcc48b8401010ca5f905db55[Disable property caching for Request/Session objects].
+The fix is on upstream mainline, not in the 0.13.13 release branch inspected
+at the time of investigation. Revisit when a compatible published release
+includes it; verify successful selection, cancellation, and absence of this
+warning without suppressing other logs.
+
+=== Popup latency is unresolved
+
+The user reports a roughly 400 ms delay from clicking Add until the chooser
+appears, on every invocation; this is a subjective estimate, not a timed GUI
+measurement. A throwaway probe against the current session bus measured 30
+warmed iterations per variant, alternating their order:
+
+[cols="3,1,1",options="header"]
+|===
+|Request preparation |Median |Min–max
+|Current cache + version read + Response subscription |1.439 ms |1.338–1.556 ms
+|No cache, no version read + Response subscription |0.399 ms |0.353–0.536 ms
+|===
+
+This probe reconstructed request preparation; it did not measure the release
+application's click-to-visible-window path. The measured difference does not
+explain the reported delay. It also removed the version read, whereas the
+upstream warning fix retains that read. GPUI scheduling and portal window
+creation/display remain unmeasured; do not claim the warning fix resolves
+popup latency.
