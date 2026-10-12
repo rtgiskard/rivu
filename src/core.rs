@@ -702,11 +702,17 @@ mod tests {
             core.publish();
             assert_eq!(
                 core.state.revisions.changed_since(before),
-                StateSections { library: true, ..StateSections::default() }
+                StateSections {
+                    library: true,
+                    ..StateSections::default()
+                }
             );
             assert!(Arc::ptr_eq(&queue.entries, &core.state.queue.entries));
             assert!(Arc::ptr_eq(&queue.tracks, &core.state.queue.tracks));
-            assert!(Arc::ptr_eq(&current, core.state.current_track.as_ref().unwrap()));
+            assert!(Arc::ptr_eq(
+                &current,
+                core.state.current_track.as_ref().unwrap()
+            ));
         }
         let edited = core.store.track(4).unwrap().unwrap();
         assert_eq!(edited.title, "Unqueued edit");
@@ -727,49 +733,110 @@ mod tests {
             title: "Edited duplicate".into(),
             artist: "Artist".into(),
             album: "Album".into(),
-        }).unwrap();
+        })
+        .unwrap();
         core.publish();
         assert_eq!(
             core.state.revisions.changed_since(before),
-            StateSections { queue: true, library: true, ..StateSections::default() }
+            StateSections {
+                queue: true,
+                library: true,
+                ..StateSections::default()
+            }
         );
         assert!(Arc::ptr_eq(&entries, &core.state.queue.entries));
-        assert!(Arc::ptr_eq(&current, core.state.current_track.as_ref().unwrap()));
-        assert_eq!(core.state.queue.tracks.iter().map(|row| row.id).collect::<Vec<_>>(), [1, 2, 3, 4]);
-        assert_eq!(core.state.queue.entries.iter().filter(|entry| entry.track_id == 2).count(), 2);
+        assert!(Arc::ptr_eq(
+            &current,
+            core.state.current_track.as_ref().unwrap()
+        ));
+        assert_eq!(
+            core.state
+                .queue
+                .tracks
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            [1, 2, 3, 4]
+        );
+        assert_eq!(
+            core.state
+                .queue
+                .entries
+                .iter()
+                .filter(|entry| entry.track_id == 2)
+                .count(),
+            2
+        );
         let duplicate = &core.state.queue.tracks[1];
-        assert_eq!((&*duplicate.title, &*duplicate.artist, &*duplicate.album), ("Edited duplicate", "Artist", "Album"));
+        assert_eq!(
+            (&*duplicate.title, &*duplicate.artist, &*duplicate.album),
+            ("Edited duplicate", "Artist", "Album")
+        );
 
         let before = core.state.revisions;
-        core.command(Command::SetFavorite { track_ids: vec![3, 2, 2], favorite: true }).unwrap();
+        core.command(Command::SetFavorite {
+            track_ids: vec![3, 2, 2],
+            favorite: true,
+        })
+        .unwrap();
         core.publish();
         assert_eq!(
             core.state.revisions.changed_since(before),
-            StateSections { queue: true, library: true, ..StateSections::default() }
+            StateSections {
+                queue: true,
+                library: true,
+                ..StateSections::default()
+            }
         );
         assert!(core.state.queue.tracks[1].favorite);
         assert!(core.state.queue.tracks[2].favorite);
         assert!(!core.state.queue.tracks[0].favorite);
 
         for command in [
-            Command::EditTrack { track_id: 1, title: "Current edit".into(), artist: "Now".into(), album: "Playing".into() },
-            Command::SetFavorite { track_ids: vec![1], favorite: true },
+            Command::EditTrack {
+                track_id: 1,
+                title: "Current edit".into(),
+                artist: "Now".into(),
+                album: "Playing".into(),
+            },
+            Command::SetFavorite {
+                track_ids: vec![1],
+                favorite: true,
+            },
         ] {
             let before = core.state.revisions;
             core.command(command).unwrap();
             core.publish();
             assert_eq!(
                 core.state.revisions.changed_since(before),
-                StateSections { playback: true, queue: true, library: true, ..StateSections::default() }
+                StateSections {
+                    playback: true,
+                    queue: true,
+                    library: true,
+                    ..StateSections::default()
+                }
             );
         }
         let current = core.state.current_track().unwrap();
-        assert_eq!((&*current.title, &*current.artist, &*current.album), ("Current edit", "Now", "Playing"));
+        assert_eq!(
+            (&*current.title, &*current.artist, &*current.album),
+            ("Current edit", "Now", "Playing")
+        );
         assert!(current.favorite);
         let before = core.state.revisions;
-        core.command(Command::SetFavorite { track_ids: vec![1, 2], favorite: true }).unwrap();
+        core.command(Command::SetFavorite {
+            track_ids: vec![1, 2],
+            favorite: true,
+        })
+        .unwrap();
         core.publish();
-        assert_eq!(core.state.revisions.changed_since(before), StateSections { library: true, ..StateSections::default() });
+        assert_eq!(
+            core.state.revisions.changed_since(before),
+            StateSections {
+                library: true,
+                ..StateSections::default()
+            }
+        );
     }
 
     #[test]
@@ -787,7 +854,11 @@ mod tests {
         assert!(Arc::ptr_eq(&rows, &core.state.queue.tracks));
         assert_eq!(
             core.state.revisions.changed_since(before),
-            StateSections { playback: true, library: true, ..StateSections::default() }
+            StateSections {
+                playback: true,
+                library: true,
+                ..StateSections::default()
+            }
         );
 
         let before = core.state.revisions;
@@ -798,7 +869,12 @@ mod tests {
         assert_eq!(core.state.current_track().unwrap().play_count, 1);
         assert_eq!(
             core.state.revisions.changed_since(before),
-            StateSections { playback: true, queue: true, library: true, ..StateSections::default() }
+            StateSections {
+                playback: true,
+                queue: true,
+                library: true,
+                ..StateSections::default()
+            }
         );
     }
 
@@ -813,7 +889,10 @@ mod tests {
         core.state.queue.tracks = Arc::default();
         core.state.queue.current_id = None;
         core.load_initial_state().unwrap();
-        assert_eq!(queue_entries(&core.state.queue.entries), [(1, 1), (2, 2), (3, 2), (4, 3), (5, 4)]);
+        assert_eq!(
+            queue_entries(&core.state.queue.entries),
+            [(1, 1), (2, 2), (3, 2), (4, 3), (5, 4)]
+        );
         assert_eq!(core.state.queue.current_id, Some(3));
         assert_eq!(core.state.current_track().unwrap().id, 2);
 
@@ -1177,7 +1256,64 @@ mod tests {
             favorite: true,
         })
         .unwrap();
-        assert!(core.view(&query).is_err());
+        assert_eq!(core.view(&query).unwrap_err(), QueryError::RevisionChanged);
+    }
+
+    #[test]
+    fn batch_errors_distinguish_revision_changes_from_invalid_requests() {
+        let (_directory, mut core) = fixture();
+        core.command(Command::CreatePlaylistWithTracks {
+            name: "mix".into(),
+            track_ids: vec![1, 2],
+        })
+        .unwrap();
+        let expected = core.state.query_revisions();
+        let queries = [
+            Query::TrackBatch {
+                query: None,
+                favorite: None,
+                missing: None,
+                after: None,
+                limit: 0,
+                expected: Some(expected),
+            },
+            Query::PlaylistSummaryBatch {
+                after: None,
+                limit: 0,
+                expected: Some(expected),
+            },
+            Query::PlaylistEntryBatch {
+                playlist_id: 1,
+                after: None,
+                limit: 0,
+                expected: Some(expected),
+            },
+        ];
+        for query in &queries {
+            assert!(matches!(core.view(query), Err(QueryError::Message(_))));
+        }
+        core.command(Command::RenamePlaylist {
+            playlist_id: 1,
+            name: "renamed".into(),
+        })
+        .unwrap();
+        // Track traversal ignores playlist-only changes; its invalid limit is
+        // still a normal request error. Both playlist lanes reject stale data.
+        assert!(matches!(
+            core.view(&queries[0]),
+            Err(QueryError::Message(_))
+        ));
+        for query in &queries[1..] {
+            assert_eq!(core.view(query).unwrap_err(), QueryError::RevisionChanged);
+        }
+        core.command(Command::SetFavorite {
+            track_ids: vec![1],
+            favorite: true,
+        })
+        .unwrap();
+        for query in &queries {
+            assert_eq!(core.view(query).unwrap_err(), QueryError::RevisionChanged);
+        }
     }
 
     fn settle_scan(core: &mut Core) -> bool {

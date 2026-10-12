@@ -87,7 +87,12 @@ impl Core {
 
     pub(in crate::core) fn update_track_stats(&mut self, track_id: i64) -> Result<()> {
         let track = self.store.track(track_id)?.context("Track not found")?;
-        if let Ok(index) = self.state.queue.tracks.binary_search_by_key(&track_id, |row| row.id) {
+        if let Ok(index) = self
+            .state
+            .queue
+            .tracks
+            .binary_search_by_key(&track_id, |row| row.id)
+        {
             let row = &self.state.queue.tracks[index];
             if row.title != track.title
                 || row.artist != track.artist

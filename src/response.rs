@@ -89,14 +89,9 @@ pub enum QueryError {
     Message(String),
 }
 
-impl QueryError {
-    pub fn from_message(message: impl Into<String>) -> Self {
-        let message = message.into();
-        if message.starts_with("Query data changed while reading") {
-            Self::RevisionChanged
-        } else {
-            Self::Message(message)
-        }
+impl From<anyhow::Error> for QueryError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Message(format!("{error:#}"))
     }
 }
 

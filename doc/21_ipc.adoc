@@ -150,10 +150,11 @@ from 1 through 256 and reject zero or larger values.
 To traverse consistently, the caller captures the first batch's query revisions
 and supplies them as `expected` on later requests. Track batches check library
 content; playlist batches check both library and playlist revisions. A mismatch
-returns `QueryError::RevisionChanged` with `Query data changed while reading;
-restart the listing`. Without `expected`, the server does not enforce traversal
-consistency. This uses bounded results and explicit restart rather than retaining
-a database snapshot for an arbitrarily slow client.
+returns the typed `QueryError::RevisionChanged`; clients must match that variant,
+not parse diagnostic text. Other query failures return `QueryError::Message`.
+Without `expected`, the server does not enforce traversal consistency. This uses
+bounded results and explicit restart rather than retaining a database snapshot
+for an arbitrarily slow client.
 
 Playlist-only edits advance the playlist revision without changing library-content
 or directory-structure revisions, so an existing track traversal remains valid.

@@ -27,7 +27,7 @@ impl Core {
                     let Ok(request) = request else { break; };
                     match request.operation {
                         Operation::Query(query) => {
-                            let result = self.view(&query).map_err(|error| QueryError::from_message(format!("{error:#}")));
+                            let result = self.view(&query);
                             if let Some(reply) = request.reply {
                                 let _ = reply.send(CoreResponse::Query(QueryResponse {
                                     revisions: self.state.query_revisions(),
@@ -272,19 +272,30 @@ impl Core {
     }
     /// Metadata edits keep unrelated queue rows and playback projections intact.
     /// Queue rows remain ID-sorted and distinct even when entries repeat a track.
-    pub(in crate::core) fn refresh_affected_queue_tracks(&mut self, track_ids: &[i64]) -> Result<()> {
+    pub(in crate::core) fn refresh_affected_queue_tracks(
+        &mut self,
+        track_ids: &[i64],
+    ) -> Result<()> {
         let mut queued_ids = track_ids
             .iter()
             .copied()
             .filter(|id| {
-                self.state.queue.tracks.binary_search_by_key(id, |row| row.id).is_ok()
+                self.state
+                    .queue
+                    .tracks
+                    .binary_search_by_key(id, |row| row.id)
+                    .is_ok()
             })
             .collect::<Vec<_>>();
         queued_ids.sort_unstable();
         queued_ids.dedup();
         if !queued_ids.is_empty() {
             for row in self.store.queue_rows(&queued_ids)? {
-                let index = self.state.queue.tracks.binary_search_by_key(&row.id, |row| row.id)
+                let index = self
+                    .state
+                    .queue
+                    .tracks
+                    .binary_search_by_key(&row.id, |row| row.id)
                     .expect("affected row is already queued");
                 if self.state.queue.tracks[index] != row {
                     Arc::make_mut(&mut self.state.queue.tracks)[index] = row;
@@ -301,7 +312,7 @@ impl Core {
         }
         Ok(())
     }
-    pub(in crate::core) fn view(&self, query: &Query) -> Result<ViewResponse> {
+    pub(in crate::core) fn view(&self, query: &Query) -> Result<ViewResponse, QueryError> {
         let current = self.state.query_revisions();
         let (expected, playlist) = match query {
             Query::TrackBatch { expected, .. } => (*expected, false),
@@ -309,12 +320,11 @@ impl Core {
             | Query::PlaylistEntryBatch { expected, .. } => (*expected, true),
             _ => (None, false),
         };
-        if let Some(expected) = expected {
-            anyhow::ensure!(
-                expected.library == current.library
-                    && (!playlist || expected.playlist == current.playlist),
-                "Query data changed while reading; restart the listing"
-            );
+        if let Some(expected) = expected
+            && (expected.library != current.library
+                || (playlist && expected.playlist != current.playlist))
+        {
+            return Err(QueryError::RevisionChanged);
         }
         Ok(match query {
             Query::LibraryPage {
