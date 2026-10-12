@@ -9,6 +9,7 @@ impl Core {
         self.stop()?;
         self.audio(AudioCommand::Load {
             path: track.path.clone(),
+            decoder_hint: track.decoder_hint,
             range: track.cue.as_ref().map(|cue| audio::PlaybackRange {
                 start_seconds: cue.start_seconds(),
                 end_seconds: cue.end_seconds(),

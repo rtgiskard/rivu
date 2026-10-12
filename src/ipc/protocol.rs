@@ -1,12 +1,12 @@
 use crate::{
-    model::{Command, DatabaseOptimization, Query, ScanProgress, SystemState},
+    model::{Command, DatabaseOptimization, DecoderHint, Query, ScanProgress, SystemState},
     response::{Ack, QueryResponse, StateResponse, StateRevisions, StateSections},
 };
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub(super) const PROTOCOL_VERSION: u8 = 9;
+pub(super) const PROTOCOL_VERSION: u8 = 11;
 pub(super) const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub(super) const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub(super) const MAX_CLIENTS: usize = 16;
@@ -281,6 +281,7 @@ pub(super) enum WireCommand {
         title: Option<String>,
         artist: Option<String>,
         album: Option<String>,
+        decoder_hint: Option<DecoderHint>,
     },
     RemoveTracks {
         track_ids: Vec<i64>,
@@ -663,11 +664,13 @@ impl From<Command> for WireCommand {
                 title,
                 artist,
                 album,
+                decoder_hint,
             } => Self::EditTrack {
                 track_id,
                 title,
                 artist,
                 album,
+                decoder_hint,
             },
             Command::RemoveTracks { track_ids } => Self::RemoveTracks { track_ids },
             Command::Device { name } => Self::Device { name },
@@ -774,11 +777,13 @@ impl TryFrom<WireCommand> for Command {
                 title,
                 artist,
                 album,
+                decoder_hint,
             } => Self::EditTrack {
                 track_id,
                 title,
                 artist,
                 album,
+                decoder_hint,
             },
             WireCommand::RemoveTracks { track_ids } => Self::RemoveTracks { track_ids },
             WireCommand::Device { name } => Self::Device { name },

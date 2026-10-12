@@ -7,6 +7,7 @@ use super::{
     waveform::{WaveformAccumulator, WaveformCoverage},
 };
 use crate::analysis::AnalysisWorker;
+use crate::model::DecoderHint;
 use anyhow::{Result, bail};
 use crossbeam_channel::Receiver;
 use parking_lot::RwLock;
@@ -19,6 +20,7 @@ const MAX_DECODE_PACKETS_PER_FILL: usize = 64;
 pub(super) struct PlaybackOptions {
     pub(super) path: PathBuf,
     pub(super) range: Option<PlaybackRange>,
+    pub(super) decoder_hint: DecoderHint,
     pub(super) generation: u64,
     pub(super) start: f64,
     pub(super) paused: bool,
@@ -56,6 +58,7 @@ impl Playback {
         let PlaybackOptions {
             path,
             range,
+            decoder_hint,
             generation,
             start,
             paused,
@@ -67,7 +70,7 @@ impl Playback {
             pipewire_auto_mix,
             still_mode,
         } = options;
-        let mut source = Source::open(&path, media_read_buffer_len, ffmpeg_enabled)?;
+        let mut source = Source::open(&path, media_read_buffer_len, decoder_hint, ffmpeg_enabled)?;
         if let Some(range) = range {
             source.restrict(range)?;
         }
@@ -88,7 +91,7 @@ impl Playback {
         {
             let mut waveform = waveform.write();
             waveform.set_still_mode(still_mode);
-            waveform.select_source(&path, range, source.info().duration);
+            waveform.select_source(&path, range, decoder_hint, source.info().duration);
         }
         Ok(Self {
             source,
@@ -336,12 +339,15 @@ mod tests {
         path: &std::path::Path,
         range: PlaybackRange,
     ) -> (Playback, impl FnMut(&mut [f32], u64) + use<>) {
-        let mut source = Source::open(path, 64 * 1024, false).unwrap();
+        let mut source = Source::open(path, 64 * 1024, DecoderHint::Auto, false).unwrap();
         source.restrict(range).unwrap();
         let waveform = Arc::new(RwLock::new(WaveformFrame::default()));
-        waveform
-            .write()
-            .select_source(path, Some(range), source.info().duration);
+        waveform.write().select_source(
+            path,
+            Some(range),
+            DecoderHint::Auto,
+            source.info().duration,
+        );
         let (output, render) = super::super::output::test_backend(8_000, false, source.layout());
         let waveform_weights = super::super::output::analysis_weights(source.layout());
         let playback = Playback {

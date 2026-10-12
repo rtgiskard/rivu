@@ -1,5 +1,7 @@
 use super::Store;
-use crate::model::{CueSegment, MediaInfo, PlaylistEntryCursor, PlaylistEntryRow, Track};
+use crate::model::{
+    CueSegment, DecoderHint, MediaInfo, PlaylistEntryCursor, PlaylistEntryRow, Track,
+};
 use rusqlite::{Connection, params};
 use std::collections::HashSet;
 use std::fs;
@@ -73,6 +75,240 @@ fn db(name: &str) -> (PathBuf, Store) {
     let p = std::env::temp_dir().join(format!("rivu-{name}-{}.db", std::process::id()));
     let _ = fs::remove_file(&p);
     (p.clone(), Store::open(&p).unwrap())
+}
+
+#[test]
+fn decoder_hint_persists_without_overwriting_track_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("decoder-hint.db");
+    let store = Store::open(&path).unwrap();
+    store
+        .apply_scan(&scan(vec![
+            rec("/music/native.wav", "native", "Native", 10.),
+            rec("/music/ffmpeg.wav", "ffmpeg", "FFmpeg", 20.),
+        ]))
+        .unwrap();
+    let mut expected = all_tracks(&store);
+    assert!(
+        expected
+            .iter()
+            .all(|track| track.decoder_hint == DecoderHint::Auto)
+    );
+    let native = expected[0].id;
+    let ffmpeg = expected[1].id;
+    store.set_favorite(&[native], true).unwrap();
+    store
+        .edit_track(native, Some("Custom"), None, None, None)
+        .unwrap();
+    store.mark_played(native, 42).unwrap();
+    store.increment_play_count(native).unwrap();
+    expected[0] = store.track(native).unwrap().unwrap(); // populate the cache
+    store
+        .edit_track(native, None, None, None, Some(DecoderHint::Native))
+        .unwrap();
+    store
+        .edit_track(ffmpeg, None, None, None, Some(DecoderHint::Ffmpeg))
+        .unwrap();
+    expected[0].decoder_hint = DecoderHint::Native;
+    expected[1].decoder_hint = DecoderHint::Ffmpeg;
+    assert_eq!(store.track(native).unwrap().unwrap(), expected[0]);
+    assert!(
+        store
+            .edit_track(999, Some("Missing"), None, None, Some(DecoderHint::Native))
+            .is_err()
+    );
+    assert_eq!(all_tracks(&store), expected);
+    assert!(
+        store
+            .conn
+            .execute(
+                "UPDATE tracks SET decoder_hint='invalid' WHERE id=?1",
+                [native]
+            )
+            .is_err()
+    );
+    assert!(
+        store
+            .conn
+            .execute("UPDATE tracks SET decoder_hint=NULL WHERE id=?1", [native])
+            .is_err()
+    );
+    drop(store);
+    let reopened = Store::open(&path).unwrap();
+    assert_eq!(all_tracks(&reopened), expected);
+    reopened
+        .edit_track(native, None, None, None, Some(DecoderHint::Auto))
+        .unwrap();
+    assert_eq!(
+        reopened.track(native).unwrap().unwrap().decoder_hint,
+        DecoderHint::Auto
+    );
+}
+
+#[test]
+fn metadata_patch_omitting_hint_preserves_concurrent_preference() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("metadata-patch.db");
+    let store = Store::open(&path).unwrap();
+    store
+        .apply_scan(&scan(vec![rec("/music/a.wav", "a", "Raw", 10.)]))
+        .unwrap();
+    let baseline = all_tracks(&store)[0].clone();
+    let concurrent = Store::open(&path).unwrap();
+    concurrent
+        .edit_track(baseline.id, None, None, None, Some(DecoderHint::Ffmpeg))
+        .unwrap();
+    store
+        .edit_track(baseline.id, Some("Edited"), None, None, None)
+        .unwrap();
+    let saved = store.track(baseline.id).unwrap().unwrap();
+    assert_eq!(saved.title, "Edited");
+    assert_eq!(saved.decoder_hint, DecoderHint::Ffmpeg);
+    assert_eq!(saved.artist, baseline.artist);
+    assert_eq!(saved.album, baseline.album);
+}
+
+#[test]
+fn combined_metadata_patch_commits_or_fails_as_one_update() {
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    store
+        .apply_scan(&scan(vec![rec("/music/a.wav", "a", "Raw", 10.)]))
+        .unwrap();
+    let id = all_tracks(&store)[0].id;
+    store.set_favorite(&[id], true).unwrap();
+    store.mark_played(id, 42).unwrap();
+    store.increment_play_count(id).unwrap();
+    let before = store.track(id).unwrap().unwrap();
+    store
+        .conn
+        .execute_batch(
+            "CREATE TEMP TRIGGER reject_decoder_hint BEFORE UPDATE OF decoder_hint ON tracks
+         WHEN NEW.decoder_hint='ffmpeg' BEGIN SELECT RAISE(ABORT,'rejected hint'); END;",
+        )
+        .unwrap();
+    assert!(
+        store
+            .edit_track(
+                id,
+                Some("Edited"),
+                Some("Artist"),
+                Some("Album"),
+                Some(DecoderHint::Ffmpeg)
+            )
+            .is_err()
+    );
+    assert_eq!(store.track(id).unwrap().unwrap(), before);
+    store
+        .conn
+        .execute_batch("DROP TRIGGER reject_decoder_hint")
+        .unwrap();
+    store
+        .edit_track(
+            id,
+            Some("Edited"),
+            Some("Artist"),
+            Some("Album"),
+            Some(DecoderHint::Ffmpeg),
+        )
+        .unwrap();
+    let mut expected = before;
+    expected.title = "Edited".into();
+    expected.artist = "Artist".into();
+    expected.album = "Album".into();
+    expected.decoder_hint = DecoderHint::Ffmpeg;
+    assert_eq!(store.track(id).unwrap().unwrap(), expected);
+    assert!(
+        store
+            .edit_track(
+                id + 1,
+                Some("Missing"),
+                Some("Artist"),
+                Some("Album"),
+                Some(DecoderHint::Native)
+            )
+            .is_err()
+    );
+    assert_eq!(all_tracks(&store), vec![expected]);
+}
+
+#[test]
+fn v7_migration_preserves_library_playlist_queue_and_current_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("v7.db");
+    let store = Store::open(&path).unwrap();
+    store
+        .apply_scan(&scan(vec![rec("/music/a.wav", "a", "Raw", 10.)]))
+        .unwrap();
+    let id = all_tracks(&store)[0].id;
+    store
+        .edit_track(id, Some("Custom"), Some("Artist"), None, None)
+        .unwrap();
+    store.set_favorite(&[id], true).unwrap();
+    store.mark_played(id, 42).unwrap();
+    store.increment_play_count(id).unwrap();
+    let playlist = store.create_playlist("Saved").unwrap();
+    store.add_playlist(playlist, &[id]).unwrap();
+    store.enqueue_tracks(&[id, id]).unwrap();
+    let queue_ids = store.queue_ids().unwrap();
+    store.set_queue_current(Some(queue_ids[1])).unwrap();
+    let expected_track = store.track(id).unwrap().unwrap();
+    let expected_playlist = playlist_entries(&store, playlist);
+    let expected_queue = store.queue_state().unwrap();
+    // Reconstruct the exact v7 delta: its tracks column set and metadata trigger.
+    store
+        .conn
+        .execute_batch(
+            "DROP TRIGGER queue_metadata;
+         ALTER TABLE tracks DROP COLUMN decoder_hint;
+         CREATE TRIGGER queue_metadata AFTER UPDATE OF raw_title,raw_artist,raw_album,
+             title_override,artist_override,album_override,duration,favorite,missing,
+             play_count,codec,bitrate_bps ON tracks
+         WHEN EXISTS(SELECT 1 FROM queue_entries WHERE track_id=new.id) BEGIN
+             UPDATE queue_meta SET revision=revision+1;
+         END;
+         UPDATE schema_meta SET value=7 WHERE key='version';",
+        )
+        .unwrap();
+    drop(store);
+
+    let migrated = Store::open(&path).unwrap();
+    assert_eq!(
+        migrated
+            .conn
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key='version'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        8
+    );
+    assert_eq!(migrated.track(id).unwrap().unwrap(), expected_track);
+    assert_eq!(playlist_entries(&migrated, playlist), expected_playlist);
+    assert_eq!(migrated.queue_ids().unwrap(), queue_ids);
+    assert_eq!(migrated.queue_state().unwrap(), expected_queue);
+    migrated
+        .edit_track(id, None, None, None, Some(DecoderHint::Ffmpeg))
+        .unwrap();
+    let after = migrated.queue_state().unwrap();
+    assert_eq!(after.current_id, expected_queue.current_id);
+    assert_eq!(after.revision, expected_queue.revision + 1);
+    drop(migrated);
+    let reopened = Store::open(&path).unwrap();
+    assert_eq!(
+        reopened.track(id).unwrap().unwrap().decoder_hint,
+        DecoderHint::Ffmpeg
+    );
+    reopened
+        .conn
+        .execute("INSERT INTO tracks(path) VALUES('/music/new.wav')", [])
+        .unwrap();
+    let next_id = reopened.conn.last_insert_rowid();
+    assert!(next_id > id);
+    assert_eq!(
+        reopened.track(next_id).unwrap().unwrap().decoder_hint,
+        DecoderHint::Auto
+    );
 }
 
 #[test]
@@ -155,7 +391,7 @@ fn track_cache_invalidates_edits_favorites_statistics_and_deletes() {
     store.set_favorite(&[id], true).unwrap();
     assert!(store.track(id).unwrap().unwrap().favorite);
     store
-        .edit_track(id, Some("Edited"), Some("Artist"), Some("Album"))
+        .edit_track(id, Some("Edited"), Some("Artist"), Some("Album"), None)
         .unwrap();
     assert_eq!(store.track(id).unwrap().unwrap().title, "Edited");
     store.mark_played(id, 42).unwrap();
@@ -177,11 +413,15 @@ fn track_cache_rescan_invalidation_returns_new_metadata() {
     let id = all_tracks(&store)[0].id;
     store.track(id).unwrap();
     store
+        .edit_track(id, None, None, None, Some(DecoderHint::Native))
+        .unwrap();
+    store
         .apply_scan(&scan(vec![rec("/music/a.mp3", "a", "Rescanned", 20.)]))
         .unwrap();
     let track = store.track(id).unwrap().unwrap();
     assert_eq!(track.title, "Rescanned");
     assert_eq!(track.duration, Some(20.));
+    assert_eq!(track.decoder_hint, DecoderHint::Native);
 }
 
 #[test]
@@ -287,7 +527,7 @@ fn title_patch_keeps_unedited_metadata_live_across_rescans() {
     // Prime the cache before editing and scanning.
     assert_eq!(store.track(id).unwrap().unwrap().artist, "Raw artist");
     store
-        .edit_track(id, Some("Edited title"), None, None)
+        .edit_track(id, Some("Edited title"), None, None, None)
         .unwrap();
     record.media.title = "Rescanned title".into();
     record.media.artist = "Rescanned artist".into();
@@ -299,7 +539,7 @@ fn title_patch_keeps_unedited_metadata_live_across_rescans() {
     assert_eq!(track.album, "Rescanned album");
 
     // Empty text is an actual override, unlike an omitted field.
-    store.edit_track(id, None, Some(""), None).unwrap();
+    store.edit_track(id, None, Some(""), None, None).unwrap();
     record.media.artist = "Another artist".into();
     record.media.album = "Another album".into();
     store.apply_scan(&scan(vec![record])).unwrap();
@@ -315,12 +555,19 @@ fn moved_id_preserves_override_and_delete_does_not_reuse() {
     s.apply_scan(&scan(vec![rec("/music/a.mp3", "same", "Raw", 100.)]))
         .unwrap();
     let id = all_tracks(&s)[0].id;
-    s.edit_track(id, Some("Override"), Some("A"), Some("B"))
-        .unwrap();
+    s.edit_track(
+        id,
+        Some("Override"),
+        Some("A"),
+        Some("B"),
+        Some(DecoderHint::Ffmpeg),
+    )
+    .unwrap();
     s.apply_scan(&scan(vec![rec("/music/b.mp3", "same", "Changed", 100.)]))
         .unwrap();
     assert_eq!(all_tracks(&s)[0].id, id);
     assert_eq!(all_tracks(&s)[0].title, "Override");
+    assert_eq!(all_tracks(&s)[0].decoder_hint, DecoderHint::Ffmpeg);
     s.remove_tracks(&[id]).unwrap();
     s.apply_scan(&scan(vec![rec("/music/c.mp3", "new", "New", 100.)]))
         .unwrap();
@@ -504,13 +751,19 @@ fn shared_source_segments_keep_independent_ids_overrides_stats_and_missing_state
     let ids: Vec<_> = tracks.iter().map(|t| t.id).collect();
     assert_eq!(ids.iter().collect::<HashSet<_>>().len(), 4);
     store
-        .edit_track(ids[1], Some("Custom"), Some("Artist"), Some("Album"))
+        .edit_track(ids[1], Some("Custom"), Some("Artist"), Some("Album"), None)
         .unwrap();
     store.mark_played(ids[1], 10).unwrap();
     store.increment_play_count(ids[1]).unwrap();
     let playlist = store.create_playlist("Segments").unwrap();
     store
         .add_playlist(playlist, &[ids[1], ids[2], ids[1], ids[3]])
+        .unwrap();
+    store
+        .edit_track(ids[1], None, None, None, Some(DecoderHint::Native))
+        .unwrap();
+    store
+        .edit_track(ids[2], None, None, None, Some(DecoderHint::Ffmpeg))
         .unwrap();
     let mut changed = first;
     changed.path = "/music/replaced.wav".into();
@@ -528,6 +781,10 @@ fn shared_source_segments_keep_independent_ids_overrides_stats_and_missing_state
     assert_eq!(after[1].path, changed.path);
     assert_eq!(after[1].duration, Some(59.0));
     assert_eq!((after[1].play_count, after[1].last_played), (1, Some(10)));
+    assert_eq!(after[0].decoder_hint, DecoderHint::Auto);
+    assert_eq!(after[1].decoder_hint, DecoderHint::Native);
+    assert_eq!(after[2].decoder_hint, DecoderHint::Ffmpeg);
+    assert_eq!(after[3].decoder_hint, DecoderHint::Auto);
     for index in [0, 2, 3] {
         assert_eq!(
             (after[index].play_count, after[index].last_played),
@@ -952,7 +1209,7 @@ fn cue_relocation_requires_absent_sheet_not_absent_shared_source() {
         store.apply_scan(&result).unwrap();
         let id = all_tracks(&store)[0].id;
         store
-            .edit_track(id, Some("Override"), Some("Artist"), Some("Album"))
+            .edit_track(id, Some("Override"), Some("Artist"), Some("Album"), None)
             .unwrap();
         if !sheet_exists {
             fs::remove_file(&sheet).unwrap();
@@ -2301,7 +2558,7 @@ fn queue_dedup_uses_first_position_not_allocation_order_and_track_deletes_remove
 fn unsupported_database_versions_are_rejected_without_migration() {
     fs::create_dir_all(".cache").unwrap();
     let directory = tempfile::tempdir_in(".cache").unwrap();
-    for version in [6, 8] {
+    for version in [6, 9] {
         let path = directory.path().join(format!("version-{version}.db"));
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection

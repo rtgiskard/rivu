@@ -1,6 +1,7 @@
 //! Container probing, decoding, seeking, and packet-accurate native-channel samples.
 
 use super::{BYTES_PER_MEBIBYTE, Channel, MediaInfo};
+use crate::model::DecoderHint;
 use anyhow::{Context, Result, anyhow, bail};
 use std::{
     fs::File,
@@ -61,14 +62,19 @@ pub struct ProbeResult {
 }
 
 pub fn probe(path: &Path, ffmpeg_enabled: bool) -> Result<MediaInfo> {
-    Ok(Source::open(path, PROBE_BUFFER_LEN, ffmpeg_enabled)?.info)
+    Ok(Source::open(path, PROBE_BUFFER_LEN, DecoderHint::Auto, ffmpeg_enabled)?.info)
 }
 
 pub fn probe_details(path: &Path, ffmpeg_enabled: bool, enhanced: bool) -> Result<ProbeResult> {
     if enhanced {
         super::ffmpeg::ensure_loaded().context("FFmpeg enhanced probing is unavailable")?;
     }
-    let source = Source::open(path, PROBE_BUFFER_LEN, ffmpeg_enabled || enhanced)?;
+    let source = Source::open(
+        path,
+        PROBE_BUFFER_LEN,
+        DecoderHint::Auto,
+        ffmpeg_enabled || enhanced,
+    )?;
     let decoder_backend = if source.uses_ffmpeg() {
         ProbeBackend::Ffmpeg
     } else {
@@ -287,17 +293,40 @@ pub(super) struct Source {
     exhausted: bool,
 }
 impl Source {
-    pub(super) fn open(path: &Path, buffer_len: usize, ffmpeg_enabled: bool) -> Result<Self> {
-        Self::open_with_cancel(path, buffer_len, ffmpeg_enabled, None)
+    pub(super) fn open(
+        path: &Path,
+        buffer_len: usize,
+        decoder_hint: DecoderHint,
+        ffmpeg_enabled: bool,
+    ) -> Result<Self> {
+        Self::open_with_cancel(path, buffer_len, decoder_hint, ffmpeg_enabled, None)
     }
 
     fn open_with_cancel(
         path: &Path,
         buffer_len: usize,
+        decoder_hint: DecoderHint,
         ffmpeg_enabled: bool,
         cancelled: Option<&AtomicBool>,
     ) -> Result<Self> {
         check_cancelled(cancelled)?;
+        match decoder_hint {
+            DecoderHint::Auto => (),
+            DecoderHint::Native => {
+                let file =
+                    File::open(path).with_context(|| format!("Opening {}", path.display()))?;
+                return Self::open_native(path, buffer_len, file, cancelled);
+            }
+            DecoderHint::Ffmpeg => {
+                if !ffmpeg_enabled {
+                    bail!("This track requires FFmpeg, but the FFmpeg extension is disabled");
+                }
+                return Self::from_ffmpeg(
+                    super::ffmpeg::Decoder::open(path, cancelled)?,
+                    cancelled,
+                );
+            }
+        }
         let inspected = if ffmpeg_enabled {
             super::ffmpeg::inspect_wave(path)?
         } else {
@@ -336,12 +365,6 @@ impl Source {
             }
             Err(error) => Err(error),
         }
-    }
-
-    #[cfg(all(test, feature = "ffmpeg"))]
-    fn open_ffmpeg(path: &Path) -> Result<Self> {
-        let decode = super::ffmpeg::Decoder::open(path, None)?;
-        Self::from_ffmpeg(decode, None)
     }
 
     fn from_ffmpeg(decode: super::ffmpeg::Decoder, cancelled: Option<&AtomicBool>) -> Result<Self> {
@@ -649,6 +672,7 @@ impl Source {
     pub(super) fn waveform(
         path: &Path,
         range: Option<super::PlaybackRange>,
+        decoder_hint: DecoderHint,
         media_read_buffer_mb: u32,
         ffmpeg_enabled: bool,
         cancelled: &AtomicBool,
@@ -657,24 +681,31 @@ impl Source {
         let buffer_len = usize::try_from(media_read_buffer_mb)
             .context("Waveform media buffer size does not fit usize")?
             .saturating_mul(super::BYTES_PER_MEBIBYTE);
-        let mut source = Self::open_with_cancel(path, buffer_len, ffmpeg_enabled, Some(cancelled))?;
+        let mut source = Self::open_with_cancel(
+            path,
+            buffer_len,
+            decoder_hint,
+            ffmpeg_enabled,
+            Some(cancelled),
+        )?;
         check_cancelled(Some(cancelled))?;
         if let Some(range) = range {
             source.restrict_with_cancel(range, Some(cancelled))?;
         }
-        source.scan_waveform(path, range, cancelled)
+        source.scan_waveform(path, range, decoder_hint, cancelled)
     }
 
     fn scan_waveform(
         &mut self,
         path: &Path,
         range: Option<super::PlaybackRange>,
+        decoder_hint: DecoderHint,
         cancelled: &AtomicBool,
     ) -> Result<super::WaveformFrame> {
         let mut frame = super::WaveformFrame::default();
         let sample_rate = self.info.sample_rate;
         let channels = self.layout.len();
-        frame.select(path, range, self.info.duration, sample_rate);
+        frame.select(path, range, decoder_hint, self.info.duration, sample_rate);
         let weights = super::output::analysis_weights(&self.layout);
         frame.set_channel_weights(&weights);
         let mut end_seconds = 0.0_f64;
@@ -1025,7 +1056,8 @@ mod tests {
     #[test]
     fn opus_seek_discards_whole_preroll_packets_without_reusing_pcm() {
         let file = opus_file();
-        let mut source = Source::open(file.path(), PROBE_BUFFER_LEN, false).unwrap();
+        let mut source =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Auto, false).unwrap();
         let reference = decode_remaining(&mut source);
         assert_eq!(reference.len(), 96_000);
         for target in [1.0, 0.0, 1.137] {
@@ -1069,7 +1101,8 @@ mod tests {
     #[test]
     fn seek_to_duration_is_exhausted_and_can_seek_back() {
         let file = opus_file();
-        let mut source = Source::open(file.path(), PROBE_BUFFER_LEN, false).unwrap();
+        let mut source =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Auto, false).unwrap();
         let duration = source.info().duration.unwrap();
         for target in [duration, duration + 1.0] {
             source.seek(target).unwrap();
@@ -1100,6 +1133,83 @@ mod tests {
         file
     }
 
+    #[test]
+    fn decoder_hints_respect_global_disable_and_keep_native_runtime_cold() {
+        const CHILD: &str = "RIVU_DECODER_HINTS_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "audio::source::tests::decoder_hints_respect_global_disable_and_keep_native_runtime_cold",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+
+        let file = pcm_file();
+        let cancelled = AtomicBool::new(false);
+        assert!(!super::super::ffmpeg::load_attempted());
+        assert!(Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Ffmpeg, false).is_err());
+        assert!(
+            Source::waveform(file.path(), None, DecoderHint::Ffmpeg, 2, false, &cancelled).is_err()
+        );
+        assert!(!super::super::ffmpeg::load_attempted());
+
+        let mut reference =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
+        let expected = decode_remaining(&mut reference);
+        let mut native =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, true).unwrap();
+        assert!(!native.uses_ffmpeg());
+        assert!(matches!(native.probe_backend, ProbeBackend::Native));
+        assert_eq!(decode_remaining(&mut native), expected);
+        native.seek(0.0).unwrap();
+        assert!(!native.uses_ffmpeg());
+        assert_eq!(decode_remaining(&mut native), expected);
+        let envelope =
+            Source::waveform(file.path(), None, DecoderHint::Native, 2, true, &cancelled).unwrap();
+        assert!(envelope.complete);
+
+        let mut unsupported = tempfile::NamedTempFile::new().unwrap();
+        unsupported.write_all(&[0; 4096]).unwrap();
+        let error = Source::open(
+            unsupported.path(),
+            PROBE_BUFFER_LEN,
+            DecoderHint::Native,
+            true,
+        )
+        .err()
+        .expect("Native must reject an unsupported container without falling back");
+        assert!(error.downcast_ref::<UnsupportedNative>().is_some());
+        assert!(!super::super::ffmpeg::load_attempted());
+    }
+
+    #[cfg(not(feature = "ffmpeg"))]
+    #[test]
+    fn forced_ffmpeg_without_extension_does_not_fall_back_to_native_pcm() {
+        let file = pcm_file();
+        let error = Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Ffmpeg, true)
+            .err()
+            .expect("Forced FFmpeg must fail when the extension is not compiled");
+        assert!(
+            error
+                .to_string()
+                .contains("FFmpeg extension is not compiled")
+        );
+        let cancelled = AtomicBool::new(false);
+        let error = Source::waveform(file.path(), None, DecoderHint::Ffmpeg, 2, true, &cancelled)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("FFmpeg extension is not compiled")
+        );
+    }
+
     #[cfg(feature = "ffmpeg")]
     #[test]
     fn lazy_wave_probe_preserves_native_pcm() {
@@ -1127,14 +1237,22 @@ mod tests {
         assert!(matches!(cold.decoder_backend, ProbeBackend::Native));
         assert!(!super::super::ffmpeg::load_attempted());
 
-        let mut reference = Source::open(file.path(), PROBE_BUFFER_LEN, false).unwrap();
+        let mut reference =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Auto, false).unwrap();
         let expected = decode_remaining(&mut reference);
         let enhanced = probe_details(file.path(), true, true).unwrap();
         assert!(super::super::ffmpeg::load_attempted());
         assert!(matches!(enhanced.probe_backend, ProbeBackend::Ffmpeg));
         assert!(matches!(enhanced.decoder_backend, ProbeBackend::Native));
 
-        let mut ready = Source::open(file.path(), PROBE_BUFFER_LEN, true).unwrap();
+        let mut forced_native =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, true).unwrap();
+        assert!(matches!(forced_native.probe_backend, ProbeBackend::Native));
+        assert!(!forced_native.uses_ffmpeg());
+        assert_eq!(decode_remaining(&mut forced_native), expected);
+
+        let mut ready =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Auto, true).unwrap();
         assert!(!ready.uses_ffmpeg());
         assert_eq!(decode_remaining(&mut ready), expected);
         let disabled = probe_details(file.path(), false, false).unwrap();
@@ -1161,17 +1279,50 @@ mod tests {
 
     #[cfg(feature = "ffmpeg")]
     #[test]
+    fn forced_ffmpeg_waveform_matches_native_pcm_cue_envelope() {
+        let file = pcm_file();
+        let cancelled = AtomicBool::new(false);
+        for range in [
+            None,
+            Some(super::super::PlaybackRange {
+                start_seconds: 30.0 / 75.0,
+                end_seconds: Some(80.0 / 75.0),
+            }),
+        ] {
+            let native =
+                Source::waveform(file.path(), range, DecoderHint::Native, 2, true, &cancelled)
+                    .unwrap();
+            let forced =
+                Source::waveform(file.path(), range, DecoderHint::Ffmpeg, 2, true, &cancelled)
+                    .unwrap();
+            assert!(super::super::ffmpeg::load_attempted());
+            assert!(forced.complete);
+            assert!(forced.matches(file.path(), range, DecoderHint::Ffmpeg));
+            assert!(native.matches(file.path(), range, DecoderHint::Native));
+            assert_eq!(forced.peaks, native.peaks);
+        }
+    }
+
+    #[cfg(feature = "ffmpeg")]
+    #[test]
     fn ffmpeg_preserves_primed_pcm_packet_timestamps_and_seek_after_eof() {
         let file = pcm_file();
-        let mut native = Source::open(file.path(), PROBE_BUFFER_LEN, false).unwrap();
+        let mut native =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Auto, false).unwrap();
         let reference = decode_remaining(&mut native);
-        let mut source = Source::open_ffmpeg(file.path()).unwrap();
+        let mut source =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Ffmpeg, true).unwrap();
+        assert!(source.uses_ffmpeg());
+        assert!(matches!(source.probe_backend, ProbeBackend::Ffmpeg));
+        assert!(super::super::ffmpeg::load_attempted());
         // Exercise decoder EOF rather than stopping at the metadata duration.
         source.range_end = None;
         assert_ffmpeg_pcm(&mut source, &reference, 0.0);
         source.seek(0.2).unwrap();
+        assert!(source.uses_ffmpeg());
         assert_ffmpeg_pcm(&mut source, &reference[8_820..], 0.2);
         source.seek(0.0).unwrap();
+        assert!(source.uses_ffmpeg());
         assert_ffmpeg_pcm(&mut source, &reference, 0.0);
     }
 
@@ -1179,13 +1330,16 @@ mod tests {
     #[test]
     fn ffmpeg_cue_trims_primed_pcm_and_seeks_with_segment_relative_timestamps() {
         let file = pcm_file();
-        let mut native = Source::open(file.path(), PROBE_BUFFER_LEN, false).unwrap();
+        let mut native =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Auto, false).unwrap();
         let reference = decode_remaining(&mut native);
         for (start_frame, end_frame) in [(0, Some(30)), (30, Some(31)), (30, Some(80)), (80, None)]
         {
             let start = start_frame * 588;
             let end = end_frame.map_or(reference.len(), |frame| frame * 588);
-            let mut source = Source::open_ffmpeg(file.path()).unwrap();
+            let mut source =
+                Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Ffmpeg, true).unwrap();
+            assert!(source.uses_ffmpeg());
             source
                 .restrict(super::super::PlaybackRange {
                     start_seconds: start_frame as f64 / 75.0,
@@ -1210,20 +1364,22 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let alias = directory.path().join("Logical title.wav");
         std::os::unix::fs::symlink(file.path(), &alias).unwrap();
-        let mut source = Source::open(&alias, PROBE_BUFFER_LEN, false).unwrap();
+        let mut source = Source::open(&alias, PROBE_BUFFER_LEN, DecoderHint::Auto, false).unwrap();
         assert_eq!(source.info().title, "Logical title");
         assert_eq!(decode_remaining(&mut source).len(), 88_200);
         let cancelled = std::sync::atomic::AtomicBool::new(false);
-        let waveform = Source::waveform(&alias, None, 2, false, &cancelled).unwrap();
+        let waveform =
+            Source::waveform(&alias, None, DecoderHint::Auto, 2, false, &cancelled).unwrap();
         assert!(waveform.complete);
-        assert!(waveform.matches(&alias, None));
-        assert!(!waveform.matches(file.path(), None));
+        assert!(waveform.matches(&alias, None, DecoderHint::Auto));
+        assert!(!waveform.matches(file.path(), None, DecoderHint::Auto));
     }
 
     #[test]
     fn waveform_covers_the_full_file_and_exact_cue_boundaries() {
         let file = pcm_file();
-        let mut source = Source::open(file.path(), PROBE_BUFFER_LEN, false).unwrap();
+        let mut source =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Auto, false).unwrap();
         let reference = decode_remaining(&mut source);
         let cancelled = std::sync::atomic::AtomicBool::new(false);
         for (start, end) in [
@@ -1243,14 +1399,16 @@ mod tests {
                 let bin = index * count / samples.len();
                 expected[bin] = expected[bin].max(sample.abs());
             }
-            let actual = Source::waveform(file.path(), range, 2, false, &cancelled).unwrap();
+            let actual =
+                Source::waveform(file.path(), range, DecoderHint::Auto, 2, false, &cancelled)
+                    .unwrap();
             assert_eq!(
                 actual.peaks,
                 expected.into_iter().map(Some).collect::<Vec<_>>(),
                 "CUE range {start}..{end:?}"
             );
             assert!(actual.complete);
-            assert!(actual.matches(file.path(), range));
+            assert!(actual.matches(file.path(), range, DecoderHint::Auto));
         }
     }
 
@@ -1281,7 +1439,8 @@ mod tests {
             }
         }
         let cancelled = std::sync::atomic::AtomicBool::new(false);
-        let envelope = Source::waveform(file.path(), None, 2, false, &cancelled).unwrap();
+        let envelope =
+            Source::waveform(file.path(), None, DecoderHint::Auto, 2, false, &cancelled).unwrap();
         assert_eq!(
             envelope.peaks,
             [
@@ -1311,7 +1470,8 @@ mod tests {
             file.write_all(&sample.to_le_bytes()).unwrap();
         }
         let cancelled = std::sync::atomic::AtomicBool::new(false);
-        let envelope = Source::waveform(file.path(), None, 2, false, &cancelled).unwrap();
+        let envelope =
+            Source::waveform(file.path(), None, DecoderHint::Auto, 2, false, &cancelled).unwrap();
         assert_eq!(
             envelope.peaks,
             [
@@ -1329,7 +1489,8 @@ mod tests {
     #[test]
     fn waveform_cancellation_precedes_opening_the_file() {
         let cancelled = std::sync::atomic::AtomicBool::new(true);
-        let error = Source::waveform(Path::new(""), None, 2, false, &cancelled).unwrap_err();
+        let error = Source::waveform(Path::new(""), None, DecoderHint::Auto, 2, false, &cancelled)
+            .unwrap_err();
         assert_eq!(error.to_string(), "Waveform loading cancelled");
     }
 
@@ -1339,7 +1500,8 @@ mod tests {
         let opus = opus_file();
         for mode in 0..3 {
             let path = if mode == 0 { pcm.path() } else { opus.path() };
-            let mut source = Source::open(path, PROBE_BUFFER_LEN, false).unwrap();
+            let mut source =
+                Source::open(path, PROBE_BUFFER_LEN, DecoderHint::Auto, false).unwrap();
             source.seek(0.0).unwrap();
             match mode {
                 1 => {
@@ -1378,7 +1540,8 @@ mod tests {
     #[test]
     fn decoded_timestamps_place_cue_seeks_in_the_correct_preview_bins() {
         let file = pcm_file();
-        let mut source = Source::open(file.path(), PROBE_BUFFER_LEN, false).unwrap();
+        let mut source =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Auto, false).unwrap();
         let range = super::super::PlaybackRange {
             start_seconds: 30.0 / 75.0,
             end_seconds: Some(80.0 / 75.0),
@@ -1387,7 +1550,13 @@ mod tests {
         let rate = source.info.sample_rate;
         let channels = source.layout.len();
         let mut frame = super::super::WaveformFrame::default();
-        frame.select(file.path(), Some(range), source.info.duration, rate);
+        frame.select(
+            file.path(),
+            Some(range),
+            DecoderHint::Auto,
+            source.info.duration,
+            rate,
+        );
         for target in [0.2, 0.0] {
             source.seek(target).unwrap();
             let (samples, timestamp) = source.next_frames().unwrap().unwrap();
@@ -1407,10 +1576,13 @@ mod tests {
     #[test]
     fn manual_scan_without_duration_uses_real_pcm_and_finishes_at_eof() {
         let file = pcm_file();
-        let mut source = Source::open(file.path(), PROBE_BUFFER_LEN, false).unwrap();
+        let mut source =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Auto, false).unwrap();
         source.info.duration = None;
         let cancelled = std::sync::atomic::AtomicBool::new(false);
-        let frame = source.scan_waveform(file.path(), None, &cancelled).unwrap();
+        let frame = source
+            .scan_waveform(file.path(), None, DecoderHint::Auto, &cancelled)
+            .unwrap();
         assert!(frame.complete);
         assert_eq!(frame.duration, Some(2.0));
         assert!(frame.span_seconds >= 2.0 && frame.span_seconds < 2.04);
@@ -1428,7 +1600,8 @@ mod tests {
         };
         for range in [None, Some(cue)] {
             for unknown in [false, true] {
-                let mut source = Source::open(file.path(), PROBE_BUFFER_LEN, false).unwrap();
+                let mut source =
+                    Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Auto, false).unwrap();
                 if let Some(range) = range {
                     source.restrict(range).unwrap();
                 }
@@ -1439,7 +1612,13 @@ mod tests {
                 let rate = source.info.sample_rate;
                 let channels = source.layout.len();
                 let mut frame = super::super::WaveformFrame::default();
-                frame.select(file.path(), range, source.info.duration, rate);
+                frame.select(
+                    file.path(),
+                    range,
+                    DecoderHint::Auto,
+                    source.info.duration,
+                    rate,
+                );
                 let mut coverage = super::super::waveform::WaveformCoverage::new(0.0);
                 while let Some((samples, timestamp)) = source.next_frames().unwrap() {
                     coverage.record(timestamp, samples.len() / channels, rate);
@@ -1461,12 +1640,13 @@ mod tests {
     #[test]
     fn seeked_decoder_eof_keeps_cached_peaks_and_unknown_intervals_incomplete() {
         let file = pcm_file();
-        let mut source = Source::open(file.path(), PROBE_BUFFER_LEN, false).unwrap();
+        let mut source =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Auto, false).unwrap();
         source.info.duration = None;
         let rate = source.info.sample_rate;
         let channels = source.layout.len();
         let mut frame = super::super::WaveformFrame::default();
-        frame.select(file.path(), None, None, rate);
+        frame.select(file.path(), None, DecoderHint::Auto, None, rate);
         let (samples, timestamp) = source.next_frames().unwrap().unwrap();
         let first_count = samples.len().min(441 * channels);
         frame.push(timestamp, &samples[..first_count], rate, channels);
@@ -1492,14 +1672,16 @@ mod tests {
     #[test]
     fn cue_ranges_crop_pcm_and_seek_relative_to_track() {
         let file = pcm_file();
-        let mut full = Source::open(file.path(), PROBE_BUFFER_LEN, false).unwrap();
+        let mut full =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Auto, false).unwrap();
         assert_eq!(full.info().bitrate_bps, Some(705_600));
         assert_eq!(full.info().bits_per_sample, Some(16));
         let reference = decode_remaining(&mut full);
         for (start_frame, end_frame) in [(0_u64, Some(30_u64)), (30, Some(80)), (80, None)] {
             let start = (start_frame * 588) as usize;
             let end = end_frame.map_or(reference.len(), |frame| (frame * 588) as usize);
-            let mut source = Source::open(file.path(), PROBE_BUFFER_LEN, false).unwrap();
+            let mut source =
+                Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Auto, false).unwrap();
             source
                 .restrict(super::super::PlaybackRange {
                     start_seconds: start_frame as f64 / 75.0,
@@ -1522,7 +1704,8 @@ mod tests {
     #[test]
     fn cue_opus_preroll_and_end_remain_inside_the_segment() {
         let file = opus_file();
-        let mut source = Source::open(file.path(), PROBE_BUFFER_LEN, false).unwrap();
+        let mut source =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Auto, false).unwrap();
         source
             .restrict(super::super::PlaybackRange {
                 start_seconds: 1.0,

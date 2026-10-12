@@ -89,9 +89,9 @@ rivu library probe album.wav --enhanced
 rivu --json library probe album.wav --enhanced
 ----
 
-Title, artist, album, and favorite edits change Rivu's database only; media
-files, tags, and CUE sheets are never rewritten. Rescans preserve matching IDs,
-overrides, favorites, counts, and last-played timestamps. `library remove` and
+Title, artist, album, favorite, and decoder-hint edits change Rivu's database only;
+media files, tags, and CUE sheets are never rewritten. Rescans preserve matching IDs,
+overrides, favorites, decoder hints, counts, and last-played timestamps. `library remove` and
 `library clean-missing` remove records and their queue/playlist references only;
 they never delete media files. Missing rows remain visible in playlist views
 until removed or cleaned.
@@ -102,12 +102,16 @@ rescanned metadata if it has no previous override. Concurrent edits to different
 fields preserve both changes; edits to the same field use the last applied value.
 Passing an empty string explicitly clears that field's displayed text.
 
-In Track details, a background refresh preserves unsaved title, artist, and
-album edits. Save updates the library; edits typed while saving remain unsaved.
+In Track details, a background refresh preserves unsaved title, artist, album,
+and decoder-hint edits. Save commits changed fields together; edits made while
+saving remain unsaved. A failed save preserves the draft for correction or retry.
 Selecting another track discards the previous draft. Changing or deleting a
 playlist, or removing one of its entries, does not discard a track's draft.
 Escape first leaves a focused input; Escape from the layout clears selection
 and restores details for the playing track.
+
+Decoder hints use the same Save and draft-discard workflow as tags. Routing and
+DTS-WAV safety: link:04_playback.adoc#_optional_ffmpeg_decoder[Playback].
 
 [source,sh]
 ----
@@ -261,9 +265,11 @@ For the JSON history shape and `--limit` behavior, see <<_cli_output,CLI output>
 
 == SQLite maintenance
 
-Rivu accepts version 7 library databases only; other schemas are not upgraded
-automatically. Stop the core and back up the database before replacing it or
-switching to a build with a different database schema.
+Rivu uses version 8 library databases and automatically upgrades version 7 in a
+transaction, preserving library records, playlists, and the saved queue. Existing
+tracks receive the Auto decoder hint. Other schemas are not upgraded automatically.
+Stop the core and back up the database before switching database-schema versions;
+older builds cannot open the upgraded database.
 
 Version 7 is still unreleased. Development builds that change its index or
 trigger definitions require rebuilding experimental version-7 databases; the
@@ -271,7 +277,7 @@ version check does not upgrade those definitions in existing databases.
 
 Stop the core before removing `library.db` and its `-wal`/`-shm` sidecars, then scan
 the music files again. This resets playlists, saved queue, favorites, metadata
-overrides, and playback statistics; audio files, `config.toml`, and
+overrides, decoder hints, and playback statistics; audio files, `config.toml`, and
 `layout.json` are independent.
 
 Graceful core shutdown (`rivu quit`, `SIGINT`, or `SIGTERM`) closes its database

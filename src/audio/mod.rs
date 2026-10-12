@@ -114,15 +114,23 @@ pub fn ffmpeg_load_attempted() -> bool {
 pub fn waveform(
     path: &Path,
     range: Option<PlaybackRange>,
+    decoder_hint: DecoderHint,
     media_read_buffer_mb: u32,
     ffmpeg_enabled: bool,
     cancelled: &std::sync::atomic::AtomicBool,
 ) -> Result<WaveformFrame> {
-    source::Source::waveform(path, range, media_read_buffer_mb, ffmpeg_enabled, cancelled)
+    source::Source::waveform(
+        path,
+        range,
+        decoder_hint,
+        media_read_buffer_mb,
+        ffmpeg_enabled,
+        cancelled,
+    )
 }
 
 use crate::analysis::{AnalysisControl, AnalysisFrame, AnalysisSettings, AnalysisWorker};
-use crate::model::MediaInfo;
+use crate::model::{DecoderHint, MediaInfo};
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use parking_lot::{Mutex, RwLock};
@@ -146,6 +154,7 @@ pub enum AudioCommand {
     Load {
         path: PathBuf,
         range: Option<PlaybackRange>,
+        decoder_hint: DecoderHint,
         generation: u64,
         start_seconds: f64,
         paused: bool,

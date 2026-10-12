@@ -186,12 +186,14 @@ impl Core {
                 title,
                 artist,
                 album,
+                decoder_hint,
             } => {
                 self.store.edit_track(
                     track_id,
                     title.as_deref(),
                     artist.as_deref(),
                     album.as_deref(),
+                    decoder_hint,
                 )?;
                 self.refresh_affected_queue_tracks(&[track_id])?;
                 self.state.library.revision = self.state.library.revision.wrapping_add(1);

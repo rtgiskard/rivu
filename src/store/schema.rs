@@ -25,7 +25,8 @@ fn create_schema(conn: &Connection) -> Result<()> {
             probe_version INTEGER NOT NULL DEFAULT 0,
             bitrate_bps INTEGER,track_number INTEGER,disc_number INTEGER,
             bits_per_sample INTEGER,release_date TEXT,
-            favorite INTEGER NOT NULL DEFAULT 0 CHECK(favorite IN (0,1))
+            favorite INTEGER NOT NULL DEFAULT 0 CHECK(favorite IN (0,1)),
+            decoder_hint TEXT NOT NULL DEFAULT 'auto' CHECK(decoder_hint IN ('auto','native','ffmpeg'))
         );
         CREATE INDEX tracks_fingerprint ON tracks(fingerprint);
         CREATE UNIQUE INDEX tracks_path ON tracks(path) WHERE cue_sheet IS NULL;
@@ -66,18 +67,43 @@ fn create_schema(conn: &Connection) -> Result<()> {
         END;
         CREATE TRIGGER queue_metadata AFTER UPDATE OF raw_title,raw_artist,raw_album,
             title_override,artist_override,album_override,duration,favorite,missing,
-            play_count,codec,bitrate_bps ON tracks
+            play_count,codec,bitrate_bps,decoder_hint ON tracks
         WHEN (COALESCE(old.title_override,old.raw_title) IS NOT COALESCE(new.title_override,new.raw_title)
             OR COALESCE(old.artist_override,old.raw_artist) IS NOT COALESCE(new.artist_override,new.raw_artist)
             OR COALESCE(old.album_override,old.raw_album) IS NOT COALESCE(new.album_override,new.raw_album)
             OR old.duration IS NOT new.duration
             OR old.favorite IS NOT new.favorite OR old.missing IS NOT new.missing
             OR old.play_count IS NOT new.play_count OR old.codec IS NOT new.codec
-            OR old.bitrate_bps IS NOT new.bitrate_bps)
+            OR old.bitrate_bps IS NOT new.bitrate_bps OR old.decoder_hint IS NOT new.decoder_hint)
             AND EXISTS(SELECT 1 FROM queue_entries WHERE track_id=new.id) BEGIN
             UPDATE queue_meta SET revision=revision+1;
         END;
-        INSERT INTO schema_meta(key,value) VALUES('version',7);",
+        INSERT INTO schema_meta(key,value) VALUES('version',8);",
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn migrate_v7(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(
+        "ALTER TABLE tracks ADD COLUMN decoder_hint TEXT NOT NULL DEFAULT 'auto'
+            CHECK(decoder_hint IN ('auto','native','ffmpeg'));
+        DROP TRIGGER queue_metadata;
+        CREATE TRIGGER queue_metadata AFTER UPDATE OF raw_title,raw_artist,raw_album,
+            title_override,artist_override,album_override,duration,favorite,missing,
+            play_count,codec,bitrate_bps,decoder_hint ON tracks
+        WHEN (COALESCE(old.title_override,old.raw_title) IS NOT COALESCE(new.title_override,new.raw_title)
+            OR COALESCE(old.artist_override,old.raw_artist) IS NOT COALESCE(new.artist_override,new.raw_artist)
+            OR COALESCE(old.album_override,old.raw_album) IS NOT COALESCE(new.album_override,new.raw_album)
+            OR old.duration IS NOT new.duration
+            OR old.favorite IS NOT new.favorite OR old.missing IS NOT new.missing
+            OR old.play_count IS NOT new.play_count OR old.codec IS NOT new.codec
+            OR old.bitrate_bps IS NOT new.bitrate_bps OR old.decoder_hint IS NOT new.decoder_hint)
+            AND EXISTS(SELECT 1 FROM queue_entries WHERE track_id=new.id) BEGIN
+            UPDATE queue_meta SET revision=revision+1;
+        END;
+        UPDATE schema_meta SET value=8 WHERE key='version';",
     )?;
     tx.commit()?;
     Ok(())
@@ -111,8 +137,12 @@ impl Store {
                     |row| row.get(0),
                 )
                 .context("Unsupported library database; remove the old database and rescan")?;
-            if version != 7 {
-                bail!("Unsupported database version {version}; remove the old database and rescan");
+            match version {
+                7 => migrate_v7(&c).context("Migrate library database from version 7 to 8")?,
+                8 => {}
+                _ => bail!(
+                    "Unsupported database version {version}; remove the old database and rescan"
+                ),
             }
         }
         // SQLite's built-in lower() is ASCII-only; preserve frontend Unicode search.

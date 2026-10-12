@@ -1,19 +1,20 @@
 //! One metadata edit session follows either an explicit selection or playback.
 //!
-//! Input entities remain window-owned and are the only draft storage. A loaded
+//! Input entities hold tag drafts; the window holds the decoder hint enum draft. A loaded
 //! track supplies display details; its refresh must not move a dirty edit's
 //! baseline. Identity epochs reject responses and save acknowledgements from a
 //! previous selection, including a switch away and back to the same track.
 //! Playlist container/membership changes do not change this track identity;
 //! they must not cancel the editor or its in-flight save.
 
-use crate::model::Track;
+use crate::model::{DecoderHint, Track};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct MetadataValues {
     pub(super) title: String,
     pub(super) artist: String,
     pub(super) album: String,
+    pub(super) decoder_hint: DecoderHint,
 }
 
 impl MetadataValues {
@@ -22,6 +23,7 @@ impl MetadataValues {
             title: track.title.clone(),
             artist: track.artist.clone(),
             album: track.album.clone(),
+            decoder_hint: track.decoder_hint,
         }
     }
 
@@ -30,6 +32,7 @@ impl MetadataValues {
             title: &self.title,
             artist: &self.artist,
             album: &self.album,
+            decoder_hint: self.decoder_hint,
         }
     }
 }
@@ -39,6 +42,7 @@ pub(super) struct MetadataDraft<'a> {
     pub(super) title: &'a str,
     pub(super) artist: &'a str,
     pub(super) album: &'a str,
+    pub(super) decoder_hint: DecoderHint,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,6 +87,7 @@ impl MetadataSession {
             baseline.title != draft.title
                 || baseline.artist != draft.artist
                 || baseline.album != draft.album
+                || baseline.decoder_hint != draft.decoder_hint
         })
     }
 
@@ -225,6 +230,8 @@ impl MetadataSession {
             title: (baseline.title != draft.title).then(|| draft.title.to_owned()),
             artist: (baseline.artist != draft.artist).then(|| draft.artist.to_owned()),
             album: (baseline.album != draft.album).then(|| draft.album.to_owned()),
+            decoder_hint: (baseline.decoder_hint != draft.decoder_hint)
+                .then_some(draft.decoder_hint),
         };
         let token = SaveToken {
             epoch: self.epoch,
@@ -264,6 +271,9 @@ impl MetadataSession {
                 if values.album != baseline.album {
                     track.album.clone_from(&values.album);
                 }
+                if values.decoder_hint != baseline.decoder_hint {
+                    track.decoder_hint = values.decoder_hint;
+                }
             }
             self.baseline = Some(values);
         }
@@ -284,6 +294,7 @@ impl GuiApp {
             title: self.inputs[&Field::Title].read(cx).text(),
             artist: self.inputs[&Field::Artist].read(cx).text(),
             album: self.inputs[&Field::Album].read(cx).text(),
+            decoder_hint: self.metadata_decoder_hint,
         })
     }
 
@@ -291,6 +302,7 @@ impl GuiApp {
         self.set_value(Field::Title, values.title, cx);
         self.set_value(Field::Artist, values.artist, cx);
         self.set_value(Field::Album, values.album, cx);
+        self.metadata_decoder_hint = values.decoder_hint;
     }
 
     pub(super) fn request_track(&mut self, id: i64, cx: &mut Context<Self>) {
@@ -335,6 +347,7 @@ impl GuiApp {
                         title: this.inputs[&Field::Title].read(cx).text(),
                         artist: this.inputs[&Field::Artist].read(cx).text(),
                         album: this.inputs[&Field::Album].read(cx).text(),
+                        decoder_hint: this.metadata_decoder_hint,
                     };
                     if let Some(values) = this.metadata.accept_load(token, track, draft) {
                         this.set_metadata_values(values, cx);
@@ -359,6 +372,7 @@ impl GuiApp {
             title: self.inputs[&Field::Title].read(cx).text(),
             artist: self.inputs[&Field::Artist].read(cx).text(),
             album: self.inputs[&Field::Album].read(cx).text(),
+            decoder_hint: self.metadata_decoder_hint,
         };
         if let Some(values) = self
             .metadata
@@ -373,6 +387,7 @@ impl GuiApp {
             title: self.value(Field::Title, cx),
             artist: self.value(Field::Artist, cx),
             album: self.value(Field::Album, cx),
+            decoder_hint: self.metadata_decoder_hint,
         };
         let Some((token, command)) = self.metadata.begin_save(values.as_draft()) else {
             return;
@@ -388,6 +403,7 @@ impl GuiApp {
                     return;
                 }
                 if ack.ok {
+                    this.sync_waveform(cx);
                     if let Some(id) = this.metadata.selected() {
                         this.request_track(id, cx);
                     }
@@ -407,6 +423,84 @@ impl GuiApp {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn decoder_hint_draft_refresh_and_save_lifecycle() {
+        let mut session = MetadataSession::default();
+        let baseline = load(&mut session, 1, "original");
+        let submitted = MetadataValues {
+            decoder_hint: DecoderHint::Ffmpeg,
+            ..baseline.clone()
+        };
+        assert!(session.dirty(submitted.as_draft()));
+        assert!(!session.dirty(baseline.as_draft()));
+        assert!(session.begin_save(baseline.as_draft()).is_none());
+        assert_eq!(session.track().unwrap().decoder_hint, DecoderHint::Auto);
+
+        let refresh = session.begin_load(1);
+        let mut remote = track(1, "remote title");
+        remote.decoder_hint = DecoderHint::Native;
+        assert!(
+            session
+                .accept_load(refresh, Some(remote), submitted.as_draft())
+                .is_none()
+        );
+        assert!(session.dirty(submitted.as_draft()));
+        assert!(!session.dirty(baseline.as_draft()));
+        let (failed, command) = session.begin_save(submitted.as_draft()).unwrap();
+        assert!(matches!(
+            command,
+            Command::EditTrack {
+                title: None,
+                artist: None,
+                album: None,
+                decoder_hint: Some(DecoderHint::Ffmpeg),
+                ..
+            }
+        ));
+        assert_eq!(session.track().unwrap().decoder_hint, DecoderHint::Native);
+        assert!(session.complete_save(failed, submitted.clone(), false));
+        assert!(session.dirty(submitted.as_draft()));
+        assert_eq!(session.track().unwrap().decoder_hint, DecoderHint::Native);
+
+        let (saved, _) = session.begin_save(submitted.as_draft()).unwrap();
+        let edited_during_save = MetadataValues {
+            title: "new title".into(),
+            decoder_hint: DecoderHint::Auto,
+            ..submitted.clone()
+        };
+        assert!(session.complete_save(saved, submitted.clone(), true));
+        assert_eq!(session.track().unwrap().decoder_hint, DecoderHint::Ffmpeg);
+        assert_eq!(session.track().unwrap().title, "remote title");
+        assert!(!session.dirty(submitted.as_draft()));
+        assert!(session.dirty(edited_during_save.as_draft()));
+        let (pending, command) = session.begin_save(edited_during_save.as_draft()).unwrap();
+        assert!(matches!(&command, Command::EditTrack {
+            title: Some(title), artist: None, album: None,
+            decoder_hint: Some(DecoderHint::Auto), ..
+        } if title == "new title"));
+        let switched = load(&mut session, 2, "other");
+        assert_eq!(switched.decoder_hint, DecoderHint::Auto);
+        assert!(!session.dirty(switched.as_draft()));
+        assert!(!session.complete_save(pending, edited_during_save.clone(), true));
+        load(&mut session, 1, "reopened");
+        assert!(!session.complete_save(pending, edited_during_save, true));
+        assert_eq!(session.track().unwrap().decoder_hint, DecoderHint::Auto);
+        let refresh = session.begin_load(1);
+        let mut remote = track(1, "reopened");
+        remote.decoder_hint = DecoderHint::Native;
+        let clean = session
+            .accept_load(refresh, Some(remote), values("reopened").as_draft())
+            .unwrap();
+        assert_eq!(clean.decoder_hint, DecoderHint::Native);
+        assert!(!session.dirty(clean.as_draft()));
+        session.clear_selection();
+        let playing = session
+            .sync_playback(Some(&track(2, "playing")), clean.as_draft())
+            .unwrap();
+        assert_eq!(playing.decoder_hint, DecoderHint::Auto);
+        assert!(!session.dirty(playing.as_draft()));
+    }
+
     use super::*;
 
     fn track(id: i64, title: &str) -> Track {
@@ -428,6 +522,7 @@ mod tests {
             bits_per_sample: None,
             release_date: None,
             favorite: false,
+            decoder_hint: Default::default(),
             missing: false,
             play_count: 0,
             last_played: None,

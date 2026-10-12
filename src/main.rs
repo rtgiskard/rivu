@@ -379,6 +379,7 @@ fn run() -> Result<()> {
                 title,
                 artist,
                 album,
+                decoder_hint: None,
             };
             let ack = ipc::request_ack(&socket, &command)?;
             show_ack(&ack, args.json)

@@ -281,6 +281,7 @@ mod tests {
             bits_per_sample: None,
             release_date: None,
             favorite: false,
+            decoder_hint: Default::default(),
             missing: false,
             play_count: 0,
             last_played: None,

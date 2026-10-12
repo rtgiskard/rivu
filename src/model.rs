@@ -60,6 +60,16 @@ impl CueSegment {
     }
 }
 
+/// User-selected decoder routing, applied when opening a track for playback.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecoderHint {
+    #[default]
+    Auto,
+    Native,
+    Ffmpeg,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Track {
     pub id: i64,
@@ -81,6 +91,8 @@ pub struct Track {
     pub bits_per_sample: Option<u32>,
     pub release_date: Option<String>,
     pub favorite: bool,
+    #[serde(default)]
+    pub decoder_hint: DecoderHint,
     pub missing: bool,
     pub play_count: u64,
     pub last_played: Option<i64>,
@@ -594,12 +606,13 @@ pub enum Command {
         playlist_id: i64,
         path: PathBuf,
     },
-    /// Only supplied fields become overrides; an empty string explicitly clears text.
+    /// Only supplied fields are changed; an empty string explicitly clears text.
     EditTrack {
         track_id: i64,
         title: Option<String>,
         artist: Option<String>,
         album: Option<String>,
+        decoder_hint: Option<DecoderHint>,
     },
     RemoveTracks {
         track_ids: Vec<i64>,

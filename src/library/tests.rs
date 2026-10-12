@@ -186,7 +186,7 @@ fn failed_audio_probe_is_not_missing_or_cleanable_but_true_deletion_is() -> Resu
     let id = store.track_id_for_source(&audio, None)?.unwrap();
     let deleted_id = store.track_id_for_source(&deleted, None)?.unwrap();
     store.set_favorite(&[id], true)?;
-    store.edit_track(id, Some("Kept title"), None, None)?;
+    store.edit_track(id, Some("Kept title"), None, None, None)?;
     fs::write(&audio, b"not audio")?;
     fs::remove_file(&deleted)?;
     let failed = scan_paths(std::slice::from_ref(&root), &[], false)?;
@@ -725,7 +725,7 @@ fn nested_scan_keeps_its_own_excluded_identity_and_user_data() -> Result<()> {
     store.apply_scan(&baseline)?;
     let id = store.track_id_for_source(&deep, None)?.unwrap();
     store.set_favorite(&[id], true)?;
-    store.edit_track(id, Some("Kept title"), None, None)?;
+    store.edit_track(id, Some("Kept title"), None, None, None)?;
     let copy = nested.join("copy.wav");
     fs::rename(&deep, &copy)?;
     let partial = scan_paths_at_depth(&[root, nested], &[], false, 1, |_, _, _, _, _| {})?;
@@ -930,6 +930,7 @@ fn track_from_record(id: i64, record: &ScanRecord) -> Track {
         bits_per_sample: record.media.bits_per_sample,
         release_date: record.media.release_date.clone(),
         favorite: false,
+        decoder_hint: Default::default(),
         codec: record.media.codec.clone(),
         channels: record.media.channels,
         sample_rate: record.media.sample_rate,
@@ -1342,6 +1343,7 @@ fn assert_playlist_roundtrip(path: &Path) -> Result<()> {
             bits_per_sample: None,
             release_date: None,
             favorite: false,
+            decoder_hint: Default::default(),
             codec: "wav".into(),
             channels: 2,
             sample_rate: 48_000,

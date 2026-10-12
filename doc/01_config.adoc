@@ -78,7 +78,8 @@ and `16` MiB.
 `playback.ffmpeg_enabled` defaults to `false`. The default build includes the `ffmpeg`
 feature; see link:../readme.adoc[README] for a native-only build. Enabling permits
 FFmpeg use on future source opens; it does not load or validate runtime libraries.
-Libraries load on the first native-unsupported source or an explicit
+Libraries load on the first native-unsupported source in Auto mode, a track opened
+with the FFmpeg decoder hint, or an explicit
 link:02_library.adoc#_metadata_and_favorites[enhanced probe]. Missing libraries
 are reported when needed; native decoders continue to work. A load failure is
 retained until restart. Disabling stops a track currently decoded through FFmpeg;

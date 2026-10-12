@@ -270,6 +270,7 @@ pub(super) struct GuiApp {
     inputs: HashMap<Field, Entity<Input>>,
     browser: BrowserState,
     metadata: MetadataSession,
+    metadata_decoder_hint: crate::model::DecoderHint,
     layout_focus: FocusHandle,
     scroll_views: scrolling::ScrollViews,
 
@@ -643,6 +644,7 @@ impl GuiApp {
             inputs,
             browser: BrowserState::default(),
             metadata: MetadataSession::default(),
+            metadata_decoder_hint: Default::default(),
             layout_focus: cx.focus_handle(),
             scroll_views: scrolling::ScrollViews::default(),
             interaction: LayoutInteraction::default(),

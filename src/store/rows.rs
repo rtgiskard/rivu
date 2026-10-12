@@ -1,4 +1,4 @@
-use crate::model::{CueSegment, Track};
+use crate::model::{CueSegment, DecoderHint, Track};
 use std::path::PathBuf;
 
 pub(super) fn cue_from_row(
@@ -29,7 +29,7 @@ pub(super) fn cue_from_row(
         .transpose()
 }
 
-pub(super) const TRACK_COLUMNS: &str = "id,path,COALESCE(title_override,raw_title),COALESCE(artist_override,raw_artist),COALESCE(album_override,raw_album),duration,codec,channels,sample_rate,missing,play_count,last_played,cue_sheet,cue_number,cue_start_frame,cue_end_frame,bitrate_bps,track_number,disc_number,bits_per_sample,release_date,favorite,fingerprint";
+pub(super) const TRACK_COLUMNS: &str = "id,path,COALESCE(title_override,raw_title),COALESCE(artist_override,raw_artist),COALESCE(album_override,raw_album),duration,codec,channels,sample_rate,missing,play_count,last_played,cue_sheet,cue_number,cue_start_frame,cue_end_frame,bitrate_bps,track_number,disc_number,bits_per_sample,release_date,favorite,fingerprint,decoder_hint";
 
 pub(super) fn track_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
     Ok(Track {
@@ -49,6 +49,22 @@ pub(super) fn track_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
         bits_per_sample: r.get(19)?,
         release_date: r.get(20)?,
         favorite: r.get(21)?,
+        decoder_hint: match r.get_ref(23)?.as_str()? {
+            "auto" => DecoderHint::Auto,
+            "native" => DecoderHint::Native,
+            "ffmpeg" => DecoderHint::Ffmpeg,
+            _ => {
+                return Err(rusqlite::Error::FromSqlConversionFailure(
+                    23,
+                    rusqlite::types::Type::Text,
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Invalid track decoder hint",
+                    )
+                    .into(),
+                ));
+            }
+        },
         missing: r.get::<_, i64>(9)? != 0,
         play_count: r.get::<_, i64>(10)? as u64,
         last_played: r.get(11)?,

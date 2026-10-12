@@ -8,7 +8,7 @@ use super::{
 pub(super) use super::{TRACK_HEIGHT, caption, list_row};
 use crate::{
     gui::QueueDrag,
-    model::{Command, PlaybackStatus, RepeatMode},
+    model::{Command, DecoderHint, PlaybackStatus, RepeatMode},
 };
 use chrono::{DateTime, Local};
 use gpui::{
@@ -1353,6 +1353,41 @@ impl GuiApp {
                                             .map_or("—".into(), |value| value.to_string()),
                                     ),
                                 )),
+                        ))
+                        .child(metadata_group(
+                            "Decoder hint",
+                            column()
+                                .gap_2()
+                                .child(
+                                    row().flex_wrap().children(
+                                        [
+                                            ("metadata-decoder-auto", "Auto", DecoderHint::Auto),
+                                            ("metadata-decoder-native", "Native", DecoderHint::Native),
+                                            ("metadata-decoder-ffmpeg", "FFmpeg", DecoderHint::Ffmpeg),
+                                        ]
+                                        .into_iter()
+                                        .map(|(key, label, decoder_hint)| {
+                                            active_control(
+                                                button(
+                                                    (key, panel_id),
+                                                    label,
+                                                    cx,
+                                                    move |this, _, cx| {
+                                                        this.metadata_decoder_hint = decoder_hint;
+                                                        cx.notify();
+                                                    },
+                                                ),
+                                                self.metadata_decoder_hint == decoder_hint,
+                                            )
+                                        }),
+                                    ),
+                                )
+                                .child(caption(
+                                    "Use Save to apply metadata and decoder hint changes together. The saved hint applies on the next track open or full waveform request.",
+                                ).text_xs().text_color(rgb(MUTED)))
+                                .child(caption(
+                                    "FFmpeg requires the extension to be enabled. Native may play DTS-WAV as noise.",
+                                ).text_xs().text_color(rgb(MUTED))),
                         ))
                         .child(metadata_group(
                             "Tags",

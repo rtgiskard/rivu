@@ -1,6 +1,7 @@
 //! A bounded, progressively filled envelope of the PCM already decoded for playback.
 
 use super::PlaybackRange;
+use crate::model::DecoderHint;
 use std::{
     path::{Path, PathBuf},
     sync::{
@@ -68,6 +69,7 @@ pub struct WaveformFrame {
     pub complete: bool,
     pub path: Option<PathBuf>,
     pub range: Option<PlaybackRange>,
+    pub decoder_hint: DecoderHint,
     pub duration: Option<f64>,
     pub span_seconds: f64,
     pub max_peak: f32,
@@ -98,6 +100,7 @@ impl Default for WaveformFrame {
             path: None,
             complete: false,
             range: None,
+            decoder_hint: DecoderHint::Auto,
             duration: None,
             span_seconds: 0.0,
             max_peak: 1.0,
@@ -227,6 +230,7 @@ impl WaveformAccumulator {
     pub(super) fn publish(&mut self, shared: &mut WaveformFrame) {
         if shared.path != self.frame.path
             || shared.range != self.frame.range
+            || shared.decoder_hint != self.frame.decoder_hint
             || shared.revision != self.published_revision
             || shared.complete
         {
@@ -273,8 +277,15 @@ impl WaveformAccumulator {
 }
 
 impl WaveformFrame {
-    pub fn matches(&self, path: &Path, range: Option<PlaybackRange>) -> bool {
-        self.path.as_deref() == Some(path) && self.range == range
+    pub fn matches(
+        &self,
+        path: &Path,
+        range: Option<PlaybackRange>,
+        decoder_hint: DecoderHint,
+    ) -> bool {
+        self.path.as_deref() == Some(path)
+            && self.range == range
+            && self.decoder_hint == decoder_hint
     }
 
     pub(crate) fn suspension_generation(&self) -> u64 {
@@ -321,6 +332,7 @@ impl WaveformFrame {
                 revision: self.revision.wrapping_add(1),
                 path: self.path.take(),
                 range: self.range,
+                decoder_hint: self.decoder_hint,
                 duration: self.duration,
                 span_seconds: self.span_seconds,
                 suspended,
@@ -410,13 +422,15 @@ impl WaveformFrame {
         &mut self,
         path: &Path,
         range: Option<PlaybackRange>,
+        decoder_hint: DecoderHint,
         duration: Option<f64>,
     ) {
-        if self.matches(path, range) {
+        if self.matches(path, range, decoder_hint) {
             return;
         }
         self.path = Some(path.to_owned());
         self.range = range;
+        self.decoder_hint = decoder_hint;
         self.duration = duration.filter(|value| value.is_finite() && *value > 0.0);
         self.span_seconds = self.duration.unwrap_or(INITIAL_UNKNOWN_SPAN);
         self.complete = false;
@@ -440,10 +454,11 @@ impl WaveformFrame {
         &mut self,
         path: &Path,
         range: Option<PlaybackRange>,
+        decoder_hint: DecoderHint,
         duration: Option<f64>,
         sample_rate: u32,
     ) {
-        self.select_source(path, range, duration);
+        self.select_source(path, range, decoder_hint, duration);
         self.prepare_bins(sample_rate);
     }
 
@@ -800,12 +815,18 @@ mod tests {
         assert!(suspended_revision > revision);
         assert_eq!(shared.suspension_generation(), 1);
         assert_eq!(shared.retained_capacity_bytes(), 0);
-        assert!(shared.matches(Path::new("track.wav"), None));
+        assert!(shared.matches(Path::new("track.wav"), None, DecoderHint::Auto));
         assert_eq!(shared.duration, Some(2.0));
         assert!(!shared.complete);
         for _ in 0..100 {
             shared.set_still_mode(true);
-            shared.select(Path::new("track.wav"), None, Some(2.0), 8_000);
+            shared.select(
+                Path::new("track.wav"),
+                None,
+                DecoderHint::Auto,
+                Some(2.0),
+                8_000,
+            );
             shared.set_channel_weights(&[[1.0, 0.0]]);
             shared.push(0.0, &[1.0], 8_000, 1);
             shared.finish_scan(2.0);
@@ -816,8 +837,8 @@ mod tests {
             assert_eq!(shared.suspension_generation(), 1);
         }
         for path in ["other.wav", "track.wav"] {
-            shared.select(Path::new(path), None, Some(2.0), 8_000);
-            assert!(shared.matches(Path::new(path), None));
+            shared.select(Path::new(path), None, DecoderHint::Auto, Some(2.0), 8_000);
+            assert!(shared.matches(Path::new(path), None, DecoderHint::Auto));
             assert_eq!(shared.retained_capacity_bytes(), 0);
         }
         shared.set_still_mode(false);
@@ -852,7 +873,13 @@ mod tests {
         assert!(shared.revision > revision);
         assert_eq!(shared.rms_counts[0], 2);
         for _ in 0..100 {
-            shared.select(Path::new("track.wav"), None, Some(1.0), 3200);
+            shared.select(
+                Path::new("track.wav"),
+                None,
+                DecoderHint::Auto,
+                Some(1.0),
+                3200,
+            );
             let mut reopened = WaveformAccumulator::new(shared.clone());
             let revision = shared.revision;
             reopened.push(0.0, &[1.0, 1.0], 3200, 1);
@@ -881,7 +908,13 @@ mod tests {
         accumulator.push(1.0, &[3.0], 1, 1);
         accumulator.publish(&mut shared);
         assert_same_bins(&shared, &expected);
-        shared.select(Path::new("other.wav"), None, Some(4.0), 1);
+        shared.select(
+            Path::new("other.wav"),
+            None,
+            DecoderHint::Auto,
+            Some(4.0),
+            1,
+        );
         let expected = shared.clone();
         accumulator.publish(&mut shared);
         assert_same_bins(&shared, &expected);
@@ -889,7 +922,13 @@ mod tests {
 
     fn frame(duration: Option<f64>, rate: u32) -> WaveformFrame {
         let mut frame = WaveformFrame::default();
-        frame.select(Path::new("track.wav"), None, duration, rate);
+        frame.select(
+            Path::new("track.wav"),
+            None,
+            DecoderHint::Auto,
+            duration,
+            rate,
+        );
         frame
     }
 
@@ -998,7 +1037,13 @@ mod tests {
         for start in (0..16).step_by(2) {
             // Reopening retains both displayed RMS and the earlier candidate;
             // no PCM is needed to recover candidate energy after publication.
-            shared.select(Path::new("track.wav"), None, Some(1.0), rate);
+            shared.select(
+                Path::new("track.wav"),
+                None,
+                DecoderHint::Auto,
+                Some(1.0),
+                rate,
+            );
             let mut reopened = WaveformAccumulator::new(shared.clone());
             let timestamp = start as f64 / f64::from(rate);
             reopened.push(timestamp, &samples[start..start + 2], rate, 1);
@@ -1038,7 +1083,7 @@ mod tests {
             assert_eq!(actual.peaks[0], Some(2.0));
             let count = if adjacent { 8 } else { 1 };
             assert_eq!(actual.rms_counts[0], count);
-            actual.select(Path::new("track.wav"), None, None, 100);
+            actual.select(Path::new("track.wav"), None, DecoderHint::Auto, None, 100);
             actual.push(0.01, &[1.0], 100, 1);
             actual.push(0.04, &[2.0], 100, 1);
             assert_eq!(actual.rms_counts[0], count);
@@ -1058,7 +1103,7 @@ mod tests {
             assert_eq!(actual.duration, Some(60.01));
             assert_eq!(actual.span_seconds, expected.span_seconds);
             assert_statistics(&actual, &expected);
-            actual.select(Path::new("track.wav"), None, None, 100);
+            actual.select(Path::new("track.wav"), None, DecoderHint::Auto, None, 100);
             actual.push(0.0, &samples, 100, 1);
             assert_statistics(&actual, &expected);
         }
@@ -1132,12 +1177,24 @@ mod tests {
         assert_eq!(live.revision, revision + 1);
         assert!(live.complete);
         live.push(0.0, &[2.0], 1, 1);
-        live.select(Path::new("track.wav"), None, Some(4.0), 1);
+        live.select(
+            Path::new("track.wav"),
+            None,
+            DecoderHint::Auto,
+            Some(4.0),
+            1,
+        );
         assert_eq!(live.revision, revision + 1);
         live.finish_scan(4.0);
         assert_eq!(live.revision, revision + 1);
         assert_eq!(live.peaks, [Some(0.5), Some(0.0), Some(0.75), Some(0.25)]);
-        live.select(Path::new("other.wav"), None, Some(4.0), 1);
+        live.select(
+            Path::new("other.wav"),
+            None,
+            DecoderHint::Auto,
+            Some(4.0),
+            1,
+        );
         assert!(!live.complete);
         assert!(live.peaks.iter().all(Option::is_none));
     }
@@ -1253,13 +1310,61 @@ mod tests {
         let mut frame = frame(Some(4.0), 1);
         frame.push(1.0, &[0.5], 1, 1);
         let revision = frame.revision;
-        frame.select(Path::new("track.wav"), None, Some(99.0), 1);
+        frame.select(
+            Path::new("track.wav"),
+            None,
+            DecoderHint::Auto,
+            Some(99.0),
+            1,
+        );
         frame.push(1.0, &[0.5], 1, 1);
         frame.push(1.0, &[0.25], 1, 1);
         frame.push(1.0, &[], 1, 1);
         assert_eq!(frame.revision, revision);
         assert_eq!(frame.peaks, [None, Some(0.5), None, None]);
         assert_eq!(frame.duration, Some(4.0));
+    }
+
+    #[test]
+    fn decoder_hint_changes_reset_peaks_and_still_mode_preserves_identity() {
+        let path = Path::new("track.wav");
+        let mut frame = frame(Some(4.0), 1);
+        for decoder_hint in [DecoderHint::Native, DecoderHint::Ffmpeg, DecoderHint::Auto] {
+            frame.push(0.0, &[2.0], 1, 1);
+            let revision = frame.revision;
+            frame.select(path, None, decoder_hint, Some(4.0), 1);
+            assert!(frame.matches(path, None, decoder_hint));
+            assert_eq!(frame.revision, revision + 1);
+            assert_eq!(frame.peaks, [None; 4]);
+            assert_eq!(frame.max_peak, 1.0);
+            assert!(!frame.complete);
+            frame.push(0.0, &[0.5], 1, 1);
+            let revision = frame.revision;
+            frame.select(path, None, decoder_hint, Some(4.0), 1);
+            assert_eq!(frame.revision, revision);
+            assert_eq!(frame.peaks[0], Some(0.5));
+        }
+
+        frame.select(path, None, DecoderHint::Ffmpeg, Some(4.0), 1);
+        frame.set_still_mode(true);
+        assert!(frame.matches(path, None, DecoderHint::Ffmpeg));
+        assert!(!frame.matches(path, None, DecoderHint::Native));
+        frame.set_still_mode(false);
+        assert!(frame.matches(path, None, DecoderHint::Ffmpeg));
+    }
+
+    #[test]
+    fn old_decoder_accumulator_cannot_publish_into_a_new_decoder_frame() {
+        let mut shared = frame(Some(4.0), 1);
+        let mut accumulator = WaveformAccumulator::new(shared.clone());
+        accumulator.push(0.0, &[2.0], 1, 1);
+        let mut replacement = frame(Some(4.0), 1);
+        replacement.decoder_hint = DecoderHint::Ffmpeg;
+        shared = replacement;
+        let expected = shared.clone();
+        accumulator.publish(&mut shared);
+        assert_same_bins(&shared, &expected);
+        assert_eq!(shared.decoder_hint, DecoderHint::Ffmpeg);
     }
 
     #[test]
@@ -1270,8 +1375,8 @@ mod tests {
             start_seconds: 10.0,
             end_seconds: Some(12.0),
         });
-        frame.select(Path::new("track.wav"), cue, Some(2.0), 1);
-        assert!(frame.matches(Path::new("track.wav"), cue));
+        frame.select(Path::new("track.wav"), cue, DecoderHint::Auto, Some(2.0), 1);
+        assert!(frame.matches(Path::new("track.wav"), cue, DecoderHint::Auto));
         assert_eq!(frame.peaks, [None, None]);
         assert!(frame.rms_counts.iter().all(|count| *count == 0));
         assert_eq!(frame.max_peak, 1.0);
@@ -1279,7 +1384,7 @@ mod tests {
         assert_eq!(frame.rms_counts, [1, 0]);
         assert_eq!(frame.rms[0], Some(0.75));
         let revision = frame.revision;
-        frame.select(Path::new("other.wav"), cue, Some(2.0), 1);
+        frame.select(Path::new("other.wav"), cue, DecoderHint::Auto, Some(2.0), 1);
         assert_eq!(frame.peaks, [None, None]);
         assert_eq!(frame.revision, revision + 1);
         frame.push(0.0, &[0.25], 1, 1);

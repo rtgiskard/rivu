@@ -44,18 +44,33 @@ sink layout without remixing. Unsupported routes report an error.
 == Optional FFmpeg decoder
 
 Native decoding is the default. Enable `playback.ffmpeg_enabled` for additional formats,
-including audio in MKV/MP4. FFmpeg loads when a native decoder cannot support a
-source, not during startup or status queries. Decoder status shows `not loaded`
-until a load is attempted; missing or incompatible libraries are reported when
-needed, and the load result is retained until restart.
+including audio in MKV/MP4. In Auto mode, FFmpeg loads when a native decoder cannot
+support a source, not during startup or status queries. Opening a track whose
+decoder hint is FFmpeg also loads the extension directly. Decoder status shows
+`not loaded` until a load is attempted; missing or incompatible libraries are
+reported when needed, and the load result is retained until restart.
 
-Once FFmpeg is loaded and enabled, future WAVE opens use its format recognition;
-ordinary PCM still uses the native decoder. Recognition is not proof that a
-file has been fully validated. When FFmpeg is disabled or not loaded, DTS stored
-inside a PCM-labelled WAVE may be treated as PCM, including incorrect metadata
-and noise on playback. An explicit enhanced probe runs in a separate process;
-it does not load FFmpeg in a running playback instance. For DTS-WAV playback,
-FFmpeg must be enabled and already loaded in that instance.
+Track details provides a *Decoder hint* selection. Use *Save* to commit it together
+with tag edits; an unsaved selection does not affect playback or waveform decoding:
+
+* *Auto* preserves automatic native-first selection and FFmpeg fallback.
+* *Native* uses only the native decoder, without FFmpeg recognition or fallback.
+* *FFmpeg* loads and uses FFmpeg directly. The global setting must be enabled;
+  disabling it, missing libraries, or a native-only build reports an error rather
+  than falling back to native decoding.
+
+The saved choice survives rescans and restart, is independent for each CUE subtrack,
+and applies to the next track open or explicit full-waveform request. Saving it
+does not reopen current playback. Waveforms from different hints are not reused;
+saving a changed hint cancels an in-flight full-waveform request without restarting it.
+
+In Auto mode, once FFmpeg is loaded and enabled, future WAVE opens use its format
+recognition; ordinary PCM still uses the native decoder. Recognition is not proof
+that a file has been fully validated. In Native mode, or Auto mode with FFmpeg
+disabled or not loaded, DTS inside a PCM-labelled WAVE may be treated as PCM,
+including incorrect metadata and noise on playback. For DTS-WAV, select FFmpeg
+and enable the extension; no prior load is required. An explicit enhanced probe
+runs in a separate process and does not load FFmpeg in a running playback instance.
 
 Library rows are not automatically reprobed after FFmpeg loads; use a forced
 rescan to refresh stored metadata. Probe commands and recognition provenance:

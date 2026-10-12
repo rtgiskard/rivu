@@ -629,12 +629,14 @@ mod tests {
                 title: Some("Title".into()),
                 artist: None,
                 album: None,
+                decoder_hint: Some(crate::model::DecoderHint::Ffmpeg),
             };
             let artist = Command::EditTrack {
                 track_id: 1,
                 title: None,
                 artist: Some("Artist".into()),
                 album: None,
+                decoder_hint: None,
             };
             let revision = core.state.queue.revision;
             for command in if title_first {
@@ -647,6 +649,7 @@ mod tests {
             assert_ne!(core.state.queue.revision, revision);
             let current = core.state.current_track().unwrap();
             assert_eq!((&*current.title, &*current.artist), ("Title", "Artist"));
+            assert_eq!(current.decoder_hint, crate::model::DecoderHint::Ffmpeg);
             let page = core.store.queue_page(0, MAX_QUERY_ROWS).unwrap();
             assert_eq!(
                 (&*page.rows[0].track.title, &*page.rows[0].track.artist),
@@ -661,6 +664,7 @@ mod tests {
                 title: Some("Unqueued".into()),
                 artist: None,
                 album: None,
+                decoder_hint: None,
             })
             .unwrap();
             core.publish();
@@ -1377,7 +1381,13 @@ mod tests {
             .unwrap();
         core.store.set_favorite(&[hidden_id], true).unwrap();
         core.store
-            .edit_track(hidden_id, Some("Kept title"), Some("Artist"), Some("Album"))
+            .edit_track(
+                hidden_id,
+                Some("Kept title"),
+                Some("Artist"),
+                Some("Album"),
+                None,
+            )
             .unwrap();
         std::fs::remove_file(&hidden).unwrap();
         let mut config = core.state.system.config.as_ref().clone();
@@ -3054,6 +3064,7 @@ mod tests {
             title: Some("Changed".into()),
             artist: None,
             album: None,
+            decoder_hint: None,
         })
         .unwrap();
         assert!(matches!(

@@ -31,13 +31,14 @@ use parking_lot::RwLock;
 use crate::{
     audio::{PlaybackRange, WaveformFrame},
     config::Config,
-    model::Track,
+    model::{DecoderHint, Track},
 };
 
 #[derive(Clone, PartialEq)]
 struct Source {
     path: PathBuf,
     range: Option<PlaybackRange>,
+    decoder_hint: DecoderHint,
 }
 
 impl Source {
@@ -45,11 +46,12 @@ impl Source {
         frame.path.as_ref().map(|path| Self {
             path: path.clone(),
             range: frame.range,
+            decoder_hint: frame.decoder_hint,
         })
     }
 
     fn matches(&self, frame: &WaveformFrame) -> bool {
-        frame.matches(&self.path, self.range)
+        frame.matches(&self.path, self.range, self.decoder_hint)
     }
 }
 
@@ -508,7 +510,7 @@ fn cursor_wobble(position: f64) -> f32 {
 }
 
 fn preview_message(source: &Source, frame: &WaveformFrame) -> Option<&'static str> {
-    if !frame.matches(&source.path, source.range) || !frame.peaks.iter().any(Option::is_some) {
+    if !source.matches(frame) || !frame.peaks.iter().any(Option::is_some) {
         return Some("Play or buffer this track to build its waveform");
     }
     None
@@ -702,7 +704,9 @@ impl Waveform {
         }
         let source_changed = match (&self.source, track) {
             (Some(source), Some(track)) => {
-                source.path != track.path || source.range != track_range(track)
+                source.path != track.path
+                    || source.range != track_range(track)
+                    || source.decoder_hint != track.decoder_hint
             }
             (None, None) => false,
             _ => true,
@@ -713,6 +717,7 @@ impl Waveform {
                 Rc::new(Source {
                     path: track.path.clone(),
                     range: track_range(track),
+                    decoder_hint: track.decoder_hint,
                 })
             });
         }
@@ -733,7 +738,10 @@ impl Waveform {
         if !self.enabled || config.still_mode {
             return;
         }
-        self.sync(track, cx);
+        let Some(track) = track else {
+            return;
+        };
+        self.sync(Some(track), cx);
         let Some(source) = self.source.as_ref() else {
             return;
         };
@@ -744,13 +752,21 @@ impl Waveform {
         let range = source.range;
         let buffer_mb = config.media_read_buffer_mb;
         let ffmpeg_enabled = config.ffmpeg_enabled;
+        let decoder_hint = track.decoder_hint;
         let (generation, cancelled) = self.start_full();
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    crate::audio::waveform(&path, range, buffer_mb, ffmpeg_enabled, &cancelled)
+                    crate::audio::waveform(
+                        &path,
+                        range,
+                        decoder_hint,
+                        buffer_mb,
+                        ffmpeg_enabled,
+                        &cancelled,
+                    )
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -1019,7 +1035,7 @@ impl Waveform {
                                 let (_revision, progress) = {
                                     let frame = shared.read();
                                     // Playback may replace its source between layout and paint.
-                                    if !frame.matches(&source.path, source.range) {
+                                    if !source.matches(&frame) {
                                         return;
                                     }
                                     waveform.columns_with_cache(
@@ -1523,8 +1539,12 @@ mod tests {
         let source = Source {
             path: PathBuf::from("track.flac"),
             range: None,
+            decoder_hint: DecoderHint::Auto,
         };
         assert!(preview_message(&source, &frame).is_none());
+        frame.decoder_hint = DecoderHint::Ffmpeg;
+        assert!(preview_message(&source, &frame).is_some());
+        frame.decoder_hint = DecoderHint::Auto;
         frame.path = Some(PathBuf::from("other.flac"));
         assert!(preview_message(&source, &frame).is_some());
         frame.path = Some(source.path.clone());
@@ -1886,6 +1906,7 @@ mod tests {
         waveform.source = Some(Rc::new(Source {
             path: PathBuf::from("selected.flac"),
             range: None,
+            decoder_hint: DecoderHint::Auto,
         }));
         let (generation, _) = waveform.start_full();
         let mut selected = frame(vec![Some(0.5), Some(0.75)]);

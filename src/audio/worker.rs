@@ -6,6 +6,7 @@ use super::{
     playback::{Playback, PlaybackOptions},
 };
 use crate::analysis::AnalysisWorker;
+use crate::model::DecoderHint;
 use anyhow::anyhow;
 use crossbeam_channel::{Receiver, Sender, TryRecvError, select};
 use parking_lot::RwLock;
@@ -133,20 +134,21 @@ impl Worker {
         &self,
         path: PathBuf,
         range: Option<super::PlaybackRange>,
+        decoder_hint: DecoderHint,
         generation: u64,
         start: f64,
         paused: bool,
-        prior_heard: f64,
     ) -> PlaybackOptions {
         PlaybackOptions {
             path,
             range,
+            decoder_hint,
             generation,
             start,
             paused,
             device: self.device.clone(),
             volume: self.volume,
-            prior_heard,
+            prior_heard: 0.0,
             media_read_buffer_len: self.media_read_buffer_len,
             ffmpeg_enabled: self.ffmpeg_enabled,
             pipewire_auto_mix: self.pipewire_auto_mix,
@@ -208,13 +210,21 @@ impl Worker {
             AudioCommand::Load {
                 path,
                 range,
+                decoder_hint,
                 generation,
                 start_seconds,
                 paused,
             } => {
                 self.stop();
                 match Playback::new(
-                    self.playback_options(path, range, generation, start_seconds, paused, 0.0),
+                    self.playback_options(
+                        path,
+                        range,
+                        decoder_hint,
+                        generation,
+                        start_seconds,
+                        paused,
+                    ),
                     &self.analyzer,
                     self.waveform.clone(),
                 ) {
@@ -419,7 +429,13 @@ mod tests {
         )))
         .unwrap();
         let mut frame = WaveformFrame::default();
-        frame.select(std::path::Path::new("stopped.wav"), None, Some(1.0), 8000);
+        frame.select(
+            std::path::Path::new("stopped.wav"),
+            None,
+            DecoderHint::Auto,
+            Some(1.0),
+            8000,
+        );
         frame.push(0.0, &[0.5; 8000], 8000, 1);
         frame.finish_scan(1.0);
         let completed = frame.clone();
@@ -468,6 +484,7 @@ mod tests {
             AudioCommand::Load {
                 path: PathBuf::from("other.wav"),
                 range: None,
+                decoder_hint: DecoderHint::Auto,
                 generation: 2,
                 start_seconds: 0.0,
                 paused: true,

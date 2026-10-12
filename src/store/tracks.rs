@@ -4,7 +4,7 @@ use super::rows::{
     library_row_from_row, track_from_row,
 };
 use super::{Store, batch_limit, changed};
-use crate::model::{Batch, HistoryEntry, Page, Track};
+use crate::model::{Batch, DecoderHint, HistoryEntry, Page, Track};
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::collections::HashMap;
@@ -424,15 +424,23 @@ impl Store {
         title: Option<&str>,
         artist: Option<&str>,
         album: Option<&str>,
+        decoder_hint: Option<DecoderHint>,
     ) -> Result<()> {
+        let decoder_hint = decoder_hint.map(|hint| match hint {
+            DecoderHint::Auto => "auto",
+            DecoderHint::Native => "native",
+            DecoderHint::Ffmpeg => "ffmpeg",
+        });
         let updated = self.conn.execute(
             "UPDATE tracks SET title_override=COALESCE(?1,title_override),
              artist_override=COALESCE(?2,artist_override),
-             album_override=COALESCE(?3,album_override) WHERE id=?4 AND
+             album_override=COALESCE(?3,album_override),
+             decoder_hint=COALESCE(?4,decoder_hint) WHERE id=?5 AND
              ((?1 IS NOT NULL AND title_override IS NOT ?1) OR
               (?2 IS NOT NULL AND artist_override IS NOT ?2) OR
-              (?3 IS NOT NULL AND album_override IS NOT ?3))",
-            params![title, artist, album, id],
+              (?3 IS NOT NULL AND album_override IS NOT ?3) OR
+              (?4 IS NOT NULL AND decoder_hint IS NOT ?4))",
+            params![title, artist, album, decoder_hint, id],
         )?;
         if updated != 0 {
             self.track_cache.borrow_mut().entries.remove(&id);

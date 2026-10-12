@@ -530,6 +530,7 @@ fn edit_track_wire_round_trip_preserves_omitted_and_explicit_fields() {
             title: title.clone(),
             artist: artist.clone(),
             album: album.clone(),
+            decoder_hint: None,
         }));
         let mut encoded = Vec::new();
         encode_request_frame_into(&request, &mut encoded).unwrap();
@@ -541,6 +542,7 @@ fn edit_track_wire_round_trip_preserves_omitted_and_explicit_fields() {
             title: decoded_title,
             artist: decoded_artist,
             album: decoded_album,
+            decoder_hint: None,
         } = command.try_into().unwrap()
         else {
             panic!("expected metadata patch");
@@ -560,6 +562,7 @@ fn request_encoding_rejects_oversized_body_before_completion() {
         title: Some("x".repeat(MAX_REQUEST)),
         artist: None,
         album: None,
+        decoder_hint: None,
     }));
     let mut encoded = Vec::new();
     assert!(encode_request_frame_into(&request, &mut encoded).is_err());
