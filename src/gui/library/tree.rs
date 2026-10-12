@@ -155,7 +155,11 @@ impl DirectoryTree {
         let branch = self.branches.entry(key).or_default();
         branch.generation = generation;
         branch.pending = Some((offset, generation));
-        self.refresh_visible();
+        // Default reserves one row before its placeholder segment exists.
+        // Later requests only change status, including for a known empty forest.
+        if self.segments.is_empty() && self.row_count != 0 {
+            self.refresh_visible();
+        }
     }
 
     pub(in crate::gui) fn retry(&mut self, key: &TreeBranch) {
@@ -273,7 +277,6 @@ impl DirectoryTree {
                 touched: self.clock,
             });
         self.evict();
-        self.refresh_visible();
     }
 
     fn evict(&mut self) {
@@ -920,6 +923,126 @@ mod tests {
     ) {
         tree.begin(key.clone(), offset, generation);
         assert!(tree.accept(key, generation, page(paths, total)));
+    }
+
+    #[test]
+    fn first_request_initializes_placeholder_and_empty_forest_reloads_after_invalidation() {
+        let mut tree = DirectoryTree::default();
+        let forest = branch("");
+        assert_eq!(tree.row_count(), 1);
+        tree.begin(forest.clone(), 0, 1);
+        assert!(matches!(tree.item(0), Some(TreeItem::Placeholder {
+            branch: key, offset: 0, depth: 0, status: BranchStatus::Loading,
+        }) if key == forest));
+        assert!(tree.requests_for_range(0..1).is_empty());
+        assert!(tree.accept(&forest, 1, page(&[], 0)));
+        assert_eq!(tree.row_count(), 0);
+        assert_eq!(tree.status(&forest), BranchStatus::Empty);
+        assert!(tree.item(0).is_none());
+
+        let revision = tree.projection_revision();
+        tree.begin(forest.clone(), 0, 2);
+        tree.fail(&forest, 2);
+        assert_eq!(tree.row_count(), 0);
+        assert!(tree.item(0).is_none());
+        assert_eq!(tree.projection_revision(), revision);
+
+        tree.invalidate();
+        assert_eq!(tree.row_count(), 1);
+        assert!(matches!(
+            tree.item(0),
+            Some(TreeItem::Placeholder {
+                status: BranchStatus::Unloaded,
+                ..
+            })
+        ));
+        assert_eq!(tree.requests_for_range(0..1), vec![(forest.clone(), 0)]);
+        tree.begin(forest.clone(), 0, 3);
+        assert!(matches!(
+            tree.item(0),
+            Some(TreeItem::Placeholder {
+                status: BranchStatus::Loading,
+                ..
+            })
+        ));
+        assert!(tree.accept(&forest, 3, page(&["/a"], 1)));
+        tree.clear();
+        assert_eq!(tree.row_count(), 1);
+        assert_eq!(tree.requests_for_range(0..1), vec![(forest, 0)]);
+    }
+
+    #[test]
+    fn request_status_retry_and_generation_preserve_selection_and_navigation_projection() {
+        for empty in [false, true] {
+            let mut tree = DirectoryTree::default();
+            let forest = branch("");
+            let root = branch("/a");
+            accept(&mut tree, &forest, 0, 1, &["/a"], 1);
+            tree.expand(&root);
+            let node = super::super::LibraryNode::Directory(std::sync::Arc::from(Path::new("/a")));
+            tree.focus_selection(&node, 0);
+            tree.defer_selection(1);
+            let revision = tree.projection_revision();
+
+            tree.begin(root.clone(), 0, 2);
+            assert_eq!(tree.status(&root), BranchStatus::Loading);
+            assert!(matches!(
+                tree.item(0),
+                Some(TreeItem::Entry(VisibleDirectoryRow {
+                    status: BranchStatus::Loading,
+                    ..
+                }))
+            ));
+            assert!(matches!(
+                tree.item(1),
+                Some(TreeItem::Placeholder {
+                    status: BranchStatus::Loading,
+                    ..
+                })
+            ));
+            tree.fail(&root, 1);
+            assert!(tree.request_pending(&root, 2));
+            tree.fail(&root, 2);
+            assert_eq!(tree.status(&root), BranchStatus::Error);
+            assert!(matches!(
+                tree.item(0),
+                Some(TreeItem::Entry(VisibleDirectoryRow {
+                    status: BranchStatus::Error,
+                    ..
+                }))
+            ));
+            assert!(matches!(
+                tree.item(1),
+                Some(TreeItem::Placeholder {
+                    status: BranchStatus::Error,
+                    ..
+                })
+            ));
+            assert!(tree.requests_for_range(1..2).is_empty());
+            assert_eq!(tree.ready_selection(), None);
+
+            tree.retry(&root);
+            assert_eq!(tree.requests_for_range(1..2), vec![(root.clone(), 0)]);
+            tree.begin(root.clone(), 0, 3);
+            assert!(!tree.accept(&root, 2, page(&["/a/stale"], 1)));
+            assert_eq!(tree.status(&root), BranchStatus::Loading);
+            assert_eq!(tree.row_count(), 2);
+            assert_eq!(tree.selected_index(), Some(0));
+            assert_eq!(tree.parent_index(1), Some(0));
+            assert_eq!(tree.projection_revision(), revision);
+            let paths: &[&str] = if empty { &[] } else { &["/a/target"] };
+            assert!(tree.accept(&root, 3, page(paths, paths.len())));
+            let status = if empty {
+                BranchStatus::Empty
+            } else {
+                BranchStatus::Ready
+            };
+            assert_eq!(tree.status(&root), status);
+            assert!(matches!(tree.item(0), Some(TreeItem::Entry(row)) if row.status == status));
+            assert_eq!(tree.row_count(), 1 + paths.len());
+            assert_eq!(tree.selected_index(), Some(0));
+            assert_eq!(tree.ready_selection(), if empty { None } else { Some(1) });
+        }
     }
 
     #[test]
