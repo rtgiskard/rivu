@@ -252,7 +252,6 @@ fn spawn_command_worker(socket_path: &Path) -> CommandWorker {
 enum QueryKind {
     Search(String),
     Directory(PathBuf),
-    Roots(Arc<Vec<PathBuf>>),
     Playlists,
     Playlist(i64),
 }
@@ -288,16 +287,6 @@ impl QueryRequest {
                 offset,
                 limit,
             },
-            QueryKind::Roots(roots) => {
-                let local_count = roots.len().saturating_sub(offset).min(limit);
-                Query::DirectoryPage {
-                    path: PathBuf::new(),
-                    query: None,
-                    favorite: None,
-                    offset: offset.saturating_sub(roots.len()),
-                    limit: (limit - local_count).max(1),
-                }
-            }
             QueryKind::Playlists => Query::PlaylistSummaries { offset, limit },
             QueryKind::Playlist(playlist_id) => Query::PlaylistEntries {
                 playlist_id: *playlist_id,
@@ -459,6 +448,10 @@ fn run_loop(socket_path: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>
                 Ok(_) => {}
                 Err(error) => tui.ui.set_message(Some(error)),
             }
+            redraw = true;
+            immediate_redraw = true;
+        }
+        if tui.ui.prepare_local_view(&tui.snapshot) {
             redraw = true;
             immediate_redraw = true;
         }
@@ -631,6 +624,30 @@ struct UiState {
     page_size: usize,
 }
 impl UiState {
+    fn prepare_local_view(&mut self, state: &TuiSnapshot) -> bool {
+        let View::Tree(tree) = &mut self.view else {
+            return false;
+        };
+        if !tree.directory.as_os_str().is_empty() {
+            return false;
+        }
+        let limit = state.system.page_size as usize;
+        let mut changed = false;
+        while let Some(offset) = tree.entries.next_offset(limit) {
+            let rows = tree
+                .roots
+                .iter()
+                .skip(offset)
+                .take(limit)
+                .cloned()
+                .map(|path| DirectoryRow::Directory { path })
+                .collect();
+            tree.entries.insert(offset, limit, tree.roots.len(), rows);
+            changed = true;
+        }
+        changed
+    }
+
     fn query_request(&self, state: &TuiSnapshot) -> Option<QueryRequest> {
         let limit = state.system.page_size as usize;
         let (kind, offset) = match &self.view {
@@ -638,15 +655,10 @@ impl UiState {
                 let offset = search.results.next_offset(limit)?;
                 (QueryKind::Search(search.query.clone()), offset)
             }
-            View::Tree(tree) => {
-                let offset = tree.entries.next_offset(limit)?;
-                let kind = if tree.directory.as_os_str().is_empty() {
-                    QueryKind::Roots(Arc::clone(&tree.roots))
-                } else {
-                    QueryKind::Directory(tree.directory.clone())
-                };
-                (kind, offset)
-            }
+            View::Tree(tree) if !tree.directory.as_os_str().is_empty() => (
+                QueryKind::Directory(tree.directory.clone()),
+                tree.entries.next_offset(limit)?,
+            ),
             View::Playlists(playlists) => (QueryKind::Playlists, playlists.next_offset(limit)?),
             View::PlaylistDetail { detail, .. } => (
                 QueryKind::Playlist(detail.playlist_id),
@@ -692,9 +704,7 @@ impl UiState {
             }
         };
         let revision_matches = match &request.kind {
-            QueryKind::Directory(_) | QueryKind::Roots(_) => {
-                result.revisions.structure == request.structure_revision
-            }
+            QueryKind::Directory(_) => result.revisions.structure == request.structure_revision,
             QueryKind::Playlists | QueryKind::Playlist(_) => {
                 result.revisions.playlist == request.playlist_revision
             }
@@ -710,28 +720,7 @@ impl UiState {
                     .results
                     .insert(request.offset, request.limit, page.total, page.rows);
             }
-            (View::Tree(tree), ViewResponse::DirectoryPage(mut page)) => {
-                if let QueryKind::Roots(roots) = &request.kind {
-                    let local_count = roots
-                        .len()
-                        .saturating_sub(request.offset)
-                        .min(request.limit);
-                    page.rows.truncate(request.limit - local_count);
-                    if local_count != 0 {
-                        drop(
-                            page.rows.splice(
-                                0..0,
-                                roots
-                                    .iter()
-                                    .skip(request.offset)
-                                    .take(local_count)
-                                    .cloned()
-                                    .map(|path| DirectoryRow::Directory { path }),
-                            ),
-                        );
-                    }
-                    page.total += roots.len();
-                }
+            (View::Tree(tree), ViewResponse::DirectoryPage(page)) => {
                 tree.entries
                     .insert(request.offset, request.limit, page.total, page.rows);
             }
@@ -1213,21 +1202,21 @@ impl LibrarySearch {
 #[derive(Default)]
 struct LibraryTree {
     directory: PathBuf,
-    roots: Arc<Vec<PathBuf>>,
+    roots: Vec<PathBuf>,
     ancestors: Vec<(PathBuf, ListState, usize)>,
     entries: PagedList<DirectoryRow>,
 }
 
 impl LibraryTree {
-    fn roots(configured: &[PathBuf]) -> Arc<Vec<PathBuf>> {
+    fn roots(configured: &[PathBuf]) -> Vec<PathBuf> {
         let mut roots: Vec<_> = configured
             .iter()
-            .filter(|path| !path.as_os_str().is_empty() && path.as_path() != Path::new("/"))
+            .filter(|path| !path.as_os_str().is_empty())
             .cloned()
             .collect();
         roots.sort();
         roots.dedup();
-        Arc::new(roots)
+        roots
     }
 
     fn new(configured: &[PathBuf]) -> Self {
@@ -1665,7 +1654,10 @@ fn draw_tree(frame: &mut ratatui::Frame<'_>, area: Rect, tree: &mut LibraryTree)
                 .file_name()
                 .unwrap_or(path.as_os_str())
                 .to_string_lossy();
-            format!("{marker}{name}/")
+            format!(
+                "{marker}{name}{}",
+                if name.ends_with('/') { "" } else { "/" }
+            )
         }
         DirectoryRow::Track(track) => {
             let marker = "\u{f001} ";
@@ -1832,17 +1824,6 @@ mod tests {
                     })
                     .collect(),
             }),
-            QueryKind::Roots(_) => {
-                let Query::DirectoryPage { offset, limit, .. } = request.query() else {
-                    unreachable!()
-                };
-                ViewResponse::DirectoryPage(Page {
-                    total,
-                    rows: (offset..(offset + limit).min(total))
-                        .map(|index| DirectoryRow::Track(track(index)))
-                        .collect(),
-                })
-            }
         };
         QueryResult {
             revisions: QueryRevisions::default(),
@@ -1851,6 +1832,7 @@ mod tests {
     }
 
     fn load_visible(ui: &mut UiState, state: &TuiSnapshot) {
+        ui.prepare_local_view(state);
         for _ in 0..16 {
             let Some(request) = ui.query_request(state) else {
                 return;
@@ -1988,26 +1970,56 @@ mod tests {
     }
 
     #[test]
-    fn configured_roots_and_root_tracks_share_one_continuous_viewport() {
+    fn tree_top_level_contains_only_configured_roots_and_restores_parent() {
         let mut state = TuiSnapshot::default();
-        state.system.page_size = 3;
-        let mut ui = UiState {
-            view: View::Tree(LibraryTree::new(&["/first".into(), "/second".into()])),
-            page_size: 4,
-            ..UiState::default()
-        };
-        render_view(&mut ui);
-        load_visible(&mut ui, &state);
-        for _ in 0..3 {
-            ui.key_action(KeyEvent::from(KeyCode::Down), &state);
-        }
-        let rendered = render_view(&mut ui);
-        assert!(rendered.contains("first/"), "{rendered}");
-        assert!(rendered.contains("row-0"), "{rendered}");
-        assert!(rendered.contains("row-1"), "{rendered}");
-        match ui.key_action(KeyEvent::from(KeyCode::Enter), &state) {
-            KeyAction::Command(Command::Enqueue { track_ids }) => assert_eq!(track_ids, vec![1]),
-            _ => panic!("root track selection did not preserve global ordering"),
+        state.system.page_size = 1;
+        for roots in [
+            vec![],
+            vec![PathBuf::from("/music")],
+            vec![
+                "/first".into(),
+                "/second".into(),
+                "/third".into(),
+                "/fourth".into(),
+                "/fifth".into(),
+            ],
+            vec!["/".into()],
+        ] {
+            let mut ui = UiState {
+                view: View::Tree(LibraryTree::new(&roots)),
+                page_size: 4,
+                ..UiState::default()
+            };
+            render_view(&mut ui);
+            load_visible(&mut ui, &state);
+            let View::Tree(tree) = &ui.view else {
+                unreachable!()
+            };
+            assert_eq!(tree.entries.total, roots.len());
+            assert!(tree.entries.loaded);
+            assert!(ui.query_request(&state).is_none());
+            if roots.is_empty() {
+                assert!(tree.entries.selection.selected().is_none());
+                continue;
+            }
+            let mut expected = roots.clone();
+            expected.sort();
+            for path in expected {
+                load_visible(&mut ui, &state);
+                let View::Tree(tree) = &ui.view else {
+                    unreachable!()
+                };
+                assert_eq!(
+                    tree.entries.selected(),
+                    Some(&DirectoryRow::Directory { path: path.clone() })
+                );
+                ui.key_action(KeyEvent::from(KeyCode::Enter), &state);
+                let request = ui.query_request(&state).unwrap();
+                assert_eq!(request.kind, QueryKind::Directory(path));
+                ui.key_action(KeyEvent::from(KeyCode::Left), &state);
+                load_visible(&mut ui, &state);
+                ui.key_action(KeyEvent::from(KeyCode::Down), &state);
+            }
         }
     }
 

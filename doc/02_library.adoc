@@ -188,6 +188,11 @@ Failed GUI loads offer a retry action; press `R` in the TUI to retry.
 Pending keyboard navigation is cancelled when library data, filters, or batch
 size change; an old row index is never applied to the refreshed collection.
 
+The TUI Library tree starts at the configured library roots only, including empty
+roots. With no configured roots it is empty; it does not add a filesystem-root
+entry inferred from stored tracks. Enter opens a directory; Left or Backspace
+returns to its parent.
+
 In the GUI, unmodified `PageUp` / `PageDown` scroll one viewport height without
 changing selected rows. They target the last-clicked visible scroll viewport;
 after clicking elsewhere, the viewport under the pointer is used instead.
