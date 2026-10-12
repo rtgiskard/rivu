@@ -176,6 +176,20 @@ pub struct QueueEntry {
     pub track_id: i64,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct QueueRow {
+    pub id: u64,
+    pub track_id: i64,
+    pub position: usize,
+    pub track: LibraryRow,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueCursor {
+    pub position: usize,
+    pub id: u64,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlaybackStatus {
@@ -228,13 +242,12 @@ pub struct LibrarySnapshot {
     pub history: Arc<Vec<HistoryEntry>>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueueState {
-    pub entries: Arc<Vec<QueueEntry>>,
-    /// ID-sorted minimal metadata for distinct queued tracks.
-    #[serde(default)]
-    pub tracks: Arc<Vec<LibraryRow>>,
+    pub total: usize,
     pub current_id: Option<u64>,
+    pub current_position: Option<usize>,
+    pub revision: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -327,16 +340,6 @@ impl Default for LibrarySnapshot {
             structure_revision: 0,
             playlist_revision: 0,
             history: Arc::new(Vec::new()),
-        }
-    }
-}
-
-impl Default for QueueState {
-    fn default() -> Self {
-        Self {
-            entries: Arc::new(Vec::new()),
-            tracks: Arc::new(Vec::new()),
-            current_id: None,
         }
     }
 }
@@ -466,6 +469,18 @@ pub enum Query {
     ScanTask {
         id: u64,
     },
+    QueuePage {
+        offset: usize,
+        limit: usize,
+    },
+    QueueBatch {
+        after: Option<QueueCursor>,
+        limit: usize,
+        expected: Option<crate::response::QueryRevisions>,
+    },
+    QueueEntries {
+        queue_ids: Vec<u64>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -544,6 +559,9 @@ pub enum Command {
     CreatePlaylistWithTracks {
         name: String,
         track_ids: Vec<i64>,
+    },
+    CreatePlaylistFromQueue {
+        name: String,
     },
     RenamePlaylist {
         playlist_id: i64,

@@ -57,7 +57,6 @@ enum Field {
     ScanMaxDepth,
     Volume,
     PlayCountThreshold,
-    QueueLimit,
     LogRetentionWeeks,
     MediaReadBuffer,
     Font,
@@ -102,7 +101,6 @@ impl Field {
             Self::ScanMaxDepth => "Maximum scan depth",
             Self::Volume => "Volume (%)",
             Self::PlayCountThreshold => "Play count threshold (%)",
-            Self::QueueLimit => "Queue capacity (tracks)",
             Self::LogRetentionWeeks => "Log retention (weeks)",
             Self::MediaReadBuffer => "Media read buffer (MiB)",
             Self::Font => "Font family",
@@ -147,7 +145,6 @@ impl Field {
             Self::ScanMaxDepth => "Minimum 1; starting folder = depth 0.",
             Self::Volume => "0–100.",
             Self::PlayCountThreshold => "0 ≤ value < 100; based on time heard.",
-            Self::QueueLimit => "1–4096.",
             Self::LogRetentionWeeks => "1–520.",
             Self::MediaReadBuffer => "1, 2, 4, 8, or 16. Applies when media is next opened.",
             Self::Font => "",
@@ -513,7 +510,6 @@ impl Settings {
             Field::ScanMaxDepth,
             Field::Volume,
             Field::PlayCountThreshold,
-            Field::QueueLimit,
             Field::LogRetentionWeeks,
             Field::MediaReadBuffer,
             Field::Font,
@@ -741,7 +737,6 @@ impl Settings {
             self.draft.play_count_threshold_percent.to_string(),
             cx,
         );
-        self.set_value(Field::QueueLimit, self.draft.queue_limit.to_string(), cx);
         self.set_value(
             Field::LogRetentionWeeks,
             self.draft.log_retention_weeks.to_string(),
@@ -926,7 +921,6 @@ impl Settings {
         config.scan_max_depth = self.number(Field::ScanMaxDepth, cx)?;
         config.volume = self.number::<f32>(Field::Volume, cx)? / 100.;
         config.play_count_threshold_percent = self.number(Field::PlayCountThreshold, cx)?;
-        config.queue_limit = self.number(Field::QueueLimit, cx)?;
         config.log_retention_weeks = self.number(Field::LogRetentionWeeks, cx)?;
         config.media_read_buffer_mb = self.number(Field::MediaReadBuffer, cx)?;
         config.ui_font = self.value(Field::Font, cx).trim().to_owned();
@@ -1464,8 +1458,7 @@ impl Settings {
             "Playback",
             column()
                 .gap_2()
-                .child(self.pair(Field::Volume, Field::PlayCountThreshold))
-                .child(self.single(Field::QueueLimit)),
+                .child(self.pair(Field::Volume, Field::PlayCountThreshold)),
         );
         let audio = settings_group(
             "Audio",

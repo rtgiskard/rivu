@@ -1,3 +1,4 @@
+use super::positions::{PositionScope, close_gaps};
 use super::rows::{
     LIBRARY_ROW_COLUMNS, LIBRARY_ROW_COLUMNS_QUALIFIED, TRACK_COLUMNS, library_row_at,
     library_row_from_row, track_from_row,
@@ -5,8 +6,7 @@ use super::rows::{
 use super::{Store, batch_limit, changed};
 use crate::model::{Batch, HistoryEntry, Page, Track};
 use anyhow::{Context, Result, bail};
-use rusqlite::{OptionalExtension, params};
-use std::collections::HashSet;
+use rusqlite::{OptionalExtension, Transaction, params};
 use std::path::{Path, PathBuf};
 
 const TRACK_SEARCH_FILTER: &str = "WHERE (?1 IS NULL OR instr(lower(COALESCE(tracks.title_override,tracks.raw_title) || ' ' || COALESCE(tracks.artist_override,tracks.raw_artist) || ' ' || tracks.path),?1)>0) AND (?2 IS NULL OR tracks.favorite=?2) AND (?3 IS NULL OR tracks.missing=?3)";
@@ -39,30 +39,10 @@ impl Store {
             self.track_cache.borrow_mut().entries.remove(id);
         }
         let tx = self.conn.unchecked_transaction()?;
-        let mut exists = tx.prepare("SELECT EXISTS(SELECT 1 FROM tracks WHERE id=?1)")?;
-        let mut update =
-            tx.prepare("UPDATE tracks SET favorite=?1 WHERE id=?2 AND favorite<>?1")?;
-        for &id in ids {
-            if !exists.query_row([id], |row| row.get::<_, bool>(0))? {
-                bail!("Track {id} does not exist");
-            }
-            update.execute(params![favorite, id])?;
-        }
-        drop(update);
-        drop(exists);
+        self.validate_tracks(ids)?;
+        tx.execute("UPDATE tracks SET favorite=?1 WHERE favorite<>?1 AND id IN (SELECT value FROM json_each(?2))", params![favorite, serde_json::to_string(ids)?])?;
         tx.commit()?;
         Ok(())
-    }
-
-    /// Loads only display metadata for queued IDs; unlike `track`, this never touches the full-track LRU.
-    pub fn queue_rows(&self, ids: &[i64]) -> Result<Vec<crate::model::LibraryRow>> {
-        let ids = serde_json::to_string(ids)?;
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT {LIBRARY_ROW_COLUMNS} FROM tracks WHERE id IN (SELECT value FROM json_each(?1)) ORDER BY id"
-        ))?;
-        Ok(stmt
-            .query_map([ids], library_row_from_row)?
-            .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn library_view_page(
@@ -268,14 +248,7 @@ impl Store {
         directories: &[PathBuf],
         track_ids: &[i64],
     ) -> Result<(String, String)> {
-        let mut exists = self
-            .conn
-            .prepare("SELECT EXISTS(SELECT 1 FROM tracks WHERE id=?1)")?;
-        for &id in track_ids {
-            if !exists.query_row([id], |row| row.get::<_, bool>(0))? {
-                bail!("Track {id} does not exist");
-            }
-        }
+        self.validate_tracks(track_ids)?;
         let prefixes = directories
             .iter()
             .map(|path| directory_prefix(path))
@@ -285,31 +258,15 @@ impl Store {
             serde_json::to_string(track_ids)?,
         ))
     }
-
-    pub fn source_track_ids(
-        &self,
-        directories: &[PathBuf],
-        track_ids: &[i64],
-        limit: usize,
-    ) -> Result<Vec<i64>> {
-        let (directories, ids) = self.source_parameters(directories, track_ids)?;
-        let count = self.conn.query_row(
-            &format!("SELECT COUNT(*) FROM tracks WHERE {SOURCE_FILTER}"),
-            params![directories, ids],
-            |row| row.get::<_, i64>(0),
-        )? as usize;
-        let limit = limit.min(4096);
-        if count > limit {
-            bail!(
-                "Selection contains {count} tracks, exceeding the remaining queue capacity of {limit}"
-            );
+    pub(crate) fn validate_tracks(&self, ids: &[i64]) -> Result<()> {
+        let missing: Option<i64> = self.conn.query_row(
+            "SELECT value FROM json_each(?1) WHERE value NOT IN (SELECT id FROM tracks) LIMIT 1",
+            [serde_json::to_string(ids)?], |row| row.get(0),
+        ).optional()?;
+        if let Some(id) = missing {
+            bail!("Track {id} does not exist");
         }
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT id FROM tracks WHERE {SOURCE_FILTER} ORDER BY id LIMIT ?3"
-        ))?;
-        Ok(stmt
-            .query_map(params![directories, ids, limit as i64], |row| row.get(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?)
+        Ok(())
     }
 
     pub fn track_id_for_source(&self, path: &Path, cue_number: Option<u32>) -> Result<Option<i64>> {
@@ -450,32 +407,28 @@ impl Store {
             self.track_cache.borrow_mut().entries.remove(id);
         }
         let tx = self.conn.unchecked_transaction()?;
-        let mut affected = HashSet::new();
-        let mut exists = tx.prepare("SELECT EXISTS(SELECT 1 FROM tracks WHERE id=?1)")?;
-        for &id in ids {
-            if !exists.query_row([id], |row| row.get::<_, bool>(0))? {
-                bail!("Track {id} does not exist");
-            }
-        }
-        let mut playlists =
-            tx.prepare("SELECT DISTINCT playlist_id FROM playlist_entries WHERE track_id=?1")?;
-        let mut delete_entries = tx.prepare("DELETE FROM playlist_entries WHERE track_id=?1")?;
-        let mut delete_tracks = tx.prepare("DELETE FROM tracks WHERE id=?1")?;
-        for &id in ids {
-            affected.extend(
-                playlists
-                    .query_map([id], |row| row.get::<_, i64>(0))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?,
-            );
-            delete_entries.execute([id])?;
-            delete_tracks.execute([id])?;
-        }
-        drop(delete_tracks);
-        drop(delete_entries);
-        drop(playlists);
-        drop(exists);
-        for playlist in affected {
-            tx.execute("WITH ordered AS (SELECT id, ROW_NUMBER() OVER (ORDER BY position,id)-1 AS new_position FROM playlist_entries WHERE playlist_id=?1) UPDATE playlist_entries SET position=(SELECT new_position FROM ordered WHERE ordered.id=playlist_entries.id) WHERE playlist_id=?1", [playlist])?;
+        self.validate_tracks(ids)?;
+        let ids = serde_json::to_string(ids)?;
+        let queue_positions = tx
+            .prepare("SELECT position FROM queue_entries WHERE track_id IN (SELECT value FROM json_each(?1)) ORDER BY position")?
+            .query_map([&ids], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<i64>>>()?;
+        let playlist_positions = removed_playlist_positions(
+            &tx,
+            "SELECT playlist_id,position FROM playlist_entries WHERE track_id IN (SELECT value FROM json_each(?1)) ORDER BY playlist_id,position",
+            [&ids],
+        )?;
+        tx.execute(
+            "DELETE FROM playlist_entries WHERE track_id IN (SELECT value FROM json_each(?1))",
+            [&ids],
+        )?;
+        tx.execute(
+            "DELETE FROM tracks WHERE id IN (SELECT value FROM json_each(?1))",
+            [&ids],
+        )?;
+        close_gaps(&tx, &queue_positions, PositionScope::Queue)?;
+        for (playlist_id, positions) in playlist_positions {
+            close_gaps(&tx, &positions, PositionScope::Playlist(playlist_id))?;
         }
         tx.commit()?;
         Ok(())
@@ -484,16 +437,23 @@ impl Store {
     pub fn remove_missing_tracks(&self) -> Result<()> {
         self.track_cache.borrow_mut().entries.clear();
         let tx = self.conn.unchecked_transaction()?;
-        // SQLite owns the affected playlist set; Rust never collects missing IDs.
-        tx.execute_batch(
-            "CREATE TEMP TABLE removed_playlists(playlist_id INTEGER PRIMARY KEY);
-             INSERT INTO removed_playlists SELECT DISTINCT playlist_id FROM playlist_entries WHERE track_id IN (SELECT id FROM tracks WHERE missing=1);
-             DELETE FROM playlist_entries WHERE track_id IN (SELECT id FROM tracks WHERE missing=1);
-             DELETE FROM tracks WHERE missing=1;
-             WITH ordered AS (SELECT id,ROW_NUMBER() OVER (PARTITION BY playlist_id ORDER BY position,id)-1 AS new_position FROM playlist_entries WHERE playlist_id IN (SELECT playlist_id FROM removed_playlists))
-             UPDATE playlist_entries SET position=(SELECT new_position FROM ordered WHERE ordered.id=playlist_entries.id) WHERE playlist_id IN (SELECT playlist_id FROM removed_playlists);
-             DROP TABLE removed_playlists;"
+        let queue_positions = tx
+            .prepare("SELECT position FROM queue_entries WHERE track_id IN (SELECT id FROM tracks WHERE missing=1) ORDER BY position")?
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<i64>>>()?;
+        let playlist_positions = removed_playlist_positions(
+            &tx,
+            "SELECT playlist_id,position FROM playlist_entries WHERE track_id IN (SELECT id FROM tracks WHERE missing=1) ORDER BY playlist_id,position",
+            [],
         )?;
+        tx.execute_batch(
+            "DELETE FROM playlist_entries WHERE track_id IN (SELECT id FROM tracks WHERE missing=1);
+             DELETE FROM tracks WHERE missing=1;",
+        )?;
+        close_gaps(&tx, &queue_positions, PositionScope::Queue)?;
+        for (playlist_id, positions) in playlist_positions {
+            close_gaps(&tx, &positions, PositionScope::Playlist(playlist_id))?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -518,5 +478,191 @@ impl Store {
             "track",
             track,
         )
+    }
+}
+
+fn removed_playlist_positions(
+    tx: &Transaction<'_>,
+    sql: &str,
+    params: impl rusqlite::Params,
+) -> Result<Vec<(i64, Vec<i64>)>> {
+    let mut stmt = tx.prepare(sql)?;
+    let rows = stmt.query_map(params, |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    let mut removed: Vec<(i64, Vec<i64>)> = Vec::new();
+    for row in rows {
+        let (playlist_id, position) = row?;
+        if let Some((id, positions)) = removed.last_mut()
+            && *id == playlist_id
+        {
+            positions.push(position);
+        } else {
+            removed.push((playlist_id, vec![position]));
+        }
+    }
+    Ok(removed)
+}
+
+#[cfg(test)]
+mod deletion_tests {
+    use super::*;
+
+    fn fixture() -> Result<Store> {
+        let store = Store::open(Path::new(":memory:"))?;
+        store.conn.execute_batch(
+            "INSERT INTO tracks(id,path) VALUES
+                (1,'one'),(2,'two'),(3,'three'),(4,'four'),
+                (5,'five'),(6,'six'),(7,'seven'),(8,'unreferenced');
+             INSERT INTO queue_entries(id,track_id,position) VALUES
+                (100,1,0),(101,2,1),(102,2,2),(103,3,3),
+                (104,4,4),(105,5,5),(106,6,6),(107,7,7);
+             UPDATE queue_meta SET current_id=106 WHERE singleton=1;
+             INSERT INTO playlists(id,name) VALUES (10,'first'),(20,'second'),(30,'untouched');
+             INSERT INTO playlist_entries(id,playlist_id,track_id,position) VALUES
+                (200,10,1,0),(201,10,2,1),(202,10,3,2),(203,10,4,3),
+                (204,10,5,4),(205,10,6,5),(206,10,7,6),
+                (300,20,5,0),(301,20,7,1),(302,20,2,2),(303,20,6,3),
+                (304,20,3,4),(305,20,1,5),(306,20,4,6),
+                (400,30,4,0),(401,30,6,1),(402,30,7,2);
+             CREATE TABLE position_updates(scope TEXT,entry_id INTEGER);
+             CREATE TRIGGER observe_queue_position AFTER UPDATE OF position ON queue_entries BEGIN
+                INSERT INTO position_updates VALUES('queue',new.id);
+             END;
+             CREATE TRIGGER observe_playlist_position AFTER UPDATE OF position ON playlist_entries BEGIN
+                INSERT INTO position_updates VALUES('playlist',new.id);
+             END;",
+        )?;
+        Ok(store)
+    }
+
+    fn queue_rows(store: &Store) -> Result<Vec<(i64, i64, i64)>> {
+        Ok(store
+            .conn
+            .prepare("SELECT id,track_id,position FROM queue_entries ORDER BY position")?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    fn playlist_rows(store: &Store) -> Result<Vec<(i64, i64, i64, i64)>> {
+        Ok(store.conn.prepare("SELECT id,playlist_id,track_id,position FROM playlist_entries ORDER BY playlist_id,position")?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    fn current(store: &Store) -> Result<Option<i64>> {
+        Ok(store.conn.query_row(
+            "SELECT current_id FROM queue_meta WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
+    fn position_updates(store: &Store) -> Result<Vec<(String, i64)>> {
+        Ok(store
+            .conn
+            .prepare("SELECT scope,entry_id FROM position_updates ORDER BY scope,entry_id")?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    fn assert_compacted(store: &Store) -> Result<()> {
+        assert_eq!(
+            queue_rows(store)?,
+            vec![(100, 1, 0), (104, 4, 1), (106, 6, 2), (107, 7, 3)]
+        );
+        assert_eq!(
+            playlist_rows(store)?,
+            vec![
+                (200, 10, 1, 0),
+                (203, 10, 4, 1),
+                (205, 10, 6, 2),
+                (206, 10, 7, 3),
+                (301, 20, 7, 0),
+                (303, 20, 6, 1),
+                (305, 20, 1, 2),
+                (306, 20, 4, 3),
+                (400, 30, 4, 0),
+                (401, 30, 6, 1),
+                (402, 30, 7, 2),
+            ]
+        );
+        let expected = [
+            ("playlist", 203),
+            ("playlist", 205),
+            ("playlist", 206),
+            ("playlist", 301),
+            ("playlist", 303),
+            ("playlist", 305),
+            ("playlist", 306),
+            ("queue", 104),
+            ("queue", 106),
+            ("queue", 107),
+        ]
+        .map(|(scope, id)| (scope.to_owned(), id))
+        .to_vec();
+        assert_eq!(position_updates(store)?, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn remove_tracks_compacts_disjoint_and_consecutive_gaps_with_duplicate_inputs() -> Result<()> {
+        let store = fixture()?;
+        store.remove_tracks(&[5, 2, 3, 2, 5])?;
+        assert_compacted(&store)?;
+        assert_eq!(current(&store)?, Some(106));
+        Ok(())
+    }
+
+    #[test]
+    fn missing_cleanup_compacts_all_references_and_clears_removed_current() -> Result<()> {
+        let store = fixture()?;
+        store.conn.execute_batch(
+            "UPDATE tracks SET missing=1 WHERE id IN (2,3,5);
+             UPDATE queue_meta SET current_id=102 WHERE singleton=1;",
+        )?;
+        store.remove_missing_tracks()?;
+        assert_compacted(&store)?;
+        assert_eq!(current(&store)?, None);
+        let remaining_missing: i64 =
+            store
+                .conn
+                .query_row("SELECT COUNT(*) FROM tracks WHERE missing=1", [], |row| {
+                    row.get(0)
+                })?;
+        assert_eq!(remaining_missing, 0);
+        store.remove_missing_tracks()?;
+        assert_compacted(&store)?;
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_ids_roll_back_and_unreferenced_deletions_do_not_update_positions() -> Result<()> {
+        let store = fixture()?;
+        let queue = queue_rows(&store)?;
+        let playlists = playlist_rows(&store)?;
+        let revision: i64 = store.conn.query_row(
+            "SELECT revision FROM queue_meta WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(store.remove_tracks(&[2, 999, 2]).is_err());
+        store.remove_tracks(&[])?;
+        store.remove_tracks(&[8, 8])?;
+        assert_eq!(queue_rows(&store)?, queue);
+        assert_eq!(playlist_rows(&store)?, playlists);
+        assert_eq!(current(&store)?, Some(106));
+        assert!(position_updates(&store)?.is_empty());
+        let after_revision: i64 = store.conn.query_row(
+            "SELECT revision FROM queue_meta WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(after_revision, revision);
+        let track_count: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get(0))?;
+        assert_eq!(track_count, 7);
+        Ok(())
     }
 }

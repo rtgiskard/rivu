@@ -1,9 +1,9 @@
+use super::positions::{PositionScope, close_gaps};
 use super::tracks::SOURCE_FILTER;
 use super::{Store, batch_limit, changed};
 use crate::model::{Batch, Page, PlaylistEntryCursor, PlaylistEntryRow, PlaylistSummary};
 use anyhow::{Context, Result, anyhow, bail};
 use rusqlite::{OptionalExtension, Transaction, params};
-use std::collections::HashSet;
 use std::path::PathBuf;
 
 impl Store {
@@ -231,6 +231,15 @@ impl Store {
         tx.commit()?;
         Ok(id)
     }
+    pub fn create_playlist_from_queue(&self, name: &str) -> Result<i64> {
+        valid_name(name)?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("INSERT INTO playlists(name) VALUES(?1)", [name])?;
+        let id = tx.last_insert_rowid();
+        tx.execute("WITH first AS (SELECT track_id,MIN(position) AS position FROM queue_entries GROUP BY track_id) INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT ?1,track_id,row_number() OVER (ORDER BY position,track_id)-1 FROM first ORDER BY position,track_id", [id])?;
+        tx.commit()?;
+        Ok(id)
+    }
     pub fn rename_playlist(&self, id: i64, name: &str) -> Result<()> {
         valid_name(name)?;
         changed(
@@ -266,10 +275,7 @@ impl Store {
             .optional()?
             .ok_or_else(|| anyhow!("playlist entry {id} does not exist"))?;
         tx.execute("DELETE FROM playlist_entries WHERE id=?", [id])?;
-        tx.execute(
-            "UPDATE playlist_entries SET position=position-1 WHERE playlist_id=? AND position>?",
-            params![pid, p],
-        )?;
+        close_gaps(&tx, &[p], PositionScope::Playlist(pid))?;
         tx.commit()?;
         Ok(())
     }
@@ -307,28 +313,18 @@ impl Store {
 }
 
 fn append_tracks(tx: &Transaction<'_>, id: i64, tracks: &[i64]) -> Result<()> {
-    let mut position: i64 = tx.query_row(
-        "SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=?",
-        [id],
-        |r| r.get(0),
-    )?;
-    let mut seen = HashSet::with_capacity(tracks.len());
-    let mut exists = tx.prepare("SELECT EXISTS(SELECT 1 FROM tracks WHERE id=?1)")?;
-    let mut insert = tx.prepare(
-        "INSERT INTO playlist_entries(playlist_id,track_id,position)
-         SELECT ?1,?2,?3 WHERE NOT EXISTS(
-             SELECT 1 FROM playlist_entries WHERE playlist_id=?1 AND track_id=?2
-         )",
-    )?;
-    for &track_id in tracks {
-        if !seen.insert(track_id) {
-            continue;
-        }
-        if !exists.query_row([track_id], |row| row.get::<_, bool>(0))? {
-            bail!("Track {track_id} does not exist");
-        }
-        position += insert.execute(params![id, track_id, position])? as i64;
+    let tracks = serde_json::to_string(tracks)?;
+    let missing: Option<i64> = tx
+        .query_row(
+            "SELECT value FROM json_each(?1) WHERE value NOT IN (SELECT id FROM tracks) LIMIT 1",
+            [&tracks],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(track) = missing {
+        bail!("Track {track} does not exist");
     }
+    tx.execute("WITH selected AS (SELECT value AS track_id,MIN(CAST(key AS INTEGER)) AS ordinal FROM json_each(?2) GROUP BY value), additions AS (SELECT track_id,ordinal FROM selected WHERE NOT EXISTS(SELECT 1 FROM playlist_entries WHERE playlist_id=?1 AND playlist_entries.track_id=selected.track_id)) INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT ?1,track_id,(SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=?1)+row_number() OVER (ORDER BY ordinal)-1 FROM additions ORDER BY ordinal", params![id, tracks])?;
     Ok(())
 }
 
@@ -348,4 +344,52 @@ fn valid_name(s: &str) -> Result<()> {
         bail!("invalid name")
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod deletion_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn remove_playlist_entry_preserves_identity_and_other_references() -> Result<()> {
+        let store = Store::open(Path::new(":memory:"))?;
+        store.conn.execute_batch(
+            "INSERT INTO tracks(id,path) VALUES (1,'one'),(2,'two'),(3,'three');
+             INSERT INTO playlists(id,name) VALUES (10,'first'),(20,'second');
+             INSERT INTO playlist_entries(id,playlist_id,track_id,position) VALUES
+                (100,10,1,0),(101,10,2,1),(102,10,3,2),
+                (200,20,1,0),(201,20,2,1),(202,20,3,2);
+             INSERT INTO queue_entries(id,track_id,position) VALUES (300,2,0);
+             UPDATE queue_meta SET current_id=300 WHERE singleton=1;",
+        )?;
+        store.remove_playlist_entry(101)?;
+        assert!(store.remove_playlist_entry(999).is_err());
+        let entries = store.conn.prepare(
+            "SELECT id,playlist_id,track_id,position FROM playlist_entries ORDER BY playlist_id,position",
+        )?.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?,row.get::<_, i64>(1)?,row.get::<_, i64>(2)?,row.get::<_, i64>(3)?))
+        })?.collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(
+            entries,
+            vec![
+                (100, 10, 1, 0),
+                (102, 10, 3, 1),
+                (200, 20, 1, 0),
+                (201, 20, 2, 1),
+                (202, 20, 3, 2),
+            ]
+        );
+        let current: Option<i64> = store.conn.query_row(
+            "SELECT current_id FROM queue_meta WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(current, Some(300));
+        let tracks: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get(0))?;
+        assert_eq!(tracks, 3);
+        Ok(())
+    }
 }

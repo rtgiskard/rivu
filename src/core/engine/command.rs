@@ -11,8 +11,8 @@ impl Core {
         ) {
             return self.apply_command(command);
         }
-        // Persist the resulting queue even when a later operation fails (for
-        // example, loading an unavailable track after replacing the queue).
+        // Queue edits commit within their SQL operation; persist the current
+        // occurrence even if a later audio load fails after replacing the queue.
         let result = self.apply_command(command);
         let saved = self.save(false);
         result.and(saved)
@@ -24,45 +24,26 @@ impl Core {
             Command::CancelScan { id } => self.cancel_scan(id)?,
             Command::Play { track_id } => {
                 self.track(track_id)?;
-                let existing = self
-                    .state
-                    .queue
-                    .entries
-                    .iter()
-                    .find(|q| q.track_id == track_id)
-                    .map(|q| q.id);
+                let existing = self.store.queued_track(track_id)?;
                 let id = if let Some(id) = existing {
                     id
                 } else {
                     self.enqueue(&[track_id])?;
-                    self.state.queue.entries.last().unwrap().id
+                    *self.queue_ids.last().unwrap()
                 };
                 self.start(id, true)?;
             }
             Command::PlayQueue { queue_id } => self.start(queue_id, true)?,
             Command::PlayPlaylist { playlist_id } => {
                 let total = self.store.playlist_entries_page(playlist_id, 0, 0)?.total;
-                ensure!(
-                    total <= self.state.system.config.queue_limit as usize,
-                    "Playlist contains {total} entries, exceeding the queue limit of {}",
-                    self.state.system.config.queue_limit
-                );
-                let ids = self.store.playlist_track_ids(
-                    playlist_id,
-                    self.state.system.config.queue_limit as usize,
-                )?;
-                if ids.is_empty() {
-                    bail!("Playlist is empty");
-                }
+                ensure!(total > 0, "Playlist is empty");
                 self.stop()?;
-                self.state.queue.entries = Arc::new(Vec::new());
-                self.state.queue.tracks = Arc::new(Vec::new());
-                self.state.queue.current_id = None;
+                self.store.replace_queue_from_playlist(playlist_id)?;
                 self.state.current_track = None;
                 self.played.clear();
                 self.played_cursor = 0;
-                self.enqueue(&ids)?;
-                self.start(self.state.queue.entries[0].id, true)?;
+                self.reload_queue()?;
+                self.start(self.queue_ids[0], true)?;
             }
             Command::Resume => {
                 if self.state.playback.status == PlaybackStatus::Stopped {
@@ -70,7 +51,7 @@ impl Core {
                         .state
                         .queue
                         .current_id
-                        .or_else(|| self.state.queue.entries.first().map(|q| q.id))
+                        .or_else(|| self.queue_ids.first().copied())
                         .context("Queue is empty")?;
                     self.start(id, true)?;
                 } else {
@@ -116,23 +97,14 @@ impl Core {
                 directories,
                 track_ids,
             } => {
-                let remaining = self
-                    .state
-                    .system
-                    .config
-                    .queue_limit
-                    .saturating_sub(self.state.queue.entries.len() as u32)
-                    as usize;
-                let ids = self
-                    .store
-                    .source_track_ids(&directories, &track_ids, remaining)?;
-                self.enqueue(&ids)?;
+                self.store.enqueue_sources(&directories, &track_ids)?;
+                self.append_queue_ids()?;
             }
             Command::RemoveQueue { queue_id } => self.remove_queue_entries(&[queue_id])?,
             Command::RemoveQueueEntries { queue_ids } => self.remove_queue_entries(&queue_ids)?,
             Command::MoveQueue { queue_id, index } => {
                 ensure!(
-                    index < self.state.queue.entries.len(),
+                    index < self.queue_ids.len(),
                     "Queue target position out of range"
                 );
                 self.move_queue_entries(&[queue_id], index)?;
@@ -142,19 +114,16 @@ impl Core {
             }
             Command::ClearQueue => {
                 self.stop()?;
-                self.state.queue.entries = Arc::new(Vec::new());
-                self.state.queue.current_id = None;
-                self.state.queue.tracks = Arc::new(Vec::new());
+                self.store.clear_queue()?;
+                self.reload_queue()?;
                 self.state.current_track = None;
                 self.played.clear();
                 self.played_cursor = 0;
-                self.shuffle_bag.clear();
             }
-            Command::RandomizeQueue => self.randomize_queue(&mut rand::rng()),
-            Command::DeduplicateQueue => self.deduplicate_queue(),
+            Command::RandomizeQueue => self.randomize_queue(&mut rand::rng())?,
+            Command::DeduplicateQueue => self.deduplicate_queue()?,
             Command::Shuffle { enabled } => {
                 self.state.playback.shuffle = enabled;
-                self.shuffle_bag.clear();
                 self.played.clear();
                 self.played_cursor = 0;
                 if let Some(id) = self.state.queue.current_id {
@@ -166,6 +135,10 @@ impl Core {
             Command::CreatePlaylist { name } => self.create_playlist(name)?,
             Command::CreatePlaylistWithTracks { name, track_ids } => {
                 self.create_playlist_with_tracks(name, track_ids)?;
+            }
+            Command::CreatePlaylistFromQueue { name } => {
+                self.store.create_playlist_from_queue(&name)?;
+                self.reload_playlists()?;
             }
             Command::RenamePlaylist { playlist_id, name } => {
                 self.rename_playlist(playlist_id, name)?;
@@ -226,9 +199,7 @@ impl Core {
             Command::RemoveTracks { mut track_ids } => {
                 track_ids.sort_unstable();
                 track_ids.dedup();
-                for id in &track_ids {
-                    self.track(*id)?;
-                }
+                self.store.validate_tracks(&track_ids)?;
                 if self
                     .state
                     .current_track()
@@ -239,10 +210,8 @@ impl Core {
                     self.state.current_track = None;
                 }
                 self.store.remove_tracks(&track_ids)?;
-                Arc::make_mut(&mut self.state.queue.entries)
-                    .retain(|q| !track_ids.contains(&q.track_id));
+                self.reload_queue()?;
                 self.refresh_queue_tracks()?;
-                self.prune_queue_history();
                 self.reload_catalog(true)?;
             }
             Command::SetFavorite {
@@ -254,15 +223,6 @@ impl Core {
                 self.refresh_affected_queue_tracks(&track_ids)?;
             }
             Command::RemoveMissingTracks => {
-                let mut missing_ids = self
-                    .state
-                    .queue
-                    .tracks
-                    .iter()
-                    .filter(|track| track.missing)
-                    .map(|track| track.id)
-                    .collect::<Vec<_>>();
-                missing_ids.sort_unstable();
                 if self
                     .state
                     .current_track()
@@ -273,10 +233,8 @@ impl Core {
                     self.state.current_track = None;
                 }
                 self.store.remove_missing_tracks()?;
-                Arc::make_mut(&mut self.state.queue.entries)
-                    .retain(|entry| missing_ids.binary_search(&entry.track_id).is_err());
+                self.reload_queue()?;
                 self.refresh_queue_tracks()?;
-                self.prune_queue_history();
                 self.reload_catalog(true)?;
             }
             Command::Device { name } => {
@@ -313,11 +271,6 @@ impl Core {
                     .iter()
                     .map(|root| library::logical_path(root))
                     .collect::<Result<_>>()?;
-                ensure!(
-                    config.queue_limit as usize >= self.state.queue.entries.len(),
-                    "queue_limit cannot be lower than current queue length ({})",
-                    self.state.queue.entries.len()
-                );
                 if let Some(device) = &config.output_device
                     && !self.state.system.devices.contains(device)
                 {
@@ -343,7 +296,6 @@ impl Core {
                 self.state.system.selected_device = config.output_device.clone();
                 self.state.playback.volume = config.volume;
                 if self.state.playback.shuffle != config.shuffle {
-                    self.shuffle_bag.clear();
                     self.played.clear();
                     self.played_cursor = 0;
                 }
@@ -373,8 +325,7 @@ impl Core {
                 }
                 self.save(false)?;
                 self.state.system.database_optimization = Some(self.store.optimize()?);
-                // The saved queue baseline makes command finalization a no-op
-                // for SQLite after maintenance has truncated the WAL.
+                // Current state is already persisted; finalization does not rewrite queue rows.
                 return Ok(());
             }
             Command::Shutdown => {

@@ -42,7 +42,6 @@ file_group!(Playback, PlaybackView {
     shuffle => shuffle: bool,
     repeat => repeat: RepeatMode,
     play_count_threshold_percent => play_count_threshold_percent: f64,
-    queue_limit => queue_limit: u32,
     media_read_buffer_mb => media_read_buffer_mb: u32,
     ffmpeg_enabled => ffmpeg_enabled: bool,
     pipewire_auto_mix => pipewire_auto_mix: bool,

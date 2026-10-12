@@ -1,35 +1,46 @@
 use super::*;
 use anyhow::ensure;
+use rand::RngExt;
+
+const MAX_NAVIGATION_HISTORY: usize = 4096;
 
 impl Core {
+    pub(in crate::core) fn random_queue_id(&self, rng: &mut impl rand::Rng) -> Option<u64> {
+        if self.queue_ids.is_empty() {
+            return None;
+        }
+        Some(self.queue_ids[rng.random_range(0..self.queue_ids.len())])
+    }
+
+    pub(in crate::core) fn record_queue_history(&mut self, id: u64) {
+        self.played.truncate(self.played_cursor);
+        self.played.push(id);
+        if self.played.len() > MAX_NAVIGATION_HISTORY {
+            self.played
+                .drain(..self.played.len() - MAX_NAVIGATION_HISTORY);
+        }
+        self.played_cursor = self.played.len();
+    }
+
+    pub(in crate::core) fn reload_queue(&mut self) -> Result<()> {
+        self.queue_ids = self.store.queue_ids()?;
+        self.state.queue = self.store.queue_projection(self.queue_ids.len())?;
+        self.prune_queue_history();
+        Ok(())
+    }
+
+    pub(in crate::core) fn append_queue_ids(&mut self) -> Result<()> {
+        self.store.extend_queue_ids(&mut self.queue_ids)?;
+        self.state.queue = self.store.queue_projection(self.queue_ids.len())?;
+        Ok(())
+    }
+
     pub(in crate::core) fn remove_queue_entries(&mut self, queue_ids: &[u64]) -> Result<()> {
         if queue_ids.is_empty() {
             return Ok(());
         }
         let ids = queue_ids.iter().copied().collect::<HashSet<_>>();
-        let found = self
-            .state
-            .queue
-            .entries
-            .iter()
-            .filter(|entry| ids.contains(&entry.id))
-            .count();
-        if found != ids.len() {
-            let missing = ids
-                .iter()
-                .find(|id| {
-                    !self
-                        .state
-                        .queue
-                        .entries
-                        .iter()
-                        .any(|entry| entry.id == **id)
-                })
-                .copied()
-                .expect("bulk queue validation mismatch");
-            bail!("Queue entry not found: {missing}");
-        }
-
+        self.validate_queue_ids(&ids)?;
         if self
             .state
             .queue
@@ -37,11 +48,20 @@ impl Core {
             .is_some_and(|id| ids.contains(&id))
         {
             self.stop()?;
-            self.state.queue.current_id = None;
         }
-        Arc::make_mut(&mut self.state.queue.entries).retain(|entry| !ids.contains(&entry.id));
-        self.refresh_queue_rows()?;
+        self.store.remove_queue_entries(queue_ids)?;
+        self.queue_ids.retain(|id| !ids.contains(id));
+        self.state.queue = self.store.queue_projection(self.queue_ids.len())?;
         self.prune_queue_history();
+        if self.state.queue.current_id.is_none() {
+            self.state.current_track = None;
+        }
+        Ok(())
+    }
+
+    fn validate_queue_ids(&self, ids: &HashSet<u64>) -> Result<()> {
+        let found = self.queue_ids.iter().filter(|id| ids.contains(id)).count();
+        ensure!(found == ids.len(), "Queue entry not found");
         Ok(())
     }
 
@@ -50,40 +70,24 @@ impl Core {
         queue_ids: &[u64],
         index: usize,
     ) -> Result<()> {
-        if queue_ids.is_empty() {
+        let ids = queue_ids.iter().copied().collect::<HashSet<_>>();
+        self.validate_queue_ids(&ids)?;
+        if ids.is_empty() {
             return Ok(());
         }
-        let ids = queue_ids.iter().copied().collect::<HashSet<_>>();
-        // Validate before make_mut so an invalid request cannot even detach
-        // the shared queue snapshot, let alone mutate playback state.
-        let found = self
-            .state
-            .queue
-            .entries
+        let mut order = Vec::with_capacity(self.queue_ids.len());
+        let insertion = index.min(self.queue_ids.len() - ids.len());
+        let mut remaining = self
+            .queue_ids
             .iter()
-            .filter(|entry| ids.contains(&entry.id))
-            .count();
-        if found != ids.len() {
-            let missing = ids
-                .iter()
-                .find(|id| {
-                    !self
-                        .state
-                        .queue
-                        .entries
-                        .iter()
-                        .any(|entry| entry.id == **id)
-                })
-                .copied()
-                .expect("bulk queue validation mismatch");
-            bail!("Queue entry not found: {missing}");
-        }
-
-        let queue = Arc::make_mut(&mut self.state.queue.entries);
-        let mut selected = Vec::with_capacity(ids.len());
-        selected.extend(queue.extract_if(.., |entry| ids.contains(&entry.id)));
-        let insertion = index.min(queue.len());
-        queue.splice(insertion..insertion, selected);
+            .copied()
+            .filter(|id| !ids.contains(id));
+        order.extend(remaining.by_ref().take(insertion));
+        order.extend(self.queue_ids.iter().copied().filter(|id| ids.contains(id)));
+        order.extend(remaining);
+        self.store.reorder_queue(&order)?;
+        self.queue_ids = order;
+        self.state.queue = self.store.queue_projection(self.queue_ids.len())?;
         Ok(())
     }
 
@@ -91,84 +95,44 @@ impl Core {
         if ids.is_empty() {
             return Ok(());
         }
-        let current_len = self.state.queue.entries.len();
-        let limit = self.state.system.config.queue_limit as usize;
-        ensure!(
-            ids.len() <= limit.saturating_sub(current_len),
-            "Queue limit of {} entries exceeded",
-            limit
-        );
-        let available = self
-            .store
-            .queue_rows(ids)?
-            .into_iter()
-            .map(|row| row.id)
-            .collect::<HashSet<_>>();
-        for id in ids {
-            ensure!(available.contains(id), "Track {id} not found");
+        self.store.enqueue_tracks(ids)?;
+        self.append_queue_ids()
+    }
+
+    pub(in crate::core) fn randomize_queue(&mut self, rng: &mut impl rand::Rng) -> Result<()> {
+        if self.queue_ids.len() < 2 {
+            return Ok(());
         }
-        let queue = Arc::make_mut(&mut self.state.queue.entries);
-        for id in ids {
-            queue.push(QueueEntry {
-                id: self.next_queue_id,
-                track_id: *id,
-            });
-            self.next_queue_id += 1;
-        }
-        self.refresh_queue_rows()?;
-        self.shuffle_bag.clear();
+        let mut order = self.queue_ids.clone();
+        order.shuffle(rng);
+        self.store.reorder_queue(&order)?;
+        self.queue_ids = order;
+        self.state.queue = self.store.queue_projection(self.queue_ids.len())?;
         Ok(())
     }
-    pub(in crate::core) fn randomize_queue(&mut self, rng: &mut impl rand::Rng) {
-        if self.state.queue.entries.len() > 1 {
-            Arc::make_mut(&mut self.state.queue.entries).shuffle(rng);
-        }
+
+    pub(in crate::core) fn deduplicate_queue(&mut self) -> Result<()> {
+        self.store.deduplicate_queue()?;
+        self.reload_queue()
     }
-    pub(in crate::core) fn deduplicate_queue(&mut self) {
-        if self.state.queue.entries.len() < 2 {
-            return;
-        }
-        let current = self.state.queue.current_id.and_then(|id| {
-            self.state
-                .queue
-                .entries
-                .iter()
-                .find(|entry| entry.id == id)
-                .map(|entry| (entry.id, entry.track_id))
-        });
-        let mut seen = std::collections::HashSet::with_capacity(self.state.queue.entries.len());
-        Arc::make_mut(&mut self.state.queue.entries).retain_mut(|entry| {
-            if !seen.insert(entry.track_id) {
-                return false;
-            }
-            // Keep the current entry's identity at this track's first position,
-            // even when playback had selected a later duplicate.
-            if let Some((id, track_id)) = current
-                && entry.track_id == track_id
-            {
-                entry.id = id;
-            }
-            true
-        });
-        self.prune_queue_history();
-    }
+
     pub(in crate::core) fn prune_queue_history(&mut self) {
-        if self.shuffle_bag.is_empty() && self.played.is_empty() {
+        if self.played.is_empty() {
             self.played_cursor = 0;
             return;
         }
-        let queue_ids = self
-            .state
-            .queue
-            .entries
+        // History is bounded independently of queue size. Avoid a second full queue index.
+        let retained = self.played.iter().copied().collect::<HashSet<_>>();
+        let present = self
+            .queue_ids
             .iter()
-            .map(|entry| entry.id)
+            .copied()
+            .filter(|id| retained.contains(id))
             .collect::<HashSet<_>>();
-        self.shuffle_bag.retain(|id| queue_ids.contains(id));
         let mut index = 0;
         let mut cursor = 0;
         self.played.retain(|id| {
-            let keep = queue_ids.contains(id);
+            let keep = present.contains(id);
             if keep && index < self.played_cursor {
                 cursor += 1;
             }

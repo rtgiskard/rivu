@@ -59,6 +59,9 @@ impl<T> PagedRows<T> {
     pub(super) fn len(&self) -> usize {
         self.total.unwrap_or(1)
     }
+    pub(super) fn set_total(&mut self, total: usize) {
+        self.total = Some(total);
+    }
     pub(super) fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -221,6 +224,32 @@ mod tests {
         assert_eq!(rows.demand(0..10, 20), Some(0));
         fill(&mut rows, 0, 10_000);
         assert_eq!(rows.position(|row| *row == 3), Some(3));
+    }
+
+    #[test]
+    fn authoritative_total_exposes_last_queue_row_before_any_page_is_loaded() {
+        let mut rows = PagedRows::default();
+        rows.set_total(200_000);
+        assert_eq!(rows.len(), 200_000);
+        assert_eq!(rows.demand(199_990..200_000, 20), Some(199_980));
+        fill(&mut rows, 199_980, 200_000);
+        assert_eq!(rows.get(199_999), Some(&199_999));
+        for offset in (0..400).step_by(20) {
+            rows.demand(offset..offset + 10, 20);
+            fill(&mut rows, offset, 200_000);
+            assert!(rows.pages.len() <= MAX_PAGES);
+        }
+        assert_eq!(rows.get(199_999), None);
+        assert_eq!(rows.demand(199_990..200_000, 20), Some(199_980));
+        fill(&mut rows, 199_980, 200_000);
+        assert_eq!(rows.get(199_999), Some(&199_999));
+        rows.invalidate();
+        rows.set_total(3);
+        assert_eq!(rows.get(199_999), None);
+        assert_eq!(rows.demand(199_990..200_000, 20), Some(0));
+        fill(&mut rows, 0, 3);
+        assert_eq!(rows.get(2), Some(&2));
+        assert_eq!(rows.get(3), None);
     }
 
     #[test]

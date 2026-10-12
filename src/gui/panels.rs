@@ -1,9 +1,9 @@
 use super::{
     ACCENT, BORDER, Dragging, Field, GuiApp, HIGHLIGHT, HistorySort, ListFocus, MUTED, Measured,
-    StatusKind, TEXT, UI_INSET, ViewRequestKind, active_control, artwork_preview, column,
+    StatusKind, TEXT, UI_INSET, ViewRequestKind, active_control, artwork_preview, button, column,
     form_field, format_time, icon_button, library::LibraryDrag, list_viewport, metadata_item,
-    panel_header, panel_surface, panel_toolbar, row, row_text, section_group, sortable_header,
-    status_message, two_column,
+    paged, panel_header, panel_surface, panel_toolbar, row, row_text, section_group,
+    sortable_header, status_message, two_column,
 };
 pub(super) use super::{TRACK_HEIGHT, caption, list_row};
 use crate::{
@@ -304,33 +304,24 @@ impl GuiApp {
         tracks.sort_unstable();
         tracks
     }
-    pub(super) fn panel_track_text(&self, track_id: i64) -> (String, String) {
-        if let Ok(index) = self
-            .state
-            .queue
-            .tracks
-            .binary_search_by_key(&track_id, |track| track.id)
-            && let Some(track) = self.state.queue.tracks.get(index)
-        {
-            let detail = format!(
-                "{}{}{} · {}{}",
-                track.artist,
-                if track.artist.is_empty() || track.album.is_empty() {
-                    ""
-                } else {
-                    " / "
-                },
-                track.album,
-                format_time(track.duration.unwrap_or(0.)),
-                if track.missing {
-                    " · File missing"
-                } else {
-                    ""
-                }
-            );
-            return (track.title.clone(), detail);
-        }
-        ("Track".into(), format!("Track #{track_id}"))
+    pub(super) fn panel_track_text(track: &crate::model::LibraryRow) -> (String, String) {
+        let detail = format!(
+            "{}{}{} · {}{}",
+            track.artist,
+            if track.artist.is_empty() || track.album.is_empty() {
+                ""
+            } else {
+                " / "
+            },
+            track.album,
+            format_time(track.duration.unwrap_or(0.)),
+            if track.missing {
+                " · File missing"
+            } else {
+                ""
+            }
+        );
+        (track.title.clone(), detail)
     }
 
     pub(super) fn panel_error(&mut self, message: &'static str, cx: &mut Context<Self>) {
@@ -582,47 +573,29 @@ impl GuiApp {
             .into_any_element()
     }
 
-    fn selected_queue_ids_in_order(&self) -> Vec<u64> {
-        self.state
-            .queue
-            .entries
-            .iter()
-            .filter(|entry| self.browser.queue.contains(&entry.id))
-            .map(|entry| entry.id)
-            .collect()
+    pub(super) fn selected_queue_ids_in_order(&self) -> Vec<u64> {
+        self.browser.queue.ordered_ids()
     }
 
     fn selected_queue_single(&self) -> Option<u64> {
-        if self.browser.queue.len() != 1 {
-            return None;
-        }
-        self.state
-            .queue
-            .entries
-            .iter()
-            .find(|entry| self.browser.queue.contains(&entry.id))
-            .map(|entry| entry.id)
+        (self.browser.queue.len() == 1)
+            .then(|| self.browser.queue.active().map(|row| row.id))
+            .flatten()
     }
 
     fn move_selected_queue(&mut self, down: bool, cx: &mut Context<Self>) {
         let Some(queue_id) = self.selected_queue_single() else {
             return;
         };
-        let Some(index) = self
-            .state
-            .queue
-            .entries
-            .iter()
-            .position(|entry| entry.id == queue_id)
-        else {
+        let Some(row) = self.browser.queue.identity(queue_id) else {
             return;
         };
         let target = if down {
-            index.saturating_add(1)
+            row.position.saturating_add(1)
         } else {
-            index.saturating_sub(1)
+            row.position.saturating_sub(1)
         };
-        if target != index && target < self.state.queue.entries.len() {
+        if target != row.position && target < self.state.queue.total {
             self.send(
                 Command::MoveQueue {
                     queue_id,
@@ -633,31 +606,28 @@ impl GuiApp {
         }
     }
 
-    fn move_queue_entry(&mut self, source_id: u64, target_id: u64, cx: &mut Context<Self>) {
-        let Some(source_index) = self
-            .state
-            .queue
-            .entries
-            .iter()
-            .position(|entry| entry.id == source_id)
-        else {
+    fn move_queue_entry(&mut self, drag: &QueueDrag, target_id: u64, cx: &mut Context<Self>) {
+        if !self.browser.queue.ready() || drag.revision != self.state.queue.revision {
             return;
-        };
-        let Some(target_index) = self
-            .state
+        }
+        let source_id = drag.queue_id;
+        let source_position = drag.position;
+        let Some(target) = self
+            .browser
             .queue
-            .entries
+            .rows
             .iter()
-            .position(|entry| entry.id == target_id)
+            .find(|row| row.id == target_id)
+            .map(super::queue::QueueIdentity::from)
         else {
             return;
         };
         if !self.browser.queue.contains(&source_id) || self.browser.queue.len() == 1 {
-            if source_index != target_index {
+            if source_position != target.position {
                 self.send(
                     Command::MoveQueue {
                         queue_id: source_id,
-                        index: target_index,
+                        index: target.position,
                     },
                     cx,
                 );
@@ -667,22 +637,20 @@ impl GuiApp {
         if self.browser.queue.contains(&target_id) {
             return;
         }
-        let target_after_removal = self.state.queue.entries[..target_index]
+        let selected = self.browser.queue.ordered();
+        let before = selected
             .iter()
-            .filter(|entry| !self.browser.queue.contains(&entry.id))
+            .filter(|row| row.position < target.position)
             .count();
-        let first_index = self
-            .state
-            .queue
-            .entries
-            .iter()
-            .position(|entry| self.browser.queue.contains(&entry.id))
-            .unwrap_or(source_index);
-        let target = target_after_removal + usize::from(target_index > first_index);
+        let first = selected
+            .first()
+            .map(|row| row.position)
+            .unwrap_or(source_position);
+        let index = target.position - before + usize::from(target.position > first);
         self.send(
             Command::MoveQueueEntries {
-                queue_ids: self.selected_queue_ids_in_order(),
-                index: target,
+                queue_ids: selected.iter().map(|row| row.id).collect(),
+                index,
             },
             cx,
         );
@@ -695,16 +663,11 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let selected_id = self.selected_queue_single();
-        let selected_index = selected_id.and_then(|id| {
-            self.state
-                .queue
-                .entries
-                .iter()
-                .position(|entry| entry.id == id)
-        });
+        let selected_index =
+            selected_id.and_then(|id| self.browser.queue.identity(id).map(|row| row.position));
         let selection_count = self.browser.queue.len();
         let mut tools = panel_toolbar().min_h(px(32.));
-        if !self.state.queue.entries.is_empty() {
+        if self.state.queue.total > 0 {
             tools = tools.child(
                 icon_button(
                     ("queue-save-playlist", panel_id),
@@ -735,6 +698,17 @@ impl GuiApp {
                 ));
             }
         }
+        if self.browser.queue.busy {
+            tools = tools.child(status_message("Loading selection…", StatusKind::Info));
+        }
+        if self.browser.queue.selection_error.is_some() {
+            tools = tools.child(button(
+                ("queue-selection-retry", panel_id),
+                "Retry selection",
+                cx,
+                |this, _, cx| this.refresh_queue(cx),
+            ));
+        }
         if selection_count > 0 {
             tools = tools
                 .child(icon_button(
@@ -743,20 +717,7 @@ impl GuiApp {
                     "Play selected queue entry",
                     cx,
                     |this, _, cx| {
-                        let queue_id = this
-                            .browser
-                            .queue
-                            .anchor()
-                            .copied()
-                            .filter(|id| this.browser.queue.contains(id))
-                            .or_else(|| {
-                                this.state
-                                    .queue
-                                    .entries
-                                    .iter()
-                                    .find(|entry| this.browser.queue.contains(&entry.id))
-                                    .map(|entry| entry.id)
-                            });
+                        let queue_id = this.browser.queue.active().map(|row| row.id);
                         if let Some(queue_id) = queue_id {
                             this.send(Command::PlayQueue { queue_id }, cx);
                         }
@@ -787,7 +748,7 @@ impl GuiApp {
                         |this, _, cx| this.move_selected_queue(false, cx),
                     ));
                 }
-                if index + 1 < self.state.queue.entries.len() {
+                if index + 1 < self.state.queue.total {
                     tools = tools.child(icon_button(
                         ("queue-down", panel_id),
                         "",
@@ -809,93 +770,92 @@ impl GuiApp {
                 "Queue",
                 format!(
                     "{} queued · {} selected · drag an entry onto its new position",
-                    self.state.queue.entries.len(),
-                    selection_count,
+                    self.state.queue.total, selection_count,
                 ),
             ))
-            .when(!self.state.queue.entries.is_empty(), |panel| {
-                panel.child(tools)
-            })
+            .when(self.state.queue.total > 0, |panel| panel.child(tools))
             .child(list_viewport(
                 uniform_list(
                     ("queue-rows", panel_id),
-                    self.state.queue.entries.len(),
+                    self.state.queue.total,
                     cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                         range
-                            .filter_map(|index| {
-                                let entry = this.state.queue.entries.get(index)?;
+                            .map(|index| {
+                                let Some(entry) = this.browser.queue.rows.get(index) else {
+                                    return this
+                                        .paged_loading_row(ViewRequestKind::Queue, index, cx)
+                                        .h(px(TRACK_HEIGHT));
+                                };
                                 let id = entry.id;
-                                let (title, detail) = this.panel_track_text(entry.track_id);
+                                let (title, detail) = Self::panel_track_text(&entry.track);
                                 let playing = this.state.queue.current_id == Some(id);
-                                let drag = QueueDrag { queue_id: id };
-                                Some(
-                                    list_row(("queue-entry", id), this.browser.queue.contains(&id))
-                                        .child(
-                                            div()
-                                                .w(px(32.0))
-                                                .flex_shrink_0()
-                                                .text_xs()
-                                                .whitespace_nowrap()
-                                                .text_color(rgb(if playing {
-                                                    ACCENT
-                                                } else {
-                                                    MUTED
-                                                }))
-                                                .when(playing, |view| {
-                                                    view.font_family(super::fonts::SYMBOLS_FAMILY)
-                                                })
-                                                .child(if playing {
-                                                    "󰐊".to_owned()
-                                                } else {
-                                                    (index + 1).to_string()
-                                                }),
-                                        )
-                                        .child(row_text(("queue-entry-text", id), title, detail))
-                                        .on_mouse_down(
-                                            gpui::MouseButton::Right,
-                                            cx.listener(move |this, _, window, cx| {
-                                                this.focus_layout(window, cx);
-                                                this.browser.focus_list(ListFocus::Queue);
-                                                if !this.browser.queue.contains(&id) {
-                                                    this.browser.queue.select(id, false);
-                                                    cx.notify();
-                                                }
+                                let drag = QueueDrag {
+                                    queue_id: id,
+                                    position: index,
+                                    revision: this.state.queue.revision,
+                                };
+                                list_row(("queue-entry", id), this.browser.queue.contains(&id))
+                                    .child(
+                                        div()
+                                            .w(px(32.0))
+                                            .flex_shrink_0()
+                                            .text_xs()
+                                            .whitespace_nowrap()
+                                            .text_color(rgb(if playing { ACCENT } else { MUTED }))
+                                            .when(playing, |view| {
+                                                view.font_family(super::fonts::SYMBOLS_FAMILY)
+                                            })
+                                            .child(if playing {
+                                                "󰐊".to_owned()
+                                            } else {
+                                                (index + 1).to_string()
                                             }),
-                                        )
-                                        .on_click(cx.listener(
-                                            move |this, event: &gpui::ClickEvent, window, cx| {
-                                                this.focus_layout(window, cx);
-                                                this.browser.focus_list(ListFocus::Queue);
-                                                let modifiers = event.modifiers();
-                                                this.select_queue_entry(
-                                                    id,
-                                                    modifiers.shift,
-                                                    modifiers.control || modifiers.platform,
-                                                    cx,
-                                                );
-                                                if event.click_count() == 2 {
-                                                    this.send(
-                                                        Command::PlayQueue { queue_id: id },
-                                                        cx,
-                                                    );
-                                                }
-                                            },
-                                        ))
-                                        .on_drag(drag, |drag, _, _, cx| cx.new(|_| *drag))
-                                        .on_drop(cx.listener(
-                                            move |this, drag: &QueueDrag, window, cx| {
-                                                window.prevent_default();
-                                                this.move_queue_entry(drag.queue_id, id, cx);
-                                            },
-                                        ))
-                                        .drag_over::<QueueDrag>(|style, _, _, _| {
-                                            style.bg(rgb(HIGHLIGHT))
+                                    )
+                                    .child(row_text(("queue-entry-text", id), title, detail))
+                                    .on_mouse_down(
+                                        gpui::MouseButton::Right,
+                                        cx.listener(move |this, _, window, cx| {
+                                            this.focus_layout(window, cx);
+                                            this.browser.focus_list(ListFocus::Queue);
+                                            if !this.browser.queue.contains(&id) {
+                                                this.select_queue_entry(id, false, false, cx);
+                                                cx.notify();
+                                            }
                                         }),
-                                )
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, event: &gpui::ClickEvent, window, cx| {
+                                            this.focus_layout(window, cx);
+                                            this.browser.focus_list(ListFocus::Queue);
+                                            let modifiers = event.modifiers();
+                                            this.select_queue_entry(
+                                                id,
+                                                modifiers.shift,
+                                                modifiers.control || modifiers.platform,
+                                                cx,
+                                            );
+                                            if event.click_count() == 2 {
+                                                this.send(Command::PlayQueue { queue_id: id }, cx);
+                                            }
+                                        },
+                                    ))
+                                    .on_drag(drag, |drag, _, _, cx| cx.new(|_| *drag))
+                                    .on_drop(cx.listener(
+                                        move |this, drag: &QueueDrag, window, cx| {
+                                            window.prevent_default();
+                                            this.move_queue_entry(drag, id, cx);
+                                        },
+                                    ))
+                                    .drag_over::<QueueDrag>(|style, _, _, _| {
+                                        style.bg(rgb(HIGHLIGHT))
+                                    })
                             })
                             .collect::<Vec<_>>()
                     }),
                 )
+                .with_decoration(paged::viewport_demand(
+                    cx.processor(|this, range, _, cx| this.ensure_queue_range(range, cx)),
+                ))
                 .on_drop(cx.listener(|this, drag: &LibraryDrag, window, cx| {
                     window.prevent_default();
                     this.resolve_library_drag(drag.nodes(), super::DragDestination::Queue, cx);

@@ -15,7 +15,6 @@ use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use parking_lot::RwLock;
 use rand::seq::SliceRandom;
-use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashSet, VecDeque},
     path::Path,
@@ -68,10 +67,11 @@ impl CoreState {
             library: self.library.revision,
             structure: self.library.structure_revision,
             playlist: self.library.playlist_revision,
+            queue: self.queue.revision,
         }
     }
 
-    /// Arc identity avoids traversing queue/history/config on playback updates.
+    /// Queue state is constant-size; Arc identity avoids traversing history/config.
     /// Replacing an Arc conservatively invalidates its section even if values match.
     fn changed_sections(&self, previous: &Self) -> StateSections {
         let current_track_changed = match (&self.current_track, &previous.current_track) {
@@ -83,10 +83,10 @@ impl CoreState {
         let old = &previous.system;
         StateSections {
             playback: self.playback != previous.playback || current_track_changed,
-            queue: !Arc::ptr_eq(&self.queue.entries, &previous.queue.entries)
-                || !Arc::ptr_eq(&self.queue.tracks, &previous.queue.tracks)
-                || self.queue.current_id != previous.queue.current_id,
-            library: self.query_revisions() != previous.query_revisions()
+            queue: self.queue != previous.queue,
+            library: self.library.revision != previous.library.revision
+                || self.library.structure_revision != previous.library.structure_revision
+                || self.library.playlist_revision != previous.library.playlist_revision
                 || self.library.track_total != previous.library.track_total
                 || self.library.playlist_total != previous.library.playlist_total
                 || !Arc::ptr_eq(&self.library.history, &previous.library.history),
@@ -371,17 +371,15 @@ impl Runtime {
                     subscribers,
                     raise_requested,
                     generation: 0,
-                    next_queue_id: 1,
+                    queue_ids: Vec::new(),
                     playback: None,
                     scan_tx,
                     scan_rx,
                     active_scan: None,
                     scan_results: VecDeque::new(),
                     next_scan_id: 1,
-                    shuffle_bag: Vec::new(),
                     played: Vec::new(),
                     played_cursor: 0,
-                    saved_queue: None,
                     config_last_attempt: Instant::now(),
                     config_save_error: None,
                 };
@@ -398,15 +396,6 @@ impl Runtime {
                         "initial_load_completed"
                     );
                 }
-                core.next_queue_id = core
-                    .state
-                    .queue
-                    .entries
-                    .iter()
-                    .map(|entry| entry.id)
-                    .max()
-                    .unwrap_or(0)
-                    + 1;
                 let _ = core
                     .engine
                     .commands
@@ -458,21 +447,6 @@ impl Drop for Runtime {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-struct Saved {
-    queue: Vec<QueueEntry>,
-    current: Option<u64>,
-}
-#[derive(Serialize)]
-struct SavedRef<'a> {
-    queue: &'a [QueueEntry],
-    current: Option<u64>,
-}
-
-struct SavedQueue {
-    entries: Arc<Vec<QueueEntry>>,
-    current: Option<u64>,
-}
 struct PlaybackStats {
     track_id: i64,
     heard: f64,
@@ -523,18 +497,17 @@ struct Core {
     subscribers: Arc<RwLock<Vec<Sender<()>>>>,
     raise_requested: Arc<AtomicBool>,
     generation: u64,
-    next_queue_id: u64,
+    // The only full queue projection: compact occurrence IDs, never shared with clients.
+    queue_ids: Vec<u64>,
     playback: Option<PlaybackStats>,
     scan_tx: Sender<ScanEvent>,
     scan_rx: Receiver<ScanEvent>,
     active_scan: Option<ScanTask>,
     scan_results: VecDeque<ScanTaskStatus>,
     next_scan_id: u64,
-    shuffle_bag: Vec<u64>,
     played: Vec<u64>,
     // Number of history entries through the current (or just removed) entry.
     played_cursor: usize,
-    saved_queue: Option<SavedQueue>,
     config_last_attempt: Instant,
     config_save_error: Option<String>,
 }
@@ -549,61 +522,8 @@ impl Core {
         } else {
             "disabled".to_owned()
         };
-        if let Some(json) = self.store.get_setting("playback")? {
-            let Saved {
-                queue: saved_queue,
-                current,
-            } = serde_json::from_str(&json).context("Reading saved playback settings")?;
-            let limit = self.state.system.config.queue_limit as usize;
-            let chunk_size = MAX_QUERY_ROWS.min(limit.max(1));
-            let mut entries = Vec::with_capacity(limit.min(saved_queue.len()));
-            for chunk in saved_queue.chunks(chunk_size) {
-                if entries.len() == limit {
-                    break;
-                }
-                let mut ids = chunk.iter().map(|entry| entry.track_id).collect::<Vec<_>>();
-                ids.sort_unstable();
-                ids.dedup();
-                let rows = self.store.queue_rows(&ids)?;
-                let available = rows.iter().map(|row| row.id).collect::<HashSet<_>>();
-                let remaining = limit - entries.len();
-                entries.extend(
-                    chunk
-                        .iter()
-                        .filter(|entry| available.contains(&entry.track_id))
-                        .take(remaining)
-                        .cloned(),
-                );
-            }
-            let mut ids = entries
-                .iter()
-                .map(|entry| entry.track_id)
-                .collect::<Vec<_>>();
-            ids.sort_unstable();
-            ids.dedup();
-            let tracks = self.store.queue_rows(&ids)?;
-            self.state.queue.entries = Arc::new(entries);
-            self.state.queue.tracks = Arc::new(tracks);
-            self.state.queue.current_id =
-                current.filter(|id| self.state.queue.entries.iter().any(|entry| entry.id == *id));
-            let current_track_id = self.state.queue.current_id.and_then(|id| {
-                self.state
-                    .queue
-                    .entries
-                    .iter()
-                    .find(|entry| entry.id == id)
-                    .map(|entry| entry.track_id)
-            });
-            self.state.current_track = current_track_id
-                .map(|id| self.store.track(id))
-                .transpose()?
-                .flatten()
-                .map(Arc::new);
-        }
-        self.saved_queue = Some(SavedQueue {
-            entries: Arc::clone(&self.state.queue.entries),
-            current: self.state.queue.current_id,
-        });
+        self.queue_ids = self.store.queue_ids()?;
+        self.refresh_queue_tracks()?;
         self.publish();
         Ok(())
     }
@@ -682,17 +602,15 @@ mod tests {
             subscribers: Arc::new(RwLock::new(Vec::new())),
             raise_requested: Arc::new(AtomicBool::new(false)),
             generation: 1,
-            next_queue_id: 1,
+            queue_ids: Vec::new(),
             playback: None,
             scan_tx,
             scan_rx,
             active_scan: None,
             scan_results: VecDeque::new(),
             next_scan_id: 1,
-            shuffle_bag: Vec::new(),
             played: Vec::new(),
             played_cursor: 0,
-            saved_queue: None,
             config_last_attempt: Instant::now(),
             config_save_error: None,
         };
@@ -701,73 +619,52 @@ mod tests {
     }
 
     #[test]
-    fn disjoint_metadata_intents_merge_in_either_execution_order() {
+    fn metadata_intents_merge_and_pages_invalidate_only_for_queued_changes() {
         for title_first in [true, false] {
             let (_directory, mut core) = fixture();
-            core.state.queue.current_id = Some(1);
+            core.store.set_queue_current(Some(1)).unwrap();
             core.refresh_queue_tracks().unwrap();
             let title = Command::EditTrack {
                 track_id: 1,
-                title: Some("Title from one client".into()),
+                title: Some("Title".into()),
                 artist: None,
                 album: None,
             };
             let artist = Command::EditTrack {
                 track_id: 1,
                 title: None,
-                artist: Some("Artist from another client".into()),
+                artist: Some("Artist".into()),
                 album: None,
             };
-            let commands = if title_first {
+            let revision = core.state.queue.revision;
+            for command in if title_first {
                 [title, artist]
             } else {
                 [artist, title]
-            };
-            for command in commands {
+            } {
                 core.command(command).unwrap();
             }
-            let stored = core.store.track(1).unwrap().unwrap();
-            assert_eq!(stored.title, "Title from one client");
-            assert_eq!(stored.artist, "Artist from another client");
+            assert_ne!(core.state.queue.revision, revision);
             let current = core.state.current_track().unwrap();
-            assert_eq!(current.title, stored.title);
-            assert_eq!(current.artist, stored.artist);
-            let queued = core
-                .state
-                .queue
-                .tracks
-                .iter()
-                .find(|track| track.id == 1)
-                .unwrap();
-            assert_eq!(queued.title, stored.title);
-            assert_eq!(queued.artist, stored.artist);
-        }
-    }
-
-    #[test]
-    fn unrelated_metadata_edits_preserve_queue_and_playback_sections() {
-        let (_directory, mut core) = fixture();
-        core.remove_queue_entries(&[5]).unwrap();
-        core.state.queue.current_id = Some(1);
-        core.refresh_queue_tracks().unwrap();
-        core.publish();
-        let queue = core.state.queue.clone();
-        let current = core.state.current_track.clone().unwrap();
-        for command in [
-            Command::EditTrack {
+            assert_eq!((&*current.title, &*current.artist), ("Title", "Artist"));
+            let page = core.store.queue_page(0, MAX_QUERY_ROWS).unwrap();
+            assert_eq!(
+                (&*page.rows[0].track.title, &*page.rows[0].track.artist),
+                ("Title", "Artist")
+            );
+            core.remove_queue_entries(&[5]).unwrap();
+            core.publish();
+            let before = core.state.revisions;
+            let queue = core.state.queue.clone();
+            core.command(Command::EditTrack {
                 track_id: 4,
-                title: Some("Unqueued edit".into()),
-                artist: Some("Artist".into()),
-                album: Some("Album".into()),
-            },
-            Command::SetFavorite {
-                track_ids: vec![4],
-                favorite: true,
-            },
-        ] {
-            let before = core.state.revisions;
-            core.command(command).unwrap();
+                title: Some("Unqueued".into()),
+                artist: None,
+                album: None,
+            })
+            .unwrap();
             core.publish();
+            assert_eq!(core.state.queue, queue);
             assert_eq!(
                 core.state.revisions.changed_since(before),
                 StateSections {
@@ -775,201 +672,58 @@ mod tests {
                     ..StateSections::default()
                 }
             );
-            assert!(Arc::ptr_eq(&queue.entries, &core.state.queue.entries));
-            assert!(Arc::ptr_eq(&queue.tracks, &core.state.queue.tracks));
-            assert!(Arc::ptr_eq(
-                &current,
-                core.state.current_track.as_ref().unwrap()
-            ));
-        }
-        let edited = core.store.track(4).unwrap().unwrap();
-        assert_eq!(edited.title, "Unqueued edit");
-        assert!(edited.favorite);
-    }
-
-    #[test]
-    fn queued_metadata_edits_update_distinct_rows_and_only_affected_sections() {
-        let (_directory, mut core) = fixture();
-        core.state.queue.current_id = Some(1);
-        core.refresh_queue_tracks().unwrap();
-        core.publish();
-        let entries = core.state.queue.entries.clone();
-        let current = core.state.current_track.clone().unwrap();
-        let before = core.state.revisions;
-        core.command(Command::EditTrack {
-            track_id: 2,
-            title: Some("Edited duplicate".into()),
-            artist: Some("Artist".into()),
-            album: Some("Album".into()),
-        })
-        .unwrap();
-        core.publish();
-        assert_eq!(
-            core.state.revisions.changed_since(before),
-            StateSections {
-                queue: true,
-                library: true,
-                ..StateSections::default()
-            }
-        );
-        assert!(Arc::ptr_eq(&entries, &core.state.queue.entries));
-        assert!(Arc::ptr_eq(
-            &current,
-            core.state.current_track.as_ref().unwrap()
-        ));
-        assert_eq!(
-            core.state
-                .queue
-                .tracks
-                .iter()
-                .map(|row| row.id)
-                .collect::<Vec<_>>(),
-            [1, 2, 3, 4]
-        );
-        assert_eq!(
-            core.state
-                .queue
-                .entries
-                .iter()
-                .filter(|entry| entry.track_id == 2)
-                .count(),
-            2
-        );
-        let duplicate = &core.state.queue.tracks[1];
-        assert_eq!(
-            (&*duplicate.title, &*duplicate.artist, &*duplicate.album),
-            ("Edited duplicate", "Artist", "Album")
-        );
-
-        let before = core.state.revisions;
-        core.command(Command::SetFavorite {
-            track_ids: vec![3, 2, 2],
-            favorite: true,
-        })
-        .unwrap();
-        core.publish();
-        assert_eq!(
-            core.state.revisions.changed_since(before),
-            StateSections {
-                queue: true,
-                library: true,
-                ..StateSections::default()
-            }
-        );
-        assert!(core.state.queue.tracks[1].favorite);
-        assert!(core.state.queue.tracks[2].favorite);
-        assert!(!core.state.queue.tracks[0].favorite);
-
-        for command in [
-            Command::EditTrack {
-                track_id: 1,
-                title: Some("Current edit".into()),
-                artist: Some("Now".into()),
-                album: Some("Playing".into()),
-            },
-            Command::SetFavorite {
-                track_ids: vec![1],
+            core.command(Command::SetFavorite {
+                track_ids: vec![2, 2, 3],
                 favorite: true,
-            },
-        ] {
-            let before = core.state.revisions;
-            core.command(command).unwrap();
-            core.publish();
-            assert_eq!(
-                core.state.revisions.changed_since(before),
-                StateSections {
-                    playback: true,
-                    queue: true,
-                    library: true,
-                    ..StateSections::default()
-                }
-            );
+            })
+            .unwrap();
+            let rows = core.store.queue_page(0, MAX_QUERY_ROWS).unwrap().rows;
+            assert!(rows[1].track.favorite && rows[2].track.favorite && rows[3].track.favorite);
+            assert!(!rows[0].track.favorite);
         }
-        let current = core.state.current_track().unwrap();
-        assert_eq!(
-            (&*current.title, &*current.artist, &*current.album),
-            ("Current edit", "Now", "Playing")
-        );
-        assert!(current.favorite);
-        let before = core.state.revisions;
-        core.command(Command::SetFavorite {
-            track_ids: vec![1, 2],
-            favorite: true,
-        })
-        .unwrap();
-        core.publish();
-        assert_eq!(
-            core.state.revisions.changed_since(before),
-            StateSections {
-                library: true,
-                ..StateSections::default()
-            }
-        );
     }
 
     #[test]
-    fn activity_only_updates_playback_without_invalidating_queue_rows() {
+    fn activity_updates_playback_but_only_display_statistics_invalidate_queue_pages() {
         let (_directory, mut core) = fixture();
-        core.state.queue.current_id = Some(1);
+        core.store.set_queue_current(Some(1)).unwrap();
         core.refresh_queue_tracks().unwrap();
-        core.publish();
-        let rows = core.state.queue.tracks.clone();
-        let before = core.state.revisions;
+        let revision = core.state.queue.revision;
         core.store.mark_played(1, 7).unwrap();
         core.update_track_stats(1).unwrap();
-        core.publish();
         assert_eq!(core.state.current_track().unwrap().last_played, Some(7));
-        assert!(Arc::ptr_eq(&rows, &core.state.queue.tracks));
-        assert_eq!(
-            core.state.revisions.changed_since(before),
-            StateSections {
-                playback: true,
-                library: true,
-                ..StateSections::default()
-            }
-        );
-
-        let before = core.state.revisions;
+        assert_eq!(core.state.queue.revision, revision);
         core.store.increment_play_count(1).unwrap();
         core.update_track_stats(1).unwrap();
-        core.publish();
-        assert_eq!(core.state.queue.tracks[0].play_count, 1);
-        assert_eq!(core.state.current_track().unwrap().play_count, 1);
+        assert_ne!(core.state.queue.revision, revision);
         assert_eq!(
-            core.state.revisions.changed_since(before),
-            StateSections {
-                playback: true,
-                queue: true,
-                library: true,
-                ..StateSections::default()
-            }
+            core.store.queue_page(0, 1).unwrap().rows[0]
+                .track
+                .play_count,
+            1
         );
     }
 
     #[test]
-    fn saved_playback_restores_order_duplicates_and_current_entry() {
+    fn sql_queue_restores_order_duplicates_current_and_clear_does_not_reuse_ids() {
         let (_directory, mut core) = fixture();
         core.state.queue.current_id = Some(3);
         core.save(false).unwrap();
-        core.state.queue.entries = Arc::default();
-        core.state.queue.tracks = Arc::default();
-        core.state.queue.current_id = None;
+        core.queue_ids.clear();
+        core.state.queue = QueueState::default();
         core.load_initial_state().unwrap();
         assert_eq!(
-            queue_entries(&core.state.queue.entries),
+            queue_entries(&core),
             [(1, 1), (2, 2), (3, 2), (4, 3), (5, 4)]
         );
         assert_eq!(core.state.queue.current_id, Some(3));
+        assert_eq!(core.state.queue.current_position, Some(2));
         assert_eq!(core.state.current_track().unwrap().id, 2);
-
-        core.state.queue.entries = Arc::default();
-        core.state.queue.current_id = None;
-        core.save(false).unwrap();
+        core.command(Command::ClearQueue).unwrap();
         core.enqueue(&[1]).unwrap();
+        assert!(core.queue_ids[0] > 5);
         core.load_initial_state().unwrap();
-        assert!(core.state.queue.entries.is_empty());
-        assert!(core.state.queue.tracks.is_empty());
-        assert!(core.state.queue.current_id.is_none());
+        assert_eq!(core.state.queue.total, 1);
         assert!(core.state.current_track.is_none());
     }
 
@@ -1103,13 +857,7 @@ mod tests {
         };
         assert!(core.finish_scan(scan).is_err());
         assert_eq!(
-            core.state
-                .queue
-                .tracks
-                .iter()
-                .find(|row| row.id == 1)
-                .unwrap()
-                .title,
+            core.store.queue_page(0, 1).unwrap().rows[0].track.title,
             "Updated by scan"
         );
         assert!(
@@ -1948,7 +1696,8 @@ mod tests {
         assert_eq!(page.total, 1);
         assert!(matches!(&page.rows[0], DirectoryRow::Track(row) if row.id == logical_id));
         core.enqueue(&[logical_id]).unwrap();
-        let entry = core.state.queue.entries.last().unwrap();
+        let entries = core.store.queue_page(0, MAX_QUERY_ROWS).unwrap().rows;
+        let entry = entries.last().unwrap();
         assert_eq!(entry.track_id, logical_id);
         assert_eq!(core.track(entry.track_id).unwrap().path, logical);
     }
@@ -1973,7 +1722,7 @@ mod tests {
     }
 
     fn pending(core: &mut Core, queue_id: u64) {
-        core.state.queue.current_id = Some(queue_id);
+        core.store.set_queue_current(Some(queue_id)).unwrap();
 
         core.refresh_queue_tracks().unwrap();
         core.state.playback.status = PlaybackStatus::Playing;
@@ -2063,16 +1812,26 @@ mod tests {
         progress(&mut core, 9.0, 2.000_001);
         assert_eq!(play_count(&core, 1), 1);
         assert_eq!(core.state.current_track().unwrap().play_count, 1);
-        assert_eq!(core.state.queue.tracks[0].play_count, 1);
+        assert_eq!(
+            core.store.queue_page(0, 1).unwrap().rows[0]
+                .track
+                .play_count,
+            1
+        );
         progress(&mut core, 9.5, 3.0);
         assert_eq!(play_count(&core, 1), 1);
         assert_eq!(core.state.current_track().unwrap().play_count, 1);
-        assert_eq!(core.state.queue.tracks[0].play_count, 1);
+        assert_eq!(
+            core.store.queue_page(0, 1).unwrap().rows[0]
+                .track
+                .play_count,
+            1
+        );
     }
     #[test]
     fn reload_refreshes_current_track_activity_and_probe_metadata() {
         let (directory, mut core) = fixture();
-        core.state.queue.current_id = Some(1);
+        core.store.set_queue_current(Some(1)).unwrap();
         core.refresh_queue_tracks().unwrap();
         core.store.mark_played(1, 7).unwrap();
         core.reload(false).unwrap();
@@ -2412,15 +2171,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [1, 3, 4]
         );
-        assert_eq!(
-            core.state
-                .queue
-                .entries
-                .iter()
-                .map(|entry| entry.id)
-                .collect::<Vec<_>>(),
-            [1, 4, 5]
-        );
+        assert_eq!(core.queue_ids, [1, 4, 5]);
         assert_eq!(
             core.store
                 .playlist_entries_page(playlist_id, 0, MAX_QUERY_ROWS)
@@ -2629,11 +2380,11 @@ mod tests {
         })
         .unwrap();
         assert_eq!(
-            core.state
-                .queue
-                .entries
+            core.store
+                .queue_page(5, MAX_QUERY_ROWS)
+                .unwrap()
+                .rows
                 .iter()
-                .skip(5)
                 .map(|entry| entry.track_id)
                 .collect::<Vec<_>>(),
             [2, 1, 2, 3, 1]
@@ -2780,21 +2531,19 @@ mod tests {
         assert_ne!(core.generation, generation);
     }
 
-    fn queue_entries(queue: &[QueueEntry]) -> Vec<(u64, i64)> {
-        queue
-            .iter()
-            .map(|entry| (entry.id, entry.track_id))
+    fn queue_entries(core: &Core) -> Vec<(u64, i64)> {
+        core.store
+            .queue_page(0, MAX_QUERY_ROWS)
+            .unwrap()
+            .rows
+            .into_iter()
+            .map(|row| (row.id, row.track_id))
             .collect()
     }
 
     fn assert_queue_saved(core: &Core) {
-        let saved: Saved =
-            serde_json::from_str(&core.store.get_setting("playback").unwrap().unwrap()).unwrap();
-        assert_eq!(
-            queue_entries(&saved.queue),
-            queue_entries(&core.state.queue.entries)
-        );
-        assert_eq!(saved.current, core.state.queue.current_id);
+        assert_eq!(core.store.queue_ids().unwrap(), core.queue_ids);
+        assert_eq!(core.store.queue_state().unwrap(), core.state.queue);
     }
 
     #[test]
@@ -2804,10 +2553,7 @@ mod tests {
         core.save(false).unwrap();
         core.command(Command::RemoveQueue { queue_id: 2 }).unwrap();
         core.load_initial_state().unwrap();
-        assert_eq!(
-            queue_entries(&core.state.queue.entries),
-            [(1, 1), (3, 2), (4, 3), (5, 4)]
-        );
+        assert_eq!(queue_entries(&core), [(1, 1), (3, 2), (4, 3), (5, 4)]);
         assert_eq!(core.state.queue.current_id, None);
     }
 
@@ -2858,9 +2604,10 @@ mod tests {
         assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
         assert!(core.store.track(1).unwrap().is_none());
         assert!(
-            core.state
-                .queue
-                .entries
+            core.store
+                .queue_page(0, MAX_QUERY_ROWS)
+                .unwrap()
+                .rows
                 .iter()
                 .all(|entry| entry.track_id != 1)
         );
@@ -2868,189 +2615,140 @@ mod tests {
     }
 
     #[test]
-    fn deduplicate_queue_keeps_current_duplicate_at_first_occurrence_and_prunes_history() {
+    fn bulk_queue_edits_preserve_current_order_history_and_reject_invalid_ids_atomically() {
         let (_directory, mut core) = fixture();
-        // Separate the duplicates to exercise first-occurrence ordering.
+        playing(&mut core, 3);
+        progress(&mut core, 1.5, 1.5);
+        core.played = vec![1, 3, 5];
+        core.played_cursor = 2;
+        let generation = core.generation;
+        let before = queue_entries(&core);
+        for command in [
+            Command::MoveQueueEntries {
+                queue_ids: vec![3, 99],
+                index: 0,
+            },
+            Command::RemoveQueueEntries {
+                queue_ids: vec![3, 99],
+            },
+            Command::MoveQueue {
+                queue_id: 3,
+                index: usize::MAX,
+            },
+        ] {
+            assert!(core.command(command).is_err());
+            assert_eq!(queue_entries(&core), before);
+            assert_eq!(core.generation, generation);
+            assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
+        }
+        core.command(Command::MoveQueueEntries {
+            queue_ids: vec![5, 1, 3, 1],
+            index: 1,
+        })
+        .unwrap();
+        assert_eq!(
+            queue_entries(&core),
+            [(2, 2), (1, 1), (3, 2), (5, 4), (4, 3)]
+        );
+        assert_eq!(core.state.queue.current_id, Some(3));
+        assert_eq!(core.state.queue.current_position, Some(2));
+        assert_eq!(core.generation, generation);
+        assert_eq!(core.played, [1, 3, 5]);
+        core.command(Command::MoveQueueEntries {
+            queue_ids: vec![1, 3, 5],
+            index: usize::MAX,
+        })
+        .unwrap();
+        assert_eq!(
+            queue_entries(&core),
+            [(2, 2), (4, 3), (1, 1), (3, 2), (5, 4)]
+        );
+        core.command(Command::RemoveQueueEntries {
+            queue_ids: vec![1, 1],
+        })
+        .unwrap();
+        assert_eq!(core.generation, generation);
+        assert_eq!(core.played, [3, 5]);
+        assert_eq!(core.played_cursor, 1);
+        core.command(Command::RemoveQueueEntries {
+            queue_ids: vec![3, 3],
+        })
+        .unwrap();
+        assert_eq!(core.state.queue.current_id, None);
+        assert!(core.state.current_track().is_none());
+        assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+        assert_queue_saved(&core);
+    }
+
+    #[test]
+    fn dedup_preserves_playing_duplicate_identity_at_first_position_and_prunes_history() {
+        let (_directory, mut core) = fixture();
         core.command(Command::MoveQueue {
             queue_id: 3,
             index: 4,
         })
         .unwrap();
         playing(&mut core, 3);
-        progress(&mut core, 1.5, 1.5);
-        core.state.playback.shuffle = true;
         core.played = vec![1, 2, 4, 3, 2, 5];
         core.played_cursor = 4;
-        core.shuffle_bag = vec![5, 2, 4];
         let generation = core.generation;
-        let seek_revision = core.state.playback.seek_revision;
-        let next_queue_id = core.next_queue_id;
-        let history = core.store.history(200).unwrap();
-        let old_queue = Arc::clone(&core.state.queue.entries);
-
         core.command(Command::DeduplicateQueue).unwrap();
-
-        assert_eq!(
-            queue_entries(&core.state.queue.entries),
-            [(1, 1), (3, 2), (4, 3), (5, 4)]
-        );
-        assert_eq!(
-            queue_entries(&old_queue),
-            [(1, 1), (2, 2), (4, 3), (5, 4), (3, 2)]
-        );
+        assert_eq!(queue_entries(&core), [(1, 1), (3, 2), (4, 3), (5, 4)]);
+        assert_eq!(core.state.queue.current_id, Some(3));
+        assert_eq!(core.state.queue.current_position, Some(1));
         assert_eq!(core.played, [1, 4, 3, 5]);
         assert_eq!(core.played_cursor, 3);
-        assert_eq!(core.shuffle_bag, [5, 4]);
-        assert!(core.state.playback.shuffle);
-        assert_eq!(core.state.queue.current_id, Some(3));
-        assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
-        assert_eq!(core.state.playback.position, 1.5);
-        assert_eq!(core.state.playback.duration, Some(10.0));
-        assert_eq!(core.state.playback.seek_revision, seek_revision);
         assert_eq!(core.generation, generation);
-        assert_eq!(core.next_queue_id, next_queue_id);
-        let playback = core.playback.as_ref().unwrap();
-        assert_eq!(playback.track_id, 2);
-        assert_eq!(playback.heard, 1.5);
-        assert_eq!(playback.position, Some(1.5));
-        assert!(playback.started);
-        assert!(!playback.counted);
-        assert_eq!(
-            core.store.history(200).unwrap()[0].played_at,
-            history[0].played_at
-        );
         assert_queue_saved(&core);
-        // Navigation still uses the retained history, including the forward gap.
-        missing(&mut core, Command::Previous, 3);
-        missing(&mut core, Command::Next, 4);
-        assert_eq!(core.played_cursor, 3);
     }
 
     #[test]
-    fn deduplicate_queue_preserves_first_entries_when_current_is_not_a_later_duplicate() {
-        for current in [None, Some(2), Some(4)] {
-            let (_directory, mut core) = fixture();
-            core.state.queue.current_id = current;
-            core.played = vec![1, 2, 3, 4, 5];
-            core.played_cursor = 2;
-            core.shuffle_bag = vec![5, 4, 3, 2];
-            core.command(Command::DeduplicateQueue).unwrap();
-            assert_eq!(
-                queue_entries(&core.state.queue.entries),
-                [(1, 1), (2, 2), (4, 3), (5, 4)]
-            );
-            assert_eq!(core.state.queue.current_id, current);
-            assert_eq!(core.played, [1, 2, 4, 5]);
-            assert_eq!(core.played_cursor, 2);
-            assert_eq!(core.shuffle_bag, [5, 4, 2]);
-            assert_queue_saved(&core);
-            core.command(Command::DeduplicateQueue).unwrap();
-            assert_eq!(
-                queue_entries(&core.state.queue.entries),
-                [(1, 1), (2, 2), (4, 3), (5, 4)]
-            );
-            assert_eq!(core.played_cursor, 2);
-        }
-    }
-
-    #[test]
-    fn randomize_queue_reorders_entries_without_changing_playback_or_shuffle_history() {
+    fn randomize_changes_order_without_changing_current_or_history() {
         use rand::SeedableRng;
-
         let (_directory, mut core) = fixture();
-        core.enqueue(&[1, 2, 3, 4].repeat(8)).unwrap();
         playing(&mut core, 3);
-        progress(&mut core, 1.5, 1.5);
-        core.played = vec![1, 2, 3, 4];
-        core.played_cursor = 3;
-        core.shuffle_bag = vec![5, 4];
+        core.played = vec![1, 3, 5];
+        core.played_cursor = 2;
         let generation = core.generation;
-        let seek_revision = core.state.playback.seek_revision;
-        let next_queue_id = core.next_queue_id;
-        let original = Arc::clone(&core.state.queue.entries);
-        let mut expected = queue_entries(&original);
-
-        core.randomize_queue(&mut rand::rngs::StdRng::seed_from_u64(42));
-        assert_ne!(queue_entries(&core.state.queue.entries), expected);
-        let mut reordered = queue_entries(&core.state.queue.entries);
-        reordered.sort_unstable();
-        expected.sort_unstable();
-        assert_eq!(reordered, expected);
-
-        for shuffle in [false, true] {
-            core.state.playback.shuffle = shuffle;
-            core.command(Command::RandomizeQueue).unwrap();
-            let mut reordered = queue_entries(&core.state.queue.entries);
-            reordered.sort_unstable();
-            assert_eq!(reordered, expected);
-            assert_eq!(core.state.playback.shuffle, shuffle);
-            assert_eq!(core.played, [1, 2, 3, 4]);
-            assert_eq!(core.played_cursor, 3);
-            assert_eq!(core.shuffle_bag, [5, 4]);
-            assert_eq!(core.state.queue.current_id, Some(3));
-            assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
-            assert_eq!(core.state.playback.position, 1.5);
-            assert_eq!(core.state.playback.seek_revision, seek_revision);
-            assert_eq!(core.generation, generation);
-            assert_eq!(core.next_queue_id, next_queue_id);
-            assert_eq!(core.playback.as_ref().unwrap().track_id, 2);
-            assert_eq!(core.playback.as_ref().unwrap().heard, 1.5);
-            assert_queue_saved(&core);
-        }
-        assert_eq!(original.len(), 37);
-        assert_eq!(original[0].id, 1);
-    }
-
-    #[test]
-    fn queue_menu_commands_round_trip_and_allow_empty_or_single_entry_queues() {
-        for (name, command) in [
-            ("randomize_queue", Command::RandomizeQueue),
-            ("deduplicate_queue", Command::DeduplicateQueue),
-        ] {
-            let json = serde_json::json!({ "command": name });
-            assert_eq!(serde_json::to_value(&command).unwrap(), json);
-            let (_directory, mut core) = fixture();
-            for queue in [vec![], vec![QueueEntry { id: 7, track_id: 2 }]] {
-                core.state.queue.entries = Arc::new(queue);
-                let expected = queue_entries(&core.state.queue.entries);
-                core.command(serde_json::from_value(json.clone()).unwrap())
-                    .unwrap();
-                assert_eq!(queue_entries(&core.state.queue.entries), expected);
-                assert_eq!(core.generation, 1);
-                assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
-                assert_queue_saved(&core);
-            }
-        }
-    }
-
-    #[test]
-    fn removing_tracks_prunes_unplayed_shuffle_entries_and_duplicates() {
-        let (_directory, mut core) = fixture();
-        playing(&mut core, 1);
-        core.state.playback.shuffle = true;
-        core.played = vec![1];
-        core.played_cursor = 1;
-        core.shuffle_bag = vec![5, 4, 3, 2];
-        core.command(Command::RemoveTracks { track_ids: vec![2] })
+        let mut expected = core.queue_ids.clone();
+        core.randomize_queue(&mut rand::rngs::StdRng::seed_from_u64(42))
             .unwrap();
-        assert_eq!(core.shuffle_bag, [5, 4]);
-        assert_eq!(
-            core.state
-                .queue
-                .entries
-                .iter()
-                .map(|q| q.id)
-                .collect::<Vec<_>>(),
-            [1, 4, 5]
-        );
-        missing(&mut core, Command::Next, 3);
-        assert_eq!(core.shuffle_bag, [5, 4]);
-        assert_eq!(core.state.queue.current_id, Some(1));
-        assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
+        let mut actual = core.queue_ids.clone();
+        actual.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(actual, expected);
+        assert_eq!(core.state.queue.current_id, Some(3));
+        assert_eq!(core.played, [1, 3, 5]);
+        assert_eq!(core.played_cursor, 2);
+        assert_eq!(core.generation, generation);
     }
 
     #[test]
-    fn removing_history_rebases_cursor_without_consuming_failed_navigation() {
+    fn empty_and_singleton_queue_edits_are_valid_and_empty_bulk_requests_are_no_ops() {
+        let (_directory, mut core) = fixture();
+        let before = core.state.queue.clone();
+        core.command(Command::RemoveQueueEntries { queue_ids: vec![] })
+            .unwrap();
+        core.command(Command::MoveQueueEntries {
+            queue_ids: vec![],
+            index: usize::MAX,
+        })
+        .unwrap();
+        assert_eq!(core.state.queue, before);
+        for singleton in [false, true] {
+            core.command(Command::ClearQueue).unwrap();
+            if singleton {
+                core.enqueue(&[2]).unwrap();
+            }
+            let before = core.queue_ids.clone();
+            core.command(Command::RandomizeQueue).unwrap();
+            core.command(Command::DeduplicateQueue).unwrap();
+            assert_eq!(core.queue_ids, before);
+        }
+    }
+
+    #[test]
+    fn removing_tracks_prunes_history_and_previous_retains_the_remaining_gap() {
         let (_directory, mut core) = fixture();
         playing(&mut core, 4);
         core.state.playback.shuffle = true;
@@ -3062,189 +2760,7 @@ mod tests {
         assert_eq!(core.played_cursor, 2);
         missing(&mut core, Command::Previous, 1);
         assert_eq!(core.played_cursor, 2);
-        missing(&mut core, Command::Next, 4);
-        assert_eq!(core.played_cursor, 2);
-        core.command(Command::RemoveQueue { queue_id: 5 }).unwrap();
-        core.command(Command::Next).unwrap();
-        assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
-    }
-
-    #[test]
-    fn removing_current_queue_entry_keeps_other_copy_and_history_gap() {
-        let (_directory, mut core) = fixture();
-        playing(&mut core, 2);
-        core.state.playback.shuffle = true;
-        core.played = vec![1, 2, 3];
-        core.played_cursor = 2;
-        core.command(Command::RemoveQueue { queue_id: 2 }).unwrap();
-        assert_eq!(core.played, [1, 3]);
-        assert_eq!(core.played_cursor, 1);
-        assert_eq!(core.state.queue.current_id, None);
-        assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
-        assert!(
-            core.state
-                .queue
-                .entries
-                .iter()
-                .any(|q| q.id == 3 && q.track_id == 2)
-        );
-        missing(&mut core, Command::Previous, 1);
-        missing(&mut core, Command::Next, 2);
-        core.command(Command::ClearQueue).unwrap();
-        assert!(core.played.is_empty());
-        assert_eq!(core.played_cursor, 0);
-        assert!(core.shuffle_bag.is_empty());
-        core.command(Command::Next).unwrap();
-        assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
-    }
-
-    #[test]
-    fn moving_bulk_queue_entries_preserves_order_playback_history_and_persistence() {
-        let (_directory, mut core) = fixture();
-        playing(&mut core, 3);
-        progress(&mut core, 1.5, 1.5);
-        core.played = vec![1, 3, 5];
-        core.played_cursor = 2;
-        core.shuffle_bag = vec![5, 4];
-        let generation = core.generation;
-        let history = core.store.history(200).unwrap();
-
-        core.command(Command::MoveQueueEntries {
-            queue_ids: vec![5, 1, 3, 1],
-            index: 1,
-        })
-        .unwrap();
-
-        assert_eq!(
-            queue_entries(&core.state.queue.entries),
-            [(2, 2), (1, 1), (3, 2), (5, 4), (4, 3)]
-        );
-        assert_eq!(core.state.queue.current_id, Some(3));
-        assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
-        assert_eq!(core.generation, generation);
-        assert_eq!(core.played, [1, 3, 5]);
-        assert_eq!(core.played_cursor, 2);
-        assert_eq!(core.shuffle_bag, [5, 4]);
-        assert_eq!(core.state.playback.position, 1.5);
-        assert_eq!(core.playback.as_ref().unwrap().track_id, 2);
-        let current_history = core.store.history(200).unwrap();
-        assert_eq!(current_history.len(), history.len());
-        assert_eq!(current_history[0].track_id, history[0].track_id);
-        assert_eq!(current_history[0].played_at, history[0].played_at);
         assert_queue_saved(&core);
-
-        core.command(Command::MoveQueueEntries {
-            queue_ids: vec![1, 3, 5],
-            index: usize::MAX,
-        })
-        .unwrap();
-        assert_eq!(
-            queue_entries(&core.state.queue.entries),
-            [(2, 2), (4, 3), (1, 1), (3, 2), (5, 4)]
-        );
-        assert_queue_saved(&core);
-    }
-
-    #[test]
-    fn bulk_queue_invalid_ids_are_atomic_and_do_not_stop_current_playback() {
-        let (_directory, mut core) = fixture();
-        playing(&mut core, 3);
-        let queue = Arc::clone(&core.state.queue.entries);
-        let generation = core.generation;
-        let status = core.state.playback.status;
-        let current = core.state.queue.current_id;
-        let error = core
-            .command(Command::MoveQueueEntries {
-                queue_ids: vec![3, 99, 3],
-                index: 0,
-            })
-            .unwrap_err();
-        assert!(error.to_string().contains("99"));
-        assert!(Arc::ptr_eq(&core.state.queue.entries, &queue));
-        assert_eq!(core.state.queue.current_id, current);
-        assert_eq!(core.state.playback.status, status);
-        assert_eq!(core.generation, generation);
-
-        let error = core
-            .command(Command::RemoveQueueEntries {
-                queue_ids: vec![3, 99],
-            })
-            .unwrap_err();
-        assert!(error.to_string().contains("99"));
-        assert!(Arc::ptr_eq(&core.state.queue.entries, &queue));
-        assert_eq!(core.state.queue.current_id, current);
-        assert_eq!(core.state.playback.status, status);
-        assert_eq!(core.generation, generation);
-    }
-
-    #[test]
-    fn bulk_remove_stops_only_when_current_entry_is_removed_and_handles_duplicates() {
-        let (_directory, mut core) = fixture();
-        playing(&mut core, 3);
-        core.played = vec![1, 3, 5];
-        core.played_cursor = 2;
-        let generation = core.generation;
-        core.command(Command::RemoveQueueEntries {
-            queue_ids: vec![1, 1],
-        })
-        .unwrap();
-        assert_eq!(
-            queue_entries(&core.state.queue.entries),
-            [(2, 2), (3, 2), (4, 3), (5, 4)]
-        );
-        assert_eq!(core.state.queue.current_id, Some(3));
-        assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
-        assert_eq!(core.generation, generation);
-        assert_eq!(core.played, [3, 5]);
-        assert_eq!(core.played_cursor, 1);
-        assert_queue_saved(&core);
-
-        core.command(Command::RemoveQueueEntries {
-            queue_ids: vec![3, 3],
-        })
-        .unwrap();
-        assert!(!core.state.queue.entries.iter().any(|entry| entry.id == 3));
-        assert_eq!(core.state.queue.current_id, None);
-        assert!(core.state.current_track().is_none());
-        assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
-        assert_ne!(core.generation, generation);
-        assert!(core.playback.is_none());
-        assert_eq!(core.played, [5]);
-        assert_eq!(core.played_cursor, 0);
-        assert_queue_saved(&core);
-    }
-
-    #[test]
-    fn empty_bulk_queue_ids_are_no_ops_and_commands_round_trip() {
-        for (command, expected) in [
-            (
-                Command::RemoveQueueEntries { queue_ids: vec![] },
-                serde_json::json!({
-                    "command": "remove_queue_entries",
-                    "queue_ids": []
-                }),
-            ),
-            (
-                Command::MoveQueueEntries {
-                    queue_ids: vec![],
-                    index: 9,
-                },
-                serde_json::json!({
-                    "command": "move_queue_entries",
-                    "queue_ids": [],
-                    "index": 9
-                }),
-            ),
-        ] {
-            assert_eq!(serde_json::to_value(&command).unwrap(), expected);
-            let (_directory, mut core) = fixture();
-            let queue = Arc::clone(&core.state.queue.entries);
-            let generation = core.generation;
-            core.command(command).unwrap();
-            assert!(Arc::ptr_eq(&core.state.queue.entries, &queue));
-            assert_eq!(core.generation, generation);
-            assert_queue_saved(&core);
-        }
     }
 
     #[test]
@@ -3285,13 +2801,10 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].track_id, 2);
         assert_eq!(
-            core.state.queue.entries[1].track_id,
-            core.state.queue.entries[2].track_id
+            core.store.queue_track_id(2).unwrap(),
+            core.store.queue_track_id(3).unwrap()
         );
-        assert_ne!(
-            core.state.queue.entries[1].id,
-            core.state.queue.entries[2].id
-        );
+        assert_ne!(core.queue_ids[1], core.queue_ids[2]);
     }
 
     #[test]
@@ -3315,9 +2828,10 @@ mod tests {
         core.state.playback.status = PlaybackStatus::Playing;
         core.state.playback.position = 12.5;
         let queue = core
-            .state
-            .queue
-            .entries
+            .store
+            .queue_page(0, MAX_QUERY_ROWS)
+            .unwrap()
+            .rows
             .iter()
             .map(|entry| (entry.id, entry.track_id))
             .collect::<Vec<_>>();
@@ -3325,15 +2839,7 @@ mod tests {
         assert!(error.to_string().contains("graphical host"));
         assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
         assert_eq!(core.state.playback.position, 12.5);
-        assert_eq!(
-            core.state
-                .queue
-                .entries
-                .iter()
-                .map(|entry| (entry.id, entry.track_id))
-                .collect::<Vec<_>>(),
-            queue
-        );
+        assert_eq!(queue_entries(&core), queue);
     }
 
     #[test]
@@ -3342,9 +2848,10 @@ mod tests {
         core.state.playback.status = PlaybackStatus::Paused;
         core.state.playback.position = 7.25;
         let queue = core
-            .state
-            .queue
-            .entries
+            .store
+            .queue_page(0, MAX_QUERY_ROWS)
+            .unwrap()
+            .rows
             .iter()
             .map(|entry| (entry.id, entry.track_id))
             .collect::<Vec<_>>();
@@ -3358,15 +2865,7 @@ mod tests {
         assert!(core.raise_requested.swap(false, Ordering::AcqRel));
         assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
         assert_eq!(core.state.playback.position, 7.25);
-        assert_eq!(
-            core.state
-                .queue
-                .entries
-                .iter()
-                .map(|entry| (entry.id, entry.track_id))
-                .collect::<Vec<_>>(),
-            queue
-        );
+        assert_eq!(queue_entries(&core), queue);
     }
 
     #[test]
@@ -3443,63 +2942,61 @@ mod tests {
     }
 
     #[test]
-    fn restoring_queue_skips_missing_entries_before_capacity_limit() {
+    fn random_draws_include_current_weight_duplicates_and_ignore_forward_history() {
+        use rand::SeedableRng;
         let (_directory, mut core) = fixture();
-        Arc::make_mut(&mut core.state.system.config).queue_limit = 2;
-        let saved = Saved {
-            queue: vec![
-                QueueEntry {
-                    id: 1,
-                    track_id: 999,
-                },
-                QueueEntry { id: 2, track_id: 1 },
-                QueueEntry { id: 3, track_id: 2 },
-                QueueEntry { id: 4, track_id: 3 },
-            ],
-            current: Some(3),
+        core.state.queue.current_id = Some(3);
+        core.played = vec![1, 3, 5];
+        core.played_cursor = 1;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(9);
+        let mut counts = [0usize; 5];
+        let mut immediate_repeat = false;
+        let mut previous = 3;
+        for _ in 0..30_000 {
+            let id = core.random_queue_id(&mut rng).unwrap();
+            immediate_repeat |= previous == id;
+            counts[id as usize - 1] += 1;
+            previous = id;
+        }
+        assert!(immediate_repeat);
+        assert!(counts.iter().all(|count| (5_500..6_500).contains(count)));
+        assert!(counts[1] + counts[2] > counts[0] * 18 / 10);
+        core.command(Command::ClearQueue).unwrap();
+        core.enqueue(&[1]).unwrap();
+        let id = core.queue_ids[0];
+        assert_eq!(core.random_queue_id(&mut rng), Some(id));
+        assert_eq!(core.random_queue_id(&mut rng), Some(id));
+        for _ in 0..5000 {
+            core.record_queue_history(id);
+        }
+        assert_eq!(core.played.len(), 4096);
+        assert_eq!(core.played_cursor, 4096);
+    }
+    #[test]
+    fn queue_batch_revisions_ignore_current_only_changes_and_reject_metadata_edits() {
+        let (_directory, mut core) = fixture();
+        let expected = core.state.query_revisions();
+        core.state.queue.current_id = Some(3);
+        core.save(false).unwrap();
+        let query = Query::QueueBatch {
+            after: None,
+            limit: 2,
+            expected: Some(expected),
         };
-        core.store
-            .set_setting("playback", &serde_json::to_string(&saved).unwrap())
-            .unwrap();
-        core.load_initial_state().unwrap();
-        assert_eq!(queue_entries(&core.state.queue.entries), [(2, 1), (3, 2)]);
-        assert_eq!(
-            core.state
-                .queue
-                .tracks
-                .iter()
-                .map(|row| row.id)
-                .collect::<Vec<_>>(),
-            [1, 2]
-        );
-        assert_eq!(core.state.queue.current_id, Some(3));
-        assert_eq!(core.state.current_track().unwrap().id, 2);
-    }
-
-    #[test]
-    fn failed_queue_move_preserves_shared_snapshot_ownership() {
-        let (_directory, mut core) = fixture();
-        let before = core.state.queue.entries.clone();
-        let index = core.state.queue.entries.len();
-        let error = core
-            .command(Command::MoveQueue { queue_id: 1, index })
-            .unwrap_err();
-        assert!(error.to_string().contains("out of range"));
-        assert!(Arc::ptr_eq(&before, &core.state.queue.entries));
-    }
-
-    #[test]
-    fn enqueue_overflow_is_atomic() {
-        let (_directory, mut core) = fixture();
-        core.state.system.config = Arc::new(Config {
-            queue_limit: 6,
-            ..Config::default()
-        });
-        let before = core.state.queue.entries.clone();
-        let next_id = core.next_queue_id;
-        let error = core.enqueue(&[1, 2]).unwrap_err();
-        assert!(error.to_string().contains("Queue limit"));
-        assert_eq!(core.state.queue.entries.as_ref(), before.as_ref());
-        assert_eq!(core.next_queue_id, next_id);
+        assert!(matches!(core.view(&query), Ok(ViewResponse::QueueBatch(_))));
+        core.command(Command::EditTrack {
+            track_id: 2,
+            title: Some("Changed".into()),
+            artist: None,
+            album: None,
+        })
+        .unwrap();
+        assert!(matches!(
+            core.view(&query),
+            Err(QueryError::RevisionChanged)
+        ));
+        let state = core.state.query_revisions();
+        core.state.playback.position = 5.;
+        assert_eq!(core.state.query_revisions().queue, state.queue);
     }
 }

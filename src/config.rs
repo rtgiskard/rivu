@@ -145,8 +145,6 @@ pub struct Config {
     pub log_level: LogLevel,
     pub log_to_file: bool,
     pub log_retention_weeks: u32,
-    /// Maximum number of in-memory queue entries.
-    pub queue_limit: u32,
     /// Default number of rows fetched by GUI and TUI paginated views.
     pub page_size: u32,
     /// UI font family; defaults to sans-serif, including empty saved values.
@@ -236,7 +234,6 @@ impl Default for Config {
             log_level: LogLevel::Warning,
             log_to_file: false,
             log_retention_weeks: 4,
-            queue_limit: 4096,
             page_size: DEFAULT_PAGE_SIZE,
             ui_font: "sans-serif".to_owned(),
             ui_scale: 1.0,
@@ -373,11 +370,6 @@ impl Config {
             matches!(self.media_read_buffer_mb, 1 | 2 | 4 | 8 | 16),
             "playback.media_read_buffer_mb must be one of 1, 2, 4, 8, or 16 MiB; got {}",
             self.media_read_buffer_mb
-        );
-        ensure!(
-            (1..=4096).contains(&self.queue_limit),
-            "playback.queue_limit must be between 1 and 4096; got {}",
-            self.queue_limit
         );
         ensure!(
             (1..=520).contains(&self.log_retention_weeks),
@@ -750,7 +742,6 @@ mod tests {
             log_level: LogLevel::Debug,
             log_to_file: true,
             log_retention_weeks: 8,
-            queue_limit: 128,
             ui_font: "Noto Sans".to_owned(),
             ui_scale: 1.5,
             layout_snap_enabled: false,
@@ -1163,16 +1154,6 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         assert!(Config::load(directory.path()).is_err());
         directory.close().unwrap();
-    }
-    #[test]
-    fn queue_limit_must_be_bounded() {
-        for queue_limit in [0, 4097] {
-            let config = Config {
-                queue_limit,
-                ..Config::default()
-            };
-            assert!(config.validate().is_err());
-        }
     }
 
     #[test]

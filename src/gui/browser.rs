@@ -9,8 +9,9 @@
 #[path = "library/selection.rs"]
 mod selection;
 
+use super::queue::QueueSelection;
 use super::{
-    HistorySort, ListFocus, SelectionModel,
+    HistorySort, ListFocus,
     library::{DirectoryTree, LibraryNode, TreeBranch},
     paged::PagedRows,
     queries::ViewRequests,
@@ -673,55 +674,6 @@ impl PlaylistBrowser {
     }
 }
 
-#[derive(Default)]
-pub(super) struct QueueSelection {
-    selection: SelectionModel<u64>,
-}
-
-impl std::ops::Deref for QueueSelection {
-    type Target = SelectionModel<u64>;
-    fn deref(&self) -> &Self::Target {
-        &self.selection
-    }
-}
-
-impl QueueSelection {
-    pub(super) fn clear(&mut self) {
-        self.selection.clear();
-        self.selection.clear_anchor();
-    }
-
-    pub(super) fn select(&mut self, id: u64, multi: bool) {
-        if !multi {
-            self.selection.clear();
-        }
-        if multi && !self.selection.insert(id) {
-            self.selection.remove(&id);
-        } else if !multi {
-            self.selection.insert(id);
-        }
-        self.selection.set_anchor(id);
-    }
-
-    pub(super) fn select_range(
-        &mut self,
-        ids: impl IntoIterator<Item = u64>,
-        anchor: u64,
-        additive: bool,
-    ) {
-        if !additive {
-            self.selection.clear();
-        }
-        self.selection.extend(ids);
-        self.selection.set_anchor(anchor);
-    }
-
-    pub(super) fn reconcile(&mut self, valid: impl FnMut(&u64) -> bool) {
-        self.selection.retain(valid);
-        self.selection.clear_anchor();
-    }
-}
-
 pub(super) struct HistoryBrowser {
     source: Arc<Vec<HistoryEntry>>,
     indices: Vec<usize>,
@@ -1218,19 +1170,5 @@ mod tests {
         assert_eq!(playlists.selected(), None);
         assert_eq!(playlists.selected_entry(), None);
         assert_eq!(playlists.entries().playlist_id, None);
-    }
-
-    #[test]
-    fn queue_reconciliation_retains_selection_and_drops_obsolete_anchor() {
-        let mut queue = QueueSelection::default();
-        queue.select_range([1, 2, 3], 1, false);
-        queue.reconcile(|id| *id != 1);
-        assert!(!queue.contains(&1));
-        assert!(queue.contains(&2));
-        assert_eq!(queue.anchor(), None);
-        queue.select(2, true);
-        assert!(!queue.contains(&2));
-        queue.clear();
-        assert_eq!(queue.anchor(), None);
     }
 }

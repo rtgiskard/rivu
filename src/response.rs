@@ -1,7 +1,7 @@
 use crate::model::{
     Batch, ClientSnapshot, DirectoryRow, LibraryRootCount, LibraryRow, LibrarySnapshot,
     LibraryStats, Page, PlaybackState, PlaylistEntryCursor, PlaylistEntryRow, PlaylistSummary,
-    QueueState, SystemState, Track,
+    QueueCursor, QueueRow, QueueState, SystemState, Track,
 };
 use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc};
@@ -68,6 +68,7 @@ pub struct QueryRevisions {
     pub library: u64,
     pub structure: u64,
     pub playlist: u64,
+    pub queue: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -84,6 +85,9 @@ pub enum ViewResponse {
     PlaylistEntryBatch(Batch<PlaylistEntryRow, PlaylistEntryCursor>),
     LibraryRootCounts(Vec<LibraryRootCount>),
     ScanTask(crate::model::ScanTaskStatus),
+    QueuePage(Page<QueueRow>),
+    QueueBatch(Batch<QueueRow, QueueCursor>),
+    QueueEntries(Vec<QueueRow>),
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QueryError {

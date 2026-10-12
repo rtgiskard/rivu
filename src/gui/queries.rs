@@ -9,6 +9,7 @@ pub(super) enum ViewRequestKind {
     Summaries,
     Entries,
     Selection,
+    Queue,
 }
 
 impl ViewRequestKind {
@@ -166,6 +167,7 @@ impl GuiApp {
                             }
                         }
                         ViewRequestKind::Selection => this.request_playlist_selection(cx),
+                        ViewRequestKind::Queue => unreachable!("queue pages use their own worker"),
                     }
                     return;
                 }
@@ -419,6 +421,14 @@ impl GuiApp {
                 {
                     self.load_playlist_entries(id, offset, cx);
                 }
+            }
+            ViewRequestKind::Queue => {
+                self.browser.queue.rows.retry();
+                if self.browser.queue.busy {
+                    self.refresh_queue(cx);
+                }
+                let range = self.browser.queue.rows.visible();
+                self.ensure_queue_range(range, cx);
             }
             _ => {}
         }

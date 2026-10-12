@@ -561,12 +561,7 @@ impl Render for GuiApp {
             let is_queue = panel_kind == Some("queue");
             let is_waveform = panel_kind == Some("waveform");
             let is_audio_visualizer = panel_kind == Some("audio_visualizer");
-            let has_selected_queue = self
-                .state
-                .queue
-                .entries
-                .iter()
-                .any(|entry| self.browser.queue.contains(&entry.id));
+            let has_selected_queue = self.browser.queue.ready() && self.browser.queue.len() > 0;
             let mut menu = context_menu_container("panel-context-menu").on_mouse_down_out(
                 cx.listener(|this, _, _, cx| {
                     this.panel_menu = None;
@@ -877,7 +872,7 @@ impl Render for GuiApp {
                     menu = menu
                         .child(div().px(gpui::px(UI_INSET)).py_2().text_sm().child(format!(
                             "Clear all {} queued entries?",
-                            self.state.queue.entries.len()
+                            self.state.queue.total
                         )))
                         .child(
                             panels::caption("This also stops playback.")
@@ -926,14 +921,15 @@ impl Render for GuiApp {
                                     );
                                     return;
                                 }
-                                let mut track_ids = Vec::new();
-                                for entry in this.state.queue.entries.iter() {
-                                    if this.browser.queue.contains(&entry.id)
-                                        && !track_ids.contains(&entry.track_id)
-                                    {
-                                        track_ids.push(entry.track_id);
-                                    }
-                                }
+                                let mut seen = HashSet::new();
+                                let track_ids: Vec<_> = this
+                                    .browser
+                                    .queue
+                                    .ordered()
+                                    .iter()
+                                    .map(|row| row.track_id)
+                                    .filter(|id| seen.insert(*id))
+                                    .collect();
                                 if track_ids.is_empty() {
                                     return;
                                 }
@@ -982,16 +978,11 @@ impl Render for GuiApp {
                                                         cx,
                                                         move |this, _, cx| {
                                                             let track_ids = this
-                                                                .state
+                                                                .browser
                                                                 .queue
-                                                                .entries
+                                                                .ordered()
                                                                 .iter()
-                                                                .filter(|entry| {
-                                                                    this.browser
-                                                                        .queue
-                                                                        .contains(&entry.id)
-                                                                })
-                                                                .map(|entry| entry.track_id)
+                                                                .map(|row| row.track_id)
                                                                 .collect();
                                                             this.panel_menu = None;
                                                             this.send(

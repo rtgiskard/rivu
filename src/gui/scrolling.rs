@@ -91,6 +91,17 @@ impl ScrollViews {
         handle.clone()
     }
 
+    pub(super) fn scroll_list_to(&self, kind: &str, index: usize) {
+        for ((region_kind, _), region) in &self.regions {
+            if *region_kind == kind
+                && region.visible
+                && let Handle::List(handle) = &region.handle
+            {
+                handle.scroll_to_item(index, gpui::ScrollStrategy::Nearest);
+            }
+        }
+    }
+
     pub(super) fn content(&mut self, target: Target) -> ScrollHandle {
         let region = self.regions.entry(target).or_insert_with(|| Region {
             handle: Handle::Content(ScrollHandle::new()),

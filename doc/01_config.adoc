@@ -38,7 +38,7 @@ The old root-level format is no longer accepted. Rewrite it before starting
 Rivu; mixing old flat keys with grouped settings is also an error.
 
 * Move library fields to `[library]`; rename `library_roots` to `roots`.
-* Move volume, shuffle, repeat, queue limit, play-count threshold, output device,
+* Move volume, shuffle, repeat, play-count threshold, output device,
   media read buffer, FFmpeg enablement, and PipeWire auto-mix fields to
   `[playback]`, keeping their names.
 * Move page size, layout snapping, tray, and MPRIS fields to `[interface]`,
@@ -66,8 +66,7 @@ scanning. `library.scan_max_depth` defaults to `64` and must be at least `1`. Se
 link:02_library.adoc[Library] for root normalization, scan boundaries, and CUE/path
 rules.
 
-`playback.queue_limit` accepts `1`–`4096`; lowering it below the current queue length is
-rejected. `interface.page_size` accepts `20`–`256` and tunes internal GUI/TUI query batches,
+`interface.page_size` accepts `20`–`256` and tunes internal GUI/TUI query batches,
 not visible pages or CLI listing/export batches. Browsing scrolls continuously;
 query batch tuning stays in the configuration file, not desktop settings. Queue behavior is described in
 link:04_playback.adoc#_queue[Playback]; query and batch contracts in

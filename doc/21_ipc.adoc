@@ -8,6 +8,17 @@ that core; frontends do not maintain independent authoritative playback or
 library state. Audio output and analysis have their own workers, so client
 transport and rendering are outside the audio callback.
 
+Queue and playlist positions remain contiguous and zero-based. Deletion captures
+only removed positions before changing rows, then closes gaps in ascending,
+disjoint original-position intervals within the same transaction. Gap compaction
+updates each affected survivor at most once and leaves the preceding prefix alone;
+tail deletion requires no position updates. Library deletion applies this to its
+queue references and separately to each affected playlist. Temporary position
+storage scales with removed references, not the full surviving collections.
+Compaction executes one SQL update per contiguous run of deleted positions; the
+final suffix update may affect zero rows. Bounded-interval updates reuse a prepared
+statement, and these local executions do not add client IPC round trips.
+
 The GUI, tray, and MPRIS service use in-process handles and purpose-specific
 projections. CLI and TUI clients use the local IPC socket. Both paths reach the
 same command and query boundary. The GUI's shared analysis and waveform data
@@ -15,13 +26,13 @@ are in-process resources, not IPC state sections.
 
 Projections expose what a consumer needs without copying the whole library on
 each playback update. Library rows are queried separately; state reads contain
-summary information, the queue, playback, and system state. In-process
+summary information, compact queue state, playback, and system state. In-process
 projections can share immutable data, whereas socket responses serialize it.
 This avoids a second control implementation without making every consumer pay
 for a universal snapshot.
 
-Queue displays resolve metadata only from the snapshot's ID-sorted queue rows;
-unrelated library pages cannot substitute stale values. GUI history retains one
+Queue displays resolve metadata from bounded queue queries captured with their
+content revision; unrelated library pages cannot substitute stale values. GUI history retains one
 sorting index for the current immutable history and sort choice, rebuilding it
 on source or sort changes rather than during painting. Tree selection locations
 are updated when selection or accepted pages change, not on each viewport demand.
@@ -52,10 +63,10 @@ The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
 Bodies use Postcard serialization without COBS framing. The current protocol
-version is `8`; clients and servers must use matching wire schemas. The four-byte
+version is `9`; clients and servers must use matching wire schemas. The four-byte
 frame length remains little-endian; body integers follow Postcard's encoding.
 
-Request frame content is limited to 64 KiB
+Request frame content is limited to 4 MiB
 and response frame content to 16 MiB, including the version and message type but
 excluding the length prefix. The server accepts at most 16 concurrent clients;
 additional connections receive `IPC server is busy` and close. An unbound client
@@ -153,12 +164,12 @@ previous values; the client advances tokens only for sections actually read,
 otherwise it could acknowledge an unseen change. Notifications coalesce to the
 latest state. A server restart requires a fresh Hello and state read.
 
-Track metadata edits invalidate Queue only when a queued display row changes,
-and Playback only when the current track changes. Unrelated edits still advance
-Library, without forcing either section to be re-read. Queue rows contain one
-ID-sorted display record per distinct track, shared by duplicate queue entries.
-Last-played activity updates the current track and Library but does not invalidate
-Queue unless a displayed field, such as play count, also changes.
+The Queue state section is constant-size: `{total, current_id, current_position,
+revision}`. It never embeds all occurrence IDs or track metadata. Queue content
+and queued display-metadata edits advance its content revision; changing only the
+current occurrence updates the Queue state-section token without invalidating
+content pages. Unrelated track edits advance Library only. Last-played activity
+does not invalidate Queue unless a displayed field, such as play count, changes.
 
 Watch has no fixed expiry. A complete new request on that connection supersedes
 a pending Watch without a Watch response. The preserved input then becomes the
@@ -168,8 +179,8 @@ next request; disconnect or server shutdown terminates the wait.
 
 Query responses contain the requested projection and its data revisions, not a
 full client state or queue snapshot. Rows and query revisions come from the same
-core dispatch. Library-content, directory-structure, and playlist revisions are
-separate from the four state-section tokens. Command acknowledgements contain
+core dispatch. Library-content, directory-structure, playlist, and queue-content
+revisions are separate from the four state-section tokens. Command acknowledgements contain
 success or an error and the core's publication revision, not replacement state.
 
 Interactive pages return an exact filtered total and at most 256 rows; larger
@@ -177,6 +188,25 @@ limits are clamped, and `limit = 0` returns the count without rows. Offset pages
 do not reserve a snapshot across requests. Cursor batches avoid the total-count
 query and return a continuation only when more rows exist. They require a limit
 from 1 through 256 and reject zero or larger values.
+
+`QueuePage {offset, limit}` returns `Page<QueueRow>` in queue order. Each row is
+`{id, track_id, position, track}` with absolute zero-based position and `LibraryRow`
+display metadata. `QueueBatch {after, limit, expected}` uses a `{position,id}`
+cursor and validates only `expected.queue`; playback-only selection changes do not
+interrupt traversal. `QueueEntries {queue_ids}` resolves at most 256 occurrence IDs,
+omits removed IDs, deduplicates repeated IDs, and returns rows in queue order.
+The query response's `revisions.queue` is captured with the rows; clients discard
+late results if the active queue-content revision no longer matches.
+
+`EnqueueSources` expands directories and explicit track IDs directly in SQL with
+no total queue cap. `CreatePlaylistFromQueue {name}` atomically saves the complete
+queue as a playlist on the server, keeping each track's first occurrence order.
+Explicit ID selections remain bounded by request-frame bytes, not total queue size.
+The core retains only one private compact occurrence-ID vector (8 bytes per row,
+about 1.53 MiB for 200,000 occurrences); client state frames remain constant-size.
+
+Shuffle navigation retains at most 4096 successful occurrence starts for
+Previous; it does not maintain a nonrepeating shuffle cycle.
 
 `LibraryRootPage` returns the same display projection and filtered total as
 `LibraryPage`, scoped recursively to one root. It preserves the library's search,
@@ -251,9 +281,6 @@ the latest 32 terminal task results. Unknown or evicted IDs return a query error
 does not merge partial scan results. A failed wait never automatically replays
 the startup command.
 
-Version 8 adds task acknowledgements, queries, and cancellation; version 7 peers
-must be upgraded together.
-
 == Wire schemas
 
 Runtime `Config` and `SystemState` use explicit positional Wire schemas. They are
@@ -267,10 +294,8 @@ as omitted overrides inheriting their common setting.
 
 `EditTrack` carries optional title, artist, and album fields. `None` leaves a
 field untouched; `Some("")` explicitly overrides it with empty text. The core
-merges these field intents into the current track, rather than replacing it
-with a client snapshot. Version 7 changes these fields from required strings to
-options; version 6 clients and servers are incompatible and must be upgraded
-together.
+merges these field intents into the current track rather than replacing it
+with a client snapshot.
 
 The source of truth for exact schemas and adapters is
 link:../src/ipc/protocol.rs[protocol.rs];

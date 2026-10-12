@@ -2,7 +2,7 @@ use crate::{
     ipc,
     model::{
         ClientSnapshot, Command, DirectoryRow, LibraryRow, LibrarySort, PlaybackStatus,
-        PlaylistEntryRow, PlaylistSummary, Query, RepeatMode, playback_key_command,
+        PlaylistEntryRow, PlaylistSummary, Query, QueueRow, RepeatMode, playback_key_command,
     },
     projection::TuiSnapshot,
     response::{Ack, StateSections, ViewResponse},
@@ -250,6 +250,8 @@ fn spawn_command_worker(socket_path: &Path) -> CommandWorker {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum QueryKind {
+    Queue,
+    QueueSelection(u64),
     Search(String),
     Directory(PathBuf),
     Playlists,
@@ -265,6 +267,7 @@ struct QueryRequest {
     library_revision: u64,
     structure_revision: u64,
     playlist_revision: u64,
+    queue_revision: u64,
 }
 
 impl QueryRequest {
@@ -272,6 +275,10 @@ impl QueryRequest {
         let offset = self.offset;
         let limit = self.limit;
         match &self.kind {
+            QueryKind::Queue => Query::QueuePage { offset, limit },
+            QueryKind::QueueSelection(queue_id) => Query::QueueEntries {
+                queue_ids: vec![*queue_id],
+            },
             QueryKind::Search(query) => Query::LibraryPage {
                 query: Some(query.clone()),
                 favorite: None,
@@ -545,8 +552,11 @@ struct TuiState {
 impl TuiState {
     fn new(snapshot: TuiSnapshot) -> Self {
         let mut ui = UiState::default();
+        ui.queue.total = snapshot.queue.total;
+        ui.queue.loaded = true;
         ui.queue
-            .select((!snapshot.queue.entries.is_empty()).then_some(0));
+            .selection
+            .select((snapshot.queue.total != 0).then_some(0));
         Self { snapshot, ui }
     }
 
@@ -585,7 +595,7 @@ fn snapshot_message(previous: &TuiSnapshot, next: &TuiSnapshot) -> Option<String
             .current_track()
             .map(|track| format!("Now playing: {} — {}", track.artist, track.title));
     }
-    match next.queue.entries.len().cmp(&previous.queue.entries.len()) {
+    match next.queue.total.cmp(&previous.queue.total) {
         std::cmp::Ordering::Greater => Some("Added to queue".into()),
         std::cmp::Ordering::Less => Some("Removed from queue".into()),
         std::cmp::Ordering::Equal => None,
@@ -613,7 +623,9 @@ enum View {
 #[derive(Default)]
 struct UiState {
     view: View,
-    queue: ListState,
+    queue: PagedList<QueueRow>,
+    // Resolve the selected occurrence after edits before requesting its new viewport.
+    queue_anchor: Option<u64>,
     show_help: bool,
     message: Option<Notice>,
     requested: Option<QueryRequest>,
@@ -651,6 +663,10 @@ impl UiState {
     fn query_request(&self, state: &TuiSnapshot) -> Option<QueryRequest> {
         let limit = state.system.page_size as usize;
         let (kind, offset) = match &self.view {
+            View::Queue if state.queue.total != 0 => match self.queue_anchor {
+                Some(queue_id) => (QueryKind::QueueSelection(queue_id), 0),
+                None => (QueryKind::Queue, self.queue.next_offset(limit)?),
+            },
             View::Search(search) if search.ready(Instant::now()) => {
                 let offset = search.results.next_offset(limit)?;
                 (QueryKind::Search(search.query.clone()), offset)
@@ -674,6 +690,7 @@ impl UiState {
             library_revision: state.library.revision,
             structure_revision: state.library.structure_revision,
             playlist_revision: state.library.playlist_revision,
+            queue_revision: state.queue.revision,
         };
         if self.failed_request.as_ref() == Some(&request) {
             None
@@ -704,6 +721,9 @@ impl UiState {
             }
         };
         let revision_matches = match &request.kind {
+            QueryKind::Queue | QueryKind::QueueSelection(_) => {
+                result.revisions.queue == request.queue_revision
+            }
             QueryKind::Directory(_) => result.revisions.structure == request.structure_revision,
             QueryKind::Playlists | QueryKind::Playlist(_) => {
                 result.revisions.playlist == request.playlist_revision
@@ -715,6 +735,21 @@ impl UiState {
             return false;
         }
         match (&mut self.view, result.view) {
+            (View::Queue, ViewResponse::QueuePage(page)) if request.kind == QueryKind::Queue => {
+                self.queue
+                    .insert(request.offset, request.limit, page.total, page.rows);
+            }
+            (View::Queue, ViewResponse::QueueEntries(rows)) => {
+                if let QueryKind::QueueSelection(queue_id) = request.kind {
+                    if let Some(row) = rows.iter().find(|row| row.id == queue_id) {
+                        self.queue.selection.select(Some(row.position));
+                        self.queue.set_viewport(self.queue.viewport_rows);
+                    }
+                    self.queue_anchor = None;
+                } else {
+                    self.set_message(Some("Unexpected view response".into()));
+                }
+            }
             (View::Search(search), ViewResponse::LibraryPage(page)) => {
                 search
                     .results
@@ -769,20 +804,25 @@ impl UiState {
     }
 
     fn sync_queue(&mut self, previous: &TuiSnapshot, next: &TuiSnapshot) {
-        if Arc::ptr_eq(&previous.queue.entries, &next.queue.entries) {
+        if previous.queue.revision == next.queue.revision {
             return;
         }
-        let selected = self.queue.selected().unwrap_or(0);
-        let queue_id = previous.queue.entries.get(selected).map(|entry| entry.id);
-        let index = next
-            .queue
-            .entries
-            .iter()
-            .position(|entry| Some(entry.id) == queue_id);
-        self.queue.select(
-            (!next.queue.entries.is_empty())
-                .then(|| index.unwrap_or(selected.min(next.queue.entries.len() - 1))),
-        );
+        self.queue_anchor = self
+            .queue_anchor
+            .or_else(|| self.queue.selected().map(|row| row.id));
+        let selected = self.queue.selection.selected().unwrap_or(0);
+        self.queue.clear();
+        self.queue.total = next.queue.total;
+        self.queue.loaded = true;
+        self.queue
+            .selection
+            .select((next.queue.total != 0).then(|| selected.min(next.queue.total - 1)));
+        if next.queue.total == 0 {
+            self.queue_anchor = None;
+        }
+        self.queue.set_viewport(self.queue.viewport_rows);
+        self.requested = None;
+        self.failed_request = None;
     }
 
     fn invalidate_views(&mut self) {
@@ -990,22 +1030,17 @@ impl UiState {
             }
             View::Queue => {
                 changed = match key.code {
-                    KeyCode::Up | KeyCode::Down => move_selection(
-                        &mut self.queue,
-                        state.queue.entries.len(),
-                        key.code == KeyCode::Down,
-                    ),
-                    KeyCode::PageUp | KeyCode::PageDown => move_selection_page(
-                        &mut self.queue,
-                        state.queue.entries.len(),
-                        page_size,
-                        key.code == KeyCode::PageDown,
-                    ),
+                    KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => {
+                        let changed = self.queue.navigate(key.code, page_size);
+                        if changed {
+                            self.queue_anchor = None;
+                        }
+                        changed
+                    }
                     KeyCode::Enter => {
                         command = self
                             .queue
                             .selected()
-                            .and_then(|index| state.queue.entries.get(index))
                             .map(|entry| Command::PlayQueue { queue_id: entry.id });
                         false
                     }
@@ -1013,7 +1048,6 @@ impl UiState {
                         command = self
                             .queue
                             .selected()
-                            .and_then(|index| state.queue.entries.get(index))
                             .map(|entry| Command::RemoveQueue { queue_id: entry.id });
                         false
                     }
@@ -1432,7 +1466,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
             "↑/↓     select playlist\nPgUp/Dn scroll screen\nR       retry loading\n→       open playlist\nEnter   play playlist\nEsc     return to queue\nP       playlists\n/       search library\nt       browse library tree\nSpace   play/pause\nn/p       next/previous\nHome/End seek start/end\nr       repeat mode\ns       shuffle\n[/]     volume\nq       quit"
         }
         View::Queue => {
-            "↑/↓     select queue\nPgUp/Dn scroll screen\nEnter   play selected\nd/Del   remove selected\n/       search library\nt       browse library tree\nP       playlists\nSpace   play/pause\n←/→     seek 5 sec\nHome/End seek start/end\nr       repeat mode\ns       shuffle\n[/]     volume\nq       quit"
+            "↑/↓     select queue\nPgUp/Dn scroll screen\nR       retry loading\nEnter   play selected\nd/Del   remove selected\n/       search library\nt       browse library tree\nP       playlists\nSpace   play/pause\n←/→     seek 5 sec\nHome/End seek start/end\nr       repeat mode\ns       shuffle\n[/]     volume\nq       quit"
         }
     };
     if ui.show_help {
@@ -1446,7 +1480,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
         (state.playback.volume * 100.0).round() as u8,
         if state.playback.shuffle { "on" } else { "off" },
         repeat_label(state.playback.repeat),
-        state.queue.entries.len()
+        state.queue.total
     );
     let status_columns = Layout::default()
         .direction(Direction::Horizontal)
@@ -1472,55 +1506,44 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
     );
 }
 
-// Keep occurrence selection and scroll global; ratatui sees only the visible slice.
-fn queue_viewport(selection: &mut ListState, total: usize, rows: usize) -> std::ops::Range<usize> {
-    let mut offset = selection.offset().min(total.saturating_sub(rows));
-    if let Some(selected) = selection.selected() {
-        if selected < offset {
-            offset = selected;
-        } else if selected >= offset.saturating_add(rows) {
-            offset = selected.saturating_sub(rows.saturating_sub(1));
-        }
-    }
-    *selection.offset_mut() = offset;
-    offset..offset.saturating_add(rows).min(total)
-}
-
 fn draw_queue(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     state: &TuiSnapshot,
-    selection: &mut ListState,
+    queue: &mut PagedList<QueueRow>,
 ) {
-    let viewport_rows = area.height.saturating_sub(2) as usize;
-    let range = queue_viewport(selection, state.queue.entries.len(), viewport_rows);
-    let mut visible_selection = ListState::default().with_selected(
-        selection
-            .selected()
-            .and_then(|index| index.checked_sub(range.start)),
-    );
-    let items = range.map(|index| {
-        let entry = &state.queue.entries[index];
-        let marker = if state.queue.current_id == Some(entry.id) {
-            "▶ "
-        } else {
-            "  "
-        };
-        let title = state
-            .queue
-            .tracks
-            .binary_search_by_key(&entry.track_id, |track| track.id)
-            .ok()
-            .map(|index| &state.queue.tracks[index])
-            .map(|track| format!("{} — {}", track.artist, track.title))
-            .unwrap_or_else(|| "Missing track".into());
-        ListItem::new(Line::from(vec![Span::raw(marker), Span::raw(title)]))
-    });
-    let title = if state.queue.entries.is_empty() {
-        "Queue — empty; / to search, t to browse"
+    queue.set_viewport(area.height.saturating_sub(2) as usize);
+    let loading =
+        (queue.selection.offset()..queue.visible_end()).any(|index| queue.get(index).is_none());
+    let title = if state.queue.total == 0 {
+        "Queue — empty; / to search, t to browse".into()
     } else {
-        "Queue"
+        format!(
+            "Queue — {}/{}{}",
+            queue.selection.selected().unwrap_or(0) + 1,
+            state.queue.total,
+            if loading { " — loading" } else { "" },
+        )
     };
+    let items = (queue.selection.offset()..queue.visible_end()).map(|index| {
+        ListItem::new(queue.get(index).map_or_else(
+            || "…".into(),
+            |row| {
+                let marker = if state.queue.current_id == Some(row.id) {
+                    "▶ "
+                } else {
+                    "  "
+                };
+                format!("{marker}{} — {}", row.track.artist, row.track.title)
+            },
+        ))
+    });
+    let mut selection = ListState::default().with_selected(
+        queue
+            .selection
+            .selected()
+            .map(|index| index - queue.selection.offset()),
+    );
     frame.render_stateful_widget(
         List::new(items)
             .block(Block::default().title(title).borders(Borders::ALL))
@@ -1531,7 +1554,7 @@ fn draw_queue(
             )
             .highlight_symbol("> "),
         area,
-        &mut visible_selection,
+        &mut selection,
     );
 }
 fn draw_paged_list<T>(
@@ -1732,32 +1755,35 @@ mod tests {
     }
 
     #[test]
-    fn long_queue_renders_only_viewport_and_preserves_occurrence_on_updates() {
+    fn queue_pages_keep_global_navigation_and_duplicate_occurrence_actions() {
         let mut state = TuiSnapshot::default();
-        state.queue.entries = Arc::new(
-            (0..100_000)
-                .map(|id| crate::model::QueueEntry { id, track_id: 7 })
-                .collect(),
-        );
-        state.queue.tracks = Arc::new(vec![track(7)]);
+        state.queue.total = 200_000;
+        state.system.page_size = 3;
         let mut tui = TuiState::new(state.clone());
-        tui.ui.queue.select(Some(50_000));
-        *tui.ui.queue.offset_mut() = 49_999;
+        tui.ui.page_size = 4;
+        tui.ui.queue.selection.select(Some(50_000));
+        *tui.ui.queue.selection.offset_mut() = 49_999;
+        tui.ui.queue.set_viewport(4);
+        load_queue(&mut tui.ui, &state);
+        assert_eq!(tui.ui.queue.selection.selected(), Some(50_000));
+        assert_eq!(tui.ui.queue.selection.offset(), 49_999);
+        assert!(matches!(
+            tui.ui.key_action(KeyEvent::from(KeyCode::Enter), &state),
+            KeyAction::Command(Command::PlayQueue { queue_id: 51_000 })
+        ));
+        assert!(matches!(
+            tui.ui.key_action(KeyEvent::from(KeyCode::Delete), &state),
+            KeyAction::Command(Command::RemoveQueue { queue_id: 51_000 })
+        ));
+        // Every row refers to track 7, but the playing marker follows its occurrence.
+        state.queue.current_id = Some(51_000);
         state.playback.position = 42.;
         tui.apply_snapshot(state.clone());
-        assert_eq!(tui.ui.queue.selected(), Some(50_000));
-        assert_eq!(tui.ui.queue.offset(), 49_999);
-        assert_eq!(
-            queue_viewport(&mut tui.ui.queue, 100_000, 4),
-            49_999..50_003
-        );
-        state.queue.current_id = Some(50_000);
+        assert!(tui.ui.query_request(&state).is_none());
         let mut terminal = Terminal::new(TestBackend::new(60, 6)).unwrap();
         terminal
             .draw(|frame| draw_queue(frame, frame.area(), &state, &mut tui.ui.queue))
             .unwrap();
-        assert_eq!(tui.ui.queue.selected(), Some(50_000));
-        assert_eq!(tui.ui.queue.offset(), 49_999);
         let text: String = terminal
             .backend()
             .buffer()
@@ -1765,12 +1791,194 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect();
-        assert!(text.contains("▶ artist — row-7"));
-        Arc::make_mut(&mut state.queue.entries).remove(0);
+        assert_eq!(text.matches("▶ artist — row-7").count(), 1);
+        tui.ui.key_action(KeyEvent::from(KeyCode::PageDown), &state);
+        assert_eq!(tui.ui.queue.selection.selected(), Some(50_004));
+        tui.ui.key_action(KeyEvent::from(KeyCode::PageUp), &state);
+        tui.ui.key_action(KeyEvent::from(KeyCode::Up), &state);
+        tui.ui.key_action(KeyEvent::from(KeyCode::Down), &state);
+        assert_eq!(tui.ui.queue.selection.selected(), Some(50_000));
+        tui.ui.queue.selection.select(Some(199_999));
+        tui.ui.queue.set_viewport(4);
+        load_queue(&mut tui.ui, &state);
+        assert_eq!(tui.ui.queue.selected().unwrap().position, 199_999);
+        assert!(tui.ui.queue.pages.len() <= 4usize.div_ceil(3) + 3);
+        assert!(tui.ui.queue.pages.values().map(Vec::len).sum::<usize>() <= 15);
+    }
+
+    #[test]
+    fn queue_mutations_relocate_selected_occurrence_and_clamp_deleted_selection() {
+        let mut state = TuiSnapshot::default();
+        state.queue.total = 12;
+        state.system.page_size = 3;
+        let mut tui = TuiState::new(state.clone());
+        tui.ui.queue.selection.select(Some(8));
+        load_queue(&mut tui.ui, &state);
+        state.queue.total = 11;
+        state.queue.revision = 1;
+        tui.apply_snapshot(state.clone());
+        assert!(tui.ui.queue.pages.is_empty());
+        let request = tui.ui.query_request(&state).unwrap();
+        assert_eq!(request.kind, QueryKind::QueueSelection(1008));
+        assert!(
+            matches!(request.query(), Query::QueueEntries { queue_ids } if queue_ids == vec![1008])
+        );
+        let relocated = QueryResult {
+            revisions: QueryRevisions {
+                queue: 1,
+                ..QueryRevisions::default()
+            },
+            view: ViewResponse::QueueEntries(vec![queue_row(2, 1008)]),
+        };
+        assert!(tui.ui.apply_query(&state, &request, Ok(relocated)));
+        assert_eq!(tui.ui.queue.selection.selected(), Some(2));
+        let request = tui.ui.query_request(&state).unwrap();
+        assert_eq!(request.offset, 0);
+        let mut page = response(&request, state.queue.total);
+        let ViewResponse::QueuePage(rows) = &mut page.view else {
+            unreachable!()
+        };
+        rows.rows[2] = queue_row(2, 1008);
+        tui.ui.apply_query(&state, &request, Ok(page));
+        state.queue.total = 2;
+        state.queue.revision = 2;
+        tui.apply_snapshot(state.clone());
+        let request = tui.ui.query_request(&state).unwrap();
+        assert_eq!(request.kind, QueryKind::QueueSelection(1008));
+        tui.ui.apply_query(
+            &state,
+            &request,
+            Ok(QueryResult {
+                revisions: QueryRevisions {
+                    queue: 2,
+                    ..QueryRevisions::default()
+                },
+                view: ViewResponse::QueueEntries(Vec::new()),
+            }),
+        );
+        assert_eq!(tui.ui.queue.selection.selected(), Some(1));
+        load_queue(&mut tui.ui, &state);
+        state.queue.total = 0;
+        state.queue.revision = 3;
+        tui.apply_snapshot(state.clone());
+        assert_eq!(tui.ui.queue.selection.selected(), None);
+        assert!(tui.ui.query_request(&state).is_none());
+        assert!(matches!(
+            tui.ui.key_action(KeyEvent::from(KeyCode::Enter), &state),
+            KeyAction::Ignored
+        ));
+        let mut terminal = Terminal::new(TestBackend::new(60, 6)).unwrap();
+        terminal
+            .draw(|frame| draw_queue(frame, frame.area(), &state, &mut tui.ui.queue))
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("Queue — empty; / to search, t to browse"));
+    }
+
+    #[test]
+    fn queue_rejects_delayed_pages_and_selection_lookups_after_navigation() {
+        let mut state = TuiSnapshot::default();
+        state.queue.total = 30;
+        state.system.page_size = 3;
+        let mut tui = TuiState::new(state.clone());
+        let delayed = tui.ui.query_request(&state).unwrap();
+        assert!(matches!(
+            delayed.query(),
+            Query::QueuePage {
+                offset: 0,
+                limit: 3
+            }
+        ));
+        tui.ui.page_size = 8;
+        tui.ui.key_action(KeyEvent::from(KeyCode::PageDown), &state);
+        assert!(
+            !tui.ui
+                .apply_query(&state, &delayed, Ok(response(&delayed, 30)))
+        );
+        load_queue(&mut tui.ui, &state);
+        state.queue.revision = 1;
+        tui.apply_snapshot(state.clone());
+        let relocation = tui.ui.query_request(&state).unwrap();
+        tui.ui.key_action(KeyEvent::from(KeyCode::Down), &state);
+        assert!(!tui.ui.apply_query(
+            &state,
+            &relocation,
+            Ok(QueryResult {
+                revisions: QueryRevisions {
+                    queue: 1,
+                    ..QueryRevisions::default()
+                },
+                view: ViewResponse::QueueEntries(vec![queue_row(0, 1008)]),
+            })
+        ));
+        assert_eq!(tui.ui.queue.selection.selected(), Some(9));
+        let request = tui.ui.query_request(&state).unwrap();
+        let mut stale = response(&request, 30);
+        stale.revisions.queue = 0;
+        tui.ui.requested = Some(request.clone());
+        assert!(!tui.ui.apply_query(&state, &request, Ok(stale)));
+        assert!(tui.ui.queue.pages.is_empty());
+        assert!(tui.ui.requested.is_none());
+        assert!(
+            tui.ui
+                .apply_query(&state, &request, Err("queue unavailable".into()))
+        );
+        assert!(tui.ui.query_request(&state).is_none());
+        tui.ui
+            .key_action(KeyEvent::from(KeyCode::Char('R')), &state);
+        assert_eq!(tui.ui.query_request(&state), Some(request));
+        load_queue(&mut tui.ui, &state);
+    }
+
+    fn queue_row(position: usize, id: u64) -> QueueRow {
+        QueueRow {
+            id,
+            track_id: 7,
+            position,
+            track: track(7),
+        }
+    }
+
+    fn load_queue(ui: &mut UiState, state: &TuiSnapshot) {
+        for _ in 0..16 {
+            let Some(request) = ui.query_request(state) else {
+                return;
+            };
+            assert!(ui.apply_query(state, &request, Ok(response(&request, state.queue.total))));
+        }
+        panic!("queue viewport requests did not converge");
+    }
+
+    #[test]
+    fn empty_queue_addition_updates_count_message_and_waits_for_occurrence_rows() {
+        let mut state = TuiSnapshot::default();
+        let mut tui = TuiState::new(state.clone());
+        assert!(tui.ui.query_request(&state).is_none());
+        state.queue.total = 2;
+        state.queue.revision = 1;
+        tui.apply_snapshot(state.clone());
+        assert_eq!(tui.ui.queue.selection.selected(), Some(0));
+        assert_eq!(tui.ui.message.as_ref().unwrap().text, "Added to queue");
+        assert!(matches!(
+            tui.ui.key_action(KeyEvent::from(KeyCode::Delete), &state),
+            KeyAction::Ignored
+        ));
+        load_queue(&mut tui.ui, &state);
+        assert!(matches!(
+            tui.ui.key_action(KeyEvent::from(KeyCode::Delete), &state),
+            KeyAction::Command(Command::RemoveQueue { queue_id: 1000 })
+        ));
+        state.queue.total = 0;
+        state.queue.revision = 2;
         tui.apply_snapshot(state);
-        assert_eq!(tui.ui.queue.selected(), Some(49_999));
-        assert_eq!(tui.snapshot.queue.entries[49_999].id, 50_000);
-        assert_eq!(queue_viewport(&mut tui.ui.queue, 99_999, 4).len(), 4);
+        assert_eq!(tui.ui.message.as_ref().unwrap().text, "Removed from queue");
+        assert!(tui.ui.queue.pages.is_empty());
     }
 
     fn track(index: usize) -> LibraryRow {
@@ -1791,6 +1999,15 @@ mod tests {
     fn response(request: &QueryRequest, total: usize) -> QueryResult {
         let indices = request.offset..(request.offset + request.limit).min(total);
         let view = match &request.kind {
+            QueryKind::Queue => ViewResponse::QueuePage(Page {
+                total,
+                rows: indices
+                    .map(|position| queue_row(position, position as u64 + 1000))
+                    .collect(),
+            }),
+            QueryKind::QueueSelection(_) => {
+                panic!("selection lookups require an explicit position")
+            }
             QueryKind::Search(_) => ViewResponse::LibraryPage(Page {
                 total,
                 rows: indices.map(track).collect(),
@@ -1826,7 +2043,10 @@ mod tests {
             }),
         };
         QueryResult {
-            revisions: QueryRevisions::default(),
+            revisions: QueryRevisions {
+                queue: request.queue_revision,
+                ..QueryRevisions::default()
+            },
             view,
         }
     }
@@ -2117,7 +2337,7 @@ mod tests {
             complete_test_handshake(&mut stream);
             assert!(matches!(
                 read_test_query(&mut stream),
-                Query::PlaylistSummaries { offset: 0, .. }
+                Query::QueuePage { offset: 0, .. }
             ));
             started.send(()).unwrap();
             resume.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -2125,14 +2345,14 @@ mod tests {
                 if offset != 0 {
                     assert!(matches!(
                         read_test_query(&mut stream),
-                        Query::PlaylistSummaries { offset: 99, .. }
+                        Query::QueuePage { offset: 99, .. }
                     ));
                 }
                 reply_test_query(
                     &mut stream,
                     crate::response::QueryResponse {
                         revisions: QueryRevisions::default(),
-                        result: Ok(ViewResponse::PlaylistSummaries(crate::model::Page {
+                        result: Ok(ViewResponse::QueuePage(crate::model::Page {
                             total: 100,
                             rows: Vec::new(),
                         })),
@@ -2142,13 +2362,14 @@ mod tests {
         });
         let mut worker = spawn_query_worker(&socket);
         let request = QueryRequest {
-            kind: QueryKind::Playlists,
+            kind: QueryKind::Queue,
             offset: 0,
             limit: 20,
             view_revision: 0,
             library_revision: 0,
             structure_revision: 0,
             playlist_revision: 0,
+            queue_revision: 0,
         };
         worker.request(request.clone());
         active.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -2166,9 +2387,7 @@ mod tests {
         worker.worker.take().unwrap().join().unwrap();
         let (request, result) = worker.latest.lock().take().unwrap();
         assert_eq!(request.offset, 99);
-        assert!(
-            matches!(result.unwrap().view, ViewResponse::PlaylistSummaries(page) if page.total == 100)
-        );
+        assert!(matches!(result.unwrap().view, ViewResponse::QueuePage(page) if page.total == 100));
         server.join().unwrap();
     }
 

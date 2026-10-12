@@ -39,8 +39,36 @@ fn create_schema(conn: &Connection) -> Result<()> {
         );
         CREATE INDEX playlist_order ON playlist_entries(playlist_id,position,id);
         CREATE UNIQUE INDEX playlist_track ON playlist_entries(playlist_id,track_id);
-        CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
-        INSERT INTO schema_meta(key,value) VALUES('version',6);",
+        CREATE TABLE queue_entries(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+            position INTEGER NOT NULL
+        );
+        CREATE INDEX queue_order ON queue_entries(position,id);
+        CREATE INDEX queue_track ON queue_entries(track_id);
+        CREATE TABLE queue_meta(
+            singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+            current_id INTEGER REFERENCES queue_entries(id) ON DELETE SET NULL,
+            revision INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT INTO queue_meta(singleton) VALUES(1);
+        CREATE TRIGGER queue_insert AFTER INSERT ON queue_entries BEGIN
+            UPDATE queue_meta SET revision=revision+1;
+        END;
+        CREATE TRIGGER queue_delete AFTER DELETE ON queue_entries BEGIN
+            UPDATE queue_meta SET revision=revision+1;
+        END;
+        CREATE TRIGGER queue_move AFTER UPDATE OF position ON queue_entries
+        WHEN old.position<>new.position BEGIN
+            UPDATE queue_meta SET revision=revision+1;
+        END;
+        CREATE TRIGGER queue_metadata AFTER UPDATE OF raw_title,raw_artist,raw_album,
+            title_override,artist_override,album_override,duration,favorite,missing,
+            play_count,codec,bitrate_bps ON tracks
+        WHEN EXISTS(SELECT 1 FROM queue_entries WHERE track_id=new.id) BEGIN
+            UPDATE queue_meta SET revision=revision+1;
+        END;
+        INSERT INTO schema_meta(key,value) VALUES('version',7);",
     )?;
     tx.commit()?;
     Ok(())
@@ -74,7 +102,7 @@ impl Store {
                     |row| row.get(0),
                 )
                 .context("Unsupported library database; remove the old database and rescan")?;
-            if version != 6 {
+            if version != 7 {
                 bail!("Unsupported database version {version}; remove the old database and rescan");
             }
         }

@@ -10,6 +10,7 @@ mod metadata;
 mod paged;
 mod panels;
 mod queries;
+mod queue;
 mod scrolling;
 mod settings;
 mod shell;
@@ -24,11 +25,11 @@ use anyhow::Result;
 use ashpd::desktop::file_chooser::SelectedFiles;
 use browser::BrowserState;
 pub(super) use components::{
-    ButtonTooltip, DropdownItem, DropdownState, POPOVER_MAX_HEIGHT, SelectionModel, StatusKind,
-    TRACK_HEIGHT, active_control, artwork_preview, button, caption, context_menu_container,
-    drag_preview, dropdown_container, dropdown_row, dropdown_trigger, form_field, icon_button,
-    list_row, list_viewport, menu_item, metadata_item, panel_header, panel_surface, panel_toolbar,
-    row_text, section_group, sortable_header, status_message, toggle_button, tree_row, two_column,
+    ButtonTooltip, DropdownItem, DropdownState, POPOVER_MAX_HEIGHT, StatusKind, TRACK_HEIGHT,
+    active_control, artwork_preview, button, caption, context_menu_container, drag_preview,
+    dropdown_container, dropdown_row, dropdown_trigger, form_field, icon_button, list_row,
+    list_viewport, menu_item, metadata_item, panel_header, panel_surface, panel_toolbar, row_text,
+    section_group, sortable_header, status_message, toggle_button, tree_row, two_column,
 };
 use futures::{StreamExt, channel::mpsc};
 use gpui::{prelude::*, *};
@@ -208,6 +209,8 @@ impl Render for PanelDrag {
 #[derive(Clone, Copy)]
 pub(super) struct QueueDrag {
     pub(super) queue_id: u64,
+    pub(super) position: usize,
+    pub(super) revision: u64,
 }
 
 impl Render for QueueDrag {
@@ -390,40 +393,7 @@ impl GuiApp {
                 self.browser.library.invalidate_selection();
                 self.navigate_library_tree(down, cx);
             }
-            ListFocus::Queue => {
-                if self.state.queue.entries.is_empty() {
-                    return;
-                }
-                let current = self
-                    .browser
-                    .queue
-                    .anchor()
-                    .copied()
-                    .filter(|id| self.browser.queue.contains(id))
-                    .and_then(|id| {
-                        self.state
-                            .queue
-                            .entries
-                            .iter()
-                            .position(|entry| entry.id == id)
-                    })
-                    .or_else(|| {
-                        self.state
-                            .queue
-                            .entries
-                            .iter()
-                            .position(|entry| self.browser.queue.contains(&entry.id))
-                    });
-                let index = match current {
-                    Some(index) if down => (index + 1).min(self.state.queue.entries.len() - 1),
-                    Some(index) => index.saturating_sub(1),
-                    None if down => 0,
-                    None => self.state.queue.entries.len() - 1,
-                };
-                if let Some(entry) = self.state.queue.entries.get(index) {
-                    self.select_queue_entry(entry.id, false, false, cx);
-                }
-            }
+            ListFocus::Queue => self.navigate_queue(down, cx),
         }
     }
 
@@ -436,20 +406,7 @@ impl GuiApp {
                 self.activate_library_tree(cx);
             }
             ListFocus::Queue => {
-                let queue_id = self
-                    .browser
-                    .queue
-                    .anchor()
-                    .copied()
-                    .filter(|id| self.browser.queue.contains(id))
-                    .or_else(|| {
-                        self.state
-                            .queue
-                            .entries
-                            .iter()
-                            .find(|entry| self.browser.queue.contains(&entry.id))
-                            .map(|entry| entry.id)
-                    });
+                let queue_id = self.browser.queue.active().map(|row| row.id);
                 if let Some(queue_id) = queue_id {
                     self.send(Command::PlayQueue { queue_id }, cx);
                 }
@@ -461,14 +418,7 @@ impl GuiApp {
         if focus != ListFocus::Queue {
             return;
         }
-        let queue_ids = self
-            .state
-            .queue
-            .entries
-            .iter()
-            .filter(|entry| self.browser.queue.contains(&entry.id))
-            .map(|entry| entry.id)
-            .collect::<Vec<_>>();
+        let queue_ids = self.selected_queue_ids_in_order();
         if queue_ids.is_empty() {
             return;
         }
@@ -736,6 +686,7 @@ impl GuiApp {
         // Initialization may have completed before the wakeup callback was
         // installed. Reconcile once so the first frame never keeps the empty snapshot.
         app.refresh(cx);
+        app.refresh_queue(cx);
         app.layout_focus.focus(window, cx);
         window
             .observe_release(&cx.entity(), cx, |this: &mut Self, window, cx| {
@@ -759,16 +710,9 @@ impl GuiApp {
         cx.notify();
     }
     fn save_queue_as_playlist(&mut self, cx: &mut Context<Self>) {
-        if self.queue_save_pending || self.state.queue.entries.is_empty() {
+        if self.queue_save_pending || self.state.queue.total == 0 {
             return;
         }
-        let track_ids = self
-            .state
-            .queue
-            .entries
-            .iter()
-            .map(|entry| entry.track_id)
-            .collect();
         let name = format!("Queue {}", chrono::Local::now().format("%Y-%m-%d %H-%M-%S"));
         self.queue_save_pending = true;
         self.queue_save_feedback = None;
@@ -776,9 +720,7 @@ impl GuiApp {
         cx.spawn(async move |this, cx| {
             let ack = cx
                 .background_executor()
-                .spawn(async move {
-                    handle.request_ack(Command::CreatePlaylistWithTracks { name, track_ids })
-                })
+                .spawn(async move { handle.request_ack(Command::CreatePlaylistFromQueue { name }) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.queue_save_pending = false;
@@ -892,6 +834,7 @@ impl GuiApp {
         let error = match kind {
             ViewRequestKind::Summaries => self.browser.playlists.summaries().rows.error(index),
             ViewRequestKind::Entries => self.browser.playlists.entries().rows.error(index),
+            ViewRequestKind::Queue => self.browser.queue.rows.error(index),
             _ => None,
         };
         list_row(("loading-row", index), false)
@@ -932,60 +875,6 @@ impl GuiApp {
         } else {
             self.clear_metadata_selection(cx);
         }
-        self.sync_waveform(cx);
-        cx.notify();
-    }
-    fn select_queue_entry(&mut self, id: u64, shift: bool, multi: bool, cx: &mut Context<Self>) {
-        self.browser.library.invalidate_selection();
-        let Some(index) = self
-            .state
-            .queue
-            .entries
-            .iter()
-            .position(|entry| entry.id == id)
-        else {
-            return;
-        };
-        let track_id = self.state.queue.entries[index].track_id;
-        if shift {
-            let anchor = self
-                .browser
-                .queue
-                .anchor()
-                .copied()
-                .filter(|anchor| {
-                    self.state
-                        .queue
-                        .entries
-                        .iter()
-                        .any(|entry| entry.id == *anchor)
-                })
-                .unwrap_or(id);
-            let Some(anchor_index) = self
-                .state
-                .queue
-                .entries
-                .iter()
-                .position(|entry| entry.id == anchor)
-            else {
-                return;
-            };
-            let (start, end) = if anchor_index <= index {
-                (anchor_index, index)
-            } else {
-                (index, anchor_index)
-            };
-            self.browser.queue.select_range(
-                self.state.queue.entries[start..=end]
-                    .iter()
-                    .map(|entry| entry.id),
-                anchor,
-                multi,
-            );
-        } else {
-            self.browser.queue.select(id, multi);
-        }
-        self.request_track(track_id, cx);
         self.sync_waveform(cx);
         cx.notify();
     }
@@ -1061,7 +950,7 @@ impl GuiApp {
                 self.state.library.structure_revision != state.library.structure_revision;
             let playlist_changed =
                 self.state.library.playlist_revision != state.library.playlist_revision;
-            let queue_changed = !Arc::ptr_eq(&self.state.queue.entries, &state.queue.entries);
+            let queue_changed = self.state.queue.revision != state.queue.revision;
             let roots_changed =
                 self.state.system.config.library_roots != state.system.config.library_roots;
             let page_size_changed =
@@ -1107,15 +996,8 @@ impl GuiApp {
             if page_size_changed {
                 self.refresh_page_size(cx);
             }
-            if queue_changed {
-                let valid = self
-                    .state
-                    .queue
-                    .entries
-                    .iter()
-                    .map(|entry| entry.id)
-                    .collect::<HashSet<_>>();
-                self.browser.queue.reconcile(|id| valid.contains(id));
+            if queue_changed || page_size_changed {
+                self.refresh_queue(cx);
             }
             if library_changed || library_structure_changed {
                 self.request_root_counts(cx);

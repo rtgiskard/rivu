@@ -1,5 +1,4 @@
 mod dropdown;
-mod list;
 
 use super::{ACCENT, BORDER, GuiApp, HIGHLIGHT, PANEL, TEXT, UI_INSET};
 
@@ -11,7 +10,6 @@ pub(crate) const MENU_WIDTH: f32 = 260.0;
 pub(crate) const POPOVER_MAX_HEIGHT: f32 = 240.0;
 pub(crate) const DROPDOWN_ROW_REMS: f32 = 2.0;
 pub(crate) use dropdown::{DropdownItem, DropdownState};
-pub(crate) use list::SelectionModel;
 
 pub(super) fn visualization_status(message: impl Into<SharedString>) -> Div {
     div()

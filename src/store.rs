@@ -3,10 +3,11 @@
 
 mod cache;
 mod playlists;
+mod positions;
+mod queue;
 mod rows;
 mod scan;
 mod schema;
-mod settings;
 mod tracks;
 
 use anyhow::{Result, bail};

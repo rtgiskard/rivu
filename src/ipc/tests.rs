@@ -210,6 +210,7 @@ fn library_root_responses_wire_round_trip_preserves_projection_and_revisions() {
                 library: 5,
                 structure: 6,
                 playlist: 7,
+                queue: 8,
             },
             result: Ok(result),
         };
@@ -844,8 +845,8 @@ async fn cancelled_frame_reads_resume_from_every_partial_prefix_and_body() {
 
 #[test]
 fn maximum_sized_request_and_response_bodies_round_trip() {
-    // Two header bytes, one command discriminant, three string-length bytes.
-    let name = "x".repeat(MAX_REQUEST - 6);
+    // Two header bytes, one command discriminant, four string-length bytes.
+    let name = "x".repeat(MAX_REQUEST - 7);
     let mut encoded = Vec::new();
     encode_request_frame_into(
         &WireRequest::Command(WireCommand::CreatePlaylist { name }),
@@ -862,7 +863,7 @@ fn maximum_sized_request_and_response_bodies_round_trip() {
     else {
         panic!("expected create playlist request")
     };
-    assert_eq!(name.len(), MAX_REQUEST - 6);
+    assert_eq!(name.len(), MAX_REQUEST - 7);
 
     // Two header bytes and four string-length bytes.
     encode_response_frame_into(
@@ -1173,4 +1174,77 @@ fn simultaneous_starters_acquire_one_real_listener() {
         assert!(std::os::unix::net::UnixStream::connect(&socket).is_ok());
     });
     assert!(!socket.exists());
+}
+
+#[test]
+fn queue_queries_and_full_queue_playlist_commands_round_trip() {
+    use crate::model::QueueCursor;
+    for query in [
+        Query::QueuePage {
+            offset: 199_936,
+            limit: 256,
+        },
+        Query::QueueBatch {
+            after: Some(QueueCursor {
+                position: 255,
+                id: 1000,
+            }),
+            limit: 256,
+            expected: Some(crate::response::QueryRevisions {
+                queue: 42,
+                ..Default::default()
+            }),
+        },
+        Query::QueueEntries {
+            queue_ids: vec![1, 3, 3],
+        },
+    ] {
+        let expected = serde_json::to_value(&query).unwrap();
+        let mut encoded = Vec::new();
+        encode_request_frame_into(&WireRequest::Query(query.into()), &mut encoded).unwrap();
+        let WireRequest::Query(decoded) = decode_request_frame(&encoded[4..]).unwrap() else {
+            panic!("wrong response");
+        };
+        assert_eq!(
+            serde_json::to_value(Query::try_from(decoded).unwrap()).unwrap(),
+            expected
+        );
+    }
+    let command = Command::CreatePlaylistFromQueue {
+        name: "All occurrences".into(),
+    };
+    let expected = serde_json::to_value(&command).unwrap();
+    let mut encoded = Vec::new();
+    encode_request_frame_into(&WireRequest::Command(command.into()), &mut encoded).unwrap();
+    let WireRequest::Command(decoded) = decode_request_frame(&encoded[4..]).unwrap() else {
+        panic!("wrong response");
+    };
+    assert_eq!(
+        serde_json::to_value(Command::try_from(decoded).unwrap()).unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn large_explicit_occurrence_selections_fit_bounded_request_frames() {
+    let mut encoded = Vec::new();
+    encode_request_frame_into(
+        &WireRequest::Command(
+            Command::MoveQueueEntries {
+                queue_ids: (1..=200_000).collect(),
+                index: 0,
+            }
+            .into(),
+        ),
+        &mut encoded,
+    )
+    .unwrap();
+    assert!(encoded.len() < MAX_REQUEST);
+    let WireRequest::Command(decoded) = decode_request_frame(&encoded[4..]).unwrap() else {
+        panic!("wrong response");
+    };
+    let Command::MoveQueueEntries { queue_ids, .. } = Command::try_from(decoded).unwrap() else {
+        panic!("wrong command");
+    };
+    assert_eq!(queue_ids.len(), 200_000);
 }

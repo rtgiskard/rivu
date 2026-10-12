@@ -12,6 +12,11 @@ seconds; CLI volume is a percentage from 0 to 100.
 Repeat cycles Off, All, and One. Previous restarts the current entry when its
 position exceeds three seconds; at or before three seconds it navigates back,
 using playback history when shuffling.
+With Shuffle enabled, each Next independently chooses a queue occurrence with
+equal probability, including the current one. Immediate repeats are expected;
+duplicate occurrences increase their track's chances. Previous follows playback
+history; Next draws afresh even after Previous. Repeat One repeats the current
+occurrence at natural EOF but does not constrain explicit Next.
 CUE playback uses the original source without splitting or transcoding it.
 Positions and seeks are relative to the subtrack; pregap directives do not
 synthesize silence absent from the source.
@@ -63,18 +68,19 @@ link:01_config.adoc[Configuration].
 == Queue
 
 Queue entries are independent occurrences, so a track may appear more than once.
-Each occurrence counts toward `playback.queue_limit` (4096 by default). Oversized additions,
-directory expansions, and playlist loads are rejected without changing the queue.
-Saved queues restore valid occurrences in order up to the configured limit,
-preserving duplicates and skipping removed records.
-Queue order, removals, and the current occurrence are saved when they change,
-including single-occurrence commands from CLI and TUI.
+The full library can be enqueued without a queue-size cap.
+Queue order, removals, and the current occurrence persist transactionally in the
+library database. Restart preserves occurrence identities, duplicates, and order;
+clearing the queue does not reuse occurrence IDs. Later scans do not automatically
+append newly discovered tracks. Removing library tracks removes their queue and
+playlist references in the same database transaction.
 
 Use `rivu queue list` to find occurrence IDs for `queue play`, `queue remove`,
 and `queue move`. Move positions start at zero. `queue add TRACK_ID...` appends
-occurrences; `queue clear` empties the queue and stops playback. JSON output
-contracts: link:02_library.adoc#_cli_output[Library].
-Capacity settings: link:01_config.adoc[Configuration].
+occurrences; `queue clear` empties the queue and stops playback. `queue list --json`
+returns a streamed JSON array of occurrence rows with absolute zero-based positions
+and display metadata. Listings stop on concurrent queue content changes; repeat
+the listing to obtain a consistent new traversal.
 
 The Queue panel displays occurrences in order and marks the current occurrence.
 Click selects one row; Ctrl/Cmd toggles; Shift selects a contiguous range;

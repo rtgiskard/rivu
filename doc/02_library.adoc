@@ -222,7 +222,7 @@ Query limits, revisions, and batch contracts: link:21_ipc.adoc[IPC].
   an array of playlists with `id`, `name`, `entry_count`, and `entries`.
   See <<_paged_views,Paged views>> before consuming streamed output.
 * `library status` returns a state object with `revisions`, `playback`, `queue`,
-  `library`, and `system`. `queue list` requests only `queue`; `library history`
+  `library`, and `system`. `queue list` streams occurrence rows; `library history`
   requests only `library`; `library optimize` requests only `system`.
   Unrequested sections are `null`, not empty data.
 * Successful ordinary mutations return an acknowledgement with `ok`, `error`,
@@ -236,8 +236,8 @@ Query limits, revisions, and batch contracts: link:21_ipc.adoc[IPC].
 * `library stats` returns aggregate statistics; `library probe` returns metadata
   and decoder status; `playback devices` returns an array of device names.
 
-State responses contain the requested section, not just the requested list:
-read queue occurrences from `queue.entries` and history from `library.history`.
+Queue listings stream a JSON array of occurrence rows from bounded queries.
+History state responses contain the requested Library section; read `library.history`.
 History's `--limit` affects human output only. Protocol and query contracts are
 described in link:21_ipc.adoc[IPC].
 
@@ -260,6 +260,10 @@ it is not a per-play log. Timestamps are Unix seconds in JSON.
 For the JSON history shape and `--limit` behavior, see <<_cli_output,CLI output>>.
 
 == SQLite maintenance
+
+Rivu accepts version 7 library databases only; other schemas are not upgraded
+automatically. Stop the core and back up the database before replacing it or
+switching to a build with a different database schema.
 
 Stop the core before removing `library.db` and its `-wal`/`-shm` sidecars, then scan
 the music files again. This resets playlists, saved queue, favorites, metadata

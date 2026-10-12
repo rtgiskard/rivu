@@ -735,6 +735,7 @@ mod tests {
                         library: 7,
                         structure: 3,
                         playlist: 0,
+                        queue: 0,
                     },
                     result: Ok(ViewResponse::LibraryPage(Page {
                         total: 100,
@@ -768,6 +769,7 @@ mod tests {
                         library: 7,
                         structure: 3,
                         playlist: 0,
+                        queue: 0,
                     },
                     result: Ok(ViewResponse::LibraryPage(Page {
                         total: 100,
@@ -881,6 +883,7 @@ mod tests {
                                     library: 7,
                                     structure: 3,
                                     playlist: 0,
+                                    queue: 0,
                                 },
                                 result: Ok(ViewResponse::LibraryPage(Page {
                                     total: 3,
@@ -1040,6 +1043,7 @@ mod tests {
                             library: 7,
                             structure: 3,
                             playlist: 0,
+                            queue: 0,
                         },
                         result: Ok(ViewResponse::DirectoryPage(page)),
                     },
@@ -1125,6 +1129,7 @@ mod tests {
                         library: 7,
                         structure: 3,
                         playlist: 0,
+                        queue: 0,
                     },
                     result: Ok(ViewResponse::DirectoryPage(Page {
                         total: 4,
@@ -1173,6 +1178,7 @@ mod tests {
                         library: 7,
                         structure: 3,
                         playlist: 0,
+                        queue: 0,
                     },
                     result: Ok(ViewResponse::LibraryPage(Page {
                         total: 10_000,
@@ -1196,6 +1202,7 @@ mod tests {
                 library,
                 structure: 3,
                 playlist: 0,
+                queue: 0,
             },
             result: Ok(ViewResponse::LibraryPage(Page {
                 total: 10_000,
@@ -1401,6 +1408,7 @@ mod tests {
                         library: 7,
                         structure: 3,
                         playlist: 0,
+                        queue: 0,
                     },
                     result: Ok(ViewResponse::DirectoryPage(Page {
                         total: slice.total,
@@ -1468,6 +1476,7 @@ mod tests {
                         library: 7,
                         structure: 3,
                         playlist: 0,
+                        queue: 0,
                     },
                     result: Ok(ViewResponse::DirectoryPage(Page {
                         total: 1,

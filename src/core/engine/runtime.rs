@@ -168,84 +168,25 @@ impl Core {
     pub(in crate::core) fn track(&self, id: i64) -> Result<Track> {
         self.store.track(id)?.context("Track not found")
     }
-    pub(in crate::core) fn refresh_queue_rows(&mut self) -> Result<()> {
-        let mut ids = self
+    pub(in crate::core) fn refresh_queue_tracks(&mut self) -> Result<()> {
+        self.state.queue = self.store.queue_projection(self.queue_ids.len())?;
+        self.state.current_track = self
             .state
             .queue
-            .entries
-            .iter()
-            .map(|entry| entry.track_id)
-            .collect::<Vec<_>>();
-        ids.sort_unstable();
-        ids.dedup();
-        self.state.queue.tracks = Arc::new(self.store.queue_rows(&ids)?);
-        let current_track_id = self.state.queue.current_id.and_then(|id| {
-            self.state
-                .queue
-                .entries
-                .iter()
-                .find(|entry| entry.id == id)
-                .map(|entry| entry.track_id)
-        });
-        if self
-            .state
-            .current_track
-            .as_ref()
-            .is_some_and(|track| Some(track.id) != current_track_id)
-        {
-            self.state.current_track = None;
-        }
-        Ok(())
-    }
-    pub(in crate::core) fn refresh_queue_tracks(&mut self) -> Result<()> {
-        self.refresh_queue_rows()?;
-        let current_track_id = self.state.queue.current_id.and_then(|id| {
-            self.state
-                .queue
-                .entries
-                .iter()
-                .find(|entry| entry.id == id)
-                .map(|entry| entry.track_id)
-        });
-        self.state.current_track = current_track_id
+            .current_id
+            .map(|id| self.store.queue_track_id(id))
+            .transpose()?
             .map(|id| self.store.track(id))
             .transpose()?
             .flatten()
             .map(Arc::new);
         Ok(())
     }
-    /// Metadata edits keep unrelated queue rows and playback projections intact.
-    /// Queue rows remain ID-sorted and distinct even when entries repeat a track.
     pub(in crate::core) fn refresh_affected_queue_tracks(
         &mut self,
         track_ids: &[i64],
     ) -> Result<()> {
-        let mut queued_ids = track_ids
-            .iter()
-            .copied()
-            .filter(|id| {
-                self.state
-                    .queue
-                    .tracks
-                    .binary_search_by_key(id, |row| row.id)
-                    .is_ok()
-            })
-            .collect::<Vec<_>>();
-        queued_ids.sort_unstable();
-        queued_ids.dedup();
-        if !queued_ids.is_empty() {
-            for row in self.store.queue_rows(&queued_ids)? {
-                let index = self
-                    .state
-                    .queue
-                    .tracks
-                    .binary_search_by_key(&row.id, |row| row.id)
-                    .expect("affected row is already queued");
-                if self.state.queue.tracks[index] != row {
-                    Arc::make_mut(&mut self.state.queue.tracks)[index] = row;
-                }
-            }
-        }
+        self.state.queue = self.store.queue_projection(self.queue_ids.len())?;
         if let Some(current) = self.state.current_track.as_ref()
             && track_ids.contains(&current.id)
         {
@@ -258,6 +199,14 @@ impl Core {
     }
     pub(in crate::core) fn view(&self, query: &Query) -> Result<ViewResponse, QueryError> {
         let current = self.state.query_revisions();
+        if let Query::QueueBatch {
+            expected: Some(expected),
+            ..
+        } = query
+            && expected.queue != current.queue
+        {
+            return Err(QueryError::RevisionChanged);
+        }
         let (expected, playlist) = match query {
             Query::TrackBatch { expected, .. } => (*expected, false),
             Query::PlaylistSummaryBatch { expected, .. }
@@ -271,6 +220,15 @@ impl Core {
             return Err(QueryError::RevisionChanged);
         }
         Ok(match query {
+            Query::QueuePage { offset, limit } => {
+                ViewResponse::QueuePage(self.store.queue_page(*offset, *limit)?)
+            }
+            Query::QueueBatch { after, limit, .. } => {
+                ViewResponse::QueueBatch(self.store.queue_batch(*after, *limit)?)
+            }
+            Query::QueueEntries { queue_ids } => {
+                ViewResponse::QueueEntries(self.store.queue_entries(queue_ids)?)
+            }
             Query::ScanTask { id } => ViewResponse::ScanTask(
                 self.active_scan
                     .as_ref()

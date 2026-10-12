@@ -248,7 +248,7 @@ impl Player {
 
     fn play(&self) -> fdo::Result<()> {
         let state = self.handle.mpris_snapshot();
-        if state.queue.entries.is_empty() || state.playback.status == PlaybackStatus::Playing {
+        if state.queue.total == 0 || state.playback.status == PlaybackStatus::Playing {
             return Ok(());
         }
         request(&self.handle, Command::Resume).map(|_| ())
@@ -410,7 +410,7 @@ impl Player {
 
     #[zbus(property)]
     fn can_play(&self) -> bool {
-        !self.handle.mpris_snapshot().queue.entries.is_empty()
+        self.handle.mpris_snapshot().queue.total != 0
     }
 
     #[zbus(property)]
@@ -467,7 +467,7 @@ fn can_seek(state: &MprisSnapshot) -> bool {
 }
 
 fn can_go_next(state: &MprisSnapshot) -> bool {
-    if state.queue.entries.is_empty() {
+    if state.queue.total == 0 {
         return false;
     }
     if state.playback.shuffle || state.playback.repeat == RepeatMode::All {
@@ -475,13 +475,12 @@ fn can_go_next(state: &MprisSnapshot) -> bool {
     }
     state
         .queue
-        .current_id
-        .and_then(|id| state.queue.entries.iter().position(|entry| entry.id == id))
-        .is_none_or(|index| index + 1 < state.queue.entries.len())
+        .current_position
+        .is_none_or(|index| index + 1 < state.queue.total)
 }
 
 fn can_go_previous(state: &MprisSnapshot) -> bool {
-    if state.queue.entries.is_empty() {
+    if state.queue.total == 0 {
         return false;
     }
     // A loaded track can restart; with stopped playback the first queue
@@ -490,11 +489,7 @@ fn can_go_previous(state: &MprisSnapshot) -> bool {
     if can_seek(state) || state.playback.shuffle {
         return true;
     }
-    state
-        .queue
-        .current_id
-        .and_then(|id| state.queue.entries.iter().position(|entry| entry.id == id))
-        .is_none_or(|index| index > 0)
+    state.queue.current_position.is_none_or(|index| index > 0)
 }
 
 fn microseconds(seconds: f64) -> i64 {
@@ -677,8 +672,7 @@ fn publish_changes(
     // Arc comparisons avoid rebuilding metadata on ordinary audio clock ticks.
     if previous.queue.current_id != current.queue.current_id
         || previous.playback.duration != current.playback.duration
-        || !Arc::ptr_eq(&previous.queue.tracks, &current.queue.tracks)
-        || !Arc::ptr_eq(&previous.queue.entries, &current.queue.entries)
+        || previous.queue.revision != current.queue.revision
     {
         let next = TrackMetadata::from_snapshot(current, artwork);
         if *metadata != next {
@@ -692,7 +686,7 @@ fn publish_changes(
         || previous.playback.status != current.playback.status
         || previous.playback.shuffle != current.playback.shuffle
         || previous.playback.repeat != current.playback.repeat
-        || !Arc::ptr_eq(&previous.queue.entries, &current.queue.entries)
+        || previous.queue != current.queue
     {
         for (name, before, after) in [
             ("CanGoNext", can_go_next(previous), can_go_next(current)),
@@ -709,14 +703,13 @@ fn publish_changes(
     }
     if previous.queue.current_id != current.queue.current_id
         || previous.playback.status != current.playback.status
-        || !Arc::ptr_eq(&previous.queue.tracks, &current.queue.tracks)
-        || !Arc::ptr_eq(&previous.queue.entries, &current.queue.entries)
+        || previous.queue != current.queue
     {
         for (name, before, after) in [
             (
                 "CanPlay",
-                !previous.queue.entries.is_empty(),
-                !current.queue.entries.is_empty(),
+                previous.queue.total != 0,
+                current.queue.total != 0,
             ),
             ("CanPause", can_pause(previous), can_pause(current)),
             ("CanSeek", can_seek(previous), can_seek(current)),
@@ -764,7 +757,7 @@ fn publish_changes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{PlaybackState, QueueEntry, QueueState, Track};
+    use crate::model::{PlaybackState, QueueState, Track};
     use std::path::PathBuf;
 
     fn track(id: i64) -> Track {
@@ -801,9 +794,10 @@ mod tests {
         current.fingerprint = Some("original".into());
         let mut state = MprisSnapshot {
             queue: QueueState {
-                entries: Arc::new(vec![QueueEntry { id: 1, track_id: 7 }]),
+                total: 1,
                 current_id: Some(1),
-                tracks: Arc::new(Vec::new()),
+                current_position: Some(0),
+                revision: 0,
             },
             current_track: Some(Arc::new(current)),
             playback: PlaybackState::default(),
@@ -830,9 +824,8 @@ mod tests {
     fn can_pause_requires_a_valid_current_track() {
         let mut state = MprisSnapshot {
             queue: QueueState {
-                entries: Arc::new(vec![QueueEntry { id: 1, track_id: 7 }]),
-                current_id: None,
-                tracks: Arc::new(Vec::new()),
+                total: 1,
+                ..QueueState::default()
             },
             current_track: None,
             playback: PlaybackState::default(),
@@ -843,10 +836,12 @@ mod tests {
         state.queue.current_id = Some(1);
         assert!(!can_pause(&state));
 
+        state.queue.current_position = Some(0);
         state.current_track = Some(Arc::new(track(7)));
         assert!(can_pause(&state));
 
         state.queue.current_id = Some(2);
+        state.queue.current_position = None;
         assert!(!can_pause(&state));
     }
     #[test]

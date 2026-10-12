@@ -40,21 +40,8 @@ impl Core {
     }
 
     fn save_queue(&mut self) -> Result<()> {
-        if self.saved_queue.as_ref().is_none_or(|saved| {
-            !Arc::ptr_eq(&saved.entries, &self.state.queue.entries)
-                || saved.current != self.state.queue.current_id
-        }) {
-            let saved = SavedRef {
-                queue: self.state.queue.entries.as_slice(),
-                current: self.state.queue.current_id,
-            };
-            self.store
-                .set_setting("playback", &serde_json::to_string(&saved)?)?;
-            self.saved_queue = Some(SavedQueue {
-                entries: Arc::clone(&self.state.queue.entries),
-                current: self.state.queue.current_id,
-            });
-        }
+        self.store.set_queue_current(self.state.queue.current_id)?;
+        self.state.queue = self.store.queue_projection(self.queue_ids.len())?;
         Ok(())
     }
 
@@ -122,31 +109,7 @@ impl Core {
 
     pub(in crate::core) fn update_track_stats(&mut self, track_id: i64) -> Result<()> {
         let track = self.store.track(track_id)?.context("Track not found")?;
-        if let Ok(index) = self
-            .state
-            .queue
-            .tracks
-            .binary_search_by_key(&track_id, |row| row.id)
-        {
-            let row = &self.state.queue.tracks[index];
-            if row.title != track.title
-                || row.artist != track.artist
-                || row.album != track.album
-                || row.duration != track.duration
-                || row.favorite != track.favorite
-                || row.missing != track.missing
-                || row.play_count != track.play_count
-            {
-                let row = &mut Arc::make_mut(&mut self.state.queue.tracks)[index];
-                row.title.clone_from(&track.title);
-                row.artist.clone_from(&track.artist);
-                row.album.clone_from(&track.album);
-                row.duration = track.duration;
-                row.favorite = track.favorite;
-                row.missing = track.missing;
-                row.play_count = track.play_count;
-            }
-        }
+        self.state.queue = self.store.queue_projection(self.queue_ids.len())?;
         if self
             .state
             .current_track

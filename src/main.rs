@@ -366,42 +366,7 @@ fn run() -> Result<()> {
             }
             Ok(())
         }
-        Action::Queue(QueueAction::List) => {
-            let response = ipc::get_state(
-                &socket,
-                StateSections {
-                    queue: true,
-                    ..StateSections::default()
-                },
-            )?;
-            if args.json {
-                return show_state(&response, true);
-            }
-            let queue = response
-                .queue
-                .as_ref()
-                .context("State omitted queue section")?;
-            for (index, entry) in queue.entries.iter().enumerate() {
-                let title = queue
-                    .tracks
-                    .iter()
-                    .find(|t| t.id == entry.track_id)
-                    .map_or("Missing track", |t| t.title.as_str());
-                println!(
-                    "{}\t{}\t{}\t{}{}",
-                    index,
-                    entry.id,
-                    entry.track_id,
-                    title,
-                    if queue.current_id == Some(entry.id) {
-                        " *"
-                    } else {
-                        ""
-                    }
-                );
-            }
-            Ok(())
-        }
+        Action::Queue(QueueAction::List) => list_queue(&socket, args.json),
         Action::Playlist(PlaylistAction::List) => list_playlists(&socket, args.json),
         Action::Library(LibraryAction::Edit {
             track_id,
@@ -498,6 +463,71 @@ fn run() -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn list_queue(socket: &Path, json: bool) -> Result<()> {
+    let mut session = ipc::client_session(socket)?;
+    let state = session.get_state(StateSections {
+        queue: true,
+        ..StateSections::default()
+    })?;
+    let current = state
+        .queue
+        .context("State omitted queue section")?
+        .current_id;
+    let mut after = None;
+    let mut expected = None;
+    let stdout = io::stdout();
+    let mut output = stdout.lock();
+    let mut first = true;
+    if json {
+        write!(output, "[")?;
+    }
+    loop {
+        let response = session.query(&Query::QueueBatch {
+            after,
+            limit: MAX_QUERY_ROWS,
+            expected,
+        })?;
+        expected.get_or_insert(response.revisions);
+        let view = match listing_result(response.result)? {
+            Some(view) => view,
+            None => return Ok(()),
+        };
+        let ViewResponse::QueueBatch(batch) = view else {
+            bail!("Queue query returned an unexpected response");
+        };
+        for row in &batch.rows {
+            if json {
+                if !first {
+                    write!(output, ",")?;
+                }
+                serde_json::to_writer(&mut output, row)?;
+                first = false;
+            } else {
+                writeln!(
+                    output,
+                    "{}\t{}\t{}\t{}{}",
+                    row.position,
+                    row.id,
+                    row.track_id,
+                    row.track.title,
+                    if current == Some(row.id) { " *" } else { "" }
+                )?;
+            }
+        }
+        let Some(next) = batch.next else {
+            break;
+        };
+        if batch.rows.is_empty() || after == Some(next) {
+            bail!("Queue query returned a non-progressing cursor");
+        }
+        after = Some(next);
+    }
+    if json {
+        writeln!(output, "]")?;
+    }
+    Ok(())
 }
 
 fn list_library(
@@ -731,10 +761,7 @@ fn show_state(response: &StateResponse, json: bool) -> Result<()> {
             playback.playback.volume * 100.0
         );
     } else {
-        let queued = response
-            .queue
-            .as_ref()
-            .map_or(0, |queue| queue.entries.len());
+        let queued = response.queue.as_ref().map_or(0, |queue| queue.total);
         println!(
             "{status} · {} tracks · {} queued",
             library.track_total, queued

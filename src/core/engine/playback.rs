@@ -2,14 +2,7 @@ use super::*;
 
 impl Core {
     pub(in crate::core) fn start(&mut self, queue_id: u64, record_history: bool) -> Result<()> {
-        let entry = self
-            .state
-            .queue
-            .entries
-            .iter()
-            .find(|entry| entry.id == queue_id)
-            .context("Queue entry not found")?;
-        let track = self.track(entry.track_id)?;
+        let track = self.track(self.store.queue_track_id(queue_id)?)?;
         if !track.path.is_file() {
             bail!("Missing audio file: {}", track.path.display());
         }
@@ -41,17 +34,8 @@ impl Core {
         self.state.playback.status = PlaybackStatus::Playing;
         self.state.system.last_error = None;
         if record_history {
-            self.played.truncate(self.played_cursor);
-            self.played.push(queue_id);
-            self.played_cursor = self.played.len();
-            let keep = self.state.system.config.queue_limit as usize;
-            if self.played.len() > keep {
-                let drop_count = self.played.len() - keep;
-                self.played.drain(..drop_count);
-                self.played_cursor = self.played_cursor.saturating_sub(drop_count);
-            }
+            self.record_queue_history(queue_id);
         }
-        self.shuffle_bag.retain(|id| *id != queue_id);
         self.save(false)
     }
     pub(in crate::core) fn count_play(&mut self) -> Result<()> {
@@ -233,7 +217,7 @@ impl Core {
         self.finish_playback(snapshot, false)
     }
     pub(in crate::core) fn advance(&mut self, natural: bool) -> Result<()> {
-        if self.state.queue.entries.is_empty() {
+        if self.queue_ids.is_empty() {
             return self.stop();
         }
         let current = self.state.queue.current_id;
@@ -244,56 +228,19 @@ impl Core {
             return self.start(id, true);
         }
         if self.state.playback.shuffle {
-            if !natural && self.played_cursor < self.played.len() {
-                let id = self.played[self.played_cursor];
-                self.start(id, false)?;
-                self.played_cursor += 1;
-                return Ok(());
-            }
-            if self.shuffle_bag.is_empty() {
-                let visited = self
-                    .played
-                    .iter()
-                    .copied()
-                    .collect::<std::collections::HashSet<_>>();
-                self.shuffle_bag = self
-                    .state
-                    .queue
-                    .entries
-                    .iter()
-                    .filter(|q| Some(q.id) != current && !visited.contains(&q.id))
-                    .map(|q| q.id)
-                    .collect();
-                if self.shuffle_bag.is_empty() && self.state.playback.repeat == RepeatMode::All {
-                    self.played.clear();
-                    self.played_cursor = 0;
-                    self.shuffle_bag = self
-                        .state
-                        .queue
-                        .entries
-                        .iter()
-                        .filter(|q| Some(q.id) != current)
-                        .map(|q| q.id)
-                        .collect();
-                    if self.shuffle_bag.is_empty() {
-                        self.shuffle_bag = self.state.queue.entries.iter().map(|q| q.id).collect();
-                    }
-                }
-                self.shuffle_bag.shuffle(&mut rand::rng());
-            }
-            if let Some(&id) = self.shuffle_bag.last() {
-                return self.start(id, true);
-            }
-        } else {
-            let index =
-                current.and_then(|id| self.state.queue.entries.iter().position(|q| q.id == id));
-            let next = index.map_or(0, |index| index + 1);
-            if let Some(entry) = self.state.queue.entries.get(next) {
-                return self.start(entry.id, true);
-            }
-            if self.state.playback.repeat == RepeatMode::All {
-                return self.start(self.state.queue.entries[0].id, true);
-            }
+            // Every Next is an independent draw over occurrences, including current.
+            let id = self
+                .random_queue_id(&mut rand::rng())
+                .expect("queue is nonempty");
+            return self.start(id, true);
+        }
+        let index = self.state.queue.current_position;
+        let next = index.map_or(0, |index| index + 1);
+        if let Some(id) = self.queue_ids.get(next).copied() {
+            return self.start(id, true);
+        }
+        if self.state.playback.repeat == RepeatMode::All {
+            return self.start(self.queue_ids[0], true);
         }
         self.stop()
     }
@@ -314,19 +261,15 @@ impl Core {
             self.played_cursor = index + 1;
             return Ok(());
         }
-        let index = self
-            .state
-            .queue
-            .current_id
-            .and_then(|id| self.state.queue.entries.iter().position(|q| q.id == id));
+        let index = self.state.queue.current_position;
         if let Some(index) = index {
             if index > 0 {
-                return self.start(self.state.queue.entries[index - 1].id, true);
+                return self.start(self.queue_ids[index - 1], true);
             }
             return self.seek(0.0);
         }
-        if let Some(entry) = self.state.queue.entries.first() {
-            return self.start(entry.id, true);
+        if let Some(id) = self.queue_ids.first().copied() {
+            return self.start(id, true);
         }
         bail!("Queue is empty")
     }

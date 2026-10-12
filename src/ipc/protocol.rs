@@ -6,8 +6,8 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub(super) const PROTOCOL_VERSION: u8 = 8;
-pub(super) const MAX_REQUEST: usize = 64 * 1024;
+pub(super) const PROTOCOL_VERSION: u8 = 9;
+pub(super) const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub(super) const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub(super) const MAX_CLIENTS: usize = 16;
 pub(super) const HELLO_TIMEOUT: Duration = Duration::from_secs(1);
@@ -155,6 +155,18 @@ pub(super) enum WireQuery {
     ScanTask {
         id: u64,
     },
+    QueuePage {
+        offset: u64,
+        limit: u64,
+    },
+    QueueBatch {
+        after: Option<crate::model::QueueCursor>,
+        limit: u64,
+        expected: Option<crate::response::QueryRevisions>,
+    },
+    QueueEntries {
+        queue_ids: Vec<u64>,
+    },
 }
 
 /// Binary command wire format. Variant order is a protocol contract; append only.
@@ -291,6 +303,9 @@ pub(super) enum WireCommand {
     CancelScan {
         id: u64,
     },
+    CreatePlaylistFromQueue {
+        name: String,
+    },
 }
 
 pub(super) fn wire_usize(value: u64, field: &str) -> Result<usize> {
@@ -410,6 +425,20 @@ impl From<Query> for WireQuery {
             },
             Query::LibraryRootCounts { roots } => Self::LibraryRootCounts { roots },
             Query::ScanTask { id } => Self::ScanTask { id },
+            Query::QueuePage { offset, limit } => Self::QueuePage {
+                offset: offset as u64,
+                limit: limit as u64,
+            },
+            Query::QueueBatch {
+                after,
+                limit,
+                expected,
+            } => Self::QueueBatch {
+                after,
+                limit: limit as u64,
+                expected,
+            },
+            Query::QueueEntries { queue_ids } => Self::QueueEntries { queue_ids },
         }
     }
 }
@@ -529,6 +558,20 @@ impl TryFrom<WireQuery> for Query {
             },
             WireQuery::LibraryRootCounts { roots } => Self::LibraryRootCounts { roots },
             WireQuery::ScanTask { id } => Self::ScanTask { id },
+            WireQuery::QueuePage { offset, limit } => Self::QueuePage {
+                offset: wire_usize(offset, "offset")?,
+                limit: wire_usize(limit, "limit")?,
+            },
+            WireQuery::QueueBatch {
+                after,
+                limit,
+                expected,
+            } => Self::QueueBatch {
+                after,
+                limit: wire_usize(limit, "limit")?,
+                expected,
+            },
+            WireQuery::QueueEntries { queue_ids } => Self::QueueEntries { queue_ids },
         })
     }
 }
@@ -637,6 +680,7 @@ impl From<Command> for WireCommand {
             },
             Command::MprisStatus { status } => Self::MprisStatus { status },
             Command::Shutdown => Self::Shutdown,
+            Command::CreatePlaylistFromQueue { name } => Self::CreatePlaylistFromQueue { name },
         }
     }
 }
@@ -747,6 +791,7 @@ impl TryFrom<WireCommand> for Command {
             },
             WireCommand::MprisStatus { status } => Self::MprisStatus { status },
             WireCommand::Shutdown => Self::Shutdown,
+            WireCommand::CreatePlaylistFromQueue { name } => Self::CreatePlaylistFromQueue { name },
         })
     }
 }
@@ -793,7 +838,6 @@ pub(super) struct WireConfig {
     log_level: crate::config::LogLevel,
     log_to_file: bool,
     log_retention_weeks: u32,
-    queue_limit: u32,
     page_size: u32,
     ui_font: String,
     ui_scale: f32,
@@ -868,7 +912,6 @@ impl From<&crate::config::Config> for WireConfig {
             log_level: value.log_level,
             log_to_file: value.log_to_file,
             log_retention_weeks: value.log_retention_weeks,
-            queue_limit: value.queue_limit,
             page_size: value.page_size,
             ui_font: value.ui_font.clone(),
             ui_scale: value.ui_scale,
@@ -945,7 +988,6 @@ impl From<WireConfig> for crate::config::Config {
             log_level: value.log_level,
             log_to_file: value.log_to_file,
             log_retention_weeks: value.log_retention_weeks,
-            queue_limit: value.queue_limit,
             page_size: value.page_size,
             ui_font: value.ui_font,
             ui_scale: value.ui_scale,

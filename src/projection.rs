@@ -178,11 +178,7 @@ impl MprisSnapshot {
 
     pub fn current_track(&self) -> Option<&Track> {
         let track = self.current_track.as_deref()?;
-        self.queue
-            .entries
-            .iter()
-            .any(|entry| Some(entry.id) == self.queue.current_id && entry.track_id == track.id)
-            .then_some(track)
+        (self.queue.current_id.is_some() && self.queue.current_position.is_some()).then_some(track)
     }
 }
 
