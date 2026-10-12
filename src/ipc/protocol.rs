@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub(super) const PROTOCOL_VERSION: u8 = 5;
+pub(super) const PROTOCOL_VERSION: u8 = 6;
 pub(super) const MAX_REQUEST: usize = 64 * 1024;
 pub(super) const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub(super) const MAX_CLIENTS: usize = 16;
@@ -139,6 +139,18 @@ pub(super) enum WireQuery {
         after: Option<crate::model::PlaylistEntryCursor>,
         limit: u64,
         expected: Option<crate::response::QueryRevisions>,
+    },
+    LibraryRootPage {
+        path: PathBuf,
+        query: Option<String>,
+        favorite: Option<bool>,
+        missing: Option<bool>,
+        sort: crate::model::LibrarySort,
+        offset: u64,
+        limit: u64,
+    },
+    LibraryRootCounts {
+        roots: Vec<PathBuf>,
     },
 }
 
@@ -373,6 +385,24 @@ impl From<Query> for WireQuery {
                 limit: limit as u64,
                 expected,
             },
+            Query::LibraryRootPage {
+                path,
+                query,
+                favorite,
+                missing,
+                sort,
+                offset,
+                limit,
+            } => Self::LibraryRootPage {
+                path,
+                query,
+                favorite,
+                missing,
+                sort,
+                offset: offset as u64,
+                limit: limit as u64,
+            },
+            Query::LibraryRootCounts { roots } => Self::LibraryRootCounts { roots },
         }
     }
 }
@@ -473,6 +503,24 @@ impl TryFrom<WireQuery> for Query {
                 limit: wire_usize(limit, "limit")?,
                 expected,
             },
+            WireQuery::LibraryRootPage {
+                path,
+                query,
+                favorite,
+                missing,
+                sort,
+                offset,
+                limit,
+            } => Self::LibraryRootPage {
+                path,
+                query,
+                favorite,
+                missing,
+                sort,
+                offset: wire_usize(offset, "offset")?,
+                limit: wire_usize(limit, "limit")?,
+            },
+            WireQuery::LibraryRootCounts { roots } => Self::LibraryRootCounts { roots },
         })
     }
 }

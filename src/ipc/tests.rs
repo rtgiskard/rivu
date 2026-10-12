@@ -41,6 +41,228 @@ fn directory_query_wire_round_trip_preserves_filter_and_page() {
 }
 
 #[test]
+fn library_root_query_wire_round_trip_preserves_paths_filters_and_pages() {
+    use crate::model::LibrarySort;
+    for sort in [LibrarySort::Id, LibrarySort::Album, LibrarySort::MostPlayed] {
+        for query in [None, Some(""), Some("Été_100%")] {
+            for favorite in [None, Some(true), Some(false)] {
+                for missing in [None, Some(true), Some(false)] {
+                    let query = Query::LibraryRootPage {
+                        path: "/音楽/夏/../".into(),
+                        query: query.map(str::to_owned),
+                        favorite,
+                        missing,
+                        sort,
+                        offset: 7,
+                        limit: 11,
+                    };
+                    let expected = serde_json::to_value(&query).unwrap();
+                    let mut encoded = Vec::new();
+                    encode_request_frame_into(
+                        &WireRequest::Query(WireQuery::from(query)),
+                        &mut encoded,
+                    )
+                    .unwrap();
+                    let WireRequest::Query(wire) = decode_request_frame(&encoded[4..]).unwrap()
+                    else {
+                        panic!("expected query");
+                    };
+                    assert_eq!(
+                        serde_json::to_value(Query::try_from(wire).unwrap()).unwrap(),
+                        expected
+                    );
+                }
+            }
+        }
+    }
+    for roots in [
+        Vec::new(),
+        vec![
+            "/".into(),
+            "/音楽".into(),
+            "/音楽/夏".into(),
+            "/音楽".into(),
+        ],
+        vec!["/music".into(); crate::model::MAX_QUERY_ROWS],
+    ] {
+        let query = Query::LibraryRootCounts { roots };
+        let expected = serde_json::to_value(&query).unwrap();
+        let mut encoded = Vec::new();
+        encode_request_frame_into(&WireRequest::Query(WireQuery::from(query)), &mut encoded)
+            .unwrap();
+        let WireRequest::Query(wire) = decode_request_frame(&encoded[4..]).unwrap() else {
+            panic!("expected query");
+        };
+        assert_eq!(
+            serde_json::to_value(Query::try_from(wire).unwrap()).unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn library_root_responses_wire_round_trip_preserves_projection_and_revisions() {
+    use crate::{
+        model::{LibraryRootCount, LibraryRow, Page},
+        response::{QueryRevisions, ViewResponse},
+    };
+    for result in [
+        ViewResponse::LibraryRootCounts(vec![
+            LibraryRootCount {
+                path: "/音楽".into(),
+                total: 3,
+            },
+            LibraryRootCount {
+                path: "/empty".into(),
+                total: 0,
+            },
+        ]),
+        ViewResponse::LibraryRootCounts(Vec::new()),
+        ViewResponse::LibraryPage(Page {
+            total: 4,
+            rows: vec![LibraryRow {
+                id: 42,
+                title: "Été_100%".into(),
+                artist: "Artist".into(),
+                album: "Album".into(),
+                duration: Some(12.0),
+                codec: "pcm".into(),
+                bitrate_bps: Some(1536000),
+                favorite: true,
+                missing: true,
+                play_count: 7,
+            }],
+        }),
+    ] {
+        let response = QueryResponse {
+            revisions: QueryRevisions {
+                library: 5,
+                structure: 6,
+                playlist: 7,
+            },
+            result: Ok(result),
+        };
+        let expected = serde_json::to_value(&response).unwrap();
+        let mut encoded = Vec::new();
+        encode_response_frame_into(&WireResponse::Query(response), &mut encoded).unwrap();
+        let WireResponse::Query(decoded) = decode_response_frame(&encoded[4..]).unwrap() else {
+            panic!("expected query response");
+        };
+        assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
+    }
+}
+
+#[test]
+fn library_root_queries_run_through_real_owner_and_ipc_session() {
+    use crate::{
+        config::Config,
+        core::Runtime,
+        model::{LibrarySort, MAX_QUERY_ROWS},
+        response::{QueryError, ViewResponse},
+        store::Store,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("音楽");
+    let nested = root.join("夏");
+    let empty = directory.path().join("empty");
+    let database = directory.path().join("library.db");
+    drop(Store::open(&database).unwrap());
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    for (path, title, missing) in [
+        (root.join("one.wav"), "Needle One", false),
+        (nested.join("two.wav"), "Needle Two", true),
+        (
+            directory.path().join("音楽室/three.wav"),
+            "Needle Outside",
+            false,
+        ),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO tracks(path,raw_title,missing) VALUES(?1,?2,?3)",
+                rusqlite::params![path.to_str().unwrap(), title, missing],
+            )
+            .unwrap();
+    }
+    drop(connection);
+    let config_path = directory.path().join("config.toml");
+    Config {
+        library_roots: vec![root.clone(), nested.clone(), empty.clone()],
+        media_read_buffer_mb: 1,
+        ..Config::default()
+    }
+    .save(&config_path)
+    .unwrap();
+    let mut runtime = Runtime::start(directory.path(), &config_path).unwrap();
+    let socket = directory.path().join("rivu.sock");
+    let server = Server::start(socket.clone(), runtime.handle.clone()).unwrap();
+    let mut session = client_session(&socket).unwrap();
+    let count_query = Query::LibraryRootCounts {
+        roots: vec![root.clone(), nested.clone(), empty],
+    };
+    let first = runtime.handle.query(count_query.clone());
+    let remote = session.query(&count_query).unwrap();
+    assert_eq!(remote.revisions, first.revisions);
+    let ViewResponse::LibraryRootCounts(counts) = remote.result.unwrap() else {
+        panic!("expected root counts")
+    };
+    assert_eq!(
+        counts.iter().map(|root| root.total).collect::<Vec<_>>(),
+        [2, 1, 0]
+    );
+    let page_query = Query::LibraryRootPage {
+        path: root,
+        query: Some("needle".into()),
+        favorite: None,
+        missing: Some(false),
+        sort: LibrarySort::Album,
+        offset: 0,
+        limit: 1,
+    };
+    let direct = runtime.handle.query(page_query.clone());
+    let remote = session.query(&page_query).unwrap();
+    assert_eq!(
+        serde_json::to_value(&remote).unwrap(),
+        serde_json::to_value(&direct).unwrap()
+    );
+    let ViewResponse::LibraryPage(page) = remote.result.unwrap() else {
+        panic!("expected library page")
+    };
+    assert_eq!(page.total, 1);
+    assert_eq!(page.rows[0].title, "Needle One");
+    let ack = session
+        .request_ack(&Command::SetFavorite {
+            track_ids: vec![page.rows[0].id],
+            favorite: true,
+        })
+        .unwrap();
+    assert!(ack.ok);
+    let updated = session.query(&count_query).unwrap();
+    assert_ne!(updated.revisions.library, first.revisions.library);
+    assert_eq!(updated.revisions.structure, first.revisions.structure);
+    let ViewResponse::LibraryRootCounts(counts) = updated.result.unwrap() else {
+        panic!("expected root counts")
+    };
+    assert_eq!(
+        counts.iter().map(|root| root.total).collect::<Vec<_>>(),
+        [2, 1, 0]
+    );
+    assert!(matches!(
+        session
+            .query(&Query::LibraryRootCounts {
+                roots: vec![nested; MAX_QUERY_ROWS + 1]
+            })
+            .unwrap()
+            .result,
+        Err(QueryError::Message(_))
+    ));
+    drop(session);
+    drop(server);
+    runtime.handle.request_shutdown().unwrap();
+    runtime.join().unwrap();
+}
+
+#[test]
 fn ack_wire_round_trip_has_explicit_response_type() {
     let ack = Ack {
         ok: false,

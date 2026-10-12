@@ -342,6 +342,26 @@ impl Core {
                 *offset,
                 *limit,
             )?),
+            Query::LibraryRootPage {
+                path,
+                query,
+                favorite,
+                missing,
+                sort,
+                offset,
+                limit,
+            } => ViewResponse::LibraryPage(self.store.library_root_page(
+                path,
+                query.as_deref(),
+                *favorite,
+                *missing,
+                *sort,
+                *offset,
+                *limit,
+            )?),
+            Query::LibraryRootCounts { roots } => {
+                ViewResponse::LibraryRootCounts(self.store.library_root_counts(roots)?)
+            }
             Query::TrackPage {
                 query,
                 favorite,

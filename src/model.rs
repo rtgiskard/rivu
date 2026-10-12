@@ -157,6 +157,13 @@ pub struct LibraryStats {
     pub play_count: u64,
 }
 
+/// Total scanned tracks under a configured root, independent of view filters.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibraryRootCount {
+    pub path: PathBuf,
+    pub total: usize,
+}
+
 /// Maximum number of rows in a query batch or interactive page.
 pub const MAX_QUERY_ROWS: usize = 256;
 
@@ -433,6 +440,18 @@ pub enum Query {
         after: Option<PlaylistEntryCursor>,
         limit: usize,
         expected: Option<crate::response::QueryRevisions>,
+    },
+    LibraryRootPage {
+        path: PathBuf,
+        query: Option<String>,
+        favorite: Option<bool>,
+        missing: Option<bool>,
+        sort: LibrarySort,
+        offset: usize,
+        limit: usize,
+    },
+    LibraryRootCounts {
+        roots: Vec<PathBuf>,
     },
 }
 

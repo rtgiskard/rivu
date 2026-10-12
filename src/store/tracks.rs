@@ -23,6 +23,16 @@ fn directory_prefix(path: &Path) -> Result<String> {
     Ok(format!("{}/", path.trim_end_matches('/')))
 }
 
+fn library_order(sort: crate::model::LibrarySort) -> &'static str {
+    match sort {
+        crate::model::LibrarySort::Id => "id",
+        crate::model::LibrarySort::Album => {
+            "COALESCE(album_override,raw_album), CASE WHEN COALESCE(album_override,raw_album)<>'' THEN COALESCE(disc_number,4294967295) END, CASE WHEN COALESCE(album_override,raw_album)<>'' THEN COALESCE(track_number,4294967295) END, COALESCE(title_override,raw_title),id"
+        }
+        crate::model::LibrarySort::MostPlayed => "play_count DESC,id",
+    }
+}
+
 impl Store {
     pub fn set_favorite(&self, ids: &[i64], favorite: bool) -> Result<()> {
         for id in ids {
@@ -64,7 +74,6 @@ impl Store {
         offset: usize,
         limit: usize,
     ) -> Result<Page<crate::model::LibraryRow>> {
-        use crate::model::LibrarySort;
         let query = query
             .filter(|query| !query.is_empty())
             .map(str::to_lowercase);
@@ -73,13 +82,7 @@ impl Store {
             params![query, favorite, missing],
             |row| row.get::<_, i64>(0),
         )? as usize;
-        let order = match sort {
-            LibrarySort::Id => "id",
-            LibrarySort::Album => {
-                "COALESCE(album_override,raw_album), CASE WHEN COALESCE(album_override,raw_album)<>'' THEN COALESCE(disc_number,4294967295) END, CASE WHEN COALESCE(album_override,raw_album)<>'' THEN COALESCE(track_number,4294967295) END, COALESCE(title_override,raw_title),id"
-            }
-            LibrarySort::MostPlayed => "play_count DESC,id",
-        };
+        let order = library_order(sort);
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {LIBRARY_ROW_COLUMNS} FROM tracks {TRACK_SEARCH_FILTER} ORDER BY {order} LIMIT ?4 OFFSET ?5"
         ))?;
@@ -96,6 +99,79 @@ impl Store {
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(Page { total, rows })
+    }
+
+    pub fn library_root_page(
+        &self,
+        path: &Path,
+        query: Option<&str>,
+        favorite: Option<bool>,
+        missing: Option<bool>,
+        sort: crate::model::LibrarySort,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Page<crate::model::LibraryRow>> {
+        let prefix = directory_prefix(path)?;
+        let query = query
+            .filter(|query| !query.is_empty())
+            .map(str::to_lowercase);
+        let scope = " AND substr(tracks.path,1,length(?4))=?4";
+        let total = self.conn.query_row(
+            &format!("SELECT COUNT(*) FROM tracks {TRACK_SEARCH_FILTER}{scope}"),
+            params![query, favorite, missing, prefix],
+            |row| row.get::<_, i64>(0),
+        )? as usize;
+        let order = library_order(sort);
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {LIBRARY_ROW_COLUMNS} FROM tracks {TRACK_SEARCH_FILTER}{scope} ORDER BY {order} LIMIT ?5 OFFSET ?6"
+        ))?;
+        let rows = stmt
+            .query_map(
+                params![
+                    query,
+                    favorite,
+                    missing,
+                    prefix,
+                    limit.min(crate::model::MAX_QUERY_ROWS) as i64,
+                    offset.min(i64::MAX as usize) as i64
+                ],
+                library_row_from_row,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(Page { total, rows })
+    }
+
+    /// One aggregate query for all roots; overlapping and duplicate inputs remain independent.
+    pub fn library_root_counts(
+        &self,
+        roots: &[PathBuf],
+    ) -> Result<Vec<crate::model::LibraryRootCount>> {
+        if roots.len() > crate::model::MAX_QUERY_ROWS {
+            bail!(
+                "Library root count request exceeds {} roots",
+                crate::model::MAX_QUERY_ROWS
+            );
+        }
+        if roots.is_empty() {
+            return Ok(Vec::new());
+        }
+        let prefixes = roots
+            .iter()
+            .map(|path| directory_prefix(path))
+            .collect::<Result<Vec<_>>>()?;
+        let prefixes = serde_json::to_string(&prefixes)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT roots.key,COUNT(tracks.id) FROM json_each(?1) AS roots LEFT JOIN tracks ON substr(tracks.path,1,length(roots.value))=roots.value GROUP BY roots.key ORDER BY roots.key"
+        )?;
+        Ok(stmt
+            .query_map([prefixes], |row| {
+                let index = row.get::<_, i64>(0)? as usize;
+                Ok(crate::model::LibraryRootCount {
+                    path: roots[index].clone(),
+                    total: row.get::<_, i64>(1)? as usize,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub(crate) fn track_count(&self) -> Result<usize> {

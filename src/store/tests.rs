@@ -1203,6 +1203,352 @@ fn directory_search_reuses_literal_unicode_metadata_and_path_matching() {
 }
 
 #[test]
+fn library_root_queries_preserve_path_boundaries_overlap_and_unicode() {
+    use crate::model::{LibraryRootCount, LibrarySort};
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    let roots = [
+        "/home/a",
+        "/home/a/deep",
+        "/home/ab",
+        "/音楽",
+        "/empty",
+        "/",
+    ]
+    .map(PathBuf::from);
+    let empty = store.library_root_counts(&roots).unwrap();
+    assert!(empty.iter().all(|root| root.total == 0));
+    for (index, path) in [
+        "/home/a/one.wav",
+        "/home/a/deep/two.wav",
+        "/home/ab/three.wav",
+        "/音楽/夏/four.wav",
+        "/音楽室/five.wav",
+    ]
+    .iter()
+    .enumerate()
+    {
+        store
+            .conn
+            .execute(
+                "INSERT INTO tracks(path,raw_title,missing) VALUES(?1,?2,?3)",
+                params![path, format!("Track {index}"), index == 1],
+            )
+            .unwrap();
+    }
+    let counts = store.library_root_counts(&roots).unwrap();
+    assert_eq!(
+        counts,
+        roots
+            .iter()
+            .zip([2, 1, 1, 1, 0, 5])
+            .map(|(path, total)| LibraryRootCount {
+                path: path.clone(),
+                total
+            })
+            .collect::<Vec<_>>()
+    );
+    for (path, expected) in [
+        ("/home/a", 2),
+        ("/home/a/", 2),
+        ("/home/a/deep/..", 2),
+        ("/home/a/./deep", 1),
+        ("/音楽/夏", 1),
+        ("/empty", 0),
+        ("/", 5),
+        ("", 5),
+    ] {
+        let page = store
+            .library_root_page(Path::new(path), None, None, None, LibrarySort::Id, 0, 10)
+            .unwrap();
+        assert_eq!(page.total, expected, "{path}");
+        assert_eq!(page.rows.len(), expected, "{path}");
+        assert_eq!(
+            store.library_root_counts(&[path.into()]).unwrap()[0].total,
+            expected
+        );
+    }
+    // Query normalization is lexical, including relative roots; no directory must exist.
+    let cwd = std::env::current_dir().unwrap();
+    store
+        .conn
+        .execute(
+            "INSERT INTO tracks(path,raw_title) VALUES(?1,'Relative')",
+            [cwd.join("root-query-relative/song.wav").to_str().unwrap()],
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .library_root_page(
+                Path::new("root-query-relative/./missing/.."),
+                None,
+                None,
+                None,
+                LibrarySort::Id,
+                0,
+                10,
+            )
+            .unwrap()
+            .total,
+        1
+    );
+}
+
+#[test]
+fn library_root_pages_reuse_search_filters_sort_and_total() {
+    use crate::model::LibrarySort;
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    for (index, (path, title, artist, album, disc, number, plays, favorite, missing)) in [
+        (
+            "/music/a/one.wav",
+            "Needle One",
+            "Artist",
+            "Album",
+            Some(2),
+            Some(1),
+            2,
+            true,
+            false,
+        ),
+        (
+            "/music/a/deep/two.wav",
+            "Other",
+            "Needle Artist",
+            "Album",
+            Some(1),
+            Some(2),
+            5,
+            false,
+            true,
+        ),
+        (
+            "/music/a/three.wav",
+            "Été_100%",
+            "World",
+            "",
+            None,
+            None,
+            5,
+            true,
+            true,
+        ),
+        (
+            "/music/ab/four.wav",
+            "Needle Outside",
+            "Artist",
+            "Album",
+            Some(1),
+            Some(1),
+            9,
+            true,
+            false,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        store.conn.execute(
+            "INSERT INTO tracks(path,raw_title,raw_artist,raw_album,disc_number,track_number,play_count,favorite,missing) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![path, title, artist, album, disc, number, plays, favorite, missing],
+        ).unwrap();
+        if index == 0 {
+            store
+                .conn
+                .execute(
+                    "UPDATE tracks SET title_override='Needle Override' WHERE path=?1",
+                    [path],
+                )
+                .unwrap();
+        }
+    }
+    for sort in [LibrarySort::Id, LibrarySort::Album, LibrarySort::MostPlayed] {
+        for query in [
+            None,
+            Some(""),
+            Some("NEEDLE"),
+            Some("Été_100%"),
+            Some("étéX100Z"),
+            Some("/music/a/deep"),
+        ] {
+            for favorite in [None, Some(true), Some(false)] {
+                for missing in [None, Some(true), Some(false)] {
+                    let baseline = store
+                        .library_view_page(query, favorite, missing, sort, 0, 10)
+                        .unwrap();
+                    let expected = baseline
+                        .rows
+                        .into_iter()
+                        .filter(|row| {
+                            store
+                                .track(row.id)
+                                .unwrap()
+                                .unwrap()
+                                .path
+                                .starts_with("/music/a")
+                        })
+                        .collect::<Vec<_>>();
+                    for (offset, limit) in [(0, 10), (1, 1), (10, 1), (0, 0), (usize::MAX, 10)] {
+                        let page = store
+                            .library_root_page(
+                                Path::new("/music/a"),
+                                query,
+                                favorite,
+                                missing,
+                                sort,
+                                offset,
+                                limit,
+                            )
+                            .unwrap();
+                        assert_eq!(page.total, expected.len());
+                        assert_eq!(
+                            page.rows,
+                            expected
+                                .iter()
+                                .skip(offset)
+                                .take(limit)
+                                .cloned()
+                                .collect::<Vec<_>>()
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(
+        store.library_root_counts(&["/music/a".into()]).unwrap()[0].total,
+        3
+    );
+    assert_eq!(
+        store
+            .library_root_page(
+                Path::new("/music/a"),
+                Some("needle"),
+                Some(true),
+                Some(false),
+                LibrarySort::Id,
+                0,
+                10
+            )
+            .unwrap()
+            .rows[0]
+            .title,
+        "Needle Override"
+    );
+    for (sort, expected) in [
+        (LibrarySort::Id, [1, 2, 3]),
+        (LibrarySort::Album, [3, 2, 1]),
+        (LibrarySort::MostPlayed, [2, 3, 1]),
+    ] {
+        let page = store
+            .library_root_page(Path::new("/music/a"), None, None, None, sort, 0, 10)
+            .unwrap();
+        assert_eq!(
+            page.rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            expected
+        );
+    }
+    assert_eq!(
+        store
+            .library_root_page(
+                Path::new("/music/a"),
+                Some("ÉTÉ_100%"),
+                None,
+                None,
+                LibrarySort::Id,
+                0,
+                10
+            )
+            .unwrap()
+            .total,
+        1
+    );
+    assert_eq!(
+        store
+            .library_root_page(
+                Path::new("/music/a"),
+                Some("étéX100Z"),
+                None,
+                None,
+                LibrarySort::Id,
+                0,
+                10
+            )
+            .unwrap()
+            .total,
+        0
+    );
+}
+
+#[test]
+fn library_root_queries_bound_root_batches_and_page_rows() {
+    use crate::model::{LibrarySort, MAX_QUERY_ROWS};
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    assert!(store.library_root_counts(&[]).unwrap().is_empty());
+    for id in 0..MAX_QUERY_ROWS + 3 {
+        store
+            .conn
+            .execute(
+                "INSERT INTO tracks(path,raw_title) VALUES(?1,?2)",
+                params![format!("/music/{id}.wav"), format!("Track {id}")],
+            )
+            .unwrap();
+    }
+    // Duplicate inputs are occurrences, not a set, and remain in request order.
+    let roots = (0..MAX_QUERY_ROWS)
+        .map(|index| {
+            if index % 2 == 0 {
+                PathBuf::from("/music")
+            } else {
+                PathBuf::from("/empty")
+            }
+        })
+        .collect::<Vec<_>>();
+    let counts = store.library_root_counts(&roots).unwrap();
+    assert_eq!(counts.len(), MAX_QUERY_ROWS);
+    for (index, count) in counts.iter().enumerate() {
+        assert_eq!(count.path, roots[index]);
+        assert_eq!(
+            count.total,
+            if index % 2 == 0 {
+                MAX_QUERY_ROWS + 3
+            } else {
+                0
+            }
+        );
+    }
+    assert!(
+        store
+            .library_root_counts(&vec![PathBuf::from("/music"); MAX_QUERY_ROWS + 1])
+            .is_err()
+    );
+    let page = store
+        .library_root_page(
+            Path::new("/music"),
+            None,
+            None,
+            None,
+            LibrarySort::Id,
+            0,
+            usize::MAX,
+        )
+        .unwrap();
+    assert_eq!(page.total, MAX_QUERY_ROWS + 3);
+    assert_eq!(page.rows.len(), MAX_QUERY_ROWS);
+    let tail = store
+        .library_root_page(
+            Path::new("/music"),
+            None,
+            None,
+            None,
+            LibrarySort::Id,
+            MAX_QUERY_ROWS,
+            MAX_QUERY_ROWS,
+        )
+        .unwrap();
+    assert_eq!(tail.total, MAX_QUERY_ROWS + 3);
+    assert_eq!(tail.rows.len(), 3);
+}
+
+#[test]
 fn directory_pages_preserve_boundaries_and_duplicate_cue_sources() {
     use crate::model::{DirectoryRow, MAX_QUERY_ROWS};
     let store = Store::open(Path::new(":memory:")).unwrap();

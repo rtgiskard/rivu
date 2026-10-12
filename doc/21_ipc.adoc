@@ -38,9 +38,9 @@ body
 The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
-Bodies use Postcard serialization without COBS framing. Clients and servers
-must use matching wire schemas. The four-byte frame length remains
-little-endian; body integers follow Postcard's encoding.
+Bodies use Postcard serialization without COBS framing. The current protocol
+version is `6`; clients and servers must use matching wire schemas. The four-byte
+frame length remains little-endian; body integers follow Postcard's encoding.
 
 Request frame content is limited to 64 KiB
 and response frame content to 16 MiB, including the version and message type but
@@ -146,6 +146,22 @@ limits are clamped, and `limit = 0` returns the count without rows. Offset pages
 do not reserve a snapshot across requests. Cursor batches avoid the total-count
 query and return a continuation only when more rows exist. They require a limit
 from 1 through 256 and reject zero or larger values.
+
+`LibraryRootPage` returns the same display projection and filtered total as
+`LibraryPage`, scoped recursively to one root. It preserves the library's search,
+favorite/missing filters, and sort order. Root paths use the existing lexical
+directory normalization and component boundary: `/home/a` never includes
+`/home/ab`; `/` includes the whole absolute-path library.
+
+`LibraryRootCounts` accepts up to 256 root paths and returns one `{path, total}`
+per input, in input order, using a single batched aggregate query. Larger input
+batches return a query error. Counts include all scanned tracks, including missing
+ones, regardless of view filters; an empty root returns zero. Overlapping roots
+each count their own subtree independently. Clients keep unavailable counts
+distinct from zero, split larger root sets into bounded requests, and discard
+results when their roots, request generation, or library revision have changed.
+These requests run on the same core owner and revision boundary as other queries;
+frontends must not query storage from rendering.
 
 To traverse consistently, the caller captures the first batch's query revisions
 and supplies them as `expected` on later requests. Track batches check library
