@@ -380,7 +380,7 @@ impl Render for GuiApp {
                         this.layouts.current_mut().locked = !this.layouts.current().locked;
                         this.catalog_open = false;
                         this.panel_menu = None;
-                        this.persist_layout(cx);
+                        cx.notify();
                     }),
                 ),
             )

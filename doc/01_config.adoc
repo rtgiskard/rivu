@@ -281,7 +281,8 @@ editing invariants.
 
 The file uses one format, without runtime IDs or version fields. `active` names
 an entry in the nonempty `layouts` object. Each entry requires `root`; `null`
-means an empty layout. `locked` defaults to `false`.
+means an empty layout. Lock state is not stored; each newly opened window starts
+locked.
 
 [source,json]
 ----

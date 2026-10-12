@@ -121,8 +121,6 @@ mod persistence {
     #[derive(Serialize)]
     struct LayoutView<'a> {
         root: Option<NodeRef<'a>>,
-        #[serde(skip_serializing_if = "is_false")]
-        locked: bool,
     }
 
     #[derive(Serialize)]
@@ -154,9 +152,6 @@ mod persistence {
         labels: Option<bool>,
     }
 
-    fn is_false(value: &bool) -> bool {
-        !*value
-    }
     fn is_true(value: &bool) -> bool {
         *value
     }
@@ -178,7 +173,6 @@ mod persistence {
                     name,
                     &LayoutView {
                         root: layout.root.as_ref().map(NodeRef),
-                        locked: layout.locked,
                     },
                 )?;
             }
@@ -281,8 +275,6 @@ mod persistence {
         // deserialize_with makes a missing root an error, while allowing null.
         #[serde(deserialize_with = "read_root")]
         root: Option<NodeInput>,
-        #[serde(default)]
-        locked: bool,
     }
 
     fn read_root<'de, D: serde::Deserializer<'de>>(
@@ -394,7 +386,7 @@ mod persistence {
                 let layout = Layout {
                     root,
                     next_id,
-                    locked: input.locked,
+                    locked: true,
                 };
                 layout.validate().map_err(|error| anyhow!(error))?;
                 if layouts.insert(name, layout).is_some() {
@@ -828,7 +820,7 @@ impl Default for Layout {
                 ],
             }),
             next_id: 14,
-            locked: false,
+            locked: true,
         }
     }
 }
@@ -1570,6 +1562,17 @@ mod tests {
 
     fn one_layout(root: Value) -> Value {
         json!({"active":"Work", "layouts":{"Work":{"root":root}}})
+    }
+
+    #[test]
+    fn reopening_layouts_resets_edit_mode_to_locked() {
+        let mut set = LayoutSet::default();
+        assert!(set.current().locked);
+        set.current_mut().locked = false;
+        let value = encoded(&set);
+        assert!(value["layouts"]["Default"].get("locked").is_none());
+        let reopened = decoded(value).unwrap();
+        assert!(reopened.current().locked);
     }
 
     fn wire_tabs(kind: &str) -> Value {
