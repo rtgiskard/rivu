@@ -25,6 +25,7 @@ enum Projection {
         favorite: Option<bool>,
         missing: Option<bool>,
         sort: LibrarySort,
+        revision: u64,
         total: usize,
     },
     Tree {
@@ -61,7 +62,8 @@ impl Scope {
                     favorite: view.favorite,
                     missing: view.missing,
                     sort: view.sort,
-                    total: view.total,
+                    revision: browser.tree().projection_revision(),
+                    total: browser.tree().row_count(),
                 }
             },
         }
@@ -89,6 +91,7 @@ impl Scope {
                     favorite,
                     missing,
                     sort,
+                    revision,
                     total,
                 } => {
                     !browser.tree_active()
@@ -96,7 +99,8 @@ impl Scope {
                         && *favorite == view.favorite
                         && *missing == view.missing
                         && *sort == view.sort
-                        && *total == view.total
+                        && *revision == browser.tree().projection_revision()
+                        && *total == browser.tree().row_count()
                 }
             }
     }
@@ -120,7 +124,7 @@ struct Anchor {
 
 #[derive(Clone, Debug)]
 enum Source {
-    Flat,
+    Flat(TreeBranch),
     Tree(TreeBranch),
 }
 
@@ -212,7 +216,7 @@ impl RangeJob {
         }
         let result = response.result.map_err(|error| error.to_string())?;
         match (&slice.source, result) {
-            (Source::Flat, ViewResponse::LibraryPage(page)) => {
+            (Source::Flat(_), ViewResponse::LibraryPage(page)) => {
                 Self::validate_page(slice, page.total, page.rows.len())?;
                 self.selected
                     .extend(page.rows.into_iter().map(|row| LibraryNode::Track(row.id)));
@@ -254,7 +258,7 @@ impl RangeJob {
                     limit: slice.len,
                 }
             }
-            Source::Flat => {
+            Source::Flat(branch) => {
                 let Projection::Flat {
                     query,
                     favorite,
@@ -265,7 +269,8 @@ impl RangeJob {
                 else {
                     unreachable!("flat ranges have a flat projection")
                 };
-                Query::LibraryPage {
+                Query::LibraryRootPage {
+                    path: branch.path().to_path_buf(),
                     query: query.clone(),
                     favorite: *favorite,
                     missing: *missing,
@@ -362,26 +367,26 @@ impl LibraryBrowser {
             });
         }
         self.range_selection.cancel(false);
-        let slices = match &scope.projection {
-            Projection::Flat { total, .. } => VecDeque::from([Slice {
-                source: Source::Flat,
-                offset: range.start,
-                len: range.len(),
-                total: *total,
-                check: None,
-            }]),
-            Projection::Tree { .. } => {
-                let spans = self.tree.range_spans(range.clone()).ok_or_else(|| {
-                    "Library tree is still loading; select the range again when its folders are ready.".to_owned()
-                })?;
-                self.tree
-                    .range_checks(range)
-                    .into_iter()
-                    .map(|(span, child)| Slice::tree(span, Some(child)))
-                    .chain(spans.into_iter().map(|span| Slice::tree(span, None)))
-                    .collect()
+        let spans = self.tree.range_spans(range.clone()).ok_or_else(|| {
+            "Library folders are still loading; select the range again when they are ready."
+                .to_owned()
+        })?;
+        let mut slices: VecDeque<_> = self
+            .tree
+            .range_checks(range)
+            .into_iter()
+            .map(|(span, child)| Slice::tree(span, Some(child)))
+            .chain(spans.into_iter().map(|span| Slice::tree(span, None)))
+            .collect();
+        if !self.tree_active {
+            for slice in &mut slices {
+                if let Source::Tree(branch) = &slice.source {
+                    if !branch.is_forest() {
+                        slice.source = Source::Flat(branch.clone());
+                    }
+                }
             }
-        };
+        }
         self.range_selection.pending = Some(RangeJob {
             token: self.range_selection.token,
             scope,
@@ -396,14 +401,10 @@ impl LibraryBrowser {
     }
 
     fn pin_selection(&mut self, endpoint: &LibraryNode, index: usize) {
-        if self.tree_active {
-            if self.selected_nodes.contains(endpoint)
-                || matches!(endpoint, LibraryNode::Track(id) if self.selected.contains(id))
-            {
-                self.tree.focus_selection(endpoint, index);
-            }
-        } else {
-            self.buffer.rows.pin(Some(index));
+        if self.selected_nodes.contains(endpoint)
+            || matches!(endpoint, LibraryNode::Track(id) if self.selected.contains(id))
+        {
+            self.tree.focus_selection(endpoint, index);
         }
     }
 
@@ -426,9 +427,7 @@ impl LibraryBrowser {
                 return Ok(RangeStep::Selected(job.endpoint));
             };
             let cached = match &slice.source {
-                Source::Flat => (slice.offset..slice.offset + slice.len)
-                    .all(|index| self.buffer.rows.get(index).is_some()),
-                Source::Tree(branch) => {
+                Source::Tree(branch) | Source::Flat(branch) => {
                     branch.is_forest()
                         || self
                             .tree
@@ -438,15 +437,6 @@ impl LibraryBrowser {
             };
             if cached {
                 let result = match &slice.source {
-                    Source::Flat => {
-                        job.selected
-                            .extend((slice.offset..slice.offset + slice.len).map(|index| {
-                                LibraryNode::Track(
-                                    self.buffer.rows.get(index).expect("cached range row").id,
-                                )
-                            }));
-                        Ok(())
-                    }
                     Source::Tree(branch) if branch.is_forest() => {
                         if roots.len() != slice.total || slice.offset + slice.len > roots.len() {
                             Err(
@@ -459,7 +449,7 @@ impl LibraryBrowser {
                                 .try_for_each(|path| job.add_directory(&slice, path))
                         }
                     }
-                    Source::Tree(branch) => self
+                    Source::Tree(branch) | Source::Flat(branch) => self
                         .tree
                         .cached_rows(branch, slice.offset..slice.offset + slice.len)
                         .expect("cached range rows")
@@ -634,6 +624,7 @@ mod tests {
                 favorite: Some(true),
                 missing: None,
                 sort: LibrarySort::Album,
+                revision: 0,
                 total: 10_000,
             },
         }
@@ -653,31 +644,86 @@ mod tests {
             play_count: 0,
         }
     }
+    fn grouped(
+        total: usize,
+        page_size: usize,
+    ) -> (LibraryBrowser, TreeBranch, Vec<std::path::PathBuf>) {
+        let mut library = LibraryBrowser::default();
+        library.toggle_view();
+        let roots = vec![std::path::PathBuf::from("/music")];
+        let forest = TreeBranch::default();
+        library.prepare_directory(forest.clone(), 0, page_size, 1);
+        library.accept_directory(
+            &forest,
+            1,
+            Page {
+                total: 1,
+                rows: vec![DirectoryRow::Directory {
+                    path: roots[0].clone(),
+                }],
+            },
+        );
+        let crate::gui::library::tree::TreeItem::Entry(entry) = library.tree.item(0).unwrap()
+        else {
+            panic!("root header");
+        };
+        let branch = entry.branch.unwrap();
+        load_group(&mut library, &branch, 0, total, page_size, 2);
+        (library, branch, roots)
+    }
+
+    fn load_group(
+        library: &mut LibraryBrowser,
+        branch: &TreeBranch,
+        offset: usize,
+        total: usize,
+        size: usize,
+        generation: u64,
+    ) {
+        library.prepare_directory(branch.clone(), offset, size, generation);
+        library.accept_directory(
+            branch,
+            generation,
+            Page {
+                total,
+                rows: (offset..(offset + size).min(total))
+                    .map(|id| DirectoryRow::Track(row(id as i64)))
+                    .collect(),
+            },
+        );
+    }
+
     #[test]
     fn cancelled_owner_range_releases_its_batch_before_loading_the_replacement() {
-        let mut library = LibraryBrowser::default();
-        library.refresh_filter();
-        library.prepare_page(0, 20);
-        library.accept_page(Page {
-            total: 100,
-            rows: (0..20).map(row).collect(),
-        });
+        let (mut library, branch, roots) = grouped(100, 20);
         library
-            .start_selection(&LibraryNode::Track(1), 1, false, false, (7, 3), 20)
+            .start_selection(&LibraryNode::Track(1), 2, false, false, (7, 3), 20)
             .unwrap();
         library
-            .start_selection(&LibraryNode::Track(30), 30, true, false, (7, 3), 20)
+            .start_selection(&LibraryNode::Track(30), 31, true, false, (7, 3), 20)
             .unwrap();
-        let RangeStep::Query { token, slice, .. } = library.advance_range((7, 3), &[]).unwrap()
+        let RangeStep::Query { token, slice, .. } = library.advance_range((7, 3), &roots).unwrap()
         else {
             panic!("uncached range needs a batch")
         };
         library.prepare_query("replacement".into());
+        let forest = TreeBranch::default();
+        library.prepare_directory(forest.clone(), 0, 20, 3);
+        library.accept_directory(
+            &forest,
+            3,
+            Page {
+                total: 1,
+                rows: vec![DirectoryRow::Directory {
+                    path: roots[0].clone(),
+                }],
+            },
+        );
         library
-            .start_selection(&LibraryNode::Track(50), 50, true, false, (7, 3), 20)
+            .start_selection(&LibraryNode::Track(50), 51, true, false, (7, 3), 20)
             .unwrap();
         assert!(matches!(
-            library.advance_range((7, 3), &[]).unwrap(),
+            library.advance_range((7, 3), &roots).unwrap(),
             RangeStep::Idle
         ));
         library
@@ -705,12 +751,13 @@ mod tests {
             token,
             slice,
             query,
-        } = library.advance_range((7, 3), &[]).unwrap()
+        } = library.advance_range((7, 3), &roots).unwrap()
         else {
-            panic!("replacement starts only after the old batch returns")
+            panic!("replacement starts after old batch")
         };
         assert!(
-            matches!(query, Query::LibraryPage { query: Some(query), offset: 50, limit: 1, .. } if query == "replacement")
+            matches!(query, Query::LibraryRootPage { path, query: Some(query), offset: 50, limit: 1, .. }
+            if path == branch.path() && query == "replacement")
         );
         library
             .complete_range(
@@ -731,7 +778,7 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(
-            library.advance_range((7, 3), &[]).unwrap(),
+            library.advance_range((7, 3), &roots).unwrap(),
             RangeStep::Selected(LibraryNode::Track(50))
         ));
         assert_eq!(library.selected(), &HashSet::from([50]));
@@ -739,45 +786,126 @@ mod tests {
 
     #[test]
     fn owner_range_selection_keeps_evicted_identities_and_rejects_changed_scope() {
-        let mut library = LibraryBrowser::default();
-        library.refresh_filter();
-        for offset in [0, 20] {
-            library.prepare_page(offset, 20);
-            library.accept_page(Page {
-                total: 1000,
-                rows: (offset..offset + 20).map(|id| row(id as i64)).collect(),
-            });
-        }
+        let (mut library, branch, roots) = grouped(1000, 20);
+        load_group(&mut library, &branch, 20, 1000, 20, 3);
         library
-            .start_selection(&LibraryNode::Track(1), 1, false, false, (7, 3), 20)
+            .start_selection(&LibraryNode::Track(1), 2, false, false, (7, 3), 20)
             .unwrap();
         library
-            .start_selection(&LibraryNode::Track(21), 21, true, false, (7, 3), 20)
+            .start_selection(&LibraryNode::Track(21), 22, true, false, (7, 3), 20)
             .unwrap();
         assert!(matches!(
-            library.advance_range((7, 3), &[]).unwrap(),
+            library.advance_range((7, 3), &roots).unwrap(),
             RangeStep::Selected(LibraryNode::Track(21))
         ));
-        for offset in (100..400).step_by(20) {
-            library.demand_page(offset..offset + 10, 20);
-            library.prepare_page(offset, 20);
-            library.accept_page(Page {
-                total: 1000,
-                rows: (offset..offset + 20).map(|id| row(id as i64)).collect(),
-            });
+        for offset in (100..500).step_by(20) {
+            load_group(&mut library, &branch, offset, 1000, 20, offset as u64);
         }
-        assert!(library.buffer().rows.get(1).is_some());
-        assert!(library.buffer().rows.get(21).is_none());
+        assert!(library.tree.cached_row(&branch, 1).is_none());
         assert_eq!(library.selected(), &(1..=21).collect::<HashSet<_>>());
         library
-            .start_selection(&LibraryNode::Track(50), 50, true, false, (7, 3), 20)
+            .start_selection(&LibraryNode::Track(50), 51, true, false, (7, 3), 20)
             .unwrap();
         assert!(matches!(
-            library.advance_range((8, 3), &[]).unwrap(),
+            library.advance_range((8, 3), &roots).unwrap(),
             RangeStep::Idle
         ));
         assert!(!library.range_pending());
         assert_eq!(library.selected(), &(1..=21).collect::<HashSet<_>>());
+    }
+    #[test]
+    fn grouped_shift_range_includes_headers_across_pages_and_overlapping_roots() {
+        let (mut library, root, mut roots) = grouped(3, 2);
+        roots.push("/music/sub".into());
+        let forest = TreeBranch::default();
+        library.prepare_directory(forest.clone(), 0, 2, 3);
+        library.accept_directory(
+            &forest,
+            3,
+            Page {
+                total: 2,
+                rows: roots
+                    .iter()
+                    .map(|path| DirectoryRow::Directory { path: path.clone() })
+                    .collect(),
+            },
+        );
+        let crate::gui::library::tree::TreeItem::Entry(entry) = library.tree.item(4).unwrap()
+        else {
+            panic!("second root header");
+        };
+        let overlapping = entry.branch.unwrap();
+        library.prepare_directory(overlapping.clone(), 0, 2, 4);
+        library.accept_directory(
+            &overlapping,
+            4,
+            Page {
+                total: 3,
+                rows: vec![DirectoryRow::Track(row(1)), DirectoryRow::Track(row(2))],
+            },
+        );
+        assert_eq!(library.tree.row_count(), 8);
+        let header = LibraryNode::Directory(Arc::from(roots[0].as_path()));
+        library
+            .start_selection(&header, 0, false, false, (7, 3), 2)
+            .unwrap();
+        library
+            .start_selection(&LibraryNode::Track(3), 7, true, false, (7, 3), 2)
+            .unwrap();
+        let mut requests = Vec::new();
+        loop {
+            match library.advance_range((7, 3), &roots).unwrap() {
+                RangeStep::Query {
+                    token,
+                    slice,
+                    query,
+                } => {
+                    let Query::LibraryRootPage {
+                        path,
+                        offset,
+                        limit,
+                        ..
+                    } = query
+                    else {
+                        panic!("grouped selection recursively pages a root");
+                    };
+                    requests.push((path.clone(), offset, limit));
+                    assert_eq!((offset, limit), (2, 1));
+                    let id = if path == root.path() { 2 } else { 3 };
+                    library
+                        .complete_range(
+                            token,
+                            &slice,
+                            QueryResponse {
+                                revisions: QueryRevisions {
+                                    library: 7,
+                                    structure: 3,
+                                    playlist: 0,
+                                },
+                                result: Ok(ViewResponse::LibraryPage(Page {
+                                    total: 3,
+                                    rows: vec![row(id)],
+                                })),
+                            },
+                            (7, 3),
+                        )
+                        .unwrap();
+                }
+                RangeStep::Selected(LibraryNode::Track(3)) => break,
+                _ => panic!("range must converge"),
+            }
+        }
+        assert_eq!(requests.len(), 2);
+        assert_eq!(library.selected(), &HashSet::from([0, 1, 2, 3]));
+        assert_eq!(
+            library.selected_nodes(),
+            &roots
+                .iter()
+                .map(|path| LibraryNode::Directory(Arc::from(path.as_path())))
+                .collect()
+        );
+        library.expand_directory(&root, false);
+        assert!(library.tree.expanded(&overlapping));
     }
 
     fn job(start: usize, end: usize, additive: bool) -> RangeJob {
@@ -785,7 +913,7 @@ mod tests {
             token: 1,
             scope: scope(),
             slices: VecDeque::from([Slice {
-                source: Source::Flat,
+                source: Source::Flat(TreeBranch::default()),
                 offset: start,
                 len: end - start,
                 total: 10_000,

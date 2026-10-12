@@ -28,8 +28,7 @@ pub(super) use components::{
     TRACK_HEIGHT, active_control, artwork_preview, button, caption, context_menu_container,
     drag_preview, dropdown_container, dropdown_row, dropdown_trigger, form_field, icon_button,
     list_row, list_viewport, menu_item, metadata_item, panel_header, panel_surface, panel_toolbar,
-    row_text, section_group, sortable_header, status_message, toggle_button, track_row, tree_row,
-    two_column,
+    row_text, section_group, sortable_header, status_message, toggle_button, tree_row, two_column,
 };
 use futures::{StreamExt, channel::mpsc};
 use gpui::{prelude::*, *};
@@ -388,53 +387,7 @@ impl GuiApp {
         match focus {
             ListFocus::Library => {
                 self.browser.library.invalidate_selection();
-                if self.browser.library.tree_active() {
-                    self.navigate_library_tree(down, cx);
-                    return;
-                }
-                let total = self.browser.library.buffer().total;
-                if total == 0 {
-                    return;
-                }
-                let current = self.browser.library.navigation().or_else(|| {
-                    self.browser
-                        .library
-                        .buffer()
-                        .rows
-                        .position(|row| self.browser.library.selected().contains(&row.id))
-                });
-                let index = match current {
-                    Some(index) if down => (index + 1).min(total - 1),
-                    Some(index) => index.saturating_sub(1),
-                    None if down => self
-                        .browser
-                        .library
-                        .buffer()
-                        .rows
-                        .visible()
-                        .start
-                        .min(total - 1),
-                    None => total - 1,
-                };
-                self.browser
-                    .library
-                    .buffer()
-                    .scroll
-                    .scroll_to_item(index, ScrollStrategy::Nearest);
-                if let Some(id) = self
-                    .browser
-                    .library
-                    .buffer()
-                    .rows
-                    .get(index)
-                    .map(|row| row.id)
-                {
-                    self.browser.library.cancel_navigation();
-                    self.select_track(id, false, cx);
-                } else {
-                    self.browser.library.defer_navigation(index);
-                    self.ensure_library_range(index..index + 1, cx);
-                }
+                self.navigate_library_tree(down, cx);
             }
             ListFocus::Queue => {
                 if self.state.queue.entries.is_empty() {
@@ -479,21 +432,7 @@ impl GuiApp {
                 if self.library_range_pending() {
                     return;
                 }
-                if self.browser.library.tree_active() {
-                    self.activate_library_tree(cx);
-                    return;
-                }
-                let track_id = self
-                    .browser
-                    .library
-                    .buffer()
-                    .rows
-                    .iter()
-                    .find(|row| self.browser.library.selected().contains(&row.id))
-                    .map(|row| row.id);
-                if let Some(track_id) = track_id {
-                    self.send(Command::Play { track_id }, cx);
-                }
+                self.activate_library_tree(cx);
             }
             ListFocus::Queue => {
                 let queue_id = self
@@ -788,7 +727,7 @@ impl GuiApp {
         app.interaction
             .retain_layout(app.layouts.current().root.as_ref());
         app.sync_metadata_default(cx);
-        app.request_library_page(0, cx);
+        app.request_root_counts(cx);
         app.request_directory_page(library::TreeBranch::default(), 0, cx);
         app.request_playlist_summaries(0, cx);
         app.request_ranking(0, cx);
@@ -945,7 +884,6 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let error = match kind {
-            ViewRequestKind::Library => self.browser.library.buffer().rows.error(index),
             ViewRequestKind::PlaylistSummaries => {
                 self.browser.playlists.summaries().rows.error(index)
             }
@@ -1156,6 +1094,7 @@ impl GuiApp {
             }
             if roots_changed {
                 self.browser.library.roots_changed();
+                self.request_root_counts(cx);
                 if !page_size_changed {
                     self.request_directory_page(library::TreeBranch::default(), 0, cx);
                 }
@@ -1174,11 +1113,8 @@ impl GuiApp {
                 self.browser.queue.reconcile(|id| valid.contains(id));
             }
             if library_changed || library_structure_changed {
+                self.request_root_counts(cx);
                 if !page_size_changed {
-                    self.request_library_page(
-                        self.browser.library.buffer().rows.visible().start,
-                        cx,
-                    );
                     self.request_ranking(self.browser.history.offset(), cx);
                     self.browser.library.refresh_tree(self.view_page_size());
                     self.request_directory_page(library::TreeBranch::default(), 0, cx);

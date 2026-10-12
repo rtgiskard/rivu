@@ -3,7 +3,7 @@ use super::{
     StatusKind, TEXT, UI_INSET, ViewRequestKind, active_control, artwork_preview, column,
     form_field, format_time, icon_button, library::LibraryDrag, list_viewport, metadata_item,
     panel_header, panel_surface, panel_toolbar, row, row_text, section_group, sortable_header,
-    status_message, track_row, two_column,
+    status_message, two_column,
 };
 pub(super) use super::{TRACK_HEIGHT, caption, list_row};
 use crate::{
@@ -333,10 +333,8 @@ impl GuiApp {
         if let Some(row) = self
             .browser
             .library
-            .buffer()
-            .rows
-            .iter()
-            .find(|row| row.id == track_id)
+            .tree()
+            .cached_track(track_id)
             .or_else(|| {
                 self.browser
                     .history
@@ -483,11 +481,7 @@ impl GuiApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let total = if self.browser.library.tree_active() {
-            self.browser.library.tree().root_total()
-        } else {
-            self.browser.library.buffer().total
-        };
+        let total = self.browser.library.tree().root_total();
         let tools = panel_toolbar()
             .child(icon_button(
                 ("library-view", panel_id),
@@ -625,86 +619,13 @@ impl GuiApp {
         if self.state.system.scan_progress.is_some() || self.state.system.scanning {
             panel = panel.child(self.library_scan_status(panel_id, cx));
         }
-        if self.browser.library.tree_active() {
-            self.scroll_views.register_list(
-                ("library-tree", panel_id),
-                &self.browser.library.tree().scroll,
-            );
-            panel
-                .child(self.library_directory_list(panel_id, cx))
-                .into_any_element()
-        } else {
-            let rows = self.browser.library.buffer().rows.len();
-            self.scroll_views.register_list(
-                ("library-flat", panel_id),
-                &self.browser.library.buffer().scroll,
-            );
-            panel
-                .child(list_viewport(
-                    uniform_list(
-                        ("library-rows", panel_id),
-                        rows,
-                        cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
-                            range
-                                .map(|index| {
-                                    let Some(row) =
-                                        this.browser.library.buffer().rows.get(index).cloned()
-                                    else {
-                                        return this
-                                            .paged_loading_row(ViewRequestKind::Library, index, cx)
-                                            .into_any_element();
-                                    };
-                                    let id = row.id;
-                                    let detail = super::library::track_detail(&row);
-                                    track_row(
-                                        ("library-track", id as u64),
-                                        ("library-track-text", id as u64),
-                                        this.browser.library.selected().contains(&id),
-                                        row.title,
-                                        detail,
-                                    )
-                                    .pl(gpui::rems(1.75))
-                                    .group("library-track-row")
-                                    .child(this.library_favorite_toggle(
-                                        ("library-track-favorite", id as u64),
-                                        id,
-                                        row.favorite,
-                                        cx,
-                                    ))
-                                    .on_click(cx.listener(
-                                        move |this, event: &gpui::ClickEvent, window, cx| {
-                                            this.focus_layout(window, cx);
-                                            this.browser.focus_list(ListFocus::Library);
-                                            this.select_library_row(
-                                                super::library::LibraryNode::Track(id),
-                                                index,
-                                                event.modifiers().shift,
-                                                event.modifiers().control
-                                                    || event.modifiers().platform,
-                                                cx,
-                                            );
-                                            if event.click_count() == 2 {
-                                                this.send(Command::Play { track_id: id }, cx);
-                                            }
-                                        },
-                                    ))
-                                    .into_any_element()
-                                })
-                                .collect::<Vec<_>>()
-                        }),
-                    )
-                    .with_decoration(super::paged::viewport_demand(cx.processor(
-                        |this, range, _, cx| {
-                            this.ensure_library_range(range, cx);
-                        },
-                    )))
-                    .h_full()
-                    .min_h_0()
-                    .w_full()
-                    .track_scroll(&self.browser.library.buffer().scroll),
-                ))
-                .into_any_element()
-        }
+        self.scroll_views.register_list(
+            ("library-projection", panel_id),
+            &self.browser.library.tree().scroll,
+        );
+        panel
+            .child(self.library_directory_list(panel_id, cx))
+            .into_any_element()
     }
 
     fn selected_queue_ids_in_order(&self) -> Vec<u64> {

@@ -171,8 +171,7 @@ impl Render for GuiApp {
                         }
                     }
                     "left" | "right" | "space" | " "
-                        if this.browser.library.tree_active()
-                            && this.active_list_focus() == Some(ListFocus::Library) =>
+                        if this.active_list_focus() == Some(ListFocus::Library) =>
                     {
                         this.library_tree_key(key, cx);
                     }

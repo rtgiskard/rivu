@@ -93,28 +93,43 @@ impl BrowserState {
 }
 
 #[derive(Default)]
+struct RootCounts {
+    generation: u64,
+    revision: u64,
+    roots: Vec<std::path::PathBuf>,
+    totals: std::collections::HashMap<std::path::PathBuf, usize>,
+    pending: HashSet<usize>,
+    failed: HashSet<usize>,
+}
+
+impl RootCounts {
+    fn invalidate(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.totals.clear();
+        self.pending.clear();
+        self.failed.clear();
+    }
+}
+
+#[derive(Default)]
 pub(super) struct LibraryViewBuffer {
     pub(super) query: Option<String>,
     pub(super) favorite: Option<bool>,
     pub(super) missing: Option<bool>,
     pub(super) sort: LibrarySort,
-    pub(super) offset: usize,
-    pub(super) total: usize,
-    pub(super) rows: PagedRows<LibraryRow>,
-    pub(super) scroll: gpui::UniformListScrollHandle,
 }
 
 pub(super) struct LibraryBrowser {
     buffer: LibraryViewBuffer,
     tree: DirectoryTree,
     range_selection: LibrarySelection,
-    navigation: Option<usize>,
     selected: HashSet<i64>,
     selected_nodes: HashSet<LibraryNode>,
     tree_active: bool,
     favorites_only: bool,
     missing_only: bool,
     force_scan: bool,
+    counts: RootCounts,
 }
 
 impl Default for LibraryBrowser {
@@ -126,18 +141,80 @@ impl Default for LibraryBrowser {
             },
             tree: DirectoryTree::default(),
             range_selection: LibrarySelection::default(),
-            navigation: None,
             selected: HashSet::new(),
             selected_nodes: HashSet::new(),
             tree_active: true,
             favorites_only: false,
             missing_only: false,
             force_scan: false,
+            counts: RootCounts::default(),
         }
     }
 }
 
 impl LibraryBrowser {
+    pub(super) fn begin_root_counts(
+        &mut self,
+        roots: &[std::path::PathBuf],
+        revision: u64,
+    ) -> (u64, Vec<usize>) {
+        if self.counts.roots != roots || self.counts.revision != revision {
+            self.counts.invalidate();
+            self.counts.roots = roots.to_vec();
+            self.counts.revision = revision;
+        }
+        let batches = (0..roots.len())
+            .step_by(crate::model::MAX_QUERY_ROWS)
+            .filter(|offset| {
+                !self.counts.pending.contains(offset)
+                    && roots[*offset..(*offset + crate::model::MAX_QUERY_ROWS).min(roots.len())]
+                        .iter()
+                        .any(|root| !self.counts.totals.contains_key(root))
+            })
+            .collect::<Vec<_>>();
+        self.counts.pending.extend(batches.iter().copied());
+        self.counts.failed.clear();
+        (self.counts.generation, batches)
+    }
+
+    pub(super) fn counts_current(
+        &self,
+        generation: u64,
+        roots: &[std::path::PathBuf],
+        revision: u64,
+    ) -> bool {
+        self.counts.generation == generation
+            && self.counts.roots == roots
+            && self.counts.revision == revision
+    }
+
+    pub(super) fn accept_root_counts(
+        &mut self,
+        generation: u64,
+        offset: usize,
+        counts: Vec<crate::model::LibraryRootCount>,
+    ) {
+        if self.counts.generation == generation && self.counts.pending.remove(&offset) {
+            self.counts
+                .totals
+                .extend(counts.into_iter().map(|count| (count.path, count.total)));
+        }
+    }
+
+    pub(super) fn fail_root_counts(&mut self, generation: u64, offset: usize) {
+        if self.counts.generation == generation && self.counts.pending.remove(&offset) {
+            self.counts.failed.insert(offset);
+        }
+    }
+
+    pub(super) fn root_count(&self, path: &std::path::Path) -> Option<usize> {
+        self.counts.totals.get(path).copied()
+    }
+
+    pub(super) fn root_counts_failed(&self) -> bool {
+        !self.counts.failed.is_empty()
+    }
+
     pub(super) fn buffer(&self) -> &LibraryViewBuffer {
         &self.buffer
     }
@@ -150,39 +227,12 @@ impl LibraryBrowser {
         self.tree.ready_selection()
     }
 
-    pub(super) fn prepare_page(&mut self, offset: usize, page_size: usize) -> Query {
-        let offset = offset / page_size * page_size;
-        self.buffer.offset = offset;
-        self.buffer.rows.begin(offset, page_size);
-        Query::LibraryPage {
-            query: self.buffer.query.clone(),
-            favorite: self.buffer.favorite,
-            missing: self.buffer.missing,
-            sort: self.buffer.sort,
-            offset,
-            limit: page_size,
-        }
-    }
-
-    pub(super) fn demand_page(&mut self, range: Range<usize>, page_size: usize) -> Option<usize> {
-        self.buffer.rows.demand(range, page_size)
-    }
-
-    pub(super) fn retry_page(&mut self, page_size: usize) -> Option<usize> {
-        self.buffer.rows.retry();
-        self.demand_page(self.buffer.rows.visible(), page_size)
-    }
-
-    pub(super) fn fail_page(&mut self, message: String) {
-        self.buffer.rows.fail(message);
-    }
-
     pub(super) fn focus_track(&mut self, id: i64) {
-        if !self.tree_active
-            && let Some(index) = self.buffer.rows.position(|row| row.id == id)
-        {
-            self.buffer.rows.pin(Some(index));
-            self.buffer
+        self.remember_selection();
+        let node = LibraryNode::Track(id);
+        if let Some(index) = self.tree.index_of(&node) {
+            self.tree.focus_selection(&node, index);
+            self.tree
                 .scroll
                 .scroll_to_item(index, ScrollStrategy::Nearest);
         }
@@ -216,9 +266,13 @@ impl LibraryBrowser {
         generation: u64,
         query: Option<&str>,
         favorite: Option<bool>,
+        tree_active: bool,
+        missing: Option<bool>,
     ) -> bool {
         query == self.buffer.query.as_deref()
             && favorite == self.favorites_only.then_some(true)
+            && tree_active == self.tree_active
+            && missing == self.buffer.missing
             && self.tree.request_pending(branch, generation)
     }
 
@@ -311,14 +365,7 @@ impl LibraryBrowser {
     pub(super) fn force_scan(&self) -> bool {
         self.force_scan
     }
-    pub(super) fn navigation(&self) -> Option<usize> {
-        self.navigation
-    }
-    pub(super) fn defer_navigation(&mut self, index: usize) {
-        self.navigation = Some(index);
-    }
     pub(super) fn cancel_navigation(&mut self) {
-        self.navigation = None;
         self.tree.cancel_navigation();
     }
 
@@ -328,7 +375,6 @@ impl LibraryBrowser {
 
     pub(super) fn invalidate_projection(&mut self) {
         self.invalidate_selection();
-        self.navigation = None;
         self.tree.cancel_navigation();
     }
 
@@ -337,11 +383,9 @@ impl LibraryBrowser {
         self.selected.clear();
         self.selected_nodes.clear();
         self.remember_selection();
-        self.buffer.rows.pin(None);
     }
 
     pub(super) fn select_node(&mut self, node: &LibraryNode, multi: bool) {
-        self.navigation = None;
         self.tree.cancel_navigation();
         if !multi {
             self.selected.clear();
@@ -384,19 +428,21 @@ impl LibraryBrowser {
     pub(super) fn roots_changed(&mut self) {
         self.invalidate_projection();
         self.tree.clear();
+        self.counts.invalidate();
         self.selected_nodes.clear();
     }
 
     pub(super) fn toggle_view(&mut self) {
         self.invalidate_projection();
         self.tree_active = !self.tree_active;
+        self.tree.set_grouped(!self.tree_active);
     }
 
     pub(super) fn toggle_favorites(&mut self) {
         self.favorites_only = !self.favorites_only;
         self.invalidate_projection();
         self.tree.invalidate();
-        self.clear_flat_payload();
+        self.buffer.favorite = self.favorites_only.then_some(true);
     }
 
     pub(super) fn toggle_missing(&mut self) {
@@ -409,25 +455,21 @@ impl LibraryBrowser {
 
     pub(super) fn refresh_filter(&mut self) {
         self.invalidate_projection();
-        self.tree_active = false;
-        self.clear_flat_payload();
+        if self.tree_active {
+            self.toggle_view();
+        }
+        self.buffer.missing = self.missing_only.then_some(true);
+        self.tree.invalidate();
         self.scroll_filter_to_top();
     }
 
     pub(super) fn refresh_search(&mut self, query: String) {
         self.prepare_query(query);
-        self.clear_flat_payload();
         self.scroll_filter_to_top();
-        self.tree.scroll.scroll_to_item(0, ScrollStrategy::Top);
     }
 
     pub(super) fn scroll_filter_to_top(&self) {
-        self.buffer.scroll.scroll_to_item(0, ScrollStrategy::Top);
-    }
-
-    pub(super) fn clear_flat_payload(&mut self) {
-        self.buffer.rows.clear();
-        self.buffer.total = 0;
+        self.tree.scroll.scroll_to_item(0, ScrollStrategy::Top);
     }
 
     pub(super) fn prepare_query(&mut self, query: String) {
@@ -439,19 +481,6 @@ impl LibraryBrowser {
         self.buffer.query = query;
         self.buffer.favorite = self.favorites_only.then_some(true);
         self.buffer.missing = self.missing_only.then_some(true);
-        self.buffer.rows.invalidate();
-    }
-
-    pub(super) fn accept_page(&mut self, page: Page<LibraryRow>) {
-        self.buffer.total = page.total;
-        self.buffer.rows.accept(page);
-        if let Some(index) = self
-            .buffer
-            .rows
-            .position(|row| self.selected.contains(&row.id))
-        {
-            self.buffer.rows.pin(Some(index));
-        }
     }
 }
 
@@ -756,19 +785,24 @@ mod tests {
     #[test]
     fn page_retry_preserves_unknown_count_until_an_empty_response_arrives() {
         let mut library = LibraryBrowser::default();
-        assert_eq!(library.buffer().rows.len(), 1);
-        assert_eq!(library.demand_page(0..1, 20), Some(0));
-        library.prepare_page(0, 20);
-        library.fail_page("unavailable".into());
-        assert_eq!(library.demand_page(0..1, 20), None);
-        assert_eq!(library.retry_page(20), Some(0));
-        library.prepare_page(0, 20);
-        library.accept_page(Page {
-            total: 0,
-            rows: Vec::new(),
-        });
-        assert!(library.buffer().rows.is_empty());
-        assert_eq!(library.retry_page(20), None);
+        let forest = TreeBranch::default();
+        library.prepare_directory(forest.clone(), 0, 20, 1);
+        library.fail_directory(&forest, 1);
+        assert_eq!(library.tree().row_count(), 1);
+        assert!(library.demand_directories(0..1).is_empty());
+        library.retry_directory(&forest);
+        assert_eq!(library.demand_directories(0..1), vec![(forest.clone(), 0)]);
+        library.prepare_directory(forest.clone(), 0, 20, 2);
+        library.accept_directory(
+            &forest,
+            2,
+            Page {
+                total: 0,
+                rows: Vec::new(),
+            },
+        );
+        assert_eq!(library.tree().row_count(), 0);
+        assert!(library.demand_directories(0..1).is_empty());
 
         let mut playlists = PlaylistBrowser::default();
         playlists.select(41, "empty".into(), 0);
@@ -826,14 +860,14 @@ mod tests {
     fn filter_and_view_changes_cancel_deferred_navigation_without_losing_identity() {
         let mut library = LibraryBrowser::default();
         library.select_node(&LibraryNode::Track(41), false);
-        library.navigation = Some(123);
+        library.tree.defer_selection(0);
         library.refresh_filter();
-        assert_eq!(library.navigation, None);
+        assert_eq!(library.take_ready_selection(), None);
         assert!(!library.tree_active());
         assert!(library.selected().contains(&41));
-        library.navigation = Some(7);
+        library.tree.defer_selection(0);
         library.toggle_view();
-        assert_eq!(library.navigation, None);
+        assert_eq!(library.take_ready_selection(), None);
         assert!(library.tree_active());
         library.clear_selection();
         assert!(library.selected().is_empty());
@@ -843,9 +877,9 @@ mod tests {
     fn refreshed_projection_cancels_old_index_navigation_but_keeps_track_identity() {
         let mut library = LibraryBrowser::default();
         library.select_node(&LibraryNode::Track(41), false);
-        library.defer_navigation(123);
+        library.tree.defer_selection(0);
         library.prepare_query(String::new());
-        assert_eq!(library.navigation(), None);
+        assert_eq!(library.take_ready_selection(), None);
         assert!(library.selected().contains(&41));
     }
 
@@ -868,17 +902,21 @@ mod tests {
                     generation,
                     previous_query.as_deref(),
                     Some(true),
+                    tree_active,
+                    None,
                 ));
-                library.defer_navigation(123);
+                library.tree.defer_selection(0);
                 library.refresh_search(query.into());
                 assert_eq!(library.tree_active(), tree_active);
-                assert_eq!(library.navigation(), None);
+                assert_eq!(library.take_ready_selection(), None);
                 assert!(library.selected().contains(&41));
                 assert!(!library.directory_request_pending(
                     &branch,
                     generation,
                     previous_query.as_deref(),
                     Some(true),
+                    tree_active,
+                    None,
                 ));
                 let expected = (!query.is_empty()).then_some(query);
                 assert_eq!(library.buffer().query.as_deref(), expected);
@@ -888,31 +926,144 @@ mod tests {
                     generation + 10,
                     expected,
                     Some(true),
+                    tree_active,
+                    None,
                 ));
                 assert!(!library.directory_request_pending(
                     &branch,
                     generation + 10,
                     expected,
                     None,
+                    tree_active,
+                    None,
                 ));
-                assert!(matches!(
-                    library.prepare_page(0, 20),
-                    Query::LibraryPage { query: actual, favorite: Some(true), .. }
-                    if actual.as_deref() == expected
-                ));
+                assert_eq!(library.buffer().query.as_deref(), expected);
+                assert_eq!(library.buffer().favorite, Some(true));
             }
             library.toggle_missing();
             library.refresh_filter();
             library.prepare_query(String::new());
             assert!(!library.tree_active());
-            assert!(matches!(
-                library.prepare_page(0, 20),
-                Query::LibraryPage {
-                    missing: Some(true),
-                    ..
-                }
-            ));
+            assert_eq!(library.buffer().missing, Some(true));
         }
+    }
+
+    #[test]
+    fn root_counts_are_batched_unknown_retryable_and_revision_bound() {
+        let mut library = LibraryBrowser::default();
+        let roots: Vec<_> = (0..crate::model::MAX_QUERY_ROWS + 1)
+            .map(|index| std::path::PathBuf::from(format!("/root/{index}")))
+            .collect();
+        let (generation, batches) = library.begin_root_counts(&roots, 7);
+        assert_eq!(batches, vec![0, crate::model::MAX_QUERY_ROWS]);
+        assert_eq!(library.root_count(&roots[0]), None);
+        library.accept_root_counts(
+            generation,
+            0,
+            roots[..crate::model::MAX_QUERY_ROWS]
+                .iter()
+                .map(|path| crate::model::LibraryRootCount {
+                    path: path.clone(),
+                    total: 0,
+                })
+                .collect(),
+        );
+        assert_eq!(library.root_count(&roots[0]), Some(0));
+        library.fail_root_counts(generation, crate::model::MAX_QUERY_ROWS);
+        assert!(library.root_counts_failed());
+        assert_eq!(library.root_count(roots.last().unwrap()), None);
+        assert_eq!(
+            library.begin_root_counts(&roots, 7).1,
+            vec![crate::model::MAX_QUERY_ROWS]
+        );
+        library.refresh_search("needle".into());
+        assert_eq!(library.root_count(&roots[0]), Some(0));
+        let (scanned, _) = library.begin_root_counts(&roots, 8);
+        assert_ne!(generation, scanned);
+        assert!(!library.counts_current(generation, &roots, 8));
+        library.accept_root_counts(
+            generation,
+            0,
+            vec![crate::model::LibraryRootCount {
+                path: roots[0].clone(),
+                total: 99,
+            }],
+        );
+        assert_eq!(library.root_count(&roots[0]), None);
+        library.accept_root_counts(
+            scanned,
+            0,
+            vec![crate::model::LibraryRootCount {
+                path: roots[0].clone(),
+                total: 3,
+            }],
+        );
+        assert_eq!(library.root_count(&roots[0]), Some(3));
+        library.roots_changed();
+        assert!(!library.counts_current(scanned, &roots, 8));
+        assert_eq!(library.root_count(&roots[0]), None);
+        let empty = library.begin_root_counts(&[], 8);
+        assert!(empty.1.is_empty());
+    }
+    #[test]
+    fn replacing_roots_rejects_old_forest_and_group_pages() {
+        use crate::gui::library::tree::TreeItem;
+        let mut library = LibraryBrowser::default();
+        library.toggle_view();
+        let forest = TreeBranch::default();
+        library.prepare_directory(forest.clone(), 0, 2, 1);
+        library.accept_directory(
+            &forest,
+            1,
+            Page {
+                total: 1,
+                rows: vec![DirectoryRow::Directory {
+                    path: "/old".into(),
+                }],
+            },
+        );
+        let TreeItem::Entry(entry) = library.tree.item(0).unwrap() else {
+            panic!("root header")
+        };
+        let old_root = entry.branch.unwrap();
+        library.prepare_directory(old_root.clone(), 0, 2, 2);
+        library.roots_changed();
+        library.prepare_directory(forest.clone(), 0, 2, 3);
+        library.accept_directory(
+            &forest,
+            1,
+            Page {
+                total: 0,
+                rows: vec![],
+            },
+        );
+        assert!(library.directory_request_pending(&forest, 3, None, None, false, None));
+        library.accept_directory(
+            &forest,
+            3,
+            Page {
+                total: 1,
+                rows: vec![DirectoryRow::Directory {
+                    path: "/new".into(),
+                }],
+            },
+        );
+        library.accept_directory(
+            &old_root,
+            2,
+            Page {
+                total: 0,
+                rows: vec![],
+            },
+        );
+        let TreeItem::Entry(entry) = library.tree.item(0).unwrap() else {
+            panic!("current root header")
+        };
+        assert!(
+            matches!(entry.row, DirectoryRow::Directory { path } if path == std::path::Path::new("/new"))
+        );
+        assert_eq!(library.tree.row_count(), 2);
+        assert!(!library.directory_request_pending(&old_root, 2, None, None, false, None));
     }
 
     fn summary(id: i64, entry_count: usize) -> PlaylistSummary {

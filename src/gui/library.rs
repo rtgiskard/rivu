@@ -348,7 +348,7 @@ impl GuiApp {
                                         depth,
                                         false,
                                     )
-                                    .h(px(32.0 * ui_scale.max(0.5)))
+                                    .h(px(48.0 * ui_scale.max(0.5)))
                                     .relative()
                                     .child(tree_guides(&this.browser.library.tree(), index))
                                     .child(
@@ -434,9 +434,17 @@ impl GuiApp {
                                 visible.depth,
                                 selected,
                             )
-                            .h(px(32.0 * ui_scale.max(0.5)))
+                            .h(px(48.0 * ui_scale.max(0.5)))
                             .relative()
                             .child(tree_guides(&this.browser.library.tree(), index))
+                            .when(visible.branch.is_some(), |view| {
+                                view.child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .font_family(super::fonts::SYMBOLS_FAMILY)
+                                        .child(if visible.expanded { "󰅀" } else { "󰅂" }),
+                                )
+                            })
                             .child(
                                 div()
                                     .flex_shrink_0()
@@ -453,21 +461,45 @@ impl GuiApp {
                                     }),
                             )
                             .child(
-                                row()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(div().min_w_0().truncate().child(title.clone()))
-                                    .when(!detail.is_empty(), |v| {
-                                        v.child(
-                                            div()
-                                                .min_w_0()
-                                                .text_xs()
-                                                .text_color(gpui::rgb(super::MUTED))
-                                                .truncate()
-                                                .child(detail),
-                                        )
-                                    }),
+                                super::row_text(
+                                    gpui::ElementId::named_usize("library-node-text", index),
+                                    title.clone(),
+                                    detail,
+                                )
+                                .flex_1()
+                                .min_w_0(),
                             )
+                            .when(visible.depth == 0 && path.is_some(), |view| {
+                                let count = this
+                                    .browser
+                                    .library
+                                    .root_count(path.as_deref().expect("root path"));
+                                view.child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .text_sm()
+                                        .text_color(gpui::rgb(super::MUTED))
+                                        .child(count.map_or_else(
+                                            || "—".to_owned(),
+                                            |total| total.to_string(),
+                                        )),
+                                )
+                                .when(
+                                    this.browser.library.root_counts_failed(),
+                                    |view| {
+                                        view.child(icon_button(
+                                            gpui::ElementId::named_usize(
+                                                "library-count-retry",
+                                                index,
+                                            ),
+                                            "󰑐",
+                                            "Retry scanned track counts",
+                                            cx,
+                                            |this, _, cx| this.request_root_counts(cx),
+                                        ))
+                                    },
+                                )
+                            })
                             .when_some(scan, |v, scan| v.child(scan))
                             .when_some(
                                 match entry {

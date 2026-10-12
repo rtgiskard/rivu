@@ -71,7 +71,6 @@ struct Branch {
     total: Option<usize>,
     expanded: bool,
     pending: Option<(usize, u64)>,
-    generation: u64,
     // Only expanded children need positional anchors. They remain renderable
     // when their parent's payload page is evicted.
     children: BTreeMap<usize, TreeBranch>,
@@ -110,6 +109,9 @@ pub(in crate::gui) struct DirectoryTree {
     focused: Option<(super::LibraryNode, TreeBranch)>,
     projection_revision: u64,
     pub(in crate::gui) scroll: UniformListScrollHandle,
+    grouped: bool,
+    saved_expansions: [HashSet<TreeBranch>; 2],
+    grouped_roots: HashSet<TreeBranch>,
 }
 
 impl Default for DirectoryTree {
@@ -127,6 +129,9 @@ impl Default for DirectoryTree {
             focused: None,
             projection_revision: 0,
             scroll: UniformListScrollHandle::new(),
+            grouped: false,
+            saved_expansions: Default::default(),
+            grouped_roots: HashSet::new(),
         }
     }
 }
@@ -140,6 +145,31 @@ pub(in crate::gui) struct TreeRangeSpan {
 }
 
 impl DirectoryTree {
+    pub(in crate::gui) fn set_grouped(&mut self, grouped: bool) {
+        if self.grouped == grouped {
+            return;
+        }
+        self.saved_expansions[self.grouped as usize] = self
+            .branches
+            .iter()
+            .filter(|(_, branch)| branch.expanded)
+            .map(|(key, _)| key.clone())
+            .collect();
+        self.grouped = grouped;
+        self.branches.clear();
+        self.selected_locations.clear();
+        for key in &self.saved_expansions[grouped as usize] {
+            self.branches.insert(
+                key.clone(),
+                Branch {
+                    expanded: true,
+                    ..Default::default()
+                },
+            );
+        }
+        self.invalidate();
+    }
+
     pub(in crate::gui) fn configure_page_size(&mut self, size: usize) -> bool {
         let size = size.max(1);
         if self.page_size == size {
@@ -155,7 +185,6 @@ impl DirectoryTree {
             page.failed = false;
         }
         let branch = self.branches.entry(key).or_default();
-        branch.generation = generation;
         branch.pending = Some((offset, generation));
         // Default reserves one row before its placeholder segment exists.
         // Later requests only change status, including for a known empty forest.
@@ -167,10 +196,6 @@ impl DirectoryTree {
     pub(in crate::gui) fn retry(&mut self, key: &TreeBranch) {
         self.pages
             .retain(|(candidate, _), page| candidate != key || !page.failed);
-    }
-
-    pub(in crate::gui) fn generation(&self, key: &TreeBranch) -> Option<u64> {
-        self.branches.get(key).map(|branch| branch.generation)
     }
 
     pub(in crate::gui) fn request_pending(&self, key: &TreeBranch, generation: u64) -> bool {
@@ -219,6 +244,9 @@ impl DirectoryTree {
             }
             if let DirectoryRow::Directory { path } = row {
                 let child = key.child(offset + index, path);
+                if self.grouped && key.is_forest() && self.grouped_roots.insert(child.clone()) {
+                    self.branches.entry(child.clone()).or_default().expanded = true;
+                }
                 if self.expanded(&child) {
                     self.attach(key, offset + index, &child);
                 }
@@ -305,6 +333,8 @@ impl DirectoryTree {
 
     pub(in crate::gui) fn clear(&mut self) {
         self.branches.clear();
+        self.saved_expansions = Default::default();
+        self.grouped_roots.clear();
         self.selected_locations.clear();
         self.invalidate();
     }
@@ -550,6 +580,16 @@ impl DirectoryTree {
             child = parent;
         }
     }
+    pub(in crate::gui) fn cached_track(&self, id: i64) -> Option<&crate::model::LibraryRow> {
+        self.pages
+            .values()
+            .flat_map(|page| &page.rows)
+            .find_map(|row| match row {
+                DirectoryRow::Track(track) if track.id == id => Some(track),
+                _ => None,
+            })
+    }
+
     #[cfg(test)]
     pub(in crate::gui) fn cached_row(
         &self,
@@ -821,6 +861,24 @@ impl DirectoryTree {
             .map(|segment| segment.start + index - segment.offset)
     }
 
+    pub(in crate::gui) fn index_of(&self, node: &super::LibraryNode) -> Option<usize> {
+        self.focused
+            .as_ref()
+            .filter(|(focused, _)| focused == node)
+            .and_then(|key| {
+                self.selected_locations
+                    .get(key)
+                    .and_then(|index| self.visible_index(&key.1, *index))
+            })
+            .or_else(|| {
+                self.selected_locations
+                    .iter()
+                    .filter(|((candidate, _), _)| candidate == node)
+                    .filter_map(|((_, key), index)| self.visible_index(key, *index))
+                    .min()
+            })
+    }
+
     /// Keep the clicked occurrence distinct from the deduplicated action selection.
     pub(in crate::gui) fn focus_selection(&mut self, node: &super::LibraryNode, index: usize) {
         let Some(segment) = self.segment(index) else {
@@ -925,6 +983,41 @@ mod tests {
     ) {
         tree.begin(key.clone(), offset, generation);
         assert!(tree.accept(key, generation, page(paths, total)));
+    }
+    #[test]
+    fn grouped_projection_preserves_independent_choices_and_never_reuses_tree_children() {
+        let mut tree = DirectoryTree::default();
+        let forest = branch("");
+        let a = branch("/a");
+        let b = branch("/b");
+        let nested = branch("/a/album");
+        accept(&mut tree, &forest, 0, 1, &["/a", "/b"], 2);
+        tree.expand(&a);
+        accept(&mut tree, &a, 0, 2, &["/a/album"], 1);
+        tree.expand(&nested);
+        tree.set_grouped(true);
+        accept(&mut tree, &forest, 0, 3, &["/a", "/b"], 2);
+        assert!(tree.expanded(&a));
+        assert!(tree.expanded(&b));
+        assert!(!tree.expanded(&nested));
+        tree.collapse(&a);
+        tree.invalidate();
+        accept(&mut tree, &forest, 0, 4, &["/a", "/b"], 2);
+        assert!(!tree.expanded(&a));
+        assert!(tree.expanded(&b));
+        tree.set_grouped(false);
+        accept(&mut tree, &forest, 0, 5, &["/a", "/b"], 2);
+        assert!(tree.expanded(&a));
+        assert!(tree.expanded(&nested));
+        assert!(!tree.expanded(&b));
+        tree.set_grouped(true);
+        accept(&mut tree, &forest, 0, 6, &["/a", "/b"], 2);
+        assert!(!tree.expanded(&a));
+        assert!(tree.expanded(&b));
+        tree.clear();
+        accept(&mut tree, &forest, 0, 7, &[], 0);
+        assert_eq!(tree.row_count(), 0);
+        assert!(tree.pages.len() <= MAX_CACHED_PAGES);
     }
 
     #[test]

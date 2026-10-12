@@ -105,12 +105,21 @@ rivu library clean-missing
 Hover a track to access its favorite toggle. Toggling a favorite does not change
 the selection or start playback; double-click a track to play it.
 
-Flat-list tracks use a uniform hanging indent from the library content edge,
-independent of their directory depth; both text lines share the same inset.
-Tree tracks retain their directory-level indentation. In both views the secondary
-line shows artist/album, duration, codec, and bitrate in kbps from stored metadata;
-unknown technical values appear as `—`. Narrow rows truncate their text; flat-list
-row tooltips expose the full title and secondary line.
+The desktop flat list is grouped by configured library roots, in configuration
+order, including roots with no matching tracks. Each folder header expands or
+collapses independently; its contents are recursive, sorted flat tracks rather
+than subdirectory rows. Track text uses one level of indentation below the root,
+independent of the track's actual directory depth. Tree tracks retain their
+directory-level indentation. Both views show artist/album, duration, codec, and
+bitrate in kbps on a secondary line. Unknown technical values appear as `—`;
+narrow rows truncate text and track tooltips expose the full title and detail.
+
+Root headers in both views show the number of scanned library tracks beneath
+that root, including missing files. These counts do not change with search,
+favorites, or the missing filter. `—` means the count is not available yet,
+not zero; failed counts offer a retry control. Counts refresh after library
+changes such as scans. Overlapping roots count their own recursive contents
+independently and can show the same track in more than one group.
 
 Search and the favorites filter apply to both the flat list and directory tree
 without switching views. Tree search shows matching tracks and their ancestor
@@ -134,14 +143,19 @@ Dragging a selected row carries the selection at drag start; dragging an
 unselected row carries that row alone. The dragged set stays fixed for the
 gesture even if the underlying selection changes.
 
-Configured roots are shown in configuration order, including empty roots, and
-identified by their paths. Click a directory row to expand or collapse it.
-Overlapping roots expand independently: closing an enclosing root does not close
-the same directory shown as another root.
+Configured roots are identified by their paths. Click a directory or group
+header to expand or collapse it. Tree and grouped-list expansion choices are
+kept separately when switching views; changing or clearing search preserves
+unrelated expansion choices. Overlapping roots expand independently: closing
+an enclosing root does not close the same directory shown as another root.
+Shift selection in the grouped list includes root headers as well as tracks,
+including ranges that cross groups or unloaded pages. Selected root headers
+support directory rescanning and dragging with the same recursive semantics
+as tree directories; actions deduplicate overlapping track identities.
 
-After a scan saves its results, the tree refreshes automatically, including
-previously empty expanded directories, even if some files failed to import.
-Collapsed directories load updated contents when reopened.
+After a scan saves its results, both views and root counts refresh automatically,
+including previously empty expanded folders, even if some files failed to import.
+Collapsed folders load updated contents when reopened.
 The scan status row offers a close button after completion or failure. Closing
 it hides the result and progress bar without changing imported tracks or the
 separate error message. A new scan shows progress again.

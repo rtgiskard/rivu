@@ -514,13 +514,3 @@ pub(crate) fn row_text(
         })
 }
 
-/// Shared track row for panels whose content is a two-line track label.
-pub(crate) fn track_row(
-    id: impl Into<ElementId>,
-    text_id: impl Into<ElementId>,
-    selected: bool,
-    title: impl Into<SharedString>,
-    detail: impl Into<SharedString>,
-) -> Stateful<Div> {
-    list_row(id, selected).child(row_text(text_id, title, detail))
-}
