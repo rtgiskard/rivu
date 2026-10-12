@@ -3,7 +3,7 @@
 //! ABI declarations are generated from development headers into Cargo OUT_DIR.
 //! No FFmpeg symbol is linked by the executable.
 
-use super::{Channel, MediaInfo};
+use super::{Channel, MediaInfo, source::check_cancelled};
 use anyhow::{Context, Result, bail};
 use libloading::Library;
 use std::{
@@ -13,7 +13,7 @@ use std::{
     os::unix::fs::FileExt,
     path::{Path, PathBuf},
     ptr,
-    sync::LazyLock,
+    sync::{LazyLock, atomic::AtomicBool},
 };
 
 #[cfg(not(all(
@@ -503,11 +503,13 @@ pub(super) struct Decoder {
 }
 unsafe impl Send for Decoder {}
 impl Decoder {
-    pub(super) fn open(path: &Path) -> Result<Self> {
+    pub(super) fn open(path: &Path, cancelled: Option<&AtomicBool>) -> Result<Self> {
+        check_cancelled(cancelled)?;
         let input = Input::open(path, runtime()?)?;
-        Self::from_input(input)
+        Self::from_input(input, cancelled)
     }
-    pub(super) fn from_input(mut input: Input) -> Result<Self> {
+    pub(super) fn from_input(mut input: Input, cancelled: Option<&AtomicBool>) -> Result<Self> {
+        check_cancelled(cancelled)?;
         let rt = input.rt;
         let path = &input.path;
         let format = input.format;
@@ -654,7 +656,7 @@ impl Decoder {
         input.format = ptr::null_mut();
         let mut frames = Vec::new();
         let timestamp = decoder
-            .next_frames(&mut frames)?
+            .next_frames(&mut frames, cancelled)?
             .context("FFmpeg audio stream contains no decodable frames")?;
         decoder.primed = Some((frames, timestamp));
         Ok(decoder)
@@ -666,13 +668,34 @@ impl Decoder {
         &self.layout
     }
     /// Replaces caller-owned PCM on success; only `Some` makes its contents valid.
-    pub(super) fn next_frames(&mut self, frames: &mut Vec<f32>) -> Result<Option<f64>> {
+    pub(super) fn next_frames(
+        &mut self,
+        frames: &mut Vec<f32>,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<Option<f64>> {
+        let read = self.rt.f.read_frame;
+        self.next_frames_with_reader(frames, cancelled, |format, packet| unsafe {
+            read(format, packet)
+        })
+    }
+
+    fn next_frames_with_reader(
+        &mut self,
+        frames: &mut Vec<f32>,
+        cancelled: Option<&AtomicBool>,
+        mut read: impl FnMut(*mut AVFormatContext, *mut AVPacket) -> c_int,
+    ) -> Result<Option<f64>> {
+        check_cancelled(cancelled)?;
         if let Some((primed, timestamp)) = self.primed.take() {
             *frames = primed;
             return Ok(Some(timestamp));
         }
         loop {
+            // Audio preroll, non-audio packets and decoder buffering may all
+            // continue without publishing PCM; every iteration is cancellable.
+            check_cancelled(cancelled)?;
             let ret = unsafe { (self.rt.f.receive_frame)(self.codec, self.frame) };
+            check_cancelled(cancelled)?;
             if ret >= 0 {
                 let frame = unsafe { &*self.frame };
                 let rate = frame.sample_rate;
@@ -736,7 +759,11 @@ impl Decoder {
             if self.draining {
                 bail!("FFmpeg decoder requested input while draining");
             }
-            let read = unsafe { (self.rt.f.read_frame)(self.format, self.packet) };
+            let read = read(self.format, self.packet);
+            if let Err(error) = check_cancelled(cancelled) {
+                unsafe { (self.rt.f.packet_unref)(self.packet) };
+                return Err(error);
+            }
             if read == ERR_EOF {
                 self.draining = true;
                 let sent = unsafe { (self.rt.f.send_packet)(self.codec, ptr::null()) };
@@ -762,7 +789,8 @@ impl Decoder {
             }
         }
     }
-    pub(super) fn seek(&mut self, seconds: f64) -> Result<()> {
+    pub(super) fn seek(&mut self, seconds: f64, cancelled: Option<&AtomicBool>) -> Result<()> {
+        check_cancelled(cancelled)?;
         if !seconds.is_finite() || seconds < 0.0 {
             bail!("Invalid FFmpeg seek position");
         }
@@ -778,6 +806,7 @@ impl Decoder {
         );
         let ret =
             unsafe { (self.rt.f.seek_file)(self.format, self.stream, i64::MIN, target, target, 0) };
+        check_cancelled(cancelled)?;
         if ret < 0 {
             return Err(error_text(self.rt, ret, "seek audio stream"));
         }
@@ -893,6 +922,57 @@ unsafe fn copy_samples<T: Copy>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancellation_stops_ffmpeg_skipped_packets_and_seek_input_at_finite_counts() {
+        use std::{io::Write, sync::atomic::Ordering};
+
+        let mut file = tempfile::Builder::new().suffix(".wav").tempfile().unwrap();
+        let samples = 16_000_u32;
+        let bytes = samples * 2;
+        file.write_all(b"RIFF").unwrap();
+        file.write_all(&(36 + bytes).to_le_bytes()).unwrap();
+        file.write_all(b"WAVEfmt \x10\0\0\0\x01\0\x01\0").unwrap();
+        file.write_all(&8_000_u32.to_le_bytes()).unwrap();
+        file.write_all(&16_000_u32.to_le_bytes()).unwrap();
+        file.write_all(b"\x02\0\x10\0data").unwrap();
+        file.write_all(&bytes.to_le_bytes()).unwrap();
+        file.write_all(&vec![0; bytes as usize]).unwrap();
+        for skip in [false, true] {
+            let mut decoder = Decoder::open(file.path(), None).unwrap();
+            decoder.seek(1.25, None).unwrap();
+            let cancelled = AtomicBool::new(false);
+            let mut packets = 0;
+            let limit = if skip { 3 } else { 1 };
+            let read = decoder.rt.f.read_frame;
+            let mut frames = Vec::new();
+            let error = decoder
+                .next_frames_with_reader(&mut frames, Some(&cancelled), |format, packet| {
+                    let status = unsafe { read(format, packet) };
+                    assert!(status >= 0, "fixture must contain the packet prefix");
+                    packets += 1;
+                    if skip {
+                        unsafe { (*packet).stream_index = -1 };
+                    }
+                    if packets == limit {
+                        cancelled.store(true, Ordering::Relaxed);
+                    }
+                    status
+                })
+                .unwrap_err();
+            assert_eq!(packets, limit);
+            assert_eq!(error.to_string(), "Waveform loading cancelled");
+            assert!(!decoder.draining, "cancellation is not EOF");
+            cancelled.store(false, Ordering::Relaxed);
+            decoder.seek(0.0, Some(&cancelled)).unwrap();
+            assert!(
+                decoder
+                    .next_frames(&mut frames, Some(&cancelled))
+                    .unwrap()
+                    .is_some()
+            );
+        }
+    }
 
     #[test]
     fn packed_signed_64_bit_samples_are_not_planar() {

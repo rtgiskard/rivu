@@ -13,6 +13,8 @@ use parking_lot::RwLock;
 use std::{path::PathBuf, sync::Arc};
 
 const PENDING_BUFFER_CAPACITY: usize = 16_384;
+// Empty/tiny packets cannot turn one refill into an unlimited decode round.
+const MAX_DECODE_PACKETS_PER_FILL: usize = 64;
 
 pub(super) struct PlaybackOptions {
     pub(super) path: PathBuf,
@@ -212,26 +214,39 @@ impl Playback {
         self.output.refill_delay(self.eof)
     }
 
-    pub(super) fn fill(&mut self) -> Result<()> {
+    /// Returns whether another finite refill can run without waiting.
+    pub(super) fn fill(&mut self) -> Result<bool> {
+        self.fill_with(|| {})
+    }
+
+    fn fill_with(&mut self, mut after_packet: impl FnMut()) -> Result<bool> {
         self.output.check_timing()?;
         if self.paused {
-            return Ok(());
+            return Ok(false);
         }
         let channels = self.source.layout().len();
         let sample_rate = self.source.info().sample_rate;
-        while self.output.has_room() {
+        // Concurrent callback consumption belongs to the next refill, not this
+        // prefix. Both submitted frames and decoded packets bound this round.
+        let mut remaining_frames = self.output.vacant_frames();
+        let mut remaining_packets = MAX_DECODE_PACKETS_PER_FILL;
+        while remaining_frames > 0 {
             if self.offset_frames < self.pending.len() / channels {
+                let end =
+                    (self.offset_frames + remaining_frames).min(self.pending.len() / channels);
                 let count = self
                     .output
-                    .push(&self.pending[self.offset_frames * channels..]);
+                    .push(&self.pending[self.offset_frames * channels..end * channels]);
+                remaining_frames -= count;
                 self.offset_frames += count;
                 if self.offset_frames < self.pending.len() / channels {
-                    return Ok(());
+                    break;
                 }
             }
-            if self.eof {
-                return Ok(());
+            if self.eof || remaining_frames == 0 || remaining_packets == 0 {
+                break;
             }
+            remaining_packets -= 1;
             self.pending.clear();
             self.offset_frames = 0;
             if let Some((frames, start_seconds)) = self.source.next_frames()? {
@@ -261,8 +276,11 @@ impl Playback {
                 // Submit decoded PCM directly; retain only the packet tail that
                 // did not fit in the bounded output ring. At most one decoded
                 // packet is pending, and its allocation is reused on refill.
-                let count = self.output.push(frames);
+                let prefix = frames.len().min(remaining_frames * channels);
+                let count = self.output.push(&frames[..prefix]);
+                remaining_frames -= count;
                 self.pending.extend_from_slice(&frames[count * channels..]);
+                after_packet();
             } else {
                 if let Some(accumulator) = &mut self.waveform_accumulator {
                     accumulator.finish(&self.waveform_coverage);
@@ -271,7 +289,10 @@ impl Playback {
                 self.eof = true;
             }
         }
-        Ok(())
+        Ok(
+            (!self.eof || self.offset_frames < self.pending.len() / channels)
+                && self.output.vacant_frames() > 0,
+        )
     }
     pub(super) fn finished(&self) -> bool {
         !self.paused
@@ -290,9 +311,13 @@ mod tests {
     use std::io::Write;
 
     fn pcm() -> tempfile::NamedTempFile {
+        pcm_samples(16_000)
+    }
+
+    fn pcm_samples(samples: u32) -> tempfile::NamedTempFile {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         let rate = 8_000_u32;
-        let bytes = rate * 2 * 2;
+        let bytes = samples * 2;
         file.write_all(b"RIFF").unwrap();
         file.write_all(&(36 + bytes).to_le_bytes()).unwrap();
         file.write_all(b"WAVEfmt \x10\0\0\0\x01\0\x01\0").unwrap();
@@ -300,7 +325,7 @@ mod tests {
         file.write_all(&(rate * 2).to_le_bytes()).unwrap();
         file.write_all(b"\x02\0\x10\0data").unwrap();
         file.write_all(&bytes.to_le_bytes()).unwrap();
-        for index in 0..rate * 2 {
+        for index in 0..samples {
             file.write_all(&((index % 16000) as i16).to_le_bytes())
                 .unwrap();
         }
@@ -515,6 +540,98 @@ mod tests {
             let expected = (energy / 10.0).sqrt() as f32;
             assert!((rms.unwrap() - expected).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn refill_snapshot_yields_to_consumption_and_preserves_the_packet_tail() {
+        let file = pcm();
+        let (mut playback, mut render) = test_playback(
+            file.path(),
+            PlaybackRange {
+                start_seconds: 0.0,
+                end_seconds: Some(2.0),
+            },
+        );
+        let prefix = playback.output.vacant_frames();
+        let mut consumed = 0;
+        let ready = playback
+            .fill_with(|| {
+                let mut data = [0.0; 256];
+                render(&mut data, consumed as u64 / 8);
+                for (offset, sample) in data.iter().enumerate() {
+                    assert_eq!(*sample, (consumed + offset) as f32 / 32768.0);
+                }
+                consumed += data.len();
+            })
+            .unwrap();
+        // A callback consumes after every decoded packet. The old refill could
+        // follow reclaimed space; this round submits only its initial prefix.
+        assert!(consumed > 0);
+        assert_eq!(prefix - playback.output.vacant_frames() + consumed, prefix);
+        assert!(ready, "available refill work must not wait for a timer");
+        assert!(!playback.pending.is_empty());
+        assert!(!playback.eof);
+        assert!(!playback.finished());
+        let mut data = [0.0; 160];
+        while consumed < 16_000 {
+            playback.fill().unwrap();
+            let count = data.len().min(16_000 - consumed);
+            render(&mut data[..count], consumed as u64 / 8);
+            for (offset, sample) in data[..count].iter().enumerate() {
+                assert_eq!(*sample, (consumed + offset) as f32 / 32768.0);
+            }
+            consumed += count;
+        }
+        assert!(!playback.fill().unwrap());
+        assert!(playback.eof);
+        assert!(!playback.finished(), "EOF still waits for the audible tail");
+        render(&mut data, 2020);
+        assert!(data.iter().all(|sample| *sample == 0.0));
+        assert!(playback.finished());
+        assert_eq!(playback.heard(), 2.0);
+        assert_eq!(
+            playback.waveform.read().rms_counts.iter().sum::<u64>(),
+            16_000
+        );
+    }
+
+    #[test]
+    fn packet_budget_yields_with_room_then_reaches_ordered_eof() {
+        let file = pcm_samples(96_000);
+        let (mut playback, _) = test_playback(
+            file.path(),
+            PlaybackRange {
+                start_seconds: 0.0,
+                end_seconds: Some(12.0),
+            },
+        );
+        let (output, mut render) = super::super::output::test_backend_with_capacity(
+            8_000,
+            false,
+            playback.source.layout(),
+            128_000,
+        );
+        playback.output = output;
+        let mut packets = 0;
+        assert!(playback.fill_with(|| packets += 1).unwrap());
+        assert_eq!(packets, MAX_DECODE_PACKETS_PER_FILL);
+        assert!(playback.output.vacant_frames() > 0);
+        assert!(!playback.eof);
+        assert!(!playback.fill().unwrap());
+        assert!(playback.eof);
+        let mut data = vec![0.0; 96_000];
+        render(&mut data, 0);
+        for (index, sample) in data.iter().enumerate() {
+            assert_eq!(*sample, (index % 16_000) as f32 / 32768.0);
+        }
+        assert!(!playback.finished());
+        render(&mut [0.0; 8], 12_020);
+        assert!(playback.finished());
+        assert_eq!(playback.heard(), 12.0);
+        assert_eq!(
+            playback.waveform.read().rms_counts.iter().sum::<u64>(),
+            96_000
+        );
     }
 
     #[test]

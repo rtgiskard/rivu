@@ -13,6 +13,13 @@
 //! Lifecycle events use bounded worker-thread backpressure; progress is best
 //! effort. Consumers must keep draining events while submitting commands.
 //! Shutdown cancels blocked event delivery without involving the output callback.
+//!
+//! Scheduling rounds admit at most 64 commands, including coalesced seeks and
+//! read-ahead barriers. A refill submits only the initially vacant ring prefix
+//! and decodes at most 64 PCM chunks; concurrently reclaimed space belongs to
+//! the next round. A partial packet tail stays ahead of later PCM and EOF.
+//! Ready commands or refill work run another round without a timer wait.
+//! These are work bounds, not wall-clock bounds on decoder/device/file calls.
 
 #[cfg(not(target_os = "linux"))]
 compile_error!("Rivu requires Linux and native PipeWire audio output");
@@ -23,7 +30,7 @@ mod ffmpeg;
 mod ffmpeg {
     use super::{Channel, MediaInfo};
     use anyhow::{Result, bail};
-    use std::{fs::File, path::Path};
+    use std::{fs::File, path::Path, sync::atomic::AtomicBool};
 
     pub(super) fn availability() -> Result<String> {
         bail!("FFmpeg extension is not compiled; rebuild with --features ffmpeg")
@@ -52,11 +59,11 @@ mod ffmpeg {
     pub(super) struct Decoder;
 
     impl Decoder {
-        pub(super) fn open(_: &Path) -> Result<Self> {
+        pub(super) fn open(_: &Path, _: Option<&AtomicBool>) -> Result<Self> {
             bail!("FFmpeg extension is not compiled; rebuild with --features ffmpeg")
         }
 
-        pub(super) fn from_input(_: Input) -> Result<Self> {
+        pub(super) fn from_input(_: Input, _: Option<&AtomicBool>) -> Result<Self> {
             availability()?;
             unreachable!("FFmpeg input cannot be opened without the ffmpeg feature")
         }
@@ -69,11 +76,15 @@ mod ffmpeg {
             unreachable!("FFmpeg decoder cannot be opened without the ffmpeg feature")
         }
 
-        pub(super) fn next_frames(&mut self, _: &mut Vec<f32>) -> Result<Option<f64>> {
+        pub(super) fn next_frames(
+            &mut self,
+            _: &mut Vec<f32>,
+            _: Option<&AtomicBool>,
+        ) -> Result<Option<f64>> {
             bail!("FFmpeg extension is not compiled; rebuild with --features ffmpeg")
         }
 
-        pub(super) fn seek(&mut self, _: f64) -> Result<()> {
+        pub(super) fn seek(&mut self, _: f64, _: Option<&AtomicBool>) -> Result<()> {
             bail!("FFmpeg extension is not compiled; rebuild with --features ffmpeg")
         }
     }

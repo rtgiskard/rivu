@@ -90,7 +90,11 @@ Only fresh decoded PCM allocates and fills bins. There is no automatic backfill
 or full-track rescan; an uninterrupted fresh traversal from zero can complete
 the envelope. Explicit full-waveform scans are cancelled by the audio worker on
 entry, without waiting for GUI refresh; quick on/off transitions cannot miss the
-cancellation. Decoder packet boundaries observe the cancellation flag. The
+cancellation. Native and FFmpeg decode loops observe the cancellation flag
+between packets, including unrelated-stream skips, discarded seek packets and
+codec preroll, even when no PCM is returned to the scan. Priming and segment
+seeking use the same signal. Blocking file/container/codec calls are not
+interruptible; cancellation takes effect when control returns. The
 cancellation flag and a shared suspension generation reject late completions,
 including requests registered before the worker has processed resumption, so
 old scans cannot restore discarded data or report an intentional cancellation

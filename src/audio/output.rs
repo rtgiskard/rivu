@@ -258,8 +258,8 @@ impl Output {
             .store(volume.to_bits(), Ordering::Release);
     }
 
-    pub(super) fn has_room(&self) -> bool {
-        self.producer.vacant_len() >= self.source_channels
+    pub(super) fn vacant_frames(&self) -> usize {
+        self.producer.vacant_len() / self.source_channels
     }
 
     pub(super) fn refill_delay(&self, eof: bool) -> Duration {
@@ -482,13 +482,18 @@ pub(super) fn test_backend(
     paused: bool,
     layout: &[Channel],
 ) -> (Output, impl FnMut(&mut [f32], u64) + use<>) {
-    let (output, mut callback, analyzer) = tests::test_output_layout(
-        rate,
-        paused,
-        layout,
-        layout,
-        (rate / 4) as usize * layout.len(),
-    );
+    test_backend_with_capacity(rate, paused, layout, (rate / 4) as usize * layout.len())
+}
+
+#[cfg(test)]
+pub(super) fn test_backend_with_capacity(
+    rate: u32,
+    paused: bool,
+    layout: &[Channel],
+    capacity: usize,
+) -> (Output, impl FnMut(&mut [f32], u64) + use<>) {
+    let (output, mut callback, analyzer) =
+        tests::test_output_layout(rate, paused, layout, layout, capacity);
     (output, move |data, millis| {
         let _keep_analyzer_alive = &analyzer;
         callback.render(

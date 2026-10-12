@@ -15,8 +15,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-// Include the first seek in the bound: continuous input must not postpone execution.
-const MAX_SEEK_BATCH: usize = 64;
+// Include coalesced seeks and read-ahead barriers in each scheduling round.
+const MAX_COMMANDS_PER_ROUND: usize = 64;
 
 struct CommandInbox {
     receiver: Receiver<AudioCommand>,
@@ -25,29 +25,38 @@ struct CommandInbox {
 }
 
 impl CommandInbox {
-    fn try_recv(&mut self) -> Result<AudioCommand, TryRecvError> {
-        if let Some(command) = self.pending.take() {
-            Ok(command)
-        } else {
-            self.receiver.try_recv()
-        }
+    fn has_ready(&self) -> bool {
+        self.pending.is_some() || !self.receiver.is_empty()
     }
 
-    fn coalesce(&mut self, command: AudioCommand) -> AudioCommand {
-        let AudioCommand::Seek(mut seconds) = command else {
-            return command;
+    fn try_recv_round(&mut self, remaining: &mut usize) -> Result<AudioCommand, TryRecvError> {
+        if *remaining == 0 {
+            return Err(TryRecvError::Empty);
+        }
+        let command = if let Some(command) = self.pending.take() {
+            command
+        } else {
+            self.receiver.try_recv()?
         };
-        for _ in 1..MAX_SEEK_BATCH {
+        *remaining -= 1;
+        let AudioCommand::Seek(mut seconds) = command else {
+            return Ok(command);
+        };
+        while *remaining > 0 {
             match self.receiver.try_recv() {
-                Ok(AudioCommand::Seek(target)) => seconds = target,
+                Ok(AudioCommand::Seek(target)) => {
+                    *remaining -= 1;
+                    seconds = target;
+                }
                 Ok(barrier) => {
+                    *remaining -= 1;
                     self.pending = Some(barrier);
                     break;
                 }
                 Err(_) => break,
             }
         }
-        AudioCommand::Seek(seconds)
+        Ok(AudioCommand::Seek(seconds))
     }
 }
 
@@ -145,7 +154,6 @@ impl Worker {
         }
     }
     fn command(&mut self, command: AudioCommand) -> bool {
-        let command = self.commands.coalesce(command);
         match command {
             AudioCommand::Shutdown => {
                 self.stop();
@@ -274,7 +282,8 @@ impl Worker {
             if matches!(self.shutdown.try_recv(), Err(TryRecvError::Disconnected)) {
                 break;
             }
-            while let Ok(command) = self.commands.try_recv() {
+            let mut remaining = MAX_COMMANDS_PER_ROUND;
+            while let Ok(command) = self.commands.try_recv_round(&mut remaining) {
                 if matches!(self.shutdown.try_recv(), Err(TryRecvError::Disconnected)) {
                     self.stop();
                     return;
@@ -284,6 +293,9 @@ impl Worker {
                 }
             }
             if self.playback.is_none() {
+                if self.commands.has_ready() {
+                    continue;
+                }
                 let command = select! {
                     recv(self.shutdown) -> _ => break,
                     recv(self.commands.receiver) -> command => match command {
@@ -291,9 +303,7 @@ impl Worker {
                         Err(_) => break,
                     },
                 };
-                if !self.command(command) {
-                    break;
-                }
+                self.commands.pending = Some(command);
                 continue;
             }
             // Fatal backend errors must still be delivered while software-paused,
@@ -302,11 +312,13 @@ impl Worker {
                 self.fail(anyhow!(error));
                 continue;
             }
-            let result = self.playback.as_mut().unwrap().fill();
-            if let Err(error) = result {
-                self.fail(error);
-                continue;
-            }
+            let refill_ready = match self.playback.as_mut().unwrap().fill() {
+                Ok(ready) => ready,
+                Err(error) => {
+                    self.fail(error);
+                    continue;
+                }
+            };
             let playback = self.playback.as_ref().unwrap();
             if playback.paused() || self.progress.elapsed() >= Duration::from_millis(100) {
                 let snapshot = (playback.generation(), playback.position(), playback.heard());
@@ -331,6 +343,10 @@ impl Worker {
                     listened_seconds: heard,
                 });
                 self.event(AudioEvent::Ended { generation });
+                continue;
+            }
+            // Neither a command-budget yield nor a partial refill needs a timer.
+            if self.commands.has_ready() || refill_ready {
                 continue;
             }
             let playback = self.playback.as_ref().unwrap();
@@ -367,9 +383,7 @@ impl Worker {
                 let Ok(command) = command else {
                     break;
                 };
-                if !self.command(command) {
-                    break;
-                }
+                self.commands.pending = Some(command);
             }
         }
         self.stop();
@@ -490,20 +504,30 @@ mod tests {
                 receiver,
                 pending: None,
             };
-            let first = inbox.try_recv().unwrap();
-            assert!(matches!(inbox.coalesce(first), AudioCommand::Seek(20.0)));
-            let next = inbox.try_recv().unwrap();
-            assert_eq!(std::mem::discriminant(&inbox.coalesce(next)), kind);
-            let last = inbox.try_recv().unwrap();
-            assert!(matches!(inbox.coalesce(last), AudioCommand::Seek(30.0)));
-            assert!(matches!(inbox.try_recv(), Err(TryRecvError::Empty)));
+            let mut remaining = MAX_COMMANDS_PER_ROUND;
+            assert!(matches!(
+                inbox.try_recv_round(&mut remaining).unwrap(),
+                AudioCommand::Seek(20.0)
+            ));
+            assert_eq!(
+                std::mem::discriminant(&inbox.try_recv_round(&mut remaining).unwrap()),
+                kind
+            );
+            assert!(matches!(
+                inbox.try_recv_round(&mut remaining).unwrap(),
+                AudioCommand::Seek(30.0)
+            ));
+            assert!(matches!(
+                inbox.try_recv_round(&mut remaining),
+                Err(TryRecvError::Empty)
+            ));
         }
     }
 
     #[test]
     fn seek_batches_are_bounded_and_keep_the_remaining_targets() {
-        let (send, receiver) = bounded(MAX_SEEK_BATCH + 2);
-        for target in 1..=MAX_SEEK_BATCH + 2 {
+        let (send, receiver) = bounded(MAX_COMMANDS_PER_ROUND + 2);
+        for target in 1..=MAX_COMMANDS_PER_ROUND + 2 {
             send.send(AudioCommand::Seek(target as f64)).unwrap();
         }
         drop(send);
@@ -511,17 +535,86 @@ mod tests {
             receiver,
             pending: None,
         };
-        let first = inbox.try_recv().unwrap();
+        let mut remaining = MAX_COMMANDS_PER_ROUND;
         assert!(matches!(
-            inbox.coalesce(first),
-            AudioCommand::Seek(target) if target == MAX_SEEK_BATCH as f64
+            inbox.try_recv_round(&mut remaining).unwrap(),
+            AudioCommand::Seek(target) if target == MAX_COMMANDS_PER_ROUND as f64
         ));
-        let remainder = inbox.try_recv().unwrap();
+        assert_eq!(remaining, 0);
+        assert!(inbox.has_ready());
         assert!(matches!(
-            inbox.coalesce(remainder),
-            AudioCommand::Seek(target) if target == (MAX_SEEK_BATCH + 2) as f64
+            inbox.try_recv_round(&mut remaining),
+            Err(TryRecvError::Empty)
         ));
-        assert!(matches!(inbox.try_recv(), Err(TryRecvError::Disconnected)));
+        remaining = MAX_COMMANDS_PER_ROUND;
+        assert!(matches!(
+            inbox.try_recv_round(&mut remaining).unwrap(),
+            AudioCommand::Seek(target) if target == (MAX_COMMANDS_PER_ROUND + 2) as f64
+        ));
+        assert!(matches!(
+            inbox.try_recv_round(&mut remaining),
+            Err(TryRecvError::Disconnected)
+        ));
+    }
+
+    #[test]
+    fn replenished_commands_yield_each_round_without_reordering() {
+        let (send, receiver) = bounded(1);
+        send.send(AudioCommand::Volume(0.0)).unwrap();
+        let mut inbox = CommandInbox {
+            receiver,
+            pending: None,
+        };
+        let mut handled = 0;
+        for _ in 0..3 {
+            let mut remaining = MAX_COMMANDS_PER_ROUND;
+            while let Ok(command) = inbox.try_recv_round(&mut remaining) {
+                assert!(matches!(command, AudioCommand::Volume(value) if value == handled as f32));
+                handled += 1;
+                // Model a producer replenishing every consumed slot, without
+                // thread timing or ever allowing the inbox to become empty.
+                send.send(AudioCommand::Volume(handled as f32)).unwrap();
+            }
+            assert_eq!(remaining, 0);
+            assert!(
+                inbox.has_ready(),
+                "refill must run despite continued commands"
+            );
+        }
+        assert_eq!(handled, 3 * MAX_COMMANDS_PER_ROUND);
+    }
+
+    #[test]
+    fn round_boundary_keeps_a_seek_read_ahead_barrier_before_later_seeks() {
+        let (send, receiver) = bounded(MAX_COMMANDS_PER_ROUND + 1);
+        for target in 1..MAX_COMMANDS_PER_ROUND {
+            send.send(AudioCommand::Seek(target as f64)).unwrap();
+        }
+        send.send(AudioCommand::Pause(true)).unwrap();
+        send.send(AudioCommand::Seek(100.0)).unwrap();
+        let mut inbox = CommandInbox {
+            receiver,
+            pending: None,
+        };
+        let mut remaining = MAX_COMMANDS_PER_ROUND;
+        assert!(matches!(
+            inbox.try_recv_round(&mut remaining).unwrap(),
+            AudioCommand::Seek(value) if value == (MAX_COMMANDS_PER_ROUND - 1) as f64
+        ));
+        assert_eq!(remaining, 0);
+        assert!(inbox.has_ready());
+        remaining = 1;
+        assert!(matches!(
+            inbox.try_recv_round(&mut remaining).unwrap(),
+            AudioCommand::Pause(true)
+        ));
+        assert_eq!(remaining, 0);
+        remaining = MAX_COMMANDS_PER_ROUND;
+        assert!(matches!(
+            inbox.try_recv_round(&mut remaining).unwrap(),
+            AudioCommand::Seek(100.0)
+        ));
+        assert!(!inbox.has_ready());
     }
 
     #[test]
@@ -534,8 +627,9 @@ mod tests {
                 receiver,
                 pending: None,
             };
-            let first = inbox.try_recv().unwrap();
-            done.send(inbox.coalesce(first)).unwrap();
+            let mut remaining = MAX_COMMANDS_PER_ROUND;
+            done.send(inbox.try_recv_round(&mut remaining).unwrap())
+                .unwrap();
         });
         assert!(matches!(
             completed.recv_timeout(Duration::from_secs(2)).unwrap(),

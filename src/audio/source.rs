@@ -2,7 +2,11 @@
 
 use super::{BYTES_PER_MEBIBYTE, Channel, MediaInfo};
 use anyhow::{Context, Result, anyhow, bail};
-use std::{fs::File, path::Path};
+use std::{
+    fs::File,
+    path::Path,
+    sync::atomic::{AtomicBool, Ordering},
+};
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::{
     core::{
@@ -26,6 +30,13 @@ use symphonia::{
 };
 
 const PROBE_BUFFER_LEN: usize = 2 * BYTES_PER_MEBIBYTE;
+
+pub(super) fn check_cancelled(cancelled: Option<&AtomicBool>) -> Result<()> {
+    if cancelled.is_some_and(|cancelled| cancelled.load(Ordering::Relaxed)) {
+        bail!("Waveform loading cancelled");
+    }
+    Ok(())
+}
 
 #[derive(Clone, Copy, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -277,6 +288,16 @@ pub(super) struct Source {
 }
 impl Source {
     pub(super) fn open(path: &Path, buffer_len: usize, ffmpeg_enabled: bool) -> Result<Self> {
+        Self::open_with_cancel(path, buffer_len, ffmpeg_enabled, None)
+    }
+
+    fn open_with_cancel(
+        path: &Path,
+        buffer_len: usize,
+        ffmpeg_enabled: bool,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<Self> {
+        check_cancelled(cancelled)?;
         let inspected = if ffmpeg_enabled {
             super::ffmpeg::inspect_wave(path)?
         } else {
@@ -288,13 +309,16 @@ impl Source {
         };
         if input.as_ref().is_some_and(|input| !input.is_pcm()) {
             drop(file);
-            return Self::from_ffmpeg(super::ffmpeg::Decoder::from_input(input.unwrap())?);
+            return Self::from_ffmpeg(
+                super::ffmpeg::Decoder::from_input(input.unwrap(), cancelled)?,
+                cancelled,
+            );
         }
         let file = match file {
             Some(file) => file,
             None => File::open(path).with_context(|| format!("Opening {}", path.display()))?,
         };
-        match Self::open_native(path, buffer_len, file) {
+        match Self::open_native(path, buffer_len, file, cancelled) {
             Ok(mut source) => {
                 if input.is_some() {
                     source.probe_backend = ProbeBackend::Ffmpeg;
@@ -305,10 +329,10 @@ impl Source {
                 if ffmpeg_enabled && native_error.downcast_ref::<UnsupportedNative>().is_some() =>
             {
                 let decoded = match input {
-                    Some(input) => super::ffmpeg::Decoder::from_input(input),
-                    None => super::ffmpeg::Decoder::open(path),
+                    Some(input) => super::ffmpeg::Decoder::from_input(input, cancelled),
+                    None => super::ffmpeg::Decoder::open(path, cancelled),
                 };
-                decoded.and_then(Self::from_ffmpeg).with_context(|| format!("Native decoder rejected the audio ({native_error:#}); FFmpeg extension failed"))
+                decoded.and_then(|decode| Self::from_ffmpeg(decode, cancelled)).with_context(|| format!("Native decoder rejected the audio ({native_error:#}); FFmpeg extension failed"))
             }
             Err(error) => Err(error),
         }
@@ -316,11 +340,11 @@ impl Source {
 
     #[cfg(all(test, feature = "ffmpeg"))]
     fn open_ffmpeg(path: &Path) -> Result<Self> {
-        let decode = super::ffmpeg::Decoder::open(path)?;
-        Self::from_ffmpeg(decode)
+        let decode = super::ffmpeg::Decoder::open(path, None)?;
+        Self::from_ffmpeg(decode, None)
     }
 
-    fn from_ffmpeg(decode: super::ffmpeg::Decoder) -> Result<Self> {
+    fn from_ffmpeg(decode: super::ffmpeg::Decoder, cancelled: Option<&AtomicBool>) -> Result<Self> {
         let info = decode.info().clone();
         let layout = decode.layout().to_vec();
         if info.sample_rate == 0 || layout.is_empty() {
@@ -343,14 +367,19 @@ impl Source {
             ready: false,
             exhausted: false,
         };
-        if !source.read_next()? {
+        if !source.read_next(cancelled)? {
             bail!("FFmpeg audio stream contains no samples");
         }
         source.ready = true;
         Ok(source)
     }
 
-    fn open_native(path: &Path, buffer_len: usize, file: File) -> Result<Self> {
+    fn open_native(
+        path: &Path,
+        buffer_len: usize,
+        file: File,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<Self> {
         let mut hint = Hint::new();
         if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
             hint.with_extension(extension);
@@ -478,13 +507,22 @@ impl Source {
             ready: false,
             exhausted: false,
         };
-        if !source.read_next()? {
+        if !source.read_next(cancelled)? {
             bail!("Audio track contains no decodable samples");
         }
         source.ready = true;
         Ok(source)
     }
     pub(super) fn restrict(&mut self, range: super::PlaybackRange) -> Result<()> {
+        self.restrict_with_cancel(range, None)
+    }
+
+    fn restrict_with_cancel(
+        &mut self,
+        range: super::PlaybackRange,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<()> {
+        check_cancelled(cancelled)?;
         if !range.start_seconds.is_finite()
             || range.start_seconds < 0.0
             || range
@@ -508,10 +546,15 @@ impl Source {
         self.range_start = range.start_seconds;
         self.range_end = end;
         self.info.duration = end.map(|end| end - range.start_seconds);
-        self.seek(0.0)
+        self.seek_with_cancel(0.0, cancelled)
     }
 
     pub(super) fn seek(&mut self, target: f64) -> Result<()> {
+        self.seek_with_cancel(target, None)
+    }
+
+    fn seek_with_cancel(&mut self, target: f64, cancelled: Option<&AtomicBool>) -> Result<()> {
+        check_cancelled(cancelled)?;
         let target = self
             .info
             .duration
@@ -530,7 +573,7 @@ impl Source {
         }
         let target = self.range_start + target;
         if let Decode::Ffmpeg(decoder) = &mut self.decode {
-            decoder.seek(target)?;
+            decoder.seek(target, cancelled)?;
             self.frames.clear();
             self.ready = false;
             self.seek_target = Some(target);
@@ -553,6 +596,7 @@ impl Source {
                     track_id: Some(self.track),
                 },
             )?;
+        check_cancelled(cancelled)?;
         match &mut self.decode {
             Decode::Native(decoder) => decoder.reset(),
             Decode::Opus(opus) => {
@@ -582,9 +626,17 @@ impl Source {
     /// Returns PCM and its first sample's segment-relative decoded timestamp.
     /// The primed first packet is returned before advancing the decoder.
     pub(super) fn next_frames(&mut self) -> Result<Option<(&[f32], f64)>> {
+        self.next_frames_with_cancel(None)
+    }
+
+    fn next_frames_with_cancel(
+        &mut self,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<Option<(&[f32], f64)>> {
+        check_cancelled(cancelled)?;
         if self.ready {
             self.ready = false;
-        } else if !self.read_next()? {
+        } else if !self.read_next(cancelled)? {
             return Ok(None);
         }
         Ok(Some((&self.frames, self.frame_start)))
@@ -599,22 +651,16 @@ impl Source {
         range: Option<super::PlaybackRange>,
         media_read_buffer_mb: u32,
         ffmpeg_enabled: bool,
-        cancelled: &std::sync::atomic::AtomicBool,
+        cancelled: &AtomicBool,
     ) -> Result<super::WaveformFrame> {
-        let check_cancelled = || -> Result<()> {
-            if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
-                bail!("Waveform loading cancelled");
-            }
-            Ok(())
-        };
-        check_cancelled()?;
+        check_cancelled(Some(cancelled))?;
         let buffer_len = usize::try_from(media_read_buffer_mb)
             .context("Waveform media buffer size does not fit usize")?
             .saturating_mul(super::BYTES_PER_MEBIBYTE);
-        let mut source = Self::open(path, buffer_len, ffmpeg_enabled)?;
-        check_cancelled()?;
+        let mut source = Self::open_with_cancel(path, buffer_len, ffmpeg_enabled, Some(cancelled))?;
+        check_cancelled(Some(cancelled))?;
         if let Some(range) = range {
-            source.restrict(range)?;
+            source.restrict_with_cancel(range, Some(cancelled))?;
         }
         source.scan_waveform(path, range, cancelled)
     }
@@ -623,14 +669,8 @@ impl Source {
         &mut self,
         path: &Path,
         range: Option<super::PlaybackRange>,
-        cancelled: &std::sync::atomic::AtomicBool,
+        cancelled: &AtomicBool,
     ) -> Result<super::WaveformFrame> {
-        let check_cancelled = || -> Result<()> {
-            if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
-                bail!("Waveform loading cancelled");
-            }
-            Ok(())
-        };
         let mut frame = super::WaveformFrame::default();
         let sample_rate = self.info.sample_rate;
         let channels = self.layout.len();
@@ -639,8 +679,8 @@ impl Source {
         frame.set_channel_weights(&weights);
         let mut end_seconds = 0.0_f64;
         loop {
-            check_cancelled()?;
-            let Some((samples, start_seconds)) = self.next_frames()? else {
+            let Some((samples, start_seconds)) = self.next_frames_with_cancel(Some(cancelled))?
+            else {
                 break;
             };
             frame.push(start_seconds, samples, sample_rate, channels);
@@ -648,15 +688,16 @@ impl Source {
                 (start_seconds * sample_rate as f64).round() + (samples.len() / channels) as f64;
             end_seconds = end_seconds.max(end_frame / sample_rate as f64);
         }
-        check_cancelled()?;
+        check_cancelled(Some(cancelled))?;
         frame.finish_scan(end_seconds);
         Ok(frame)
     }
 
-    fn read_ffmpeg_next(&mut self) -> Result<bool> {
+    fn read_ffmpeg_next(&mut self, cancelled: Option<&AtomicBool>) -> Result<bool> {
         loop {
+            check_cancelled(cancelled)?;
             let decoded = match &mut self.decode {
-                Decode::Ffmpeg(decoder) => decoder.next_frames(&mut self.frames),
+                Decode::Ffmpeg(decoder) => decoder.next_frames(&mut self.frames, cancelled),
                 _ => unreachable!(),
             };
             let packet_start = match decoded {
@@ -707,14 +748,27 @@ impl Source {
         }
     }
 
-    fn read_next(&mut self) -> Result<bool> {
+    fn read_next(&mut self, cancelled: Option<&AtomicBool>) -> Result<bool> {
+        self.read_next_with_reader(cancelled, |format| format.next_packet())
+    }
+
+    fn read_next_with_reader(
+        &mut self,
+        cancelled: Option<&AtomicBool>,
+        mut read: impl FnMut(
+            &mut dyn FormatReader,
+        )
+            -> symphonia::core::errors::Result<Option<symphonia::core::packet::Packet>>,
+    ) -> Result<bool> {
+        check_cancelled(cancelled)?;
         if self.exhausted {
             return Ok(false);
         }
         if matches!(self.decode, Decode::Ffmpeg(_)) {
-            return self.read_ffmpeg_next();
+            return self.read_ffmpeg_next(cancelled);
         }
         loop {
+            check_cancelled(cancelled)?;
             // Seeking can discard whole packets (including Opus preroll).
             // Never append the next packet onto samples already discarded.
             self.frames.clear();
@@ -722,7 +776,9 @@ impl Source {
                 .format
                 .as_mut()
                 .context("Native source has no format reader")?;
-            let Some(packet) = format.next_packet()? else {
+            let packet = read(format.as_mut());
+            check_cancelled(cancelled)?;
+            let Some(packet) = packet? else {
                 self.exhausted = true;
                 return Ok(false);
             };
@@ -1275,6 +1331,48 @@ mod tests {
         let cancelled = std::sync::atomic::AtomicBool::new(true);
         let error = Source::waveform(Path::new(""), None, 2, false, &cancelled).unwrap_err();
         assert_eq!(error.to_string(), "Waveform loading cancelled");
+    }
+
+    #[test]
+    fn cancellation_bounds_native_skips_empty_opus_and_seek_preroll() {
+        let pcm = pcm_file();
+        let opus = opus_file();
+        for mode in 0..3 {
+            let path = if mode == 0 { pcm.path() } else { opus.path() };
+            let mut source = Source::open(path, PROBE_BUFFER_LEN, false).unwrap();
+            source.seek(0.0).unwrap();
+            match mode {
+                1 => {
+                    let Decode::Opus(opus) = &mut source.decode else {
+                        panic!("expected native Opus");
+                    };
+                    opus.skip = usize::MAX;
+                }
+                2 => source.seek_target = Some(1.9),
+                _ => {}
+            }
+            let cancelled = AtomicBool::new(false);
+            let mut packets = 0;
+            let error = source
+                .read_next_with_reader(Some(&cancelled), |format| {
+                    let mut packet = format.next_packet()?.expect("fixture has more packets");
+                    packets += 1;
+                    if mode == 0 {
+                        packet.track_id = packet.track_id.wrapping_add(1);
+                    }
+                    if packets == 3 {
+                        cancelled.store(true, Ordering::Relaxed);
+                    }
+                    Ok(Some(packet))
+                })
+                .unwrap_err();
+            assert_eq!(packets, 3, "mode {mode} must stop inside the packet loop");
+            assert_eq!(error.to_string(), "Waveform loading cancelled");
+            assert!(!source.exhausted, "cancellation is not EOF");
+            cancelled.store(false, Ordering::Relaxed);
+            source.seek(0.0).unwrap();
+            assert!(source.next_frames().unwrap().is_some());
+        }
     }
 
     #[test]
