@@ -167,9 +167,10 @@ impl GuiApp {
                         ViewRequestKind::Library => {
                             this.request_library_page(this.browser.library.buffer.offset, cx);
                         }
-                        ViewRequestKind::Ranking | ViewRequestKind::Stats => {
-                            this.request_ranking(this.browser.history.offset(), cx)
+                        ViewRequestKind::Ranking => {
+                            this.request_ranking_page(this.browser.history.offset(), cx)
                         }
+                        ViewRequestKind::Stats => this.request_stats(cx),
                         _ => {}
                     }
                     return;
@@ -207,7 +208,7 @@ impl GuiApp {
                         {
                             let last = page.total.saturating_sub(1) / this.view_page_size()
                                 * this.view_page_size();
-                            this.request_ranking(last, cx);
+                            this.request_ranking_page(last, cx);
                             return;
                         }
                         this.browser.history.accept(page);
@@ -510,9 +511,9 @@ impl GuiApp {
         if self.browser.library.tree_active() {
             // Drop stale flat payloads and tokens; query only when that view is opened.
             self.browser.requests.cancel(ViewRequestKind::Library);
-            self.browser.library.clear_flat_payload();
         } else {
-            self.refresh_filter(cx);
+            self.browser.library.scroll_filter_to_top();
+            self.request_library_page(0, cx);
         }
     }
 
@@ -522,6 +523,11 @@ impl GuiApp {
         self.request_library_page(0, cx);
     }
     pub(super) fn request_ranking(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.request_ranking_page(offset, cx);
+        self.request_stats(cx);
+    }
+
+    fn request_ranking_page(&mut self, offset: usize, cx: &mut Context<Self>) {
         let page_size = self.view_page_size();
         let offset = offset / page_size * page_size;
         self.browser.history.begin(offset);
@@ -538,6 +544,9 @@ impl GuiApp {
             generation,
             cx,
         );
+    }
+
+    fn request_stats(&mut self, cx: &mut Context<Self>) {
         let generation = self.browser.requests.next_generation();
         self.request_view(Query::LibraryStats, generation, cx);
     }
@@ -546,11 +555,9 @@ impl GuiApp {
         // Invalidate query tokens and payload, not identity, metadata drafts, or scroll position.
         self.browser.requests.invalidate_pages();
         self.request_library_page(self.browser.library.buffer.rows.visible().start, cx);
-        self.browser
-            .library
-            .tree
-            .configure_page_size(self.view_page_size());
-        self.browser.library.tree.invalidate();
+        if !self.browser.library.tree.configure_page_size(self.view_page_size()) {
+            self.browser.library.tree.invalidate();
+        }
         self.request_directory_page(library::TreeBranch::default(), 0, cx);
         self.request_playlist_summaries(self.browser.playlists.summaries.rows.visible().start, cx);
         if let Some(id) = self.browser.playlists.entries.playlist_id {

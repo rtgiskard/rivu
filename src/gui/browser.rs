@@ -251,6 +251,10 @@ impl LibraryBrowser {
         self.invalidate_projection();
         self.tree_active = false;
         self.clear_flat_payload();
+        self.scroll_filter_to_top();
+    }
+
+    pub(super) fn scroll_filter_to_top(&self) {
         self.buffer.scroll.scroll_to_item(0, ScrollStrategy::Top);
     }
 

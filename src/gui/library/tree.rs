@@ -140,12 +140,14 @@ pub(in crate::gui) struct TreeRangeSpan {
 }
 
 impl DirectoryTree {
-    pub(in crate::gui) fn configure_page_size(&mut self, size: usize) {
+    pub(in crate::gui) fn configure_page_size(&mut self, size: usize) -> bool {
         let size = size.max(1);
-        if self.page_size != size {
-            self.page_size = size;
-            self.invalidate();
+        if self.page_size == size {
+            return false;
         }
+        self.page_size = size;
+        self.invalidate();
+        true
     }
 
     pub(in crate::gui) fn begin(&mut self, key: TreeBranch, offset: usize, generation: u64) {
