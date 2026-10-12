@@ -1,5 +1,6 @@
 use super::scan::{
     MAX_RECORDED_SCAN_UNCERTAINTIES, MAX_RECORDED_SKIPPED_DIRECTORIES, MAX_REPORTED_SCAN_ERRORS,
+    UNCACHEABLE_MODIFIED_NS, cache_modified_ns,
 };
 use super::*;
 use crate::model::{CueSegment, ScanPhase, Track};
@@ -7,6 +8,7 @@ use anyhow::{Context, Result};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, UNIX_EPOCH};
 
 fn scan_paths(paths: &[PathBuf], known: &[KnownFile], ffmpeg_enabled: bool) -> Result<ScanResult> {
     let library_roots: Vec<_> = paths
@@ -913,6 +915,119 @@ fn known_records(records: &[ScanRecord]) -> Vec<KnownFile> {
             cue: record.cue.clone(),
         })
         .collect()
+}
+
+#[test]
+fn signed_mtime_cache_keys_preserve_epoch_and_reject_unavailable_or_out_of_range() {
+    let maximum = i64::MAX as u64;
+    for (modified, expected) in [
+        (None, UNCACHEABLE_MODIFIED_NS),
+        (Some(UNIX_EPOCH), 0),
+        (Some(UNIX_EPOCH - Duration::from_nanos(1)), -1),
+        (Some(UNIX_EPOCH + Duration::from_nanos(maximum)), i64::MAX),
+        (Some(UNIX_EPOCH - Duration::from_nanos(maximum)), -i64::MAX),
+        (
+            Some(UNIX_EPOCH + Duration::from_nanos(maximum + 1)),
+            UNCACHEABLE_MODIFIED_NS,
+        ),
+        (
+            Some(UNIX_EPOCH - Duration::from_nanos(maximum + 1)),
+            UNCACHEABLE_MODIFIED_NS,
+        ),
+        (
+            Some(UNIX_EPOCH - Duration::from_nanos(maximum + 2)),
+            UNCACHEABLE_MODIFIED_NS,
+        ),
+    ] {
+        let modified_ns = cache_modified_ns(modified);
+        assert_eq!(modified_ns, expected);
+        let known = KnownFile {
+            track_id: 1,
+            path: PathBuf::from("audio.wav"),
+            size: 1,
+            modified_ns,
+            fingerprint: None,
+            media: None,
+            cue: None,
+        };
+        assert_eq!(
+            known.matches_metadata(1, modified_ns),
+            modified_ns != UNCACHEABLE_MODIFIED_NS
+        );
+        assert!(!known.matches_metadata(2, modified_ns));
+    }
+}
+
+#[test]
+fn ordinary_scan_rehashes_same_size_wav_after_pre_epoch_mtime_change() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let audio = directory.path().join("audio.wav");
+    wav(&audio, 150)?;
+    File::options()
+        .write(true)
+        .open(&audio)?
+        .set_modified(UNIX_EPOCH - Duration::from_secs(2))?;
+    let original = scan_paths(std::slice::from_ref(&audio), &[], false)?;
+    assert!(original.errors.is_empty(), "{:?}", original.errors);
+    assert_eq!(original.records[0].modified_ns, -2_000_000_000);
+    let store = crate::store::Store::open(Path::new(":memory:"))?;
+    store.apply_scan(&original)?;
+    let id = store.track_id_for_source(&audio, None)?.unwrap();
+    let known = store.known_files()?;
+    assert_eq!(known[0].modified_ns, -2_000_000_000);
+
+    let mut contents = fs::read(&audio)?;
+    *contents.last_mut().unwrap() = 1;
+    fs::write(&audio, contents)?;
+    File::options()
+        .write(true)
+        .open(&audio)?
+        .set_modified(UNIX_EPOCH - Duration::from_secs(1))?;
+    let rescanned = scan_paths(std::slice::from_ref(&audio), &known, false)?;
+    assert!(rescanned.errors.is_empty(), "{:?}", rescanned.errors);
+    assert_eq!(rescanned.records[0].size, original.records[0].size);
+    assert_eq!(rescanned.records[0].modified_ns, -1_000_000_000);
+    assert_ne!(rescanned.records[0].fingerprint, original.records[0].fingerprint);
+    store.apply_scan(&rescanned)?;
+    assert_eq!(store.track_id_for_source(&audio, None)?, Some(id));
+    assert_eq!(store.track(id)?.unwrap().fingerprint, rescanned.records[0].fingerprint);
+    Ok(())
+}
+
+#[test]
+fn epoch_zero_reuses_cache_while_forced_scan_rehashes() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let audio = directory.path().join("audio.wav");
+    wav(&audio, 150)?;
+    File::options()
+        .write(true)
+        .open(&audio)?
+        .set_modified(UNIX_EPOCH)?;
+    let original = scan_paths(std::slice::from_ref(&audio), &[], false)?;
+    assert!(original.errors.is_empty(), "{:?}", original.errors);
+    assert_eq!(original.records[0].modified_ns, 0);
+    let known = known_records(&original.records);
+
+    // Preserve size and the genuine epoch timestamp to exercise ordinary reuse.
+    let mut contents = fs::read(&audio)?;
+    *contents.last_mut().unwrap() = 1;
+    fs::write(&audio, contents)?;
+    File::options()
+        .write(true)
+        .open(&audio)?
+        .set_modified(UNIX_EPOCH)?;
+    let ordinary = scan_paths(std::slice::from_ref(&audio), &known, false)?;
+    assert!(ordinary.errors.is_empty(), "{:?}", ordinary.errors);
+    assert_eq!(ordinary.records[0].modified_ns, 0);
+    assert_eq!(ordinary.records[0].fingerprint, original.records[0].fingerprint);
+
+    // The owner implements force by supplying no reusable source snapshots.
+    let forced = scan_paths(std::slice::from_ref(&audio), &[], false)?;
+    assert!(forced.errors.is_empty(), "{:?}", forced.errors);
+    assert_eq!(forced.records[0].size, original.records[0].size);
+    assert_eq!(forced.records[0].modified_ns, 0);
+    assert_ne!(forced.records[0].fingerprint, original.records[0].fingerprint);
+    Ok(())
 }
 
 fn track_from_record(id: i64, record: &ScanRecord) -> Track {

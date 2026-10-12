@@ -8,7 +8,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
 /// Cooperative cancellation shared by the scan owner and its filesystem worker.
@@ -34,22 +34,52 @@ impl ScanCancellation {
     }
 }
 
+// Reserved in modified_ns for unavailable/out-of-range mtimes, including the
+// sentinel instant itself. This key must never authorize cache reuse; epoch 0 is
+// a real timestamp. All other representable signed nanoseconds remain exact.
+pub(super) const UNCACHEABLE_MODIFIED_NS: i64 = i64::MIN;
+
+pub(super) fn cache_modified_ns(modified: Option<SystemTime>) -> i64 {
+    let Some(modified) = modified else {
+        return UNCACHEABLE_MODIFIED_NS;
+    };
+    let nanoseconds = match modified.duration_since(UNIX_EPOCH) {
+        Ok(duration) => i128::try_from(duration.as_nanos()).ok(),
+        Err(error) => i128::try_from(error.duration().as_nanos())
+            .ok()
+            .map(|nanoseconds| -nanoseconds),
+    };
+    nanoseconds
+        .and_then(|nanoseconds| i64::try_from(nanoseconds).ok())
+        .unwrap_or(UNCACHEABLE_MODIFIED_NS)
+}
+
 /// The filesystem information and cached probe result known to the database.
 #[derive(Clone, Debug)]
 pub struct KnownFile {
     pub track_id: i64,
     pub path: PathBuf,
     pub size: u64,
+    /// Signed Unix nanoseconds; i64::MIN is reserved for uncacheable mtimes.
     pub modified_ns: i64,
     pub fingerprint: Option<String>,
     pub media: Option<MediaInfo>,
     pub cue: Option<CueSegment>,
 }
 
+impl KnownFile {
+    pub(super) fn matches_metadata(&self, size: u64, modified_ns: i64) -> bool {
+        modified_ns != UNCACHEABLE_MODIFIED_NS
+            && self.size == size
+            && self.modified_ns == modified_ns
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ScanRecord {
     pub path: PathBuf,
     pub size: u64,
+    /// Signed Unix nanoseconds; i64::MIN is reserved for uncacheable mtimes.
     pub modified_ns: i64,
     pub fingerprint: Option<String>,
     pub media: MediaInfo,
@@ -461,7 +491,7 @@ pub fn scan_paths(
 }
 
 fn source_record<'a>(
-    path: &Path,
+    path: PathBuf,
     known: &HashMap<&Path, &KnownFile>,
     sources: &'a mut HashMap<PathBuf, std::result::Result<ScanRecord, String>>,
     ffmpeg_enabled: bool,
@@ -469,10 +499,14 @@ fn source_record<'a>(
 ) -> Result<&'a ScanRecord> {
     cancellation.check()?;
     sources
-        .entry(path.to_path_buf())
-        .or_insert_with(|| {
-            scan_file(path, known.get(path).copied(), ffmpeg_enabled, cancellation)
-                .map_err(|error| format!("{error:#}"))
+        .entry(path)
+        .or_insert_with_key(|path| {
+            scan_file(
+                path,
+                known.get(path.as_path()).copied(),
+                ffmpeg_enabled,
+                cancellation,
+            )
         })
         .as_ref()
         .map_err(|error| anyhow!("{error}"))
@@ -501,13 +535,14 @@ fn scan_cue(
                 source.display()
             );
         }
-        let mut record =
-            source_record(&source, known, sources, ffmpeg_enabled, cancellation)?.clone();
-        let duration = record
+        let source = source_record(source, known, sources, ffmpeg_enabled, cancellation)?;
+        let duration = source
             .media
             .duration
             .filter(|duration| duration.is_finite() && *duration > 0.0)
-            .with_context(|| format!("CUE source {} has no finite duration", source.display()))?;
+            .with_context(|| {
+                format!("CUE source {} has no finite duration", source.path.display())
+            })?;
         let start = track.start_frame as f64 / 75.0;
         let end = track
             .end_frame
@@ -518,6 +553,7 @@ fn scan_cue(
                 track.number
             );
         }
+        let mut record = source.clone();
         record.media.duration = Some(end.min(duration) - start);
         record.media.track_number = Some(track.number);
         record.media.title = track
@@ -552,13 +588,8 @@ fn scan_file(
         fs::metadata(path).with_context(|| format!("read metadata for {}", path.display()))?;
     cancellation.check()?;
     let size = metadata.len();
-    let modified_ns = metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_nanos().min(i64::MAX as u128) as i64)
-        .unwrap_or(0);
-    let unchanged = known.filter(|known| known.size == size && known.modified_ns == modified_ns);
+    let modified_ns = cache_modified_ns(metadata.modified().ok());
+    let unchanged = known.filter(|known| known.matches_metadata(size, modified_ns));
     let media = match unchanged
         .filter(|known| known.cue.is_none())
         .and_then(|known| known.media.as_ref())
