@@ -76,8 +76,7 @@ impl Core {
         Ok(())
     }
     pub(in crate::core) fn reload_library(&mut self, structure_changed: bool) -> Result<()> {
-        let stats = self.store.library_stats()?;
-        self.state.library.track_total = stats.total;
+        self.state.library.track_total = self.store.track_count()?;
         self.state.library.revision = self.state.library.revision.wrapping_add(1);
         if structure_changed {
             self.state.library.structure_revision =
@@ -112,13 +111,21 @@ impl Core {
         Ok(())
     }
 
-    pub(in crate::core) fn reload(&mut self, structure_changed: bool) -> Result<()> {
-        self.reload_library(structure_changed)?;
-        let playlist_total = self.store.playlist_summary_page(0, 0)?.total;
-        self.state.library.playlist_total = playlist_total;
+    pub(in crate::core) fn reload_playlists(&mut self) -> Result<()> {
+        self.state.library.playlist_total = self.store.playlist_summary_page(0, 0)?.total;
         self.state.library.playlist_revision = self.state.library.playlist_revision.wrapping_add(1);
-        self.state.library.history = Arc::new(self.store.history(MAX_QUERY_ROWS)?);
-        self.refresh_queue_tracks()?;
         Ok(())
+    }
+
+    pub(in crate::core) fn reload_catalog(&mut self, structure_changed: bool) -> Result<()> {
+        self.reload_library(structure_changed)?;
+        self.reload_playlists()?;
+        self.state.library.history = Arc::new(self.store.history(MAX_QUERY_ROWS)?);
+        Ok(())
+    }
+
+    pub(in crate::core) fn reload(&mut self, structure_changed: bool) -> Result<()> {
+        self.reload_catalog(structure_changed)?;
+        self.refresh_queue_tracks()
     }
 }

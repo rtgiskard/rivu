@@ -141,6 +141,12 @@ restart the listing`. Without `expected`, the server does not enforce traversal
 consistency. This uses bounded results and explicit restart rather than retaining
 a database snapshot for an arbitrarily slow client.
 
+Playlist-only edits advance the playlist revision without changing library-content
+or directory-structure revisions, so an existing track traversal remains valid.
+Importing a playlist can still invalidate track queries because its scan updates
+the library before the playlist is created. If playlist creation fails after a
+successful scan, the committed library changes remain visible.
+
 == Request failures and completion
 
 Well-formed requests with invalid values, handshake-order errors, and server-side

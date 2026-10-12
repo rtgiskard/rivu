@@ -140,7 +140,7 @@ impl Core {
             }
             let playlist_id = self.store.create_playlist(&name)?;
             self.store.add_playlist(playlist_id, &ids)?;
-            self.reload(true)?;
+            self.reload_playlists()?;
         }
         Ok(successful)
     }

@@ -206,7 +206,7 @@ impl Core {
             } => {
                 self.store
                     .add_playlist_sources(playlist_id, &directories, &track_ids)?;
-                self.reload(true)?;
+                self.reload_playlists()?;
             }
             Command::RemovePlaylistEntry { entry_id } => self.remove_playlist_entry(entry_id)?,
             Command::MovePlaylistEntry { entry_id, index } => {
@@ -260,7 +260,7 @@ impl Core {
                     .retain(|q| !track_ids.contains(&q.track_id));
                 self.refresh_queue_tracks()?;
                 self.prune_queue_history();
-                self.reload(true)?;
+                self.reload_catalog(true)?;
             }
             Command::SetFavorite {
                 track_ids,
@@ -294,7 +294,7 @@ impl Core {
                     .retain(|entry| missing_ids.binary_search(&entry.track_id).is_err());
                 self.refresh_queue_tracks()?;
                 self.prune_queue_history();
-                self.reload(true)?;
+                self.reload_catalog(true)?;
             }
             Command::Device { name } => {
                 if let Some(name) = &name

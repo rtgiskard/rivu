@@ -518,8 +518,7 @@ struct Core {
 }
 impl Core {
     fn load_initial_state(&mut self) -> Result<()> {
-        let stats = self.store.library_stats()?;
-        self.state.library.track_total = stats.total;
+        self.state.library.track_total = self.store.track_count()?;
         self.state.library.playlist_total = self.store.playlist_summary_page(0, 0)?.total;
         self.state.library.history = Arc::new(self.store.history(200.min(MAX_QUERY_ROWS))?);
         self.state.system.devices = Arc::new(audio::devices().unwrap_or_default());
@@ -640,7 +639,7 @@ mod tests {
             })
             .unwrap();
         let mut state = CoreState::default();
-        state.library.track_total = store.library_stats().unwrap().total;
+        state.library.track_total = store.track_count().unwrap();
         state.system.config_path = directory.path().join("config.toml");
         Arc::make_mut(&mut state.system.config)
             .library_roots
@@ -670,6 +669,159 @@ mod tests {
         };
         core.enqueue(&[1, 2, 2, 3, 4]).unwrap();
         (directory, core)
+    }
+
+    #[test]
+    fn playlist_mutations_preserve_track_traversal_and_playback_sections() {
+        let (_directory, mut core) = fixture();
+        core.publish();
+        let track_revision = core.state.query_revisions();
+        let sections = core.state.revisions;
+        let operations = [
+            (
+                Command::CreatePlaylist {
+                    name: "empty".into(),
+                },
+                1,
+            ),
+            (
+                Command::CreatePlaylistWithTracks {
+                    name: "mix".into(),
+                    track_ids: vec![1, 2],
+                },
+                2,
+            ),
+            (
+                Command::RenamePlaylist {
+                    playlist_id: 2,
+                    name: "renamed".into(),
+                },
+                2,
+            ),
+            (
+                Command::AddPlaylist {
+                    playlist_id: 2,
+                    track_ids: vec![3],
+                },
+                2,
+            ),
+            (
+                Command::AddPlaylistSources {
+                    playlist_id: 2,
+                    directories: vec![],
+                    track_ids: vec![4],
+                },
+                2,
+            ),
+            (
+                Command::MovePlaylistEntry {
+                    entry_id: 2,
+                    index: 0,
+                },
+                2,
+            ),
+            (Command::RemovePlaylistEntry { entry_id: 1 }, 2),
+            (Command::DeletePlaylist { playlist_id: 1 }, 1),
+            (Command::DeletePlaylist { playlist_id: 2 }, 0),
+        ];
+        for (command, total) in operations {
+            let before = core.state.query_revisions();
+            core.command(command).unwrap();
+            core.publish();
+            assert_eq!(core.state.library.playlist_total, total);
+            assert_eq!(
+                core.state.query_revisions().structure,
+                track_revision.structure
+            );
+            assert_eq!(core.state.revisions.queue, sections.queue);
+            assert_eq!(core.state.revisions.playback, sections.playback);
+            let ViewResponse::TrackBatch(batch) = core
+                .view(&Query::TrackBatch {
+                    query: None,
+                    favorite: None,
+                    missing: None,
+                    after: Some(1),
+                    limit: 2,
+                    expected: Some(track_revision),
+                })
+                .unwrap()
+            else {
+                panic!("expected track batch")
+            };
+            assert_eq!(
+                batch.rows.iter().map(|track| track.id).collect::<Vec<_>>(),
+                [2, 3]
+            );
+            assert!(
+                core.view(&Query::PlaylistSummaryBatch {
+                    after: None,
+                    limit: 2,
+                    expected: Some(before),
+                })
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn failed_playlist_import_keeps_committed_scan_visible() {
+        let (directory, mut core) = fixture();
+        let before = core.state.query_revisions();
+        let mut media = core
+            .store
+            .known_files()
+            .unwrap()
+            .into_iter()
+            .find(|known| known.track_id == 1)
+            .unwrap()
+            .media
+            .unwrap();
+        media.title = "Updated by scan".into();
+        let scan = ScanFinished {
+            result: Ok(ScanResult {
+                records: vec![ScanRecord {
+                    path: directory.path().join("1.wav"),
+                    size: 1,
+                    modified_ns: 2,
+                    fingerprint: None,
+                    cue: None,
+                    media,
+                }],
+                ..ScanResult::default()
+            }),
+            import: Some(("empty".into(), vec![])),
+            progress: ScanProgress {
+                phase: ScanPhase::Completed,
+                processed: 1,
+                total: Some(1),
+                errors: 0,
+                path: None,
+            },
+        };
+        assert!(core.finish_scan(scan).is_err());
+        assert_eq!(
+            core.state
+                .queue
+                .tracks
+                .iter()
+                .find(|row| row.id == 1)
+                .unwrap()
+                .title,
+            "Updated by scan"
+        );
+        assert!(
+            core.view(&Query::TrackBatch {
+                query: None,
+                favorite: None,
+                missing: None,
+                after: Some(1),
+                limit: 2,
+                expected: Some(before),
+            })
+            .is_err()
+        );
+        assert_eq!(core.state.library.track_total, 4);
+        assert_eq!(core.state.library.playlist_total, 0);
     }
 
     #[test]

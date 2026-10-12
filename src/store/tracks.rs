@@ -98,6 +98,14 @@ impl Store {
         Ok(Page { total, rows })
     }
 
+    pub(crate) fn track_count(&self) -> Result<usize> {
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM tracks", [], |row| {
+                row.get::<_, i64>(0)
+            })? as usize)
+    }
+
     pub fn library_stats(&self) -> Result<crate::model::LibraryStats> {
         Ok(self.conn.query_row(
             "SELECT COUNT(*),COALESCE(SUM(play_count),0) FROM tracks",
