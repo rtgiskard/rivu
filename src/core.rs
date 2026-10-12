@@ -114,8 +114,9 @@ impl CoreState {
     }
 }
 
+/// Cloneable access to core business commands, queries, and published state.
 #[derive(Clone)]
-pub struct AppHandle {
+pub struct CoreHandle {
     state: Arc<RwLock<CoreState>>,
     pub analysis: Arc<RwLock<AnalysisFrame>>,
     analysis_control: Arc<AnalysisControl>,
@@ -127,7 +128,7 @@ pub struct AppHandle {
     raise_requested: Arc<AtomicBool>,
 }
 
-impl AppHandle {
+impl CoreHandle {
     /// Request optional plots without reopening output or changing the IPC schema.
     pub(crate) fn set_visualizer_demand(&self, demand: VisualizerDemand) {
         self.analysis_control.set_visualizer_demand(demand);
@@ -314,7 +315,7 @@ impl AppHandle {
 }
 
 pub struct Runtime {
-    pub handle: AppHandle,
+    pub handle: CoreHandle,
     worker: Option<JoinHandle<()>>,
 }
 impl Runtime {
@@ -353,7 +354,7 @@ impl Runtime {
             state
         };
         *shared.write() = initial.clone();
-        let handle = AppHandle {
+        let handle = CoreHandle {
             state: shared.clone(),
             analysis: engine.analysis.clone(),
             analysis_control: Arc::clone(&engine.analysis_control),

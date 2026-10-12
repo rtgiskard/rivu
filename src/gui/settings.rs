@@ -12,7 +12,7 @@ use crate::{
         AnalysisWindow, AudioVisualizerOptions, AudioVisualizerStyle, Config, LogLevel, RgbColor,
         SpectrumStyle, VisualizationPalette,
     },
-    core::AppHandle,
+    core::CoreHandle,
 };
 use anyhow::{Context as _, Result};
 use gpui::{prelude::*, *};
@@ -370,7 +370,7 @@ impl EventEmitter<SettingsEvent> for Settings {}
 
 /// Unsaved preferences stay independent from live playback snapshots.
 pub(super) struct Settings {
-    handle: AppHandle,
+    handle: CoreHandle,
     artwork_manager: Arc<ArtworkManager>,
     artwork_cache_age: Entity<Input>,
     artwork_cache_age_revision: u64,
@@ -405,7 +405,7 @@ pub(super) struct Settings {
 
 impl Settings {
     pub(super) fn new(
-        handle: AppHandle,
+        handle: CoreHandle,
         artwork_manager: Arc<ArtworkManager>,
         devices: Arc<Vec<String>>,
         ffmpeg_status: String,

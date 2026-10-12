@@ -4,7 +4,7 @@
 
 use crate::{
     artwork::{Artwork, ArtworkIdentity, ArtworkManager},
-    core::AppHandle,
+    core::CoreHandle,
     model::{Command, PlaybackStatus, RepeatMode},
     projection::MprisSnapshot,
 };
@@ -37,7 +37,11 @@ pub struct Mpris {
 }
 
 impl Mpris {
-    pub fn start(handle: AppHandle, can_raise: bool, artwork: Arc<ArtworkManager>) -> Result<Self> {
+    pub fn start(
+        handle: CoreHandle,
+        can_raise: bool,
+        artwork: Arc<ArtworkManager>,
+    ) -> Result<Self> {
         let updates = handle.subscribe();
         let initial = handle.mpris_snapshot();
         let initial_can_raise = can_raise && handle.can_raise();
@@ -135,7 +139,7 @@ impl Drop for Mpris {
 }
 
 struct Root {
-    handle: AppHandle,
+    handle: CoreHandle,
     raise_supported: bool,
 }
 
@@ -192,7 +196,7 @@ impl Root {
 }
 
 struct Player {
-    handle: AppHandle,
+    handle: CoreHandle,
     artwork: Arc<ArtworkManager>,
     artwork_result: parking_lot::Mutex<Option<Artwork>>,
 }
@@ -429,7 +433,7 @@ impl Player {
     }
 }
 
-fn request(handle: &AppHandle, command: Command) -> fdo::Result<()> {
+fn request(handle: &CoreHandle, command: Command) -> fdo::Result<()> {
     let response = handle.request_ack(command);
     if response.ok {
         Ok(())
@@ -595,7 +599,7 @@ fn metadata_map(track: Option<&TrackMetadata>) -> Metadata {
 /// blocking load: a completion may warm the cache but never publish stale art.
 fn publish_artwork(
     connection: &Connection,
-    handle: &AppHandle,
+    handle: &CoreHandle,
     requested: &MprisSnapshot,
     metadata: &mut Option<TrackMetadata>,
     artwork: &ArtworkManager,

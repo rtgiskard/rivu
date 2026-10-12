@@ -19,10 +19,10 @@ impl GuiApp {
     }
 
     fn reload_layout_gui(&self, cx: &mut Context<Self>) {
-        let host = self.host.clone();
+        let session = self.session.clone();
         cx.defer(move |cx| {
-            if let Some(host) = host.upgrade() {
-                host.borrow_mut().reload_window(cx);
+            if let Some(session) = session.upgrade() {
+                session.borrow_mut().reload_window(cx);
             }
         });
     }

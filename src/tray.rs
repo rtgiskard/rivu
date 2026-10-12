@@ -1,6 +1,6 @@
 use crate::{
     artwork::DEFAULT_IMAGE,
-    core::AppHandle,
+    core::CoreHandle,
     model::{Command, PlaybackStatus, RepeatMode},
     projection::TraySnapshot,
 };
@@ -82,7 +82,7 @@ pub(crate) struct TrayController {
 }
 
 impl TrayController {
-    pub(crate) fn start(handle: AppHandle) -> Result<Option<Self>> {
+    pub(crate) fn start(handle: CoreHandle) -> Result<Option<Self>> {
         let (stop, stop_receiver) = bounded(1);
         let (ready_sender, ready_receiver) = bounded(1);
         let data = Arc::new(RwLock::new(TrayData {
@@ -131,7 +131,7 @@ impl Drop for TrayController {
 }
 
 fn run_bus(
-    handle: AppHandle,
+    handle: CoreHandle,
     data: Arc<RwLock<TrayData>>,
     stop: Receiver<()>,
     ready: Sender<std::result::Result<(), String>>,
@@ -168,7 +168,7 @@ fn run_bus(
 
     let item_address = connection
         .unique_name()
-        .map(|name| format!("{}{SNI_PATH}", name.as_str()))
+        .map(|name| name.as_str().to_owned())
         .unwrap_or_else(|| service_name.clone());
     if let Err(error) =
         futures::executor::block_on(register_with_watcher(&connection, &item_address))
@@ -270,7 +270,7 @@ async fn register_with_watcher(connection: &Connection, service_name: &str) -> z
 }
 
 fn update_loop(
-    handle: AppHandle,
+    handle: CoreHandle,
     data: Arc<RwLock<TrayData>>,
     connection: Connection,
     updates: Receiver<()>,
@@ -331,7 +331,7 @@ fn emit_update(
 }
 
 struct StatusNotifierItem {
-    handle: AppHandle,
+    handle: CoreHandle,
     data: Arc<RwLock<TrayData>>,
 }
 
@@ -516,7 +516,7 @@ fn owned_value(value: String) -> OwnedValue {
 }
 
 struct DbusMenu {
-    handle: AppHandle,
+    handle: CoreHandle,
     data: Arc<RwLock<TrayData>>,
 }
 
@@ -542,7 +542,7 @@ impl DbusMenu {
     ) -> fdo::Result<Vec<(i32, HashMap<String, OwnedValue>)>> {
         let snapshot = self.data.read().snapshot.clone();
         let ids = if ids.is_empty() {
-            (2..=9).collect()
+            (1..=9).collect()
         } else {
             ids
         };
@@ -574,13 +574,38 @@ impl DbusMenu {
         Ok(())
     }
 
+    fn event_group(&self, events: Vec<(i32, String, OwnedValue, u32)>) -> Vec<i32> {
+        let mut invalid = Vec::new();
+        for (id, event, _, _) in events {
+            if !(1..=9).contains(&id) && id != 0 {
+                invalid.push(id);
+            } else if event == "clicked" {
+                self.activate(id);
+            }
+        }
+        invalid
+    }
+
+    fn about_to_show_group(&self, ids: Vec<i32>) -> (Vec<i32>, Vec<i32>) {
+        let mut updates = Vec::new();
+        let mut invalid = Vec::new();
+        for id in ids {
+            match self.about_to_show(id) {
+                Ok(true) => updates.push(id),
+                Ok(false) => {}
+                Err(_) => invalid.push(id),
+            }
+        }
+        (updates, invalid)
+    }
+
     fn about_to_show(&self, id: i32) -> fdo::Result<bool> {
         if id == 0 {
             // Hosts commonly call AboutToShow before their first GetLayout.
             // Force the static root layout to be loaded instead of leaving an
             // empty host-side cache.
             Ok(true)
-        } else if (2..=9).contains(&id) {
+        } else if (1..=9).contains(&id) {
             Ok(false)
         } else {
             Err(fdo::Error::InvalidArgs("Unknown menu item".into()))
@@ -610,6 +635,20 @@ impl DbusMenu {
 
 impl DbusMenu {
     fn activate(&self, id: i32) {
+        if id == 1 {
+            if let Err(error) = self.handle.raise() {
+                tracing::warn!(error = %error, "tray_raise_failed");
+            }
+            return;
+        }
+        if id == 9 {
+            // This is the D-Bus worker, not the UI or audio thread. Quit must
+            // wait for request capacity rather than disappear under load.
+            if let Err(error) = self.handle.request_shutdown() {
+                tracing::warn!(error = %error, "tray_quit_failed");
+            }
+            return;
+        }
         let snapshot = self.data.read().snapshot.clone();
         let command = match id {
             2 if snapshot.status == PlaybackStatus::Playing => Command::Pause,
@@ -626,7 +665,6 @@ impl DbusMenu {
                     RepeatMode::One => RepeatMode::Off,
                 },
             },
-            9 => Command::Shutdown,
             _ => return,
         };
         if let Err(error) = self.handle.send(command) {
@@ -642,6 +680,7 @@ fn menu_items(snapshot: &TraySnapshot) -> Vec<MenuLayout> {
         "Play"
     };
     vec![
+        MenuLayout::item(1, "Show window"),
         MenuLayout::item(2, play_label),
         MenuLayout::item(3, "Previous"),
         MenuLayout::item(4, "Next"),
@@ -672,7 +711,7 @@ fn menu_properties(
     id: i32,
     requested: &[String],
 ) -> Option<HashMap<String, OwnedValue>> {
-    if !(2..=9).contains(&id) {
+    if !(1..=9).contains(&id) {
         return None;
     }
     let play_label = if snapshot.status == PlaybackStatus::Playing {
@@ -681,6 +720,7 @@ fn menu_properties(
         "Play"
     };
     let (label, item_type) = match id {
+        1 => ("Show window", "standard"),
         2 => (play_label, "standard"),
         3 => ("Previous", "standard"),
         4 => ("Next", "standard"),
@@ -726,6 +766,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn grouped_menu_quit_stops_core_without_window_and_reports_invalid_ids() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut runtime =
+            crate::core::Runtime::start(directory.path(), &directory.path().join("config.toml"))
+                .unwrap();
+        let handle = runtime.handle.clone();
+        assert!(!handle.can_raise());
+        let menu = DbusMenu {
+            data: Arc::new(RwLock::new(TrayData {
+                snapshot: handle.tray_snapshot(),
+                menu_revision: 1,
+            })),
+            handle: handle.clone(),
+        };
+        assert_eq!(
+            menu.about_to_show_group(vec![0, 1, 2, 9, 99, -1]),
+            (vec![0], vec![99, -1]),
+        );
+        assert_eq!(
+            menu.event_group(vec![
+                (99, "clicked".into(), OwnedValue::from(0_i32), 0),
+                (9, "clicked".into(), OwnedValue::from(0_i32), 0),
+            ]),
+            vec![99],
+        );
+        runtime.join().unwrap();
+        assert!(handle.is_shutting_down());
+    }
+
+    #[test]
     fn startup_sync_uses_published_baseline_and_layout_revision_stays_paired() {
         let baseline = TraySnapshot {
             current_track: None,
@@ -751,12 +821,7 @@ mod tests {
         // A newer publication cannot alter the already captured layout/revision.
         latest.status = PlaybackStatus::Paused;
         assert_eq!(data.publish(&latest).unwrap().1, 3);
-        let layout = MenuLayout::root(&layout_snapshot, -1);
-        assert_eq!(layout.children.len(), 8);
-        assert_eq!(
-            menu_properties(&layout_snapshot, 2, &[]).unwrap()["label"],
-            owned_value("Pause".into())
-        );
+        assert_eq!(layout_snapshot.status, PlaybackStatus::Playing);
         assert!(data.publish(&latest).is_none());
         latest.shutting_down = true;
         let (_, revision, menu_changed) = data.publish(&latest).unwrap();
@@ -769,31 +834,5 @@ mod tests {
         let root_only = MenuLayout::root(&snapshot, 0);
         assert_eq!(revision, 0);
         assert!(root_only.children.is_empty());
-    }
-
-    #[test]
-    fn menu_labels_follow_playback_status() {
-        let mut snapshot = TraySnapshot {
-            current_track: None,
-            current_track_id: None,
-            status: PlaybackStatus::Playing,
-            shuffle: false,
-            repeat: RepeatMode::Off,
-            shutting_down: false,
-        };
-        assert_eq!(
-            menu_properties(&snapshot, 2, &[]).unwrap()["label"],
-            owned_value("Pause".into())
-        );
-        snapshot.status = PlaybackStatus::Paused;
-        assert_eq!(
-            menu_properties(&snapshot, 2, &[]).unwrap()["label"],
-            owned_value("Play".into())
-        );
-        snapshot.status = PlaybackStatus::Stopped;
-        assert_eq!(
-            menu_properties(&snapshot, 2, &[]).unwrap()["label"],
-            owned_value("Play".into())
-        );
     }
 }

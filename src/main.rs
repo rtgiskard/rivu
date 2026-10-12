@@ -1,9 +1,7 @@
-mod application;
-
 use anyhow::{Context, Result, bail};
-use application::{open_gui, start};
 use clap::{Parser, Subcommand, ValueEnum};
 use rivu::{
+    app::App,
     audio, config, ipc,
     model::{Command, MAX_QUERY_ROWS, PlaybackStatus, Query, RepeatMode},
     response::{QueryError, StateResponse, StateSections, ViewResponse},
@@ -255,8 +253,18 @@ fn run() -> Result<()> {
     let socket = data_dir.join("rivu.sock");
     let action = args.action.unwrap_or(Action::Gui { paths: Vec::new() });
     match action {
-        Action::Gui { paths } => open_gui(data_dir, config_path, paths),
-        Action::Serve { paths } => start(data_dir, config_path, paths, false),
+        Action::Gui { paths } => App::open_gui(
+            data_dir,
+            config_path,
+            paths.into_iter().map(client_path).collect::<Result<_>>()?,
+        ),
+        Action::Serve { paths } => App::start(
+            data_dir,
+            config_path,
+            paths.into_iter().map(client_path).collect::<Result<_>>()?,
+            false,
+        )?
+        .run(),
         Action::Tui => terminal::run(&socket),
         Action::Library(LibraryAction::Probe { path, enhanced }) => {
             let probe_config = config::Config::load(&config_path)?;

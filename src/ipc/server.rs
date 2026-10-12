@@ -3,7 +3,7 @@ use super::{
     WireRequest, WireResponse, decode_request_frame, read_frame, wire_state, write_error_frame,
     write_frame_buffered,
 };
-use crate::core::AppHandle;
+use crate::core::CoreHandle;
 use crate::{
     model::{Command, Query},
     response::{Ack, QueryResponse, StateRevisions},
@@ -100,16 +100,17 @@ impl Drop for SocketOwner {
     }
 }
 
-pub struct Server<'a> {
+/// Transport worker using a cloned listener, with no socket retirement authority.
+/// The application must retain SocketOwner through core and server teardown.
+pub struct Server {
     path: PathBuf,
-    _owner: &'a SocketOwner,
     shutdown: watch::Sender<bool>,
     bridge_stop: crossbeam_channel::Sender<()>,
     worker: Option<JoinHandle<()>>,
 }
 
-impl<'a> Server<'a> {
-    pub fn start(owner: &'a SocketOwner, handle: AppHandle) -> Result<Self> {
+impl Server {
+    pub fn start(owner: &SocketOwner, handle: CoreHandle) -> Result<Self> {
         let path = owner.path.clone();
         let worker_listener = owner.listener.try_clone()?;
         let (shutdown, shutdown_rx) = watch::channel(false);
@@ -167,7 +168,6 @@ impl<'a> Server<'a> {
         match ready_rx.recv() {
             Ok(Ok(())) => Ok(Self {
                 path,
-                _owner: owner,
                 shutdown,
                 bridge_stop,
                 worker: Some(worker),
@@ -186,7 +186,7 @@ impl<'a> Server<'a> {
     }
 }
 
-impl Drop for Server<'_> {
+impl Drop for Server {
     fn drop(&mut self) {
         tracing::info!(path = %self.path.display(), "ipc_server_stopping");
         let _ = self.shutdown.send(true);
@@ -196,7 +196,7 @@ impl Drop for Server<'_> {
         }
     }
 }
-async fn run_command(handle: &AppHandle, command: Command) -> Result<Ack> {
+async fn run_command(handle: &CoreHandle, command: Command) -> Result<Ack> {
     let duration = if matches!(command, Command::OptimizeDatabase) {
         Duration::from_secs(120)
     } else {
@@ -214,7 +214,7 @@ async fn run_command(handle: &AppHandle, command: Command) -> Result<Ack> {
     .map_err(|error| anyhow::anyhow!("Core command task failed: {error}"))
 }
 
-async fn run_query(handle: &AppHandle, query: Query) -> Result<QueryResponse> {
+async fn run_query(handle: &CoreHandle, query: Query) -> Result<QueryResponse> {
     timeout(
         Duration::from_secs(15),
         tokio::task::spawn_blocking({
@@ -230,7 +230,7 @@ async fn run_query(handle: &AppHandle, query: Query) -> Result<QueryResponse> {
 async fn wait_for_revisions(
     stream: &mut UnixStream,
     pending: &mut BytesMut,
-    handle: &AppHandle,
+    handle: &CoreHandle,
     expected: StateRevisions,
     updates: &mut watch::Receiver<StateRevisions>,
     shutdown: &mut watch::Receiver<bool>,
@@ -266,7 +266,7 @@ async fn wait_for_revisions(
 
 async fn serve_connection(
     mut stream: UnixStream,
-    handle: AppHandle,
+    handle: CoreHandle,
     instance_id: u32,
     mut updates: watch::Receiver<StateRevisions>,
     mut shutdown: watch::Receiver<bool>,
@@ -429,7 +429,7 @@ async fn serve_connection(
 
 async fn run_server(
     listener: UnixListener,
-    handle: AppHandle,
+    handle: CoreHandle,
     updates: watch::Receiver<StateRevisions>,
     mut shutdown: watch::Receiver<bool>,
 ) {

@@ -2,7 +2,6 @@ mod artwork;
 mod browser;
 mod components;
 mod fonts;
-mod host;
 mod input;
 mod layout;
 mod library;
@@ -12,12 +11,13 @@ mod panels;
 mod queries;
 mod queue;
 mod scrolling;
+pub(crate) mod session;
 mod settings;
 mod shell;
 mod visualization;
 use crate::{
     config::{AudioVisualizerOptions, AudioVisualizerStyle},
-    core::AppHandle,
+    core::CoreHandle,
     model::{Command, PlaybackStatus, Query, Track},
     projection::GuiSnapshot,
 };
@@ -33,8 +33,6 @@ pub(super) use components::{
 };
 use futures::{StreamExt, channel::mpsc};
 use gpui::{prelude::*, *};
-use host::GuiHost;
-pub use host::run;
 use input::{Input, InputEvent};
 use layout::interaction::{
     Cancellation, DockGeometry, DockHover, DockRequest, DragCommit, Dragging, LayoutInteraction,
@@ -44,6 +42,7 @@ use layout::{Axis, Edge, LayoutSet, Node};
 use library::LibraryNode;
 use metadata::MetadataSession;
 use queries::ViewRequestKind;
+pub(crate) use session::UiSession;
 use shell::{PanelMenu, PanelMenuPage};
 use std::{
     cell::RefCell,
@@ -54,6 +53,14 @@ use std::{
     time::{Duration, Instant},
 };
 use url::Url;
+
+pub(crate) fn init(cx: &mut App) -> Result<()> {
+    #[cfg(feature = "embed-nerd-font")]
+    fonts::register_symbols(cx)
+        .map_err(|error| error.context("Could not load embedded icon font"))?;
+    Input::init(cx);
+    Ok(())
+}
 
 const BG: u32 = 0x1a1b26;
 const PANEL: u32 = 0x16161e;
@@ -336,10 +343,10 @@ impl FullWaveformRequest {
 }
 
 pub(super) struct GuiApp {
-    handle: AppHandle,
+    handle: CoreHandle,
     state: GuiSnapshot,
     layouts: LayoutSet,
-    host: Weak<RefCell<GuiHost>>,
+    session: Weak<RefCell<UiSession>>,
     layout_path: PathBuf,
     inputs: HashMap<Field, Entity<Input>>,
     browser: BrowserState,
@@ -503,10 +510,10 @@ impl GuiApp {
         self.send(Command::RemoveQueueEntries { queue_ids }, cx);
     }
     fn new(
-        handle: AppHandle,
+        handle: CoreHandle,
         layout_path: PathBuf,
         artwork_manager: Arc<crate::artwork::ArtworkManager>,
-        host: Weak<RefCell<GuiHost>>,
+        session: Weak<RefCell<UiSession>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -715,7 +722,7 @@ impl GuiApp {
             handle,
             state,
             layouts,
-            host,
+            session,
             layout_path,
             inputs,
             browser: BrowserState::default(),
