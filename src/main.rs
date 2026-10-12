@@ -456,33 +456,37 @@ fn run() -> Result<()> {
         }
         action => {
             let (command, wait_scan) = translate(action)?;
-            let ack = ipc::request_ack(&socket, &command)?;
+            let mut session = ipc::client_session(&socket)?;
+            let ack = session.request_ack(&command)?;
             if !ack.ok {
                 bail!("{}", ack.error.as_deref().unwrap_or("Command failed"));
             }
             if wait_scan {
+                let id = ack.scan_id.context("Scan startup omitted task ID")?;
                 loop {
                     thread::sleep(Duration::from_millis(200));
-                    let response = ipc::get_state(
-                        &socket,
-                        StateSections {
-                            system: true,
-                            ..StateSections::default()
-                        },
-                    )?;
-                    let system = response
-                        .system
-                        .as_ref()
-                        .context("State omitted system section")?;
-                    if !system.scanning {
-                        if let Some(error) = &system.last_error {
-                            bail!("{error}");
+                    let response = session.query(&Query::ScanTask { id })?;
+                    let ViewResponse::ScanTask(task) =
+                        response.result.map_err(anyhow::Error::from)?
+                    else {
+                        bail!("Scan task query returned an unexpected response");
+                    };
+                    if task.id != id {
+                        bail!("Scan task query returned a different task ID");
+                    }
+                    match task.progress.phase {
+                        rivu::model::ScanPhase::Completed => {
+                            if args.json {
+                                println!("{}", serde_json::to_string_pretty(&task)?);
+                            } else {
+                                println!("{}", task.message);
+                            }
+                            return Ok(());
                         }
-                        if args.json {
-                            return show_state(&response, true);
+                        rivu::model::ScanPhase::Failed | rivu::model::ScanPhase::Cancelled => {
+                            bail!("{}", task.error.as_deref().unwrap_or(&task.message));
                         }
-                        println!("{}", system.scan_message);
-                        return Ok(());
+                        _ => {}
                     }
                 }
             }

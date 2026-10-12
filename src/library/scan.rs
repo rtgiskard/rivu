@@ -4,10 +4,35 @@ use crate::model::{CueSegment, MediaInfo, ScanPhase};
 use anyhow::{Context, Result, anyhow, bail};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::BufReader;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::UNIX_EPOCH;
 use walkdir::WalkDir;
+
+/// Cooperative cancellation shared by the scan owner and its filesystem worker.
+#[derive(Clone, Debug, Default)]
+pub struct ScanCancellation {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl ScanCancellation {
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
+    }
+
+    pub fn check(&self) -> Result<()> {
+        if self.is_cancelled() {
+            bail!("scan cancelled");
+        }
+        Ok(())
+    }
+}
 
 /// The filesystem information and cached probe result known to the database.
 #[derive(Clone, Debug)]
@@ -33,12 +58,26 @@ pub struct ScanRecord {
 
 pub(super) const MAX_REPORTED_SCAN_ERRORS: usize = 256;
 pub(super) const MAX_RECORDED_SKIPPED_DIRECTORIES: usize = 256;
+pub(super) const MAX_RECORDED_SCAN_UNCERTAINTIES: usize = 256;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SkippedDirectory {
     /// Index of the requested root in `ScanResult::roots` that excluded this path.
     pub root_index: usize,
     pub path: PathBuf,
+}
+
+/// An area whose absence could not be established by this scan.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ScanUncertainty {
+    /// Metadata for a requested root failed for a reason other than NotFound.
+    Root { root_index: usize },
+    /// Traversal failed within this requested root, including transient NotFound.
+    Subtree { root_index: usize, path: PathBuf },
+    /// A whole source could not be read, probed or hashed.
+    File(PathBuf),
+    /// A sheet failed atomically; none of its track identities were established.
+    CueSheet(PathBuf),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -50,7 +89,9 @@ pub struct ScanResult {
     pub skipped_directories: Vec<SkippedDirectory>,
     /// Additional skipped-directory paths were omitted after the memory bound.
     pub skipped_directories_truncated: bool,
-    /// A bounded error/path list omitted additional scan details.
+    /// Failed filesystem, source and sheet scopes; bounded independently of diagnostics.
+    pub uncertainties: Vec<ScanUncertainty>,
+    /// Bounded metadata omitted details: preserve absent identities and disable relocation.
     pub scan_incomplete: bool,
     /// Whole sources represented by successfully scanned CUE sheets.
     pub suppressed_sources: Vec<PathBuf>,
@@ -90,6 +131,17 @@ impl ScanResult {
         true
     }
 
+    fn push_uncertainty(&mut self, uncertainty: ScanUncertainty) {
+        if self.uncertainties.contains(&uncertainty) {
+            return;
+        }
+        if self.uncertainties.len() == MAX_RECORDED_SCAN_UNCERTAINTIES {
+            self.scan_incomplete = true;
+            return;
+        }
+        self.uncertainties.push(uncertainty);
+    }
+
     pub fn errors(&self) -> &[String] {
         &self.errors
     }
@@ -107,14 +159,18 @@ impl ScanResult {
 /// be reused. Failed sheets contribute no partial tracks or source suppression.
 /// `library_roots` are normalized absolute logical paths, as published by the core.
 /// `max_depth` is relative to each requested directory, which is itself depth 0.
+/// Cancellation returns an error, never a partial result. Checks surround blocking
+/// probes, but an in-flight probe itself is not interruptible.
 pub fn scan_paths(
     paths: &[PathBuf],
     known: &[KnownFile],
     ffmpeg_enabled: bool,
     library_roots: &[PathBuf],
     max_depth: u32,
+    cancellation: &ScanCancellation,
     mut progress: impl FnMut(ScanPhase, usize, Option<usize>, usize, Option<&Path>),
 ) -> Result<ScanResult> {
+    cancellation.check()?;
     if max_depth == 0 {
         bail!("scan max depth must be at least 1");
     }
@@ -130,6 +186,7 @@ pub fn scan_paths(
     let mut result = ScanResult::default();
     let mut seen_requests = HashSet::with_capacity(paths.len());
     for requested in paths {
+        cancellation.check()?;
         let root = logical_path(requested)?;
         if !seen_requests.insert(root.clone()) {
             continue;
@@ -151,9 +208,14 @@ pub fn scan_paths(
             continue;
         }
         result.roots.push(root.clone());
+        let root_index = result.roots.len() - 1;
         let metadata = match fs::metadata(&root) {
             Ok(metadata) => metadata,
             Err(error) => {
+                cancellation.check()?;
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    result.push_uncertainty(ScanUncertainty::Root { root_index });
+                }
                 result.push_error(|| format!("{}: {error}", root.display()));
                 progress(
                     ScanPhase::Discovering,
@@ -165,6 +227,7 @@ pub fn scan_paths(
                 continue;
             }
         };
+        cancellation.check()?;
         if metadata.is_file() {
             if is_audio_path(&root) {
                 explicit_audio.insert(root.clone());
@@ -208,14 +271,18 @@ pub fn scan_paths(
                 .follow_links(true)
                 .max_depth(max_walk_depth)
                 .into_iter();
-            while let Some(entry) = entries.next() {
+            loop {
+                cancellation.check()?;
+                let Some(entry) = entries.next() else {
+                    break;
+                };
+                cancellation.check()?;
                 match entry {
                     Ok(entry)
                         if entry.depth() > max_depth as usize && entry.file_type().is_dir() =>
                     {
                         entries.skip_current_dir();
-                        let report =
-                            result.push_skipped_directory(result.roots.len() - 1, entry.path());
+                        let report = result.push_skipped_directory(root_index, entry.path());
                         if report {
                             tracing::warn!(
                                 path = %entry.path().display(),
@@ -253,6 +320,10 @@ pub fn scan_paths(
                     }
                     Ok(_) => {}
                     Err(error) => {
+                        result.push_uncertainty(ScanUncertainty::Subtree {
+                            root_index,
+                            path: error.path().unwrap_or(&root).to_path_buf(),
+                        });
                         result.push_error(|| format!("{}: {error}", root.display()));
                         progress(
                             ScanPhase::Discovering,
@@ -266,6 +337,7 @@ pub fn scan_paths(
             }
         }
     }
+    cancellation.check()?;
     progress(
         ScanPhase::Discovering,
         files.len(),
@@ -287,18 +359,24 @@ pub fn scan_paths(
     let mut sources = HashMap::new();
     let mut suppressed = HashSet::new();
     for sheet in files.iter().filter(|path| is_cue_path(path)) {
+        cancellation.check()?;
         match scan_cue(
             sheet,
             &known_by_path,
             &mut sources,
             ffmpeg_enabled,
             library_roots,
+            cancellation,
         ) {
             Ok(records) => {
                 suppressed.extend(records.iter().map(|record| record.path.clone()));
                 result.records.extend(records);
             }
-            Err(error) => result.push_error(|| format!("{}: {error:#}", sheet.display())),
+            Err(error) => {
+                cancellation.check()?;
+                result.push_uncertainty(ScanUncertainty::CueSheet(sheet.clone()));
+                result.push_error(|| format!("{}: {error:#}", sheet.display()));
+            }
         }
         processed += 1;
         progress(
@@ -309,7 +387,13 @@ pub fn scan_paths(
             Some(sheet.as_path()),
         );
     }
+    for (path, source) in &sources {
+        if source.is_err() {
+            result.push_uncertainty(ScanUncertainty::File(path.clone()));
+        }
+    }
     for path in files.iter().filter(|path| is_audio_path(path)) {
+        cancellation.check()?;
         if suppressed.contains(path) && !explicit_audio.contains(path) {
             processed += 1;
             progress(
@@ -328,11 +412,16 @@ pub fn scan_paths(
                 path,
                 known_by_path.get(path.as_path()).copied(),
                 ffmpeg_enabled,
+                cancellation,
             ),
         };
+        cancellation.check()?;
         match record {
             Ok(record) => result.records.push(record),
-            Err(error) => result.push_error(|| format!("{}: {error:#}", path.display())),
+            Err(error) => {
+                result.push_uncertainty(ScanUncertainty::File(path.clone()));
+                result.push_error(|| format!("{}: {error:#}", path.display()));
+            }
         }
         processed += 1;
         progress(
@@ -343,6 +432,7 @@ pub fn scan_paths(
             Some(path.as_path()),
         );
     }
+    cancellation.check()?;
     suppressed.retain(|path| !explicit_audio.contains(path));
     result.suppressed_sources = suppressed.into_iter().collect();
     result.suppressed_sources.sort();
@@ -366,6 +456,7 @@ pub fn scan_paths(
         result.errors.len(),
         None,
     );
+    cancellation.check()?;
     Ok(result)
 }
 
@@ -374,11 +465,13 @@ fn source_record<'a>(
     known: &HashMap<&Path, &KnownFile>,
     sources: &'a mut HashMap<PathBuf, std::result::Result<ScanRecord, String>>,
     ffmpeg_enabled: bool,
+    cancellation: &ScanCancellation,
 ) -> Result<&'a ScanRecord> {
+    cancellation.check()?;
     sources
         .entry(path.to_path_buf())
         .or_insert_with(|| {
-            scan_file(path, known.get(path).copied(), ffmpeg_enabled)
+            scan_file(path, known.get(path).copied(), ffmpeg_enabled, cancellation)
                 .map_err(|error| format!("{error:#}"))
         })
         .as_ref()
@@ -391,10 +484,15 @@ fn scan_cue(
     sources: &mut HashMap<PathBuf, std::result::Result<ScanRecord, String>>,
     ffmpeg_enabled: bool,
     library_roots: &[PathBuf],
+    cancellation: &ScanCancellation,
 ) -> Result<Vec<ScanRecord>> {
-    let sheet = crate::cue::read(path)?;
+    cancellation.check()?;
+    let sheet = crate::cue::read(path);
+    cancellation.check()?;
+    let sheet = sheet?;
     let mut records = Vec::with_capacity(sheet.tracks.len());
     for track in sheet.tracks {
+        cancellation.check()?;
         let source = logical_path(&track.file)
             .with_context(|| format!("resolve CUE source {}", track.file.display()))?;
         if !library_roots.iter().any(|root| source.starts_with(root)) {
@@ -403,7 +501,8 @@ fn scan_cue(
                 source.display()
             );
         }
-        let mut record = source_record(&source, known, sources, ffmpeg_enabled)?.clone();
+        let mut record =
+            source_record(&source, known, sources, ffmpeg_enabled, cancellation)?.clone();
         let duration = record
             .media
             .duration
@@ -438,12 +537,20 @@ fn scan_cue(
         });
         records.push(record);
     }
+    cancellation.check()?;
     Ok(records)
 }
 
-fn scan_file(path: &Path, known: Option<&KnownFile>, ffmpeg_enabled: bool) -> Result<ScanRecord> {
+fn scan_file(
+    path: &Path,
+    known: Option<&KnownFile>,
+    ffmpeg_enabled: bool,
+    cancellation: &ScanCancellation,
+) -> Result<ScanRecord> {
+    cancellation.check()?;
     let metadata =
         fs::metadata(path).with_context(|| format!("read metadata for {}", path.display()))?;
+    cancellation.check()?;
     let size = metadata.len();
     let modified_ns = metadata
         .modified()
@@ -458,12 +565,18 @@ fn scan_file(path: &Path, known: Option<&KnownFile>, ffmpeg_enabled: bool) -> Re
         .filter(|media| !ffmpeg_enabled || (media.channels != 0 && media.sample_rate != 0))
     {
         Some(media) => media.clone(),
-        None => probe(path, ffmpeg_enabled).with_context(|| "probe audio")?,
+        None => {
+            cancellation.check()?;
+            let media = probe(path, ffmpeg_enabled).with_context(|| "probe audio");
+            cancellation.check()?;
+            media?
+        }
     };
     let fingerprint = match unchanged.and_then(|known| known.fingerprint.as_ref()) {
         Some(fingerprint) => fingerprint.clone(),
-        None => hash_file(path)?,
+        None => hash_file(path, cancellation)?,
     };
+    cancellation.check()?;
     Ok(ScanRecord {
         path: path.to_path_buf(),
         size,
@@ -474,10 +587,30 @@ fn scan_file(path: &Path, known: Option<&KnownFile>, ffmpeg_enabled: bool) -> Re
     })
 }
 
-fn hash_file(path: &Path) -> Result<String> {
+fn hash_file(path: &Path, cancellation: &ScanCancellation) -> Result<String> {
+    cancellation.check()?;
     let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
-    let mut reader = BufReader::with_capacity(128 * 1024, file);
+    hash_reader(file, cancellation).with_context(|| format!("hash {}", path.display()))
+}
+
+pub(super) fn hash_reader(
+    mut reader: impl Read,
+    cancellation: &ScanCancellation,
+) -> Result<String> {
+    let mut buffer = [0; 128 * 1024];
     let mut hasher = blake3::Hasher::new();
-    std::io::copy(&mut reader, &mut hasher).with_context(|| format!("hash {}", path.display()))?;
+    loop {
+        cancellation.check()?;
+        let count = match reader.read(&mut buffer) {
+            Ok(count) => count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error.into()),
+        };
+        cancellation.check()?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
     Ok(hasher.finalize().to_hex().to_string())
 }

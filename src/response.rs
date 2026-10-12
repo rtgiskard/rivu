@@ -83,6 +83,7 @@ pub enum ViewResponse {
     PlaylistSummaryBatch(Batch<PlaylistSummary, i64>),
     PlaylistEntryBatch(Batch<PlaylistEntryRow, PlaylistEntryCursor>),
     LibraryRootCounts(Vec<LibraryRootCount>),
+    ScanTask(crate::model::ScanTaskStatus),
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QueryError {
@@ -163,6 +164,8 @@ pub struct Ack {
     pub ok: bool,
     pub error: Option<String>,
     pub revision: u64,
+    /// Present only when this command accepted a new scan/import task.
+    pub scan_id: Option<u64>,
 }
 
 #[cfg(test)]

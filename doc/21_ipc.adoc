@@ -39,7 +39,7 @@ The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
 Bodies use Postcard serialization without COBS framing. The current protocol
-version is `7`; clients and servers must use matching wire schemas. The four-byte
+version is `8`; clients and servers must use matching wire schemas. The four-byte
 frame length remains little-endian; body integers follow Postcard's encoding.
 
 Request frame content is limited to 64 KiB
@@ -101,7 +101,7 @@ Response types:
 * `Hello` — returns the server instance ID and selected state
 * `State` — returns selected state sections
 * `Query` — returns query revisions and the query result
-* `Ack` — returns command success, error, and revision
+* `Ack` — returns command success, error, revision, and optional scan task ID
 * `Watch` — returns changed state revisions
 * `Error` — returns a protocol or request error
 
@@ -202,6 +202,26 @@ a non-idempotent operation.
 Failed exchanges discard the client connection. A later explicit request can
 reconnect and perform a fresh Hello, but clients never automatically replay a
 failed command.
+
+Accepted scan and playlist-import commands return `Ack.scan_id` with their `u64`
+task ID. Acceptance is not completion. The CLI polls `Query::ScanTask { id }`
+and waits for that exact task's result: only `Completed` succeeds; `Failed` and
+`Cancelled` report the task's error or message. Global scanning state and
+`last_error` are presentation fields, not evidence that a particular task finished.
+JSON completion output contains the task status rather than a global state snapshot.
+Startup and waiting share one connection; disconnection fails the wait rather
+than binding the same numeric task ID to a newly started instance.
+
+`ViewResponse::ScanTask` contains `{id, progress, message, error}`. The progress
+phases are `Discovering`, `ReadingMetadata`, `Saving`, `Completed`, `Failed`, and
+`Cancelled`; the last three are terminal. The core retains the active task and
+the latest 32 terminal task results. Unknown or evicted IDs return a query error.
+`Command::CancelScan { id }` requests cancellation of that task; cancellation
+does not merge partial scan results. A failed wait never automatically replays
+the startup command.
+
+Version 8 adds task acknowledgements, queries, and cancellation; version 7 peers
+must be upgraded together.
 
 == Wire schemas
 

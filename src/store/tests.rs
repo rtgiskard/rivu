@@ -33,7 +33,7 @@ fn playlist_entries(store: &Store, playlist_id: i64) -> Vec<PlaylistEntryRow> {
         }
     }
 }
-use crate::library::{ScanRecord, ScanResult};
+use crate::library::{ScanRecord, ScanResult, ScanUncertainty};
 fn rec(path: &str, hash: &str, title: &str, dur: f64) -> ScanRecord {
     ScanRecord {
         path: path.into(),
@@ -66,6 +66,7 @@ fn scan(records: Vec<ScanRecord>) -> ScanResult {
         skipped_directories: Vec::new(),
         skipped_directories_truncated: false,
         scan_incomplete: false,
+        uncertainties: Vec::new(),
     }
 }
 fn db(name: &str) -> (PathBuf, Store) {
@@ -743,6 +744,147 @@ fn incomplete_scan_preserves_absent_identities_and_avoids_relocation() {
     );
     store.apply_scan(&scan(vec![copy])).unwrap();
     assert!(store.track(id).unwrap().unwrap().missing);
+}
+
+#[test]
+fn uncertain_scopes_preserve_owned_rows_and_reject_relocation_candidates() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().to_path_buf();
+    let old_path = root.join("failed/whole.wav");
+    let old_sheet = root.join("failed/old.cue");
+    let copy_path = root.join("copy.wav");
+    let new_sheet = root.join("new.cue");
+    for (uncertainty, protect_file, protect_cue) in [
+        (ScanUncertainty::Root { root_index: 0 }, true, true),
+        (
+            ScanUncertainty::Subtree {
+                root_index: 0,
+                path: root.join("failed"),
+            },
+            true,
+            true,
+        ),
+        (ScanUncertainty::File(old_path.clone()), true, false),
+        (ScanUncertainty::CueSheet(old_sheet.clone()), false, true),
+    ] {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let old_file = rec(old_path.to_str().unwrap(), "whole", "Original", 10.0);
+        let old_cue = segment(old_sheet.to_str().unwrap(), 1, 0, Some(4500));
+        let mut baseline = scan(vec![old_file.clone(), old_cue.clone()]);
+        baseline.roots = vec![root.clone()];
+        store.apply_scan(&baseline).unwrap();
+        let file_id = store.track_id_for_source(&old_path, None).unwrap().unwrap();
+        let cue_id = store
+            .track_id_for_source(&old_sheet, Some(1))
+            .unwrap()
+            .unwrap();
+        store.set_favorite(&[file_id, cue_id], true).unwrap();
+        let copy = rec(copy_path.to_str().unwrap(), "whole", "Copy", 10.0);
+        let new_cue = segment(new_sheet.to_str().unwrap(), 1, 0, Some(4500));
+        let mut partial = scan(vec![copy, new_cue]);
+        partial.roots = vec![root.clone()];
+        partial.uncertainties.push(uncertainty);
+        store.apply_scan(&partial).unwrap();
+        if protect_file {
+            let preserved = store.track(file_id).unwrap().unwrap();
+            assert_eq!(preserved.path, old_file.path);
+            assert!(!preserved.missing);
+            assert!(preserved.favorite);
+            assert_ne!(
+                store
+                    .track_id_for_source(&copy_path, None)
+                    .unwrap()
+                    .unwrap(),
+                file_id
+            );
+        }
+        if protect_cue {
+            let preserved = store.track(cue_id).unwrap().unwrap();
+            assert_eq!(preserved.cue, old_cue.cue);
+            assert!(!preserved.missing);
+            assert!(preserved.favorite);
+            assert_ne!(
+                store
+                    .track_id_for_source(&new_sheet, Some(1))
+                    .unwrap()
+                    .unwrap(),
+                cue_id
+            );
+        }
+        store.remove_missing_tracks().unwrap();
+        assert!(store.track(file_id).unwrap().is_some());
+        assert!(store.track(cue_id).unwrap().is_some());
+    }
+}
+
+#[test]
+fn nearest_explicit_root_owns_uncertain_directory_coverage() {
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    let sibling = rec("/music/deep/sibling.wav", "sibling", "Sibling", 10.0);
+    let nested = rec("/music/deep/nested/absent.wav", "nested", "Nested", 10.0);
+    let beyond = segment("/music/deep/nested/beyond/hidden.cue", 1, 0, Some(4500));
+    store
+        .apply_scan(&scan(vec![sibling.clone(), nested.clone(), beyond.clone()]))
+        .unwrap();
+    let sibling_id = store
+        .track_id_for_source(&sibling.path, None)
+        .unwrap()
+        .unwrap();
+    let nested_id = store
+        .track_id_for_source(&nested.path, None)
+        .unwrap()
+        .unwrap();
+    let beyond_id = store
+        .track_id_for_source(&beyond.cue.as_ref().unwrap().sheet, Some(1))
+        .unwrap()
+        .unwrap();
+    let mut partial = scan(Vec::new());
+    partial.roots.push("/music/deep/nested".into());
+    partial.uncertainties = vec![
+        ScanUncertainty::Root { root_index: 0 },
+        ScanUncertainty::Subtree {
+            root_index: 0,
+            path: "/music/deep/nested".into(),
+        },
+        ScanUncertainty::Subtree {
+            root_index: 1,
+            path: "/music/deep/nested/beyond".into(),
+        },
+    ];
+    store.apply_scan(&partial).unwrap();
+    assert!(!store.track(sibling_id).unwrap().unwrap().missing);
+    assert!(store.track(nested_id).unwrap().unwrap().missing);
+    assert!(!store.track(beyond_id).unwrap().unwrap().missing);
+}
+
+#[test]
+fn incomplete_scan_does_not_relocate_unknown_sources_outside_requested_roots() {
+    let directory = tempfile::tempdir().unwrap();
+    let old_path = directory.path().join("outside/old.wav");
+    let requested = directory.path().join("requested");
+    let copy_path = requested.join("copy.wav");
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    store
+        .apply_scan(&scan(vec![rec(
+            old_path.to_str().unwrap(),
+            "same",
+            "Original",
+            10.0,
+        )]))
+        .unwrap();
+    let id = store.track_id_for_source(&old_path, None).unwrap().unwrap();
+    let mut partial = scan(vec![rec(copy_path.to_str().unwrap(), "same", "Copy", 10.0)]);
+    partial.roots = vec![requested];
+    partial.scan_incomplete = true;
+    store.apply_scan(&partial).unwrap();
+    assert_eq!(store.track(id).unwrap().unwrap().path, old_path);
+    assert_ne!(
+        store
+            .track_id_for_source(&copy_path, None)
+            .unwrap()
+            .unwrap(),
+        id
+    );
 }
 
 #[test]

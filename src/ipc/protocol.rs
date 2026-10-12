@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub(super) const PROTOCOL_VERSION: u8 = 7;
+pub(super) const PROTOCOL_VERSION: u8 = 8;
 pub(super) const MAX_REQUEST: usize = 64 * 1024;
 pub(super) const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub(super) const MAX_CLIENTS: usize = 16;
@@ -152,6 +152,9 @@ pub(super) enum WireQuery {
     LibraryRootCounts {
         roots: Vec<PathBuf>,
     },
+    ScanTask {
+        id: u64,
+    },
 }
 
 /// Binary command wire format. Variant order is a protocol contract; append only.
@@ -285,6 +288,9 @@ pub(super) enum WireCommand {
     },
     Shutdown,
     DismissScanResult,
+    CancelScan {
+        id: u64,
+    },
 }
 
 pub(super) fn wire_usize(value: u64, field: &str) -> Result<usize> {
@@ -403,6 +409,7 @@ impl From<Query> for WireQuery {
                 limit: limit as u64,
             },
             Query::LibraryRootCounts { roots } => Self::LibraryRootCounts { roots },
+            Query::ScanTask { id } => Self::ScanTask { id },
         }
     }
 }
@@ -521,6 +528,7 @@ impl TryFrom<WireQuery> for Query {
                 limit: wire_usize(limit, "limit")?,
             },
             WireQuery::LibraryRootCounts { roots } => Self::LibraryRootCounts { roots },
+            WireQuery::ScanTask { id } => Self::ScanTask { id },
         })
     }
 }
@@ -623,6 +631,7 @@ impl From<Command> for WireCommand {
             Command::Analysis { enabled } => Self::Analysis { enabled },
             Command::DismissError => Self::DismissError,
             Command::DismissScanResult => Self::DismissScanResult,
+            Command::CancelScan { id } => Self::CancelScan { id },
             Command::Configure { config } => Self::Configure {
                 config: WireConfig::from(&config),
             },
@@ -732,6 +741,7 @@ impl TryFrom<WireCommand> for Command {
             WireCommand::Analysis { enabled } => Self::Analysis { enabled },
             WireCommand::DismissError => Self::DismissError,
             WireCommand::DismissScanResult => Self::DismissScanResult,
+            WireCommand::CancelScan { id } => Self::CancelScan { id },
             WireCommand::Configure { config } => Self::Configure {
                 config: config.into(),
             },

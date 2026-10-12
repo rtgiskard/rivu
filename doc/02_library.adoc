@@ -22,10 +22,17 @@ directories beyond the limit are skipped and reported. Direct file and CUE
 requests are unaffected by this directory limit; `0` is invalid. An explicit
 nested scan has its own boundary, even when an enclosing walk skipped it.
 
-Depth exclusions and truncated diagnostics protect affected existing records
-from being marked missing. Other read, traversal, or sheet errors may still mark
-tracks missing; successfully read tracks are saved. Inspect diagnostics and
-rescan before cleaning missing records.
+Depth exclusions and filesystem, traversal, audio-read/probe, or CUE errors
+protect the affected existing identities: they are neither newly marked missing
+nor used as relocation candidates. A failed sheet protects all tracks owned by
+that sheet, not just its readable sources. Successfully read tracks are still saved.
+A requested path whose initial metadata lookup reports `NotFound` is confirmed
+absent and can mark its tracks missing; a path disappearing during traversal or
+reading is uncertain until a later scan establishes absence. An explicit nested
+directory scan owns its own coverage, independently of enclosing exclusions.
+Diagnostic and uncertainty details are bounded; when details are omitted, missing
+detection and relocation are conservatively disabled for that scan. Fix reported
+errors and rescan before cleaning missing records.
 
 Scanning runs asynchronously without stopping playback; a second scan or playlist
 import is rejected while one is active. The desktop UI does not scan configured
@@ -33,6 +40,11 @@ roots during startup; trigger scans from the Library controls or use
 `rivu library scan PATH...`. Progress reports completion or failure. `--wait`
 waits for completion and reports scan errors even when readable tracks were saved;
 `--force` rereads unchanged audio metadata. CUE sheets are always reread.
+
+Cancellation is cooperative: discovery, files, CUE boundaries, and hash-read chunks
+check the scan owner's shared cancellation token. A blocking audio probe is checked
+before and after, but is not itself interruptible. A cancelled scan returns no result
+for merging, so even tracks read before cancellation are not saved.
 
 [source,sh]
 ----
@@ -206,12 +218,16 @@ Query limits, revisions, and batch contracts: link:21_ipc.adoc[IPC].
   See <<_paged_views,Paged views>> before consuming streamed output.
 * `library status` returns a state object with `revisions`, `playback`, `queue`,
   `library`, and `system`. `queue list` requests only `queue`; `library history`
-  requests only `library`; scan/import with `--wait` and `library optimize`
-  request only `system`. Unrequested sections are `null`, not empty data.
+  requests only `library`; `library optimize` requests only `system`.
+  Unrequested sections are `null`, not empty data.
 * Successful ordinary mutations return an acknowledgement with `ok`, `error`,
-  and `revision`; acceptance does not mean an asynchronous scan has completed.
+  `revision`, and `scan_id` (null except for accepted scan/import tasks).
+  Acceptance does not mean an asynchronous scan has completed.
   Rejected commands and failed scan waits report an error on stderr and exit
   unsuccessfully rather than printing a JSON acknowledgement.
+* Successful scan/import with `--wait` returns the submitted task's
+  `{id, progress, message, error}` status, not a global state snapshot. Later
+  scans and unrelated command errors do not change that result.
 * `library stats` returns aggregate statistics; `library probe` returns metadata
   and decoder status; `playback devices` returns an array of device names.
 

@@ -3,6 +3,14 @@ use anyhow::ensure;
 
 impl Core {
     pub(in crate::core) fn command(&mut self, command: Command) -> Result<()> {
+        // Scan acceptance is the asynchronous commit boundary. scan() flushes
+        // pending state before spawning; never turn acceptance into an error later.
+        if matches!(
+            &command,
+            Command::Scan { .. } | Command::ImportPlaylist { .. }
+        ) {
+            return self.apply_command(command);
+        }
         // Persist the resulting queue even when a later operation fails (for
         // example, loading an unavailable track after replacing the queue).
         let result = self.apply_command(command);
@@ -20,7 +28,8 @@ impl Core {
                 | Command::Configure { .. }
         );
         match command {
-            Command::Scan { paths, force } => self.scan(paths, None, force)?,
+            Command::Scan { paths, force } => return self.scan(paths, None, force),
+            Command::CancelScan { id } => self.cancel_scan(id)?,
             Command::Play { track_id } => {
                 self.track(track_id)?;
                 let existing = self
@@ -188,7 +197,7 @@ impl Core {
                 self.move_playlist_entry(entry_id, index)?;
             }
             Command::ImportPlaylist { path, name } => {
-                if self.state.system.scanning {
+                if self.active_scan.is_some() {
                     bail!("A library scan is already running");
                 }
                 let items = library::import_playlist(&path)?;
@@ -202,7 +211,7 @@ impl Core {
                         .to_string_lossy()
                         .into_owned()
                 });
-                self.scan(paths, Some((name, items)), false)?;
+                return self.scan(paths, Some((name, items)), false);
             }
             Command::ExportPlaylist { playlist_id, path } => {
                 self.export_playlist(playlist_id, &path)?;

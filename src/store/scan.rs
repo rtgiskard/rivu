@@ -1,6 +1,6 @@
 use super::Store;
 use super::rows::cue_from_row;
-use crate::library::{KnownFile, ScanResult};
+use crate::library::{KnownFile, ScanResult, ScanUncertainty};
 use crate::model::{CueSegment, MediaInfo};
 use anyhow::{Context, Result, bail};
 use rusqlite::params;
@@ -108,7 +108,7 @@ impl Store {
             .iter()
             .filter_map(|r| r.fingerprint.as_deref())
             .collect();
-        let skipped_directories: HashSet<(&Path, &Path)> = result
+        let mut excluded_directories: HashSet<(&Path, &Path)> = result
             .skipped_directories
             .iter()
             .map(|entry| {
@@ -119,28 +119,63 @@ impl Store {
                 Ok((root.as_path(), entry.path.as_path()))
             })
             .collect::<Result<_>>()?;
-        let scan_incomplete = result.scan_incomplete;
+        let mut uncertain_files = HashSet::new();
+        let mut uncertain_sheets = HashSet::new();
+        for uncertainty in &result.uncertainties {
+            match uncertainty {
+                ScanUncertainty::Root { root_index } => {
+                    let root = result
+                        .roots
+                        .get(*root_index)
+                        .context("Uncertain area references an unknown scan root")?;
+                    excluded_directories.insert((root.as_path(), root.as_path()));
+                }
+                ScanUncertainty::Subtree { root_index, path } => {
+                    let root = result
+                        .roots
+                        .get(*root_index)
+                        .context("Uncertain area references an unknown scan root")?;
+                    excluded_directories.insert((root.as_path(), path.as_path()));
+                }
+                ScanUncertainty::File(path) => {
+                    uncertain_files.insert(path.as_path());
+                }
+                ScanUncertainty::CueSheet(path) => {
+                    uncertain_sheets.insert(path.as_path());
+                }
+            }
+        }
         let requested_roots: HashSet<&Path> = result.roots.iter().map(PathBuf::as_path).collect();
-        let depth_skipped = |path: &Path| {
-            if scan_incomplete
-                && requested_roots
-                    .iter()
-                    .any(|root| path == *root || path.starts_with(root))
-            {
+        let unconfirmed = |record: &Existing| {
+            // Truncation can omit a failed CUE source outside the requested roots:
+            // conservatively disable all relocation as well as missing detection.
+            if result.scan_incomplete {
                 return true;
             }
-            if skipped_directories.is_empty() {
-                return false;
-            }
-            // Only exclusions produced by the nearest explicit scan apply.
-            let Some(root) = path
+            let owner = match &record.cue {
+                Some(cue) => {
+                    if uncertain_sheets.contains(cue.sheet.as_path()) {
+                        return true;
+                    }
+                    cue.sheet.as_path()
+                }
+                None => {
+                    if uncertain_files.contains(record.path.as_path()) {
+                        return true;
+                    }
+                    record.path.as_path()
+                }
+            };
+            // Only directory exclusions produced by the nearest explicit scan apply.
+            let Some(root) = owner
                 .ancestors()
                 .find(|ancestor| requested_roots.contains(ancestor))
             else {
                 return false;
             };
-            path.ancestors()
-                .any(|ancestor| skipped_directories.contains(&(root, ancestor)))
+            owner
+                .ancestors()
+                .any(|ancestor| excluded_directories.contains(&(root, ancestor)))
         };
         let mut byidentity = HashMap::new();
         let mut byhash: HashMap<&str, Vec<&Existing>> = HashMap::new();
@@ -153,7 +188,7 @@ impl Store {
             if !identities.contains(&key)
                 && let Some(hash) = record.hash.as_deref()
                 && candidate_hashes.contains(hash)
-                && !depth_skipped(owner)
+                && !unconfirmed(record)
                 && fs::symlink_metadata(owner)
                     .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
             {
@@ -299,7 +334,7 @@ impl Store {
                     .roots
                     .iter()
                     .any(|root| owner == root || owner.starts_with(root))
-                && !depth_skipped(owner)
+                && !unconfirmed(o)
             {
                 mark_missing.execute([o.id])?;
             }

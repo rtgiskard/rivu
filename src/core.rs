@@ -17,7 +17,7 @@ use parking_lot::RwLock;
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashSet,
+    collections::{HashSet, VecDeque},
     path::Path,
     sync::{
         Arc,
@@ -299,6 +299,7 @@ impl AppHandle {
                 ok: false,
                 error: Some(error),
                 revision: self.revision(),
+                scan_id: None,
             },
         }
     }
@@ -374,7 +375,9 @@ impl Runtime {
                     playback: None,
                     scan_tx,
                     scan_rx,
-                    scan_workers: Vec::new(),
+                    active_scan: None,
+                    scan_results: VecDeque::new(),
+                    next_scan_id: 1,
                     shuffle_bag: Vec::new(),
                     played: Vec::new(),
                     played_cursor: 0,
@@ -495,13 +498,20 @@ impl PlaybackStats {
     }
 }
 struct ScanFinished {
+    id: u64,
     result: Result<ScanResult>,
     import: Option<(String, Vec<M3uItem>)>,
     progress: ScanProgress,
 }
 enum ScanEvent {
-    Progress(ScanProgress),
+    Progress { id: u64, progress: ScanProgress },
     Finished(ScanFinished),
+}
+const MAX_RETAINED_SCAN_RESULTS: usize = 32;
+struct ScanTask {
+    status: ScanTaskStatus,
+    cancellation: library::ScanCancellation,
+    worker: JoinHandle<()>,
 }
 struct Core {
     store: Store,
@@ -517,7 +527,9 @@ struct Core {
     playback: Option<PlaybackStats>,
     scan_tx: Sender<ScanEvent>,
     scan_rx: Receiver<ScanEvent>,
-    scan_workers: Vec<JoinHandle<()>>,
+    active_scan: Option<ScanTask>,
+    scan_results: VecDeque<ScanTaskStatus>,
+    next_scan_id: u64,
     shuffle_bag: Vec<u64>,
     played: Vec<u64>,
     // Number of history entries through the current (or just removed) entry.
@@ -626,6 +638,7 @@ mod tests {
                 skipped_directories: Vec::new(),
                 skipped_directories_truncated: false,
                 scan_incomplete: false,
+                uncertainties: Vec::new(),
                 records: (1..=4)
                     .map(|id| ScanRecord {
                         path: directory.path().join(format!("{id}.wav")),
@@ -673,7 +686,9 @@ mod tests {
             playback: None,
             scan_tx,
             scan_rx,
-            scan_workers: Vec::new(),
+            active_scan: None,
+            scan_results: VecDeque::new(),
+            next_scan_id: 1,
             shuffle_bag: Vec::new(),
             played: Vec::new(),
             played_cursor: 0,
@@ -1065,6 +1080,7 @@ mod tests {
             .unwrap();
         media.title = "Updated by scan".into();
         let scan = ScanFinished {
+            id: 0,
             result: Ok(ScanResult {
                 records: vec![ScanRecord {
                     path: directory.path().join("1.wav"),
@@ -1233,7 +1249,11 @@ mod tests {
     #[test]
     fn scan_result_dismissal_preserves_errors_and_active_scans() {
         let (_directory, mut core) = fixture();
-        for phase in [ScanPhase::Completed, ScanPhase::Failed] {
+        for phase in [
+            ScanPhase::Completed,
+            ScanPhase::Failed,
+            ScanPhase::Cancelled,
+        ] {
             core.state.system.scan_progress = Some(ScanProgress {
                 phase,
                 processed: 2,
@@ -1361,16 +1381,140 @@ mod tests {
     }
 
     fn settle_scan(core: &mut Core) -> bool {
-        loop {
-            match core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
-                ScanEvent::Progress(_) => {}
-                ScanEvent::Finished(scan) => {
-                    let successful = core.finish_scan(scan).unwrap();
-                    core.state.system.scanning = false;
-                    return successful;
-                }
-            }
+        while core.active_scan.is_some() {
+            let event = core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            core.scan_event(event);
         }
+        core.scan_results.back().unwrap().progress.phase == ScanPhase::Completed
+    }
+
+    #[test]
+    fn scan_start_ack_binds_the_accepted_task() {
+        let (directory, mut core) = fixture();
+        let path = directory.path().join("1.wav");
+        write_pcm(&path);
+        let (requests, receiver) = bounded(3);
+        let (reply, ack) = bounded(1);
+        requests
+            .send(Request {
+                operation: Operation::Command(Command::Scan {
+                    paths: vec![path],
+                    force: false,
+                }),
+                reply: Some(reply),
+            })
+            .unwrap();
+        requests
+            .send(Request {
+                operation: Operation::Command(Command::Shutdown),
+                reply: None,
+            })
+            .unwrap();
+        core.run(receiver);
+        let CoreResponse::Ack(ack) = ack.recv().unwrap() else {
+            panic!("Expected ack");
+        };
+        assert!(ack.ok);
+        let id = ack
+            .scan_id
+            .expect("Accepted scans must expose their identity");
+        let ViewResponse::ScanTask(task) = core.view(&Query::ScanTask { id }).unwrap() else {
+            panic!("Expected task");
+        };
+        assert_eq!(task.id, id);
+    }
+
+    #[test]
+    fn completed_scan_wait_is_independent_of_later_scans_and_global_errors() {
+        let (directory, mut core) = fixture();
+        let path = directory.path().join("1.wav");
+        write_pcm(&path);
+        core.scan(vec![path.clone()], None, false).unwrap();
+        let id = core.active_scan.as_ref().unwrap().status.id;
+        assert!(settle_scan(&mut core));
+        let ViewResponse::ScanTask(before) = core.view(&Query::ScanTask { id }).unwrap() else {
+            panic!("Expected task");
+        };
+        core.state.system.last_error = Some("Unrelated audio failure".into());
+        core.scan(vec![path], None, false).unwrap();
+        let ViewResponse::ScanTask(after) = core.view(&Query::ScanTask { id }).unwrap() else {
+            panic!("Expected task");
+        };
+        assert_eq!(before, after);
+        assert_ne!(core.active_scan.as_ref().unwrap().status.id, id);
+        assert!(settle_scan(&mut core));
+    }
+
+    #[test]
+    fn cancelling_finished_but_uncommitted_scan_discards_its_result() {
+        let (directory, mut core) = fixture();
+        let path = directory.path().join("new.wav");
+        write_pcm(&path);
+        let total = core.state.library.track_total;
+        core.scan(vec![path], None, false).unwrap();
+        let id = core.active_scan.as_ref().unwrap().status.id;
+        let finished = loop {
+            match core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+                ScanEvent::Progress { .. } => {}
+                ScanEvent::Finished(scan) => break scan,
+            }
+        };
+        core.command(Command::CancelScan { id }).unwrap();
+        core.scan_event(ScanEvent::Finished(finished));
+        assert_eq!(core.state.library.track_total, total);
+        assert_eq!(
+            core.scan_results.back().unwrap().progress.phase,
+            ScanPhase::Cancelled
+        );
+        assert!(core.active_scan.is_none());
+    }
+    #[test]
+    fn stale_scan_events_cannot_replace_the_active_task() {
+        let (directory, mut core) = fixture();
+        let path = directory.path().join("1.wav");
+        write_pcm(&path);
+        core.scan(vec![path], None, false).unwrap();
+        let before = core.active_scan.as_ref().unwrap().status.clone();
+        let progress = ScanProgress {
+            phase: ScanPhase::Failed,
+            processed: 999,
+            total: None,
+            errors: 1,
+            path: None,
+        };
+        core.scan_event(ScanEvent::Progress {
+            id: 0,
+            progress: progress.clone(),
+        });
+        core.scan_event(ScanEvent::Finished(ScanFinished {
+            id: 0,
+            result: Ok(ScanResult::default()),
+            import: None,
+            progress,
+        }));
+        assert_eq!(core.active_scan.as_ref().unwrap().status, before);
+        assert!(core.scan_results.is_empty());
+        assert!(settle_scan(&mut core));
+    }
+
+    #[test]
+    fn scan_terminal_retention_is_bounded_and_unknown_ids_fail() {
+        let (directory, mut core) = fixture();
+        let path = directory.path().join("1.wav");
+        write_pcm(&path);
+        for _ in 0..MAX_RETAINED_SCAN_RESULTS + 1 {
+            core.scan(vec![path.clone()], None, false).unwrap();
+            assert!(settle_scan(&mut core));
+        }
+        assert_eq!(core.scan_results.len(), MAX_RETAINED_SCAN_RESULTS);
+        assert!(core.view(&Query::ScanTask { id: 1 }).is_err());
+        assert!(core.view(&Query::ScanTask { id: u64::MAX }).is_err());
+        assert!(
+            core.view(&Query::ScanTask {
+                id: MAX_RETAINED_SCAN_RESULTS as u64 + 1
+            })
+            .is_ok()
+        );
     }
 
     fn write_pcm(path: &Path) {
@@ -1476,7 +1620,7 @@ mod tests {
             .is_err()
         );
         assert!(!core.state.system.scanning);
-        assert!(core.scan_workers.is_empty());
+        assert!(core.active_scan.is_none());
     }
 
     #[test]
@@ -1509,7 +1653,7 @@ mod tests {
             })
             .is_err()
         );
-        assert!(core.scan_workers.is_empty());
+        assert!(core.active_scan.is_none());
     }
 
     #[test]
@@ -1650,7 +1794,7 @@ mod tests {
             })
             .is_err()
         );
-        assert!(core.scan_workers.is_empty());
+        assert!(core.active_scan.is_none());
     }
 
     #[test]
@@ -1757,7 +1901,7 @@ mod tests {
         );
         assert_eq!(core.state.library.track_total, total);
         assert!(!core.state.system.scanning);
-        assert!(core.scan_workers.is_empty());
+        assert!(core.active_scan.is_none());
     }
 
     fn pending(core: &mut Core, queue_id: u64) {
@@ -1883,6 +2027,7 @@ mod tests {
                 skipped_directories: Vec::new(),
                 skipped_directories_truncated: false,
                 scan_incomplete: true,
+                uncertainties: Vec::new(),
                 records: vec![ScanRecord {
                     path: known.path,
                     cue: known.cue,
@@ -2237,6 +2382,7 @@ mod tests {
             false,
             &[_directory.path().to_path_buf()],
             core.state.system.config.scan_max_depth,
+            &library::ScanCancellation::default(),
             |_, _, _, _, _| {},
         )
         .unwrap();
@@ -2250,14 +2396,7 @@ mod tests {
                 force,
             })
             .unwrap();
-            let finished = loop {
-                match core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
-                    ScanEvent::Progress(_) => continue,
-                    ScanEvent::Finished(scan) => break scan,
-                }
-            };
-            core.finish_scan(finished).unwrap();
-            core.state.system.scanning = false;
+            assert!(settle_scan(&mut core));
             assert_eq!(core.track(1).unwrap().title, expected);
         }
     }
@@ -2391,6 +2530,7 @@ mod tests {
         let path = directory.path().join("duplicates.m3u");
         std::fs::write(&path, "2.wav\n1.wav\n2.wav\n3.wav\n1.wav\n").unwrap();
         core.finish_scan(ScanFinished {
+            id: 0,
             result: Ok(ScanResult::default()),
             import: Some((
                 "First occurrences".into(),
@@ -2467,6 +2607,7 @@ mod tests {
             })
             .collect();
         core.finish_scan(ScanFinished {
+            id: 0,
             result: Ok(ScanResult {
                 roots: vec![sheet],
                 records,
@@ -3183,61 +3324,54 @@ mod tests {
         assert!(observed.load(Ordering::Acquire));
     }
     #[test]
-    fn shutdown_disconnects_a_backpressured_scan_worker() {
+    fn shutdown_cancels_and_disconnects_a_backpressured_scan_worker() {
         let (_directory, mut core) = fixture();
-        let shared = core.shared.clone();
-        let progress_sender = core.scan_tx.clone();
-        let finished_sender = core.scan_tx.clone();
-        let (start_sender, start_receiver) = bounded(1);
-        let (result_sender, result_receiver) = bounded(1);
-        core.scan_workers.push(thread::spawn(move || {
-            start_receiver.recv().unwrap();
-            let result = finished_sender.send_timeout(
-                ScanEvent::Finished(ScanFinished {
-                    result: Ok(ScanResult::default()),
-                    import: None,
-                    progress: ScanProgress {
-                        phase: ScanPhase::ReadingMetadata,
-                        processed: 0,
-                        total: Some(0),
-                        errors: 0,
-                        path: None,
-                    },
-                }),
-                Duration::from_secs(1),
-            );
-            result_sender
-                .send(matches!(
-                    result,
-                    Err(crossbeam_channel::SendTimeoutError::Disconnected(_))
-                ))
-                .unwrap();
-        }));
-        let started = AtomicBool::new(false);
-        *core.wakeup.write() = Some(Arc::new(move || {
-            if shared.read().system.shutting_down && !started.swap(true, Ordering::AcqRel) {
-                progress_sender
-                    .send(ScanEvent::Progress(ScanProgress {
-                        phase: ScanPhase::Discovering,
-                        processed: 0,
-                        total: None,
-                        errors: 0,
-                        path: None,
-                    }))
-                    .unwrap();
-                start_sender.send(()).unwrap();
-            }
-        }));
-        let (sender, receiver) = bounded(1);
+        let cancellation = library::ScanCancellation::default();
+        let observed = cancellation.clone();
+        let sender = core.scan_tx.clone();
+        let progress = ScanProgress {
+            phase: ScanPhase::Discovering,
+            processed: 0,
+            total: None,
+            errors: 0,
+            path: None,
+        };
         sender
-            .send(Request {
-                operation: Operation::Command(Command::Shutdown),
-                reply: None,
+            .send(ScanEvent::Progress {
+                id: 1,
+                progress: progress.clone(),
             })
             .unwrap();
-        core.run(receiver);
-        assert!(result_receiver.recv().unwrap());
-        assert!(core.state.system.shutting_down);
+        let (result_tx, result_rx) = bounded(1);
+        core.active_scan = Some(ScanTask {
+            status: ScanTaskStatus {
+                id: 1,
+                progress: progress.clone(),
+                message: String::new(),
+                error: None,
+            },
+            cancellation,
+            worker: thread::spawn(move || {
+                let disconnected = sender
+                    .send(ScanEvent::Finished(ScanFinished {
+                        id: 1,
+                        result: Ok(ScanResult::default()),
+                        import: None,
+                        progress,
+                    }))
+                    .is_err();
+                result_tx
+                    .send((disconnected, observed.is_cancelled()))
+                    .unwrap();
+            }),
+        });
+        core.shutdown_scan();
+        assert_eq!(result_rx.recv().unwrap(), (true, true));
+        assert!(core.active_scan.is_none());
+        assert_eq!(
+            core.scan_results.back().unwrap().progress.phase,
+            ScanPhase::Cancelled
+        );
     }
 
     #[test]

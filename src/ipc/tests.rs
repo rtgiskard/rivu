@@ -6,6 +6,77 @@ use crate::{
 use std::sync::Arc;
 
 #[test]
+fn scan_task_query_and_cancel_wire_round_trip_preserve_id() {
+    for id in [0, 42, u64::MAX] {
+        let mut encoded = Vec::new();
+        encode_request_frame_into(
+            &WireRequest::Query(WireQuery::from(Query::ScanTask { id })),
+            &mut encoded,
+        )
+        .unwrap();
+        let WireRequest::Query(wire) = decode_request_frame(&encoded[4..]).unwrap() else {
+            panic!("expected query");
+        };
+        assert!(
+            matches!(Query::try_from(wire).unwrap(), Query::ScanTask { id: decoded } if decoded == id)
+        );
+        encode_request_frame_into(
+            &WireRequest::Command(WireCommand::from(Command::CancelScan { id })),
+            &mut encoded,
+        )
+        .unwrap();
+        let WireRequest::Command(wire) = decode_request_frame(&encoded[4..]).unwrap() else {
+            panic!("expected command");
+        };
+        assert!(
+            matches!(Command::try_from(wire).unwrap(), Command::CancelScan { id: decoded } if decoded == id)
+        );
+    }
+}
+
+#[test]
+fn scan_task_status_wire_round_trip_preserves_all_phases() {
+    use crate::{
+        model::{ScanPhase, ScanProgress, ScanTaskStatus},
+        response::{QueryRevisions, ViewResponse},
+    };
+    for phase in [
+        ScanPhase::Discovering,
+        ScanPhase::ReadingMetadata,
+        ScanPhase::Saving,
+        ScanPhase::Completed,
+        ScanPhase::Failed,
+        ScanPhase::Cancelled,
+    ] {
+        let task = ScanTaskStatus {
+            id: u64::MAX,
+            progress: ScanProgress {
+                phase,
+                processed: 3,
+                total: Some(7),
+                errors: 1,
+                path: Some("/音楽/song.flac".into()),
+            },
+            message: "task status".into(),
+            error: Some("task error".into()),
+        };
+        let response = QueryResponse {
+            revisions: QueryRevisions::default(),
+            result: Ok(ViewResponse::ScanTask(task.clone())),
+        };
+        let mut encoded = Vec::new();
+        encode_response_frame_into(&WireResponse::Query(response), &mut encoded).unwrap();
+        let WireResponse::Query(decoded) = decode_response_frame(&encoded[4..]).unwrap() else {
+            panic!("expected query response");
+        };
+        let ViewResponse::ScanTask(decoded) = decoded.result.unwrap() else {
+            panic!("expected scan task");
+        };
+        assert_eq!(decoded, task);
+    }
+}
+
+#[test]
 fn directory_query_wire_round_trip_preserves_filter_and_page() {
     use std::path::Path;
     for favorite in [None, Some(true), Some(false)] {
@@ -268,6 +339,7 @@ fn ack_wire_round_trip_has_explicit_response_type() {
         ok: false,
         error: Some("failed".into()),
         revision: 42,
+        scan_id: Some(u64::MAX),
     };
     let mut encoded = Vec::new();
     encode_response_frame_into(&WireResponse::Ack(ack.clone()), &mut encoded).unwrap();
@@ -278,6 +350,7 @@ fn ack_wire_round_trip_has_explicit_response_type() {
     };
     assert_eq!(decoded.revision, ack.revision);
     assert_eq!(decoded.error, ack.error);
+    assert_eq!(decoded.scan_id, ack.scan_id);
 }
 
 #[test]
@@ -907,6 +980,7 @@ fn client_session_reuses_connection_after_command_and_request_rejections() {
                 ok: false,
                 error: Some("rejected".into()),
                 revision: 3,
+                scan_id: None,
             },
         );
         assert!(matches!(
@@ -968,6 +1042,7 @@ fn client_session_discards_partial_failed_response_before_next_explicit_request(
                 ok: true,
                 error: None,
                 revision: 1,
+                scan_id: None,
             }),
             &mut frame,
         )
@@ -987,6 +1062,7 @@ fn client_session_discards_partial_failed_response_before_next_explicit_request(
                 ok: true,
                 error: None,
                 revision: 2,
+                scan_id: None,
             },
         );
     });

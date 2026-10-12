@@ -399,6 +399,7 @@ impl GuiApp {
             ScanPhase::Saving => "Saving library",
             ScanPhase::Completed => "Scan completed",
             ScanPhase::Failed => "Scan failed",
+            ScanPhase::Cancelled => "Scan cancelled",
         };
         let count = match progress.total {
             Some(total) => format!("{} / {total} files", progress.processed),
@@ -409,7 +410,10 @@ impl GuiApp {
             .gap_2()
             .child(caption(format!("{phase} · {count} · {} errors", progress.errors)).flex_1());
         if !self.state.system.scanning
-            && matches!(progress.phase, ScanPhase::Completed | ScanPhase::Failed)
+            && matches!(
+                progress.phase,
+                ScanPhase::Completed | ScanPhase::Failed | ScanPhase::Cancelled
+            )
         {
             header = header.child(super::components::quiet_icon_button(icon_button(
                 ("dismiss-scan-result", panel_id),

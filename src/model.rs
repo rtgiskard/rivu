@@ -260,6 +260,7 @@ pub enum ScanPhase {
     Saving,
     Completed,
     Failed,
+    Cancelled,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -269,6 +270,15 @@ pub struct ScanProgress {
     pub total: Option<usize>,
     pub errors: usize,
     pub path: Option<PathBuf>,
+}
+
+/// Result of one scan/import task, independent of global UI errors or later tasks.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScanTaskStatus {
+    pub id: u64,
+    pub progress: ScanProgress,
+    pub message: String,
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -453,6 +463,9 @@ pub enum Query {
     LibraryRootCounts {
         roots: Vec<PathBuf>,
     },
+    ScanTask {
+        id: u64,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -588,6 +601,9 @@ pub enum Command {
     },
     Shutdown,
     DismissScanResult,
+    CancelScan {
+        id: u64,
+    },
 }
 
 #[cfg(test)]

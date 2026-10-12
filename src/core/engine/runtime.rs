@@ -1,21 +1,3 @@
-fn scan_message(progress: &ScanProgress) -> String {
-    let unit = progress.total.map_or_else(
-        || progress.processed.to_string(),
-        |total| format!("{} / {total}", progress.processed),
-    );
-    let phase = match progress.phase {
-        ScanPhase::Discovering => "Discovering files",
-        ScanPhase::ReadingMetadata => "Reading audio metadata",
-        ScanPhase::Saving => "Saving library",
-        ScanPhase::Completed => "Scan complete",
-        ScanPhase::Failed => "Scan failed",
-    };
-    progress.path.as_ref().map_or_else(
-        || format!("{phase} ({unit})"),
-        |path| format!("{phase} ({unit}): {}", path.display()),
-    )
-}
-
 use super::*;
 
 impl Core {
@@ -37,17 +19,20 @@ impl Core {
                         }
                         Operation::Command(command) => {
                             let shutdown = matches!(&command, Command::Shutdown);
+                            let starts_scan = matches!(&command, Command::Scan { .. } | Command::ImportPlaylist { .. });
                             let changed = !matches!(&command, Command::ShowWindow);
                             let result = self.command(command);
                             if let Err(error) = &result {
                                 self.state.system.last_error = Some(format!("{error:#}"));
                             }
                             if changed || result.is_err() { self.publish(); }
+                            let scan_id = if result.is_ok() && starts_scan { self.active_scan.as_ref().map(|task| task.status.id) } else { None };
                             if let Some(reply) = request.reply {
                                 let _ = reply.send(CoreResponse::Ack(Ack {
                                     ok: result.is_ok(),
                                     error: result.err().map(|error| format!("{error:#}")),
                                     revision: self.state.system.revision,
+                                    scan_id,
                                 }));
                             }
                             if shutdown { break; }
@@ -63,6 +48,7 @@ impl Core {
                                     ok: result.is_ok(),
                                     error: result.err().map(|error| format!("{error:#}")),
                                     revision: self.state.system.revision,
+                                    scan_id: None,
                                 }));
                             }
                         }
@@ -75,50 +61,7 @@ impl Core {
                 }
                 recv(self.scan_rx) -> scan => {
                     if let Ok(scan) = scan {
-                        match scan {
-                            ScanEvent::Progress(progress) => {
-                                self.state.system.scanning = true;
-                                self.state.system.scan_message = scan_message(&progress);
-                                self.state.system.scan_progress = Some(progress);
-                                self.publish();
-                            }
-                            ScanEvent::Finished(scan) => {
-                                let progress = scan.progress.clone();
-                                self.state.system.scan_progress = Some(ScanProgress {
-                                    phase: ScanPhase::Saving,
-                                    ..progress.clone()
-                                });
-                                self.state.system.scan_message = "Saving library…".into();
-                                self.publish();
-                                let result = self.finish_scan(scan);
-                                self.state.system.scanning = false;
-                                match result {
-                                    Ok(true) => {
-                                        self.state.system.scan_progress = Some(ScanProgress {
-                                            phase: ScanPhase::Completed,
-                                            ..progress
-                                        });
-                                    }
-                                    Ok(false) => {
-                                        self.state.system.scan_progress = Some(ScanProgress {
-                                            phase: ScanPhase::Failed,
-                                            ..progress
-                                        });
-                                    }
-                                    Err(error) => {
-                                        self.state.system.last_error = Some(format!("{error:#}"));
-                                        self.state.system.scan_message = "Scan failed".into();
-                                        let errors = progress.errors.saturating_add(1);
-                                        self.state.system.scan_progress = Some(ScanProgress {
-                                            phase: ScanPhase::Failed,
-                                            errors,
-                                            ..progress
-                                        });
-                                    }
-                                }
-                                self.publish();
-                            }
-                        }
+                        self.scan_event(scan);
                     }
                 }
                 recv(config_ticks) -> _ => {
@@ -146,11 +89,7 @@ impl Core {
         }
         let _ = self.save(true);
         let _ = self.engine.send(AudioCommand::Shutdown);
-        // Disconnect before joining: a worker may be blocked sending its final event.
-        self.scan_rx = crossbeam_channel::never();
-        for worker in self.scan_workers.drain(..) {
-            let _ = worker.join();
-        }
+        self.shutdown_scan();
         self.state.playback.status = PlaybackStatus::Stopped;
         self.state.system.shutting_down = true;
         self.publish();
@@ -327,6 +266,15 @@ impl Core {
             return Err(QueryError::RevisionChanged);
         }
         Ok(match query {
+            Query::ScanTask { id } => ViewResponse::ScanTask(
+                self.active_scan
+                    .as_ref()
+                    .map(|task| &task.status)
+                    .filter(|status| status.id == *id)
+                    .or_else(|| self.scan_results.iter().find(|status| status.id == *id))
+                    .cloned()
+                    .context("Unknown or expired scan task")?,
+            ),
             Query::LibraryPage {
                 query,
                 favorite,

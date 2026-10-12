@@ -2128,6 +2128,7 @@ mod tests {
                     ok: true,
                     error: None,
                     revision: 2,
+                    scan_id: None,
                 },
             );
         });

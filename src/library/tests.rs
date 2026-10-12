@@ -1,9 +1,11 @@
-use super::scan::{MAX_RECORDED_SKIPPED_DIRECTORIES, MAX_REPORTED_SCAN_ERRORS};
+use super::scan::{
+    MAX_RECORDED_SCAN_UNCERTAINTIES, MAX_RECORDED_SKIPPED_DIRECTORIES, MAX_REPORTED_SCAN_ERRORS,
+};
 use super::*;
 use crate::model::{CueSegment, ScanPhase, Track};
 use anyhow::{Context, Result};
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 fn scan_paths(paths: &[PathBuf], known: &[KnownFile], ffmpeg_enabled: bool) -> Result<ScanResult> {
@@ -28,6 +30,7 @@ fn scan_paths(paths: &[PathBuf], known: &[KnownFile], ffmpeg_enabled: bool) -> R
         ffmpeg_enabled,
         &library_roots,
         crate::config::Config::default().scan_max_depth,
+        &ScanCancellation::default(),
         |_, _, _, _, _| {},
     )
 }
@@ -60,6 +63,7 @@ fn scan_paths_at_depth(
         ffmpeg_enabled,
         &library_roots,
         max_depth,
+        &ScanCancellation::default(),
         progress,
     )
 }
@@ -93,6 +97,307 @@ fn two_track_sheet(path: &Path) -> Result<()> {
 }
 
 #[test]
+fn cancellation_is_shared_and_discards_discovery_or_accumulated_records() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().to_path_buf();
+    wav(&root.join("first.wav"), 150)?;
+    wav(&root.join("second.wav"), 150)?;
+    for cancel_phase in [ScanPhase::Discovering, ScanPhase::ReadingMetadata] {
+        let cancellation = ScanCancellation::default();
+        let owner = cancellation.clone();
+        assert!(owner.check().is_ok());
+        let outcome = super::scan_paths(
+            std::slice::from_ref(&root),
+            &[],
+            false,
+            std::slice::from_ref(&root),
+            1,
+            &cancellation,
+            |phase, processed, _, _, path| {
+                if phase == cancel_phase && processed > 0 && path.is_some() {
+                    owner.cancel();
+                }
+            },
+        );
+        assert!(owner.is_cancelled());
+        assert!(cancellation.check().is_err());
+        assert!(
+            outcome.is_err(),
+            "cancelled scan must not expose partial records"
+        );
+    }
+    let cancellation = ScanCancellation::default();
+    cancellation.cancel();
+    let mut reported_progress = false;
+    assert!(
+        super::scan_paths(
+            &[root.clone()],
+            &[],
+            false,
+            &[root],
+            1,
+            &cancellation,
+            |_, _, _, _, _| reported_progress = true,
+        )
+        .is_err()
+    );
+    assert!(!reported_progress);
+    Ok(())
+}
+
+#[test]
+fn cancellation_during_a_hash_read_stops_at_the_chunk_boundary() {
+    struct CancellingReader {
+        cancellation: ScanCancellation,
+        reads: usize,
+    }
+    impl Read for CancellingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.reads += 1;
+            if self.reads == 2 {
+                self.cancellation.cancel();
+            }
+            if self.reads > 2 {
+                return Ok(0);
+            }
+            buffer.fill(1);
+            Ok(buffer.len())
+        }
+    }
+    let cancellation = ScanCancellation::default();
+    let mut reader = CancellingReader {
+        cancellation: cancellation.clone(),
+        reads: 0,
+    };
+    assert!(super::scan::hash_reader(&mut reader, &cancellation).is_err());
+    assert_eq!(reader.reads, 2);
+}
+
+#[test]
+fn failed_audio_probe_is_not_missing_or_cleanable_but_true_deletion_is() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().to_path_buf();
+    let audio = root.join("audio.wav");
+    let deleted = root.join("deleted.wav");
+    wav(&audio, 150)?;
+    wav(&deleted, 150)?;
+    let store = crate::store::Store::open(Path::new(":memory:"))?;
+    store.apply_scan(&scan_paths(std::slice::from_ref(&root), &[], false)?)?;
+    let id = store.track_id_for_source(&audio, None)?.unwrap();
+    let deleted_id = store.track_id_for_source(&deleted, None)?.unwrap();
+    store.set_favorite(&[id], true)?;
+    store.edit_track(id, Some("Kept title"), None, None)?;
+    fs::write(&audio, b"not audio")?;
+    fs::remove_file(&deleted)?;
+    let failed = scan_paths(std::slice::from_ref(&root), &[], false)?;
+    assert_eq!(failed.uncertainties, [ScanUncertainty::File(audio.clone())]);
+    store.apply_scan(&failed)?;
+    assert!(!store.track(id)?.unwrap().missing);
+    assert!(store.track(deleted_id)?.unwrap().missing);
+    store.remove_missing_tracks()?;
+    let preserved = store.track(id)?.unwrap();
+    assert!(preserved.favorite);
+    assert_eq!(preserved.title, "Kept title");
+    assert!(store.track(deleted_id)?.is_none());
+    fs::remove_file(&audio)?;
+    let absent = scan_paths(std::slice::from_ref(&audio), &[], false)?;
+    assert!(absent.uncertainties.is_empty());
+    store.apply_scan(&absent)?;
+    assert!(store.track(id)?.unwrap().missing);
+    Ok(())
+}
+
+#[test]
+fn discovered_file_not_found_is_uncertain_until_a_later_explicit_request() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().to_path_buf();
+    let audio = root.join("audio.wav");
+    wav(&audio, 150)?;
+    let store = crate::store::Store::open(Path::new(":memory:"))?;
+    store.apply_scan(&scan_paths(std::slice::from_ref(&root), &[], false)?)?;
+    let id = store.track_id_for_source(&audio, None)?.unwrap();
+    let failed = scan_paths_at_depth(
+        std::slice::from_ref(&root),
+        &[],
+        false,
+        1,
+        |phase, processed, _, _, _| {
+            if phase == ScanPhase::ReadingMetadata && processed == 0 {
+                fs::remove_file(&audio).expect("remove discovered audio before reading metadata");
+            }
+        },
+    )?;
+    assert_eq!(failed.uncertainties, [ScanUncertainty::File(audio.clone())]);
+    store.apply_scan(&failed)?;
+    assert!(!store.track(id)?.unwrap().missing);
+    store.apply_scan(&scan_paths(&[audio], &[], false)?)?;
+    assert!(store.track(id)?.unwrap().missing);
+    Ok(())
+}
+
+#[test]
+fn failed_cue_read_preserves_owned_tracks_without_suppressing_full_audio() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().to_path_buf();
+    let audio = root.join("audio.wav");
+    let sheet = root.join("album.cue");
+    wav(&audio, 225)?;
+    two_track_sheet(&sheet)?;
+    let store = crate::store::Store::open(Path::new(":memory:"))?;
+    store.apply_scan(&scan_paths(std::slice::from_ref(&root), &[], false)?)?;
+    let first_id = store.track_id_for_source(&sheet, Some(1))?.unwrap();
+    let second_id = store.track_id_for_source(&sheet, Some(2))?.unwrap();
+    store.set_favorite(&[first_id], true)?;
+    let failed = scan_paths_at_depth(
+        std::slice::from_ref(&root),
+        &[],
+        false,
+        1,
+        |phase, processed, _, _, _| {
+            if phase == ScanPhase::ReadingMetadata && processed == 0 {
+                fs::remove_file(&sheet).expect("remove discovered CUE before reading it");
+            }
+        },
+    )?;
+    assert_eq!(
+        failed.uncertainties,
+        [ScanUncertainty::CueSheet(sheet.clone())]
+    );
+    assert!(failed.suppressed_sources.is_empty());
+    assert_eq!(failed.records.len(), 1);
+    assert_eq!(failed.records[0].path, audio);
+    assert!(failed.records[0].cue.is_none());
+    store.apply_scan(&failed)?;
+    store.remove_missing_tracks()?;
+    assert!(store.track(first_id)?.unwrap().favorite);
+    assert!(!store.track(second_id)?.unwrap().missing);
+    let absent = scan_paths(&[sheet], &[], false)?;
+    assert!(absent.uncertainties.is_empty());
+    store.apply_scan(&absent)?;
+    assert!(store.track(first_id)?.unwrap().missing);
+    assert!(store.track(second_id)?.unwrap().missing);
+    Ok(())
+}
+
+#[test]
+fn failed_cue_source_not_found_keeps_segments_until_the_sheet_is_deleted() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let audio = directory.path().join("audio.wav");
+    let sheet = directory.path().join("album.cue");
+    wav(&audio, 225)?;
+    two_track_sheet(&sheet)?;
+    let store = crate::store::Store::open(Path::new(":memory:"))?;
+    store.apply_scan(&scan_paths(std::slice::from_ref(&sheet), &[], false)?)?;
+    let id = store.track_id_for_source(&sheet, Some(1))?.unwrap();
+    fs::remove_file(&audio)?;
+    let failed = scan_paths(std::slice::from_ref(&sheet), &[], false)?;
+    assert!(failed.records.is_empty());
+    assert!(
+        failed
+            .uncertainties
+            .contains(&ScanUncertainty::CueSheet(sheet.clone()))
+    );
+    assert!(failed.uncertainties.contains(&ScanUncertainty::File(audio)));
+    store.apply_scan(&failed)?;
+    store.remove_missing_tracks()?;
+    assert!(!store.track(id)?.unwrap().missing);
+    fs::remove_file(&sheet)?;
+    store.apply_scan(&scan_paths(&[sheet], &[], false)?)?;
+    assert!(store.track(id)?.unwrap().missing);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn traversal_not_found_preserves_the_failed_subtree_and_its_identities() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let actual = tempfile::tempdir()?;
+    let target = actual.path().join("target");
+    fs::create_dir(&target)?;
+    let root = directory.path().to_path_buf();
+    let branch = root.join("branch");
+    std::os::unix::fs::symlink(&target, &branch)?;
+    let audio = branch.join("audio.wav");
+    let sheet = branch.join("album.cue");
+    wav(&audio, 225)?;
+    two_track_sheet(&sheet)?;
+    let deleted = root.join("deleted.wav");
+    wav(&deleted, 150)?;
+    let store = crate::store::Store::open(Path::new(":memory:"))?;
+    store.apply_scan(&scan_paths(&[root.clone(), audio.clone()], &[], false)?)?;
+    let audio_id = store.track_id_for_source(&audio, None)?.unwrap();
+    let cue_id = store.track_id_for_source(&sheet, Some(1))?.unwrap();
+    let deleted_id = store.track_id_for_source(&deleted, None)?.unwrap();
+    store.set_favorite(&[audio_id, cue_id], true)?;
+    let copy = root.join("copy.wav");
+    fs::copy(&audio, &copy)?;
+    fs::remove_dir_all(&target)?;
+    fs::remove_file(deleted)?;
+    let partial = scan_paths(std::slice::from_ref(&root), &[], false)?;
+    assert_eq!(
+        partial.uncertainties,
+        [ScanUncertainty::Subtree {
+            root_index: 0,
+            path: branch
+        }]
+    );
+    assert!(!partial.scan_incomplete);
+    store.apply_scan(&partial)?;
+    assert_ne!(store.track_id_for_source(&copy, None)?.unwrap(), audio_id);
+    assert_eq!(store.track(audio_id)?.unwrap().path, audio);
+    assert!(store.track(deleted_id)?.unwrap().missing);
+    store.remove_missing_tracks()?;
+    for id in [audio_id, cue_id] {
+        let preserved = store.track(id)?.unwrap();
+        assert!(!preserved.missing);
+        assert!(preserved.favorite);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_requested_root_metadata_is_uncertain_not_deleted() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().join("root");
+    fs::create_dir(&root)?;
+    let audio = root.join("audio.wav");
+    wav(&audio, 150)?;
+    let store = crate::store::Store::open(Path::new(":memory:"))?;
+    store.apply_scan(&scan_paths(std::slice::from_ref(&root), &[], false)?)?;
+    let id = store.track_id_for_source(&audio, None)?.unwrap();
+    fs::rename(&root, directory.path().join("moved"))?;
+    std::os::unix::fs::symlink(&root, &root)?;
+    let failed = scan_paths(std::slice::from_ref(&root), &[], false)?;
+    assert_eq!(
+        failed.uncertainties,
+        [ScanUncertainty::Root { root_index: 0 }]
+    );
+    store.apply_scan(&failed)?;
+    assert!(!store.track(id)?.unwrap().missing);
+    fs::remove_file(&root)?;
+    store.apply_scan(&scan_paths(&[root], &[], false)?)?;
+    assert!(store.track(id)?.unwrap().missing);
+    Ok(())
+}
+
+#[test]
+fn scan_uncertainty_metadata_is_bounded_with_an_incomplete_fallback() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    for index in 0..=MAX_RECORDED_SCAN_UNCERTAINTIES {
+        fs::write(
+            directory.path().join(format!("broken-{index}.wav")),
+            b"not audio",
+        )?;
+    }
+    let result = scan_paths(&[directory.path().to_path_buf()], &[], false)?;
+    assert_eq!(result.uncertainties.len(), MAX_RECORDED_SCAN_UNCERTAINTIES);
+    assert!(result.scan_incomplete);
+    assert!(result.records.is_empty());
+    Ok(())
+}
+
+#[test]
 fn logical_paths_normalize_missing_paths_and_parent_components() -> Result<()> {
     let cwd = std::env::current_dir()?;
     assert_eq!(
@@ -122,6 +427,7 @@ fn missing_requests_keep_normalized_logical_roots_and_progress_paths() -> Result
         false,
         &[directory.path().to_path_buf()],
         crate::config::Config::default().scan_max_depth,
+        &ScanCancellation::default(),
         |_, _, _, _, path| {
             if let Some(path) = path {
                 progress_paths.push(path.to_path_buf());
@@ -149,6 +455,7 @@ fn linked_root_keeps_alias_in_records_roots_and_progress() -> Result<()> {
         false,
         std::slice::from_ref(&alias),
         crate::config::Config::default().scan_max_depth,
+        &ScanCancellation::default(),
         |_, _, _, _, path| {
             if let Some(path) = path {
                 progress_paths.push(path.to_path_buf());
@@ -263,6 +570,7 @@ fn cue_in_linked_tree_keeps_sheet_and_source_aliases_across_roots() -> Result<()
         false,
         &[root.clone(), other_root],
         crate::config::Config::default().scan_max_depth,
+        &ScanCancellation::default(),
         |_, _, _, _, _| {},
     )?;
     assert!(result.errors.is_empty(), "{:?}", result.errors);
@@ -302,6 +610,7 @@ fn scan_progress_reports_deduplicated_candidates_and_suppressed_tasks() -> Resul
         false,
         &library_roots,
         crate::config::Config::default().scan_max_depth,
+        &ScanCancellation::default(),
         |phase, processed, total, errors, path| {
             events.push((phase, processed, total, errors, path.map(Path::to_path_buf)));
         },
@@ -453,6 +762,7 @@ fn scan_depth_zero_is_rejected_by_library_api() -> Result<()> {
         false,
         std::slice::from_ref(&root),
         0,
+        &ScanCancellation::default(),
         |_, _, _, _, _| {},
     )
     .expect_err("zero scan depth must be rejected");
@@ -557,6 +867,7 @@ fn cue_sources_require_logical_membership_in_any_configured_root() -> Result<()>
         false,
         &[logical_path(inside.path())?, logical_path(outside.path())?],
         crate::config::Config::default().scan_max_depth,
+        &ScanCancellation::default(),
         |_, _, _, _, _| {},
     )?;
     assert!(control.errors.is_empty(), "{:?}", control.errors);
@@ -569,6 +880,7 @@ fn cue_sources_require_logical_membership_in_any_configured_root() -> Result<()>
         false,
         &library_roots,
         crate::config::Config::default().scan_max_depth,
+        &ScanCancellation::default(),
         |phase, processed, total, errors, path| {
             events.push((phase, processed, total, errors, path.map(Path::to_path_buf)));
         },
