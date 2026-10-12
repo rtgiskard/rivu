@@ -40,6 +40,10 @@ roots during startup; trigger scans from the Library controls or use
 `rivu library scan PATH...`. Progress reports completion or failure. `--wait`
 waits for completion and reports scan errors even when readable tracks were saved;
 `--force` rereads unchanged audio metadata. CUE sheets are always reread.
+Ordinary scans reuse valid metadata and fingerprints when file size and modification
+time match; force scans reprobe and reread source content. Neither resets user edits.
+Representable pre-epoch modification times remain valid cache keys; unavailable or
+out-of-range times always bypass cache reuse.
 
 Cancellation is cooperative: discovery, files, CUE boundaries, and hash-read chunks
 check the scan owner's shared cancellation token. A blocking audio probe is checked
@@ -265,15 +269,13 @@ For the JSON history shape and `--limit` behavior, see <<_cli_output,CLI output>
 
 == SQLite maintenance
 
-Rivu uses version 8 library databases and automatically upgrades version 7 in a
-transaction, preserving library records, playlists, and the saved queue. Existing
+Rivu uses version 9 library databases and automatically upgrades versions 7 and 8
+in one transaction, preserving library records, overrides, favorites, statistics,
+decoder hints, playlists, saved queue occurrences and current selection. Version-7
 tracks receive the Auto decoder hint. Other schemas are not upgraded automatically.
 Stop the core and back up the database before switching database-schema versions;
-older builds cannot open the upgraded database.
-
-Version 7 is still unreleased. Development builds that change its index or
-trigger definitions require rebuilding experimental version-7 databases; the
-version check does not upgrade those definitions in existing databases.
+older builds cannot open the upgraded database. Migration requires temporary disk
+space to rebuild track storage; use optimization afterward to reclaim free pages.
 
 Stop the core before removing `library.db` and its `-wal`/`-shm` sidecars, then scan
 the music files again. This resets playlists, saved queue, favorites, metadata
@@ -296,4 +298,5 @@ rivu library optimize
 
 Optimization is rejected while playback or scanning is active. It reports
 database and WAL sizes before and after maintenance; failures are returned as
-errors.
+errors. A failed optimization remains pending but is not retried during startup.
+Close any blocking database reader and explicitly run optimization again.

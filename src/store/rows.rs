@@ -1,6 +1,28 @@
 use crate::model::{CueSegment, DecoderHint, Track};
 use std::path::PathBuf;
 
+pub(super) fn fingerprint_from_row(
+    row: &rusqlite::Row<'_>,
+    offset: usize,
+) -> rusqlite::Result<Option<String>> {
+    let value = row.get_ref(offset)?;
+    if value == rusqlite::types::ValueRef::Null {
+        return Ok(None);
+    }
+    let bytes: &[u8; 32] = value.as_blob()?.try_into().map_err(|_| {
+        rusqlite::Error::FromSqlConversionFailure(
+            offset,
+            rusqlite::types::Type::Blob,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Invalid BLAKE3 fingerprint length",
+            )
+            .into(),
+        )
+    })?;
+    Ok(Some(blake3::Hash::from_bytes(*bytes).to_hex().to_string()))
+}
+
 pub(super) fn cue_from_row(
     row: &rusqlite::Row<'_>,
     offset: usize,
@@ -35,7 +57,7 @@ pub(super) fn track_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
     Ok(Track {
         id: r.get(0)?,
         path: PathBuf::from(r.get::<_, String>(1)?),
-        fingerprint: r.get(22)?,
+        fingerprint: fingerprint_from_row(r, 22)?,
         title: r.get(2)?,
         artist: r.get(3)?,
         album: r.get(4)?,
@@ -49,14 +71,14 @@ pub(super) fn track_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
         bits_per_sample: r.get(19)?,
         release_date: r.get(20)?,
         favorite: r.get(21)?,
-        decoder_hint: match r.get_ref(23)?.as_str()? {
-            "auto" => DecoderHint::Auto,
-            "native" => DecoderHint::Native,
-            "ffmpeg" => DecoderHint::Ffmpeg,
+        decoder_hint: match r.get::<_, i64>(23)? {
+            0 => DecoderHint::Auto,
+            1 => DecoderHint::Native,
+            2 => DecoderHint::Ffmpeg,
             _ => {
                 return Err(rusqlite::Error::FromSqlConversionFailure(
                     23,
-                    rusqlite::types::Type::Text,
+                    rusqlite::types::Type::Integer,
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         "Invalid track decoder hint",

@@ -42,7 +42,7 @@ fn rec(path: &str, hash: &str, title: &str, dur: f64) -> ScanRecord {
         cue: None,
         size: 1,
         modified_ns: 1,
-        fingerprint: Some(hash.into()),
+        fingerprint: Some(blake3::hash(hash.as_bytes()).to_hex().to_string()),
         media: MediaInfo {
             title: title.into(),
             artist: String::new(),
@@ -103,6 +103,9 @@ fn decoder_hint_persists_without_overwriting_track_state() {
     store.mark_played(native, 42).unwrap();
     store.increment_play_count(native).unwrap();
     expected[0] = store.track(native).unwrap().unwrap(); // populate the cache
+    store.enqueue_tracks(&[native, native, ffmpeg]).unwrap();
+    let queue_before_hint = store.queue_state().unwrap();
+    let page_before_hint = store.queue_page(0, 10).unwrap();
     store
         .edit_track(native, None, None, None, Some(DecoderHint::Native))
         .unwrap();
@@ -111,6 +114,13 @@ fn decoder_hint_persists_without_overwriting_track_state() {
         .unwrap();
     expected[0].decoder_hint = DecoderHint::Native;
     expected[1].decoder_hint = DecoderHint::Ffmpeg;
+    assert_eq!(store.queue_state().unwrap(), queue_before_hint);
+    assert_eq!(store.queue_page(0, 10).unwrap(), page_before_hint);
+    assert!(
+        !store
+            .edit_track(native, None, None, None, Some(DecoderHint::Native))
+            .unwrap()
+    );
     assert_eq!(store.track(native).unwrap().unwrap(), expected[0]);
     assert!(
         store
@@ -121,10 +131,7 @@ fn decoder_hint_persists_without_overwriting_track_state() {
     assert!(
         store
             .conn
-            .execute(
-                "UPDATE tracks SET decoder_hint='invalid' WHERE id=?1",
-                [native]
-            )
+            .execute("UPDATE tracks SET decoder_hint=3 WHERE id=?1", [native])
             .is_err()
     );
     assert!(
@@ -183,7 +190,7 @@ fn combined_metadata_patch_commits_or_fails_as_one_update() {
         .conn
         .execute_batch(
             "CREATE TEMP TRIGGER reject_decoder_hint BEFORE UPDATE OF decoder_hint ON tracks
-         WHEN NEW.decoder_hint='ffmpeg' BEGIN SELECT RAISE(ABORT,'rejected hint'); END;",
+         WHEN NEW.decoder_hint=2 BEGIN SELECT RAISE(ABORT,'rejected hint'); END;",
         )
         .unwrap();
     assert!(
@@ -231,84 +238,174 @@ fn combined_metadata_patch_commits_or_fails_as_one_update() {
     assert_eq!(all_tracks(&store), vec![expected]);
 }
 
-#[test]
-fn v7_migration_preserves_library_playlist_queue_and_current_identity() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("v7.db");
-    let store = Store::open(&path).unwrap();
-    store
-        .apply_scan(&scan(vec![rec("/music/a.wav", "a", "Raw", 10.)]))
-        .unwrap();
-    let id = all_tracks(&store)[0].id;
-    store
-        .edit_track(id, Some("Custom"), Some("Artist"), None, None)
-        .unwrap();
-    store.set_favorite(&[id], true).unwrap();
-    store.mark_played(id, 42).unwrap();
-    store.increment_play_count(id).unwrap();
-    let playlist = store.create_playlist("Saved").unwrap();
-    store.add_playlist(playlist, &[id]).unwrap();
-    store.enqueue_tracks(&[id, id]).unwrap();
-    let queue_ids = store.queue_ids().unwrap();
-    store.set_queue_current(Some(queue_ids[1])).unwrap();
-    let expected_track = store.track(id).unwrap().unwrap();
-    let expected_playlist = playlist_entries(&store, playlist);
-    let expected_queue = store.queue_state().unwrap();
-    // Reconstruct the exact v7 delta: its tracks column set and metadata trigger.
+// Rebuild the supported legacy tracks definition, not a v9 table with an old label.
+fn legacy_schema(store: &Store, version: i64, patched_indexes: bool) {
+    let hint = if version == 7 {
+        ""
+    } else {
+        ",decoder_hint TEXT NOT NULL DEFAULT 'auto' CHECK(decoder_hint IN ('auto','native','ffmpeg'))"
+    };
+    let table = super::schema::TRACK_TABLE
+        .replacen("CREATE TABLE tracks(", "CREATE TABLE tracks_legacy(", 1)
+        .replace("fingerprint BLOB CHECK(fingerprint IS NULL OR (typeof(fingerprint)='blob' AND length(fingerprint)=32))", "fingerprint TEXT")
+        .replace(",\n    decoder_hint INTEGER NOT NULL DEFAULT 0 CHECK(decoder_hint IN (0,1,2))", hint);
+    let columns = "id,path,fingerprint,file_size,modified_ns,raw_title,raw_artist,raw_album,title_override,artist_override,album_override,duration,codec,channels,sample_rate,missing,play_count,last_played,cue_sheet,cue_number,cue_start_frame,cue_end_frame,probe_version,bitrate_bps,track_number,disc_number,bits_per_sample,release_date,favorite";
+    let select = columns.replace(
+        "fingerprint",
+        "CASE WHEN fingerprint IS NULL THEN NULL ELSE lower(hex(fingerprint)) END",
+    );
+    let hint_columns = if version == 7 { "" } else { ",decoder_hint" };
+    let hint_select = if version == 7 {
+        ""
+    } else {
+        ",CASE decoder_hint WHEN 0 THEN 'auto' WHEN 1 THEN 'native' WHEN 2 THEN 'ffmpeg' END"
+    };
     store
         .conn
-        .execute_batch(
-            "DROP TRIGGER queue_metadata;
-         ALTER TABLE tracks DROP COLUMN decoder_hint;
-         CREATE TRIGGER queue_metadata AFTER UPDATE OF raw_title,raw_artist,raw_album,
-             title_override,artist_override,album_override,duration,favorite,missing,
-             play_count,codec,bitrate_bps ON tracks
-         WHEN EXISTS(SELECT 1 FROM queue_entries WHERE track_id=new.id) BEGIN
-             UPDATE queue_meta SET revision=revision+1;
-         END;
-         UPDATE schema_meta SET value=7 WHERE key='version';",
+        .pragma_update(None, "foreign_keys", "OFF")
+        .unwrap();
+    let tx = store.conn.unchecked_transaction().unwrap();
+    let sequence: i64 = tx
+        .query_row(
+            "SELECT seq FROM sqlite_sequence WHERE name='tracks'",
+            [],
+            |row| row.get(0),
         )
         .unwrap();
-    drop(store);
+    tx.execute_batch(&table).unwrap();
+    tx.execute_batch(&format!(
+        "INSERT INTO tracks_legacy({columns}{hint_columns}) SELECT {select}{hint_select} FROM tracks;
+         DROP TRIGGER queue_metadata;
+         DROP TABLE tracks;
+         ALTER TABLE tracks_legacy RENAME TO tracks;
+         DROP INDEX queue_order;
+         CREATE INDEX queue_order ON queue_entries(position,id);
+         DROP INDEX playlist_order;
+         CREATE INDEX playlist_order ON playlist_entries(playlist_id,position,id);
+         UPDATE schema_meta SET value={version} WHERE key='version';"
+    )).unwrap();
+    tx.execute(
+        "UPDATE sqlite_sequence SET seq=?1 WHERE name='tracks'",
+        [sequence],
+    )
+    .unwrap();
+    tx.execute_batch(super::schema::TRACK_INDEXES_AND_TRIGGER)
+        .unwrap();
+    tx.execute_batch("DROP INDEX tracks_album; DROP INDEX tracks_most_played;")
+        .unwrap();
+    if !patched_indexes {
+        tx.execute_batch("DROP INDEX tracks_directory; DROP INDEX playlist_track_lookup;")
+            .unwrap();
+    }
+    tx.commit().unwrap();
+    store
+        .conn
+        .pragma_update(None, "foreign_keys", "ON")
+        .unwrap();
+}
 
-    let migrated = Store::open(&path).unwrap();
-    assert_eq!(
+#[test]
+fn supported_migrations_preserve_library_playlist_queue_and_current_identity() {
+    for (version, patched) in [(7, false), (7, true), (8, true)] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy.db");
+        let store = Store::open(&path).unwrap();
+        let records = vec![
+            rec("/music/a.wav", "a", "Raw", 10.),
+            segment("/music/a.cue", 1, 0, Some(4500)),
+        ];
+        store.apply_scan(&scan(records)).unwrap();
+        let id = all_tracks(&store)[0].id;
+        store
+            .edit_track(id, Some("Custom"), Some(""), None, None)
+            .unwrap();
+        if version == 8 {
+            store
+                .edit_track(id, None, None, None, Some(DecoderHint::Ffmpeg))
+                .unwrap();
+        }
+        store.set_favorite(&[id], true).unwrap();
+        store.mark_played(id, 42).unwrap();
+        store.increment_play_count(id).unwrap();
+        let playlist = store.create_playlist("Saved").unwrap();
+        store.add_playlist(playlist, &[2, id]).unwrap();
+        store.enqueue_tracks(&[id, 2, id]).unwrap();
+        let queue_ids = store.queue_ids().unwrap();
+        store.set_queue_current(Some(queue_ids[2])).unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO tracks(id,path) VALUES(3,'/music/unhashed.wav')",
+                [],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute("INSERT INTO tracks(id,path) VALUES(100,'deleted')", [])
+            .unwrap();
+        store.remove_tracks(&[100]).unwrap();
+        let expected_tracks = all_tracks(&store);
+        let expected_known = store.known_files().unwrap();
+        let expected_playlist = playlist_entries(&store, playlist);
+        let expected_queue = store.queue_state().unwrap();
+        let expected_page = store.queue_page(0, 10).unwrap();
+        legacy_schema(&store, version, patched);
+        drop(store);
+
+        let migrated = Store::open(&path).unwrap();
+        assert_eq!(
+            migrated
+                .conn
+                .query_row(
+                    "SELECT value FROM schema_meta WHERE key='version'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            9
+        );
+        assert_eq!(all_tracks(&migrated), expected_tracks);
+        assert_eq!(
+            migrated
+                .known_files()
+                .unwrap()
+                .iter()
+                .map(|file| &file.fingerprint)
+                .collect::<Vec<_>>(),
+            expected_known
+                .iter()
+                .map(|file| &file.fingerprint)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(playlist_entries(&migrated, playlist), expected_playlist);
+        assert_eq!(migrated.queue_ids().unwrap(), queue_ids);
+        assert_eq!(migrated.queue_state().unwrap(), expected_queue);
+        assert_eq!(migrated.queue_page(0, 10).unwrap(), expected_page);
+        assert_eq!(migrated.conn.query_row("SELECT COUNT(*) FROM tracks WHERE typeof(fingerprint)='blob' AND length(fingerprint)=32 AND typeof(decoder_hint)='integer'", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
+        assert!(
+            !migrated
+                .edit_track(id, Some("Custom"), Some(""), None, None)
+                .unwrap()
+        );
+        migrated.enqueue_sources(&["/music".into()], &[]).unwrap();
         migrated
             .conn
-            .query_row(
-                "SELECT value FROM schema_meta WHERE key='version'",
-                [],
-                |row| row.get::<_, i64>(0)
-            )
-            .unwrap(),
-        8
-    );
-    assert_eq!(migrated.track(id).unwrap().unwrap(), expected_track);
-    assert_eq!(playlist_entries(&migrated, playlist), expected_playlist);
-    assert_eq!(migrated.queue_ids().unwrap(), queue_ids);
-    assert_eq!(migrated.queue_state().unwrap(), expected_queue);
-    migrated
-        .edit_track(id, None, None, None, Some(DecoderHint::Ffmpeg))
-        .unwrap();
-    let after = migrated.queue_state().unwrap();
-    assert_eq!(after.current_id, expected_queue.current_id);
-    assert_eq!(after.revision, expected_queue.revision + 1);
-    drop(migrated);
-    let reopened = Store::open(&path).unwrap();
-    assert_eq!(
-        reopened.track(id).unwrap().unwrap().decoder_hint,
-        DecoderHint::Ffmpeg
-    );
-    reopened
-        .conn
-        .execute("INSERT INTO tracks(path) VALUES('/music/new.wav')", [])
-        .unwrap();
-    let next_id = reopened.conn.last_insert_rowid();
-    assert!(next_id > id);
-    assert_eq!(
-        reopened.track(next_id).unwrap().unwrap().decoder_hint,
-        DecoderHint::Auto
-    );
+            .execute("INSERT INTO tracks(path) VALUES('/music/new.wav')", [])
+            .unwrap();
+        assert!(migrated.conn.last_insert_rowid() > 100);
+        assert_eq!(
+            migrated
+                .conn
+                .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+        drop(migrated);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(reopened.track(id).unwrap().unwrap(), expected_tracks[0]);
+    }
 }
 
 #[test]
@@ -682,6 +779,18 @@ fn maintenance_retries_after_reader_releases_and_keeps_records() {
     drop(store);
     let reopened = Store::open(&path).unwrap();
     assert_eq!(all_tracks(&reopened)[0].last_played, Some(42));
+    assert_eq!(
+        reopened
+            .conn
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key='compact_pending'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+    reopened.optimize().unwrap();
     assert_eq!(
         reopened
             .conn
@@ -2558,7 +2667,7 @@ fn queue_dedup_uses_first_position_not_allocation_order_and_track_deletes_remove
 fn unsupported_database_versions_are_rejected_without_migration() {
     fs::create_dir_all(".cache").unwrap();
     let directory = tempfile::tempdir_in(".cache").unwrap();
-    for version in [6, 9] {
+    for version in [6, 10] {
         let path = directory.path().join(format!("version-{version}.db"));
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection

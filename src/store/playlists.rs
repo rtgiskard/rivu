@@ -252,14 +252,16 @@ impl Store {
         tx.commit()?;
         Ok(id)
     }
-    pub fn rename_playlist(&self, id: i64, name: &str) -> Result<()> {
+    pub fn rename_playlist(&self, id: i64, name: &str) -> Result<bool> {
         valid_name(name)?;
-        changed(
-            self.conn
-                .execute("UPDATE playlists SET name=? WHERE id=?", params![name, id])?,
-            "playlist",
-            id,
-        )
+        let tx = self.conn.unchecked_transaction()?;
+        exists_playlist(&tx, id)?;
+        let updated = tx.execute(
+            "UPDATE playlists SET name=?1 WHERE id=?2 AND name IS NOT ?1",
+            params![name, id],
+        )?;
+        tx.commit()?;
+        Ok(updated != 0)
     }
     pub fn delete_playlist(&self, id: i64) -> Result<()> {
         changed(
@@ -399,6 +401,26 @@ mod request_tests {
             "INSERT INTO tracks(id,path) VALUES (1,'one'),(2,'two'),(3,'three'),(4,'four');",
         )?;
         Ok(store)
+    }
+
+    #[test]
+    fn rename_reports_persistent_changes_and_rejects_unknown_ids() -> Result<()> {
+        let store = store()?;
+        let id = store.create_playlist_with_tracks("Original", &[3, 1])?;
+        let entries = store.playlist_entries_page(id, 0, 10)?.rows;
+        assert!(!store.rename_playlist(id, "Original")?);
+        assert!(store.rename_playlist(id, "Renamed")?);
+        assert!(!store.rename_playlist(id, "Renamed")?);
+        assert!(store.rename_playlist(i64::MAX, "Renamed").is_err());
+        assert_eq!(store.playlist_entries_page(id, 0, 10)?.rows, entries);
+        let name: String =
+            store
+                .conn
+                .query_row("SELECT name FROM playlists WHERE id=?1", [id], |row| {
+                    row.get(0)
+                })?;
+        assert_eq!(name, "Renamed");
+        Ok(())
     }
 
     #[test]

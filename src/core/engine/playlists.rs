@@ -20,8 +20,10 @@ impl Core {
         playlist_id: i64,
         name: String,
     ) -> Result<()> {
-        self.store.rename_playlist(playlist_id, &name)?;
-        self.reload_playlists()
+        if self.store.rename_playlist(playlist_id, &name)? {
+            self.reload_playlists()?;
+        }
+        Ok(())
     }
 
     pub(in crate::core) fn delete_playlist(&mut self, playlist_id: i64) -> Result<()> {

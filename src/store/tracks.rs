@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 const TRACK_SEARCH_FILTER: &str = "WHERE (?1 IS NULL OR instr(lower(COALESCE(tracks.title_override,tracks.raw_title) || ' ' || COALESCE(tracks.artist_override,tracks.raw_artist) || ' ' || tracks.path),?1)>0) AND (?2 IS NULL OR tracks.favorite=?2) AND (?3 IS NULL OR tracks.missing=?3)";
-pub(super) const SOURCE_FILTER: &str = "tracks.id IN (SELECT value FROM json_each(?2)) OR EXISTS (SELECT 1 FROM json_each(?1) AS directory WHERE substr(tracks.path,1,length(directory.value))=directory.value)";
+pub(super) const SOURCE_FILTER: &str = "tracks.id IN (SELECT value FROM json_each(?2) UNION SELECT scoped.id FROM json_each(?1) AS directory CROSS JOIN tracks AS scoped INDEXED BY tracks_directory WHERE directory.value<>'' AND scoped.path>=directory.value AND scoped.path<(rtrim(directory.value,'/')||'0') UNION SELECT id FROM tracks WHERE EXISTS(SELECT 1 FROM json_each(?1) WHERE value=''))";
 // Normalized nonempty prefixes end in ASCII '/'; replacing that final byte with
 // '0' gives the exclusive BINARY upper bound, including every Unicode suffix.
 const DIRECTORY_SCOPE: &str = " AND tracks.path>=?4 AND tracks.path<(rtrim(?4,'/')||'0')";
@@ -45,15 +45,27 @@ pub(crate) struct PreparedTrackRemoval<'a> {
 }
 
 impl Store {
-    pub fn set_favorite(&self, ids: &[i64], favorite: bool) -> Result<()> {
+    pub fn set_favorite(&self, ids: &[i64], favorite: bool) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
         let encoded_ids = self.validated_track_ids(ids)?;
-        for id in ids {
-            self.track_cache.borrow_mut().entries.remove(id);
-        }
-        tx.execute("UPDATE tracks SET favorite=?1 WHERE favorite<>?1 AND id IN (SELECT value FROM json_each(?2))", params![favorite, encoded_ids])?;
+        let updated = tx.execute(
+            "UPDATE tracks SET favorite=?1 WHERE favorite<>?1 AND id IN (SELECT value FROM json_each(?2))",
+            params![favorite, encoded_ids],
+        )?;
         tx.commit()?;
-        Ok(())
+        if updated != 0 {
+            let mut cache = self.track_cache.borrow_mut();
+            for id in ids {
+                if cache
+                    .entries
+                    .get(id)
+                    .is_some_and(|(track, _)| track.favorite != favorite)
+                {
+                    cache.entries.remove(id);
+                }
+            }
+        }
+        Ok(updated != 0)
     }
 
     pub fn library_view_page(
@@ -68,11 +80,7 @@ impl Store {
         let query = query
             .filter(|query| !query.is_empty())
             .map(str::to_lowercase);
-        let total = self.conn.query_row(
-            &format!("SELECT COUNT(*) FROM tracks {TRACK_SEARCH_FILTER}"),
-            params![query, favorite, missing],
-            |row| row.get::<_, i64>(0),
-        )? as usize;
+        let total = self.filtered_track_count(query.as_deref(), favorite, missing)?;
         let order = library_order(sort);
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {LIBRARY_ROW_COLUMNS} FROM tracks {TRACK_SEARCH_FILTER} ORDER BY {order} LIMIT ?4 OFFSET ?5"
@@ -186,6 +194,22 @@ impl Store {
             .query_row("SELECT COUNT(*) FROM tracks", [], |row| {
                 row.get::<_, i64>(0)
             })? as usize)
+    }
+
+    fn filtered_track_count(
+        &self,
+        query: Option<&str>,
+        favorite: Option<bool>,
+        missing: Option<bool>,
+    ) -> Result<usize> {
+        if query.is_none() && favorite.is_none() && missing.is_none() {
+            return self.track_count();
+        }
+        Ok(self.conn.query_row(
+            &format!("SELECT COUNT(*) FROM tracks {TRACK_SEARCH_FILTER}"),
+            params![query, favorite, missing],
+            |row| row.get::<_, i64>(0),
+        )? as usize)
     }
 
     pub fn library_stats(&self) -> Result<crate::model::LibraryStats> {
@@ -350,15 +374,8 @@ impl Store {
                 track_from_row,
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let total: i64 = self.conn.query_row(
-            &format!("SELECT COUNT(*) FROM tracks {TRACK_SEARCH_FILTER}"),
-            params![pattern, favorite, missing],
-            |r| r.get(0),
-        )?;
-        Ok(Page {
-            total: total as usize,
-            rows,
-        })
+        let total = self.filtered_track_count(pattern.as_deref(), favorite, missing)?;
+        Ok(Page { total, rows })
     }
 
     pub fn track_batch(
@@ -425,13 +442,20 @@ impl Store {
         artist: Option<&str>,
         album: Option<&str>,
         decoder_hint: Option<DecoderHint>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tracks WHERE id=?1)",
+            [id],
+            |row| row.get(0),
+        )?;
+        changed(usize::from(exists), "track", id)?;
         let decoder_hint = decoder_hint.map(|hint| match hint {
-            DecoderHint::Auto => "auto",
-            DecoderHint::Native => "native",
-            DecoderHint::Ffmpeg => "ffmpeg",
+            DecoderHint::Auto => 0,
+            DecoderHint::Native => 1,
+            DecoderHint::Ffmpeg => 2,
         });
-        let updated = self.conn.execute(
+        let updated = tx.execute(
             "UPDATE tracks SET title_override=COALESCE(?1,title_override),
              artist_override=COALESCE(?2,artist_override),
              album_override=COALESCE(?3,album_override),
@@ -442,16 +466,11 @@ impl Store {
               (?4 IS NOT NULL AND decoder_hint IS NOT ?4))",
             params![title, artist, album, decoder_hint, id],
         )?;
+        tx.commit()?;
         if updated != 0 {
             self.track_cache.borrow_mut().entries.remove(&id);
-            return Ok(());
         }
-        let exists: bool = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM tracks WHERE id=?1)",
-            [id],
-            |row| row.get(0),
-        )?;
-        changed(usize::from(exists), "track", id)
+        Ok(updated != 0)
     }
     pub fn remove_tracks(&self, ids: &[i64]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
@@ -733,19 +752,23 @@ mod request_tests {
             [],
         )?;
         let original = store.track(1)?.unwrap();
-        store.edit_track(1, None, None, None)?;
+        assert!(!store.edit_track(1, None, None, None, None)?);
         assert_eq!(store.track(1)?.unwrap(), original);
-        assert!(store.edit_track(999, None, None, None).is_err());
-        assert!(store.edit_track(999, Some("Title"), None, None).is_err());
-        store.edit_track(1, Some(""), Some("Override"), None)?;
+        assert!(store.edit_track(999, None, None, None, None).is_err());
+        assert!(
+            store
+                .edit_track(999, Some("Title"), None, None, None)
+                .is_err()
+        );
+        assert!(store.edit_track(1, Some(""), Some("Override"), None, None)?);
         let edited = store.track(1)?.unwrap();
         assert_eq!(
             (&*edited.title, &*edited.artist, &*edited.album),
             ("", "Override", "Album")
         );
-        store.edit_track(1, Some(""), Some("Override"), None)?;
+        assert!(!store.edit_track(1, Some(""), Some("Override"), None, None)?);
         assert_eq!(store.track(1)?.unwrap(), edited);
-        store.edit_track(1, None, None, Some("New album"))?;
+        assert!(store.edit_track(1, None, None, Some("New album"), None)?);
         let edited = store.track(1)?.unwrap();
         assert_eq!(
             (&*edited.title, &*edited.artist, &*edited.album),
@@ -773,7 +796,9 @@ mod request_tests {
                     row.get(0)
                 })?;
         assert_eq!(favorites, 0);
-        store.set_favorite(&[2, 1, 2], true)?;
+        assert!(store.set_favorite(&[2, 1, 2], true)?);
+        assert!(!store.set_favorite(&[2, 1, 2], true)?);
+        assert!(!store.set_favorite(&[], false)?);
         assert_eq!(store.library_stats()?.total, 2);
         Ok(())
     }
@@ -810,6 +835,23 @@ mod request_tests {
             let tree = store.directory_page(path, None, None, 0, 10)?;
             assert_eq!(tree.total, 1);
             assert!(matches!(&tree.rows[..], [DirectoryRow::Track(row)] if row.id == included));
+            let queue_before = store.queue_state()?.total;
+            store.enqueue_sources(
+                &[path.to_path_buf(), path.to_path_buf()],
+                &[included, included],
+            )?;
+            let queued = store.queue_page(queue_before, 10)?;
+            assert_eq!(
+                queued
+                    .rows
+                    .iter()
+                    .map(|row| row.track_id)
+                    .collect::<Vec<_>>(),
+                [included]
+            );
+            let playlist = store.create_playlist("Literal range")?;
+            store.add_playlist_sources(playlist, &[path.to_path_buf()], &[included])?;
+            assert_eq!(store.playlist_track_ids(playlist, 10)?, [included]);
         }
         store.conn.execute(
             "INSERT INTO tracks(path) VALUES('/upper/not-capitalized.wav')",
@@ -818,6 +860,12 @@ mod request_tests {
         assert_eq!(
             store.library_root_counts(&[PathBuf::from("/Upper")])?[0].total,
             1
+        );
+        let playlist = store.create_playlist("All")?;
+        store.add_playlist_sources(playlist, &[PathBuf::new(), "/Upper".into()], &[1, 1])?;
+        assert_eq!(
+            store.playlist_track_ids(playlist, 100)?,
+            (1..=13).collect::<Vec<_>>()
         );
         Ok(())
     }

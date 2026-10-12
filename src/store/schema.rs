@@ -2,44 +2,64 @@ use super::Store;
 use super::cache::TrackCache;
 use crate::model::DatabaseOptimization;
 use anyhow::{Context, Result, bail};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
+pub(super) const TRACK_TABLE: &str = "CREATE TABLE tracks(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,path TEXT NOT NULL,
+    fingerprint BLOB CHECK(fingerprint IS NULL OR (typeof(fingerprint)='blob' AND length(fingerprint)=32)),
+    file_size INTEGER NOT NULL DEFAULT 0,modified_ns INTEGER NOT NULL DEFAULT 0,
+    raw_title TEXT NOT NULL DEFAULT '',raw_artist TEXT NOT NULL DEFAULT '',
+    raw_album TEXT NOT NULL DEFAULT '',title_override TEXT,artist_override TEXT,
+    album_override TEXT,duration REAL,codec TEXT NOT NULL DEFAULT '',
+    channels INTEGER NOT NULL DEFAULT 0,sample_rate INTEGER NOT NULL DEFAULT 0,
+    missing INTEGER NOT NULL DEFAULT 0,play_count INTEGER NOT NULL DEFAULT 0,
+    last_played INTEGER,cue_sheet TEXT,cue_number INTEGER,
+    cue_start_frame INTEGER,cue_end_frame INTEGER,
+    probe_version INTEGER NOT NULL DEFAULT 0,
+    bitrate_bps INTEGER,track_number INTEGER,disc_number INTEGER,
+    bits_per_sample INTEGER,release_date TEXT,
+    favorite INTEGER NOT NULL DEFAULT 0 CHECK(favorite IN (0,1)),
+    decoder_hint INTEGER NOT NULL DEFAULT 0 CHECK(decoder_hint IN (0,1,2))
+);";
+
+pub(super) const TRACK_INDEXES_AND_TRIGGER: &str = "
+    CREATE INDEX tracks_fingerprint ON tracks(fingerprint);
+    CREATE UNIQUE INDEX tracks_path ON tracks(path) WHERE cue_sheet IS NULL;
+    CREATE INDEX tracks_directory ON tracks(path);
+    CREATE UNIQUE INDEX tracks_cue ON tracks(cue_sheet,cue_number) WHERE cue_sheet IS NOT NULL;
+    CREATE INDEX tracks_recent ON tracks(last_played DESC,id DESC) WHERE last_played IS NOT NULL;
+    CREATE INDEX tracks_album ON tracks(COALESCE(album_override,raw_album), CASE WHEN COALESCE(album_override,raw_album)<>'' THEN COALESCE(disc_number,4294967295) END, CASE WHEN COALESCE(album_override,raw_album)<>'' THEN COALESCE(track_number,4294967295) END, COALESCE(title_override,raw_title));
+    CREATE INDEX tracks_most_played ON tracks(play_count DESC);
+    CREATE TRIGGER queue_metadata AFTER UPDATE OF raw_title,raw_artist,raw_album,
+        title_override,artist_override,album_override,duration,favorite,missing,
+        play_count,codec,bitrate_bps ON tracks
+    WHEN (COALESCE(old.title_override,old.raw_title) IS NOT COALESCE(new.title_override,new.raw_title)
+        OR COALESCE(old.artist_override,old.raw_artist) IS NOT COALESCE(new.artist_override,new.raw_artist)
+        OR COALESCE(old.album_override,old.raw_album) IS NOT COALESCE(new.album_override,new.raw_album)
+        OR old.duration IS NOT new.duration
+        OR old.favorite IS NOT new.favorite OR old.missing IS NOT new.missing
+        OR old.play_count IS NOT new.play_count OR old.codec IS NOT new.codec
+        OR old.bitrate_bps IS NOT new.bitrate_bps)
+        AND EXISTS(SELECT 1 FROM queue_entries WHERE track_id=new.id) BEGIN
+        UPDATE queue_meta SET revision=revision+1;
+    END;";
+
 fn create_schema(conn: &Connection) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(TRACK_TABLE)?;
     tx.execute_batch(
         "CREATE TABLE schema_meta(key TEXT PRIMARY KEY,value INTEGER NOT NULL);
-        CREATE TABLE tracks(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,path TEXT NOT NULL,fingerprint TEXT,
-            file_size INTEGER NOT NULL DEFAULT 0,modified_ns INTEGER NOT NULL DEFAULT 0,
-            raw_title TEXT NOT NULL DEFAULT '',raw_artist TEXT NOT NULL DEFAULT '',
-            raw_album TEXT NOT NULL DEFAULT '',title_override TEXT,artist_override TEXT,
-            album_override TEXT,duration REAL,codec TEXT NOT NULL DEFAULT '',
-            channels INTEGER NOT NULL DEFAULT 0,sample_rate INTEGER NOT NULL DEFAULT 0,
-            missing INTEGER NOT NULL DEFAULT 0,play_count INTEGER NOT NULL DEFAULT 0,
-            last_played INTEGER,cue_sheet TEXT,cue_number INTEGER,
-            cue_start_frame INTEGER,cue_end_frame INTEGER,
-            probe_version INTEGER NOT NULL DEFAULT 0,
-            bitrate_bps INTEGER,track_number INTEGER,disc_number INTEGER,
-            bits_per_sample INTEGER,release_date TEXT,
-            favorite INTEGER NOT NULL DEFAULT 0 CHECK(favorite IN (0,1)),
-            decoder_hint TEXT NOT NULL DEFAULT 'auto' CHECK(decoder_hint IN ('auto','native','ffmpeg'))
-        );
-        CREATE INDEX tracks_fingerprint ON tracks(fingerprint);
-        CREATE UNIQUE INDEX tracks_path ON tracks(path) WHERE cue_sheet IS NULL;
-        CREATE INDEX tracks_directory ON tracks(path);
-        CREATE UNIQUE INDEX tracks_cue ON tracks(cue_sheet,cue_number) WHERE cue_sheet IS NOT NULL;
-        CREATE INDEX tracks_recent ON tracks(last_played DESC,id DESC) WHERE last_played IS NOT NULL;
         CREATE TABLE playlists(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL);
         CREATE TABLE playlist_entries(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
             track_id INTEGER NOT NULL,position INTEGER NOT NULL
         );
-        CREATE INDEX playlist_order ON playlist_entries(playlist_id,position,id);
+        CREATE INDEX playlist_order ON playlist_entries(playlist_id,position);
         CREATE UNIQUE INDEX playlist_track ON playlist_entries(playlist_id,track_id);
         CREATE INDEX playlist_track_lookup ON playlist_entries(track_id,playlist_id);
         CREATE TABLE queue_entries(
@@ -47,7 +67,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
             track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
             position INTEGER NOT NULL
         );
-        CREATE INDEX queue_order ON queue_entries(position,id);
+        CREATE INDEX queue_order ON queue_entries(position);
         CREATE INDEX queue_track ON queue_entries(track_id);
         CREATE TABLE queue_meta(
             singleton INTEGER PRIMARY KEY CHECK(singleton=1),
@@ -65,48 +85,85 @@ fn create_schema(conn: &Connection) -> Result<()> {
         WHEN old.position<>new.position BEGIN
             UPDATE queue_meta SET revision=revision+1;
         END;
-        CREATE TRIGGER queue_metadata AFTER UPDATE OF raw_title,raw_artist,raw_album,
-            title_override,artist_override,album_override,duration,favorite,missing,
-            play_count,codec,bitrate_bps,decoder_hint ON tracks
-        WHEN (COALESCE(old.title_override,old.raw_title) IS NOT COALESCE(new.title_override,new.raw_title)
-            OR COALESCE(old.artist_override,old.raw_artist) IS NOT COALESCE(new.artist_override,new.raw_artist)
-            OR COALESCE(old.album_override,old.raw_album) IS NOT COALESCE(new.album_override,new.raw_album)
-            OR old.duration IS NOT new.duration
-            OR old.favorite IS NOT new.favorite OR old.missing IS NOT new.missing
-            OR old.play_count IS NOT new.play_count OR old.codec IS NOT new.codec
-            OR old.bitrate_bps IS NOT new.bitrate_bps OR old.decoder_hint IS NOT new.decoder_hint)
-            AND EXISTS(SELECT 1 FROM queue_entries WHERE track_id=new.id) BEGIN
-            UPDATE queue_meta SET revision=revision+1;
-        END;
-        INSERT INTO schema_meta(key,value) VALUES('version',8);",
+        INSERT INTO schema_meta(key,value) VALUES('version',9);",
     )?;
+    tx.execute_batch(TRACK_INDEXES_AND_TRIGGER)?;
     tx.commit()?;
     Ok(())
 }
 
-fn migrate_v7(conn: &Connection) -> Result<()> {
-    let tx = conn.unchecked_transaction()?;
-    tx.execute_batch(
-        "ALTER TABLE tracks ADD COLUMN decoder_hint TEXT NOT NULL DEFAULT 'auto'
-            CHECK(decoder_hint IN ('auto','native','ffmpeg'));
-        DROP TRIGGER queue_metadata;
-        CREATE TRIGGER queue_metadata AFTER UPDATE OF raw_title,raw_artist,raw_album,
-            title_override,artist_override,album_override,duration,favorite,missing,
-            play_count,codec,bitrate_bps,decoder_hint ON tracks
-        WHEN (COALESCE(old.title_override,old.raw_title) IS NOT COALESCE(new.title_override,new.raw_title)
-            OR COALESCE(old.artist_override,old.raw_artist) IS NOT COALESCE(new.artist_override,new.raw_artist)
-            OR COALESCE(old.album_override,old.raw_album) IS NOT COALESCE(new.album_override,new.raw_album)
-            OR old.duration IS NOT new.duration
-            OR old.favorite IS NOT new.favorite OR old.missing IS NOT new.missing
-            OR old.play_count IS NOT new.play_count OR old.codec IS NOT new.codec
-            OR old.bitrate_bps IS NOT new.bitrate_bps OR old.decoder_hint IS NOT new.decoder_hint)
-            AND EXISTS(SELECT 1 FROM queue_entries WHERE track_id=new.id) BEGIN
-            UPDATE queue_meta SET revision=revision+1;
-        END;
-        UPDATE schema_meta SET value=8 WHERE key='version';",
+fn migrate_to_v9(conn: &Connection, version: i64) -> Result<()> {
+    conn.create_scalar_function(
+        "fingerprint_blob",
+        1,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8
+            | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let value = ctx.get_raw(0);
+            if value == rusqlite::types::ValueRef::Null {
+                return Ok(None);
+            }
+            blake3::Hash::from_hex(value.as_str()?)
+                .map(|hash| Some(*hash.as_bytes()))
+                .map_err(|error| {
+                    rusqlite::Error::UserFunctionError(
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+                            .into(),
+                    )
+                })
+        },
     )?;
-    tx.commit()?;
-    Ok(())
+    // Rebuild only tracks, with FK actions disabled outside the atomic transaction.
+    // Queue entries/current selection and every other table retain their identities.
+    conn.pragma_update(None, "foreign_keys", "OFF")?;
+    let result = (|| -> Result<()> {
+        let tx = conn.unchecked_transaction()?;
+        let sequence: Option<i64> = tx
+            .query_row(
+                "SELECT seq FROM sqlite_sequence WHERE name='tracks'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        tx.execute_batch(&TRACK_TABLE.replacen(
+            "CREATE TABLE tracks(",
+            "CREATE TABLE tracks_v9(",
+            1,
+        ))?;
+        let columns = "id,path,fingerprint,file_size,modified_ns,raw_title,raw_artist,raw_album,title_override,artist_override,album_override,duration,codec,channels,sample_rate,missing,play_count,last_played,cue_sheet,cue_number,cue_start_frame,cue_end_frame,probe_version,bitrate_bps,track_number,disc_number,bits_per_sample,release_date,favorite";
+        let select = columns.replace("fingerprint", "fingerprint_blob(fingerprint)");
+        let hint = if version == 7 {
+            "0"
+        } else {
+            "CASE decoder_hint WHEN 'auto' THEN 0 WHEN 'native' THEN 1 WHEN 'ffmpeg' THEN 2 END"
+        };
+        tx.execute_batch(&format!(
+            "INSERT INTO tracks_v9({columns},decoder_hint) SELECT {select},{hint} FROM tracks;
+             DROP TRIGGER queue_metadata;
+             DROP TABLE tracks;
+             ALTER TABLE tracks_v9 RENAME TO tracks;"
+        ))?;
+        if let Some(sequence) = sequence {
+            tx.execute(
+                "UPDATE sqlite_sequence SET seq=?1 WHERE name='tracks'",
+                [sequence],
+            )?;
+        }
+        tx.execute_batch(TRACK_INDEXES_AND_TRIGGER)?;
+        tx.execute_batch(
+            "DROP INDEX queue_order;
+             CREATE INDEX queue_order ON queue_entries(position);
+             DROP INDEX playlist_order;
+             CREATE INDEX playlist_order ON playlist_entries(playlist_id,position);
+             CREATE INDEX IF NOT EXISTS playlist_track_lookup ON playlist_entries(track_id,playlist_id);
+             UPDATE schema_meta SET value=9 WHERE key='version';"
+        )?;
+        tx.commit()?;
+        Ok(())
+    })();
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    conn.remove_function("fingerprint_blob", 1)?;
+    result
 }
 
 impl Store {
@@ -138,8 +195,10 @@ impl Store {
                 )
                 .context("Unsupported library database; remove the old database and rescan")?;
             match version {
-                7 => migrate_v7(&c).context("Migrate library database from version 7 to 8")?,
-                8 => {}
+                7 | 8 => migrate_to_v9(&c, version).with_context(|| {
+                    format!("Migrate library database from version {version} to 9")
+                })?,
+                9 => {}
                 _ => bail!(
                     "Unsupported database version {version}; remove the old database and rescan"
                 ),
@@ -167,14 +226,6 @@ impl Store {
                 clock: 0,
             }),
         };
-        let pending: bool = store.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM schema_meta WHERE key='compact_pending' AND value=1)",
-            [],
-            |row| row.get(0),
-        )?;
-        if pending && let Err(error) = store.optimize() {
-            tracing::warn!(error = %error, "database_maintenance_pending");
-        }
         Ok(store)
     }
     pub fn optimize(&self) -> Result<DatabaseOptimization> {

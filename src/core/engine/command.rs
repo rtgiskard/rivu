@@ -188,15 +188,16 @@ impl Core {
                 album,
                 decoder_hint,
             } => {
-                self.store.edit_track(
+                if self.store.edit_track(
                     track_id,
                     title.as_deref(),
                     artist.as_deref(),
                     album.as_deref(),
                     decoder_hint,
-                )?;
-                self.refresh_affected_queue_tracks(&[track_id])?;
-                self.state.library.revision = self.state.library.revision.wrapping_add(1);
+                )? {
+                    self.refresh_affected_queue_tracks(&[track_id])?;
+                    self.state.library.revision = self.state.library.revision.wrapping_add(1);
+                }
             }
             Command::RemoveTracks { mut track_ids } => {
                 track_ids.sort_unstable();
@@ -208,9 +209,8 @@ impl Core {
                     .is_some_and(|track| track_ids.contains(&track.id))
                 {
                     self.stop()?;
-                    self.state.queue.current_id = None;
-                    self.state.current_track = None;
                 }
+                // Keep the selection on failure; only a committed cascade clears it.
                 self.store.remove_prepared_tracks(removal)?;
                 self.reload_queue()?;
                 self.refresh_queue_tracks()?;
@@ -220,9 +220,10 @@ impl Core {
                 track_ids,
                 favorite,
             } => {
-                self.store.set_favorite(&track_ids, favorite)?;
-                self.state.library.revision = self.state.library.revision.wrapping_add(1);
-                self.refresh_affected_queue_tracks(&track_ids)?;
+                if self.store.set_favorite(&track_ids, favorite)? {
+                    self.state.library.revision = self.state.library.revision.wrapping_add(1);
+                    self.refresh_affected_queue_tracks(&track_ids)?;
+                }
             }
             Command::RemoveMissingTracks => {
                 if self
@@ -231,9 +232,8 @@ impl Core {
                     .is_some_and(|track| track.missing)
                 {
                     self.stop()?;
-                    self.state.queue.current_id = None;
-                    self.state.current_track = None;
                 }
+                // A stopped decoder does not imply the database deletion succeeded.
                 self.store.remove_missing_tracks()?;
                 self.reload_queue()?;
                 self.refresh_queue_tracks()?;

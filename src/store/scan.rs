@@ -1,5 +1,5 @@
 use super::Store;
-use super::rows::cue_from_row;
+use super::rows::{cue_from_row, fingerprint_from_row};
 use crate::library::{KnownFile, ScanResult, ScanUncertainty};
 use crate::model::{CueSegment, MediaInfo};
 use anyhow::{Context, Result, bail};
@@ -40,7 +40,7 @@ impl Store {
                 path: PathBuf::from(r.get::<_, String>(1)?),
                 size: r.get::<_, i64>(2)? as u64,
                 modified_ns: r.get(3)?,
-                fingerprint: r.get(4)?,
+                fingerprint: fingerprint_from_row(r, 4)?,
                 cue: cue_from_row(r, 12)?,
                 media: if r.get::<_, i64>(16)? == PROBE_VERSION {
                     Some(MediaInfo {
@@ -65,7 +65,6 @@ impl Store {
         .collect::<rusqlite::Result<Vec<_>>>()?)
     }
     pub fn apply_scan(&self, result: &ScanResult) -> Result<()> {
-        self.track_cache.borrow_mut().entries.clear();
         for r in &result.records {
             if r.path.to_str().is_none() {
                 bail!("scan path is not UTF-8: {}", r.path.display());
@@ -87,7 +86,7 @@ impl Store {
                 Ok(Existing {
                     id: r.get(0)?,
                     path: PathBuf::from(r.get::<_, String>(1)?),
-                    hash: r.get(2)?,
+                    hash: fingerprint_from_row(r, 2)?,
                     cue: cue_from_row(r, 3)?,
                 })
             })?
@@ -201,7 +200,7 @@ impl Store {
             "CREATE TEMP TABLE scan_stage(
                 resolved_id INTEGER,
                 path TEXT NOT NULL,
-                fingerprint TEXT,
+                fingerprint BLOB,
                 file_size INTEGER NOT NULL,
                 modified_ns INTEGER NOT NULL,
                 raw_title TEXT NOT NULL,
@@ -267,10 +266,16 @@ impl Store {
                 .map(i64::try_from)
                 .transpose()
                 .context("Audio bitrate exceeds database range")?;
+            let fingerprint = r
+                .fingerprint
+                .as_deref()
+                .map(blake3::Hash::from_hex)
+                .transpose()
+                .context("Invalid scan BLAKE3 fingerprint")?;
             stage.execute(params![
                 id,
                 r.path.to_str(),
-                r.fingerprint.as_deref(),
+                fingerprint.as_ref().map(|hash| hash.as_bytes().as_slice()),
                 r.size as i64,
                 r.modified_ns,
                 m.title,
@@ -298,7 +303,7 @@ impl Store {
             }
         }
         drop(stage);
-        tx.execute(
+        let mut changed_tracks = tx.execute(
             "UPDATE tracks SET
                 path=s.path,fingerprint=s.fingerprint,file_size=s.file_size,modified_ns=s.modified_ns,
                 raw_title=s.raw_title,raw_artist=s.raw_artist,raw_album=s.raw_album,duration=s.duration,
@@ -325,7 +330,7 @@ impl Store {
              )",
             [],
         )?;
-        tx.execute(
+        changed_tracks += tx.execute(
             "INSERT INTO tracks(
                 path,fingerprint,file_size,modified_ns,raw_title,raw_artist,raw_album,duration,codec,
                 channels,sample_rate,cue_sheet,cue_number,cue_start_frame,cue_end_frame,probe_version,
@@ -352,11 +357,14 @@ impl Store {
                     .any(|root| owner == root || owner.starts_with(root))
                 && !unconfirmed(o)
             {
-                mark_missing.execute([o.id])?;
+                changed_tracks += mark_missing.execute([o.id])?;
             }
         }
         drop(mark_missing);
         tx.commit()?;
+        if changed_tracks != 0 {
+            self.track_cache.borrow_mut().entries.clear();
+        }
         Ok(())
     }
 }
@@ -374,7 +382,7 @@ mod tests {
             cue: None,
             size: 1024,
             modified_ns: 42,
-            fingerprint: Some("fingerprint".into()),
+            fingerprint: Some(blake3::hash(b"fingerprint").to_hex().to_string()),
             media: MediaInfo {
                 title: "Title".into(),
                 artist: "Artist".into(),
@@ -411,7 +419,9 @@ mod tests {
         store.set_favorite(&[id], true).unwrap();
         store.mark_played(id, 123).unwrap();
         store.increment_play_count(id).unwrap();
-        store.edit_track(id, Some("Override"), None, None).unwrap();
+        store
+            .edit_track(id, Some("Override"), None, None, None)
+            .unwrap();
         let page = store.queue_page(0, 10).unwrap();
         store.set_queue_current(Some(page.rows[0].id)).unwrap();
         let state = store.queue_state().unwrap();
@@ -459,6 +469,7 @@ mod tests {
                 Some("Custom title"),
                 Some("Custom artist"),
                 Some("Custom album"),
+                None,
             )
             .unwrap();
         let page = store.queue_page(0, 10).unwrap();
@@ -492,7 +503,7 @@ mod tests {
             (Some("Title"), Some("Artist"), Some("Album")),
         ] {
             for _ in 0..2 {
-                store.edit_track(id, title, artist, album).unwrap();
+                store.edit_track(id, title, artist, album, None).unwrap();
                 assert_eq!(store.queue_state().unwrap(), state);
                 assert_eq!(store.queue_page(0, 10).unwrap(), page);
             }
@@ -519,7 +530,7 @@ mod tests {
         ] {
             let before = store.queue_page(0, 10).unwrap().rows.remove(0);
             let state = store.queue_state().unwrap();
-            store.edit_track(id, title, artist, album).unwrap();
+            store.edit_track(id, title, artist, album, None).unwrap();
             assert!(store.queue_state().unwrap().revision > state.revision);
             let after = store.queue_page(0, 10).unwrap().rows.remove(0);
             assert_eq!(
@@ -530,7 +541,7 @@ mod tests {
             assert_eq!(after.track.artist, artist.unwrap_or(&before.track.artist));
             assert_eq!(after.track.album, album.unwrap_or(&before.track.album));
             let state = store.queue_state().unwrap();
-            store.edit_track(id, title, artist, album).unwrap();
+            store.edit_track(id, title, artist, album, None).unwrap();
             assert_eq!(store.queue_state().unwrap(), state);
             assert_eq!(store.queue_page(0, 10).unwrap().rows[0], after);
         }
@@ -652,7 +663,7 @@ mod tests {
         let (store, mut scan, _) = queued(record());
         let mut other = record();
         other.path = "/music/other.wav".into();
-        other.fingerprint = Some("other".into());
+        other.fingerprint = Some(blake3::hash(b"other").to_hex().to_string());
         scan.records.push(other);
         store.apply_scan(&scan).unwrap();
         let page = store.queue_page(0, 10).unwrap();

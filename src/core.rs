@@ -549,8 +549,17 @@ mod tests {
     }
 
     fn fixture_with_duration(duration: Option<f64>) -> (tempfile::TempDir, Core) {
+        fixture_with_database(duration, false)
+    }
+
+    fn fixture_with_database(duration: Option<f64>, persistent: bool) -> (tempfile::TempDir, Core) {
         let directory = tempfile::tempdir().unwrap();
-        let store = Store::open(Path::new(":memory:")).unwrap();
+        let database_path = if persistent {
+            directory.path().join("library.db")
+        } else {
+            Path::new(":memory:").to_path_buf()
+        };
+        let store = Store::open(&database_path).unwrap();
         store
             .apply_scan(&ScanResult {
                 roots: vec![directory.path().to_path_buf()],
@@ -685,6 +694,138 @@ mod tests {
             assert!(rows[1].track.favorite && rows[2].track.favorite && rows[3].track.favorite);
             assert!(!rows[0].track.favorite);
         }
+    }
+
+    #[test]
+    fn unchanged_metadata_favorite_and_playlist_intents_preserve_revisions() {
+        let (_directory, mut core) = fixture();
+        core.store.set_queue_current(Some(1)).unwrap();
+        core.refresh_queue_tracks().unwrap();
+        core.command(Command::CreatePlaylist { name: "Mix".into() })
+            .unwrap();
+        // Creating an override is persistent intent even when its display value matches.
+        let before = core.state.query_revisions();
+        core.command(Command::EditTrack {
+            track_id: 1,
+            title: Some("Track 1".into()),
+            artist: None,
+            album: None,
+            decoder_hint: None,
+        })
+        .unwrap();
+        assert_ne!(core.state.library.revision, before.library);
+        assert_eq!(core.state.queue.revision, before.queue);
+        core.publish();
+        let revisions = core.state.query_revisions();
+        let sections = core.state.revisions;
+        let current = Arc::clone(core.state.current_track.as_ref().unwrap());
+        for command in [
+            Command::EditTrack {
+                track_id: 1,
+                title: None,
+                artist: None,
+                album: None,
+                decoder_hint: None,
+            },
+            Command::EditTrack {
+                track_id: 1,
+                title: Some("Track 1".into()),
+                artist: None,
+                album: None,
+                decoder_hint: Some(DecoderHint::Auto),
+            },
+            Command::SetFavorite {
+                track_ids: vec![1, 1, 2],
+                favorite: false,
+            },
+            Command::SetFavorite {
+                track_ids: vec![],
+                favorite: true,
+            },
+            Command::RenamePlaylist {
+                playlist_id: 1,
+                name: "Mix".into(),
+            },
+        ] {
+            core.command(command).unwrap();
+            core.publish();
+            assert_eq!(core.state.query_revisions(), revisions);
+            assert_eq!(core.state.revisions, sections);
+            assert!(Arc::ptr_eq(
+                core.state.current_track.as_ref().unwrap(),
+                &current
+            ));
+        }
+        for command in [
+            Command::EditTrack {
+                track_id: 999,
+                title: None,
+                artist: None,
+                album: None,
+                decoder_hint: None,
+            },
+            Command::SetFavorite {
+                track_ids: vec![1, 999],
+                favorite: true,
+            },
+            Command::RenamePlaylist {
+                playlist_id: 999,
+                name: "Mix".into(),
+            },
+        ] {
+            assert!(core.command(command).is_err());
+            assert_eq!(core.state.query_revisions(), revisions);
+            assert!(!core.track(1).unwrap().favorite);
+        }
+    }
+
+    #[test]
+    fn decoder_hint_intent_refreshes_current_without_invalidating_queue_or_restarting_audio() {
+        let (_directory, mut core) = fixture();
+        playing(&mut core, 3);
+        core.publish();
+        let revisions = core.state.query_revisions();
+        let sections = core.state.revisions;
+        let playback = core.state.playback.clone();
+        let generation = core.generation;
+        for hint in [DecoderHint::Ffmpeg, DecoderHint::Native, DecoderHint::Auto] {
+            core.command(Command::EditTrack {
+                track_id: 2,
+                title: None,
+                artist: None,
+                album: None,
+                decoder_hint: Some(hint),
+            })
+            .unwrap();
+            core.publish();
+            assert_eq!(core.state.current_track().unwrap().decoder_hint, hint);
+            assert_eq!(core.track(2).unwrap().decoder_hint, hint);
+            assert_eq!(core.state.queue.current_id, Some(3));
+            assert_eq!(core.state.queue.revision, revisions.queue);
+            assert_eq!(core.state.playback, playback);
+            assert_eq!(core.generation, generation);
+            assert!(core.playback.is_some());
+            let query = Query::QueueBatch {
+                after: None,
+                limit: 5,
+                expected: Some(revisions),
+            };
+            assert!(matches!(core.view(&query), Ok(ViewResponse::QueueBatch(_))));
+            let before_repeat = core.state.revisions;
+            core.command(Command::EditTrack {
+                track_id: 2,
+                title: None,
+                artist: None,
+                album: None,
+                decoder_hint: Some(hint),
+            })
+            .unwrap();
+            core.publish();
+            assert_eq!(core.state.revisions, before_repeat);
+        }
+        assert_ne!(core.state.library.revision, revisions.library);
+        assert_ne!(core.state.revisions.playback, sections.playback);
+        assert_eq!(core.state.revisions.queue, sections.queue);
     }
 
     #[test]
@@ -2622,6 +2763,137 @@ mod tests {
                 .all(|entry| entry.track_id != 1)
         );
         assert_queue_saved(&core);
+    }
+
+    #[test]
+    fn failed_track_deletion_retains_persisted_current_occurrence_and_fences_audio() {
+        for missing in [false, true] {
+            for status in [
+                PlaybackStatus::Stopped,
+                PlaybackStatus::Paused,
+                PlaybackStatus::Playing,
+            ] {
+                let (directory, mut core) = fixture_with_database(Some(10.0), true);
+                if missing {
+                    let path = core.track(2).unwrap().path;
+                    core.store
+                        .apply_scan(&ScanResult {
+                            roots: vec![path],
+                            ..ScanResult::default()
+                        })
+                        .unwrap();
+                }
+                playing(&mut core, 3);
+                match status {
+                    PlaybackStatus::Stopped => core.stop().unwrap(),
+                    PlaybackStatus::Paused => core.command(Command::Pause).unwrap(),
+                    PlaybackStatus::Playing => {}
+                }
+                core.save(false).unwrap();
+                let playlist = core
+                    .store
+                    .create_playlist_with_tracks("Keep", &[1, 2])
+                    .unwrap();
+                let connection =
+                    rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+                connection
+                    .execute_batch(
+                        "CREATE TRIGGER reject_track_delete BEFORE DELETE ON tracks
+                     BEGIN SELECT RAISE(ABORT,'rejected track deletion'); END;",
+                    )
+                    .unwrap();
+                let current = Arc::clone(core.state.current_track.as_ref().unwrap());
+                let generation = core.generation;
+                let late_started = started_event(&core, Some(10.0));
+                let command = if missing {
+                    Command::RemoveMissingTracks
+                } else {
+                    Command::RemoveTracks {
+                        track_ids: vec![2, 2],
+                    }
+                };
+                let error = core.command(command).unwrap_err();
+                assert!(format!("{error:#}").contains("rejected track deletion"));
+                assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+                assert_ne!(core.generation, generation);
+                assert!(core.playback.is_none());
+                assert_eq!(core.state.queue.current_id, Some(3));
+                assert!(Arc::ptr_eq(
+                    core.state.current_track.as_ref().unwrap(),
+                    &current
+                ));
+                assert_eq!(
+                    queue_entries(&core),
+                    [(1, 1), (2, 2), (3, 2), (4, 3), (5, 4)]
+                );
+                assert_eq!(core.store.playlist_track_ids(playlist, 10).unwrap(), [1, 2]);
+                assert_queue_saved(&core);
+                core.audio_event(late_started).unwrap();
+                core.audio_event(AudioEvent::Ended { generation }).unwrap();
+                assert_eq!(core.state.queue.current_id, Some(3));
+                assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+                core.load_initial_state().unwrap();
+                assert_eq!(core.state.queue.current_id, Some(3));
+                assert_eq!(core.state.current_track().unwrap().id, 2);
+                connection
+                    .execute_batch("DROP TRIGGER reject_track_delete")
+                    .unwrap();
+                let command = if missing {
+                    Command::RemoveMissingTracks
+                } else {
+                    Command::RemoveTracks {
+                        track_ids: vec![2, 2],
+                    }
+                };
+                core.command(command).unwrap();
+                assert!(core.state.current_track.is_none());
+                assert_eq!(core.state.queue.current_id, None);
+                assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+                assert_eq!(queue_entries(&core), [(1, 1), (4, 3), (5, 4)]);
+                assert_queue_saved(&core);
+            }
+        }
+    }
+
+    #[test]
+    fn unrelated_track_deletion_preserves_current_occurrence_and_playback_status() {
+        for missing in [false, true] {
+            for status in [
+                PlaybackStatus::Stopped,
+                PlaybackStatus::Paused,
+                PlaybackStatus::Playing,
+            ] {
+                let (_directory, mut core) = fixture();
+                if missing {
+                    let path = core.track(1).unwrap().path;
+                    core.store
+                        .apply_scan(&ScanResult {
+                            roots: vec![path],
+                            ..ScanResult::default()
+                        })
+                        .unwrap();
+                }
+                playing(&mut core, 3);
+                match status {
+                    PlaybackStatus::Stopped => core.stop().unwrap(),
+                    PlaybackStatus::Paused => core.command(Command::Pause).unwrap(),
+                    PlaybackStatus::Playing => {}
+                }
+                let generation = core.generation;
+                let command = if missing {
+                    Command::RemoveMissingTracks
+                } else {
+                    Command::RemoveTracks { track_ids: vec![1] }
+                };
+                core.command(command).unwrap();
+                assert_eq!(core.state.playback.status, status);
+                assert_eq!(core.generation, generation);
+                assert_eq!(core.state.queue.current_id, Some(3));
+                assert_eq!(core.state.queue.current_position, Some(1));
+                assert_eq!(core.state.current_track().unwrap().id, 2);
+                assert_queue_saved(&core);
+            }
+        }
     }
 
     #[test]
