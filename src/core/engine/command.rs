@@ -19,14 +19,6 @@ impl Core {
     }
 
     fn apply_command(&mut self, command: Command) -> Result<()> {
-        let persist_config = matches!(
-            &command,
-            Command::Volume { .. }
-                | Command::Shuffle { .. }
-                | Command::Repeat { .. }
-                | Command::Device { .. }
-                | Command::Configure { .. }
-        );
         match command {
             Command::Scan { paths, force } => return self.scan(paths, None, force),
             Command::CancelScan { id } => self.cancel_scan(id)?,
@@ -337,7 +329,7 @@ impl Core {
                     audio::ffmpeg_status().unwrap_or_else(|error| format!("unavailable: {error:#}"))
                 };
                 crate::logging::reconfigure(&config)?;
-                config.save(&self.state.system.config_path)?;
+                self.write_config(&config)?;
                 self.audio(AudioCommand::StillMode(config.still_mode))?;
                 self.audio(AudioCommand::MediaReadBuffer(config.media_read_buffer_mb))?;
                 self.audio(AudioCommand::Volume(config.volume))?;
@@ -390,7 +382,6 @@ impl Core {
                 self.stop()?;
             }
         }
-        self.config_dirty |= persist_config;
         Ok(())
     }
 }

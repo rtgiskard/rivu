@@ -31,13 +31,11 @@ impl Core {
         config
             .output_device
             .clone_from(&self.state.system.selected_device);
-        config.save(&self.state.system.config_path)?;
+        self.write_config(&config)?;
         if still_mode {
             self.audio(AudioCommand::StillMode(config.still_mode))?;
         }
         self.state.system.config = Arc::new(config);
-        self.config_dirty = false;
-        self.config_last_saved = Instant::now();
         Ok(())
     }
 
@@ -61,30 +59,56 @@ impl Core {
     }
 
     pub(in crate::core) fn save(&mut self, force_config: bool) -> Result<()> {
-        self.save_queue()?;
-        let config_changed = self.state.system.config.volume != self.state.playback.volume
+        // Independent persistence domains both get a final attempt even if one fails.
+        let queue = self.save_queue();
+        let config = self.flush_config(force_config).map(|_| ());
+        queue.and(config)
+    }
+
+    pub(in crate::core) fn write_config(&mut self, config: &Config) -> Result<()> {
+        self.config_last_attempt = Instant::now();
+        let result = config
+            .save(&self.state.system.config_path)
+            .context("Saving configuration");
+        match &result {
+            Ok(()) => {
+                if let Some(previous) = self.config_save_error.take()
+                    && self.state.system.last_error.as_ref() == Some(&previous)
+                {
+                    self.state.system.last_error = None;
+                }
+            }
+            Err(error) => {
+                let message = format!("{error:#}");
+                if self.config_save_error.as_ref() != Some(&message) {
+                    tracing::error!(error = %message, "configuration_save_failed");
+                    self.state.system.last_error = Some(message.clone());
+                    self.config_save_error = Some(message);
+                }
+            }
+        }
+        result
+    }
+
+    pub(in crate::core) fn flush_config(&mut self, force: bool) -> Result<bool> {
+        // The saved configuration is the baseline; no command whitelist owns dirty state.
+        let changed = self.state.system.config.volume != self.state.playback.volume
             || self.state.system.config.shuffle != self.state.playback.shuffle
             || self.state.system.config.repeat != self.state.playback.repeat
             || self.state.system.config.output_device != self.state.system.selected_device;
-        if self.config_dirty
-            && config_changed
-            && (force_config || self.config_last_saved.elapsed() >= Duration::from_millis(250))
-        {
-            let mut config = self.state.system.config.as_ref().clone();
-            config.volume = self.state.playback.volume;
-            config.shuffle = self.state.playback.shuffle;
-            config.repeat = self.state.playback.repeat;
-            config
-                .output_device
-                .clone_from(&self.state.system.selected_device);
-            config.save(&self.state.system.config_path)?;
-            self.state.system.config = Arc::new(config);
-            self.config_last_saved = Instant::now();
-            self.config_dirty = false;
-        } else if !config_changed {
-            self.config_dirty = false;
+        if !changed || (!force && self.config_last_attempt.elapsed() < Duration::from_millis(250)) {
+            return Ok(false);
         }
-        Ok(())
+        let mut config = self.state.system.config.as_ref().clone();
+        config.volume = self.state.playback.volume;
+        config.shuffle = self.state.playback.shuffle;
+        config.repeat = self.state.playback.repeat;
+        config
+            .output_device
+            .clone_from(&self.state.system.selected_device);
+        self.write_config(&config)?;
+        self.state.system.config = Arc::new(config);
+        Ok(true)
     }
     pub(in crate::core) fn reload_library(&mut self, structure_changed: bool) -> Result<()> {
         self.state.library.track_total = self.store.track_count()?;

@@ -74,11 +74,13 @@ impl Core {
                             .unwrap_or_else(|error| format!("unavailable: {error:#}"));
                         self.publish();
                     }
-                    if self.config_dirty
-                        && self.config_last_saved.elapsed() >= Duration::from_millis(250)
-                        && self.save(false).is_ok()
-                    {
-                        self.publish();
+                    match self.flush_config(false) {
+                        Ok(true) => self.publish(),
+                        Err(_) => {
+                            let changed = self.state.system.last_error != self.shared.read().system.last_error;
+                            if changed { self.publish(); }
+                        }
+                        Ok(false) => {}
                     }
             }
                 }
@@ -87,7 +89,10 @@ impl Core {
         if let Err(error) = self.stop() {
             self.state.system.last_error = Some(format!("Saving play count: {error:#}"));
         }
-        let _ = self.save(true);
+        if let Err(error) = self.save(true) {
+            tracing::error!(error = %error, "shutdown_persistence_failed");
+            self.state.system.last_error = Some(format!("Final save failed: {error:#}"));
+        }
         let _ = self.engine.send(AudioCommand::Shutdown);
         self.shutdown_scan();
         self.state.playback.status = PlaybackStatus::Stopped;

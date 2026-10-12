@@ -92,6 +92,14 @@ in `[0, 100)`; zero still requires some confirmed heard time. Edit the threshold
 in the configuration file or desktop settings; see
 link:02_library.adoc#_play_counts_and_recent_tracks[Library] for counting semantics.
 
+Playback-control changes are saved automatically. If saving fails, the running
+values remain active and pending for retry; the error is logged and exposed in
+library status and the desktop error notice. Repeated identical failures do not
+produce repeated notices. A successful retry clears its own error, not an unrelated
+error reported later. Shutdown makes a final save attempt and logs any failure;
+unsaved changes may be lost on restart. Desktop Settings Apply and immediate
+configuration controls reject a candidate that cannot be saved.
+
 `playback.pipewire_auto_mix` controls channel remixing; see link:04_playback.adoc[Playback].
 `interface.tray_enabled` and `interface.mpris_enabled` independently control desktop integration.
 

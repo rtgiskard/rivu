@@ -382,8 +382,8 @@ impl Runtime {
                     played: Vec::new(),
                     played_cursor: 0,
                     saved_queue: None,
-                    config_dirty: false,
-                    config_last_saved: Instant::now(),
+                    config_last_attempt: Instant::now(),
+                    config_save_error: None,
                 };
                 tracing::debug!("core_worker_started");
                 let initial_load_started = Instant::now();
@@ -535,8 +535,8 @@ struct Core {
     // Number of history entries through the current (or just removed) entry.
     played_cursor: usize,
     saved_queue: Option<SavedQueue>,
-    config_dirty: bool,
-    config_last_saved: Instant,
+    config_last_attempt: Instant,
+    config_save_error: Option<String>,
 }
 impl Core {
     fn load_initial_state(&mut self) -> Result<()> {
@@ -693,8 +693,8 @@ mod tests {
             played: Vec::new(),
             played_cursor: 0,
             saved_queue: None,
-            config_dirty: false,
-            config_last_saved: Instant::now(),
+            config_last_attempt: Instant::now(),
+            config_save_error: None,
         };
         core.enqueue(&[1, 2, 2, 3, 4]).unwrap();
         (directory, core)
@@ -1125,6 +1125,74 @@ mod tests {
         );
         assert_eq!(core.state.library.track_total, 4);
         assert_eq!(core.state.library.playlist_total, 0);
+    }
+
+    #[test]
+    fn deferred_config_failure_retains_values_and_recovers_without_clearing_other_errors() {
+        for unrelated in [false, true] {
+            let (directory, mut core) = fixture();
+            let path = core.state.system.config_path.clone();
+            core.state.system.config.save(&path).unwrap();
+            let backup = directory.path().join("config.good");
+            std::fs::rename(&path, &backup).unwrap();
+            std::fs::create_dir(&path).unwrap();
+            core.command(Command::Volume { value: 0.25 }).unwrap();
+            core.config_last_attempt -= Duration::from_millis(250);
+            assert!(core.flush_config(false).is_err());
+            core.publish();
+            assert!(core.shared.read().system.last_error.is_some());
+            assert_eq!(core.state.playback.volume, 0.25);
+            assert_ne!(core.state.system.config.volume, 0.25);
+            assert_ne!(Config::load(&backup).unwrap().volume, 0.25);
+            if unrelated {
+                core.state.system.last_error = Some("Unrelated failure".into());
+            } else {
+                core.command(Command::DismissError).unwrap();
+            }
+            // Retrying the same failure must not replace another error or a dismissal.
+            let expected = core.state.system.last_error.clone();
+            assert!(core.flush_config(true).is_err());
+            assert_eq!(core.state.system.last_error, expected);
+            std::fs::remove_dir(&path).unwrap();
+            std::fs::rename(&backup, &path).unwrap();
+            assert!(core.flush_config(true).unwrap());
+            assert_eq!(Config::load(&path).unwrap().volume, 0.25);
+            assert_eq!(core.state.system.last_error, expected);
+            assert!(!core.flush_config(true).unwrap());
+        }
+    }
+
+    #[test]
+    fn successful_config_retry_clears_only_its_own_failure() {
+        let (_directory, mut core) = fixture();
+        let path = core.state.system.config_path.clone();
+        std::fs::create_dir(&path).unwrap();
+        core.command(Command::Shuffle { enabled: true }).unwrap();
+        assert!(core.flush_config(true).is_err());
+        assert!(core.state.system.last_error.is_some());
+        std::fs::remove_dir(&path).unwrap();
+        assert!(core.flush_config(true).unwrap());
+        assert!(core.state.system.last_error.is_none());
+        assert!(Config::load(&path).unwrap().shuffle);
+    }
+
+    #[test]
+    fn shutdown_flush_reports_failure_and_does_not_wait_for_debounce() {
+        let (_directory, mut core) = fixture();
+        let path = core.state.system.config_path.clone();
+        std::fs::create_dir(&path).unwrap();
+        core.command(Command::Repeat {
+            mode: RepeatMode::All,
+        })
+        .unwrap();
+        let (sender, receiver) = bounded(1);
+        drop(sender);
+        core.run(receiver);
+        let state = core.shared.read();
+        assert!(state.system.shutting_down);
+        assert!(state.system.last_error.is_some());
+        assert_eq!(state.playback.repeat, RepeatMode::All);
+        assert_eq!(state.system.config.repeat, RepeatMode::Off);
     }
 
     #[test]
