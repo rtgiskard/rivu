@@ -72,6 +72,20 @@ impl Drop for ShutdownSignals {
     }
 }
 
+struct MediaWorker {
+    stop: crossbeam_channel::Sender<()>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for MediaWorker {
+    fn drop(&mut self) {
+        let _ = self.stop.try_send(());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 pub(super) fn start(
     data_dir: PathBuf,
     config_path: PathBuf,
@@ -80,21 +94,14 @@ pub(super) fn start(
 ) -> Result<()> {
     let signals = Signals::new([SIGINT, SIGTERM]).context("Registering shutdown signals")?;
     let socket = data_dir.join("rivu.sock");
-    ipc::bind(&socket)?;
-    let mut runtime = match Runtime::start(&data_dir, &config_path) {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            let _ = std::fs::remove_file(&socket);
-            return Err(error);
-        }
-    };
+    let socket_owner = ipc::SocketOwner::acquire(&socket)?;
+    let mut runtime = Runtime::start(&data_dir, &config_path)?;
     let _shutdown_signals = ShutdownSignals::start(signals, runtime.handle.clone())?;
-    let server = ipc::Server::start(socket, runtime.handle.clone())?;
+    let server = ipc::Server::start(&socket_owner, runtime.handle.clone())?;
     let artwork = Arc::new(ArtworkManager::new(&data_dir));
     let media_handle = runtime.handle.clone();
     let media_changes = media_handle.subscribe();
     let (media_stop, media_stop_receiver) = bounded(1);
-    let media_stop_for_cleanup = media_stop.clone();
     let media_artwork = Arc::clone(&artwork);
     let media_worker = thread::Builder::new()
         .name("rivu-mpris-manager".into())
@@ -137,6 +144,10 @@ pub(super) fn start(
             }
             drop(service);
         })?;
+    let media_worker = MediaWorker {
+        stop: media_stop,
+        worker: Some(media_worker),
+    };
     if !paths.is_empty() {
         runtime.handle.send(Command::Scan {
             paths: paths.into_iter().map(client_path).collect::<Result<_>>()?,
@@ -157,10 +168,50 @@ pub(super) fn start(
         let _ = runtime.handle.send(Command::Shutdown);
     }
     let join_result = runtime.join();
-    let _ = media_stop_for_cleanup.send(());
-    let _ = media_worker.join();
+    drop(media_worker);
     interface_result?;
     join_result.map_err(|_| anyhow!("Rivu core worker panicked"))?;
     drop(server);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_start_does_not_touch_runtime_storage_or_configuration() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("rivu.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let config = directory.path().join("config.toml");
+        std::fs::write(&config, b"invalid config intentionally").unwrap();
+        assert!(
+            start(
+                directory.path().to_owned(),
+                config.clone(),
+                Vec::new(),
+                false
+            )
+            .is_err()
+        );
+        assert!(!directory.path().join("library.db").exists());
+        assert_eq!(
+            std::fs::read(config).unwrap(),
+            b"invalid config intentionally"
+        );
+        assert!(std::os::unix::net::UnixStream::connect(socket).is_ok());
+        drop(listener);
+    }
+
+    #[test]
+    fn failed_runtime_start_retires_its_bound_socket() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        std::fs::write(&config, b"invalid config intentionally").unwrap();
+        assert!(start(directory.path().to_owned(), config, Vec::new(), false).is_err());
+        let socket = directory.path().join("rivu.sock");
+        assert!(!socket.exists());
+        assert!(ipc::SocketOwner::acquire(&socket).is_ok());
+    }
 }

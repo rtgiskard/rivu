@@ -264,9 +264,11 @@ fn library_root_queries_run_through_real_owner_and_ipc_session() {
     }
     .save(&config_path)
     .unwrap();
-    let mut runtime = Runtime::start(directory.path(), &config_path).unwrap();
     let socket = directory.path().join("rivu.sock");
-    let server = Server::start(socket.clone(), runtime.handle.clone()).unwrap();
+    let owner = SocketOwner::acquire(&socket).unwrap();
+    let mut runtime = Runtime::start(directory.path(), &config_path).unwrap();
+    let server = Server::start(&owner, runtime.handle.clone()).unwrap();
+    assert!(SocketOwner::acquire(&socket).is_err());
     let mut session = client_session(&socket).unwrap();
     let count_query = Query::LibraryRootCounts {
         roots: vec![root.clone(), nested.clone(), empty],
@@ -329,8 +331,13 @@ fn library_root_queries_run_through_real_owner_and_ipc_session() {
     ));
     drop(session);
     drop(server);
+    // Stopping transport does not release the runtime's instance acquisition.
+    assert!(socket.exists());
+    assert!(SocketOwner::acquire(&socket).is_err());
     runtime.handle.request_shutdown().unwrap();
     runtime.join().unwrap();
+    drop(owner);
+    assert!(!socket.exists());
 }
 
 #[test]
@@ -1107,4 +1114,63 @@ fn cancelling_client_session_closes_pending_watch_without_a_response() {
     notify.notify_waiters();
     assert!(client.join().unwrap().unwrap().is_none());
     assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+}
+
+#[test]
+fn instance_acquisition_never_removes_a_live_or_non_socket_path() {
+    let directory = socket_test_directory();
+    let socket = directory.path().join("owned.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    assert!(SocketOwner::acquire(&socket).is_err());
+    assert!(std::os::unix::net::UnixStream::connect(&socket).is_ok());
+    drop(listener);
+    std::fs::remove_file(&socket).unwrap();
+    std::fs::write(&socket, b"not a socket").unwrap();
+    assert!(SocketOwner::acquire(&socket).is_err());
+    assert_eq!(std::fs::read(&socket).unwrap(), b"not a socket");
+}
+
+#[test]
+fn bound_owner_serializes_stale_recovery_and_only_retires_its_own_inode() {
+    let directory = socket_test_directory();
+    let socket = directory.path().join("owned.sock");
+    drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+    let owner = SocketOwner::acquire(&socket).unwrap();
+    assert!(SocketOwner::acquire(&socket).is_err());
+    assert!(std::os::unix::net::UnixStream::connect(&socket).is_ok());
+    // A replacement created outside Rivu is not the owner's retirement target.
+    std::fs::remove_file(&socket).unwrap();
+    let replacement = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    drop(owner);
+    assert!(std::os::unix::net::UnixStream::connect(&socket).is_ok());
+    drop(replacement);
+    std::fs::remove_file(&socket).unwrap();
+    let owner = SocketOwner::acquire(&socket).unwrap();
+    drop(owner);
+    assert!(!socket.exists());
+    assert!(SocketOwner::acquire(&socket).is_ok());
+}
+
+#[test]
+fn simultaneous_starters_acquire_one_real_listener() {
+    let directory = socket_test_directory();
+    let socket = directory.path().join("race.sock");
+    let barrier = std::sync::Barrier::new(8);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                scope.spawn(|| {
+                    barrier.wait();
+                    SocketOwner::acquire(&socket)
+                })
+            })
+            .collect();
+        let owners: Vec<_> = handles
+            .into_iter()
+            .filter_map(|thread| thread.join().unwrap().ok())
+            .collect();
+        assert_eq!(owners.len(), 1);
+        assert!(std::os::unix::net::UnixStream::connect(&socket).is_ok());
+    });
+    assert!(!socket.exists());
 }

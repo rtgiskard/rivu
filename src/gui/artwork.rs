@@ -1,6 +1,9 @@
-use std::{rc::Rc, sync::Arc};
+use std::{cell::RefCell, rc::Rc, sync::Arc};
 
-use crate::{artwork::ArtworkIdentity, model::Track};
+use crate::{
+    artwork::{ArtworkIdentity, ArtworkLease},
+    model::Track,
+};
 
 use gpui::{
     Background, Context, Path, PathBuilder, Pixels, Render, Window, canvas, div, linear_color_stop,
@@ -8,6 +11,38 @@ use gpui::{
 };
 
 use super::{ACCENT, BG, GuiApp};
+
+#[derive(Clone, Default)]
+pub(super) struct ArtworkView(Rc<RefCell<ArtworkViewState>>);
+
+#[derive(Default)]
+struct ArtworkViewState {
+    current: Option<ArtworkLease>,
+    retired: Vec<ArtworkLease>,
+}
+
+impl ArtworkView {
+    fn replace(&self, next: Option<ArtworkLease>) {
+        let mut state = self.0.borrow_mut();
+        if state.current == next {
+            return;
+        }
+        if let Some(old) = std::mem::replace(&mut state.current, next) {
+            state.retired.push(old);
+        }
+    }
+
+    pub(super) fn path(&self) -> Option<Arc<std::path::Path>> {
+        self.0.borrow().current.as_ref().map(ArtworkLease::path)
+    }
+
+    pub(super) fn release_retired(&self, window: &mut Window) {
+        let retired = std::mem::take(&mut self.0.borrow_mut().retired);
+        if !retired.is_empty() {
+            window.on_next_frame(move |_, _| drop(retired));
+        }
+    }
+}
 
 /// One executor load plus the latest requested identity, never a task per render.
 #[derive(Default)]
@@ -52,6 +87,11 @@ impl ArtworkLoader {
 
 impl GuiApp {
     pub(super) fn prepare_artwork(&mut self, cx: &mut Context<Self>) {
+        self.artwork_view.replace(
+            self.metadata
+                .track()
+                .and_then(|track| self.artwork_manager.cached(track)),
+        );
         let current = self
             .metadata
             .track()
@@ -65,7 +105,7 @@ impl GuiApp {
         let identity = ArtworkIdentity::for_track(&track);
         let manager = Arc::clone(&self.artwork_manager);
         cx.spawn(async move |this, cx| {
-            let _ = cx
+            let loaded = cx
                 .background_executor()
                 .spawn(async move { manager.load(&track) })
                 .await;
@@ -77,6 +117,7 @@ impl GuiApp {
                     .track()
                     .is_some_and(|track| identity.matches(track))
                 {
+                    this.artwork_view.replace(loaded);
                     cx.notify();
                 }
                 let current = this

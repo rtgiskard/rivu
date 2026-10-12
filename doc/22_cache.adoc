@@ -137,10 +137,37 @@ an initial cold load without another playback update.
 The manager retains at most 64 track IDs with FIFO eviction; a changed
 fingerprint replaces that ID's entry. Loads for a resident ID and fingerprint
 share one probe outside the cache lock. Cache-only reads neither insert entries
-nor probe on misses. Eviction releases only the manager's reference: callers
-already probing remain valid, but revisiting an evicted key can start a new probe.
-Late completions cannot replace newer entries. This bounds resident lookup data,
-not content-addressed artwork files on disk; existing file URIs are not invalidated.
+nor probe on misses. Eviction releases only the manager's lookup reference:
+callers already probing remain valid, but revisiting an evicted key can start
+a new probe. Late completions cannot replace newer entries.
+
+Content-addressed files have a separate fixed budget: at most 128 files and
+64 MiB of encoded image bytes under `artwork/cache`, with an 8 MiB limit per
+new embedded image. The bundled fallback is stored separately and is not part
+of that disposable-content budget. Identical image bytes reuse one file,
+independent of track identity. These limits are not visualization settings or
+user configuration knobs.
+
+Completed lookup records do not pin files. URI/path consumers acquire explicit
+leases: the GUI keeps its current preview lease, retiring replaced leases at a
+subsequent window-frame boundary and releasing remaining leases on window
+destruction; MPRIS metadata keeps its published lease until replacement or
+service shutdown. A property read also keeps its returned lease until the next
+metadata read or service shutdown. In-flight loads retain a lease through
+completion acceptance. No collection can retire a leased file, even if its
+track lookup has been evicted or its fingerprint replaced.
+
+Startup inventories the previous session's files and collects excess oldest
+unleased content. Existing blocking artwork loaders collect before admitting
+new content; lease release itself performs no filesystem work. If active leases
+prevent fitting an image, that best-effort load uses the fallback instead of
+exceeding either budget. Released content becomes collectible on the next
+admission; it need not be deleted immediately. Retired lookup results become
+cache misses and are reloaded on the existing background paths. Neither render
+nor an MPRIS property getter inventories, probes, deletes, or waits for disk I/O.
+Filesystem failures remain best-effort: undeletable legacy files can prevent
+recovery to the budget, and no new content is admitted until enough space can
+be reclaimed.
 
 == Font data and glyphs
 

@@ -12,8 +12,8 @@ use anyhow::{Context, Error, Result, bail};
 use bytes::BytesMut;
 use rand::RngExt;
 use std::{
-    fs,
-    os::unix::fs::{FileTypeExt, PermissionsExt},
+    fs::{self, File, OpenOptions},
+    os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     thread::{self, JoinHandle},
     time::Duration,
@@ -24,43 +24,94 @@ use tokio::{
     sync::watch,
     time::timeout,
 };
-pub struct Server {
+/// Owns the real listener before any database or audio startup side effects.
+/// The stable lock file is never unlinked: competing starters lock one inode.
+pub struct SocketOwner {
     path: PathBuf,
+    listener: std::os::unix::net::UnixListener,
+    identity: (u64, u64),
+    _lock: File,
+}
+
+impl SocketOwner {
+    pub fn acquire(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(path.with_extension("sock.lock"))?;
+        lock.try_lock()
+            .context("Another Rivu owns this data directory")?;
+        match fs::symlink_metadata(path) {
+            Ok(metadata) => {
+                if !metadata.file_type().is_socket() {
+                    bail!("Refusing to replace non-socket {}", path.display());
+                }
+                match std::os::unix::net::UnixStream::connect(path) {
+                    Ok(_) => bail!(
+                        "Rivu is already running at {}. Use its CLI or TUI.",
+                        path.display()
+                    ),
+                    Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+                        // The lock serializes Rivu's stale recovery. Still check
+                        // identity before removal, including an external replacer.
+                        let current = fs::symlink_metadata(path)?;
+                        if (current.dev(), current.ino()) != (metadata.dev(), metadata.ino()) {
+                            bail!("Rivu socket changed during startup");
+                        }
+                        fs::remove_file(path)?;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error).context("Checking existing Rivu socket"),
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        // Only successful bind grants retirement authority. A failed bind
+        // never constructs an owner and cannot unlink the winning listener.
+        let listener = std::os::unix::net::UnixListener::bind(path)?;
+        let metadata = fs::symlink_metadata(path)?;
+        let owner = Self {
+            path: path.to_owned(),
+            listener,
+            identity: (metadata.dev(), metadata.ino()),
+            _lock: lock,
+        };
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        owner.listener.set_nonblocking(true)?;
+        Ok(owner)
+    }
+}
+
+impl Drop for SocketOwner {
+    fn drop(&mut self) {
+        if let Ok(metadata) = fs::symlink_metadata(&self.path)
+            && (metadata.dev(), metadata.ino()) == self.identity
+            && let Err(error) = fs::remove_file(&self.path)
+        {
+            tracing::warn!(path = %self.path.display(), %error, "ipc_socket_cleanup_failed");
+        }
+    }
+}
+
+pub struct Server<'a> {
+    path: PathBuf,
+    _owner: &'a SocketOwner,
     shutdown: watch::Sender<bool>,
     bridge_stop: crossbeam_channel::Sender<()>,
     worker: Option<JoinHandle<()>>,
 }
 
-pub fn bind(path: &Path) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    if !path.exists() {
-        return Ok(());
-    }
-    if !fs::symlink_metadata(path)?.file_type().is_socket() {
-        bail!("Refusing to replace non-socket {}", path.display());
-    }
-    match std::os::unix::net::UnixStream::connect(path) {
-        Ok(_) => bail!(
-            "Rivu is already running at {}. Use its CLI or TUI.",
-            path.display()
-        ),
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
-            ) =>
-        {
-            fs::remove_file(path)?;
-            Ok(())
-        }
-        Err(error) => Err(error).context("Checking existing Rivu socket"),
-    }
-}
-
-impl Server {
-    pub fn start(path: PathBuf, handle: AppHandle) -> Result<Self> {
+impl<'a> Server<'a> {
+    pub fn start(owner: &'a SocketOwner, handle: AppHandle) -> Result<Self> {
+        let path = owner.path.clone();
+        let worker_listener = owner.listener.try_clone()?;
         let (shutdown, shutdown_rx) = watch::channel(false);
         let (bridge_stop, bridge_stop_rx) = crossbeam_channel::bounded(1);
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
@@ -74,23 +125,19 @@ impl Server {
                     return;
                 }
             };
-            let listener = { let _guard = runtime.enter(); UnixListener::bind(&worker_path) };
+            // The application retains the sole retirement owner until runtime
+            // shutdown; this worker owns only a cloned listening descriptor.
+            let listener = {
+                let _guard = runtime.enter();
+                UnixListener::from_std(worker_listener)
+            };
             let listener = match listener {
                 Ok(listener) => listener,
                 Err(error) => {
-                    tracing::error!(path = %worker_path.display(), error = %error, "ipc_socket_bind_failed");
                     let _ = ready_tx.send(Err(anyhow::Error::from(error)));
                     return;
                 }
             };
-            if let Err(error) = fs::set_permissions(&worker_path, fs::Permissions::from_mode(0o600)) {
-                tracing::error!(path = %worker_path.display(), error = %error, "ipc_socket_permissions_failed");
-                if let Err(cleanup_error) = fs::remove_file(&worker_path) {
-                    tracing::warn!(path = %worker_path.display(), error = %cleanup_error, "ipc_socket_cleanup_failed");
-                }
-                let _ = ready_tx.send(Err(anyhow::Error::from(error)));
-                return;
-            }
             let (revision_tx, revision_rx) = watch::channel(handle.state_revisions());
             let updates = handle.subscribe();
             let bridge_handle = handle.clone();
@@ -108,9 +155,6 @@ impl Server {
                 Ok(bridge) => bridge,
                 Err(error) => {
                     tracing::error!(path = %worker_path.display(), error = %error, "ipc_revision_bridge_start_failed");
-                    if let Err(cleanup_error) = fs::remove_file(&worker_path) {
-                        tracing::warn!(path = %worker_path.display(), error = %cleanup_error, "ipc_socket_cleanup_failed");
-                    }
                     let _ = ready_tx.send(Err(anyhow::anyhow!("starting IPC revision bridge: {error}")));
                     return;
                 }
@@ -123,6 +167,7 @@ impl Server {
         match ready_rx.recv() {
             Ok(Ok(())) => Ok(Self {
                 path,
+                _owner: owner,
                 shutdown,
                 bridge_stop,
                 worker: Some(worker),
@@ -130,20 +175,18 @@ impl Server {
             Ok(Err(error)) => {
                 tracing::error!(path = %path.display(), error = %error, "ipc_server_start_failed");
                 let _ = worker.join();
-                let _ = fs::remove_file(&path);
                 Err(error)
             }
             Err(error) => {
                 tracing::error!(path = %path.display(), error = %error, "ipc_server_start_failed");
                 let _ = worker.join();
-                let _ = fs::remove_file(&path);
                 Err(anyhow::Error::from(error))
             }
         }
     }
 }
 
-impl Drop for Server {
+impl Drop for Server<'_> {
     fn drop(&mut self) {
         tracing::info!(path = %self.path.display(), "ipc_server_stopping");
         let _ = self.shutdown.send(true);
@@ -151,7 +194,6 @@ impl Drop for Server {
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
-        let _ = fs::remove_file(&self.path);
     }
 }
 async fn run_command(handle: &AppHandle, command: Command) -> Result<Ack> {

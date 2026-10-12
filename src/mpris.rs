@@ -3,7 +3,7 @@
 //! Playback changes come from the core subscription, never a library polling loop.
 
 use crate::{
-    artwork::{ArtworkIdentity, ArtworkManager},
+    artwork::{ArtworkIdentity, ArtworkLease, ArtworkManager},
     core::AppHandle,
     model::{Command, PlaybackStatus, RepeatMode},
     projection::MprisSnapshot,
@@ -61,6 +61,7 @@ impl Mpris {
                 Player {
                     handle: handle.clone(),
                     artwork: artwork.clone(),
+                    artwork_lease: parking_lot::Mutex::new(None),
                 },
             )?
             .build()
@@ -193,6 +194,7 @@ impl Root {
 struct Player {
     handle: AppHandle,
     artwork: Arc<ArtworkManager>,
+    artwork_lease: parking_lot::Mutex<Option<ArtworkLease>>,
 }
 
 impl Player {
@@ -355,9 +357,9 @@ impl Player {
 
     #[zbus(property)]
     fn metadata(&self) -> Metadata {
-        metadata_map(
-            TrackMetadata::from_snapshot(&self.handle.mpris_snapshot(), &self.artwork).as_ref(),
-        )
+        let track = TrackMetadata::from_snapshot(&self.handle.mpris_snapshot(), &self.artwork);
+        *self.artwork_lease.lock() = track.as_ref().and_then(|track| track.art_url.clone());
+        metadata_map(track.as_ref())
     }
 
     #[zbus(property(emits_changed_signal = "false"))]
@@ -541,7 +543,7 @@ struct TrackMetadata {
     album: String,
     url: String,
     length: Option<i64>,
-    art_url: Option<String>,
+    art_url: Option<ArtworkLease>,
 }
 
 impl TrackMetadata {
@@ -554,7 +556,7 @@ impl TrackMetadata {
             artist: track.artist.clone(),
             album: track.album.clone(),
             url: url::Url::from_file_path(&track.path).ok()?.into(),
-            art_url: artwork.cached_uri(track),
+            art_url: artwork.cached(track),
             length: state
                 .playback
                 .duration
@@ -579,7 +581,7 @@ fn metadata_map(track: Option<&TrackMetadata>) -> Metadata {
             metadata.insert("mpris:length".into(), length.into());
         }
         if let Some(art_url) = &track.art_url {
-            metadata.insert("mpris:artUrl".into(), Str::from(art_url.as_str()).into());
+            metadata.insert("mpris:artUrl".into(), Str::from(art_url.uri()).into());
         }
         metadata.insert("xesam:title".into(), Str::from(track.title.as_str()).into());
         metadata.insert(
@@ -618,7 +620,7 @@ fn publish_artwork(
         return Ok(());
     }
     let identity = ArtworkIdentity::for_track(track);
-    let _ = artwork.load(track);
+    let lease = artwork.load(track);
     let current = handle.mpris_snapshot();
     if current.shutting_down
         || !current
@@ -628,7 +630,10 @@ fn publish_artwork(
         return Ok(());
     }
     *loaded = Some(identity);
-    let next = TrackMetadata::from_snapshot(&current, artwork);
+    let mut next = TrackMetadata::from_snapshot(&current, artwork);
+    if let Some(next) = &mut next {
+        next.art_url = lease;
+    }
     if *metadata != next {
         let mut changed: HashMap<&str, Value<'_>> = HashMap::new();
         changed.insert("Metadata", Value::from(metadata_map(next.as_ref())));
@@ -809,7 +814,7 @@ mod tests {
             TrackMetadata::from_snapshot(&state, &artwork)
                 .unwrap()
                 .art_url,
-            artwork.cached_uri(current)
+            artwork.cached(current)
         );
         assert!(!artwork.is_loaded(current));
         artwork.load(current);
@@ -865,6 +870,10 @@ mod tests {
 
     #[test]
     fn metadata_has_dbus_types_and_queue_occurrence_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let artwork = ArtworkManager::new(directory.path());
+        let art = artwork.cached(&self::track(1)).unwrap();
+        let expected_uri = art.uri().to_owned();
         let track = TrackMetadata {
             queue_id: 42,
             title: "Title".into(),
@@ -872,7 +881,7 @@ mod tests {
             album: "Album".into(),
             url: "file:///music/a%20b.flac".into(),
             length: Some(1_250_000),
-            art_url: Some("file:///artwork/cache/cover.png".into()),
+            art_url: Some(art),
         };
         let metadata = metadata_map(Some(&track));
         assert_eq!(metadata["mpris:trackid"].value_signature().to_string(), "o");
@@ -881,7 +890,7 @@ mod tests {
         assert_eq!(metadata["mpris:artUrl"].value_signature().to_string(), "s");
         assert_eq!(
             <&str>::try_from(&metadata["mpris:artUrl"]).unwrap(),
-            "file:///artwork/cache/cover.png",
+            expected_uri,
         );
         assert_eq!(<&str>::try_from(&metadata["xesam:title"]).unwrap(), "Title");
         assert_eq!(i64::try_from(&metadata["mpris:length"]).unwrap(), 1_250_000);

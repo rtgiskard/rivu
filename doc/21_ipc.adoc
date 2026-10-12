@@ -72,8 +72,22 @@ Error response and close that connection; other client sessions remain usable.
 
 The socket is created with owner-only permissions (`0600`). There is no separate
 credential exchange: the socket's filesystem access boundary controls who may
-issue commands. Startup refuses to replace a non-socket path or an accepting
-socket, and removes a stale socket only after connection refusal or absence.
+issue commands. Before opening the data database, saving configuration, or
+starting audio workers, startup acquires a nonblocking advisory lock on the
+stable `rivu.sock.lock` file and binds a real listener. The lock file is retained
+after shutdown: unlinking it while Rivu is running would break the shared-inode
+locking boundary. Concurrent Rivu starters therefore cannot both recover a
+stale socket or initialize the same data directory.
+
+Startup refuses to replace a non-socket path or an accepting socket, and
+recovers a stale socket only after connection refusal, under that lock. Only a
+successful bind grants ownership of the socket pathname. The application keeps
+that owner until runtime shutdown, including all IPC worker startup failures;
+the serving worker borrows it and owns only a cloned listening descriptor.
+Failures and shutdown use the same retirement path. It unlinks only a pathname
+whose device/inode still matches the bound socket. Failed bind or failed
+competing startup cannot unlink another listener, and an externally replaced
+pathname is left untouched.
 
 The transport retains partial input across cancelled reads and keeps frames
 independent. Sessions process requests serially; frames have no request IDs or
