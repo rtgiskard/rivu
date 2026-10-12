@@ -460,6 +460,11 @@ struct Saved {
     queue: Vec<QueueEntry>,
     current: Option<u64>,
 }
+#[derive(Serialize)]
+struct SavedRef<'a> {
+    queue: &'a [QueueEntry],
+    current: Option<u64>,
+}
 struct PlaybackStats {
     track_id: i64,
     heard: f64,
@@ -795,6 +800,33 @@ mod tests {
             core.state.revisions.changed_since(before),
             StateSections { playback: true, queue: true, library: true, ..StateSections::default() }
         );
+    }
+
+    #[test]
+    fn saved_playback_restores_order_duplicates_and_current_entry() {
+        let (_directory, mut core) = fixture();
+        core.state.queue.current_id = Some(3);
+        core.queue_dirty = true;
+        core.save(false).unwrap();
+        assert!(!core.queue_dirty);
+        core.state.queue.entries = Arc::default();
+        core.state.queue.tracks = Arc::default();
+        core.state.queue.current_id = None;
+        core.load_initial_state().unwrap();
+        assert_eq!(queue_entries(&core.state.queue.entries), [(1, 1), (2, 2), (3, 2), (4, 3), (5, 4)]);
+        assert_eq!(core.state.queue.current_id, Some(3));
+        assert_eq!(core.state.current_track().unwrap().id, 2);
+
+        core.state.queue.entries = Arc::default();
+        core.state.queue.current_id = None;
+        core.queue_dirty = true;
+        core.save(false).unwrap();
+        core.enqueue(&[1]).unwrap();
+        core.load_initial_state().unwrap();
+        assert!(core.state.queue.entries.is_empty());
+        assert!(core.state.queue.tracks.is_empty());
+        assert!(core.state.queue.current_id.is_none());
+        assert!(core.state.current_track.is_none());
     }
 
     #[test]

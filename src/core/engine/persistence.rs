@@ -65,8 +65,8 @@ impl Core {
             self.config_dirty = false;
         }
         if self.queue_dirty {
-            let saved = Saved {
-                queue: self.state.queue.entries.as_ref().clone(),
+            let saved = SavedRef {
+                queue: self.state.queue.entries.as_slice(),
                 current: self.state.queue.current_id,
             };
             self.store
