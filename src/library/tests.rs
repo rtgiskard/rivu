@@ -808,6 +808,110 @@ fn cue_directory_suppresses_sources_but_explicit_audio_survives() -> Result<()> 
     Ok(())
 }
 
+#[test]
+fn cue_sheets_share_source_snapshot_with_explicit_full_audio() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let audio = directory.path().join("audio.wav");
+    let first_sheet = directory.path().join("a.cue");
+    let second_sheet = directory.path().join("b.cue");
+    wav(&audio, 225)?;
+    two_track_sheet(&first_sheet)?;
+    fs::write(
+        &second_sheet,
+        "TITLE \"Other album\"\nFILE \"audio.wav\" WAVE\nTRACK 01 AUDIO\nTITLE \"Other track\"\nINDEX 01 00:01:00\n",
+    )?;
+    let original = scan_paths(std::slice::from_ref(&audio), &[], false)?;
+    assert!(original.errors.is_empty(), "{:?}", original.errors);
+    let mut removed_source = false;
+    let result = scan_paths_at_depth(
+        &[directory.path().to_path_buf(), audio.clone(), audio.clone()],
+        &[],
+        false,
+        crate::config::Config::default().scan_max_depth,
+        |phase, _, _, _, path| {
+            if phase == ScanPhase::ReadingMetadata && path == Some(first_sheet.as_path()) {
+                // Later sheets and the full-file request must use this scan's snapshot.
+                fs::remove_file(&audio).expect("remove source after first CUE sheet");
+                removed_source = true;
+            }
+        },
+    )?;
+    assert!(removed_source);
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    assert_eq!(result.records.len(), 4);
+    assert!(result.suppressed_sources.is_empty());
+    let full = result
+        .records
+        .iter()
+        .find(|record| record.cue.is_none())
+        .unwrap();
+    assert_eq!(full.path, audio);
+    assert_eq!(full.media.duration, Some(3.0));
+    assert_eq!(full.media.title, original.records[0].media.title);
+    assert_eq!(full.fingerprint, original.records[0].fingerprint);
+    let segments: Vec<_> = result
+        .records
+        .iter()
+        .filter(|record| record.cue.is_some())
+        .collect();
+    assert_eq!(segments[0].cue.as_ref().unwrap().sheet, first_sheet);
+    assert_eq!(segments[0].media.duration, Some(1.0));
+    assert_eq!(segments[1].media.duration, Some(2.0));
+    assert_eq!(segments[2].cue.as_ref().unwrap().sheet, second_sheet);
+    assert_eq!(segments[2].media.title, "Other track");
+    assert_eq!(segments[2].media.album, "Other album");
+    assert_eq!(segments[2].media.duration, Some(2.0));
+    assert!(
+        segments
+            .iter()
+            .all(|record| record.fingerprint == full.fingerprint)
+    );
+    Ok(())
+}
+
+#[test]
+fn cue_source_errors_are_reused_for_later_sheets_and_ordinary_audio() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let audio = directory.path().join("audio.wav");
+    let first_sheet = directory.path().join("a.cue");
+    let second_sheet = directory.path().join("b.cue");
+    fs::write(&audio, b"invalid audio")?;
+    two_track_sheet(&first_sheet)?;
+    two_track_sheet(&second_sheet)?;
+    let mut repaired_source = false;
+    let result = scan_paths_at_depth(
+        &[directory.path().to_path_buf(), audio.clone()],
+        &[],
+        false,
+        crate::config::Config::default().scan_max_depth,
+        |phase, _, _, _, path| {
+            if phase == ScanPhase::ReadingMetadata && path == Some(first_sheet.as_path()) {
+                // A repaired source must not cause a second probe in this scan.
+                wav(&audio, 225).expect("repair source after first CUE sheet");
+                repaired_source = true;
+            }
+        },
+    )?;
+    assert!(repaired_source);
+    assert!(result.records.is_empty());
+    assert!(result.suppressed_sources.is_empty());
+    assert_eq!(result.errors.len(), 3);
+    let details: Vec<_> = result
+        .errors
+        .iter()
+        .zip([&first_sheet, &second_sheet, &audio])
+        .map(|(error, path)| {
+            error
+                .strip_prefix(&format!("{}: ", path.display()))
+                .expect("scan error must retain its candidate path")
+        })
+        .collect();
+    assert!(!details[0].is_empty());
+    assert_eq!(details[1], details[0]);
+    assert_eq!(details[2], details[0]);
+    Ok(())
+}
+
 fn playlist_tracks<'a>(
     track_ids: &'a [i64],
     tracks: &'a [Track],

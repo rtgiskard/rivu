@@ -321,8 +321,17 @@ pub fn scan_paths(
             );
             continue;
         }
-        match source_record(path, &known_by_path, &mut sources, ffmpeg_enabled) {
-            Ok(record) => result.records.push(record.clone()),
+        // CUE sheets are finished, so ordinary files can consume their source snapshot.
+        let record = match sources.remove(path) {
+            Some(record) => record.map_err(|error| anyhow!("{error}")),
+            None => scan_file(
+                path,
+                known_by_path.get(path.as_path()).copied(),
+                ffmpeg_enabled,
+            ),
+        };
+        match record {
+            Ok(record) => result.records.push(record),
             Err(error) => result.push_error(|| format!("{}: {error:#}", path.display())),
         }
         processed += 1;

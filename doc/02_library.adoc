@@ -48,6 +48,10 @@ a whole. Directory scans omit sources represented by valid sheets; failed sheets
 may still leave their whole audio sources eligible for import. Explicitly
 scanning a source imports it as a whole track.
 
+Within one scan, CUE sheets sharing a source and an explicitly requested whole
+source reuse the same source probe result or error. Changes to that source
+during the scan are picked up by a subsequent scan.
+
 Supported formats and playlist exchange: link:03_playlist.adoc#_cue_import[CUE import].
 
 == Metadata and favorites
