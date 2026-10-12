@@ -56,3 +56,44 @@ pub(super) fn close_gaps(
     };
     Ok(())
 }
+
+/// Move one validated occurrence, shifting only the intervening positions.
+pub(super) fn move_entry(
+    tx: &Transaction<'_>,
+    scope: PositionScope,
+    id: i64,
+    old: i64,
+    new: i64,
+) -> Result<()> {
+    if old == new {
+        return Ok(());
+    }
+    let (lower, upper, shift) = if new < old {
+        (new, old - 1, 1)
+    } else {
+        (old + 1, new, -1)
+    };
+    match scope {
+        PositionScope::Queue => {
+            tx.execute(
+                "UPDATE queue_entries SET position=position+?3 WHERE position>=?1 AND position<=?2",
+                params![lower, upper, shift],
+            )?;
+            tx.execute(
+                "UPDATE queue_entries SET position=?1 WHERE id=?2",
+                params![new, id],
+            )?;
+        }
+        PositionScope::Playlist(playlist) => {
+            tx.execute(
+                "UPDATE playlist_entries SET position=position+?3 WHERE playlist_id=?4 AND position>=?1 AND position<=?2",
+                params![lower, upper, shift, playlist],
+            )?;
+            tx.execute(
+                "UPDATE playlist_entries SET position=?1 WHERE id=?2",
+                params![new, id],
+            )?;
+        }
+    }
+    Ok(())
+}

@@ -1,5 +1,5 @@
-use super::positions::{PositionScope, close_gaps};
-use super::tracks::SOURCE_FILTER;
+use super::positions::{PositionScope, close_gaps, move_entry};
+use super::tracks::{SOURCE_FILTER, validate_encoded_track_ids};
 use super::{Store, batch_limit, changed};
 use crate::model::{Batch, Page, PlaylistEntryCursor, PlaylistEntryRow, PlaylistSummary};
 use anyhow::{Context, Result, anyhow, bail};
@@ -17,6 +17,12 @@ impl Store {
             .query_row("SELECT COUNT(*) FROM playlists", [], |row| {
                 row.get::<_, i64>(0)
             })? as usize;
+        if limit == 0 {
+            return Ok(Page {
+                total,
+                rows: Vec::new(),
+            });
+        }
         let rows = self.playlist_summary_rows(offset, limit.min(crate::model::MAX_QUERY_ROWS))?;
         Ok(Page { total, rows })
     }
@@ -189,6 +195,12 @@ impl Store {
             [playlist_id],
             |r| r.get(0),
         ).optional()?.context("Playlist not found")?;
+        if limit == 0 {
+            return Ok(Page {
+                total: total as usize,
+                rows: Vec::new(),
+            });
+        }
         let mut stmt = self.conn.prepare("SELECT e.id,e.track_id,COALESCE(t.title_override,t.raw_title),COALESCE(t.artist_override,t.raw_artist),COALESCE(t.album_override,t.raw_album),COALESCE(t.missing,1) FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id WHERE e.playlist_id=?1 ORDER BY e.position,e.id LIMIT ?2 OFFSET ?3")?;
         let limit = limit.min(crate::model::MAX_QUERY_ROWS) as i64;
         let offset = offset.min(i64::MAX as usize) as i64;
@@ -297,16 +309,7 @@ impl Store {
         if index >= n as usize {
             bail!("playlist index out of range");
         }
-        let new = index as i64;
-        if new < old {
-            tx.execute("UPDATE playlist_entries SET position=position+1 WHERE playlist_id=? AND position>=? AND position<?",params![pid,new,old])?;
-        } else if new > old {
-            tx.execute("UPDATE playlist_entries SET position=position-1 WHERE playlist_id=? AND position>? AND position<=?",params![pid,old,new])?;
-        }
-        tx.execute(
-            "UPDATE playlist_entries SET position=? WHERE id=?",
-            params![new, id],
-        )?;
+        move_entry(&tx, PositionScope::Playlist(pid), id, old, index as i64)?;
         tx.commit()?;
         Ok(())
     }
@@ -314,16 +317,7 @@ impl Store {
 
 fn append_tracks(tx: &Transaction<'_>, id: i64, tracks: &[i64]) -> Result<()> {
     let tracks = serde_json::to_string(tracks)?;
-    let missing: Option<i64> = tx
-        .query_row(
-            "SELECT value FROM json_each(?1) WHERE value NOT IN (SELECT id FROM tracks) LIMIT 1",
-            [&tracks],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if let Some(track) = missing {
-        bail!("Track {track} does not exist");
-    }
+    validate_encoded_track_ids(tx, &tracks)?;
     tx.execute("WITH selected AS (SELECT value AS track_id,MIN(CAST(key AS INTEGER)) AS ordinal FROM json_each(?2) GROUP BY value), additions AS (SELECT track_id,ordinal FROM selected WHERE NOT EXISTS(SELECT 1 FROM playlist_entries WHERE playlist_id=?1 AND playlist_entries.track_id=selected.track_id)) INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT ?1,track_id,(SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=?1)+row_number() OVER (ORDER BY ordinal)-1 FROM additions ORDER BY ordinal", params![id, tracks])?;
     Ok(())
 }
@@ -390,6 +384,116 @@ mod deletion_tests {
             .conn
             .query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get(0))?;
         assert_eq!(tracks, 3);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::*;
+    use std::path::Path;
+
+    fn store() -> Result<Store> {
+        let store = Store::open(Path::new(":memory:"))?;
+        store.conn.execute_batch(
+            "INSERT INTO tracks(id,path) VALUES (1,'one'),(2,'two'),(3,'three'),(4,'four');",
+        )?;
+        Ok(store)
+    }
+
+    #[test]
+    fn append_keeps_first_occurrence_order_and_invalid_ids_roll_back() -> Result<()> {
+        let store = store()?;
+        assert!(
+            store
+                .create_playlist_with_tracks("invalid", &[1, -1, 2])
+                .is_err()
+        );
+        assert_eq!(store.playlist_summary_page(0, 0)?.total, 0);
+        let id = store.create_playlist_with_tracks("valid", &[3, 1, 3, 2, 1])?;
+        let original = store.playlist_entries_page(id, 0, 10)?.rows;
+        assert_eq!(store.playlist_track_ids(id, 10)?, vec![3, 1, 2]);
+        assert!(store.add_playlist(id, &[4, i64::MAX, 4]).is_err());
+        assert!(
+            store
+                .add_playlist_sources(id, &[PathBuf::new()], &[i64::MAX])
+                .is_err()
+        );
+        assert_eq!(store.playlist_track_ids(id, 10)?, vec![3, 1, 2]);
+        assert_eq!(
+            store
+                .playlist_entries_page(id, 0, 10)?
+                .rows
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            original.iter().map(|row| row.id).collect::<Vec<_>>()
+        );
+        store.add_playlist(id, &[2, 4, 3, 4])?;
+        assert_eq!(store.playlist_track_ids(id, 10)?, vec![3, 1, 2, 4]);
+        Ok(())
+    }
+
+    #[test]
+    fn count_only_pages_keep_totals_and_unknown_playlist_errors() -> Result<()> {
+        let store = store()?;
+        let id = store.create_playlist_with_tracks("entries", &[1, 2, 3])?;
+        store.create_playlist("empty")?;
+        let summaries = store.playlist_summary_page(usize::MAX, 0)?;
+        assert_eq!(summaries.total, 2);
+        assert!(summaries.rows.is_empty());
+        let entries = store.playlist_entries_page(id, usize::MAX, 0)?;
+        assert_eq!(entries.total, 3);
+        assert!(entries.rows.is_empty());
+        assert!(store.playlist_entries_page(i64::MAX, 0, 0).is_err());
+        assert_eq!(store.playlist_entries_page(id, 1, 1)?.rows[0].track_id, 2);
+        assert_eq!(
+            store.playlist_entries_page(id, 0, usize::MAX)?.rows.len(),
+            3
+        );
+        Ok(())
+    }
+
+    fn positioned_entries(store: &Store, id: i64) -> Result<Vec<(i64, i64, i64)>> {
+        Ok(store.conn.prepare(
+            "SELECT id,track_id,position FROM playlist_entries WHERE playlist_id=?1 ORDER BY position,id",
+        )?.query_map([id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    #[test]
+    fn moves_preserve_identity_and_no_op_or_invalid_moves_preserve_order() -> Result<()> {
+        let store = store()?;
+        let id = store.create_playlist_with_tracks("moves", &[1, 2, 3, 4])?;
+        let other = store.create_playlist_with_tracks("other", &[4, 3])?;
+        let other_before = positioned_entries(&store, other)?;
+        let initial = positioned_entries(&store, id)?;
+        store.move_playlist_entry(initial[1].0, 3)?;
+        assert_eq!(
+            positioned_entries(&store, id)?,
+            vec![
+                initial[0],
+                (initial[2].0, 3, 1),
+                (initial[3].0, 4, 2),
+                (initial[1].0, 2, 3)
+            ]
+        );
+        store.move_playlist_entry(initial[1].0, 0)?;
+        let moved = positioned_entries(&store, id)?;
+        assert_eq!(
+            moved,
+            vec![
+                (initial[1].0, 2, 0),
+                (initial[0].0, 1, 1),
+                (initial[2].0, 3, 2),
+                (initial[3].0, 4, 3)
+            ]
+        );
+        store.move_playlist_entry(initial[1].0, 0)?;
+        assert!(store.move_playlist_entry(initial[1].0, 4).is_err());
+        assert!(store.move_playlist_entry(i64::MAX, 0).is_err());
+        assert_eq!(positioned_entries(&store, id)?, moved);
+        assert_eq!(positioned_entries(&store, other)?, other_before);
         Ok(())
     }
 }

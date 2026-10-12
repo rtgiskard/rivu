@@ -2615,6 +2615,71 @@ mod tests {
     }
 
     #[test]
+    fn interval_queue_moves_match_stable_selection_order_and_preserve_current() {
+        let (_directory, mut core) = fixture();
+        let original = core.queue_ids.clone();
+        let current = original[2];
+        core.store.set_queue_current(Some(current)).unwrap();
+        for mask in 0..(1usize << original.len()) {
+            for target in (0..=original.len()).chain(std::iter::once(usize::MAX)) {
+                core.store.reorder_queue(&original).unwrap();
+                core.queue_ids.clone_from(&original);
+                core.refresh_queue_tracks().unwrap();
+                let selected: Vec<_> = original
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| mask & (1 << index) != 0)
+                    .map(|(_, &id)| id)
+                    .collect();
+                let mut expected: Vec<_> = original
+                    .iter()
+                    .copied()
+                    .filter(|id| !selected.contains(id))
+                    .collect();
+                let insertion = target.min(expected.len());
+                expected.splice(insertion..insertion, selected.iter().copied());
+                let mut requested: Vec<_> = selected.iter().rev().copied().collect();
+                if let Some(&id) = selected.first() {
+                    requested.push(id);
+                }
+                core.command(Command::MoveQueueEntries {
+                    queue_ids: requested,
+                    index: target,
+                })
+                .unwrap();
+                assert_eq!(core.queue_ids, expected, "mask={mask} target={target}");
+                assert_queue_saved(&core);
+                assert_eq!(core.state.queue.current_id, Some(current));
+                assert_eq!(
+                    core.state.queue.current_position,
+                    expected.iter().position(|&id| id == current)
+                );
+                let ViewResponse::QueuePage(page) = core
+                    .view(&Query::QueuePage {
+                        offset: 0,
+                        limit: MAX_QUERY_ROWS,
+                    })
+                    .unwrap()
+                else {
+                    panic!("expected queue page")
+                };
+                assert_eq!(page.total, original.len());
+                assert_eq!(
+                    page.rows
+                        .iter()
+                        .map(|row| (row.id, row.position))
+                        .collect::<Vec<_>>(),
+                    expected
+                        .iter()
+                        .enumerate()
+                        .map(|(position, &id)| (id, position))
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn bulk_queue_edits_preserve_current_order_history_and_reject_invalid_ids_atomically() {
         let (_directory, mut core) = fixture();
         playing(&mut core, 3);

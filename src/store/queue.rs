@@ -1,15 +1,38 @@
-use super::positions::{PositionScope, close_gaps};
+use super::positions::{PositionScope, close_gaps, move_entry};
 use super::rows::{LIBRARY_ROW_COLUMNS_QUALIFIED, library_row_at};
 use super::tracks::SOURCE_FILTER;
 use super::{Store, batch_limit};
 use crate::model::{Batch, MAX_QUERY_ROWS, Page, QueueCursor, QueueRow, QueueState};
 use anyhow::{Context, Result, ensure};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, Transaction, params};
 use std::path::PathBuf;
 
 fn integer<T: TryFrom<i64>>(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<T> {
     let value = row.get::<_, i64>(index)?;
     T::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
+}
+
+fn reorder_interval(tx: &Transaction<'_>, start: i64, ids: &[u64]) -> Result<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let end = start
+        .checked_add(i64::try_from(ids.len())?)
+        .context("Queue range exceeds database positions")?;
+    tx.execute_batch(
+        "CREATE TEMP TABLE queue_order_update(id INTEGER PRIMARY KEY,position INTEGER NOT NULL);",
+    )?;
+    tx.execute("INSERT INTO queue_order_update(id,position) SELECT value,?2+CAST(key AS INTEGER) FROM json_each(?1)", params![serde_json::to_string(ids)?, start])?;
+    let matched: usize = tx.query_row(
+        "SELECT COUNT(*) FROM queue_order_update JOIN queue_entries USING(id) WHERE queue_entries.position>=?1 AND queue_entries.position<?2",
+        params![start, end], |row| integer(row, 0),
+    )?;
+    ensure!(
+        matched == ids.len(),
+        "Queue entry not found in target range"
+    );
+    tx.execute_batch("UPDATE queue_entries SET position=(SELECT position FROM queue_order_update WHERE queue_order_update.id=queue_entries.id) WHERE id IN (SELECT id FROM queue_order_update) AND position<>(SELECT position FROM queue_order_update WHERE queue_order_update.id=queue_entries.id); DROP TABLE queue_order_update;")?;
+    Ok(())
 }
 
 fn queue_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueueRow> {
@@ -100,7 +123,26 @@ impl Store {
     }
 
     pub fn queue_page(&self, offset: usize, limit: usize) -> Result<Page<QueueRow>> {
-        let total = self.queue_state()?.total;
+        let total = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM queue_entries", [], |row| {
+                integer(row, 0)
+            })?;
+        self.queue_page_with_total(offset, limit, total)
+    }
+
+    pub(crate) fn queue_page_with_total(
+        &self,
+        offset: usize,
+        limit: usize,
+        total: usize,
+    ) -> Result<Page<QueueRow>> {
+        if limit == 0 {
+            return Ok(Page {
+                total,
+                rows: Vec::new(),
+            });
+        }
         let mut statement = self.conn.prepare(&format!("SELECT q.id,q.track_id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED} FROM queue_entries q JOIN tracks t ON t.id=q.track_id WHERE q.position>=?1 ORDER BY q.position,q.id LIMIT ?2"))?;
         let rows = statement
             .query_map(
@@ -153,8 +195,8 @@ impl Store {
 
     pub(crate) fn enqueue_tracks(&self, ids: &[i64]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
-        self.validate_tracks(ids)?;
-        tx.execute("INSERT INTO queue_entries(track_id,position) SELECT value,(SELECT COALESCE(MAX(position)+1,0) FROM queue_entries)+CAST(key AS INTEGER) FROM json_each(?1) ORDER BY CAST(key AS INTEGER)", [serde_json::to_string(ids)?])?;
+        let ids = self.validated_track_ids(ids)?;
+        tx.execute("INSERT INTO queue_entries(track_id,position) SELECT value,(SELECT COALESCE(MAX(position)+1,0) FROM queue_entries)+CAST(key AS INTEGER) FROM json_each(?1) ORDER BY CAST(key AS INTEGER)", [ids])?;
         tx.commit()?;
         Ok(())
     }
@@ -212,15 +254,41 @@ impl Store {
             total == ids.len(),
             "Queue order does not contain every entry"
         );
-        tx.execute_batch("CREATE TEMP TABLE queue_order_update(id INTEGER PRIMARY KEY,position INTEGER NOT NULL);")?;
-        tx.execute("INSERT INTO queue_order_update(id,position) SELECT value,CAST(key AS INTEGER) FROM json_each(?1)", [serde_json::to_string(ids)?])?;
-        let matched: usize = tx.query_row(
-            "SELECT COUNT(*) FROM queue_order_update JOIN queue_entries USING(id)",
-            [],
+        reorder_interval(&tx, 0, ids)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn move_queue_entry(&self, id: u64, index: usize) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        let id = i64::try_from(id).context("Queue ID exceeds database range")?;
+        let (old, last): (i64, i64) = tx.query_row(
+            "SELECT position,(SELECT MAX(position) FROM queue_entries) FROM queue_entries WHERE id=?1",
+            [id], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?.context("Queue entry not found")?;
+        let new = i64::try_from(index).context("Queue target exceeds database range")?;
+        ensure!(new <= last, "Queue target position out of range");
+        move_entry(&tx, PositionScope::Queue, id, old, new)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn reorder_queue_range(&self, offset: usize, ids: &[u64]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        let start = i64::try_from(offset).context("Queue offset exceeds database range")?;
+        let end = start
+            .checked_add(i64::try_from(ids.len())?)
+            .context("Queue range exceeds database positions")?;
+        let total: usize = tx.query_row(
+            "SELECT COUNT(*) FROM queue_entries WHERE position>=?1 AND position<?2",
+            params![start, end],
             |row| integer(row, 0),
         )?;
-        ensure!(matched == total, "Queue entry not found");
-        tx.execute_batch("UPDATE queue_entries SET position=(SELECT position FROM queue_order_update WHERE queue_order_update.id=queue_entries.id); DROP TABLE queue_order_update;")?;
+        ensure!(
+            total == ids.len(),
+            "Queue range does not contain every entry"
+        );
+        reorder_interval(&tx, start, ids)?;
         tx.commit()?;
         Ok(())
     }

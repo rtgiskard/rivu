@@ -19,6 +19,25 @@ Compaction executes one SQL update per contiguous run of deleted positions; the
 final suffix update may affect zero rows. Bounded-interval updates reuse a prepared
 statement, and these local executions do not add client IPC round trips.
 
+Single-entry moves update only the positions between the old and new locations.
+Bulk queue moves rewrite the affected interval rather than the full queue;
+reorders skip rows whose position is already correct. Entry identities and the
+current occurrence remain stable, and no-op moves leave queue content valid.
+
+Scan-backed metadata and user overrides use null-safe change predicates, so
+identical values do not rewrite tracks or invalidate queue content. Track-ID
+mutations serialize each input list once and validate it inside the mutation's
+transaction before writing. Count-only pages omit row projection; queue and
+playlist totals do not join track metadata. Equivalent normalized root prefixes
+are counted once per request, then expanded to the original paths and order.
+Root aggregation state is request-local and bounded by the 256-root query limit.
+
+Playlist deletion-reference lookup has an additional index on
+`(track_id,playlist_id,position)`. It avoids scanning unrelated playlist entries
+for sparse library deletions, at the cost of extra storage and index maintenance
+on insertion, movement, and deletion. Dense deletion still processes its affected
+references and can be slower with this index.
+
 The GUI, tray, and MPRIS service use in-process handles and purpose-specific
 projections. CLI and TUI clients use the local IPC socket. Both paths reach the
 same command and query boundary. The GUI's shared analysis and waveform data
@@ -170,6 +189,8 @@ and queued display-metadata edits advance its content revision; changing only th
 current occurrence updates the Queue state-section token without invalidating
 content pages. Unrelated track edits advance Library only. Last-played activity
 does not invalidate Queue unless a displayed field, such as play count, changes.
+Reapplying identical metadata or favorites, including a forced scan that keeps
+the same displayed values, does not advance the queue content revision.
 
 Watch has no fixed expiry. A complete new request on that connection supersedes
 a pending Watch without a Watch response. The preserved input then becomes the

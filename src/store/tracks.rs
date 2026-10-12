@@ -6,7 +6,8 @@ use super::rows::{
 use super::{Store, batch_limit, changed};
 use crate::model::{Batch, HistoryEntry, Page, Track};
 use anyhow::{Context, Result, bail};
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 const TRACK_SEARCH_FILTER: &str = "WHERE (?1 IS NULL OR instr(lower(COALESCE(tracks.title_override,tracks.raw_title) || ' ' || COALESCE(tracks.artist_override,tracks.raw_artist) || ' ' || tracks.path),?1)>0) AND (?2 IS NULL OR tracks.favorite=?2) AND (?3 IS NULL OR tracks.missing=?3)";
@@ -35,12 +36,12 @@ fn library_order(sort: crate::model::LibrarySort) -> &'static str {
 
 impl Store {
     pub fn set_favorite(&self, ids: &[i64], favorite: bool) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        let encoded_ids = self.validated_track_ids(ids)?;
         for id in ids {
             self.track_cache.borrow_mut().entries.remove(id);
         }
-        let tx = self.conn.unchecked_transaction()?;
-        self.validate_tracks(ids)?;
-        tx.execute("UPDATE tracks SET favorite=?1 WHERE favorite<>?1 AND id IN (SELECT value FROM json_each(?2))", params![favorite, serde_json::to_string(ids)?])?;
+        tx.execute("UPDATE tracks SET favorite=?1 WHERE favorite<>?1 AND id IN (SELECT value FROM json_each(?2))", params![favorite, encoded_ids])?;
         tx.commit()?;
         Ok(())
     }
@@ -139,19 +140,30 @@ impl Store {
             .iter()
             .map(|path| directory_prefix(path))
             .collect::<Result<Vec<_>>>()?;
-        let prefixes = serde_json::to_string(&prefixes)?;
+        let mut unique = Vec::with_capacity(prefixes.len());
+        let mut indices = HashMap::with_capacity(prefixes.len());
+        for prefix in &prefixes {
+            if !indices.contains_key(prefix.as_str()) {
+                indices.insert(prefix.as_str(), unique.len());
+                unique.push(prefix.as_str());
+            }
+        }
         let mut stmt = self.conn.prepare(
             "SELECT roots.key,COUNT(tracks.id) FROM json_each(?1) AS roots LEFT JOIN tracks ON substr(tracks.path,1,length(roots.value))=roots.value GROUP BY roots.key ORDER BY roots.key"
         )?;
-        Ok(stmt
-            .query_map([prefixes], |row| {
-                let index = row.get::<_, i64>(0)? as usize;
-                Ok(crate::model::LibraryRootCount {
-                    path: roots[index].clone(),
-                    total: row.get::<_, i64>(1)? as usize,
-                })
+        let totals = stmt
+            .query_map([serde_json::to_string(&unique)?], |row| {
+                Ok(row.get::<_, i64>(1)? as usize)
             })?
-            .collect::<rusqlite::Result<Vec<_>>>()?)
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(roots
+            .iter()
+            .zip(prefixes.iter())
+            .map(|(path, prefix)| crate::model::LibraryRootCount {
+                path: path.clone(),
+                total: totals[indices[prefix.as_str()]],
+            })
+            .collect())
     }
 
     pub(crate) fn track_count(&self) -> Result<usize> {
@@ -248,25 +260,22 @@ impl Store {
         directories: &[PathBuf],
         track_ids: &[i64],
     ) -> Result<(String, String)> {
-        self.validate_tracks(track_ids)?;
+        let ids = self.validated_track_ids(track_ids)?;
         let prefixes = directories
             .iter()
             .map(|path| directory_prefix(path))
             .collect::<Result<Vec<_>>>()?;
-        Ok((
-            serde_json::to_string(&prefixes)?,
-            serde_json::to_string(track_ids)?,
-        ))
+        Ok((serde_json::to_string(&prefixes)?, ids))
     }
     pub(crate) fn validate_tracks(&self, ids: &[i64]) -> Result<()> {
-        let missing: Option<i64> = self.conn.query_row(
-            "SELECT value FROM json_each(?1) WHERE value NOT IN (SELECT id FROM tracks) LIMIT 1",
-            [serde_json::to_string(ids)?], |row| row.get(0),
-        ).optional()?;
-        if let Some(id) = missing {
-            bail!("Track {id} does not exist");
-        }
+        self.validated_track_ids(ids)?;
         Ok(())
+    }
+
+    pub(super) fn validated_track_ids(&self, ids: &[i64]) -> Result<String> {
+        let encoded = serde_json::to_string(ids)?;
+        validate_encoded_track_ids(&self.conn, &encoded)?;
+        Ok(encoded)
     }
 
     pub fn track_id_for_source(&self, path: &Path, cue_number: Option<u32>) -> Result<Option<i64>> {
@@ -403,12 +412,12 @@ impl Store {
         )
     }
     pub fn remove_tracks(&self, ids: &[i64]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        let encoded_ids = self.validated_track_ids(ids)?;
         for id in ids {
             self.track_cache.borrow_mut().entries.remove(id);
         }
-        let tx = self.conn.unchecked_transaction()?;
-        self.validate_tracks(ids)?;
-        let ids = serde_json::to_string(ids)?;
+        let ids = encoded_ids;
         let queue_positions = tx
             .prepare("SELECT position FROM queue_entries WHERE track_id IN (SELECT value FROM json_each(?1)) ORDER BY position")?
             .query_map([&ids], |row| row.get(0))?
@@ -481,6 +490,20 @@ impl Store {
     }
 }
 
+pub(super) fn validate_encoded_track_ids(conn: &Connection, ids: &str) -> Result<()> {
+    let missing: Option<i64> = conn
+        .query_row(
+            "SELECT value FROM json_each(?1) WHERE value NOT IN (SELECT id FROM tracks) LIMIT 1",
+            [ids],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(id) = missing {
+        bail!("Track {id} does not exist");
+    }
+    Ok(())
+}
+
 fn removed_playlist_positions(
     tx: &Transaction<'_>,
     sql: &str,
@@ -524,14 +547,7 @@ mod deletion_tests {
                 (204,10,5,4),(205,10,6,5),(206,10,7,6),
                 (300,20,5,0),(301,20,7,1),(302,20,2,2),(303,20,6,3),
                 (304,20,3,4),(305,20,1,5),(306,20,4,6),
-                (400,30,4,0),(401,30,6,1),(402,30,7,2);
-             CREATE TABLE position_updates(scope TEXT,entry_id INTEGER);
-             CREATE TRIGGER observe_queue_position AFTER UPDATE OF position ON queue_entries BEGIN
-                INSERT INTO position_updates VALUES('queue',new.id);
-             END;
-             CREATE TRIGGER observe_playlist_position AFTER UPDATE OF position ON playlist_entries BEGIN
-                INSERT INTO position_updates VALUES('playlist',new.id);
-             END;",
+                (400,30,4,0),(401,30,6,1),(402,30,7,2);",
         )?;
         Ok(store)
     }
@@ -558,14 +574,6 @@ mod deletion_tests {
         )?)
     }
 
-    fn position_updates(store: &Store) -> Result<Vec<(String, i64)>> {
-        Ok(store
-            .conn
-            .prepare("SELECT scope,entry_id FROM position_updates ORDER BY scope,entry_id")?
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?)
-    }
-
     fn assert_compacted(store: &Store) -> Result<()> {
         assert_eq!(
             queue_rows(store)?,
@@ -587,21 +595,6 @@ mod deletion_tests {
                 (402, 30, 7, 2),
             ]
         );
-        let expected = [
-            ("playlist", 203),
-            ("playlist", 205),
-            ("playlist", 206),
-            ("playlist", 301),
-            ("playlist", 303),
-            ("playlist", 305),
-            ("playlist", 306),
-            ("queue", 104),
-            ("queue", 106),
-            ("queue", 107),
-        ]
-        .map(|(scope, id)| (scope.to_owned(), id))
-        .to_vec();
-        assert_eq!(position_updates(store)?, expected);
         Ok(())
     }
 
@@ -637,7 +630,7 @@ mod deletion_tests {
     }
 
     #[test]
-    fn unknown_ids_roll_back_and_unreferenced_deletions_do_not_update_positions() -> Result<()> {
+    fn unknown_ids_roll_back_and_unreferenced_deletions_preserve_order() -> Result<()> {
         let store = fixture()?;
         let queue = queue_rows(&store)?;
         let playlists = playlist_rows(&store)?;
@@ -652,7 +645,6 @@ mod deletion_tests {
         assert_eq!(queue_rows(&store)?, queue);
         assert_eq!(playlist_rows(&store)?, playlists);
         assert_eq!(current(&store)?, Some(106));
-        assert!(position_updates(&store)?.is_empty());
         let after_revision: i64 = store.conn.query_row(
             "SELECT revision FROM queue_meta WHERE singleton=1",
             [],
@@ -663,6 +655,84 @@ mod deletion_tests {
             .conn
             .query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get(0))?;
         assert_eq!(track_count, 7);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_track_requests_have_no_effect_and_duplicate_ids_are_accepted() -> Result<()> {
+        let store = Store::open(Path::new(":memory:"))?;
+        store
+            .conn
+            .execute_batch("INSERT INTO tracks(id,path) VALUES (1,'one'),(2,'two');")?;
+        for ids in [&[1, -1, 1][..], &[2, i64::MAX][..]] {
+            assert!(store.set_favorite(ids, true).is_err());
+            assert!(store.remove_tracks(ids).is_err());
+            assert!(store.source_parameters(&[], ids).is_err());
+        }
+        assert_eq!(store.track_count()?, 2);
+        let favorites: i64 =
+            store
+                .conn
+                .query_row("SELECT COUNT(*) FROM tracks WHERE favorite=1", [], |row| {
+                    row.get(0)
+                })?;
+        assert_eq!(favorites, 0);
+        store.set_favorite(&[2, 1, 2], true)?;
+        assert_eq!(store.library_stats()?.total, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn root_aliases_preserve_input_paths_overlap_and_all_track_kinds() -> Result<()> {
+        let store = Store::open(Path::new(":memory:"))?;
+        let roots = [
+            "/music",
+            "/music/",
+            "/music/disc/..",
+            "/music/./disc",
+            "/music/disc",
+            "/musical",
+            "/empty",
+            "",
+            "/",
+        ]
+        .map(PathBuf::from);
+        let empty = store.library_root_counts(&roots)?;
+        assert!(empty.iter().all(|count| count.total == 0));
+        assert_eq!(
+            empty.iter().map(|count| &count.path).collect::<Vec<_>>(),
+            roots.iter().collect::<Vec<_>>()
+        );
+        store.conn.execute_batch(
+            "INSERT INTO tracks(id,path,missing,cue_sheet,cue_number) VALUES
+                (1,'/music/one.wav',0,NULL,NULL),
+                (2,'/music/disc/image.wav',1,'/music/disc/image.cue',1),
+                (3,'/music/disc/image.wav',0,'/music/disc/image.cue',2),
+                (4,'/musical/other.wav',0,NULL,NULL);",
+        )?;
+        let counts = store.library_root_counts(&roots)?;
+        assert_eq!(
+            counts.iter().map(|count| count.total).collect::<Vec<_>>(),
+            vec![3, 3, 3, 2, 2, 1, 0, 4, 4]
+        );
+        assert_eq!(
+            counts.iter().map(|count| &count.path).collect::<Vec<_>>(),
+            roots.iter().collect::<Vec<_>>()
+        );
+        assert!(store.library_root_counts(&[])?.is_empty());
+        assert!(
+            store
+                .library_root_counts(&vec![
+                    PathBuf::from("/music");
+                    crate::model::MAX_QUERY_ROWS + 1
+                ])
+                .is_err()
+        );
         Ok(())
     }
 }

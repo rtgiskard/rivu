@@ -71,22 +71,53 @@ impl Core {
         index: usize,
     ) -> Result<()> {
         let ids = queue_ids.iter().copied().collect::<HashSet<_>>();
-        self.validate_queue_ids(&ids)?;
         if ids.is_empty() {
             return Ok(());
         }
-        let mut order = Vec::with_capacity(self.queue_ids.len());
-        let insertion = index.min(self.queue_ids.len() - ids.len());
-        let mut remaining = self
+        let mut selected = self
             .queue_ids
             .iter()
-            .copied()
-            .filter(|id| !ids.contains(id));
-        order.extend(remaining.by_ref().take(insertion));
-        order.extend(self.queue_ids.iter().copied().filter(|id| ids.contains(id)));
-        order.extend(remaining);
-        self.store.reorder_queue(&order)?;
-        self.queue_ids = order;
+            .enumerate()
+            .filter(|(_, id)| ids.contains(id));
+        let (first, &first_id) = selected.next().context("Queue entry not found")?;
+        let mut last = first;
+        let mut found = 1;
+        if ids.len() > 1 {
+            for (position, _) in selected {
+                last = position;
+                found += 1;
+                if found == ids.len() {
+                    break;
+                }
+            }
+        }
+        ensure!(found == ids.len(), "Queue entry not found");
+        let insertion = index.min(self.queue_ids.len() - ids.len());
+        if ids.len() == 1 {
+            if first == insertion {
+                return Ok(());
+            }
+            self.store.move_queue_entry(first_id, insertion)?;
+            if insertion < first {
+                self.queue_ids[insertion..=first].rotate_right(1);
+            } else {
+                self.queue_ids[first..=insertion].rotate_left(1);
+            }
+        } else {
+            let start = first.min(insertion);
+            let end = (last + 1).max(insertion + ids.len());
+            let span = &self.queue_ids[start..end];
+            let mut order = Vec::with_capacity(span.len());
+            let mut remaining = span.iter().copied().filter(|id| !ids.contains(id));
+            order.extend(remaining.by_ref().take(insertion - start));
+            order.extend(span.iter().copied().filter(|id| ids.contains(id)));
+            order.extend(remaining);
+            if order == span {
+                return Ok(());
+            }
+            self.store.reorder_queue_range(start, &order)?;
+            self.queue_ids[start..end].copy_from_slice(&order);
+        }
         self.state.queue = self.store.queue_projection(self.queue_ids.len())?;
         Ok(())
     }
@@ -105,6 +136,9 @@ impl Core {
         }
         let mut order = self.queue_ids.clone();
         order.shuffle(rng);
+        if order == self.queue_ids {
+            return Ok(());
+        }
         self.store.reorder_queue(&order)?;
         self.queue_ids = order;
         self.state.queue = self.store.queue_projection(self.queue_ids.len())?;

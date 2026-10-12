@@ -220,9 +220,10 @@ impl Core {
             return Err(QueryError::RevisionChanged);
         }
         Ok(match query {
-            Query::QueuePage { offset, limit } => {
-                ViewResponse::QueuePage(self.store.queue_page(*offset, *limit)?)
-            }
+            Query::QueuePage { offset, limit } => ViewResponse::QueuePage(
+                self.store
+                    .queue_page_with_total(*offset, *limit, self.queue_ids.len())?,
+            ),
             Query::QueueBatch { after, limit, .. } => {
                 ViewResponse::QueueBatch(self.store.queue_batch(*after, *limit)?)
             }

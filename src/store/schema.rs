@@ -39,6 +39,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
         );
         CREATE INDEX playlist_order ON playlist_entries(playlist_id,position,id);
         CREATE UNIQUE INDEX playlist_track ON playlist_entries(playlist_id,track_id);
+        CREATE INDEX playlist_track_lookup ON playlist_entries(track_id,playlist_id,position);
         CREATE TABLE queue_entries(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
@@ -65,7 +66,14 @@ fn create_schema(conn: &Connection) -> Result<()> {
         CREATE TRIGGER queue_metadata AFTER UPDATE OF raw_title,raw_artist,raw_album,
             title_override,artist_override,album_override,duration,favorite,missing,
             play_count,codec,bitrate_bps ON tracks
-        WHEN EXISTS(SELECT 1 FROM queue_entries WHERE track_id=new.id) BEGIN
+        WHEN (old.raw_title IS NOT new.raw_title OR old.raw_artist IS NOT new.raw_artist
+            OR old.raw_album IS NOT new.raw_album OR old.title_override IS NOT new.title_override
+            OR old.artist_override IS NOT new.artist_override
+            OR old.album_override IS NOT new.album_override OR old.duration IS NOT new.duration
+            OR old.favorite IS NOT new.favorite OR old.missing IS NOT new.missing
+            OR old.play_count IS NOT new.play_count OR old.codec IS NOT new.codec
+            OR old.bitrate_bps IS NOT new.bitrate_bps)
+            AND EXISTS(SELECT 1 FROM queue_entries WHERE track_id=new.id) BEGIN
             UPDATE queue_meta SET revision=revision+1;
         END;
         INSERT INTO schema_meta(key,value) VALUES('version',7);",
