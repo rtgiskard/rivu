@@ -1026,11 +1026,7 @@ impl GuiApp {
                                     this.browser.playlists.summaries().rows.get(index).cloned()
                                 else {
                                     return this
-                                        .paged_loading_row(
-                                            ViewRequestKind::PlaylistSummaries,
-                                            index,
-                                            cx,
-                                        )
+                                        .paged_loading_row(ViewRequestKind::Summaries, index, cx)
                                         .into_any_element();
                                 };
                                 let id = p.id;
@@ -1198,11 +1194,7 @@ impl GuiApp {
                                         this.browser.playlists.entries().rows.get(index).cloned()
                                     else {
                                         return this
-                                            .paged_loading_row(
-                                                ViewRequestKind::PlaylistEntries,
-                                                index,
-                                                cx,
-                                            )
+                                            .paged_loading_row(ViewRequestKind::Entries, index, cx)
                                             .into_any_element();
                                     };
                                     let id = e.id;

@@ -6,17 +6,17 @@ use crate::{model::Query, response::ViewResponse};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum ViewRequestKind {
-    PlaylistSummaries,
-    PlaylistEntries,
-    PlaylistSelection,
+    Summaries,
+    Entries,
+    Selection,
 }
 
 impl ViewRequestKind {
     fn for_query(query: &Query) -> Option<Self> {
         Some(match query {
-            Query::PlaylistSummaries { .. } => Self::PlaylistSummaries,
-            Query::PlaylistEntries { .. } => Self::PlaylistEntries,
-            Query::PlaylistSummaryBatch { .. } => Self::PlaylistSelection,
+            Query::PlaylistSummaries { .. } => Self::Summaries,
+            Query::PlaylistEntries { .. } => Self::Entries,
+            Query::PlaylistSummaryBatch { .. } => Self::Selection,
             _ => return None,
         })
     }
@@ -49,7 +49,7 @@ impl ViewRequests {
     fn invalidate_pages(&mut self) {
         // Existence lookups are not pages; changing page size cannot supersede them.
         self.generations
-            .retain(|kind, _| *kind == ViewRequestKind::PlaylistSelection);
+            .retain(|kind, _| *kind == ViewRequestKind::Selection);
     }
 }
 
@@ -137,10 +137,10 @@ impl GuiApp {
                     Err(error) => {
                         let message = error.to_string();
                         match kind {
-                            ViewRequestKind::PlaylistSummaries => {
+                            ViewRequestKind::Summaries => {
                                 this.browser.playlists.fail_page(false, message.clone())
                             }
-                            ViewRequestKind::PlaylistEntries => {
+                            ViewRequestKind::Entries => {
                                 this.browser.playlists.fail_page(true, message.clone())
                             }
                             _ => {}
@@ -152,11 +152,11 @@ impl GuiApp {
                 };
                 if revisions.playlist != this.state.library.playlist_revision {
                     match kind {
-                        ViewRequestKind::PlaylistSummaries => this.request_playlist_summaries(
+                        ViewRequestKind::Summaries => this.request_playlist_summaries(
                             this.browser.playlists.summaries().offset,
                             cx,
                         ),
-                        ViewRequestKind::PlaylistEntries => {
+                        ViewRequestKind::Entries => {
                             if let Some(id) = this.browser.playlists.entries().playlist_id {
                                 this.request_playlist_entries(
                                     id,
@@ -165,23 +165,19 @@ impl GuiApp {
                                 );
                             }
                         }
-                        ViewRequestKind::PlaylistSelection => this.request_playlist_selection(cx),
+                        ViewRequestKind::Selection => this.request_playlist_selection(cx),
                     }
                     return;
                 }
                 match result {
-                    ViewResponse::PlaylistSummaries(page)
-                        if kind == ViewRequestKind::PlaylistSummaries =>
-                    {
+                    ViewResponse::PlaylistSummaries(page) if kind == ViewRequestKind::Summaries => {
                         this.browser.playlists.accept_summaries(page);
                     }
-                    ViewResponse::PlaylistEntries(page)
-                        if kind == ViewRequestKind::PlaylistEntries =>
-                    {
+                    ViewResponse::PlaylistEntries(page) if kind == ViewRequestKind::Entries => {
                         this.browser.playlists.accept_entries(page);
                     }
                     ViewResponse::PlaylistSummaryBatch(batch)
-                        if kind == ViewRequestKind::PlaylistSelection =>
+                        if kind == ViewRequestKind::Selection =>
                     {
                         if let Some(id) = selected_playlist {
                             this.browser
@@ -412,12 +408,12 @@ impl GuiApp {
     pub(super) fn retry_view_page(&mut self, kind: ViewRequestKind, cx: &mut Context<Self>) {
         let page_size = self.view_page_size();
         match kind {
-            ViewRequestKind::PlaylistSummaries => {
+            ViewRequestKind::Summaries => {
                 if let Some(offset) = self.browser.playlists.retry_page(false, page_size) {
                     self.load_playlist_summaries(offset, cx);
                 }
             }
-            ViewRequestKind::PlaylistEntries => {
+            ViewRequestKind::Entries => {
                 if let Some(id) = self.browser.playlists.entries().playlist_id
                     && let Some(offset) = self.browser.playlists.retry_page(true, page_size)
                 {

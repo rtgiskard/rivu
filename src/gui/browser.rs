@@ -68,7 +68,7 @@ impl BrowserState {
 
     pub(super) fn remove_playlist_selection(&mut self) {
         self.requests
-            .cancel(super::queries::ViewRequestKind::PlaylistEntries);
+            .cancel(super::queries::ViewRequestKind::Entries);
         self.playlists.remove_selected();
     }
 

@@ -890,10 +890,8 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let error = match kind {
-            ViewRequestKind::PlaylistSummaries => {
-                self.browser.playlists.summaries().rows.error(index)
-            }
-            ViewRequestKind::PlaylistEntries => self.browser.playlists.entries().rows.error(index),
+            ViewRequestKind::Summaries => self.browser.playlists.summaries().rows.error(index),
+            ViewRequestKind::Entries => self.browser.playlists.entries().rows.error(index),
             _ => None,
         };
         list_row(("loading-row", index), false)

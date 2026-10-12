@@ -952,73 +952,74 @@ impl Render for GuiApp {
                                 * panels::TRACK_HEIGHT)
                                 .min(240.)
                                 .min(f32::from(window.viewport_size().height) * 0.5);
-                            menu =
-                                menu.child(
-                                    uniform_list(
-                                        "queue-playlist-targets",
-                                        self.browser.playlists.summaries().rows.len(),
-                                        cx.processor(
-                                            move |this, range: std::ops::Range<usize>, _, cx| {
-                                                range
-                                                    .map(|index| {
-                                                        let Some(playlist) = this
-                                                            .browser
-                                                            .playlists
-                                                            .summaries()
-                                                            .rows
-                                                            .get(index)
-                                                        else {
-                                                            return this.paged_loading_row(
-                                                            ViewRequestKind::PlaylistSummaries,
-                                                            index,
-                                                            cx,
-                                                        ).h(px(panels::TRACK_HEIGHT));
-                                                        };
-                                                        let playlist_id = playlist.id;
-                                                        menu_item(
-                                                            ("queue-playlist", playlist_id as u64),
-                                                            playlist.name.clone(),
-                                                            cx,
-                                                            move |this, _, cx| {
-                                                                let track_ids = this
-                                                                    .state
-                                                                    .queue
-                                                                    .entries
-                                                                    .iter()
-                                                                    .filter(|entry| {
-                                                                        this.browser
-                                                                            .queue
-                                                                            .contains(&entry.id)
-                                                                    })
-                                                                    .map(|entry| entry.track_id)
-                                                                    .collect();
-                                                                this.panel_menu = None;
-                                                                this.send(
-                                                                    Command::AddPlaylist {
-                                                                        playlist_id,
-                                                                        track_ids,
-                                                                    },
-                                                                    cx,
-                                                                );
-                                                                cx.notify();
-                                                            },
-                                                        )
-                                                        .h(px(panels::TRACK_HEIGHT))
-                                                        .w_full()
-                                                        .overflow_hidden()
-                                                    })
-                                                    .collect()
-                                            },
-                                        ),
-                                    )
-                                    .with_decoration(paged::viewport_demand(cx.processor(
-                                        |this, range, _, cx| {
-                                            this.ensure_playlist_range(range, cx);
+                            menu = menu.child(
+                                uniform_list(
+                                    "queue-playlist-targets",
+                                    self.browser.playlists.summaries().rows.len(),
+                                    cx.processor(
+                                        move |this, range: std::ops::Range<usize>, _, cx| {
+                                            range
+                                                .map(|index| {
+                                                    let Some(playlist) = this
+                                                        .browser
+                                                        .playlists
+                                                        .summaries()
+                                                        .rows
+                                                        .get(index)
+                                                    else {
+                                                        return this
+                                                            .paged_loading_row(
+                                                                ViewRequestKind::Summaries,
+                                                                index,
+                                                                cx,
+                                                            )
+                                                            .h(px(panels::TRACK_HEIGHT));
+                                                    };
+                                                    let playlist_id = playlist.id;
+                                                    menu_item(
+                                                        ("queue-playlist", playlist_id as u64),
+                                                        playlist.name.clone(),
+                                                        cx,
+                                                        move |this, _, cx| {
+                                                            let track_ids = this
+                                                                .state
+                                                                .queue
+                                                                .entries
+                                                                .iter()
+                                                                .filter(|entry| {
+                                                                    this.browser
+                                                                        .queue
+                                                                        .contains(&entry.id)
+                                                                })
+                                                                .map(|entry| entry.track_id)
+                                                                .collect();
+                                                            this.panel_menu = None;
+                                                            this.send(
+                                                                Command::AddPlaylist {
+                                                                    playlist_id,
+                                                                    track_ids,
+                                                                },
+                                                                cx,
+                                                            );
+                                                            cx.notify();
+                                                        },
+                                                    )
+                                                    .h(px(panels::TRACK_HEIGHT))
+                                                    .w_full()
+                                                    .overflow_hidden()
+                                                })
+                                                .collect()
                                         },
-                                    )))
-                                    .h(px(height))
-                                    .w_full(),
-                                );
+                                    ),
+                                )
+                                .with_decoration(paged::viewport_demand(cx.processor(
+                                    |this, range, _, cx| {
+                                        this.ensure_playlist_range(range, cx);
+                                    },
+                                )))
+                                .h(px(height))
+                                .w_full(),
+                            );
                         }
                     } else {
                         menu = menu.child(panels::caption(

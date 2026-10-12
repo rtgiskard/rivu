@@ -131,10 +131,10 @@ fn cancellation_is_shared_and_discards_discovery_or_accumulated_records() -> Res
     let mut reported_progress = false;
     assert!(
         super::scan_paths(
-            &[root.clone()],
+            std::slice::from_ref(&root),
             &[],
             false,
-            &[root],
+            std::slice::from_ref(&root),
             1,
             &cancellation,
             |_, _, _, _, _| reported_progress = true,
