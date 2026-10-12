@@ -219,10 +219,17 @@ impl Store {
     }
 
     pub fn create_playlist(&self, name: &str) -> Result<i64> {
+        self.create_playlist_with_tracks(name, &[])
+    }
+
+    pub fn create_playlist_with_tracks(&self, name: &str, tracks: &[i64]) -> Result<i64> {
         valid_name(name)?;
-        self.conn
-            .execute("INSERT INTO playlists(name)VALUES(?)", [name])?;
-        Ok(self.conn.last_insert_rowid())
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("INSERT INTO playlists(name)VALUES(?)", [name])?;
+        let id = tx.last_insert_rowid();
+        append_tracks(&tx, id, tracks)?;
+        tx.commit()?;
+        Ok(id)
     }
     pub fn rename_playlist(&self, id: i64, name: &str) -> Result<()> {
         valid_name(name)?;
@@ -244,31 +251,7 @@ impl Store {
     pub fn add_playlist(&self, id: i64, tracks: &[i64]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         exists_playlist(&tx, id)?;
-        let mut position: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=?",
-            [id],
-            |r| r.get(0),
-        )?;
-        let mut seen = HashSet::with_capacity(tracks.len());
-        let mut exists_track_stmt =
-            tx.prepare("SELECT EXISTS(SELECT 1 FROM tracks WHERE id=?1)")?;
-        let mut insert = tx.prepare(
-            "INSERT INTO playlist_entries(playlist_id,track_id,position)
-             SELECT ?1,?2,?3 WHERE NOT EXISTS(
-                 SELECT 1 FROM playlist_entries WHERE playlist_id=?1 AND track_id=?2
-             )",
-        )?;
-        for &track_id in tracks {
-            if !seen.insert(track_id) {
-                continue;
-            }
-            if !exists_track_stmt.query_row([track_id], |row| row.get::<_, bool>(0))? {
-                bail!("Track {track_id} does not exist");
-            }
-            position += insert.execute(params![id, track_id, position])? as i64;
-        }
-        drop(insert);
-        drop(exists_track_stmt);
+        append_tracks(&tx, id, tracks)?;
         tx.commit()?;
         Ok(())
     }
@@ -321,6 +304,32 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+}
+
+fn append_tracks(tx: &Transaction<'_>, id: i64, tracks: &[i64]) -> Result<()> {
+    let mut position: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=?",
+        [id],
+        |r| r.get(0),
+    )?;
+    let mut seen = HashSet::with_capacity(tracks.len());
+    let mut exists = tx.prepare("SELECT EXISTS(SELECT 1 FROM tracks WHERE id=?1)")?;
+    let mut insert = tx.prepare(
+        "INSERT INTO playlist_entries(playlist_id,track_id,position)
+         SELECT ?1,?2,?3 WHERE NOT EXISTS(
+             SELECT 1 FROM playlist_entries WHERE playlist_id=?1 AND track_id=?2
+         )",
+    )?;
+    for &track_id in tracks {
+        if !seen.insert(track_id) {
+            continue;
+        }
+        if !exists.query_row([track_id], |row| row.get::<_, bool>(0))? {
+            bail!("Track {track_id} does not exist");
+        }
+        position += insert.execute(params![id, track_id, position])? as i64;
+    }
+    Ok(())
 }
 
 fn exists_playlist(tx: &Transaction<'_>, id: i64) -> Result<()> {

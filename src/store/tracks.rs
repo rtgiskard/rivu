@@ -444,14 +444,16 @@ impl Store {
         let tx = self.conn.unchecked_transaction()?;
         let mut affected = HashSet::new();
         let mut exists = tx.prepare("SELECT EXISTS(SELECT 1 FROM tracks WHERE id=?1)")?;
+        for &id in ids {
+            if !exists.query_row([id], |row| row.get::<_, bool>(0))? {
+                bail!("Track {id} does not exist");
+            }
+        }
         let mut playlists =
             tx.prepare("SELECT DISTINCT playlist_id FROM playlist_entries WHERE track_id=?1")?;
         let mut delete_entries = tx.prepare("DELETE FROM playlist_entries WHERE track_id=?1")?;
         let mut delete_tracks = tx.prepare("DELETE FROM tracks WHERE id=?1")?;
         for &id in ids {
-            if !exists.query_row([id], |row| row.get::<_, bool>(0))? {
-                bail!("Track {id} does not exist");
-            }
             affected.extend(
                 playlists
                     .query_map([id], |row| row.get::<_, i64>(0))?

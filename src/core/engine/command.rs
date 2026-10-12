@@ -3,19 +3,14 @@ use anyhow::ensure;
 
 impl Core {
     pub(in crate::core) fn command(&mut self, command: Command) -> Result<()> {
-        let persist_queue = matches!(
-            &command,
-            Command::Enqueue { .. }
-                | Command::EnqueueSources { .. }
-                | Command::RemoveQueueEntries { .. }
-                | Command::MoveQueue { .. }
-                | Command::MoveQueueEntries { .. }
-                | Command::ClearQueue
-                | Command::RandomizeQueue
-                | Command::DeduplicateQueue
-                | Command::RemoveTracks { .. }
-                | Command::RemoveMissingTracks
-        );
+        // Persist the resulting queue even when a later operation fails (for
+        // example, loading an unavailable track after replacing the queue).
+        let result = self.apply_command(command);
+        let saved = self.save(false);
+        result.and(saved)
+    }
+
+    fn apply_command(&mut self, command: Command) -> Result<()> {
         let persist_config = matches!(
             &command,
             Command::Volume { .. }
@@ -132,34 +127,14 @@ impl Core {
                     .source_track_ids(&directories, &track_ids, remaining)?;
                 self.enqueue(&ids)?;
             }
-            Command::RemoveQueue { queue_id } => {
-                if !self.state.queue.entries.iter().any(|q| q.id == queue_id) {
-                    bail!("Queue entry not found");
-                }
-                if self.state.queue.current_id == Some(queue_id) {
-                    self.stop()?;
-                    self.state.queue.current_id = None;
-                }
-                Arc::make_mut(&mut self.state.queue.entries).retain(|q| q.id != queue_id);
-                self.refresh_queue_rows()?;
-                self.prune_queue_history();
-            }
+            Command::RemoveQueue { queue_id } => self.remove_queue_entries(&[queue_id])?,
             Command::RemoveQueueEntries { queue_ids } => self.remove_queue_entries(&queue_ids)?,
             Command::MoveQueue { queue_id, index } => {
-                let old = self
-                    .state
-                    .queue
-                    .entries
-                    .iter()
-                    .position(|q| q.id == queue_id)
-                    .context("Queue entry not found")?;
                 ensure!(
                     index < self.state.queue.entries.len(),
                     "Queue target position out of range"
                 );
-                let queue = Arc::make_mut(&mut self.state.queue.entries);
-                let entry = queue.remove(old);
-                queue.insert(index, entry);
+                self.move_queue_entries(&[queue_id], index)?;
             }
             Command::MoveQueueEntries { queue_ids, index } => {
                 self.move_queue_entries(&queue_ids, index)?;
@@ -242,7 +217,9 @@ impl Core {
                 self.refresh_affected_queue_tracks(&[track_id])?;
                 self.state.library.revision = self.state.library.revision.wrapping_add(1);
             }
-            Command::RemoveTracks { track_ids } => {
+            Command::RemoveTracks { mut track_ids } => {
+                track_ids.sort_unstable();
+                track_ids.dedup();
                 for id in &track_ids {
                     self.track(*id)?;
                 }
@@ -388,9 +365,10 @@ impl Core {
                 {
                     bail!("Database optimization requires stopped playback and no active scan");
                 }
+                self.save(false)?;
                 self.state.system.database_optimization = Some(self.store.optimize()?);
-                // Saving playback here would immediately create new WAL pages
-                // after maintenance has truncated them.
+                // The saved queue baseline makes command finalization a no-op
+                // for SQLite after maintenance has truncated the WAL.
                 return Ok(());
             }
             Command::Shutdown => {
@@ -398,8 +376,7 @@ impl Core {
                 self.stop()?;
             }
         }
-        self.queue_dirty |= persist_queue;
         self.config_dirty |= persist_config;
-        self.save(false)
+        Ok(())
     }
 }

@@ -378,7 +378,7 @@ impl Runtime {
                     shuffle_bag: Vec::new(),
                     played: Vec::new(),
                     played_cursor: 0,
-                    queue_dirty: false,
+                    saved_queue: None,
                     config_dirty: false,
                     config_last_saved: Instant::now(),
                 };
@@ -465,6 +465,11 @@ struct SavedRef<'a> {
     queue: &'a [QueueEntry],
     current: Option<u64>,
 }
+
+struct SavedQueue {
+    entries: Arc<Vec<QueueEntry>>,
+    current: Option<u64>,
+}
 struct PlaybackStats {
     track_id: i64,
     heard: f64,
@@ -517,7 +522,7 @@ struct Core {
     played: Vec<u64>,
     // Number of history entries through the current (or just removed) entry.
     played_cursor: usize,
-    queue_dirty: bool,
+    saved_queue: Option<SavedQueue>,
     config_dirty: bool,
     config_last_saved: Instant,
 }
@@ -583,6 +588,10 @@ impl Core {
                 .flatten()
                 .map(Arc::new);
         }
+        self.saved_queue = Some(SavedQueue {
+            entries: Arc::clone(&self.state.queue.entries),
+            current: self.state.queue.current_id,
+        });
         self.publish();
         Ok(())
     }
@@ -668,7 +677,7 @@ mod tests {
             shuffle_bag: Vec::new(),
             played: Vec::new(),
             played_cursor: 0,
-            queue_dirty: false,
+            saved_queue: None,
             config_dirty: false,
             config_last_saved: Instant::now(),
         };
@@ -882,9 +891,7 @@ mod tests {
     fn saved_playback_restores_order_duplicates_and_current_entry() {
         let (_directory, mut core) = fixture();
         core.state.queue.current_id = Some(3);
-        core.queue_dirty = true;
         core.save(false).unwrap();
-        assert!(!core.queue_dirty);
         core.state.queue.entries = Arc::default();
         core.state.queue.tracks = Arc::default();
         core.state.queue.current_id = None;
@@ -898,7 +905,6 @@ mod tests {
 
         core.state.queue.entries = Arc::default();
         core.state.queue.current_id = None;
-        core.queue_dirty = true;
         core.save(false).unwrap();
         core.enqueue(&[1]).unwrap();
         core.load_initial_state().unwrap();
@@ -2088,11 +2094,9 @@ mod tests {
         core.state.system.scanning = true;
         assert!(core.command(Command::OptimizeDatabase).is_err());
         core.state.system.scanning = false;
-        let saved = core.store.get_setting("playback").unwrap();
         core.enqueue(&[4]).unwrap();
         core.command(Command::OptimizeDatabase).unwrap();
         assert!(core.state.system.database_optimization.is_some());
-        assert_eq!(core.store.get_setting("playback").unwrap(), saved);
         assert_eq!(core.store.history(200).unwrap()[0].track_id, 1);
         assert_eq!(play_count(&core, 1), 0);
     }
@@ -2538,6 +2542,76 @@ mod tests {
             queue_entries(&core.state.queue.entries)
         );
         assert_eq!(saved.current, core.state.queue.current_id);
+    }
+
+    #[test]
+    fn single_queue_removal_survives_restore() {
+        let (_directory, mut core) = fixture();
+        core.state.queue.current_id = Some(2);
+        core.save(false).unwrap();
+        core.command(Command::RemoveQueue { queue_id: 2 }).unwrap();
+        core.load_initial_state().unwrap();
+        assert_eq!(
+            queue_entries(&core.state.queue.entries),
+            [(1, 1), (3, 2), (4, 3), (5, 4)]
+        );
+        assert_eq!(core.state.queue.current_id, None);
+    }
+
+    #[test]
+    fn playlist_creation_failure_leaves_catalog_and_versions_unchanged() {
+        let (_directory, mut core) = fixture();
+        core.publish();
+        let before = core.state.query_revisions();
+        assert!(
+            core.command(Command::CreatePlaylistWithTracks {
+                name: "invalid".into(),
+                track_ids: vec![1, 999],
+            })
+            .is_err()
+        );
+        core.publish();
+        assert_eq!(core.store.playlist_summary_page(0, 1).unwrap().total, 0);
+        assert_eq!(core.state.library.playlist_total, 0);
+        assert_eq!(core.state.query_revisions(), before);
+        core.command(Command::CreatePlaylistWithTracks {
+            name: "valid".into(),
+            track_ids: vec![2, 1, 2],
+        })
+        .unwrap();
+        let playlist = core.store.playlist_summary_page(0, 1).unwrap().rows[0].id;
+        assert_eq!(core.store.playlist_track_ids(playlist, 10).unwrap(), [2, 1]);
+        assert_eq!(core.state.library.playlist_total, 1);
+    }
+
+    #[test]
+    fn track_removal_validates_the_set_before_stopping_playback() {
+        let (_directory, mut core) = fixture();
+        playing(&mut core, 1);
+        let generation = core.generation;
+        assert!(
+            core.command(Command::RemoveTracks {
+                track_ids: vec![1, 1, 999],
+            })
+            .is_err()
+        );
+        assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
+        assert_eq!(core.generation, generation);
+        assert!(core.store.track(1).unwrap().is_some());
+        core.command(Command::RemoveTracks {
+            track_ids: vec![1, 1],
+        })
+        .unwrap();
+        assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+        assert!(core.store.track(1).unwrap().is_none());
+        assert!(
+            core.state
+                .queue
+                .entries
+                .iter()
+                .all(|entry| entry.track_id != 1)
+        );
+        assert_queue_saved(&core);
     }
 
     #[test]

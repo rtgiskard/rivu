@@ -11,6 +11,9 @@ Use `rivu playlist` to create, rename, delete, add, remove, move, or play.
 Playlist IDs identify collections; entry IDs identify items for removal or
 movement. Move indices start at zero. `playlist list` shows both kinds of ID.
 
+Creating a playlist from a queue commits the name and entries together. If an
+entry cannot be saved, no empty playlist is left behind.
+
 [source,sh]
 ----
 rivu playlist new "Mix"

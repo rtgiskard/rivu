@@ -52,7 +52,6 @@ impl Core {
             }
         }
         self.shuffle_bag.retain(|id| *id != queue_id);
-        self.queue_dirty = true;
         self.save(false)
     }
     pub(in crate::core) fn count_play(&mut self) -> Result<()> {

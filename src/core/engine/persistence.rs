@@ -41,7 +41,27 @@ impl Core {
         Ok(())
     }
 
+    fn save_queue(&mut self) -> Result<()> {
+        if self.saved_queue.as_ref().is_none_or(|saved| {
+            !Arc::ptr_eq(&saved.entries, &self.state.queue.entries)
+                || saved.current != self.state.queue.current_id
+        }) {
+            let saved = SavedRef {
+                queue: self.state.queue.entries.as_slice(),
+                current: self.state.queue.current_id,
+            };
+            self.store
+                .set_setting("playback", &serde_json::to_string(&saved)?)?;
+            self.saved_queue = Some(SavedQueue {
+                entries: Arc::clone(&self.state.queue.entries),
+                current: self.state.queue.current_id,
+            });
+        }
+        Ok(())
+    }
+
     pub(in crate::core) fn save(&mut self, force_config: bool) -> Result<()> {
+        self.save_queue()?;
         let config_changed = self.state.system.config.volume != self.state.playback.volume
             || self.state.system.config.shuffle != self.state.playback.shuffle
             || self.state.system.config.repeat != self.state.playback.repeat
@@ -63,15 +83,6 @@ impl Core {
             self.config_dirty = false;
         } else if !config_changed {
             self.config_dirty = false;
-        }
-        if self.queue_dirty {
-            let saved = SavedRef {
-                queue: self.state.queue.entries.as_slice(),
-                current: self.state.queue.current_id,
-            };
-            self.store
-                .set_setting("playback", &serde_json::to_string(&saved)?)?;
-            self.queue_dirty = false;
         }
         Ok(())
     }

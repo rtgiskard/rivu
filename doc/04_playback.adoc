@@ -67,6 +67,8 @@ Each occurrence counts toward `playback.queue_limit` (4096 by default). Oversize
 directory expansions, and playlist loads are rejected without changing the queue.
 Saved queues restore valid occurrences in order up to the configured limit,
 preserving duplicates and skipping removed records.
+Queue order, removals, and the current occurrence are saved when they change,
+including single-occurrence commands from CLI and TUI.
 
 Use `rivu queue list` to find occurrence IDs for `queue play`, `queue remove`,
 and `queue move`. Move positions start at zero. `queue add TRACK_ID...` appends

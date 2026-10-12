@@ -88,6 +88,9 @@ impl Core {
     }
 
     pub(in crate::core) fn enqueue(&mut self, ids: &[i64]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
         let current_len = self.state.queue.entries.len();
         let limit = self.state.system.config.queue_limit as usize;
         ensure!(
@@ -114,9 +117,6 @@ impl Core {
         }
         self.refresh_queue_rows()?;
         self.shuffle_bag.clear();
-        if !ids.is_empty() {
-            self.queue_dirty = true;
-        }
         Ok(())
     }
     pub(in crate::core) fn randomize_queue(&mut self, rng: &mut impl rand::Rng) {

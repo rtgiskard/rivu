@@ -138,8 +138,7 @@ impl Core {
             if ids.is_empty() {
                 bail!("Playlist contains no supported, accessible audio tracks");
             }
-            let playlist_id = self.store.create_playlist(&name)?;
-            self.store.add_playlist(playlist_id, &ids)?;
+            self.store.create_playlist_with_tracks(&name, &ids)?;
             self.reload_playlists()?;
         }
         Ok(successful)

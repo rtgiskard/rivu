@@ -11,8 +11,7 @@ impl Core {
         name: String,
         track_ids: Vec<i64>,
     ) -> Result<()> {
-        let playlist_id = self.store.create_playlist(&name)?;
-        self.store.add_playlist(playlist_id, &track_ids)?;
+        self.store.create_playlist_with_tracks(&name, &track_ids)?;
         self.reload_playlists()
     }
 
