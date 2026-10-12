@@ -76,11 +76,26 @@ struct Tile {
     image: Arc<RenderImage>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WaveformColumn {
+    left_rms: Option<f32>,
+    left_peak: Option<f32>,
+    right_rms: Option<f32>,
+    right_peak: Option<f32>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct WaveformMapping {
+    rms_gain: f32,
+    peak_gain: f32,
+    peak_gamma: f32,
+}
+
 struct Columns {
     revision: u64,
     width: usize,
-    mapping: Option<(f32, f32, f32)>,
-    values: Vec<(Option<f32>, Option<f32>, Option<f32>, Option<f32>)>,
+    mapping: Option<WaveformMapping>,
+    values: Vec<WaveformColumn>,
     layer_key: Option<LayerKey>,
     tiles: Vec<Tile>,
     tile_revision: Option<u64>,
@@ -125,24 +140,27 @@ fn pooled_side(
     first: usize,
     end: usize,
     scale: f32,
-    rms_gain: f32,
-    peak_gain: f32,
-    peak_gamma: f32,
+    mapping: WaveformMapping,
 ) -> (Option<f32>, Option<f32>) {
     let peak = peaks[first..end]
         .iter()
         .flatten()
         .copied()
         .reduce(f32::max)
-        .map(|value| waveform_level(value * scale, peak_gain, peak_gamma));
+        .map(|value| waveform_level(value * scale, mapping.peak_gain, mapping.peak_gamma));
     let mut energy = 0.0_f32;
     let mut known = 0_u32;
     for value in rms[first..end].iter().flatten().copied() {
         energy += value * value;
         known += 1;
     }
-    let rms = (known != 0)
-        .then(|| waveform_level((energy / known as f32).sqrt() * scale, rms_gain, 0.86));
+    let rms = (known != 0).then(|| {
+        waveform_level(
+            (energy / known as f32).sqrt() * scale,
+            mapping.rms_gain,
+            0.86,
+        )
+    });
     (rms, peak)
 }
 
@@ -202,14 +220,15 @@ impl WaveformImageRelease {
     }
 }
 
-fn tile_fingerprint(
-    values: &[(Option<f32>, Option<f32>, Option<f32>, Option<f32>)],
-    start: usize,
-    end: usize,
-) -> u64 {
+fn tile_fingerprint(values: &[WaveformColumn], start: usize, end: usize) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    for &(a, b, c, d) in &values[start..end] {
-        for value in [a, b, c, d] {
+    for column in &values[start..end] {
+        for value in [
+            column.left_rms,
+            column.left_peak,
+            column.right_rms,
+            column.right_peak,
+        ] {
             value.map(f32::to_bits).hash(&mut hasher);
         }
     }
@@ -319,7 +338,7 @@ impl WaveformPlot {
     }
 
     fn build_tile(
-        values: &[(Option<f32>, Option<f32>, Option<f32>, Option<f32>)],
+        values: &[WaveformColumn],
         x_start: u32,
         x_end: u32,
         width: u32,
@@ -330,7 +349,12 @@ impl WaveformPlot {
         let center = height as f32 * 0.5;
         let range = tile_columns(x_start, x_end, width, values.len());
         for column in range {
-            let (left_rms, left_peak, right_rms, right_peak) = values[column];
+            let WaveformColumn {
+                left_rms,
+                left_peak,
+                right_rms,
+                right_peak,
+            } = values[column];
             let x0 = (column as u32 * width / values.len() as u32).max(x_start);
             let x1 = (((column + 1) as u32 * width) / values.len() as u32).min(x_end);
             if x0 >= x1 {
@@ -379,13 +403,18 @@ impl WaveformPlot {
         Arc::new(RenderImage::new([image::Frame::new(pixels)]))
     }
     #[cfg(test)]
-    fn columns(
-        &mut self,
-        panel_id: u64,
-        width: usize,
-        frame: &WaveformFrame,
-    ) -> &[(Option<f32>, Option<f32>, Option<f32>, Option<f32>)] {
-        self.columns_with_cache(panel_id, width, frame, true, 1.0, 1.0, 1.0)
+    fn columns(&mut self, panel_id: u64, width: usize, frame: &WaveformFrame) -> &[WaveformColumn] {
+        self.columns_with_cache(
+            panel_id,
+            width,
+            frame,
+            true,
+            WaveformMapping {
+                rms_gain: 1.0,
+                peak_gain: 1.0,
+                peak_gamma: 1.0,
+            },
+        )
     }
 
     fn columns_with_cache(
@@ -394,10 +423,8 @@ impl WaveformPlot {
         width: usize,
         frame: &WaveformFrame,
         cache_enabled: bool,
-        rms_gain: f32,
-        peak_gain: f32,
-        peak_gamma: f32,
-    ) -> &[(Option<f32>, Option<f32>, Option<f32>, Option<f32>)] {
+        mapping: WaveformMapping,
+    ) -> &[WaveformColumn] {
         let columns = self.columns.entry(panel_id).or_insert_with(|| Columns {
             revision: frame.revision,
             width,
@@ -428,7 +455,6 @@ impl WaveformPlot {
             &frame.right_rms
         };
         let count = width.max(1).min(left_peaks.len());
-        let mapping = (rms_gain, peak_gain, peak_gamma);
         if !cache_enabled
             || columns.revision != frame.revision
             || columns.width != width
@@ -442,22 +468,16 @@ impl WaveformPlot {
             for column in 0..count {
                 let first = column * left_peaks.len() / count;
                 let end = (column + 1) * left_peaks.len() / count;
-                let (left_rms, left_peak) = pooled_side(
-                    left_peaks, left_rms, first, end, scale, rms_gain, peak_gain, peak_gamma,
-                );
-                let (right_rms, right_peak) = pooled_side(
-                    right_peaks,
+                let (left_rms, left_peak) =
+                    pooled_side(left_peaks, left_rms, first, end, scale, mapping);
+                let (right_rms, right_peak) =
+                    pooled_side(right_peaks, right_rms, first, end, scale, mapping);
+                columns.values.push(WaveformColumn {
+                    left_rms,
+                    left_peak,
                     right_rms,
-                    first,
-                    end,
-                    scale,
-                    rms_gain,
-                    peak_gain,
-                    peak_gamma,
-                );
-                columns
-                    .values
-                    .push((left_rms, left_peak, right_rms, right_peak));
+                    right_peak,
+                });
             }
         }
         columns.revision = frame.revision;
@@ -1007,9 +1027,11 @@ impl Waveform {
                                         (plot.size.width / px(1.0)) as usize,
                                         &frame,
                                         cache_enabled,
-                                        rms_gain,
-                                        peak_gain,
-                                        peak_gamma,
+                                        WaveformMapping {
+                                            rms_gain,
+                                            peak_gain,
+                                            peak_gamma,
+                                        },
                                     );
                                     (
                                         frame.revision,
@@ -1197,8 +1219,18 @@ mod tests {
         );
         let image = WaveformPlot::build_tile(
             &[
-                (Some(0.5), Some(0.9), Some(0.5), Some(0.9)),
-                (None, Some(0.9), None, Some(0.9)),
+                WaveformColumn {
+                    left_rms: Some(0.5),
+                    left_peak: Some(0.9),
+                    right_rms: Some(0.5),
+                    right_peak: Some(0.9),
+                },
+                WaveformColumn {
+                    left_rms: None,
+                    left_peak: Some(0.9),
+                    right_rms: None,
+                    right_peak: Some(0.9),
+                },
             ],
             0,
             2,
@@ -1260,8 +1292,19 @@ mod tests {
         plot.release_images(|_| released += 1);
         assert_eq!(released, 4);
         assert!(tile.upgrade().is_none());
-        let image =
-            WaveformPlot::build_tile(&[(Some(0.2), Some(0.3), None, None)], 0, 1, 1, 10, &palette);
+        let image = WaveformPlot::build_tile(
+            &[WaveformColumn {
+                left_rms: Some(0.2),
+                left_peak: Some(0.3),
+                right_rms: None,
+                right_peak: None,
+            }],
+            0,
+            1,
+            1,
+            10,
+            &palette,
+        );
         let pending = Arc::downgrade(&image);
         plot.pending_images.push(image);
         plot.release_images(|_| panic!("pending image released in its first boundary"));
@@ -1373,10 +1416,8 @@ mod tests {
         }
     }
 
-    fn amplitudes(
-        columns: &[(Option<f32>, Option<f32>, Option<f32>, Option<f32>)],
-    ) -> Vec<Option<f32>> {
-        columns.iter().map(|column| column.1).collect()
+    fn amplitudes(columns: &[WaveformColumn]) -> Vec<Option<f32>> {
+        columns.iter().map(|column| column.left_peak).collect()
     }
 
     #[test]
@@ -1393,7 +1434,7 @@ mod tests {
             amplitudes(plot.columns(1, 2, &frame)),
             vec![fine[1], fine[2]]
         );
-        assert_eq!(plot.columns(1, 1, &frame)[0].1, Some(1.0));
+        assert_eq!(plot.columns(1, 1, &frame)[0].left_peak, Some(1.0));
         assert_eq!(amplitudes(plot.columns(2, 5, &frame)), fine);
     }
 
@@ -1401,8 +1442,18 @@ mod tests {
     fn low_amplitude_rms_stays_within_peak_after_display_mapping() {
         for scale in [1.0, 0.5] {
             for (rms, peak) in [(0.1, 0.15), (0.01, 0.02), (0.00025, 0.0005), (0.2, 0.2)] {
-                let (rms_height, peak_height) =
-                    pooled_side(&[Some(peak)], &[Some(rms)], 0, 1, scale, 1.0, 1.0, 0.86);
+                let (rms_height, peak_height) = pooled_side(
+                    &[Some(peak)],
+                    &[Some(rms)],
+                    0,
+                    1,
+                    scale,
+                    WaveformMapping {
+                        rms_gain: 1.0,
+                        peak_gain: 1.0,
+                        peak_gamma: 0.86,
+                    },
+                );
                 let rms_height = rms_height.unwrap();
                 let peak_height = peak_height.unwrap();
                 assert!(rms_height > 0.0);
@@ -1433,7 +1484,7 @@ mod tests {
             amplitudes(plot.columns(1, 3, &frame)),
             vec![None, Some(0.0), fine[4]]
         );
-        assert_eq!(plot.columns(2, 1, &frame)[0].1, fine[4]);
+        assert_eq!(plot.columns(2, 1, &frame)[0].left_peak, fine[4]);
     }
 
     #[test]
@@ -1460,7 +1511,7 @@ mod tests {
         let fine = amplitudes(plot.columns(1, usize::MAX, &data));
         assert_eq!(fine.len(), 3);
         assert_eq!(plot.columns(1, 0, &data).len(), 1);
-        assert_eq!(plot.columns(1, 0, &data)[0].1, fine[2]);
+        assert_eq!(plot.columns(1, 0, &data)[0].left_peak, fine[2]);
         let empty = frame(Vec::new());
         assert!(plot.columns(1, 0, &empty).is_empty());
         assert!(plot.columns(1, usize::MAX, &empty).is_empty());
@@ -1649,8 +1700,19 @@ mod tests {
             );
             Arc::downgrade(&plot.columns[&1].tiles[0].image)
         };
-        let image =
-            WaveformPlot::build_tile(&[(Some(0.2), Some(0.3), None, None)], 0, 1, 1, 10, &palette);
+        let image = WaveformPlot::build_tile(
+            &[WaveformColumn {
+                left_rms: Some(0.2),
+                left_peak: Some(0.3),
+                right_rms: None,
+                right_peak: None,
+            }],
+            0,
+            1,
+            1,
+            10,
+            &palette,
+        );
         let pending = Arc::downgrade(&image);
         waveform.plot.borrow_mut().pending_images.push(image);
         waveform.dragging = true;
