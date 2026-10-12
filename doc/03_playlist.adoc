@@ -20,7 +20,7 @@ rivu playlist move ENTRY_ID 0
 rivu playlist play PLAYLIST_ID
 ----
 
-Playlist storage is not capped by `queue_limit`. Playing one replaces the queue
+Playlist storage is not capped by `playback.queue_limit`. Playing one replaces the queue
 and requires a non-empty playlist that fits the limit; oversized loads leave
 the existing queue unchanged. See link:04_playback.adoc#_queue[Playback queue].
 

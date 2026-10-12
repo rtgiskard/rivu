@@ -2,46 +2,81 @@
 
 Rivu reads `~/.config/rivu/config.toml` by default (or the XDG configuration
 directory); path overrides are described in link:../readme.adoc[the README].
-A missing file or omitted field uses defaults. Unreadable files, malformed TOML,
-unknown keys, and invalid values are errors, not a reason to fall back to defaults.
+A missing file, group, or field uses the existing defaults. Unreadable files,
+malformed TOML, unknown keys at the root or in any group or nested view table,
+misplaced fields, and invalid values are errors, not a reason to fall back to defaults.
 Paths are literal: `~` and environment variables are not expanded.
-A minimal example:
+The file has five stable top-level domains: `[library]`, `[playback]`,
+`[interface]`, `[logging]`, and `[visualizations]`. Visualization view settings
+live in `[visualizations.spectrum]`, `[visualizations.spectrogram]`,
+`[visualizations.audio_visualizer]`, and `[visualizations.waveform]`.
+Desktop integration belongs to Interface; output and decoding belong to Playback;
+shared analysis belongs to Visualizations. Dotted names below identify file paths.
+A minimal example (all omitted settings retain their defaults):
 
 [source,toml]
 ----
-library_roots = [] # Add music-directory paths before scanning
-scan_max_depth = 64
-queue_limit = 4096
-page_size = 64
-media_read_buffer_mb = 2
-ffmpeg_enabled = false
-pipewire_auto_mix = true
+[library]
+roots = [] # Add music-directory paths before scanning
+
+[playback]
+volume = 0.7
+
+[interface]
+font = "sans-serif"
+
+[logging]
+level = "warning"
+
+[visualizations]
 still_mode = false
-layout_snap_enabled = true
-layout_snap_grid_px = 8
-tray_enabled = true
-mpris_enabled = true
-log_level = "warning"
-log_to_file = false
-log_retention_weeks = 4
 ----
 
-`library_roots` defaults to an empty list; add existing directories before
-scanning. `scan_max_depth` defaults to `64` and must be at least `1`. See
+== Migrating an existing file
+
+The old root-level format is no longer accepted. Rewrite it before starting
+Rivu; mixing old flat keys with grouped settings is also an error.
+
+* Move library fields to `[library]`; rename `library_roots` to `roots`.
+* Move volume, shuffle, repeat, queue limit, play-count threshold, output device,
+  media read buffer, FFmpeg enablement, and PipeWire auto-mix fields to
+  `[playback]`, keeping their names.
+* Move page size, layout snapping, tray, and MPRIS fields to `[interface]`,
+  keeping their names; rename `ui_font` to `font` and `ui_scale` to `scale`.
+* Move logging fields to `[logging]`: `log_level` becomes `level`, `log_to_file`
+  becomes `to_file`, and `log_retention_weeks` becomes `retention_weeks`.
+* Move shared visualization and analysis fields to `[visualizations]`:
+  `visual_background` becomes `background`, `visual_palette` becomes `palette`,
+  `visualization_db_range` becomes `db_range`, and `visualization_cache` becomes
+  `cache`. Keep `still_mode`, `analysis_fps`, `analysis_fft_size`, and
+  `analysis_window` unchanged within that table.
+* Move every view-prefixed field to its corresponding nested view table and
+  remove only its `spectrum_`, `spectrogram_`, `audio_visualizer_`, or `waveform_`
+  prefix. Keep units and subfeature qualifiers, such as `history_seconds`,
+  `sampling_points_scale`, `rms_gain`, and `bloom_intensity`.
+
+Do not invent values for omitted optional fields: `playback.output_device` and
+each view's `db_range` remain unset and are omitted when saving. Other missing
+groups and fields inherit defaults; grouping does not change ranges or behavior.
+
+== Parameters
+
+`library.roots` defaults to an empty list; add existing directories before
+scanning. `library.scan_max_depth` defaults to `64` and must be at least `1`. See
 link:02_library.adoc[Library] for root normalization, scan boundaries, and CUE/path
 rules.
 
-`queue_limit` accepts `1`–`4096`; lowering it below the current queue length is
-rejected. `page_size` accepts `20`–`256` and tunes internal GUI/TUI query batches,
+`playback.queue_limit` accepts `1`–`4096`; lowering it below the current queue length is
+rejected. `interface.page_size` accepts `20`–`256` and tunes internal GUI/TUI query batches,
 not visible pages or CLI listing/export batches. Browsing scrolls continuously;
 query batch tuning stays in the configuration file, not desktop settings. Queue behavior is described in
 link:04_playback.adoc#_queue[Playback]; query and batch contracts in
 link:02_library.adoc#_paged_views[Library].
 
-`media_read_buffer_mb` defaults to `2`; accepted sizes are `1`, `2`, `4`, `8`,
+`playback.media_read_buffer_mb` defaults to `2`; accepted sizes are `1`, `2`, `4`, `8`,
 and `16` MiB.
 
-`ffmpeg_enabled` defaults to `false`. The default build includes the `ffmpeg`
+`playback.ffmpeg_enabled` defaults to `false`. The default build includes the `ffmpeg`
 feature; see link:../readme.adoc[README] for a native-only build. Enabling permits
 FFmpeg use on future source opens; it does not load or validate runtime libraries.
 Libraries load on the first native-unsupported source or an explicit
@@ -50,23 +85,24 @@ are reported when needed; native decoders continue to work. A load failure is
 retained until restart. Disabling stops a track currently decoded through FFmpeg;
 native-decoded playback is unaffected.
 
-`volume` accepts finite values from `0` to `1` and defaults to `0.7`.
-`shuffle` defaults to `false`; `repeat` accepts `off`, `all`, or `one` and defaults
-to `off`. `play_count_threshold_percent` defaults to `20` and must be finite and
+`playback.volume` accepts finite values from `0` to `1` and defaults to `0.7`.
+`playback.shuffle` defaults to `false`; `playback.repeat` accepts `off`, `all`, or `one` and defaults
+to `off`. `playback.play_count_threshold_percent` defaults to `20` and must be finite and
 in `[0, 100)`; zero still requires some confirmed heard time. Edit the threshold
 in the configuration file or desktop settings; see
 link:02_library.adoc#_play_counts_and_recent_tracks[Library] for counting semantics.
 
-`pipewire_auto_mix` controls channel remixing; see link:04_playback.adoc[Playback].
-`tray_enabled` and `mpris_enabled` independently control desktop integration.
+`playback.pipewire_auto_mix` controls channel remixing; see link:04_playback.adoc[Playback].
+`interface.tray_enabled` and `interface.mpris_enabled` independently control desktop integration.
 
-`log_level` accepts `debug`, `info`, `warning`, or `error`. Warnings and errors
-always go to stderr. `log_to_file` enables weekly logs under the data directory;
-`log_retention_weeks` accepts `1`–`520`. `NO_COLOR` or `RIVU_COLOR=never` disables
+`logging.level` accepts `debug`, `info`, `warning`, or `error`. Warnings and errors
+always go to stderr. `logging.to_file` enables weekly logs under the data directory;
+`logging.retention_weeks` accepts `1`–`520`. `NO_COLOR` or `RIVU_COLOR=never` disables
 stderr colors.
 
-Color settings use quoted `"#RRGGBB"` values. The complete field set, defaults,
-and validation are in link:../src/config.rs[`Config`].
+Color settings use quoted `"#RRGGBB"` values. The file schema is defined in
+link:../src/config/file.rs[the grouped file adapter]; runtime defaults and
+validation remain in link:../src/config.rs[`Config`].
 
 == Desktop settings
 
@@ -81,35 +117,35 @@ including full waveform scans; it does not reopen the current track.
 Still mode is under Visualizations → Common → Rendering and takes effect when
 settings are applied, without restarting playback. The application menu also
 offers a Still mode toggle below Layouts; it applies and saves immediately.
-Both controls use the persisted `still_mode` setting.
+Both controls use the persisted `visualizations.still_mode` setting.
 
 Shuffle and Repeat are playback controls, not desktop settings. Applying settings
 preserves their values at the time the core executes the request, including
 changes made while the dialog was open or waiting to save. Adding a library root
 or toggling waveform seeking does not overwrite playback or output-device settings.
 General → Interface includes Layout snapping and Layout grid spacing. These save
-`layout_snap_enabled` (default `true`) and `layout_snap_grid_px` (default `8`,
+`interface.layout_snap_enabled` (default `true`) and `interface.layout_snap_grid_px` (default `8`,
 integer `1`–`64` logical pixels before interface scaling) in `config.toml`.
 
 Hover settings fields for accepted ranges and input syntax.
 
 Common visualization settings apply as follows:
 
-* `visual_background` sets the background for all views; `visual_palette` is
+* `visualizations.background` sets the background for all views; `visualizations.palette` is
   shared by Spectrum, Spectrogram, and Waveform. Audio Visualizer has independent
   primary and secondary colors.
-* `visualization_db_range` supplies the display span for Spectrum, Spectrogram,
+* `visualizations.db_range` supplies the display span for Spectrum, Spectrogram,
   and Audio Visualizer unless a view overrides it. It does not affect Waveform
   gain or volume.
-* `analysis_fft_size`, `analysis_window`, and `analysis_fps` apply to Spectrum,
+* `visualizations.analysis_fft_size`, `visualizations.analysis_window`, and `visualizations.analysis_fps` apply to Spectrum,
   Spectrogram, and Audio Visualizer, not Waveform. FFT size accepts powers of two
   from `512` to `32768` and defaults to `8192`. Window accepts `hann`,
   `blackman_harris` (default), or `none`. Changing size or window clears
   visualization history.
-  `analysis_fps` is the maximum analysis rate; actual updates follow window
+  `visualizations.analysis_fps` is the maximum analysis rate; actual updates follow window
   frames and can be slower when the compositor throttles presentation.
 * Still Mode stops visualization processing and discards results; see
-  <<_still_mode,Still Mode>>. `visualization_cache` controls rendering reuse,
+  <<_still_mode,Still Mode>>. `visualizations.cache` controls rendering reuse,
   separately from media read buffering; see link:22_cache.adoc[Visualization Cache].
 
 Each frequency view has a range override; leave it empty to inherit Common,
@@ -125,7 +161,7 @@ Font: type to search installed families, or use the arrow to browse them and
 `serif`, `sans-serif`, and `monospace`. Enter or a click selects a choice; Space
 remains text. Custom family names are accepted.
 
-`ui_font` defaults to `sans-serif`; empty values also select `sans-serif`.
+`interface.font` defaults to `sans-serif`; empty values also select `sans-serif`.
 Family names use Fontconfig system and user rules
 (`~/.config/fontconfig/fonts.conf`) to select the primary family.
 Missing text glyphs use native fallback, which does not guarantee Fontconfig's
@@ -135,16 +171,16 @@ Fontconfig hinting, subpixel, and synthetic-bold settings do not control GUI
 rendering. If the requested primary family cannot be resolved or is unavailable
 to the GUI, Rivu logs a warning and uses `sans-serif`.
 
-`ui_scale` accepts `0.75`–`2.0`.
+`interface.scale` accepts `0.75`–`2.0`.
 GUI icons use the system-installed Symbols Nerd Font Mono independently of
-`ui_font`. The optional `embed-nerd-font` Cargo feature embeds a build-host font;
+`interface.font`. The optional `embed-nerd-font` Cargo feature embeds a build-host font;
 see link:../readme.adoc[build instructions] for requirements and licensing.
 The TUI requires a Nerd Font or Nerd Symbols fallback in the displaying terminal.
 For SSH, configure the local client terminal; installing fonts on the server
 does not supply terminal glyphs. Missing glyphs can appear as boxes or blanks.
 
-Omitted `output_device` uses the default output; a selected device must be available.
-Changing the output device or `pipewire_auto_mix` reopens the current audio
+Omitted `playback.output_device` uses the default output; a selected device must be available.
+Changing the output device or `playback.pipewire_auto_mix` reopens the current audio
 source and output, unlike display-only settings.
 
 Apply validates and saves all General and Visualizations pages together;
@@ -292,8 +328,8 @@ are errors.
 
 == Visualization dB ranges
 
-`visualization_db_range` defaults to `70` dB. The optional `spectrum_db_range`,
-`spectrogram_db_range`, and `audio_visualizer_db_range` override it only for their
+`visualizations.db_range` defaults to `70` dB. The optional `visualizations.spectrum.db_range`,
+`visualizations.spectrogram.db_range`, and `visualizations.audio_visualizer.db_range` override it only for their
 named view. Every supplied range must be finite and between `1` and `160` dB,
 inclusive. An explicit override remains an override even if it equals Common's
 current value; changing Common later affects only views without overrides.
@@ -304,10 +340,15 @@ inherited range omits that override key.
 
 [source,toml]
 ----
-visualization_db_range = 80.0
-spectrum_db_range = 60.0
-audio_visualizer_db_range = 100.0
-# spectrogram_db_range is omitted, so Spectrogram uses 80 dB
+[visualizations]
+db_range = 80.0
+
+[visualizations.spectrum]
+db_range = 60.0
+
+[visualizations.audio_visualizer]
+db_range = 100.0
+# visualizations.spectrogram.db_range is omitted, so Spectrogram uses 80 dB
 ----
 
 These ranges affect display mapping only, not FFT analysis, decoded audio,
@@ -320,25 +361,25 @@ override equal to the current resolved value leaves the display unchanged.
 Live FFT analysis runs during playback only when Still Mode is off, the
 application window is visible, and a Spectrum, Spectrogram, or Audio Visualizer
 panel is visible.
-`analysis_fps` accepts `5`–`60` and defaults to `20`.
-`visual_palette` accepts `tokyo_night` or `deadbeef` (default `deadbeef`) and is
+`visualizations.analysis_fps` accepts `5`–`60` and defaults to `20`.
+`visualizations.palette` accepts `tokyo_night` or `deadbeef` (default `deadbeef`) and is
 shared by Spectrum, Spectrogram, and Waveform. See
 link:../src/config.rs[`Config`] for the full setting ranges and defaults.
-`visualization_cache` defaults to `true`; disabling it preserves the displayed
+`visualizations.cache` defaults to `true`; disabling it preserves the displayed
 results but rebuilds derived graphics on repaint. It does not affect Radial
 Spectrum. See link:22_cache.adoc[Visualization Cache] for scope and trade-offs,
 and link:23_visuals.adoc[Visualization Rendering Design] for rendering choices.
 
 === Still Mode
 
-`still_mode` defaults to `false`. Enabling it replaces all four visualization
+`visualizations.still_mode` defaults to `false`. Enabling it replaces all four visualization
 views with a static status, stops analysis sampling and FFT work, and discards
 all visualization results. Progressive waveform collection stops; any running
 full-waveform request is cancelled, and new requests are unavailable.
 
 Playback, seeking through the playback slider, ordinary interface effects,
 library operations, covers, IPC, MPRIS, and the tray are unchanged. Layout and
-visualization settings are preserved, including `visualization_cache`.
+visualization settings are preserved, including `visualizations.cache`.
 
 Disabling Still Mode starts the visible views fresh, without reopening audio
 output or the decoder. Views rebuild from new audio; leaving the mode while
@@ -364,7 +405,7 @@ To preview a track without starting playback, select it in Library and use
 `Load full waveform now`. A selected track with no decoded samples can also
 build its preview through playback.
 
-`waveform_seek_enabled` defaults to `true`. Disable Click and drag to seek in
+`visualizations.waveform.seek_enabled` defaults to `true`. Disable Click and drag to seek in
 the Waveform settings page or its panel right-click menu to prevent accidental
 seeks. Disabling it cancels any active waveform drag and preview; the playback
 slider remains available.
@@ -373,40 +414,40 @@ RMS uses a center-to-edge palette gradient; Peak uses the palette color at its
 level. Known silence remains visible as a minimum-height RMS fill; unknown
 intervals stay blank.
 
-`waveform_labels`, `waveform_cursor_color`, and `waveform_glow` control labels,
-cursor, and glow. The Amplitude display group exposes `waveform_rms_gain`
-(`0`–`3`, default `1.6`), `waveform_peak_gain` (`0`–`2`, default `0.75`), and
-`waveform_peak_gamma` (`0.25`–`3`, default `1.1`). Gamma above `1` reduces low
+`visualizations.waveform.labels`, `visualizations.waveform.cursor_color`, and `visualizations.waveform.glow` control labels,
+cursor, and glow. The Amplitude display group exposes `visualizations.waveform.rms_gain`
+(`0`–`3`, default `1.6`), `visualizations.waveform.peak_gain` (`0`–`2`, default `0.75`), and
+`visualizations.waveform.peak_gamma` (`0.25`–`3`, default `1.1`). Gamma above `1` reduces low
 peaks; below `1` lifts them. These controls affect rendering only, not playback
 volume or decoded preview data.
 
 === Spectrum and Spectrogram
 
-Spectrum shows current frequency energy. `spectrum_style` accepts `bars`,
-`outline`, `led`, `line`, or `solid` (default `bars`). The remaining `spectrum_*`
+Spectrum shows current frequency energy. `visualizations.spectrum.style` accepts `bars`,
+`outline`, `led`, `line`, or `solid` (default `bars`). The remaining `visualizations.spectrum.*`
 settings control band density, spacing, bar and peak hold, release motion,
-smoothing, reference lines, labels, and display range. `spectrum_bars = 0`
+smoothing, reference lines, labels, and display range. `visualizations.spectrum.bars = 0`
 (default) chooses the band count automatically; explicit counts accept `1`–`512`.
 Motion freezes while paused.
 
-`spectrum_interpolate` controls frequency interpolation and whether `solid` has a
+`visualizations.spectrum.interpolate` controls frequency interpolation and whether `solid` has a
 continuous or stepped boundary. `line` always connects valid body points
 continuously and skips empty slots rather than drawing them at the floor.
 Peak indicators remain discrete in every style.
 
-Spectrogram shows recent frequency history; `spectrogram_*` settings control its
+Spectrogram shows recent frequency history; `visualizations.spectrogram.*` settings control its
 history duration, color range, labels, interpolation, and the `0.4`–`1.4`
-`spectrogram_sampling_points_scale` used to choose source frequency rows. Retained
+`visualizations.spectrogram.sampling_points_scale` used to choose source frequency rows. Retained
 history also depends on panel width and analysis rate; unavailable history stays blank.
-`spectrogram_history_seconds` accepts `1`–`120` and defaults to `20` seconds.
-`spectrogram_interpolation_points` accepts `64`–`4096` and defaults to `1024`;
+`visualizations.spectrogram.history_seconds` accepts `1`–`120` and defaults to `20` seconds.
+`visualizations.spectrogram.interpolation_points` accepts `64`–`4096` and defaults to `1024`;
 the settings page labels it Maximum frequency rows. This rendering row limit
 applies with or without frequency interpolation; it is not the FFT size, and
 increasing it does not add
 measured frequency detail.
-Both views use a logarithmic frequency axis and share `analysis_fft_size` and
-`analysis_window`. Their independent `spectrum_db_range` and
-`spectrogram_db_range` overrides inherit `visualization_db_range` when omitted;
+Both views use a logarithmic frequency axis and share `visualizations.analysis_fft_size` and
+`visualizations.analysis_window`. Their independent `visualizations.spectrum.db_range` and
+`visualizations.spectrogram.db_range` overrides inherit `visualizations.db_range` when omitted;
 see <<_visualization_db_ranges,Visualization dB ranges>>.
 
 === Audio Visualizer
@@ -418,8 +459,8 @@ group independently toggles `Reference lines` and `Labels`, showing `On` or
 `Off`. Choosing a style or toggling an overlay closes the menu. Visualizer
 settings lets you apply these choices together to that instance.
 Moving panels and restarting preserve their choices. Different styles can run
-simultaneously. Global `audio_visualizer_style`, `audio_visualizer_grid`, and
-`audio_visualizer_labels` seed new instances only. Style defaults to `bars_rings`;
+simultaneously. Global `visualizations.audio_visualizer.style`, `visualizations.audio_visualizer.grid`, and
+`visualizations.audio_visualizer.labels` seed new instances only. Style defaults to `bars_rings`;
 both overlay defaults are `false`.
 
 Reference lines and labels are independently optional. Radial guides show
@@ -448,15 +489,15 @@ labels that would overlap. Available styles:
 
 Both fractal styles are generative art, not amplitude or phase measurements.
 
-All styles share `analysis_fft_size`, `analysis_window`, `analysis_fps`, and the
-two `audio_visualizer_*_color` endpoints. `audio_visualizer_db_range` inherits
-`visualization_db_range` when omitted; it controls color mapping, not playback
+All styles share `visualizations.analysis_fft_size`, `visualizations.analysis_window`, `visualizations.analysis_fps`, and the
+two `visualizations.audio_visualizer.*_color` endpoints. `visualizations.audio_visualizer.db_range` inherits
+`visualizations.db_range` when omitted; it controls color mapping, not playback
 volume or measured amplitude. The two analysis styles retain a 0.5-second
 exponential trail measured in accepted audio time, so pausing freezes the field.
 Seeking, signal gaps, style changes, and FFT size/window changes clear the trail.
 
-The fractal styles use `audio_visualizer_sensitivity` and `audio_visualizer_db_range`
-to map measured energy into shape and brightness; `audio_visualizer_bloom_intensity`
+The fractal styles use `visualizations.audio_visualizer.sensitivity` and `visualizations.audio_visualizer.db_range`
+to map measured energy into shape and brightness; `visualizations.audio_visualizer.bloom_intensity`
 controls the halo. Rotation, bar/ring shape, and idle fade do not apply. Motion
 and decay follow accepted audio time: silence extinguishes the light, while
 pause freezes it. Seeking, signal gaps, hiding the view, and style/FFT changes

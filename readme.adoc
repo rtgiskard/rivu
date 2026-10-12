@@ -80,7 +80,7 @@ Release builds strip symbols. For troubleshooting, set
 The FFmpeg feature supports little-endian x86-64 and aarch64 Linux with the header
 versions listed above. Cross-compiling is not currently a supported build path.
 
-Compilation makes the extension available; `ffmpeg_enabled = true` enables it
+Compilation makes the extension available; `playback.ffmpeg_enabled = true` enables it
 at runtime. See link:doc/04_playback.adoc[Playback] for runtime dependencies and
 decoding behavior.
 
@@ -97,7 +97,7 @@ timestamp. Invalid values fail the build; About displays the timestamp locally.
 == Start and stop
 
 Before scanning, configure music directories using the Library `+` button or
-`library_roots` in `config.toml`. See link:doc/02_library.adoc[Library] for root
+`library.roots` in `config.toml`. See link:doc/02_library.adoc[Library] for root
 and path rules.
 
 [source,sh]
@@ -168,7 +168,7 @@ typical Linux installation: `~/.local/share/rivu`) and
 The data directory contains `library.db` (library and playback state),
 `rivu.sock` (the local IPC endpoint), `layout.json` (desktop layout), and
 the `artwork/` cache. When file logging is enabled, weekly logs are stored in
-`logs/` and old files are retained according to `log_retention_weeks`. Stop the
+`logs/` and old files are retained according to `logging.retention_weeks`. Stop the
 core before operating on `library.db`; see link:doc/02_library.adoc[Library] for
 database maintenance and reset behavior.
 

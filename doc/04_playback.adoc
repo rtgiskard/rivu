@@ -23,7 +23,7 @@ statistics use confirmed heard time; see link:02_library.adoc[Library].
 
 == Output devices and speaker layouts
 
-`output_device` is an exact name from `rivu playback devices`, which lists native
+`playback.output_device` is an exact name from `rivu playback devices`, which lists native
 PipeWire sinks only. Omit the setting for the default PipeWire sink, or use
 `PipeWire: <node.name>` for a named sink. PipeWire must be running; there is no
 direct ALSA output or fallback to a different backend.
@@ -32,13 +32,13 @@ PipeWire handles device-rate conversion. Playback stays bound to its selected
 sink; invalid or disappearing routes fail explicitly instead of silently
 rerouting. Select an available sink and start playback again to recover.
 
-Multichannel output preserves speaker identities. `pipewire_auto_mix` is enabled
+Multichannel output preserves speaker identities. `playback.pipewire_auto_mix` is enabled
 by default and permits PipeWire remixing; disable it to require a compatible
 sink layout without remixing. Unsupported routes report an error.
 
 == Optional FFmpeg decoder
 
-Native decoding is the default. Enable `ffmpeg_enabled` for additional formats,
+Native decoding is the default. Enable `playback.ffmpeg_enabled` for additional formats,
 including audio in MKV/MP4. FFmpeg loads when a native decoder cannot support a
 source, not during startup or status queries. Decoder status shows `not loaded`
 until a load is attempted; missing or incompatible libraries are reported when
@@ -63,7 +63,7 @@ link:01_config.adoc[Configuration].
 == Queue
 
 Queue entries are independent occurrences, so a track may appear more than once.
-Each occurrence counts toward `queue_limit` (4096 by default). Oversized additions,
+Each occurrence counts toward `playback.queue_limit` (4096 by default). Oversized additions,
 directory expansions, and playlist loads are rejected without changing the queue.
 Saved queues restore valid occurrences in order up to the configured limit,
 preserving duplicates and skipping removed records.
@@ -119,7 +119,7 @@ Use the application menu's Quit application action, tray Quit, or `rivu quit`
 to stop the core. Quitting also removes the tray item and releases desktop media
 controls; closing only the window does not.
 
-`tray_enabled` controls tray startup and takes effect after restarting the
+`interface.tray_enabled` controls tray startup and takes effect after restarting the
 graphical host, not merely reopening its window. The tray requires a session
 D-Bus and a StatusNotifier-compatible desktop host. If unavailable, the GUI and
 playback remain usable. Its menu offers Play/Pause, Previous, Next, Shuffle,
@@ -128,7 +128,7 @@ Repeat, and Quit. Repeat follows the cycle described under
 
 == MPRIS and artwork
 
-`mpris_enabled` enables desktop media controls for graphical and headless cores
+`interface.mpris_enabled` enables desktop media controls for graphical and headless cores
 and can be changed while running. A session D-Bus is required; unavailable media
 controls are reported in status without preventing playback. If enabling fails,
 disable and re-enable the setting after restoring the session bus.

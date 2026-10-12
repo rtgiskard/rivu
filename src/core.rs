@@ -1083,9 +1083,7 @@ mod tests {
                 core.state.system.selected_device.as_deref(),
                 Some("pending-output")
             );
-            let saved: Config =
-                toml::from_str(&std::fs::read_to_string(&core.state.system.config_path).unwrap())
-                    .unwrap();
+            let saved = Config::load(&core.state.system.config_path).unwrap();
             assert_eq!(saved.volume, 0.25);
             assert!(saved.shuffle);
             assert_eq!(saved.repeat, RepeatMode::All);
@@ -1121,9 +1119,7 @@ mod tests {
             core.state.system.selected_device.as_deref(),
             Some("pending-output")
         );
-        let saved: Config =
-            toml::from_str(&std::fs::read_to_string(&core.state.system.config_path).unwrap())
-                .unwrap();
+        let saved = Config::load(&core.state.system.config_path).unwrap();
         assert_eq!(saved.volume, 0.25);
         assert!(saved.shuffle);
         assert_eq!(saved.repeat, RepeatMode::All);
@@ -1146,9 +1142,7 @@ mod tests {
         assert!(core.state.playback.shuffle);
         assert_eq!(core.state.playback.repeat, RepeatMode::One);
         assert_eq!(core.state.playback.volume, 0.4);
-        let saved: Config =
-            toml::from_str(&std::fs::read_to_string(&core.state.system.config_path).unwrap())
-                .unwrap();
+        let saved = Config::load(&core.state.system.config_path).unwrap();
         assert!(saved.shuffle);
         assert_eq!(saved.repeat, RepeatMode::One);
         assert_eq!(saved.volume, 0.4);

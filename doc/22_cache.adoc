@@ -2,7 +2,7 @@
 
 == Scope and contract
 
-`visualization_cache` trades retained graphics memory for less repeated rendering
+`visualizations.cache` trades retained graphics memory for less repeated rendering
 work. It does not change audio analysis, waveform samples, spectrum levels,
 palette mapping, or playback state. Settings and display controls are documented
 in link:01_config.adoc[Configuration and layout]; signal continuity and rendering
@@ -116,7 +116,7 @@ Settings owns its draft, inputs, navigation, and save feedback in a separate
 GPUI entity. Playback and analysis updates do not invalidate that entity's
 cached element tree. Settings interactions and relevant runtime changes do;
 GPUI also invalidates reuse when bounds or inherited text style change.
-This cache is independent of `visualization_cache`, retains no settings
+This cache is independent of `visualizations.cache`, retains no settings
 bitmap, and does not freeze background visualizations or eliminate window
 composition.
 
@@ -144,7 +144,7 @@ not content-addressed artwork files on disk; existing file URIs are not invalida
 
 == Font data and glyphs
 
-Font retention is independent of `visualization_cache` and Still Mode.
+Font retention is independent of `visualizations.cache` and Still Mode.
 Primary-font selection and fallback behavior are documented in
 link:01_config.adoc[Configuration and layout]. Rivu resolves the primary family
 at startup or when its saved setting changes, not during painting. It leaves

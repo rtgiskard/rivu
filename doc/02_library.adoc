@@ -7,7 +7,7 @@ link:03_playlist.adoc[Playlists].
 
 == Roots and scanning
 
-Scanning requires at least one configured `library_roots`. Add a directory with
+Scanning requires at least one configured `library.roots`. Add a directory with
 the GUI Library `+` button or set absolute directory paths in `config.toml`.
 Scan paths are normalized without resolving symlinks and must be at or below a
 configured root; a mixed inside/outside request is rejected before scanning.
@@ -16,7 +16,7 @@ Symlinks are followed even when their targets are outside configured roots;
 logical aliases remain distinct library identities. Directory cycles are scan
 errors. CUE sheets and their sources must also lie within configured logical roots.
 
-`scan_max_depth` applies independently to each requested directory. The start
+`library.scan_max_depth` applies independently to each requested directory. The start
 directory is depth `0`; files in a directory at the limit are scanned, while
 directories beyond the limit are skipped and reported. Direct file and CUE
 requests are unaffected by this directory limit; `0` is invalid. An explicit
@@ -58,7 +58,7 @@ Supported formats and playlist exchange: link:03_playlist.adoc#_cue_import[CUE i
 
 `rivu library probe PATH` reads audio metadata and decoder support without
 starting a core; it does not create or update a library row. Add `--enhanced`
-to explicitly load FFmpeg for this command, even when `ffmpeg_enabled` is off.
+to explicitly load FFmpeg for this command, even when `playback.ffmpeg_enabled` is off.
 Missing libraries or a native-only build make an enhanced probe fail rather
 than silently use native recognition. JSON includes `probe_backend` and
 `decoder_backend` (`native` or `ffmpeg`); these may differ for ordinary PCM.
@@ -153,14 +153,14 @@ This applies to Library, Queue, playlists, history, metadata, and overflowing
 Playback content. Hidden or closed views cannot remain keyboard targets.
 Settings uses these keys for its current page or open dropdown; text inputs
 retain editing behavior. About and open menus prevent background paging.
-`page_size` controls query batch size, not the visible viewport or total results;
+`interface.page_size` controls query batch size, not the visible viewport or total results;
 see link:01_config.adoc[Configuration] for its range. In the TUI,
 PageUp/PageDown moves the selection by one screen; returning from a directory or
 playlist detail restores the parent selection and viewport. Exiting the TUI
 does not have to wait for a stalled query.
 
 CLI library and playlist listings include all matching rows, independently of
-`page_size`. If relevant data changes while a listing is being read, the command
+`interface.page_size`. If relevant data changes while a listing is being read, the command
 stops, prints a `Listing incomplete` notice on stderr, and exits successfully.
 Already emitted text may be incomplete, and JSON may be invalid; discard it and
 retry. GUI/TUI refresh stale query results automatically.
@@ -193,7 +193,7 @@ described in link:21_ipc.adoc[IPC].
 == Play counts and recent tracks
 
 A playback increments its play count once when confirmed heard time *strictly
-exceeds* `play_count_threshold_percent` of the track duration (20% by default).
+exceeds* `playback.play_count_threshold_percent` of the track duration (20% by default).
 Exactly reaching the threshold does not count. Pause/resume and seeks do not
 reset count state or create additional counts; skipped or unconfirmed output
 time is not heard time. When duration is unknown, counting waits for a natural
