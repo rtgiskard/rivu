@@ -112,9 +112,9 @@ fn spawn_watcher(socket_path: &Path) -> Watcher {
     let cancel_notify = Arc::new(tokio::sync::Notify::new());
     let thread_notify = Arc::clone(&cancel_notify);
     let worker = std::thread::spawn(move || {
-        let Ok(mut session) = ipc::watch_session_with_cancel(&socket_path, stop, thread_notify)
+        let Ok(mut session) = ipc::client_session_with_cancel(&socket_path, stop, thread_notify)
         else {
-            *latest_worker.lock() = Some(Err("TUI state watcher could not connect".into()));
+            *latest_worker.lock() = Some(Err("TUI state watcher could not initialize".into()));
             let _ = sender.try_send(());
             return;
         };
@@ -189,6 +189,8 @@ fn spawn_watcher(socket_path: &Path) -> Watcher {
 struct CommandWorker {
     sender: Option<Sender<Command>>,
     stopping: Option<Sender<()>>,
+    shutdown: Arc<AtomicBool>,
+    shutdown_notify: Arc<tokio::sync::Notify>,
     results: Receiver<Result<Ack, String>>,
     worker: Option<JoinHandle<()>>,
 }
@@ -196,6 +198,8 @@ struct CommandWorker {
 impl Drop for CommandWorker {
     fn drop(&mut self) {
         self.sender.take();
+        self.shutdown.store(true, Ordering::Release);
+        self.shutdown_notify.notify_waiters();
         if let Some(stopping) = self.stopping.take() {
             let _ = stopping.send(());
         }
@@ -210,10 +214,24 @@ fn spawn_command_worker(socket_path: &Path) -> CommandWorker {
     let (sender, receiver) = bounded::<Command>(8);
     let (stopping, stop_receiver) = bounded::<()>(1);
     let (result_sender, results) = bounded::<Result<Ack, String>>(8);
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_notify = Arc::new(tokio::sync::Notify::new());
+    let stop = Arc::clone(&shutdown);
+    let stop_notify = Arc::clone(&shutdown_notify);
     let worker = std::thread::spawn(move || {
+        let mut session =
+            ipc::client_session_with_cancel(&socket_path, Arc::clone(&stop), stop_notify)
+                .map_err(|error| format!("{error:#}"));
         while let Ok(command) = receiver.recv() {
-            let result =
-                ipc::request_ack(&socket_path, &command).map_err(|error| format!("{error:#}"));
+            if stop.load(Ordering::Acquire) {
+                break;
+            }
+            let result = match &mut session {
+                Ok(session) => session
+                    .request_ack(&command)
+                    .map_err(|error| format!("{error:#}")),
+                Err(error) => Err(error.clone()),
+            };
             crossbeam_channel::select! {
                 send(result_sender, result) -> _ => {}
                 recv(stop_receiver) -> _ => break,
@@ -223,6 +241,8 @@ fn spawn_command_worker(socket_path: &Path) -> CommandWorker {
     CommandWorker {
         sender: Some(sender),
         stopping: Some(stopping),
+        shutdown,
+        shutdown_notify,
         results,
         worker: Some(worker),
     }
@@ -352,24 +372,29 @@ fn spawn_query_worker(socket_path: &Path) -> QueryWorker {
     let stopping = Arc::clone(&shutdown);
     let stop_notify = Arc::clone(&shutdown_notify);
     let worker = std::thread::spawn(move || {
+        let mut session =
+            ipc::client_session_with_cancel(&socket_path, Arc::clone(&stopping), stop_notify)
+                .map_err(|error| format!("{error:#}"));
         while receiver.recv().is_ok() {
+            if stopping.load(Ordering::Acquire) {
+                break;
+            }
             let Some(job) = requests.lock().take() else {
                 continue;
             };
-            let result = ipc::query_with_cancel(
-                &socket_path,
-                &job.request.query(),
-                Arc::clone(&stopping),
-                Arc::clone(&stop_notify),
-            )
-            .map_err(|error| format!("{error:#}"))
-            .and_then(|response| {
-                let view = response.result.map_err(|error| error.to_string())?;
-                Ok(QueryResult {
-                    revisions: response.revisions,
-                    view,
-                })
-            });
+            let result = match &mut session {
+                Ok(session) => session
+                    .query(&job.request.query())
+                    .map_err(|error| format!("{error:#}"))
+                    .and_then(|response| {
+                        let view = response.result.map_err(|error| error.to_string())?;
+                        Ok(QueryResult {
+                            revisions: response.revisions,
+                            view,
+                        })
+                    }),
+                Err(error) => Err(error.clone()),
+            };
             if !job.cancelled.load(Ordering::Acquire) {
                 *results.lock() = Some((job.request, result));
             }
@@ -1952,10 +1977,8 @@ mod tests {
     fn replacing_queries_keeps_one_stalled_socket_until_worker_shutdown() {
         use std::{io::Read, os::unix::net::UnixListener};
 
-        let socket = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
-            ".cache/tui-query-worker-{}.sock",
-            std::process::id()
-        ));
+        let directory = ipc::tests::socket_test_directory();
+        let socket = directory.path().join("stalled-query.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         let (connected, accepted) = bounded(1);
         let server = std::thread::spawn(move || {
@@ -2000,13 +2023,188 @@ mod tests {
         drop(worker);
         let closed = stream.read(&mut buffer).unwrap();
         server.join().unwrap();
-        std::fs::remove_file(socket).unwrap();
         assert!(
             retained,
             "replacement abandoned an active server connection"
         );
         assert_eq!(closed, 0, "worker shutdown must close a stalled connection");
     }
+
+    #[test]
+    fn replaced_queries_drain_then_send_only_latest_on_the_same_session() {
+        use ipc::tests::{complete_test_handshake, read_test_query, reply_test_query};
+        use std::os::unix::net::UnixListener;
+
+        let directory = ipc::tests::socket_test_directory();
+        let socket = directory.path().join("drained-query.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (started, active) = bounded(1);
+        let (release, resume) = bounded(1);
+        let server = std::thread::spawn(move || {
+            let mut stream = listener.accept().unwrap().0;
+            complete_test_handshake(&mut stream);
+            assert!(matches!(
+                read_test_query(&mut stream),
+                Query::PlaylistSummaries { offset: 0, .. }
+            ));
+            started.send(()).unwrap();
+            resume.recv_timeout(Duration::from_secs(5)).unwrap();
+            for offset in [0, 99] {
+                if offset != 0 {
+                    assert!(matches!(
+                        read_test_query(&mut stream),
+                        Query::PlaylistSummaries { offset: 99, .. }
+                    ));
+                }
+                reply_test_query(
+                    &mut stream,
+                    crate::response::QueryResponse {
+                        revisions: QueryRevisions::default(),
+                        result: Ok(ViewResponse::PlaylistSummaries(crate::model::Page {
+                            total: 100,
+                            rows: Vec::new(),
+                        })),
+                    },
+                );
+            }
+        });
+        let mut worker = spawn_query_worker(&socket);
+        let request = QueryRequest {
+            kind: QueryKind::Playlists,
+            offset: 0,
+            limit: 20,
+            view_revision: 0,
+            library_revision: 0,
+            structure_revision: 0,
+            playlist_revision: 0,
+        };
+        worker.request(request.clone());
+        active.recv_timeout(Duration::from_secs(5)).unwrap();
+        for offset in 1..100 {
+            worker.request(QueryRequest {
+                offset,
+                ..request.clone()
+            });
+        }
+        assert!(worker.latest.lock().is_none());
+        release.send(()).unwrap();
+        // Finish the accepted jobs without shutdown cancellation so the final
+        // consumer result can be inspected without polling or timing races.
+        worker.sender.take();
+        worker.worker.take().unwrap().join().unwrap();
+        let (request, result) = worker.latest.lock().take().unwrap();
+        assert_eq!(request.offset, 99);
+        assert!(
+            matches!(result.unwrap().view, ViewResponse::PlaylistSummaries(page) if page.total == 100)
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn command_worker_reports_ambiguous_failure_without_replaying_the_mutation() {
+        use ipc::tests::{complete_test_handshake, read_test_command, reply_test_ack};
+        use std::os::unix::net::UnixListener;
+
+        let directory = ipc::tests::socket_test_directory();
+        let socket = directory.path().join("command-error.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let mut stream = listener.accept().unwrap().0;
+            complete_test_handshake(&mut stream);
+            assert!(
+                matches!(read_test_command(&mut stream), Command::CreatePlaylist { name } if name == "first")
+            );
+            // Mutation execution is ambiguous to the client: no Ack arrives.
+            drop(stream);
+            let mut stream = listener.accept().unwrap().0;
+            complete_test_handshake(&mut stream);
+            assert!(
+                matches!(read_test_command(&mut stream), Command::CreatePlaylist { name } if name == "second")
+            );
+            reply_test_ack(
+                &mut stream,
+                Ack {
+                    ok: true,
+                    error: None,
+                    revision: 2,
+                },
+            );
+        });
+        let worker = spawn_command_worker(&socket);
+        worker
+            .sender
+            .as_ref()
+            .unwrap()
+            .send(Command::CreatePlaylist {
+                name: "first".into(),
+            })
+            .unwrap();
+        assert!(
+            worker
+                .results
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .is_err()
+        );
+        worker
+            .sender
+            .as_ref()
+            .unwrap()
+            .send(Command::CreatePlaylist {
+                name: "second".into(),
+            })
+            .unwrap();
+        let ack = worker
+            .results
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        assert!(ack.ok);
+        assert_eq!(ack.revision, 2);
+        drop(worker);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn command_worker_shutdown_closes_pending_exchange_and_drops_queued_commands() {
+        use ipc::tests::{complete_test_handshake, read_test_command};
+        use std::{io::Read, os::unix::net::UnixListener};
+
+        let directory = ipc::tests::socket_test_directory();
+        let socket = directory.path().join("stalled-command.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (started, active) = bounded(1);
+        let server = std::thread::spawn(move || {
+            let mut stream = listener.accept().unwrap().0;
+            complete_test_handshake(&mut stream);
+            assert!(
+                matches!(read_test_command(&mut stream), Command::CreatePlaylist { name } if name == "first")
+            );
+            started.send(stream).unwrap();
+        });
+        let worker = spawn_command_worker(&socket);
+        worker
+            .sender
+            .as_ref()
+            .unwrap()
+            .send(Command::CreatePlaylist {
+                name: "first".into(),
+            })
+            .unwrap();
+        let mut stream = active.recv_timeout(Duration::from_secs(5)).unwrap();
+        worker
+            .sender
+            .as_ref()
+            .unwrap()
+            .send(Command::CreatePlaylist {
+                name: "second".into(),
+            })
+            .unwrap();
+        drop(worker);
+        assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+        server.join().unwrap();
+    }
+
     #[test]
     fn returning_to_parent_restores_selection_and_middle_of_viewport() {
         let state = TuiSnapshot::default();

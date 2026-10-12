@@ -79,6 +79,13 @@ as the invalid instance ID. IDs are equality tokens for detecting server
 identity changes; they are not ordered identifiers, authentication credentials,
 or globally unique identifiers.
 
+The TUI keeps separate command, query, and Watch sessions on its existing
+workers. Each worker reuses its runtime, connection, and framing buffers;
+Watch never blocks command or query traffic. Replacing a query discards its
+result but drains the active exchange before sending only the latest pending
+query. Exiting the TUI closes an in-flight socket wait, including command and
+handshake waits, without waiting for a response.
+
 == Message types
 
 Request types:
@@ -166,13 +173,18 @@ Core request capacity is bounded to 64 queued operations. Requests waiting for
 capacity or a result can fail as unavailable; UI fire-and-forget sends report
 `Rivu is busy or stopped` rather than blocking. The server bounds query and
 ordinary command dispatch waits to 15 seconds, with 120 seconds for database
-optimization. One-shot clients allow 120 seconds for each response read.
+optimization. Clients allow 120 seconds for each non-Watch response read,
+including Hello; persistent sessions keep the same limit as one-shot requests.
 
 A timeout or client disconnect is not command cancellation: an operation
 already queued at the core may still execute. An unsuccessful acknowledgement
 caused by a response timeout therefore does not prove the requested mutation
 was absent. Clients must consult current state before deciding whether to repeat
 a non-idempotent operation.
+
+Failed exchanges discard the client connection. A later explicit request can
+reconnect and perform a fresh Hello, but clients never automatically replay a
+failed command.
 
 == Wire schemas
 

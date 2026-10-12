@@ -1,6 +1,6 @@
 use super::{
     SessionState, WireCommand, WireQuery, WireRequest, WireResponse, read_response_frame,
-    state_response, unpack_error, unpack_hello, validate_hello, write_request_frame_buffered,
+    state_response, unpack_error, unpack_hello, write_request_frame_buffered,
 };
 use crate::{
     model::{Command, Query},
@@ -9,7 +9,7 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use bytes::BytesMut;
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -17,9 +17,14 @@ use std::{
     time::Duration,
 };
 use tokio::{net::UnixStream, runtime::Builder, time::timeout};
-pub struct WatcherSession {
+
+/// Serial IPC requests share a runtime, socket, handshake, and framing buffers.
+/// A failed exchange discards the socket; only a later request reconnects, and
+/// the failed request is never replayed because its mutation may have executed.
+pub struct ClientSession {
     runtime: tokio::runtime::Runtime,
-    stream: UnixStream,
+    path: PathBuf,
+    stream: Option<UnixStream>,
     cancelled: Arc<AtomicBool>,
     cancel_notify: Arc<tokio::sync::Notify>,
     read_buffer: BytesMut,
@@ -35,31 +40,24 @@ fn client_runtime() -> Result<tokio::runtime::Runtime> {
         .context("creating IPC runtime")
 }
 
-pub fn watch_session(path: &Path) -> Result<WatcherSession> {
-    watch_session_with_cancel(
+/// Create a session that connects and handshakes on its first request.
+pub fn client_session(path: &Path) -> Result<ClientSession> {
+    client_session_with_cancel(
         path,
         Arc::new(AtomicBool::new(false)),
         Arc::new(tokio::sync::Notify::new()),
     )
 }
 
-pub fn watch_session_with_cancel(
+pub fn client_session_with_cancel(
     path: &Path,
     cancelled: Arc<AtomicBool>,
     cancel_notify: Arc<tokio::sync::Notify>,
-) -> Result<WatcherSession> {
-    let runtime = client_runtime()?;
-    let stream = runtime
-        .block_on(UnixStream::connect(path))
-        .with_context(|| {
-            format!(
-                "Cannot connect to Rivu at {}. Start `rivu` or `rivu serve` first.",
-                path.display()
-            )
-        })?;
-    Ok(WatcherSession {
-        runtime,
-        stream,
+) -> Result<ClientSession> {
+    Ok(ClientSession {
+        runtime: client_runtime()?,
+        path: path.to_owned(),
+        stream: None,
         cancelled,
         cancel_notify,
         read_buffer: BytesMut::new(),
@@ -67,25 +65,32 @@ pub fn watch_session_with_cancel(
         session: SessionState::Unbound,
     })
 }
-impl WatcherSession {
+
+impl ClientSession {
     pub fn cancellation(&self) -> (Arc<AtomicBool>, Arc<tokio::sync::Notify>) {
         (self.cancelled.clone(), self.cancel_notify.clone())
     }
+
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
         self.cancel_notify.notify_waiters();
     }
 
-    fn ensure_handshake(&self) -> Result<()> {
-        if self.session.is_bound() {
-            Ok(())
-        } else {
-            bail!("Watcher session requires a Hello handshake")
+    fn disconnect(&mut self) {
+        self.stream = None;
+        self.session = SessionState::Unbound;
+        self.read_buffer.clear();
+    }
+
+    fn ensure_handshake(&mut self) -> Result<()> {
+        if !self.session.is_bound() {
+            self.get_state(StateSections::default())?;
         }
+        Ok(())
     }
 
     fn exchange(&mut self, request: &WireRequest) -> Result<WireResponse> {
-        self.runtime.block_on(async {
+        let result = self.runtime.block_on(async {
             let notified = self.cancel_notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
@@ -95,8 +100,24 @@ impl WatcherSession {
             tokio::select! {
                 _ = &mut notified => bail!("IPC request cancelled"),
                 response = async {
-                    write_request_frame_buffered(&mut self.stream, request, &mut self.write_buffer).await?;
-                    read_response_frame(&mut self.stream, &mut self.read_buffer).await
+                    if self.stream.is_none() {
+                        self.stream = Some(UnixStream::connect(&self.path).await.with_context(|| {
+                            format!(
+                                "Cannot connect to Rivu at {}. Start `rivu` or `rivu serve` first.",
+                                self.path.display()
+                            )
+                        })?);
+                    }
+                    let stream = self.stream.as_mut().unwrap();
+                    write_request_frame_buffered(stream, request, &mut self.write_buffer).await?;
+                    let response = read_response_frame(stream, &mut self.read_buffer);
+                    if matches!(request, WireRequest::Watch(_)) {
+                        response.await
+                    } else {
+                        timeout(Duration::from_secs(120), response)
+                            .await
+                            .context("Reading IPC response timed out")?
+                    }
                 } => {
                     let response = response?;
                     if self.cancelled.load(Ordering::Acquire) {
@@ -105,23 +126,30 @@ impl WatcherSession {
                     Ok(response)
                 }
             }
-        })
+        });
+        if result.is_err() {
+            self.disconnect();
+        }
+        result
     }
 
     pub fn get_state(&mut self, sections: StateSections) -> Result<StateResponse> {
-        let request = if self.session.is_bound() {
-            WireRequest::State(sections)
-        } else {
-            WireRequest::Hello(sections)
-        };
-        match unpack_error(self.exchange(&request)?)? {
-            WireResponse::Hello(response) => {
-                let response = validate_hello(response)?;
-                self.session = SessionState::Bound;
-                Ok(state_response(response.state))
-            }
-            WireResponse::State(state) if self.session.is_bound() => Ok(state_response(state)),
-            _ => bail!("IPC response was not a state or Hello response"),
+        if !self.session.is_bound() {
+            let response = self.exchange(&WireRequest::Hello(sections))?;
+            return match unpack_hello(response) {
+                Ok(response) => {
+                    self.session = SessionState::Bound;
+                    Ok(state_response(response.state))
+                }
+                Err(error) => {
+                    self.disconnect();
+                    Err(error)
+                }
+            };
+        }
+        match unpack_error(self.exchange(&WireRequest::State(sections))?)? {
+            WireResponse::State(state) => Ok(state_response(state)),
+            _ => bail!("IPC response was not a state response"),
         }
     }
 
@@ -131,6 +159,15 @@ impl WatcherSession {
         match unpack_error(self.exchange(&request)?)? {
             WireResponse::Query(response) => Ok(response),
             _ => bail!("IPC response was not a query response"),
+        }
+    }
+
+    pub fn request_ack(&mut self, command: &Command) -> Result<Ack> {
+        self.ensure_handshake()?;
+        let request = WireRequest::Command(WireCommand::from(command.clone()));
+        match unpack_error(self.exchange(&request)?)? {
+            WireResponse::Ack(response) => Ok(response),
+            _ => bail!("IPC response was not an acknowledgement"),
         }
     }
 
@@ -157,110 +194,14 @@ impl WatcherSession {
     }
 }
 
-async fn one_shot(
-    path: &Path,
-    request: WireRequest,
-    cancellation: Option<(Arc<AtomicBool>, Arc<tokio::sync::Notify>)>,
-) -> Result<WireResponse> {
-    let operation = async {
-        let mut stream = UnixStream::connect(path).await.with_context(|| {
-            format!(
-                "Cannot connect to Rivu at {}. Start `rivu` or `rivu serve` first.",
-                path.display()
-            )
-        })?;
-        let mut pending = BytesMut::new();
-        let mut write_buffer = Vec::new();
-        let state_sections = match &request {
-            WireRequest::State(sections) => Some(*sections),
-            _ => None,
-        };
-        write_request_frame_buffered(
-            &mut stream,
-            &WireRequest::Hello(state_sections.unwrap_or_default()),
-            &mut write_buffer,
-        )
-        .await?;
-        let response = timeout(
-            Duration::from_secs(120),
-            read_response_frame(&mut stream, &mut pending),
-        )
-        .await
-        .context("Reading IPC Hello response timed out")??;
-        let hello = unpack_hello(response)?;
-        if state_sections.is_some() {
-            return Ok(WireResponse::State(hello.state));
-        }
-        write_request_frame_buffered(&mut stream, &request, &mut write_buffer).await?;
-        let response = timeout(
-            Duration::from_secs(120),
-            read_response_frame(&mut stream, &mut pending),
-        )
-        .await
-        .context("Reading IPC response timed out")??;
-        unpack_error(response)
-    };
-    let Some((cancelled, notify)) = cancellation else {
-        return operation.await;
-    };
-    let notified = notify.notified();
-    tokio::pin!(notified);
-    notified.as_mut().enable();
-    if cancelled.load(Ordering::Acquire) {
-        bail!("IPC request cancelled");
-    }
-    tokio::select! { _ = &mut notified => bail!("IPC request cancelled"), response = operation => response }
-}
-
 pub fn query(path: &Path, query: &Query) -> Result<QueryResponse> {
-    let runtime = client_runtime()?;
-    let frame = runtime.block_on(one_shot(
-        path,
-        WireRequest::Query(WireQuery::from(query.clone())),
-        None,
-    ))?;
-    match frame {
-        WireResponse::Query(response) => Ok(response),
-        _ => bail!("IPC response was not a query response"),
-    }
-}
-
-pub(crate) fn query_with_cancel(
-    path: &Path,
-    query: &Query,
-    cancelled: Arc<AtomicBool>,
-    notify: Arc<tokio::sync::Notify>,
-) -> Result<QueryResponse> {
-    let runtime = client_runtime()?;
-    let frame = runtime.block_on(one_shot(
-        path,
-        WireRequest::Query(WireQuery::from(query.clone())),
-        Some((cancelled, notify)),
-    ))?;
-    match frame {
-        WireResponse::Query(response) => Ok(response),
-        _ => bail!("IPC response was not a query response"),
-    }
+    client_session(path)?.query(query)
 }
 
 pub fn get_state(path: &Path, sections: StateSections) -> Result<StateResponse> {
-    let runtime = client_runtime()?;
-    let frame = runtime.block_on(one_shot(path, WireRequest::State(sections), None))?;
-    match frame {
-        WireResponse::State(response) => Ok(state_response(response)),
-        _ => bail!("IPC response was not a state response"),
-    }
+    client_session(path)?.get_state(sections)
 }
 
 pub fn request_ack(path: &Path, command: &Command) -> Result<Ack> {
-    let runtime = client_runtime()?;
-    let frame = runtime.block_on(one_shot(
-        path,
-        WireRequest::Command(WireCommand::from(command.clone())),
-        None,
-    ))?;
-    match frame {
-        WireResponse::Ack(response) => Ok(response),
-        _ => bail!("IPC response was not an acknowledgement"),
-    }
+    client_session(path)?.request_ack(command)
 }

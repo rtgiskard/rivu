@@ -508,7 +508,7 @@ fn list_library(
     favorites: bool,
     missing: bool,
 ) -> Result<()> {
-    let mut session = ipc::watch_session(socket)?;
+    let mut session = ipc::client_session(socket)?;
     let _ = session.get_state(StateSections::default())?;
     let mut after = None;
     let mut expected = None;
@@ -578,7 +578,7 @@ fn list_library(
 }
 
 fn list_playlists(socket: &Path, json: bool) -> Result<()> {
-    let mut session = ipc::watch_session(socket)?;
+    let mut session = ipc::client_session(socket)?;
     let _ = session.get_state(StateSections::default())?;
     let mut expected = None;
     let mut after = None;

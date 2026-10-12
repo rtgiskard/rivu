@@ -537,3 +537,235 @@ fn maximum_sized_request_and_response_bodies_round_trip() {
     };
     assert_eq!(message.len(), MAX_RESPONSE - 6);
 }
+
+pub(crate) fn socket_test_directory() -> tempfile::TempDir {
+    let cache = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    tempfile::tempdir_in(cache).unwrap()
+}
+
+fn read_test_request(stream: &mut std::os::unix::net::UnixStream) -> WireRequest {
+    use std::io::Read;
+    let mut prefix = [0; 4];
+    stream.read_exact(&mut prefix).unwrap();
+    let length = u32::from_le_bytes(prefix) as usize;
+    assert!(length <= MAX_REQUEST);
+    let mut body = vec![0; length];
+    stream.read_exact(&mut body).unwrap();
+    decode_request_frame(&body).unwrap()
+}
+
+fn write_test_response(stream: &mut std::os::unix::net::UnixStream, response: WireResponse) {
+    use std::io::Write;
+    let mut frame = Vec::new();
+    encode_response_frame_into(&response, &mut frame).unwrap();
+    stream.write_all(&frame).unwrap();
+}
+
+pub(crate) fn complete_test_handshake(stream: &mut std::os::unix::net::UnixStream) {
+    let timeout = Some(std::time::Duration::from_secs(5));
+    stream.set_read_timeout(timeout).unwrap();
+    stream.set_write_timeout(timeout).unwrap();
+    assert!(matches!(read_test_request(stream), WireRequest::Hello(_)));
+    write_test_response(
+        stream,
+        WireResponse::Hello(HelloResponse {
+            instance_id: 1u32.to_le_bytes(),
+            state: wire_state(StateResponse {
+                revisions: StateRevisions::default(),
+                playback: None,
+                queue: None,
+                library: None,
+                system: None,
+            }),
+        }),
+    );
+}
+
+pub(crate) fn read_test_query(stream: &mut std::os::unix::net::UnixStream) -> Query {
+    let WireRequest::Query(query) = read_test_request(stream) else {
+        panic!("expected query")
+    };
+    Query::try_from(query).unwrap()
+}
+
+pub(crate) fn reply_test_query(
+    stream: &mut std::os::unix::net::UnixStream,
+    response: QueryResponse,
+) {
+    write_test_response(stream, WireResponse::Query(response));
+}
+
+pub(crate) fn read_test_command(stream: &mut std::os::unix::net::UnixStream) -> Command {
+    let WireRequest::Command(command) = read_test_request(stream) else {
+        panic!("expected command")
+    };
+    Command::try_from(command).unwrap()
+}
+
+pub(crate) fn reply_test_ack(stream: &mut std::os::unix::net::UnixStream, ack: Ack) {
+    write_test_response(stream, WireResponse::Ack(ack));
+}
+
+fn playlist_test_response(total: usize) -> QueryResponse {
+    QueryResponse {
+        revisions: crate::response::QueryRevisions::default(),
+        result: Ok(crate::response::ViewResponse::PlaylistSummaries(
+            crate::model::Page {
+                total,
+                rows: Vec::new(),
+            },
+        )),
+    }
+}
+
+#[test]
+fn client_session_reuses_connection_after_command_and_request_rejections() {
+    use std::os::unix::net::UnixListener;
+
+    let directory = socket_test_directory();
+    let socket = directory.path().join("session.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = std::thread::spawn(move || {
+        let mut stream = listener.accept().unwrap().0;
+        complete_test_handshake(&mut stream);
+        assert!(matches!(
+            read_test_query(&mut stream),
+            Query::PlaylistSummaries { offset: 0, .. }
+        ));
+        reply_test_query(&mut stream, playlist_test_response(40));
+        assert!(matches!(
+            read_test_command(&mut stream),
+            Command::CreatePlaylist { .. }
+        ));
+        reply_test_ack(
+            &mut stream,
+            Ack {
+                ok: false,
+                error: Some("rejected".into()),
+                revision: 3,
+            },
+        );
+        assert!(matches!(
+            read_test_query(&mut stream),
+            Query::PlaylistSummaries { offset: 20, .. }
+        ));
+        write_test_response(
+            &mut stream,
+            WireResponse::Error("request unavailable".into()),
+        );
+        assert!(matches!(
+            read_test_query(&mut stream),
+            Query::PlaylistSummaries { offset: 20, .. }
+        ));
+        reply_test_query(&mut stream, playlist_test_response(7));
+    });
+    let mut session = client_session(&socket).unwrap();
+    let query = Query::PlaylistSummaries {
+        offset: 0,
+        limit: 20,
+    };
+    let response = session.query(&query).unwrap();
+    assert!(
+        matches!(response.result, Ok(crate::response::ViewResponse::PlaylistSummaries(page)) if page.total == 40)
+    );
+    let ack = session
+        .request_ack(&Command::CreatePlaylist { name: "new".into() })
+        .unwrap();
+    assert!(!ack.ok);
+    assert_eq!(ack.revision, 3);
+    let query = Query::PlaylistSummaries {
+        offset: 20,
+        limit: 20,
+    };
+    assert!(session.query(&query).is_err());
+    let response = session.query(&query).unwrap();
+    assert!(
+        matches!(response.result, Ok(crate::response::ViewResponse::PlaylistSummaries(page)) if page.total == 7)
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn client_session_discards_partial_failed_response_before_next_explicit_request() {
+    use std::{io::Write, os::unix::net::UnixListener};
+
+    let directory = socket_test_directory();
+    let socket = directory.path().join("reconnect.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = std::thread::spawn(move || {
+        let mut stream = listener.accept().unwrap().0;
+        complete_test_handshake(&mut stream);
+        assert!(
+            matches!(read_test_command(&mut stream), Command::CreatePlaylist { name } if name == "first")
+        );
+        let mut frame = Vec::new();
+        encode_response_frame_into(
+            &WireResponse::Ack(Ack {
+                ok: true,
+                error: None,
+                revision: 1,
+            }),
+            &mut frame,
+        )
+        .unwrap();
+        stream.write_all(&frame[..5]).unwrap();
+        drop(stream);
+        let mut stream = listener.accept().unwrap().0;
+        complete_test_handshake(&mut stream);
+        // The first mutation may have executed. The new request, not a replay,
+        // must be the next operation after the replacement handshake.
+        assert!(
+            matches!(read_test_command(&mut stream), Command::CreatePlaylist { name } if name == "second")
+        );
+        reply_test_ack(
+            &mut stream,
+            Ack {
+                ok: true,
+                error: None,
+                revision: 2,
+            },
+        );
+    });
+    let mut session = client_session(&socket).unwrap();
+    assert!(
+        session
+            .request_ack(&Command::CreatePlaylist {
+                name: "first".into()
+            })
+            .is_err()
+    );
+    let ack = session
+        .request_ack(&Command::CreatePlaylist {
+            name: "second".into(),
+        })
+        .unwrap();
+    assert!(ack.ok);
+    assert_eq!(ack.revision, 2);
+    server.join().unwrap();
+}
+
+#[test]
+fn cancelling_client_session_closes_pending_watch_without_a_response() {
+    use std::{io::Read, os::unix::net::UnixListener, sync::atomic::Ordering};
+
+    let directory = socket_test_directory();
+    let socket = directory.path().join("watch.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let mut session = client_session(&socket).unwrap();
+    let (cancelled, notify) = session.cancellation();
+    let client = std::thread::spawn(move || {
+        session.get_state(StateSections::default()).unwrap();
+        session.watch_until(StateRevisions::default())
+    });
+    let mut stream = listener.accept().unwrap().0;
+    complete_test_handshake(&mut stream);
+    assert!(matches!(
+        read_test_request(&mut stream),
+        WireRequest::Watch(_)
+    ));
+    cancelled.store(true, Ordering::Release);
+    notify.notify_waiters();
+    assert!(client.join().unwrap().unwrap().is_none());
+    assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+}
