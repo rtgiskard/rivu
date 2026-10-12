@@ -3,7 +3,7 @@
 //! Playback changes come from the core subscription, never a library polling loop.
 
 use crate::{
-    artwork::ArtworkManager,
+    artwork::{ArtworkIdentity, ArtworkManager},
     core::AppHandle,
     model::{Command, PlaybackStatus, RepeatMode},
     projection::MprisSnapshot,
@@ -12,7 +12,6 @@ use anyhow::{Context, Result};
 use crossbeam_channel::{Sender, bounded, select_biased};
 use std::{
     collections::HashMap,
-    path::Path,
     sync::Arc,
     thread::{self, JoinHandle},
     time::Duration,
@@ -38,8 +37,7 @@ pub struct Mpris {
 }
 
 impl Mpris {
-    pub fn start(handle: AppHandle, can_raise: bool, data_dir: &Path) -> Result<Self> {
-        let artwork = Arc::new(ArtworkManager::new(data_dir));
+    pub fn start(handle: AppHandle, can_raise: bool, artwork: Arc<ArtworkManager>) -> Result<Self> {
         let updates = handle.subscribe();
         let initial = handle.mpris_snapshot();
         let initial_can_raise = can_raise && handle.can_raise();
@@ -75,6 +73,14 @@ impl Mpris {
                 let mut previous = initial;
                 let mut previous_can_raise = initial_can_raise;
                 let mut metadata = TrackMetadata::from_snapshot(&previous, &artwork);
+                let mut loaded_artwork = None;
+                if let Err(error) = publish_artwork(&bus, &handle, &previous, &mut metadata, &artwork, &mut loaded_artwork) {
+                    let _ = handle.send(Command::MprisStatus {
+                        status: format!("publisher stopped: {error}"),
+                    });
+                    tracing::warn!(error = %error, "mpris_publisher_stopped");
+                    return;
+                }
                 loop {
                     select_biased! {
                         recv(stopped) -> _ => break,
@@ -90,7 +96,9 @@ impl Mpris {
                                 &artwork,
                                 previous_can_raise,
                                 current_can_raise,
-                            ) {
+                            ).and_then(|()| publish_artwork(
+                                &bus, &handle, &current, &mut metadata, &artwork, &mut loaded_artwork,
+                            )) {
                                 let _ = handle.send(Command::MprisStatus {
                                     status: format!("publisher stopped: {error}"),
                                 });
@@ -546,7 +554,7 @@ impl TrackMetadata {
             artist: track.artist.clone(),
             album: track.album.clone(),
             url: url::Url::from_file_path(&track.path).ok()?.into(),
-            art_url: artwork.uri_for(track),
+            art_url: artwork.cached_uri(track),
             length: state
                 .playback
                 .duration
@@ -584,6 +592,56 @@ fn metadata_map(track: Option<&TrackMetadata>) -> Metadata {
         metadata.insert("xesam:url".into(), Str::from(track.url.as_str()).into());
     }
     metadata
+}
+
+/// Cold probes run only on the existing publisher. Re-read playback after the
+/// blocking load: a completion may warm the cache but never publish stale art.
+fn publish_artwork(
+    connection: &Connection,
+    handle: &AppHandle,
+    requested: &MprisSnapshot,
+    metadata: &mut Option<TrackMetadata>,
+    artwork: &ArtworkManager,
+    loaded: &mut Option<ArtworkIdentity>,
+) -> zbus::Result<()> {
+    let Some(track) = requested
+        .current_track()
+        .filter(|_| !requested.shutting_down)
+    else {
+        *loaded = None;
+        return Ok(());
+    };
+    if loaded
+        .as_ref()
+        .is_some_and(|identity| identity.matches(track))
+    {
+        return Ok(());
+    }
+    let identity = ArtworkIdentity::for_track(track);
+    let _ = artwork.load(track);
+    let current = handle.mpris_snapshot();
+    if current.shutting_down
+        || !current
+            .current_track()
+            .is_some_and(|track| identity.matches(track))
+    {
+        return Ok(());
+    }
+    *loaded = Some(identity);
+    let next = TrackMetadata::from_snapshot(&current, artwork);
+    if *metadata != next {
+        let mut changed: HashMap<&str, Value<'_>> = HashMap::new();
+        changed.insert("Metadata", Value::from(metadata_map(next.as_ref())));
+        connection.emit_signal(
+            None::<&str>,
+            OBJECT_PATH,
+            "org.freedesktop.DBus.Properties",
+            "PropertiesChanged",
+            &(PLAYER_INTERFACE, changed, Vec::<&str>::new()),
+        )?;
+        *metadata = next;
+    }
+    Ok(())
 }
 
 fn publish_changes(
@@ -727,6 +785,40 @@ mod tests {
             play_count: 0,
             last_played: None,
         }
+    }
+
+    #[test]
+    fn metadata_getter_leaves_cold_and_replaced_fingerprints_unprobed() {
+        let directory = tempfile::tempdir().unwrap();
+        let artwork = ArtworkManager::new(directory.path());
+        let mut current = track(7);
+        current.path = directory.path().join("missing.flac");
+        current.fingerprint = Some("original".into());
+        let mut state = MprisSnapshot {
+            queue: QueueState {
+                entries: Arc::new(vec![QueueEntry { id: 1, track_id: 7 }]),
+                current_id: Some(1),
+                tracks: Arc::new(Vec::new()),
+            },
+            current_track: Some(Arc::new(current)),
+            playback: PlaybackState::default(),
+            shutting_down: false,
+        };
+        let current = state.current_track().unwrap();
+        assert_eq!(
+            TrackMetadata::from_snapshot(&state, &artwork)
+                .unwrap()
+                .art_url,
+            artwork.cached_uri(current)
+        );
+        assert!(!artwork.is_loaded(current));
+        artwork.load(current);
+        assert!(artwork.is_loaded(current));
+        let mut replacement = current.clone();
+        replacement.fingerprint = Some("replacement".into());
+        state.current_track = Some(Arc::new(replacement));
+        assert!(TrackMetadata::from_snapshot(&state, &artwork).is_some());
+        assert!(!artwork.is_loaded(state.current_track().unwrap()));
     }
 
     #[test]

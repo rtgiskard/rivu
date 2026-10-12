@@ -48,7 +48,7 @@ use shell::{PanelMenu, PanelMenuPage};
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
-    path::{Path, PathBuf},
+    path::PathBuf,
     rc::Weak,
     sync::Arc,
     time::{Duration, Instant},
@@ -274,6 +274,7 @@ pub(super) struct GuiApp {
     interaction: LayoutInteraction,
     error: Option<String>,
     artwork_manager: Arc<crate::artwork::ArtworkManager>,
+    artwork_loader: artwork::ArtworkLoader,
     queue_save_pending: bool,
     queue_save_feedback: Option<Result<String, String>>,
     settings: Entity<settings::Settings>,
@@ -396,24 +397,34 @@ impl GuiApp {
                     return;
                 }
                 let current = self.browser.library.navigation().or_else(|| {
-                    self.browser.library.buffer()
+                    self.browser
+                        .library
+                        .buffer()
                         .rows
                         .position(|row| self.browser.library.selected().contains(&row.id))
                 });
                 let index = match current {
                     Some(index) if down => (index + 1).min(total - 1),
                     Some(index) => index.saturating_sub(1),
-                    None if down => self.browser.library.buffer()
+                    None if down => self
+                        .browser
+                        .library
+                        .buffer()
                         .rows
                         .visible()
                         .start
                         .min(total - 1),
                     None => total - 1,
                 };
-                self.browser.library.buffer()
+                self.browser
+                    .library
+                    .buffer()
                     .scroll
                     .scroll_to_item(index, ScrollStrategy::Nearest);
-                if let Some(id) = self.browser.library.buffer()
+                if let Some(id) = self
+                    .browser
+                    .library
+                    .buffer()
                     .rows
                     .get(index)
                     .map(|row| row.id)
@@ -472,7 +483,10 @@ impl GuiApp {
                     self.activate_library_tree(cx);
                     return;
                 }
-                let track_id = self.browser.library.buffer()
+                let track_id = self
+                    .browser
+                    .library
+                    .buffer()
                     .rows
                     .iter()
                     .find(|row| self.browser.library.selected().contains(&row.id))
@@ -525,6 +539,7 @@ impl GuiApp {
     fn new(
         handle: AppHandle,
         layout_path: PathBuf,
+        artwork_manager: Arc<crate::artwork::ArtworkManager>,
         host: Weak<RefCell<GuiHost>>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -729,9 +744,6 @@ impl GuiApp {
             }
         })
         .detach();
-        let artwork_manager = Arc::new(crate::artwork::ArtworkManager::new(
-            layout_path.parent().unwrap_or_else(|| Path::new(".")),
-        ));
         let mut app = Self {
             settings,
             handle,
@@ -749,6 +761,7 @@ impl GuiApp {
             queue_save_pending: false,
             queue_save_feedback: None,
             artwork_manager,
+            artwork_loader: artwork::ArtworkLoader::default(),
             visuals: visualization::Visuals::new(),
             audio_visualizer: visualization::AudioVisualizer::new(),
             default_album: cx.new(|_| artwork::Artwork::new()),
@@ -1162,7 +1175,10 @@ impl GuiApp {
             }
             if library_changed || library_structure_changed {
                 if !page_size_changed {
-                    self.request_library_page(self.browser.library.buffer().rows.visible().start, cx);
+                    self.request_library_page(
+                        self.browser.library.buffer().rows.visible().start,
+                        cx,
+                    );
                     self.request_ranking(self.browser.history.offset(), cx);
                     self.browser.library.refresh_tree(self.view_page_size());
                     self.request_directory_page(library::TreeBranch::default(), 0, cx);

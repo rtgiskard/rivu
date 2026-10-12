@@ -273,13 +273,12 @@ pub(crate) fn metadata_item(label: impl Into<SharedString>, value: impl Into<Sha
 }
 
 /// Standard embedded artwork preview row for metadata panels.
-pub(crate) fn artwork_preview(uri: impl Into<SharedString>) -> Div {
-    let uri = uri.into();
+pub(crate) fn artwork_preview(path: std::sync::Arc<std::path::Path>) -> Div {
     super::row()
         .items_start()
         .gap_2()
         .child(caption("Album artwork").w(px(92.)).flex_shrink_0())
-        .child(img(uri).size(px(128.)))
+        .child(img(path).size(px(128.)))
 }
 
 /// Menu item with shared application event handling.

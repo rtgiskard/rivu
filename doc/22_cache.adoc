@@ -122,13 +122,25 @@ composition.
 
 == Artwork lookup retention
 
-Artwork lookup is independent of visualization caching. Each manager retains at
-most 64 track IDs with FIFO eviction; a changed fingerprint replaces that ID's
-entry. Requests for a resident ID and fingerprint share one probe, performed
-outside the cache lock. Eviction releases only the manager's reference: callers
+Artwork lookup is independent of visualization caching. One application-session
+manager is shared by MPRIS and every graphical window, including reopened and
+reloaded windows. Cache-only reads return completed artwork or the bundled icon
+without media I/O or waiting for a probe. Blocking loads run on GPUI's existing
+background executor and the existing MPRIS publisher, not new artwork threads.
+
+The GUI keeps one active load and only the latest pending selection. Completions
+are matched by track ID and fingerprint before updating the selected preview or
+publishing MPRIS metadata; a late result can warm the cache, never replace a
+newer identity. MPRIS signals metadata after artwork becomes available, including
+an initial cold load without another playback update.
+
+The manager retains at most 64 track IDs with FIFO eviction; a changed
+fingerprint replaces that ID's entry. Loads for a resident ID and fingerprint
+share one probe outside the cache lock. Cache-only reads neither insert entries
+nor probe on misses. Eviction releases only the manager's reference: callers
 already probing remain valid, but revisiting an evicted key can start a new probe.
 Late completions cannot replace newer entries. This bounds resident lookup data,
-not content-addressed artwork files on disk, whose retention policy is unchanged.
+not content-addressed artwork files on disk; existing file URIs are not invalidated.
 
 == Font data and glyphs
 

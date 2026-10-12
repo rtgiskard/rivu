@@ -1,5 +1,6 @@
-//! Local, best-effort artwork for desktop media controls. No decoder or audio
-//! output is opened, and cache failures never propagate into playback.
+//! Local, best-effort artwork shared by the application session. Cache-only
+//! reads never probe media; blocking loads belong on existing background workers.
+//! No decoder or audio output is opened; failures never propagate into playback.
 
 use crate::model::Track;
 use parking_lot::Mutex;
@@ -23,9 +24,29 @@ pub(crate) static DEFAULT_IMAGE: &[u8] = include_bytes!("../assets/rivu.png");
 
 const MAX_ARTWORK_ENTRIES: usize = 64;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ArtworkIdentity {
+    id: i64,
+    fingerprint: Option<String>,
+}
+
+impl ArtworkIdentity {
+    pub(crate) fn for_track(track: &Track) -> Self {
+        Self {
+            id: track.id,
+            fingerprint: track.fingerprint.clone(),
+        }
+    }
+
+    pub(crate) fn matches(&self, track: &Track) -> bool {
+        self.id == track.id && self.fingerprint == track.fingerprint
+    }
+}
+
 struct CachedArtwork {
     fingerprint: Option<String>,
     uri: OnceLock<Option<String>>,
+    path: OnceLock<Option<Arc<Path>>>,
 }
 
 #[derive(Default)]
@@ -37,6 +58,7 @@ struct ArtworkCache {
 pub struct ArtworkManager {
     directory: PathBuf,
     default_uri: Option<String>,
+    default_path: Option<Arc<Path>>,
     // The lookup key is exactly (track ID, fingerprint). Index by ID and compare
     // the fingerprint in place, avoiding a fingerprint allocation on cache hits.
     entries: Mutex<ArtworkCache>,
@@ -46,14 +68,59 @@ impl ArtworkManager {
     pub fn new(data_dir: &Path) -> Self {
         let directory = data_dir.join("artwork");
         let default_uri = write_image(&directory.join("default.png"), DEFAULT_IMAGE).ok();
+        let default_path = default_uri
+            .as_ref()
+            .map(|_| Arc::from(directory.join("default.png")));
         Self {
             directory,
             default_uri,
+            default_path,
             entries: Mutex::new(ArtworkCache::default()),
         }
     }
 
-    pub fn uri_for(&self, track: &Track) -> Option<String> {
+    /// Returns a completed URI or the session fallback, without media/file I/O
+    /// or waiting for an in-flight probe. Failed loads are completed entries too.
+    pub fn cached_uri(&self, track: &Track) -> Option<String> {
+        let cache = self.entries.lock();
+        cache
+            .items
+            .get(&track.id)
+            .filter(|cached| cached.fingerprint == track.fingerprint)
+            .and_then(|cached| cached.uri.get())
+            .cloned()
+            .unwrap_or_else(|| self.default_uri.clone())
+    }
+
+    /// GPUI local resources use paths, not HTTP-backed URI resources.
+    pub(crate) fn cached_path(&self, track: &Track) -> Option<Arc<Path>> {
+        self.entries
+            .lock()
+            .items
+            .get(&track.id)
+            .filter(|cached| cached.fingerprint == track.fingerprint)
+            .and_then(|cached| cached.path.get())
+            .cloned()
+            .unwrap_or_else(|| self.default_path.clone())
+    }
+
+    pub fn is_loaded(&self, track: &Track) -> bool {
+        self.entries
+            .lock()
+            .items
+            .get(&track.id)
+            .is_some_and(|cached| {
+                cached.fingerprint == track.fingerprint && cached.uri.get().is_some()
+            })
+    }
+
+    /// Blocking, singleflight load for this (ID, fingerprint). The map lock is
+    /// released before probing or waiting for another caller's in-flight load.
+    pub fn load(&self, track: &Track) -> Option<String> {
+        self.load_with(track, || self.embedded_uri(&track.path))
+    }
+
+    fn load_with(&self, track: &Track, probe: impl FnOnce() -> Option<String>) -> Option<String> {
         let cached = {
             let mut cache = self.entries.lock();
             let ArtworkCache {
@@ -77,6 +144,7 @@ impl ArtworkManager {
                 let cached = Arc::new(CachedArtwork {
                     fingerprint: track.fingerprint.clone(),
                     uri: OnceLock::new(),
+                    path: OnceLock::new(),
                 });
                 entries.insert(track.id, Arc::clone(&cached));
                 cached
@@ -89,8 +157,14 @@ impl ArtworkManager {
         cached
             .uri
             .get_or_init(|| {
-                self.embedded_uri(&track.path)
-                    .or_else(|| self.default_uri.clone())
+                let uri = probe().or_else(|| self.default_uri.clone());
+                let path = uri
+                    .as_ref()
+                    .and_then(|uri| url::Url::parse(uri).ok())
+                    .and_then(|url| url.to_file_path().ok())
+                    .map(Arc::from);
+                let _ = cached.path.set(path);
+                uri
             })
             .clone()
     }
@@ -256,7 +330,7 @@ mod tests {
         tagged_wav(&source);
         let manager = ArtworkManager::new(directory.path());
         let mut track = track(source);
-        let uri = manager.uri_for(&track).unwrap();
+        let uri = manager.load(&track).unwrap();
         let expected = directory
             .path()
             .join("artwork/cache")
@@ -268,43 +342,88 @@ mod tests {
         // Another track with the same picture reuses the content-addressed file.
         track.id = 2;
         track.fingerprint = Some("other".into());
-        assert_eq!(manager.uri_for(&track).as_deref(), Some(uri.as_str()));
+        assert_eq!(manager.load(&track).as_deref(), Some(uri.as_str()));
         assert_eq!(fs::read_dir(expected.parent().unwrap()).unwrap().count(), 1);
 
         // Path and editable metadata are deliberately not cache-key components.
         track.path = directory.path().join("missing.wav");
         track.title = "Edited title".into();
-        assert_eq!(manager.uri_for(&track).as_deref(), Some(uri.as_str()));
+        assert_eq!(manager.load(&track).as_deref(), Some(uri.as_str()));
         track.fingerprint = Some("changed".into());
-        assert_eq!(manager.uri_for(&track), manager.default_uri);
+        assert_eq!(manager.load(&track), manager.default_uri);
         track.id = 3;
         track.fingerprint = Some("original".into());
-        assert_eq!(manager.uri_for(&track), manager.default_uri);
+        assert_eq!(manager.load(&track), manager.default_uri);
     }
 
     #[test]
-    fn concurrent_requests_share_a_complete_cached_image() {
+    fn concurrent_requests_probe_once_and_share_a_complete_image() {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("track.wav");
         tagged_wav(&source);
         let manager = ArtworkManager::new(directory.path());
         let track = track(source);
         let barrier = std::sync::Barrier::new(4);
+        let probes = std::sync::atomic::AtomicUsize::new(0);
         std::thread::scope(|scope| {
             let handles: Vec<_> = (0..4)
                 .map(|_| {
                     scope.spawn(|| {
                         barrier.wait();
-                        manager.uri_for(&track).unwrap()
+                        manager
+                            .load_with(&track, || {
+                                probes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                manager.embedded_uri(&track.path)
+                            })
+                            .unwrap()
                     })
                 })
                 .collect();
             for handle in handles {
                 let uri = handle.join().unwrap();
                 assert_eq!(fs::read(file_path(&uri)).unwrap(), DEFAULT_IMAGE);
-                assert_eq!(manager.uri_for(&track).as_deref(), Some(uri.as_str()));
+                assert_eq!(manager.load(&track).as_deref(), Some(uri.as_str()));
             }
         });
+        assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cached_reads_return_fallback_without_waiting_for_a_cold_load() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = ArtworkManager::new(directory.path());
+        let track = track(directory.path().join("missing.wav"));
+        assert_eq!(manager.cached_uri(&track), manager.default_uri);
+        assert!(!manager.is_loaded(&track));
+        assert!(manager.entries.lock().items.is_empty());
+        let (started, loading) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let (read, reads) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let manager = &manager;
+            let track = &track;
+            let loader = scope.spawn(move || {
+                manager.load_with(track, || {
+                    started.send(()).unwrap();
+                    released.recv().unwrap();
+                    Some("file:///cover.png".into())
+                })
+            });
+            loading.recv().unwrap();
+            scope.spawn(move || {
+                read.send((manager.cached_uri(track), manager.is_loaded(track)))
+                    .unwrap()
+            });
+            let during_load = reads.recv_timeout(std::time::Duration::from_secs(2));
+            release.send(()).unwrap();
+            assert_eq!(during_load.unwrap(), (manager.default_uri.clone(), false));
+            assert_eq!(loader.join().unwrap().as_deref(), Some("file:///cover.png"));
+        });
+        assert!(manager.is_loaded(&track));
+        assert_eq!(
+            manager.cached_uri(&track).as_deref(),
+            Some("file:///cover.png")
+        );
     }
 
     #[test]
@@ -315,13 +434,14 @@ mod tests {
         let old = Arc::new(CachedArtwork {
             fingerprint: track.fingerprint.clone(),
             uri: OnceLock::new(),
+            path: OnceLock::new(),
         });
         manager.entries.lock().items.insert(track.id, old.clone());
         manager.entries.lock().insertion_order.push_back(track.id);
         track.fingerprint = Some("new".into());
-        let current_uri = manager.uri_for(&track);
+        let current_uri = manager.load(&track);
         old.uri.set(Some("file:///old.png".into())).unwrap();
-        assert_eq!(manager.uri_for(&track), current_uri);
+        assert_eq!(manager.cached_uri(&track), current_uri);
         let entries = manager.entries.lock();
         let entries = &entries.items;
         assert!(!Arc::ptr_eq(entries.get(&track.id).unwrap(), &old));
@@ -340,6 +460,7 @@ mod tests {
         let pending = Arc::new(CachedArtwork {
             fingerprint: track.fingerprint.clone(),
             uri: OnceLock::new(),
+            path: OnceLock::new(),
         });
         manager
             .entries
@@ -350,7 +471,7 @@ mod tests {
 
         for offset in 1..=MAX_ARTWORK_ENTRIES * 2 {
             track.id = first_id + offset as i64;
-            manager.uri_for(&track);
+            manager.load(&track);
             let cache = manager.entries.lock();
             assert!(cache.items.len() <= MAX_ARTWORK_ENTRIES);
             assert!(cache.insertion_order.len() <= MAX_ARTWORK_ENTRIES);
@@ -364,7 +485,7 @@ mod tests {
 
         track.id = first_id;
         track.fingerprint = Some("replacement".into());
-        assert_eq!(manager.uri_for(&track), manager.default_uri);
+        assert_eq!(manager.load(&track), manager.default_uri);
         let entries = manager.entries.lock();
         let entries = &entries.items;
         assert_eq!(entries.len(), MAX_ARTWORK_ENTRIES);
@@ -382,13 +503,18 @@ mod tests {
         let default = manager.default_uri.as_deref().unwrap();
         assert_eq!(fs::read(file_path(default)).unwrap(), DEFAULT_IMAGE);
         fs::write(directory.path().join("artwork/cache"), b"not a directory").unwrap();
-        assert_eq!(manager.uri_for(&track(source)), manager.default_uri);
+        assert_eq!(manager.load(&track(source)), manager.default_uri);
 
         let blocked = directory.path().join("blocked");
         fs::write(&blocked, b"not a directory").unwrap();
         let unavailable = ArtworkManager::new(&blocked);
+        let missing = track(directory.path().join("missing"));
+        assert!(!unavailable.is_loaded(&missing));
+        assert_eq!(unavailable.cached_uri(&missing), None);
+        assert_eq!(unavailable.load(&missing), None);
+        assert!(unavailable.is_loaded(&missing));
         assert_eq!(
-            unavailable.uri_for(&track(directory.path().join("missing"))),
+            unavailable.load_with(&missing, || panic!("failed load must be cached")),
             None
         );
     }

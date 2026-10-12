@@ -330,7 +330,10 @@ impl GuiApp {
             );
             return (track.title.clone(), detail);
         }
-        if let Some(row) = self.browser.library.buffer()
+        if let Some(row) = self
+            .browser
+            .library
+            .buffer()
             .rows
             .iter()
             .find(|row| row.id == track_id)
@@ -357,7 +360,10 @@ impl GuiApp {
                 ),
             );
         }
-        if let Some(row) = self.browser.playlists.entries()
+        if let Some(row) = self
+            .browser
+            .playlists
+            .entries()
             .rows
             .iter()
             .find(|row| row.track_id == track_id)
@@ -1042,7 +1048,10 @@ impl GuiApp {
         let Some(entry_id) = self.browser.playlists.selected_entry() else {
             return;
         };
-        let Some(index) = self.browser.playlists.entries()
+        let Some(index) = self
+            .browser
+            .playlists
+            .entries()
             .rows
             .position(|entry| entry.id == entry_id)
         else {
@@ -1073,7 +1082,9 @@ impl GuiApp {
         let playlist_id = self.browser.playlists.selected();
         let selected_name = playlist_id
             .and_then(|id| {
-                self.browser.playlists.summaries()
+                self.browser
+                    .playlists
+                    .summaries()
                     .rows
                     .iter()
                     .find(|p| p.id == id)
@@ -1268,7 +1279,10 @@ impl GuiApp {
                                 "Play selected track",
                                 cx,
                                 move |this, _, cx| {
-                                    let track_id = this.browser.playlists.entries()
+                                    let track_id = this
+                                        .browser
+                                        .playlists
+                                        .entries()
                                         .rows
                                         .iter()
                                         .find(|entry| {
@@ -1383,6 +1397,7 @@ impl GuiApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.prepare_artwork(cx);
         let mut panel = panel_surface(("metadata-panel", panel_id));
         if let Some(track) = self.metadata.track() {
             let id = track.id;
@@ -1555,9 +1570,10 @@ impl GuiApp {
                                     metadata_pair("Play count", track.play_count.to_string()),
                                     metadata_pair("Last played", last_played),
                                 ))
-                                .when_some(self.artwork_manager.uri_for(track), |tags, uri| {
-                                    tags.child(artwork_preview(uri))
-                                }),
+                                .when_some(
+                                    self.artwork_manager.cached_path(track),
+                                    |tags, path| tags.child(artwork_preview(path)),
+                                ),
                         )),
                 );
             panel = panel.child(details);

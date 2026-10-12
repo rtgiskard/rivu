@@ -3,7 +3,7 @@
 #[cfg(feature = "embed-nerd-font")]
 use super::fonts;
 use super::{GuiApp, input::Input};
-use crate::{core::AppHandle, model::Command, tray::TrayController};
+use crate::{artwork::ArtworkManager, core::AppHandle, model::Command, tray::TrayController};
 use anyhow::Result;
 use futures::{StreamExt, channel::mpsc};
 use gpui::*;
@@ -11,11 +11,13 @@ use std::{
     cell::RefCell,
     path::PathBuf,
     rc::{Rc, Weak},
+    sync::Arc,
 };
 
 pub(super) struct GuiHost {
     handle: AppHandle,
     layout_path: PathBuf,
+    artwork_manager: Arc<ArtworkManager>,
     self_weak: Weak<RefCell<GuiHost>>,
     window: Option<WindowHandle<GuiApp>>,
     tray: Option<TrayController>,
@@ -47,6 +49,7 @@ impl GuiHost {
         let bounds = Bounds::centered(None, size(px(1200.), px(800.)), cx);
         let handle = self.handle.clone();
         let layout_path = self.layout_path.clone();
+        let artwork_manager = Arc::clone(&self.artwork_manager);
         let host = self.self_weak.clone();
         match cx.open_window(
             WindowOptions {
@@ -59,7 +62,9 @@ impl GuiHost {
                 app_id: Some("rivu".into()),
                 ..Default::default()
             },
-            move |window, cx| cx.new(|cx| GuiApp::new(handle, layout_path, host, window, cx)),
+            move |window, cx| {
+                cx.new(|cx| GuiApp::new(handle, layout_path, artwork_manager, host, window, cx))
+            },
         ) {
             Ok(window) => {
                 self.window = Some(window);
@@ -83,12 +88,13 @@ impl GuiHost {
         };
         let handle = self.handle.clone();
         let layout_path = self.layout_path.clone();
+        let artwork_manager = Arc::clone(&self.artwork_manager);
         let host = self.self_weak.clone();
         self.clear_window_state();
         if let Err(error) = window.update(cx, |old, window, cx| {
             old.release_render_images(window, cx);
             window.replace_root(cx, |window, cx| {
-                GuiApp::new(handle, layout_path, host, window, cx)
+                GuiApp::new(handle, layout_path, artwork_manager, host, window, cx)
             });
         }) {
             tracing::error!(%error, "Could not reload Rivu window; use Show window to retry");
@@ -145,7 +151,11 @@ impl Drop for GuiHost {
     }
 }
 
-pub fn run(handle: AppHandle, layout_path: PathBuf) -> Result<()> {
+pub fn run(
+    handle: AppHandle,
+    layout_path: PathBuf,
+    artwork_manager: Arc<ArtworkManager>,
+) -> Result<()> {
     let tray = if handle.config_snapshot().tray_enabled {
         TrayController::start(handle.clone())?
     } else {
@@ -155,6 +165,7 @@ pub fn run(handle: AppHandle, layout_path: PathBuf) -> Result<()> {
         RefCell::new(GuiHost {
             handle: handle.clone(),
             layout_path,
+            artwork_manager,
             self_weak: self_weak.clone(),
             window: None,
             tray,

@@ -1,11 +1,98 @@
-use std::rc::Rc;
+use std::{rc::Rc, sync::Arc};
+
+use crate::{artwork::ArtworkIdentity, model::Track};
 
 use gpui::{
     Background, Context, Path, PathBuilder, Pixels, Render, Window, canvas, div, linear_color_stop,
     linear_gradient, point, prelude::*, px, rgb,
 };
 
-use super::{ACCENT, BG};
+use super::{ACCENT, BG, GuiApp};
+
+/// One executor load plus the latest requested identity, never a task per render.
+#[derive(Default)]
+pub(super) struct ArtworkLoader {
+    active: Option<ArtworkIdentity>,
+    pending: Option<Track>,
+}
+
+impl ArtworkLoader {
+    fn prepare(&mut self, track: Option<&Track>) -> Option<Track> {
+        let Some(track) = track else {
+            self.pending = None;
+            return None;
+        };
+        if let Some(active) = &self.active {
+            if active.matches(track) {
+                self.pending = None;
+            } else if !self.pending.as_ref().is_some_and(|pending| {
+                pending.id == track.id && pending.fingerprint == track.fingerprint
+            }) {
+                self.pending = Some(track.clone());
+            }
+            return None;
+        }
+        self.active = Some(ArtworkIdentity::for_track(track));
+        Some(track.clone())
+    }
+
+    fn finish(&mut self, identity: &ArtworkIdentity, current: Option<&Track>) -> Option<Track> {
+        debug_assert_eq!(self.active.as_ref(), Some(identity));
+        self.active = None;
+        let pending = self.pending.take()?;
+        let current = current?;
+        let identity = ArtworkIdentity::for_track(&pending);
+        if !identity.matches(current) {
+            return None;
+        }
+        self.active = Some(identity);
+        Some(pending)
+    }
+}
+
+impl GuiApp {
+    pub(super) fn prepare_artwork(&mut self, cx: &mut Context<Self>) {
+        let current = self
+            .metadata
+            .track()
+            .filter(|track| !self.artwork_manager.is_loaded(track));
+        if let Some(track) = self.artwork_loader.prepare(current) {
+            self.start_artwork(track, cx);
+        }
+    }
+
+    fn start_artwork(&mut self, track: Track, cx: &mut Context<Self>) {
+        let identity = ArtworkIdentity::for_track(&track);
+        let manager = Arc::clone(&self.artwork_manager);
+        cx.spawn(async move |this, cx| {
+            let _ = cx
+                .background_executor()
+                .spawn(async move { manager.load(&track) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                // The URI always comes from the selected track's cache entry;
+                // an old completion can warm the cache, never replace the view.
+                if this
+                    .metadata
+                    .track()
+                    .is_some_and(|track| identity.matches(track))
+                {
+                    cx.notify();
+                }
+                let current = this
+                    .metadata
+                    .track()
+                    .filter(|track| !this.artwork_manager.is_loaded(track));
+                if let Some(next) = this.artwork_loader.finish(&identity, current) {
+                    this.start_artwork(next, cx);
+                } else {
+                    this.prepare_artwork(cx);
+                }
+            });
+        })
+        .detach();
+    }
+}
 
 pub(super) struct Artwork {
     layers: Rc<Vec<(Path<Pixels>, Background)>>,
@@ -128,4 +215,71 @@ fn river(width: f32, lower: bool) -> Path<Pixels> {
     path.bounds = path.bounds.union(&caps.bounds);
     path.vertices.extend(caps.vertices);
     path
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn track(id: i64, fingerprint: &str) -> Track {
+        Track {
+            id,
+            path: format!("/music/{id}.wav").into(),
+            fingerprint: Some(fingerprint.into()),
+            cue: None,
+            title: String::new(),
+            artist: String::new(),
+            album: String::new(),
+            duration: None,
+            codec: String::new(),
+            channels: 0,
+            sample_rate: 0,
+            bitrate_bps: None,
+            track_number: None,
+            disc_number: None,
+            bits_per_sample: None,
+            release_date: None,
+            favorite: false,
+            missing: false,
+            play_count: 0,
+            last_played: None,
+        }
+    }
+
+    #[test]
+    fn rapid_selection_keeps_only_the_latest_pending_identity() {
+        let mut loader = ArtworkLoader::default();
+        let first = track(1, "original");
+        let skipped = track(2, "original");
+        let latest = track(1, "replacement");
+        assert!(loader.prepare(Some(&first)).is_some());
+        let active = ArtworkIdentity::for_track(&first);
+        assert!(loader.prepare(Some(&skipped)).is_none());
+        assert!(loader.prepare(Some(&latest)).is_none());
+        assert!(loader.prepare(Some(&latest)).is_none());
+        assert!(!active.matches(&latest));
+        let next = loader.finish(&active, Some(&latest)).unwrap();
+        assert_eq!(next.id, latest.id);
+        assert_eq!(next.fingerprint, latest.fingerprint);
+        assert!(loader.pending.is_none());
+    }
+
+    #[test]
+    fn returning_to_active_or_clearing_selection_drops_pending_work() {
+        let first = track(1, "original");
+        let other = track(2, "original");
+        for current in [Some(&first), None] {
+            let mut loader = ArtworkLoader::default();
+            loader.prepare(Some(&first));
+            loader.prepare(Some(&other));
+            loader.prepare(current);
+            assert!(
+                loader
+                    .finish(&ArtworkIdentity::for_track(&first), current)
+                    .is_none()
+            );
+            assert!(loader.active.is_none());
+            assert!(loader.pending.is_none());
+        }
+    }
 }

@@ -5,6 +5,7 @@ use super::client_path;
 use anyhow::{Context, Result, anyhow, bail};
 use crossbeam_channel::{bounded, select};
 use rivu::{
+    artwork::ArtworkManager,
     core::{AppHandle, Runtime},
     gui, ipc,
     model::Command,
@@ -14,7 +15,7 @@ use signal_hook::{
     consts::{SIGINT, SIGTERM},
     iterator::{Handle as SignalHandle, Signals},
 };
-use std::{path::PathBuf, thread};
+use std::{path::PathBuf, sync::Arc, thread};
 pub(super) fn open_gui(data_dir: PathBuf, config_path: PathBuf, paths: Vec<PathBuf>) -> Result<()> {
     let socket = data_dir.join("rivu.sock");
     match ipc::request_ack(&socket, &Command::ShowWindow) {
@@ -89,11 +90,12 @@ pub(super) fn start(
     };
     let _shutdown_signals = ShutdownSignals::start(signals, runtime.handle.clone())?;
     let server = ipc::Server::start(socket, runtime.handle.clone())?;
+    let artwork = Arc::new(ArtworkManager::new(&data_dir));
     let media_handle = runtime.handle.clone();
     let media_changes = media_handle.subscribe();
     let (media_stop, media_stop_receiver) = bounded(1);
     let media_stop_for_cleanup = media_stop.clone();
-    let media_data_dir = data_dir.clone();
+    let media_artwork = Arc::clone(&artwork);
     let media_worker = thread::Builder::new()
         .name("rivu-mpris-manager".into())
         .spawn(move || {
@@ -107,7 +109,11 @@ pub(super) fn start(
                 if snapshot.system.config.mpris_enabled != enabled {
                     enabled = snapshot.system.config.mpris_enabled;
                     let status = if enabled {
-                        match mpris::Mpris::start(media_handle.clone(), desktop, &media_data_dir) {
+                        match mpris::Mpris::start(
+                            media_handle.clone(),
+                            desktop,
+                            Arc::clone(&media_artwork),
+                        ) {
                             Ok(started) => {
                                 service = Some(started);
                                 "Connected to desktop media controls".to_owned()
@@ -138,7 +144,11 @@ pub(super) fn start(
         })?;
     }
     let interface_result = if desktop {
-        gui::run(runtime.handle.clone(), data_dir.join("layout.json"))
+        gui::run(
+            runtime.handle.clone(),
+            data_dir.join("layout.json"),
+            artwork,
+        )
     } else {
         println!("Rivu core ready. Data: {}", data_dir.display());
         Ok(())
