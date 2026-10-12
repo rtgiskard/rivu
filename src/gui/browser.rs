@@ -210,6 +210,18 @@ impl LibraryBrowser {
         offset
     }
 
+    pub(super) fn directory_request_pending(
+        &self,
+        branch: &TreeBranch,
+        generation: u64,
+        query: Option<&str>,
+        favorite: Option<bool>,
+    ) -> bool {
+        query == self.buffer.query.as_deref()
+            && favorite == self.favorites_only.then_some(true)
+            && self.tree.request_pending(branch, generation)
+    }
+
     pub(super) fn accept_directory(
         &mut self,
         branch: &TreeBranch,
@@ -402,6 +414,13 @@ impl LibraryBrowser {
         self.scroll_filter_to_top();
     }
 
+    pub(super) fn refresh_search(&mut self, query: String) {
+        self.prepare_query(query);
+        self.clear_flat_payload();
+        self.scroll_filter_to_top();
+        self.tree.scroll.scroll_to_item(0, ScrollStrategy::Top);
+    }
+
     pub(super) fn scroll_filter_to_top(&self) {
         self.buffer.scroll.scroll_to_item(0, ScrollStrategy::Top);
     }
@@ -413,7 +432,11 @@ impl LibraryBrowser {
 
     pub(super) fn prepare_query(&mut self, query: String) {
         self.invalidate_projection();
-        self.buffer.query = (!query.is_empty()).then_some(query);
+        let query = (!query.is_empty()).then_some(query);
+        if self.buffer.query != query {
+            self.tree.invalidate();
+        }
+        self.buffer.query = query;
         self.buffer.favorite = self.favorites_only.then_some(true);
         self.buffer.missing = self.missing_only.then_some(true);
         self.buffer.rows.invalidate();
@@ -824,6 +847,72 @@ mod tests {
         library.prepare_query(String::new());
         assert_eq!(library.navigation(), None);
         assert!(library.selected().contains(&41));
+    }
+
+    #[test]
+    fn search_changes_and_clear_keep_view_and_reject_old_directory_requests() {
+        for tree_active in [true, false] {
+            let mut library = LibraryBrowser::default();
+            if !tree_active {
+                library.toggle_view();
+            }
+            library.toggle_favorites();
+            library.select_node(&LibraryNode::Track(41), false);
+            let branch = TreeBranch::default();
+            for (index, query) in ["first", "second", ""].into_iter().enumerate() {
+                let previous_query = library.buffer().query.clone();
+                let generation = index as u64 + 1;
+                library.prepare_directory(branch.clone(), 0, 20, generation);
+                assert!(library.directory_request_pending(
+                    &branch,
+                    generation,
+                    previous_query.as_deref(),
+                    Some(true),
+                ));
+                library.defer_navigation(123);
+                library.refresh_search(query.into());
+                assert_eq!(library.tree_active(), tree_active);
+                assert_eq!(library.navigation(), None);
+                assert!(library.selected().contains(&41));
+                assert!(!library.directory_request_pending(
+                    &branch,
+                    generation,
+                    previous_query.as_deref(),
+                    Some(true),
+                ));
+                let expected = (!query.is_empty()).then_some(query);
+                assert_eq!(library.buffer().query.as_deref(), expected);
+                library.prepare_directory(branch.clone(), 0, 20, generation + 10);
+                assert!(library.directory_request_pending(
+                    &branch,
+                    generation + 10,
+                    expected,
+                    Some(true),
+                ));
+                assert!(!library.directory_request_pending(
+                    &branch,
+                    generation + 10,
+                    expected,
+                    None,
+                ));
+                assert!(matches!(
+                    library.prepare_page(0, 20),
+                    Query::LibraryPage { query: actual, favorite: Some(true), .. }
+                    if actual.as_deref() == expected
+                ));
+            }
+            library.toggle_missing();
+            library.refresh_filter();
+            library.prepare_query(String::new());
+            assert!(!library.tree_active());
+            assert!(matches!(
+                library.prepare_page(0, 20),
+                Query::LibraryPage {
+                    missing: Some(true),
+                    ..
+                }
+            ));
+        }
     }
 
     fn summary(id: i64, entry_count: usize) -> PlaylistSummary {

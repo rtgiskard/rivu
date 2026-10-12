@@ -276,13 +276,35 @@ impl GuiApp {
         }
         let handle = self.handle.clone();
         let favorite = self.browser.library.favorites_only().then_some(true);
+        let query = self.browser.library.buffer().query.clone();
+        let delay = if query.is_some() {
+            crate::model::SEARCH_DEBOUNCE
+        } else {
+            Duration::ZERO
+        };
         cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            if !this
+                .update(cx, |this, _| {
+                    this.browser.library.directory_request_pending(
+                        &branch,
+                        generation,
+                        query.as_deref(),
+                        favorite,
+                    )
+                })
+                .unwrap_or(false)
+            {
+                return;
+            }
+            let request_query = query.clone();
             let request_path = branch.path().to_path_buf();
             let response = cx
                 .background_executor()
                 .spawn(async move {
                     handle.query(Query::DirectoryPage {
                         path: request_path,
+                        query: request_query,
                         favorite,
                         offset,
                         limit: page_size,
@@ -290,12 +312,12 @@ impl GuiApp {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if !this
-                    .browser
-                    .library
-                    .tree()
-                    .request_pending(&branch, generation)
-                {
+                if !this.browser.library.directory_request_pending(
+                    &branch,
+                    generation,
+                    query.as_deref(),
+                    favorite,
+                ) {
                     return;
                 }
                 let result = match response.result {
@@ -308,7 +330,7 @@ impl GuiApp {
                     }
                 };
                 if response.revisions.structure != this.state.library.structure_revision
-                    || (favorite.is_some()
+                    || ((favorite.is_some() || query.is_some())
                         && response.revisions.library != this.state.library.revision)
                 {
                     this.request_directory_page(branch, offset, cx);
@@ -474,8 +496,18 @@ impl GuiApp {
         }
     }
 
+    pub(super) fn refresh_search(&mut self, cx: &mut Context<Self>) {
+        let query = self.value(Field::Search, cx).trim().to_lowercase();
+        self.browser.library.refresh_search(query);
+        self.browser.requests.cancel(ViewRequestKind::Library);
+        self.request_directory_page(library::TreeBranch::default(), 0, cx);
+        if !self.browser.library.tree_active() {
+            self.load_library_page(0, cx);
+        }
+    }
+
     pub(super) fn refresh_filter(&mut self, cx: &mut Context<Self>) {
-        // Search and missing filters use the flat track view.
+        // The missing filter retains its flat-view behavior.
         self.browser.library.refresh_filter();
         self.request_library_page(0, cx);
     }

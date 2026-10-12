@@ -9,29 +9,34 @@ use std::sync::Arc;
 fn directory_query_wire_round_trip_preserves_filter_and_page() {
     use std::path::Path;
     for favorite in [None, Some(true), Some(false)] {
-        let request = WireRequest::Query(WireQuery::from(Query::DirectoryPage {
-            path: "/music".into(),
-            favorite,
-            offset: 7,
-            limit: 11,
-        }));
-        let mut encoded = Vec::new();
-        encode_request_frame_into(&request, &mut encoded).unwrap();
-        let WireRequest::Query(wire) = decode_request_frame(&encoded[4..]).unwrap() else {
-            panic!("expected query");
-        };
-        let Query::DirectoryPage {
-            path,
-            favorite: decoded_favorite,
-            offset,
-            limit,
-        } = Query::try_from(wire).unwrap()
-        else {
-            panic!("expected directory query");
-        };
-        assert_eq!(path, Path::new("/music"));
-        assert_eq!(decoded_favorite, favorite);
-        assert_eq!((offset, limit), (7, 11));
+        for query in [None, Some(""), Some("Été_100%")] {
+            let request = WireRequest::Query(WireQuery::from(Query::DirectoryPage {
+                path: "/music".into(),
+                query: query.map(str::to_owned),
+                favorite,
+                offset: 7,
+                limit: 11,
+            }));
+            let mut encoded = Vec::new();
+            encode_request_frame_into(&request, &mut encoded).unwrap();
+            let WireRequest::Query(wire) = decode_request_frame(&encoded[4..]).unwrap() else {
+                panic!("expected query");
+            };
+            let Query::DirectoryPage {
+                path,
+                query: decoded_query,
+                favorite: decoded_favorite,
+                offset,
+                limit,
+            } = Query::try_from(wire).unwrap()
+            else {
+                panic!("expected directory query");
+            };
+            assert_eq!(path, Path::new("/music"));
+            assert_eq!(decoded_query.as_deref(), query);
+            assert_eq!(decoded_favorite, favorite);
+            assert_eq!((offset, limit), (7, 11));
+        }
     }
 }
 

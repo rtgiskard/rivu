@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub(super) const PROTOCOL_VERSION: u8 = 4;
+pub(super) const PROTOCOL_VERSION: u8 = 5;
 pub(super) const MAX_REQUEST: usize = 64 * 1024;
 pub(super) const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub(super) const MAX_CLIENTS: usize = 16;
@@ -103,6 +103,7 @@ pub(super) enum WireQuery {
     },
     DirectoryPage {
         path: PathBuf,
+        query: Option<String>,
         favorite: Option<bool>,
         offset: u64,
         limit: u64,
@@ -311,11 +312,13 @@ impl From<Query> for WireQuery {
             },
             Query::DirectoryPage {
                 path,
+                query,
                 favorite,
                 offset,
                 limit,
             } => Self::DirectoryPage {
                 path,
+                query,
                 favorite,
                 offset: offset as u64,
                 limit: limit as u64,
@@ -409,11 +412,13 @@ impl TryFrom<WireQuery> for Query {
             },
             WireQuery::DirectoryPage {
                 path,
+                query,
                 favorite,
                 offset,
                 limit,
             } => Self::DirectoryPage {
                 path,
+                query,
                 favorite,
                 offset: wire_usize(offset, "offset")?,
                 limit: wire_usize(limit, "limit")?,

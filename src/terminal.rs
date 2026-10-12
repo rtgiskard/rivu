@@ -283,6 +283,7 @@ impl QueryRequest {
             },
             QueryKind::Directory(path) => Query::DirectoryPage {
                 path: path.clone(),
+                query: None,
                 favorite: None,
                 offset,
                 limit,
@@ -291,6 +292,7 @@ impl QueryRequest {
                 let local_count = roots.len().saturating_sub(offset).min(limit);
                 Query::DirectoryPage {
                     path: PathBuf::new(),
+                    query: None,
                     favorite: None,
                     offset: offset.saturating_sub(roots.len()),
                     limit: (limit - local_count).max(1),
@@ -1730,6 +1732,8 @@ mod tests {
             artist: "artist".into(),
             album: "album".into(),
             duration: None,
+            codec: "flac".into(),
+            bitrate_bps: None,
             favorite: false,
             missing: false,
             play_count: 0,

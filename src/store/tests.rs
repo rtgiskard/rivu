@@ -833,6 +833,55 @@ fn invalid_cue_database_range_leaves_entire_scan_unchanged() {
     assert!(!tracks[0].missing);
 }
 #[test]
+fn library_audio_metadata_survives_all_display_projections() {
+    use crate::model::{DirectoryRow, LibrarySort};
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    let mut known = rec("/music/known.flac", "known", "Known", 123.5);
+    known.media.codec = "flac".into();
+    known.media.bitrate_bps = Some(921_600);
+    known.media.artist = "Artist".into();
+    known.media.album = "Album".into();
+    let mut unknown = rec("/music/unknown.opus", "unknown", "Unknown", 1.0);
+    unknown.media.codec = "opus".into();
+    unknown.media.duration = None;
+    store.apply_scan(&scan(vec![known, unknown])).unwrap();
+    let library = store
+        .library_view_page(None, None, None, LibrarySort::Id, 0, 10)
+        .unwrap();
+    assert_eq!(library.total, 2);
+    let known = &library.rows[0];
+    assert_eq!(known.codec, "flac");
+    assert_eq!(known.bitrate_bps, Some(921_600));
+    assert_eq!(known.duration, Some(123.5));
+    assert_eq!((&*known.artist, &*known.album), ("Artist", "Album"));
+    let unknown = &library.rows[1];
+    assert_eq!(unknown.codec, "opus");
+    assert_eq!(unknown.bitrate_bps, None);
+    assert_eq!(unknown.duration, None);
+    store.increment_play_count(unknown.id).unwrap();
+    let ranking = store
+        .library_view_page(None, None, None, LibrarySort::MostPlayed, 0, 10)
+        .unwrap();
+    assert_eq!(ranking.rows[0].id, unknown.id);
+    assert_eq!(ranking.rows[0].codec, unknown.codec);
+    assert_eq!(ranking.rows[0].bitrate_bps, None);
+    assert_eq!(ranking.rows[1], *known);
+    let directory = store
+        .directory_page(Path::new("/music"), None, None, 0, 10)
+        .unwrap();
+    assert_eq!(directory.rows[0], DirectoryRow::Track(known.clone()));
+    assert_eq!(
+        directory.rows[1],
+        DirectoryRow::Track(ranking.rows[0].clone())
+    );
+    let ids = [known.id, unknown.id];
+    assert_eq!(
+        store.queue_rows(&ids).unwrap(),
+        [known.clone(), ranking.rows[0].clone()]
+    );
+}
+
+#[test]
 fn bounded_view_queries_filter_order_and_count() {
     let store = Store::open(Path::new(":memory:")).unwrap();
     store
@@ -897,7 +946,7 @@ fn directory_favorites_filter_before_grouping_and_paging() {
     ];
     store.set_favorite(&ids, true).unwrap();
     let page = store
-        .directory_page(Path::new("/music"), Some(true), 0, 1)
+        .directory_page(Path::new("/music"), None, Some(true), 0, 1)
         .unwrap();
     assert_eq!(page.total, 3);
     assert_eq!(
@@ -907,17 +956,17 @@ fn directory_favorites_filter_before_grouping_and_paging() {
         }]
     );
     let page = store
-        .directory_page(Path::new("/music"), Some(true), 1, 1)
+        .directory_page(Path::new("/music"), None, Some(true), 1, 1)
         .unwrap();
     assert_eq!(page.total, 3);
     assert!(matches!(&page.rows[..], [DirectoryRow::Track(row)] if row.id == ids[1]));
     let page = store
-        .directory_page(Path::new("/music"), Some(true), 3, 1)
+        .directory_page(Path::new("/music"), None, Some(true), 3, 1)
         .unwrap();
     assert_eq!(page.total, 3);
     assert!(page.rows.is_empty());
     let page = store
-        .directory_page(Path::new("/music/mixed"), Some(true), 0, 10)
+        .directory_page(Path::new("/music/mixed"), None, Some(true), 0, 10)
         .unwrap();
     assert_eq!(page.total, 1);
     assert_eq!(
@@ -927,16 +976,16 @@ fn directory_favorites_filter_before_grouping_and_paging() {
         }]
     );
     let page = store
-        .directory_page(Path::new("/music/mixed/deep"), Some(true), 0, 10)
+        .directory_page(Path::new("/music/mixed/deep"), None, Some(true), 0, 10)
         .unwrap();
     assert!(matches!(&page.rows[..], [DirectoryRow::Track(row)] if row.id == ids[0]));
     let page = store
-        .directory_page(Path::new("/music/empty"), Some(true), 0, 10)
+        .directory_page(Path::new("/music/empty"), None, Some(true), 0, 10)
         .unwrap();
     assert_eq!(page.total, 0);
     assert!(page.rows.is_empty());
     let page = store
-        .directory_page(Path::new("/music"), Some(false), 0, 10)
+        .directory_page(Path::new("/music"), None, Some(false), 0, 10)
         .unwrap();
     assert_eq!(page.total, 3);
     assert!(
@@ -947,7 +996,7 @@ fn directory_favorites_filter_before_grouping_and_paging() {
     );
     assert!(matches!(&page.rows[2], DirectoryRow::Track(row) if !row.favorite && row.id != ids[2]));
     let page = store
-        .directory_page(Path::new("/music"), None, 0, 10)
+        .directory_page(Path::new("/music"), None, None, 0, 10)
         .unwrap();
     assert_eq!(page.total, 5);
     let cue_rows = page
@@ -960,6 +1009,197 @@ fn directory_favorites_filter_before_grouping_and_paging() {
         .collect::<Vec<_>>();
     assert_eq!(cue_rows.len(), 2);
     assert_ne!(cue_rows[0], cue_rows[1]);
+}
+
+#[test]
+fn directory_search_preserves_matching_ancestors_and_combines_favorites() {
+    use crate::model::DirectoryRow;
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    store
+        .apply_scan(&scan(vec![
+            rec("/music/a/deep/one.wav", "one", "Needle One", 60.0),
+            rec("/music/a/deep/two.wav", "two", "Needle Two", 60.0),
+            rec("/music/b/deep/three.wav", "three", "Needle Three", 60.0),
+            rec("/music/b/other.wav", "other", "Other", 60.0),
+            rec("/music/hidden/deep/no.wav", "no", "No", 60.0),
+            rec("/music/direct.wav", "direct", "Needle Direct", 60.0),
+            rec("/music/a-extra/edge.wav", "edge", "Needle Edge", 60.0),
+        ]))
+        .unwrap();
+    let favorite = store
+        .track_id_for_source(Path::new("/music/a/deep/one.wav"), None)
+        .unwrap()
+        .unwrap();
+    let other = store
+        .track_id_for_source(Path::new("/music/b/other.wav"), None)
+        .unwrap()
+        .unwrap();
+    store.set_favorite(&[favorite, other], true).unwrap();
+    let first = store
+        .directory_page(Path::new("/music"), Some("NEEDLE"), None, 0, 2)
+        .unwrap();
+    assert_eq!(first.total, 4);
+    assert_eq!(
+        first.rows,
+        [
+            DirectoryRow::Directory {
+                path: "/music/a".into()
+            },
+            DirectoryRow::Directory {
+                path: "/music/a-extra".into()
+            },
+        ]
+    );
+    let tail = store
+        .directory_page(Path::new("/music"), Some("needle"), None, 2, 2)
+        .unwrap();
+    assert_eq!(tail.total, 4);
+    assert!(
+        matches!(&tail.rows[0], DirectoryRow::Directory { path } if path == Path::new("/music/b"))
+    );
+    assert!(matches!(&tail.rows[1], DirectoryRow::Track(row) if row.title == "Needle Direct"));
+    let selected = store
+        .directory_page(Path::new("/music"), Some("needle"), Some(true), 0, 10)
+        .unwrap();
+    assert_eq!(selected.total, 1);
+    assert_eq!(
+        selected.rows,
+        [DirectoryRow::Directory {
+            path: "/music/a".into()
+        }]
+    );
+    let ancestor = store
+        .directory_page(Path::new("/music/a/"), Some("needle"), Some(true), 0, 10)
+        .unwrap();
+    assert_eq!(ancestor.total, 1);
+    assert_eq!(
+        ancestor.rows,
+        [DirectoryRow::Directory {
+            path: "/music/a/deep".into()
+        }]
+    );
+    let leaf = store
+        .directory_page(
+            Path::new("/music/a/deep"),
+            Some("needle"),
+            Some(true),
+            0,
+            10,
+        )
+        .unwrap();
+    assert_eq!(leaf.total, 1);
+    assert!(matches!(&leaf.rows[..], [DirectoryRow::Track(row)] if row.id == favorite));
+    let non_favorites = store
+        .directory_page(
+            Path::new("/music/a/deep"),
+            Some("needle"),
+            Some(false),
+            0,
+            10,
+        )
+        .unwrap();
+    assert_eq!(non_favorites.total, 1);
+    assert!(
+        matches!(&non_favorites.rows[..], [DirectoryRow::Track(row)] if row.title == "Needle Two")
+    );
+    let root = store
+        .directory_page(Path::new(""), Some("needle"), Some(true), 0, 10)
+        .unwrap();
+    assert_eq!(root.total, 1);
+    assert_eq!(root.rows, [DirectoryRow::Directory { path: "/".into() }]);
+    for favorite in [None, Some(true), Some(false)] {
+        let unfiltered = store
+            .directory_page(Path::new("/music"), None, favorite, 1, 10)
+            .unwrap();
+        let empty = store
+            .directory_page(Path::new("/music"), Some(""), favorite, 1, 10)
+            .unwrap();
+        assert_eq!(empty.total, unfiltered.total);
+        assert_eq!(empty.rows, unfiltered.rows);
+    }
+    for (query, offset, limit) in [
+        ("absent", 0, 10),
+        ("needle", 4, 10),
+        ("needle", 0, 0),
+        ("needle", usize::MAX, 10),
+    ] {
+        let page = store
+            .directory_page(Path::new("/music"), Some(query), None, offset, limit)
+            .unwrap();
+        assert_eq!(page.total, if query == "absent" { 0 } else { 4 });
+        assert!(page.rows.is_empty());
+    }
+}
+
+#[test]
+fn directory_search_reuses_literal_unicode_metadata_and_path_matching() {
+    use crate::model::{DirectoryRow, LibrarySort};
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    store
+        .apply_scan(&scan(vec![
+            rec("/music/search/one.wav", "one", "Raw Title", 60.0),
+            rec("/music/search/two.wav", "two", "Other", 60.0),
+        ]))
+        .unwrap();
+    store.conn.execute(
+        "UPDATE tracks SET title_override='ÉTÉ_100%', artist_override='World' WHERE path='/music/search/one.wav'",
+        [],
+    ).unwrap();
+    store
+        .conn
+        .execute(
+            "UPDATE tracks SET raw_artist='Été_100%' WHERE path='/music/search/two.wav'",
+            [],
+        )
+        .unwrap();
+    for query in [
+        "été_100%",
+        "ÉTÉ_100% world",
+        "/music/search/two.wav",
+        "raw title",
+        "étéX100Z",
+    ] {
+        let directory = store
+            .directory_page(Path::new("/music/search"), Some(query), None, 0, 10)
+            .unwrap();
+        let library = store
+            .library_view_page(Some(query), None, None, LibrarySort::Id, 0, 10)
+            .unwrap();
+        assert_eq!(directory.total, library.total);
+        let ids = directory
+            .rows
+            .iter()
+            .map(|row| match row {
+                DirectoryRow::Track(row) => row.id,
+                DirectoryRow::Directory { .. } => panic!("expected only tracks"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            library.rows.iter().map(|row| row.id).collect::<Vec<_>>()
+        );
+    }
+    assert_eq!(
+        store
+            .directory_page(Path::new("/music/search"), Some("été_100%"), None, 0, 10)
+            .unwrap()
+            .total,
+        2
+    );
+    assert_eq!(
+        store
+            .directory_page(Path::new("/music/search"), Some("raw title"), None, 0, 10)
+            .unwrap()
+            .total,
+        0
+    );
+    assert_eq!(
+        store
+            .directory_page(Path::new("/music/search"), Some("étéX100Z"), None, 0, 10)
+            .unwrap()
+            .total,
+        0
+    );
 }
 
 #[test]
@@ -981,24 +1221,47 @@ fn directory_pages_preserve_boundaries_and_duplicate_cue_sources() {
     records.push(segment("/music/Album/sheet.cue", 2, 750, None));
     store.apply_scan(&scan(records)).unwrap();
     let root = store
-        .directory_page(Path::new(""), None, 0, MAX_QUERY_ROWS)
+        .directory_page(Path::new(""), None, None, 0, MAX_QUERY_ROWS)
         .unwrap();
     assert_eq!(root.rows, [DirectoryRow::Directory { path: "/".into() }]);
     let music = store
-        .directory_page(Path::new("/music"), None, 0, MAX_QUERY_ROWS)
+        .directory_page(Path::new("/music"), None, None, 0, MAX_QUERY_ROWS)
         .unwrap();
     assert_eq!(music.total, 4);
     assert!(
         matches!(&music.rows[0], DirectoryRow::Directory { path } if path == Path::new("/music/Album"))
     );
     let first = store
-        .directory_page(Path::new("/music/Album/"), None, 0, usize::MAX)
+        .directory_page(Path::new("/music/Album/"), None, None, 0, usize::MAX)
         .unwrap();
     assert_eq!(first.total, 300);
     assert_eq!(first.rows.len(), MAX_QUERY_ROWS);
+    let searched = store
+        .directory_page(
+            Path::new("/music/Album/"),
+            Some("Track "),
+            None,
+            0,
+            usize::MAX,
+        )
+        .unwrap();
+    assert_eq!(searched.total, 300);
+    assert_eq!(searched.rows.len(), MAX_QUERY_ROWS);
+    let searched_tail = store
+        .directory_page(
+            Path::new("/music/Album"),
+            Some("Track "),
+            None,
+            MAX_QUERY_ROWS,
+            MAX_QUERY_ROWS,
+        )
+        .unwrap();
+    assert_eq!(searched_tail.total, 300);
+    assert_eq!(searched_tail.rows.len(), 44);
     let last = store
         .directory_page(
             Path::new("/music/Album"),
+            None,
             None,
             MAX_QUERY_ROWS,
             MAX_QUERY_ROWS,
@@ -1007,7 +1270,7 @@ fn directory_pages_preserve_boundaries_and_duplicate_cue_sources() {
     assert_eq!(last.rows.len(), 44);
     assert!(matches!(&last.rows[43], DirectoryRow::Track(row) if row.title == "Track 299"));
     let cue_sources = store
-        .directory_page(Path::new("/music"), None, 2, MAX_QUERY_ROWS)
+        .directory_page(Path::new("/music"), None, None, 2, MAX_QUERY_ROWS)
         .unwrap();
     assert_eq!(cue_sources.rows.len(), 2);
     assert!(
@@ -1016,6 +1279,29 @@ fn directory_pages_preserve_boundaries_and_duplicate_cue_sources() {
             .iter()
             .all(|row| matches!(row, DirectoryRow::Track(_)))
     );
+    let cue_matches = store
+        .directory_page(Path::new("/music"), Some("Track "), None, 1, MAX_QUERY_ROWS)
+        .unwrap();
+    assert_eq!(cue_matches.total, 3);
+    assert_eq!(cue_matches.rows.len(), 2);
+    assert!(
+        cue_matches
+            .rows
+            .iter()
+            .all(|row| matches!(row, DirectoryRow::Track(_)))
+    );
+    assert_ne!(cue_matches.rows[0], cue_matches.rows[1]);
+    let cue_match = store
+        .directory_page(
+            Path::new("/music"),
+            Some("Track 2"),
+            None,
+            1,
+            MAX_QUERY_ROWS,
+        )
+        .unwrap();
+    assert_eq!(cue_match.total, 2);
+    assert!(matches!(&cue_match.rows[..], [DirectoryRow::Track(row)] if row.title == "Track 2"));
     let tail_id = store
         .track_id_for_source(Path::new("/music/Album/299.wav"), None)
         .unwrap()

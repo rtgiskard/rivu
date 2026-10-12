@@ -357,13 +357,17 @@ impl Core {
             )?),
             Query::DirectoryPage {
                 path,
+                query,
                 favorite,
                 offset,
                 limit,
-            } => ViewResponse::DirectoryPage(
-                self.store
-                    .directory_page(path, *favorite, *offset, *limit)?,
-            ),
+            } => ViewResponse::DirectoryPage(self.store.directory_page(
+                path,
+                query.as_deref(),
+                *favorite,
+                *offset,
+                *limit,
+            )?),
             Query::PlaylistSummaries { offset, limit } => {
                 ViewResponse::PlaylistSummaries(self.store.playlist_summary_page(*offset, *limit)?)
             }

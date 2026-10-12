@@ -92,6 +92,8 @@ pub struct LibraryRow {
     pub artist: String,
     pub album: String,
     pub duration: Option<f64>,
+    pub codec: String,
+    pub bitrate_bps: Option<u64>,
     pub favorite: bool,
     pub missing: bool,
     pub play_count: u64,
@@ -395,6 +397,7 @@ pub enum Query {
     },
     DirectoryPage {
         path: PathBuf,
+        query: Option<String>,
         favorite: Option<bool>,
         offset: usize,
         limit: usize,

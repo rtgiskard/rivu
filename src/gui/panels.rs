@@ -655,18 +655,7 @@ impl GuiApp {
                                             .into_any_element();
                                     };
                                     let id = row.id;
-                                    let detail = format!(
-                                        "{}{}{} · {}{}",
-                                        row.artist,
-                                        if row.artist.is_empty() || row.album.is_empty() {
-                                            ""
-                                        } else {
-                                            " / "
-                                        },
-                                        row.album,
-                                        format_time(row.duration.unwrap_or(0.)),
-                                        if row.missing { " · File missing" } else { "" }
-                                    );
+                                    let detail = super::library::track_detail(&row);
                                     track_row(
                                         ("library-track", id as u64),
                                         ("library-track-text", id as u64),
@@ -674,6 +663,7 @@ impl GuiApp {
                                         row.title,
                                         detail,
                                     )
+                                    .pl(gpui::rems(1.75))
                                     .group("library-track-row")
                                     .child(this.library_favorite_toggle(
                                         ("library-track-favorite", id as u64),

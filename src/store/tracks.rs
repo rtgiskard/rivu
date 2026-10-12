@@ -122,45 +122,42 @@ impl Store {
     pub fn directory_page(
         &self,
         path: &Path,
+        query: Option<&str>,
         favorite: Option<bool>,
         offset: usize,
         limit: usize,
     ) -> Result<Page<crate::model::DirectoryRow>> {
         use crate::model::DirectoryRow;
         let prefix = directory_prefix(path)?;
+        let query = query
+            .filter(|query| !query.is_empty())
+            .map(str::to_lowercase);
         // SQLite derives immediate children; Rust retains only the requested page.
         // Group directories but preserve distinct CUE tracks sharing a source path.
-        let sources = "WITH sources AS (SELECT id,path,substr(path,length(?1)+1) AS rest FROM tracks WHERE substr(path,1,length(?1))=?1";
-        let filter = if favorite.is_some() {
-            " AND favorite=?2"
-        } else {
-            ""
-        };
-        let children = "), children AS (SELECT 0 AS kind,CASE WHEN ?1='' AND instr(rest,'/')=1 THEN '/' ELSE ?1||substr(rest,1,instr(rest,'/')-1) END AS child,MIN(id) AS track_id FROM sources WHERE instr(rest,'/')>0 GROUP BY child UNION ALL SELECT 1,path,id FROM sources WHERE instr(rest,'/')=0)";
+        let sources =
+            "WITH sources AS (SELECT id,path,substr(path,length(?4)+1) AS rest FROM tracks ";
+        let children = " AND substr(path,1,length(?4))=?4), children AS (SELECT 0 AS kind,CASE WHEN ?4='' AND instr(rest,'/')=1 THEN '/' ELSE ?4||substr(rest,1,instr(rest,'/')-1) END AS child,MIN(id) AS track_id FROM sources WHERE instr(rest,'/')>0 GROUP BY child UNION ALL SELECT 1,path,id FROM sources WHERE instr(rest,'/')=0)";
         let page_columns = " SELECT c.kind,c.child,";
-        let page_tail = " FROM children c JOIN tracks t ON t.id=c.track_id ORDER BY c.kind,c.child,t.id LIMIT ?3 OFFSET ?4";
-        // Reuse one SQL buffer for count and payload; the unfiltered source stays unchanged.
+        let page_tail = " FROM children c JOIN tracks t ON t.id=c.track_id ORDER BY c.kind,c.child,t.id LIMIT ?5 OFFSET ?6";
+        // Reuse the library search predicate and one SQL buffer for count and payload.
         let mut sql = String::with_capacity(
             sources.len()
-                + filter.len()
+                + TRACK_SEARCH_FILTER.len()
                 + children.len()
                 + page_columns.len()
                 + LIBRARY_ROW_COLUMNS_QUALIFIED.len()
                 + page_tail.len(),
         );
         sql.push_str(sources);
-        sql.push_str(filter);
+        sql.push_str(TRACK_SEARCH_FILTER);
         sql.push_str(children);
         let children_end = sql.len();
         sql.push_str(" SELECT COUNT(*) FROM children");
-        let count_params: &[&dyn rusqlite::ToSql] = if favorite.is_some() {
-            &[&prefix, &favorite]
-        } else {
-            &[&prefix]
-        };
-        let total =
-            self.conn
-                .query_row(&sql, count_params, |row| row.get::<_, i64>(0))? as usize;
+        let total = self.conn.query_row(
+            &sql,
+            params![query, favorite, None::<bool>, prefix],
+            |row| row.get::<_, i64>(0),
+        )? as usize;
         sql.truncate(children_end);
         sql.push_str(page_columns);
         sql.push_str(LIBRARY_ROW_COLUMNS_QUALIFIED);
@@ -169,8 +166,10 @@ impl Store {
         let rows = stmt
             .query_map(
                 params![
-                    prefix,
+                    query,
                     favorite,
+                    None::<bool>,
+                    prefix,
                     limit.min(crate::model::MAX_QUERY_ROWS) as i64,
                     offset.min(i64::MAX as usize) as i64
                 ],

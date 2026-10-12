@@ -8,6 +8,41 @@ use std::{path::Path, sync::Arc};
 use tree::TreeItem;
 pub(super) use tree::{BranchStatus, DirectoryTree, TreeBranch};
 
+pub(super) fn track_detail(track: &crate::model::LibraryRow) -> String {
+    let mut detail = track.artist.clone();
+    if !track.album.is_empty() {
+        if !detail.is_empty() {
+            detail.push_str(" / ");
+        }
+        detail.push_str(&track.album);
+    }
+    if !detail.is_empty() {
+        detail.push_str(" · ");
+    }
+    match track.duration {
+        Some(duration) => detail.push_str(&super::format_time(duration)),
+        None => detail.push('—'),
+    }
+    detail.push_str(" · ");
+    detail.push_str(if track.codec.is_empty() {
+        "—"
+    } else {
+        &track.codec
+    });
+    detail.push_str(" · ");
+    match track.bitrate_bps {
+        Some(value) => {
+            use std::fmt::Write;
+            let _ = write!(detail, "{:.1} kbps", value as f64 / 1000.0);
+        }
+        None => detail.push('—'),
+    }
+    if track.missing {
+        detail.push_str(" · File missing");
+    }
+    detail
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) enum LibraryNode {
     Directory(Arc<Path>),
@@ -369,22 +404,7 @@ impl GuiApp {
                                 DirectoryRow::Track(track) => (
                                     LibraryNode::Track(track.id),
                                     track.title.clone(),
-                                    format!(
-                                        "{}{}{} · {}{}",
-                                        track.artist,
-                                        if track.artist.is_empty() || track.album.is_empty() {
-                                            ""
-                                        } else {
-                                            " / "
-                                        },
-                                        track.album,
-                                        super::format_time(track.duration.unwrap_or(0.)),
-                                        if track.missing {
-                                            " · File missing"
-                                        } else {
-                                            ""
-                                        },
-                                    ),
+                                    track_detail(track),
                                     None,
                                 ),
                             };

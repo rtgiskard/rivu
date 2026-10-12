@@ -472,15 +472,15 @@ struct TrackTooltip {
 impl Render for TrackTooltip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         super::column()
-            .max_w(gpui::px(560.))
+            .w(gpui::px(560.))
             .px(gpui::px(UI_INSET))
             .py_2()
             .bg(rgb(PANEL))
             .border_1()
             .border_color(rgb(BORDER))
             .text_color(rgb(TEXT))
-            .child(self.title.clone())
-            .child(caption(self.detail.clone()))
+            .child(div().w_full().flex_shrink_0().child(self.title.clone()))
+            .child(caption(self.detail.clone()).w_full().flex_shrink_0())
     }
 }
 

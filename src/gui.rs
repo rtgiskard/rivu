@@ -684,7 +684,7 @@ impl GuiApp {
         );
         subscriptions.push(cx.subscribe(&inputs[&Field::Search], |this, _, event, cx| {
             if matches!(event, InputEvent::Changed { .. }) {
-                this.refresh_filter(cx);
+                this.refresh_search(cx);
                 cx.notify();
             }
         }));

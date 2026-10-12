@@ -28,6 +28,7 @@ enum Projection {
         total: usize,
     },
     Tree {
+        query: Option<String>,
         favorite: Option<bool>,
         revision: u64,
         total: usize,
@@ -49,6 +50,7 @@ impl Scope {
             structure: revisions.1,
             projection: if browser.tree_active() {
                 Projection::Tree {
+                    query: view.query.clone(),
                     favorite: browser.favorites_only().then_some(true),
                     revision: browser.tree().projection_revision(),
                     total: browser.tree().row_count(),
@@ -71,11 +73,13 @@ impl Scope {
             && self.structure == revisions.1
             && match &self.projection {
                 Projection::Tree {
+                    query,
                     favorite,
                     revision,
                     total,
                 } => {
                     browser.tree_active()
+                        && query == &view.query
                         && *favorite == browser.favorites_only().then_some(true)
                         && *revision == browser.tree().projection_revision()
                         && *total == browser.tree().row_count()
@@ -236,12 +240,16 @@ impl RangeJob {
     fn query(&self, slice: &Slice) -> Query {
         match &slice.source {
             Source::Tree(branch) => {
-                let Projection::Tree { favorite, .. } = self.scope.projection else {
+                let Projection::Tree {
+                    query, favorite, ..
+                } = &self.scope.projection
+                else {
                     unreachable!("tree ranges have a tree projection")
                 };
                 Query::DirectoryPage {
                     path: branch.path().to_path_buf(),
-                    favorite,
+                    query: query.clone(),
+                    favorite: *favorite,
                     offset: slice.offset,
                     limit: slice.len,
                 }
@@ -638,6 +646,8 @@ mod tests {
             artist: String::new(),
             album: String::new(),
             duration: None,
+            codec: String::new(),
+            bitrate_bps: None,
             favorite: true,
             missing: false,
             play_count: 0,
@@ -790,7 +800,7 @@ mod tests {
     }
 
     #[test]
-    fn tree_range_selects_only_favorites_across_query_batches() {
+    fn tree_range_search_and_favorites_share_query_batches() {
         use crate::{
             library::{ScanRecord, ScanResult},
             model::MediaInfo,
@@ -855,44 +865,132 @@ mod tests {
             panic!("expected library root")
         };
         let branch = entry.branch.unwrap();
-        let mut job = RangeJob {
-            token: 1,
-            scope: Scope {
-                library: 7,
-                structure: 3,
-                projection: Projection::Tree {
-                    favorite: Some(true),
-                    revision: tree.projection_revision(),
-                    total: 3,
+        for (query, expected) in [(None, favorites.clone()), (Some("3"), vec![favorites[1]])] {
+            let mut job = RangeJob {
+                token: 1,
+                scope: Scope {
+                    library: 7,
+                    structure: 3,
+                    projection: Projection::Tree {
+                        query: query.map(str::to_owned),
+                        favorite: Some(true),
+                        revision: tree.projection_revision(),
+                        total: expected.len(),
+                    },
                 },
-            },
-            slices: VecDeque::from([Slice {
-                source: Source::Tree(branch),
-                offset: 0,
-                len: 3,
-                total: 3,
-                check: None,
-            }]),
-            selected: HashSet::new(),
-            endpoint: LibraryNode::Track(favorites[2]),
-            endpoint_index: 2,
-            additive: false,
-            batch_size: 1,
-        };
-        while let Some(slice) = job.next() {
-            let Query::DirectoryPage {
-                path,
-                favorite,
-                offset,
-                limit,
-            } = job.query(&slice)
-            else {
-                panic!("expected directory range query")
+                slices: VecDeque::from([Slice {
+                    source: Source::Tree(branch.clone()),
+                    offset: 0,
+                    len: expected.len(),
+                    total: expected.len(),
+                    check: None,
+                }]),
+                selected: HashSet::new(),
+                endpoint: LibraryNode::Track(*expected.last().unwrap()),
+                endpoint_index: expected.len() - 1,
+                additive: false,
+                batch_size: 1,
             };
-            let page = store
-                .directory_page(&path, favorite, offset, limit)
+            while let Some(slice) = job.next() {
+                let Query::DirectoryPage {
+                    path,
+                    query,
+                    favorite,
+                    offset,
+                    limit,
+                } = job.query(&slice)
+                else {
+                    panic!("expected directory range query")
+                };
+                let page = store
+                    .directory_page(&path, query.as_deref(), favorite, offset, limit)
+                    .unwrap();
+                job.accept(
+                    &slice,
+                    QueryResponse {
+                        revisions: QueryRevisions {
+                            library: 7,
+                            structure: 3,
+                            playlist: 0,
+                        },
+                        result: Ok(ViewResponse::DirectoryPage(page)),
+                    },
+                )
                 .unwrap();
-            job.accept(
+            }
+            assert_eq!(
+                job.selected,
+                expected.into_iter().map(LibraryNode::Track).collect()
+            );
+        }
+    }
+
+    #[test]
+    fn tree_search_owner_cancels_old_range_and_uses_same_query() {
+        use crate::gui::library::tree::TreeItem;
+        let mut library = LibraryBrowser::default();
+        library.toggle_favorites();
+        library.refresh_search("needle".into());
+        let forest = TreeBranch::default();
+        library.prepare_directory(forest.clone(), 0, 2, 1);
+        library.accept_directory(
+            &forest,
+            1,
+            Page {
+                total: 1,
+                rows: vec![DirectoryRow::Directory {
+                    path: "/music".into(),
+                }],
+            },
+        );
+        let Some(TreeItem::Entry(entry)) = library.tree().item(0) else {
+            panic!("expected configured root")
+        };
+        let branch = entry.branch.unwrap();
+        library.expand_directory(&branch, true);
+        library.prepare_directory(branch.clone(), 0, 2, 2);
+        library.accept_directory(
+            &branch,
+            2,
+            Page {
+                total: 4,
+                rows: vec![DirectoryRow::Track(row(0)), DirectoryRow::Track(row(1))],
+            },
+        );
+        library
+            .start_selection(&LibraryNode::Track(0), 1, false, false, (7, 3), 2)
+            .unwrap();
+        library
+            .start_selection(&LibraryNode::Track(3), 4, true, false, (7, 3), 2)
+            .unwrap();
+        let RangeStep::Query {
+            token,
+            slice,
+            query,
+        } = library.advance_range((7, 3), &["/music".into()]).unwrap()
+        else {
+            panic!("uncached filtered rows require a range query")
+        };
+        assert!(matches!(
+            query,
+            Query::DirectoryPage {
+                query: Some(query), favorite: Some(true), offset: 2, limit: 2, ..
+            } if query == "needle"
+        ));
+        let scope = Scope::capture(&library, (7, 3));
+        let mut other_query = scope.clone();
+        let Projection::Tree { query, .. } = &mut other_query.projection else {
+            unreachable!()
+        };
+        *query = Some("other".into());
+        assert!(!other_query.matches(&library, (7, 3)));
+        library.refresh_search("replacement".into());
+        assert!(library.tree_active());
+        assert!(!scope.matches(&library, (7, 3)));
+        assert!(!library.range_pending());
+        library
+            .complete_range(
+                token,
                 &slice,
                 QueryResponse {
                     revisions: QueryRevisions {
@@ -900,15 +998,18 @@ mod tests {
                         structure: 3,
                         playlist: 0,
                     },
-                    result: Ok(ViewResponse::DirectoryPage(page)),
+                    result: Ok(ViewResponse::DirectoryPage(Page {
+                        total: 4,
+                        rows: vec![DirectoryRow::Track(row(2)), DirectoryRow::Track(row(3))],
+                    })),
                 },
+                (7, 3),
             )
             .unwrap();
-        }
-        assert_eq!(
-            job.selected,
-            favorites.into_iter().map(LibraryNode::Track).collect()
-        );
+        assert_eq!(library.selected(), &HashSet::from([0]));
+        library.refresh_search(String::new());
+        assert!(library.tree_active());
+        assert_eq!(library.buffer().query, None);
     }
 
     #[test]
@@ -1113,6 +1214,7 @@ mod tests {
                 library: 7,
                 structure: 3,
                 projection: Projection::Tree {
+                    query: None,
                     favorite: None,
                     revision: tree.projection_revision(),
                     total: tree.row_count(),
@@ -1217,6 +1319,7 @@ mod tests {
                 library: 7,
                 structure: 3,
                 projection: Projection::Tree {
+                    query: None,
                     favorite: None,
                     revision: tree.projection_revision(),
                     total: 1,
@@ -1259,6 +1362,7 @@ mod tests {
             library: 7,
             structure: 3,
             projection: Projection::Tree {
+                query: None,
                 favorite: None,
                 revision: tree.projection_revision() + 1,
                 total: 1,
