@@ -213,7 +213,12 @@ impl Core {
                 artist,
                 album,
             } => {
-                self.store.edit_track(track_id, &title, &artist, &album)?;
+                self.store.edit_track(
+                    track_id,
+                    title.as_deref(),
+                    artist.as_deref(),
+                    album.as_deref(),
+                )?;
                 self.refresh_affected_queue_tracks(&[track_id])?;
                 self.state.library.revision = self.state.library.revision.wrapping_add(1);
             }

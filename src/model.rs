@@ -563,11 +563,12 @@ pub enum Command {
         playlist_id: i64,
         path: PathBuf,
     },
+    /// Only supplied fields become overrides; an empty string explicitly clears text.
     EditTrack {
         track_id: i64,
-        title: String,
-        artist: String,
-        album: String,
+        title: Option<String>,
+        artist: Option<String>,
+        album: Option<String>,
     },
     RemoveTracks {
         track_ids: Vec<i64>,

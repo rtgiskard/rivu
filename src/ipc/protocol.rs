@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub(super) const PROTOCOL_VERSION: u8 = 6;
+pub(super) const PROTOCOL_VERSION: u8 = 7;
 pub(super) const MAX_REQUEST: usize = 64 * 1024;
 pub(super) const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub(super) const MAX_CLIENTS: usize = 16;
@@ -263,9 +263,9 @@ pub(super) enum WireCommand {
     },
     EditTrack {
         track_id: i64,
-        title: String,
-        artist: String,
-        album: String,
+        title: Option<String>,
+        artist: Option<String>,
+        album: Option<String>,
     },
     RemoveTracks {
         track_ids: Vec<i64>,

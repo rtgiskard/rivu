@@ -39,7 +39,7 @@ The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
 Bodies use Postcard serialization without COBS framing. The current protocol
-version is `6`; clients and servers must use matching wire schemas. The four-byte
+version is `7`; clients and servers must use matching wire schemas. The four-byte
 frame length remains little-endian; body integers follow Postcard's encoding.
 
 Request frame content is limited to 64 KiB
@@ -213,6 +213,13 @@ the message body.
 The codec and positional payload schema are not negotiated. Changes require
 coordinated client and server updates, preserving configuration semantics such
 as omitted overrides inheriting their common setting.
+
+`EditTrack` carries optional title, artist, and album fields. `None` leaves a
+field untouched; `Some("")` explicitly overrides it with empty text. The core
+merges these field intents into the current track, rather than replacing it
+with a client snapshot. Version 7 changes these fields from required strings to
+options; version 6 clients and servers are incompatible and must be upgraded
+together.
 
 The source of truth for exact schemas and adapters is
 link:../src/ipc/protocol.rs[protocol.rs];

@@ -214,18 +214,25 @@ impl MetadataSession {
         self.accept_track(track.cloned(), draft)
     }
 
-    pub(super) fn begin_save(&mut self, draft: MetadataDraft<'_>) -> Option<SaveToken> {
+    pub(super) fn begin_save(&mut self, draft: MetadataDraft<'_>) -> Option<(SaveToken, Command)> {
         let track_id = self.track.as_ref()?.id;
         if self.saving() || !self.dirty(draft) {
             return None;
         }
+        let baseline = self.baseline.as_ref()?;
+        let command = Command::EditTrack {
+            track_id,
+            title: (baseline.title != draft.title).then(|| draft.title.to_owned()),
+            artist: (baseline.artist != draft.artist).then(|| draft.artist.to_owned()),
+            album: (baseline.album != draft.album).then(|| draft.album.to_owned()),
+        };
         let token = SaveToken {
             epoch: self.epoch,
             request: self.request.wrapping_add(1),
             track_id,
         };
         self.saving = Some(token);
-        Some(token)
+        Some((token, command))
     }
 
     /// Never writes widgets: edits typed while saving remain the active draft.
@@ -244,10 +251,19 @@ impl MetadataSession {
         self.saving = None;
         if ok {
             self.request = self.request.wrapping_add(1);
-            if let Some(track) = self.track.as_mut() {
-                track.title.clone_from(&values.title);
-                track.artist.clone_from(&values.artist);
-                track.album.clone_from(&values.album);
+            if let (Some(track), Some(baseline)) = (self.track.as_mut(), self.baseline.as_ref()) {
+                // Refreshes may have updated other fields while this save was in flight.
+                // Only the submitted changes are acknowledged; untouched draft fields
+                // keep their baseline so a later save cannot turn them into overrides.
+                if values.title != baseline.title {
+                    track.title.clone_from(&values.title);
+                }
+                if values.artist != baseline.artist {
+                    track.artist.clone_from(&values.artist);
+                }
+                if values.album != baseline.album {
+                    track.album.clone_from(&values.album);
+                }
             }
             self.baseline = Some(values);
         }
@@ -358,14 +374,8 @@ impl GuiApp {
             artist: self.value(Field::Artist, cx),
             album: self.value(Field::Album, cx),
         };
-        let Some(token) = self.metadata.begin_save(values.as_draft()) else {
+        let Some((token, command)) = self.metadata.begin_save(values.as_draft()) else {
             return;
-        };
-        let command = Command::EditTrack {
-            track_id: token.track_id,
-            title: values.title.clone(),
-            artist: values.artist.clone(),
-            album: values.album.clone(),
         };
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
@@ -464,7 +474,7 @@ mod tests {
         let mut session = MetadataSession::default();
         load(&mut session, 1, "one");
         let old_load = session.begin_load(1);
-        let save = session.begin_save(values("edit").as_draft()).unwrap();
+        let (save, _) = session.begin_save(values("edit").as_draft()).unwrap();
         load(&mut session, 2, "two");
         load(&mut session, 1, "fresh");
         assert!(!session.accepts_load(old_load));
@@ -473,17 +483,110 @@ mod tests {
     }
 
     #[test]
+    fn save_patches_baseline_not_refreshed_track_and_preserves_untouched_fields() {
+        let mut session = MetadataSession::default();
+        load(&mut session, 1, "original");
+        let submitted = values("saved title");
+        let (token, command) = session.begin_save(submitted.as_draft()).unwrap();
+        let Command::EditTrack {
+            title,
+            artist,
+            album,
+            ..
+        } = command
+        else {
+            panic!("expected metadata patch");
+        };
+        assert_eq!(title.as_deref(), Some("saved title"));
+        assert_eq!(artist, None);
+        assert_eq!(album, None);
+        let load_token = session.begin_load(1);
+        let mut remote = track(1, "saved title");
+        remote.artist = "External artist".into();
+        let newer_draft = values("typed while saving");
+        assert!(
+            session
+                .accept_load(load_token, Some(remote), newer_draft.as_draft())
+                .is_none()
+        );
+        assert!(session.complete_save(token, submitted.clone(), true));
+        assert!(!session.dirty(submitted.as_draft()));
+        assert_eq!(session.track().unwrap().artist, "External artist");
+        assert!(session.dirty(newer_draft.as_draft()));
+        let (_, command) = session.begin_save(newer_draft.as_draft()).unwrap();
+        let Command::EditTrack {
+            title,
+            artist,
+            album,
+            ..
+        } = command
+        else {
+            panic!("expected metadata patch");
+        };
+        assert_eq!(title.as_deref(), Some("typed while saving"));
+        assert_eq!(artist, None);
+        assert_eq!(album, None);
+    }
+
+    #[test]
+    fn explicitly_cleared_field_is_included_but_clean_draft_cannot_save() {
+        let mut session = MetadataSession::default();
+        let baseline = load(&mut session, 1, "original");
+        assert!(session.begin_save(baseline.as_draft()).is_none());
+        let (_, command) = session.begin_save(values("").as_draft()).unwrap();
+        let Command::EditTrack {
+            title,
+            artist,
+            album,
+            ..
+        } = command
+        else {
+            panic!("expected metadata patch");
+        };
+        assert_eq!(title.as_deref(), Some(""));
+        assert_eq!(artist, None);
+        assert_eq!(album, None);
+    }
+
+    #[test]
+    fn different_field_typed_during_save_is_the_only_next_patch() {
+        let mut session = MetadataSession::default();
+        load(&mut session, 1, "original");
+        let submitted = values("saved title");
+        let (token, _) = session.begin_save(submitted.as_draft()).unwrap();
+        let newer_draft = MetadataValues {
+            artist: "New artist typed while saving".into(),
+            ..submitted.clone()
+        };
+        assert!(session.complete_save(token, submitted, true));
+        assert!(session.dirty(newer_draft.as_draft()));
+        let (_, command) = session.begin_save(newer_draft.as_draft()).unwrap();
+        let Command::EditTrack {
+            title,
+            artist,
+            album,
+            ..
+        } = command
+        else {
+            panic!("expected metadata patch");
+        };
+        assert_eq!(title, None);
+        assert_eq!(artist.as_deref(), Some("New artist typed while saving"));
+        assert_eq!(album, None);
+    }
+
+    #[test]
     fn save_ack_advances_only_submitted_baseline_and_preserves_new_edits() {
         let mut session = MetadataSession::default();
         load(&mut session, 1, "one");
         let submitted = values("saved");
-        let token = session.begin_save(submitted.as_draft()).unwrap();
+        let (token, _) = session.begin_save(submitted.as_draft()).unwrap();
         let pending_load = session.begin_load(1);
         assert!(session.complete_save(token, submitted.clone(), true));
         assert!(!session.accepts_load(pending_load));
         assert!(!session.dirty(submitted.as_draft()));
         assert!(session.dirty(values("typed while saving").as_draft()));
-        let token = session.begin_save(values("failed").as_draft()).unwrap();
+        let (token, _) = session.begin_save(values("failed").as_draft()).unwrap();
         assert!(session.complete_save(token, values("failed"), false));
         assert!(session.dirty(values("failed").as_draft()));
     }

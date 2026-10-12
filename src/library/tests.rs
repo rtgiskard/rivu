@@ -416,7 +416,7 @@ fn nested_scan_keeps_its_own_excluded_identity_and_user_data() -> Result<()> {
     store.apply_scan(&baseline)?;
     let id = store.track_id_for_source(&deep, None)?.unwrap();
     store.set_favorite(&[id], true)?;
-    store.edit_track(id, "Kept title", "", "")?;
+    store.edit_track(id, Some("Kept title"), None, None)?;
     let copy = nested.join("copy.wav");
     fs::rename(&deep, &copy)?;
     let partial = scan_paths_at_depth(&[root, nested], &[], false, 1, |_, _, _, _, _| {})?;

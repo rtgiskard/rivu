@@ -153,7 +153,9 @@ fn track_cache_invalidates_edits_favorites_statistics_and_deletes() {
 
     store.set_favorite(&[id], true).unwrap();
     assert!(store.track(id).unwrap().unwrap().favorite);
-    store.edit_track(id, "Edited", "Artist", "Album").unwrap();
+    store
+        .edit_track(id, Some("Edited"), Some("Artist"), Some("Album"))
+        .unwrap();
     assert_eq!(store.track(id).unwrap().unwrap().title, "Edited");
     store.mark_played(id, 42).unwrap();
     assert_eq!(store.track(id).unwrap().unwrap().last_played, Some(42));
@@ -274,12 +276,46 @@ fn recent_tracks_merge_replays_without_losing_counts() {
     let _ = fs::remove_file(p);
 }
 #[test]
+fn title_patch_keeps_unedited_metadata_live_across_rescans() {
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    let mut record = rec("/music/a.mp3", "same", "Raw title", 100.);
+    record.media.artist = "Raw artist".into();
+    record.media.album = "Raw album".into();
+    store.apply_scan(&scan(vec![record.clone()])).unwrap();
+    let id = all_tracks(&store)[0].id;
+    // Prime the cache before editing and scanning.
+    assert_eq!(store.track(id).unwrap().unwrap().artist, "Raw artist");
+    store
+        .edit_track(id, Some("Edited title"), None, None)
+        .unwrap();
+    record.media.title = "Rescanned title".into();
+    record.media.artist = "Rescanned artist".into();
+    record.media.album = "Rescanned album".into();
+    store.apply_scan(&scan(vec![record.clone()])).unwrap();
+    let track = store.track(id).unwrap().unwrap();
+    assert_eq!(track.title, "Edited title");
+    assert_eq!(track.artist, "Rescanned artist");
+    assert_eq!(track.album, "Rescanned album");
+
+    // Empty text is an actual override, unlike an omitted field.
+    store.edit_track(id, None, Some(""), None).unwrap();
+    record.media.artist = "Another artist".into();
+    record.media.album = "Another album".into();
+    store.apply_scan(&scan(vec![record])).unwrap();
+    let track = store.track(id).unwrap().unwrap();
+    assert_eq!(track.title, "Edited title");
+    assert_eq!(track.artist, "");
+    assert_eq!(track.album, "Another album");
+}
+
+#[test]
 fn moved_id_preserves_override_and_delete_does_not_reuse() {
     let (p, s) = db("identity");
     s.apply_scan(&scan(vec![rec("/music/a.mp3", "same", "Raw", 100.)]))
         .unwrap();
     let id = all_tracks(&s)[0].id;
-    s.edit_track(id, "Override", "A", "B").unwrap();
+    s.edit_track(id, Some("Override"), Some("A"), Some("B"))
+        .unwrap();
     s.apply_scan(&scan(vec![rec("/music/b.mp3", "same", "Changed", 100.)]))
         .unwrap();
     assert_eq!(all_tracks(&s)[0].id, id);
@@ -467,7 +503,7 @@ fn shared_source_segments_keep_independent_ids_overrides_stats_and_missing_state
     let ids: Vec<_> = tracks.iter().map(|t| t.id).collect();
     assert_eq!(ids.iter().collect::<HashSet<_>>().len(), 4);
     store
-        .edit_track(ids[1], "Custom", "Artist", "Album")
+        .edit_track(ids[1], Some("Custom"), Some("Artist"), Some("Album"))
         .unwrap();
     store.mark_played(ids[1], 10).unwrap();
     store.increment_play_count(ids[1]).unwrap();
@@ -773,7 +809,9 @@ fn cue_relocation_requires_absent_sheet_not_absent_shared_source() {
         result.roots = vec![root.clone()];
         store.apply_scan(&result).unwrap();
         let id = all_tracks(&store)[0].id;
-        store.edit_track(id, "Override", "Artist", "Album").unwrap();
+        store
+            .edit_track(id, Some("Override"), Some("Artist"), Some("Album"))
+            .unwrap();
         if !sheet_exists {
             fs::remove_file(&sheet).unwrap();
         }

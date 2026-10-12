@@ -686,6 +686,50 @@ mod tests {
     }
 
     #[test]
+    fn disjoint_metadata_intents_merge_in_either_execution_order() {
+        for title_first in [true, false] {
+            let (_directory, mut core) = fixture();
+            core.state.queue.current_id = Some(1);
+            core.refresh_queue_tracks().unwrap();
+            let title = Command::EditTrack {
+                track_id: 1,
+                title: Some("Title from one client".into()),
+                artist: None,
+                album: None,
+            };
+            let artist = Command::EditTrack {
+                track_id: 1,
+                title: None,
+                artist: Some("Artist from another client".into()),
+                album: None,
+            };
+            let commands = if title_first {
+                [title, artist]
+            } else {
+                [artist, title]
+            };
+            for command in commands {
+                core.command(command).unwrap();
+            }
+            let stored = core.store.track(1).unwrap().unwrap();
+            assert_eq!(stored.title, "Title from one client");
+            assert_eq!(stored.artist, "Artist from another client");
+            let current = core.state.current_track().unwrap();
+            assert_eq!(current.title, stored.title);
+            assert_eq!(current.artist, stored.artist);
+            let queued = core
+                .state
+                .queue
+                .tracks
+                .iter()
+                .find(|track| track.id == 1)
+                .unwrap();
+            assert_eq!(queued.title, stored.title);
+            assert_eq!(queued.artist, stored.artist);
+        }
+    }
+
+    #[test]
     fn unrelated_metadata_edits_preserve_queue_and_playback_sections() {
         let (_directory, mut core) = fixture();
         core.remove_queue_entries(&[5]).unwrap();
@@ -697,9 +741,9 @@ mod tests {
         for command in [
             Command::EditTrack {
                 track_id: 4,
-                title: "Unqueued edit".into(),
-                artist: "Artist".into(),
-                album: "Album".into(),
+                title: Some("Unqueued edit".into()),
+                artist: Some("Artist".into()),
+                album: Some("Album".into()),
             },
             Command::SetFavorite {
                 track_ids: vec![4],
@@ -739,9 +783,9 @@ mod tests {
         let before = core.state.revisions;
         core.command(Command::EditTrack {
             track_id: 2,
-            title: "Edited duplicate".into(),
-            artist: "Artist".into(),
-            album: "Album".into(),
+            title: Some("Edited duplicate".into()),
+            artist: Some("Artist".into()),
+            album: Some("Album".into()),
         })
         .unwrap();
         core.publish();
@@ -804,9 +848,9 @@ mod tests {
         for command in [
             Command::EditTrack {
                 track_id: 1,
-                title: "Current edit".into(),
-                artist: "Now".into(),
-                album: "Playing".into(),
+                title: Some("Current edit".into()),
+                artist: Some("Now".into()),
+                album: Some("Playing".into()),
             },
             Command::SetFavorite {
                 track_ids: vec![1],
@@ -1373,7 +1417,7 @@ mod tests {
             .unwrap();
         core.store.set_favorite(&[hidden_id], true).unwrap();
         core.store
-            .edit_track(hidden_id, "Kept title", "Artist", "Album")
+            .edit_track(hidden_id, Some("Kept title"), Some("Artist"), Some("Album"))
             .unwrap();
         std::fs::remove_file(&hidden).unwrap();
         let mut config = core.state.system.config.as_ref().clone();

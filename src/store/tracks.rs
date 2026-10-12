@@ -426,11 +426,19 @@ impl Store {
         .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    pub fn edit_track(&self, id: i64, title: &str, artist: &str, album: &str) -> Result<()> {
+    pub fn edit_track(
+        &self,
+        id: i64,
+        title: Option<&str>,
+        artist: Option<&str>,
+        album: Option<&str>,
+    ) -> Result<()> {
         self.track_cache.borrow_mut().entries.remove(&id);
         changed(
             self.conn.execute(
-                "UPDATE tracks SET title_override=?,artist_override=?,album_override=? WHERE id=?",
+                "UPDATE tracks SET title_override=COALESCE(?1,title_override),
+                 artist_override=COALESCE(?2,artist_override),
+                 album_override=COALESCE(?3,album_override) WHERE id=?4",
                 params![title, artist, album, id],
             )?,
             "track",

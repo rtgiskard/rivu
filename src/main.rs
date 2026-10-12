@@ -409,16 +409,11 @@ fn run() -> Result<()> {
             artist,
             album,
         }) => {
-            let response = ipc::query(&socket, &Query::Track { track_id })?;
-            let ViewResponse::Track(track) = response.result.map_err(anyhow::Error::from)? else {
-                bail!("Track query returned an unexpected response");
-            };
-            let track = track.context("Track not found")?;
             let command = Command::EditTrack {
                 track_id,
-                title: title.unwrap_or(track.title),
-                artist: artist.unwrap_or(track.artist),
-                album: album.unwrap_or(track.album),
+                title,
+                artist,
+                album,
             };
             let ack = ipc::request_ack(&socket, &command)?;
             show_ack(&ack, args.json)

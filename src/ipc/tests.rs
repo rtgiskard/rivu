@@ -437,12 +437,48 @@ fn configure_request_round_trip_preserves_optional_config_field() {
 }
 
 #[test]
+fn edit_track_wire_round_trip_preserves_omitted_and_explicit_fields() {
+    for (title, artist, album) in [
+        (Some("Title".to_owned()), None, None),
+        (None, Some(String::new()), None),
+        (None, None, Some("Album".to_owned())),
+        (None, None, None),
+    ] {
+        let request = WireRequest::Command(WireCommand::from(Command::EditTrack {
+            track_id: 12,
+            title: title.clone(),
+            artist: artist.clone(),
+            album: album.clone(),
+        }));
+        let mut encoded = Vec::new();
+        encode_request_frame_into(&request, &mut encoded).unwrap();
+        let WireRequest::Command(command) = decode_request_frame(&encoded[4..]).unwrap() else {
+            panic!("expected command request");
+        };
+        let Command::EditTrack {
+            track_id,
+            title: decoded_title,
+            artist: decoded_artist,
+            album: decoded_album,
+        } = command.try_into().unwrap()
+        else {
+            panic!("expected metadata patch");
+        };
+        assert_eq!(track_id, 12);
+        assert_eq!(
+            (decoded_title, decoded_artist, decoded_album),
+            (title, artist, album)
+        );
+    }
+}
+
+#[test]
 fn request_encoding_rejects_oversized_body_before_completion() {
     let request = WireRequest::Command(WireCommand::from(Command::EditTrack {
         track_id: 1,
-        title: "x".repeat(MAX_REQUEST),
-        artist: String::new(),
-        album: String::new(),
+        title: Some("x".repeat(MAX_REQUEST)),
+        artist: None,
+        album: None,
     }));
     let mut encoded = Vec::new();
     assert!(encode_request_frame_into(&request, &mut encoded).is_err());
