@@ -542,7 +542,9 @@ impl Visuals {
             return;
         }
         let last = data.last_update.replace(now).unwrap_or(now);
-        if !data.envelope_initialized || data.peaks.len() != frame.spectrum_db.len() {
+        let mut body_changed =
+            !data.envelope_initialized || data.peaks.len() != frame.spectrum_db.len();
+        if body_changed {
             data.peaks.clone_from(&frame.spectrum_db);
             data.bar_levels.clone_from(&frame.spectrum_db);
             data.smoothed_levels.clone_from(&frame.spectrum_db);
@@ -556,9 +558,10 @@ impl Visuals {
                 .resize(frame.spectrum_db.len(), bar_deadline);
             data.envelope_initialized = true;
         }
-        data.spectrum_geometry_revision = data.spectrum_geometry_revision.wrapping_add(1);
         let decay = smoothing_decay(now.saturating_sub(last), data.spectrum_smoothing_ms);
         for index in 0..data.peaks.len() {
+            // Deadlines and peak markers advance independently of the cached body.
+            let before = data.display_level(index);
             let value = finite_level(frame.spectrum_db[index]);
             let (peak, deadline) = advance_envelope(
                 data.peaks[index],
@@ -583,6 +586,10 @@ impl Visuals {
             data.bar_levels[index] = level;
             data.bar_deadlines[index] = deadline;
             data.smoothed_levels[index] = smooth_release(data.smoothed_levels[index], value, decay);
+            body_changed |= before != data.display_level(index);
+        }
+        if body_changed {
+            data.spectrum_geometry_revision = data.spectrum_geometry_revision.wrapping_add(1);
         }
         let top_levels = if data.spectrum_peaks {
             &data.peaks

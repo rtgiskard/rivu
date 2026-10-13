@@ -39,12 +39,13 @@ palette changes rebuild the affected derived data.
 === Spectrum
 
 Spectrum retains body geometry and frequency-band grouping per panel. Differently
-sized panels do not replace one another's grouping. Repaints between analysis
-updates can reuse geometry, including while paused. New analysis data or changes
-to panel geometry and display mapping require a rebuild. Peak markers are drawn
-separately from the cached body. Restoring a hidden panel waits for a valid audio
-frame to initialize its envelopes before drawing. The benefit depends on how
-often the UI repaints without new analysis data, not on a fixed expected hit rate.
+sized panels do not replace one another's grouping. Repaints can reuse geometry,
+including across analysis updates whose effective body levels are unchanged.
+Envelope reinitialization and changes to panel geometry, frequency grouping, or
+display mapping still invalidate reuse. Hold timing and Peak markers advance
+independently of the cached body; Peak markers are drawn separately. Restoring a
+hidden panel waits for a valid audio frame to initialize its envelopes before
+drawing. The benefit depends on the workload, not on a fixed expected hit rate.
 
 === Spectrogram
 
