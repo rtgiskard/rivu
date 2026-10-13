@@ -1422,8 +1422,8 @@ impl GuiApp {
                                     metadata_pair("Play count", track.play_count.to_string()),
                                     metadata_pair("Last played", last_played),
                                 ))
-                                .when_some(self.artwork_view.path(), |tags, path| {
-                                    tags.child(artwork_preview(path))
+                                .when_some(self.artwork_view.image(cx), |tags, image| {
+                                    tags.child(artwork_preview(image))
                                 }),
                         )),
                 );

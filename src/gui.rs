@@ -781,13 +781,14 @@ impl GuiApp {
             .detach();
         app
     }
-    fn release_render_images(&self, window: &mut Window, cx: &App) {
+    fn release_render_images(&self, window: &mut Window, cx: &mut App) {
         self.audio_visualizer.release_all_images(window);
         self.visuals.release_all_images(window);
         self.waveform
             .read(cx)
             .image_releaser()
             .release_all_images(window);
+        self.artwork_view.release_all_images(window, cx);
     }
     fn send(&mut self, command: Command, cx: &mut Context<Self>) {
         if let Err(error) = self.handle.send(command) {

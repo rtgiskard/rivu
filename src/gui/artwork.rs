@@ -6,8 +6,9 @@ use crate::{
 };
 
 use gpui::{
-    Background, Context, Path, PathBuilder, Pixels, Render, Window, canvas, div, linear_color_stop,
-    linear_gradient, point, prelude::*, px, rgb,
+    App, Background, Context, Entity, ImageCache, ImageCacheError, ImageCacheItem, Img, Path,
+    PathBuilder, Pixels, Render, RenderImage, Resource, Window, canvas, div, img,
+    linear_color_stop, linear_gradient, point, prelude::*, px, rgb,
 };
 
 use super::{ACCENT, BG, GuiApp};
@@ -17,30 +18,95 @@ pub(super) struct ArtworkView(Rc<RefCell<ArtworkViewState>>);
 
 #[derive(Default)]
 struct ArtworkViewState {
-    current: Option<LoadedArtwork>,
-    retired: Vec<LoadedArtwork>,
+    current: Option<Entity<ArtworkImage>>,
+    retired: Vec<Entity<ArtworkImage>>,
 }
 
 impl ArtworkView {
-    fn replace(&self, next: Option<LoadedArtwork>) {
+    fn replace(&self, next: Option<LoadedArtwork>, cx: &mut App) {
         let mut state = self.0.borrow_mut();
-        if state.current == next {
+        if state.current.as_ref().map(|image| &image.read(cx).artwork) == next.as_ref() {
             return;
         }
+        let next = next.map(|artwork| ArtworkImage::new(artwork, cx));
         if let Some(old) = std::mem::replace(&mut state.current, next) {
-            state.retired.push(old);
+            // Results never requested by a rendered preview have no scene to retire.
+            if old.read(cx).item.is_some() {
+                state.retired.push(old);
+            }
         }
     }
 
-    pub(super) fn path(&self) -> Option<Arc<std::path::Path>> {
-        self.0.borrow().current.as_ref().map(LoadedArtwork::path)
+    pub(super) fn image(&self, cx: &App) -> Option<Img> {
+        let state = self.0.borrow();
+        let image = state.current.as_ref()?;
+        Some(img(image.read(cx).artwork.path()).image_cache(image))
     }
 
     pub(super) fn release_retired(&self, window: &mut Window) {
         let retired = std::mem::take(&mut self.0.borrow_mut().retired);
         if !retired.is_empty() {
-            window.on_next_frame(move |_, _| drop(retired));
+            window.on_next_frame(move |window, cx| {
+                for image in retired {
+                    image.update(cx, |image, cx| image.clear(window, cx));
+                }
+            });
         }
+    }
+
+    pub(super) fn release_all_images(&self, window: &mut Window, cx: &mut App) {
+        let mut state = self.0.borrow_mut();
+        let current = state.current.take();
+        for image in current.into_iter().chain(state.retired.drain(..)) {
+            image.update(cx, |image, cx| image.clear(window, cx));
+        }
+    }
+}
+
+/// One immutable source per owner. Repeated metadata panels share the same load;
+/// another window owns its own decode, so releasing this image cannot evict it.
+struct ArtworkImage {
+    artwork: LoadedArtwork,
+    item: Option<ImageCacheItem>,
+}
+
+impl ArtworkImage {
+    fn new(artwork: LoadedArtwork, cx: &mut App) -> Entity<Self> {
+        let image = cx.new(|_| Self {
+            artwork,
+            item: None,
+        });
+        cx.observe_release(&image, |image, cx| {
+            if let Some(Ok(decoded)) = image.item.as_ref().and_then(ImageCacheItem::get) {
+                cx.drop_image(decoded, None);
+            }
+            // Dropping the entry also cancels a pending decode. Its source result
+            // stays held until then, protecting the file from manual cleanup.
+        })
+        .detach();
+        image
+    }
+
+    fn clear(&mut self, window: &mut Window, cx: &mut App) {
+        if let Some(item) = self.item.take()
+            && let Some(Ok(decoded)) = item.get()
+        {
+            cx.drop_image(decoded, Some(window));
+        }
+    }
+}
+
+impl ImageCache for ArtworkImage {
+    fn load(
+        &mut self,
+        resource: &Resource,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
+        debug_assert_eq!(resource, &Resource::from(self.artwork.path()));
+        self.item
+            .get_or_insert_with(|| ImageCacheItem::new(resource, cx))
+            .use_image(window)
     }
 }
 
@@ -91,6 +157,7 @@ impl GuiApp {
             self.metadata
                 .track()
                 .and_then(|track| self.artwork_manager.cached(track)),
+            cx,
         );
         let current = self
             .metadata
@@ -117,7 +184,7 @@ impl GuiApp {
                     .track()
                     .is_some_and(|track| identity.matches(track))
                 {
-                    this.artwork_view.replace(loaded);
+                    this.artwork_view.replace(loaded, cx);
                     cx.notify();
                 }
                 let current = this

@@ -3,7 +3,7 @@ mod dropdown;
 use super::{ACCENT, BORDER, GuiApp, HIGHLIGHT, PANEL, TEXT, UI_INSET};
 
 use gpui::{
-    Context, Div, ElementId, Render, SharedString, Stateful, Window, div, img, prelude::*, px, rgb,
+    Context, Div, ElementId, Render, SharedString, Stateful, Window, div, prelude::*, px, rgb,
 };
 pub(crate) const ROW_HEIGHT: f32 = 42.0;
 pub(crate) const MENU_WIDTH: f32 = 260.0;
@@ -271,12 +271,12 @@ pub(crate) fn metadata_item(label: impl Into<SharedString>, value: impl Into<Sha
 }
 
 /// Standard embedded artwork preview row for metadata panels.
-pub(crate) fn artwork_preview(path: std::sync::Arc<std::path::Path>) -> Div {
+pub(crate) fn artwork_preview(image: gpui::Img) -> Div {
     super::row()
         .items_start()
         .gap_2()
         .child(caption("Album artwork").w(px(92.)).flex_shrink_0())
-        .child(img(path).size(px(128.)))
+        .child(image.size(px(128.)))
 }
 
 /// Menu item with shared application event handling.

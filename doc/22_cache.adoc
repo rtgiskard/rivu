@@ -172,8 +172,25 @@ lookup registration, preventing cleanup from deleting a file during first use.
 Directory traversal and deletion never hold the lookup mutex over filesystem I/O;
 render and MPRIS property reads remain cache-only and do not wait for that gate.
 Maintenance ignores symlinks and unrelated names, reports inspection/deletion
-failures, and leaves the fallback and audio sources untouched. These file and
-lookup rules do not bound GPUI's independent decoded-image asset cache.
+failures, and leaves the fallback and audio sources untouched.
+
+GUI previews keep decoded images separate from this session-wide lookup cache.
+Each selected lookup result has one window-local image owner; repeated metadata
+panels share its pending load or completed decode. Loading starts only when a
+preview requests the image and uses GPUI's background loader, not render-time
+file I/O. Replaced owners are retired at the next window-frame boundary;
+retirement cancels pending loads and removes completed images from the renderer.
+Window close or reload releases current and retired images. Another window
+owns an independent decode, so releasing one cannot evict the other's image.
+The source lookup result remains held for the image owner's lifetime.
+
+Revisiting a released image decodes it again; there is no decoded-image reuse
+cache across selections or windows. GPUI still handles display scaling;
+all animation frames are retained and preview playback behavior is unchanged.
+Rivu does not generate thumbnails or resize decoded pixel buffers:
+a single large image or multi-frame animation can still consume substantial
+memory. Encoded-file maintenance does not measure or reclaim decoded images,
+and the encoded 8 MiB admission limit is not a decoded-pixel memory limit.
 
 == Font data and glyphs
 
