@@ -3945,4 +3945,158 @@ mod tests {
         core.state.playback.position = 5.;
         assert_eq!(core.state.query_revisions().queue, state.queue);
     }
+
+    #[test]
+    fn configure_failed_save_keeps_desired_settings_and_does_not_deliver_audio() {
+        let (_directory, mut core) = fixture();
+        let audio = recording_audio(&mut core);
+        let previous = core.state.system.config.clone();
+        std::fs::create_dir(&core.state.system.config_path).unwrap();
+        let mut config = previous.as_ref().clone();
+        config.volume = 0.25;
+        config.shuffle = true;
+        config.repeat = RepeatMode::All;
+        config.still_mode = true;
+        config.ffmpeg_enabled = false;
+        config.page_size = 32;
+        config.output_device = Some("configured-output".into());
+        Arc::make_mut(&mut core.state.system.devices).push("configured-output".into());
+        core.played = vec![1, 2];
+        core.played_cursor = 2;
+        let playback = core.state.playback.clone();
+        let device = core.state.system.selected_device.clone();
+        let ffmpeg_status = core.state.system.ffmpeg_status.clone();
+
+        core.command(Command::Configure { config }).unwrap_err();
+
+        assert_eq!(*core.state.system.config, *previous);
+        assert_eq!(core.state.playback.volume, playback.volume);
+        assert_eq!(core.state.playback.shuffle, playback.shuffle);
+        assert_eq!(core.state.playback.repeat, playback.repeat);
+        assert_eq!(core.state.system.selected_device, device);
+        assert_eq!(core.state.system.ffmpeg_status, ffmpeg_status);
+        assert_eq!(core.played, [1, 2]);
+        assert_eq!(core.played_cursor, 2);
+        assert!(matches!(
+            audio.recv_timeout(Duration::from_millis(50)),
+            Err(crossbeam_channel::RecvTimeoutError::Timeout)
+        ));
+    }
+
+    #[test]
+    fn configure_rejected_preparation_keeps_saved_and_desired_settings() {
+        let (_directory, mut core) = fixture();
+        let audio = recording_audio(&mut core);
+        let previous = core.state.system.config.clone();
+        previous.save(&core.state.system.config_path).unwrap();
+        let mut config = previous.as_ref().clone();
+        config.volume = 0.25;
+        config.still_mode = true;
+        config.page_size = 0;
+
+        core.command(Command::Configure { config }).unwrap_err();
+
+        assert_eq!(*core.state.system.config, *previous);
+        assert_eq!(core.state.playback.volume, previous.volume);
+        assert_eq!(
+            Config::load(&core.state.system.config_path).unwrap(),
+            *previous
+        );
+        assert!(matches!(
+            audio.recv_timeout(Duration::from_millis(50)),
+            Err(crossbeam_channel::RecvTimeoutError::Timeout)
+        ));
+    }
+
+    #[test]
+    fn configure_saved_but_disconnected_audio_retains_desired_settings() {
+        let (_directory, mut core) = fixture();
+        let (commands, receiver) = bounded(1);
+        drop(receiver);
+        core.engine.commands = commands;
+        let mut config = core.state.system.config.as_ref().clone();
+        config.volume = 0.25;
+        config.shuffle = true;
+        config.repeat = RepeatMode::All;
+        config.still_mode = true;
+        config.ffmpeg_enabled = false;
+        config.page_size = 32;
+        config.output_device = Some("configured-output".into());
+        Arc::make_mut(&mut core.state.system.devices).push("configured-output".into());
+        core.played = vec![1, 2];
+        core.played_cursor = 2;
+        let expected = config.clone();
+
+        core.command(Command::Configure { config }).unwrap_err();
+
+        assert_eq!(*core.state.system.config, expected);
+        assert_eq!(core.state.playback.volume, expected.volume);
+        assert_eq!(core.state.playback.shuffle, expected.shuffle);
+        assert_eq!(core.state.playback.repeat, expected.repeat);
+        assert_eq!(core.state.system.selected_device, expected.output_device);
+        assert_eq!(core.state.system.ffmpeg_status, "disabled");
+        assert!(core.played.is_empty());
+        assert_eq!(core.played_cursor, 0);
+        assert_eq!(
+            Config::load(&core.state.system.config_path).unwrap(),
+            expected
+        );
+        assert!(!core.flush_config(true).unwrap());
+        core.publish();
+        assert_eq!(*core.shared.read().system.config, expected);
+    }
+
+    #[test]
+    fn still_mode_failed_save_keeps_desired_settings_and_does_not_deliver_audio() {
+        let (_directory, mut core) = fixture();
+        let audio = recording_audio(&mut core);
+        let previous = core.state.system.config.clone();
+        std::fs::create_dir(&core.state.system.config_path).unwrap();
+
+        core.update_gui_config(GuiConfigChange::ToggleStillMode)
+            .unwrap_err();
+
+        assert_eq!(*core.state.system.config, *previous);
+        assert!(matches!(
+            audio.recv_timeout(Duration::from_millis(50)),
+            Err(crossbeam_channel::RecvTimeoutError::Timeout)
+        ));
+    }
+
+    #[test]
+    fn still_mode_saved_but_disconnected_audio_retains_desired_settings() {
+        let (_directory, mut core) = fixture();
+        let (commands, receiver) = bounded(1);
+        drop(receiver);
+        core.engine.commands = commands;
+        // Pending playback settings must be incorporated in the same saved snapshot.
+        core.state.playback.volume = 0.25;
+        core.state.playback.shuffle = true;
+        core.state.playback.repeat = RepeatMode::All;
+        core.state.system.selected_device = Some("pending-output".into());
+        let mut expected = core.state.system.config.as_ref().clone();
+        expected.volume = 0.25;
+        expected.shuffle = true;
+        expected.repeat = RepeatMode::All;
+        expected.output_device = Some("pending-output".into());
+
+        for enabled in [true, false] {
+            expected.still_mode = enabled;
+            core.update_gui_config(GuiConfigChange::ToggleStillMode)
+                .unwrap_err();
+
+            assert_eq!(*core.state.system.config, expected);
+            assert_eq!(core.state.playback.volume, expected.volume);
+            assert_eq!(core.state.playback.shuffle, expected.shuffle);
+            assert_eq!(core.state.playback.repeat, expected.repeat);
+            assert_eq!(core.state.system.selected_device, expected.output_device);
+            assert_eq!(
+                Config::load(&core.state.system.config_path).unwrap(),
+                expected
+            );
+            assert!(!core.flush_config(true).unwrap());
+            core.publish();
+            assert_eq!(*core.shared.read().system.config, expected);
+        }
+    }
 }

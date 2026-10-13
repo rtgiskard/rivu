@@ -32,10 +32,12 @@ impl Core {
             .output_device
             .clone_from(&self.state.system.selected_device);
         self.write_config(&config)?;
-        if still_mode {
-            self.audio(AudioCommand::StillMode(config.still_mode))?;
-        }
+        // A saved change remains the desired configuration even if audio is gone.
         self.state.system.config = Arc::new(config);
+        if still_mode {
+            self.audio(AudioCommand::StillMode(self.state.system.config.still_mode))
+                .context("Configuration saved, but audio application failed")?;
+        }
         Ok(())
     }
 

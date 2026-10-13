@@ -99,6 +99,11 @@ produce repeated notices. A successful retry clears its own error, not an unrela
 error reported later. Shutdown makes a final save attempt and logs any failure;
 unsaved changes may be lost on restart. Desktop Settings Apply and immediate
 configuration controls reject a candidate that cannot be saved.
+After a successful save, status and settings reflect the persisted desired
+configuration. If subsequent audio-command delivery fails, Apply or a Still Mode
+toggle reports `Configuration saved, but audio application failed`; the saved
+configuration remains committed rather than rolling back partially delivered
+audio commands. Resolve the audio failure before retrying or restarting.
 
 `playback.pipewire_auto_mix` controls channel remixing; see link:04_playback.adoc[Playback].
 `interface.tray_enabled` and `interface.mpris_enabled` independently control desktop integration.

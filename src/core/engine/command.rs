@@ -288,15 +288,8 @@ impl Core {
                 } else {
                     self.write_config(&config)?;
                 }
-                self.audio(AudioCommand::StillMode(config.still_mode))?;
-                self.audio(AudioCommand::MediaReadBuffer(config.media_read_buffer_mb))?;
-                self.audio(AudioCommand::Volume(config.volume))?;
-                self.audio(AudioCommand::AnalysisSettings((&config).into()))?;
-                self.audio(AudioCommand::FfmpegEnabled(config.ffmpeg_enabled))?;
-                self.audio(AudioCommand::OutputSettings {
-                    device: config.output_device.clone(),
-                    auto_mix: config.pipewire_auto_mix,
-                })?;
+                // Persistence and logging have committed the desired settings.
+                // Audio delivery may partially succeed; never roll this state back.
                 self.store.set_track_cache_page_size(config.page_size);
                 self.state.system.selected_device = config.output_device.clone();
                 self.state.playback.volume = config.volume;
@@ -309,6 +302,19 @@ impl Core {
                 self.state.system.ffmpeg_status = ffmpeg_status;
                 self.state.system.config = Arc::new(config);
                 tracing::info!("configuration_updated");
+                let config = &self.state.system.config;
+                (|| -> Result<()> {
+                    self.audio(AudioCommand::StillMode(config.still_mode))?;
+                    self.audio(AudioCommand::MediaReadBuffer(config.media_read_buffer_mb))?;
+                    self.audio(AudioCommand::Volume(config.volume))?;
+                    self.audio(AudioCommand::AnalysisSettings(config.as_ref().into()))?;
+                    self.audio(AudioCommand::FfmpegEnabled(config.ffmpeg_enabled))?;
+                    self.audio(AudioCommand::OutputSettings {
+                        device: config.output_device.clone(),
+                        auto_mix: config.pipewire_auto_mix,
+                    })
+                })()
+                .context("Configuration saved, but audio application failed")?;
             }
             Command::MprisStatus { status } => {
                 self.state.system.mpris_status = status;
