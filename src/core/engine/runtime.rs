@@ -54,8 +54,12 @@ impl Core {
                                 }));
                             }
                         }
-                        Operation::GuiConfig(change) => {
-                            let result = self.update_gui_config(change);
+                        operation @ (Operation::GuiConfig(_) | Operation::Navigate(_)) => {
+                            let result = match operation {
+                                Operation::GuiConfig(change) => self.update_gui_config(change),
+                                Operation::Navigate(direction) => self.navigate(direction),
+                                _ => unreachable!("operation matched above"),
+                            };
                             if let Err(error) = &result {
                                 self.state.system.last_error = Some(format!("{error:#}"));
                             }

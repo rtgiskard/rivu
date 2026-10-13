@@ -5,7 +5,7 @@
 use crate::{
     app::{AppCommand, AppHandle},
     artwork::{Artwork, ArtworkIdentity, ArtworkManager},
-    core::CoreHandle,
+    core::{CoreHandle, Navigation},
     model::{Command, PlaybackStatus, RepeatMode},
     projection::MprisSnapshot,
 };
@@ -203,23 +203,8 @@ struct Player {
 }
 
 impl Player {
-    // Next/Previous and restoring play state are separate core commands; the
-    // interface cannot make this sequence atomic without changing core APIs.
-    fn navigate(&self, command: Command) -> fdo::Result<()> {
-        let status = self.handle.mpris_snapshot().playback.status;
-        request(&self.handle, command)?;
-        if self.handle.mpris_snapshot().playback.status == PlaybackStatus::Playing {
-            match status {
-                PlaybackStatus::Paused => {
-                    request(&self.handle, Command::Pause)?;
-                }
-                PlaybackStatus::Stopped => {
-                    request(&self.handle, Command::Stop)?;
-                }
-                PlaybackStatus::Playing => {}
-            }
-        }
-        Ok(())
+    fn navigate(&self, direction: Navigation) -> fdo::Result<()> {
+        acknowledge(self.handle.navigate(direction))
     }
 }
 
@@ -229,14 +214,14 @@ impl Player {
         if !can_go_next(&self.handle.mpris_snapshot()) {
             return Ok(());
         }
-        self.navigate(Command::Next)
+        self.navigate(Navigation::Next)
     }
 
     fn previous(&self) -> fdo::Result<()> {
         if !can_go_previous(&self.handle.mpris_snapshot()) {
             return Ok(());
         }
-        self.navigate(Command::Previous)
+        self.navigate(Navigation::Previous)
     }
 
     fn pause(&self) -> fdo::Result<()> {
@@ -435,7 +420,10 @@ impl Player {
 }
 
 fn request(handle: &CoreHandle, command: Command) -> fdo::Result<()> {
-    let response = handle.request_ack(command);
+    acknowledge(handle.request_ack(command))
+}
+
+fn acknowledge(response: crate::response::Ack) -> fdo::Result<()> {
     if response.ok {
         Ok(())
     } else {

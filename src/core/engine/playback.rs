@@ -2,37 +2,47 @@ use super::*;
 
 impl Core {
     pub(in crate::core) fn start(&mut self, queue_id: u64, record_history: bool) -> Result<()> {
+        self.start_with_status(queue_id, record_history, PlaybackStatus::Playing)
+    }
+    fn start_with_status(
+        &mut self,
+        queue_id: u64,
+        record_history: bool,
+        status: PlaybackStatus,
+    ) -> Result<()> {
         let track = self.track(self.store.queue_track_id(queue_id)?)?;
-        if !track.path.is_file() {
+        if status != PlaybackStatus::Stopped && !track.path.is_file() {
             bail!("Missing audio file: {}", track.path.display());
         }
         self.stop()?;
-        self.audio(AudioCommand::Load {
-            path: track.path.clone(),
-            decoder_hint: track.decoder_hint,
-            range: track.cue.as_ref().map(|cue| audio::PlaybackRange {
-                start_seconds: cue.start_seconds(),
-                end_seconds: cue.end_seconds(),
-            }),
-            generation: self.generation,
-            start_seconds: 0.0,
-            paused: false,
-        })?;
-        self.playback = Some(PlaybackStats {
-            track_id: track.id,
-            heard: 0.0,
-            position: None,
-            started: false,
-            counted: false,
-            last_heard_at: None,
-            activity_updated: false,
-            paused_at: None,
-        });
+        if status != PlaybackStatus::Stopped {
+            self.audio(AudioCommand::Load {
+                path: track.path.clone(),
+                decoder_hint: track.decoder_hint,
+                range: track.cue.as_ref().map(|cue| audio::PlaybackRange {
+                    start_seconds: cue.start_seconds(),
+                    end_seconds: cue.end_seconds(),
+                }),
+                generation: self.generation,
+                start_seconds: 0.0,
+                paused: status == PlaybackStatus::Paused,
+            })?;
+            self.playback = Some(PlaybackStats {
+                track_id: track.id,
+                heard: 0.0,
+                position: None,
+                started: false,
+                counted: false,
+                last_heard_at: None,
+                activity_updated: false,
+                paused_at: (status == PlaybackStatus::Paused).then(now),
+            });
+        }
         self.state.playback.last_heard_at = None;
         self.state.queue.current_id = Some(queue_id);
         self.state.playback.duration = track.duration;
         self.state.current_track = Some(Arc::new(track));
-        self.state.playback.status = PlaybackStatus::Playing;
+        self.state.playback.status = status;
         self.state.system.last_error = None;
         if record_history {
             self.record_queue_history(queue_id);
@@ -218,6 +228,17 @@ impl Core {
         self.finish_playback(snapshot, false)
     }
     pub(in crate::core) fn advance(&mut self, natural: bool) -> Result<()> {
+        self.advance_with_status(natural, PlaybackStatus::Playing)
+    }
+    pub(in crate::core) fn navigate(&mut self, direction: Navigation) -> Result<()> {
+        // Read the owner state here, after earlier queued operations have run.
+        let status = self.state.playback.status;
+        match direction {
+            Navigation::Next => self.advance_with_status(false, status),
+            Navigation::Previous => self.previous_with_status(status),
+        }
+    }
+    fn advance_with_status(&mut self, natural: bool, status: PlaybackStatus) -> Result<()> {
         if self.queue_ids.is_empty() {
             return self.stop();
         }
@@ -226,26 +247,33 @@ impl Core {
             && self.state.playback.repeat == RepeatMode::One
             && let Some(id) = current
         {
-            return self.start(id, true);
+            return self.start_with_status(id, true, status);
         }
         if self.state.playback.shuffle {
             // Every Next is an independent draw over occurrences, including current.
             let id = self
                 .random_queue_id(&mut rand::rng())
                 .expect("queue is nonempty");
-            return self.start(id, true);
+            return self.start_with_status(id, true, status);
         }
         let index = self.state.queue.current_position;
         let next = index.map_or(0, |index| index + 1);
         if let Some(id) = self.queue_ids.get(next).copied() {
-            return self.start(id, true);
+            return self.start_with_status(id, true, status);
         }
         if self.state.playback.repeat == RepeatMode::All {
-            return self.start(self.queue_ids[0], true);
+            return self.start_with_status(self.queue_ids[0], true, status);
         }
-        self.stop()
+        if status == PlaybackStatus::Paused {
+            Ok(())
+        } else {
+            self.stop()
+        }
     }
     pub(in crate::core) fn previous(&mut self) -> Result<()> {
+        self.previous_with_status(PlaybackStatus::Playing)
+    }
+    fn previous_with_status(&mut self, status: PlaybackStatus) -> Result<()> {
         if self.state.playback.position > 3.0 {
             return self.seek(0.0);
         }
@@ -258,19 +286,23 @@ impl Core {
                         1
                     })
         {
-            self.start(self.played[index], false)?;
+            self.start_with_status(self.played[index], false, status)?;
             self.played_cursor = index + 1;
             return Ok(());
         }
         let index = self.state.queue.current_position;
         if let Some(index) = index {
             if index > 0 {
-                return self.start(self.queue_ids[index - 1], true);
+                return self.start_with_status(self.queue_ids[index - 1], true, status);
             }
-            return self.seek(0.0);
+            return if status == PlaybackStatus::Stopped {
+                Ok(())
+            } else {
+                self.seek(0.0)
+            };
         }
         if let Some(id) = self.queue_ids.first().copied() {
-            return self.start(id, true);
+            return self.start_with_status(id, true, status);
         }
         bail!("Queue is empty")
     }

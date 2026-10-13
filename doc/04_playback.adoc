@@ -174,4 +174,9 @@ Relative `Seek` beyond a known end advances when a next occurrence is available;
 out-of-range `SetPosition` is ignored. `OpenUri` is rejected: import media first.
 `Raise` is unavailable for a headless core, while `Quit` remains available.
 Next and Previous preserve paused or stopped state when used through MPRIS.
+Navigation uses the authoritative state when the core executes it, without a
+temporary Playing transition or a later status-restoration command. Stopped
+navigation selects the occurrence without opening its decoder; paused navigation
+loads it paused. CLI, TUI, and GUI Next/Previous retain their normal play-starting
+behavior when navigating to another occurrence.
 `SetPosition` for an occurrence other than the current one is ignored.
