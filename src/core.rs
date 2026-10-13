@@ -123,6 +123,11 @@ pub struct CoreHandle {
     subscribers: Arc<RwLock<Vec<Sender<()>>>>,
 }
 
+pub(crate) struct MprisServiceState {
+    pub enabled: bool,
+    pub shutting_down: bool,
+}
+
 impl CoreHandle {
     /// Publish complete display demand without entering the business command queue.
     pub(crate) fn set_display_demand(&self, demand: DisplayDemand) {
@@ -167,6 +172,13 @@ impl CoreHandle {
     }
     pub fn config_snapshot(&self) -> Arc<Config> {
         Arc::clone(&self.state.read().system.config)
+    }
+    pub(crate) fn mpris_service_state(&self) -> MprisServiceState {
+        let state = self.state.read();
+        MprisServiceState {
+            enabled: state.system.config.mpris_enabled,
+            shutting_down: state.system.shutting_down,
+        }
     }
     pub fn revision(&self) -> u64 {
         self.state.read().system.revision

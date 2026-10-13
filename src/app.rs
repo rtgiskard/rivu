@@ -487,12 +487,12 @@ impl MediaWorker {
                 let mut service = None;
                 let mut enabled = false;
                 loop {
-                    let snapshot = handle.gui_snapshot();
-                    if snapshot.system.shutting_down {
+                    let state = handle.mpris_service_state();
+                    if state.shutting_down {
                         break;
                     }
-                    if snapshot.system.config.mpris_enabled != enabled {
-                        enabled = snapshot.system.config.mpris_enabled;
+                    if state.enabled != enabled {
+                        enabled = state.enabled;
                         let status = if enabled {
                             match mpris::Mpris::start(
                                 handle.clone(),
