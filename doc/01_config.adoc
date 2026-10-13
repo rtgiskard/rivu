@@ -106,7 +106,13 @@ configuration controls reject a candidate that cannot be saved.
 `logging.level` accepts `debug`, `info`, `warning`, or `error`. Warnings and errors
 always go to stderr. `logging.to_file` enables weekly logs under the data directory;
 `logging.retention_weeks` accepts `1`–`520`. `NO_COLOR` or `RIVU_COLOR=never` disables
-stderr colors.
+stderr colors. Closing the GUI window does not stop file logging. Normal application
+shutdown makes a bounded attempt to drain and flush queued file logs; forced
+termination cannot guarantee the final records. File output uses a lossy queue
+of 4096 messages to avoid blocking producers; dropped messages are reported when
+the writer stops. Changing only the log level does not trigger retention cleanup.
+If creating the writer or saving the configuration fails, the previous logging
+settings remain active.
 
 Color settings use quoted `"#RRGGBB"` values. The file schema is defined in
 link:../src/config/file.rs[the grouped file adapter]; runtime defaults and

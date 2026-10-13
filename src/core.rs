@@ -3,6 +3,7 @@ use crate::{
     audio::{self, AudioCommand, AudioEngine, AudioEvent},
     config::Config,
     library::{self, M3uItem, ScanResult},
+    logging,
     model::*,
     projection::{GuiSnapshot, MprisSnapshot, TraySnapshot},
     response::{
@@ -402,8 +403,26 @@ pub struct Runtime {
     worker: Option<JoinHandle<()>>,
 }
 impl Runtime {
+    /// Start a standalone core without installing or owning process logging.
     pub fn start(data_dir: &Path, config_path: &Path) -> Result<Self> {
-        let mut config = Config::load(config_path)?;
+        Self::start_inner(data_dir, config_path, Config::load(config_path)?, None)
+    }
+
+    pub(crate) fn start_with_logging(
+        data_dir: &Path,
+        config_path: &Path,
+        config: Config,
+        logging: logging::Control,
+    ) -> Result<Self> {
+        Self::start_inner(data_dir, config_path, config, Some(logging))
+    }
+
+    fn start_inner(
+        data_dir: &Path,
+        config_path: &Path,
+        mut config: Config,
+        logging: Option<logging::Control>,
+    ) -> Result<Self> {
         config.library_roots = config
             .library_roots
             .iter()
@@ -411,7 +430,6 @@ impl Runtime {
             .collect::<Result<_>>()?;
         config.save(config_path)?;
         std::fs::create_dir_all(data_dir)?;
-        crate::logging::init(data_dir, &config)?;
         tracing::info!(path = %config_path.display(), "configuration_loaded");
         // Keep the handle usable with a config-only snapshot. Database views,
         // device enumeration and optional decoder probing run on the core
@@ -455,6 +473,7 @@ impl Runtime {
                 let mut core = Core {
                     store,
                     engine,
+                    logging,
                     state: initial,
                     shared,
                     wakeup,
@@ -580,6 +599,7 @@ struct ScanTask {
 struct Core {
     store: Store,
     engine: AudioEngine,
+    logging: Option<logging::Control>,
     state: CoreState,
     shared: Arc<RwLock<CoreState>>,
     wakeup: Arc<RwLock<Option<Wakeup>>>,
@@ -733,6 +753,7 @@ mod tests {
         let mut core = Core {
             store,
             engine: AudioEngine::new(1).unwrap(),
+            logging: None,
             shared: Arc::new(RwLock::new(state.clone())),
             state,
             wakeup: Arc::new(RwLock::new(None)),

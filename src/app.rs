@@ -3,9 +3,10 @@
 
 use crate::{
     artwork::ArtworkManager,
+    config::Config,
     core::{CoreHandle, Runtime, RuntimeControl},
     gui::{self, session::UiSession},
-    ipc,
+    ipc, logging,
     model::Command,
     mpris,
     response::Ack,
@@ -175,12 +176,13 @@ impl AppHandle {
 pub struct App {
     handle: AppHandle,
     runtime: Runtime,
-    _signals: ShutdownSignals,
+    signals: Option<ShutdownSignals>,
     media: Option<MediaWorker>,
     artwork: Arc<ArtworkManager>,
     tray: Option<TrayController>,
     gui: Option<GuiState>,
-    _server: ipc::Server,
+    server: Option<ipc::Server>,
+    session: Option<logging::Session>,
     // Retire the socket last, including after partial startup and core join.
     _socket_owner: ipc::SocketOwner,
 }
@@ -232,9 +234,12 @@ impl App {
         paths: Vec<PathBuf>,
         graphical: bool,
     ) -> Result<Self> {
-        let signals = Signals::new([SIGINT, SIGTERM]).context("Registering shutdown signals")?;
         let socket_owner = ipc::SocketOwner::acquire(&data_dir.join("rivu.sock"))?;
-        let runtime = Runtime::start(&data_dir, &config_path)?;
+        let signals = Signals::new([SIGINT, SIGTERM]).context("Registering shutdown signals")?;
+        let config = Config::load(&config_path)?;
+        let session = logging::Session::start(&data_dir, &config)?;
+        let runtime =
+            Runtime::start_with_logging(&data_dir, &config_path, config, session.control())?;
         let handle = AppHandle::new(&runtime, graphical);
         let signals = ShutdownSignals::start(signals, handle.clone())?;
         let server = ipc::Server::start(&socket_owner, runtime.handle.clone(), handle.clone())?;
@@ -242,12 +247,13 @@ impl App {
         let mut app = Self {
             handle,
             runtime,
-            _signals: signals,
+            signals: Some(signals),
             media: None,
             artwork,
             tray: None,
             gui: None,
-            _server: server,
+            server: Some(server),
+            session: Some(session),
             _socket_owner: socket_owner,
         };
         app.media = Some(MediaWorker::start(
@@ -420,10 +426,21 @@ impl App {
             let _ = self.handle.request_shutdown();
         }
         let join_result = self.runtime.join();
-        // Keep IPC/socket acquisition alive through core join and MPRIS stop.
-        drop(self.media.take());
+        // Keep IPC/socket acquisition and logging alive through core and MPRIS stop.
+        self.stop_services();
         interface_result?;
         join_result.map_err(|_| anyhow!("Rivu core worker panicked"))
+    }
+
+    /// Drain producers before flushing, only after core join and outside GPUI.
+    fn stop_services(&mut self) {
+        drop(self.media.take());
+        // Server::drop stops acceptance and drains accepted operations before joining.
+        drop(self.server.take());
+        drop(self.signals.take());
+        if let Some(mut session) = self.session.take() {
+            session.shutdown();
+        }
     }
 }
 
@@ -435,7 +452,7 @@ impl Drop for App {
             let _ = self.handle.request_shutdown();
         }
         let _ = self.runtime.join();
-        drop(self.media.take());
+        self.stop_services();
     }
 }
 

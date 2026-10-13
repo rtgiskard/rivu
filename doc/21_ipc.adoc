@@ -63,8 +63,9 @@ are in-process resources, not IPC state sections.
 The graphical host has three lifetime boundaries within one process:
 
 * `App` in `app.rs` owns the core runtime, IPC server and socket acquisition,
-  shutdown signals, MPRIS, shared artwork, optional tray, and open/focus/quit
-  coordination. Its GPUI event loop remains available when no window exists.
+  shutdown signals, MPRIS, shared artwork, logging session, optional tray, and
+  open/focus/quit coordination. Its GPUI event loop remains available when no
+  window exists.
 * The core owns accepted business operations and authoritative state. Closing a
   window does not cancel playback, scans, saves, or other accepted commands.
 * `UiSession` owns window creation, focus, reload, and close. `GuiApp` owns the
@@ -80,6 +81,14 @@ completion before GUI registration and core panic; it does not reuse a window
 opener callback. Shutdown uses a bounded lifecycle signal independent of the
 business queue. IPC shutdown acknowledgements are drained before transport and
 socket retirement, and service joins occur outside GPUI quit callbacks.
+
+The same App owns the headless `serve` instance. The process logging subscriber
+is installed once; file-writer lifetime belongs to App, while Core receives only
+a configuration control handle. Logging prepares a candidate writer before
+configuration persistence and commits its route only after a successful save.
+App retires core, media, IPC, and signal producers before flushing file output,
+outside GPUI callbacks and writer locks. Standalone Core runtimes do not install
+a process subscriber. A TUI is a separate IPC client, not another host runtime.
 
 These boundaries do not introduce internal IPC or require destroying and
 reinitializing GPUI. Framework-global resources remain resident; no headless

@@ -283,8 +283,11 @@ impl Core {
                 } else {
                     audio::ffmpeg_status().unwrap_or_else(|error| format!("unavailable: {error:#}"))
                 };
-                crate::logging::reconfigure(&config)?;
-                self.write_config(&config)?;
+                if let Some(logging) = self.logging.clone() {
+                    logging.reconfigure_with(&config, || self.write_config(&config))?;
+                } else {
+                    self.write_config(&config)?;
+                }
                 self.audio(AudioCommand::StillMode(config.still_mode))?;
                 self.audio(AudioCommand::MediaReadBuffer(config.media_read_buffer_mb))?;
                 self.audio(AudioCommand::Volume(config.volume))?;
