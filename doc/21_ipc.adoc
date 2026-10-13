@@ -134,7 +134,7 @@ The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
 Bodies use Postcard serialization without COBS framing. The current protocol
-version is `11`; clients and servers must use matching wire schemas. The four-byte
+version is `12`; clients and servers must use matching wire schemas. The four-byte
 frame length remains little-endian; body integers follow Postcard's encoding.
 
 Request frame content is limited to 4 MiB
@@ -363,6 +363,8 @@ Runtime `Config` and `SystemState` use explicit positional Wire schemas. They ar
 not serialized directly because their in-process serde representation is not a
 stable binary contract. Collection lengths and optional fields are encoded in
 the message body.
+Library information-column selection is encoded in WireConfig as five booleans
+in Artist, Album, Duration, Codec, and Bitrate order; all false means no columns.
 
 The codec and positional payload schema are not negotiated. Changes require
 coordinated client and server updates, preserving configuration semantics such

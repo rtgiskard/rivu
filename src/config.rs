@@ -125,6 +125,90 @@ impl From<RgbColor> for String {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LibraryColumn {
+    Artist,
+    Album,
+    Duration,
+    Codec,
+    Bitrate,
+}
+
+impl LibraryColumn {
+    pub const ALL: [Self; 5] = [
+        Self::Artist,
+        Self::Album,
+        Self::Duration,
+        Self::Codec,
+        Self::Bitrate,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Artist => "Artist",
+            Self::Album => "Album",
+            Self::Duration => "Duration",
+            Self::Codec => "Codec",
+            Self::Bitrate => "Bitrate",
+        }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Artist => "artist",
+            Self::Album => "album",
+            Self::Duration => "duration",
+            Self::Codec => "codec",
+            Self::Bitrate => "bitrate",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LibraryColumns {
+    pub artist: bool,
+    pub album: bool,
+    pub duration: bool,
+    pub codec: bool,
+    pub bitrate: bool,
+}
+
+impl Default for LibraryColumns {
+    fn default() -> Self {
+        Self {
+            artist: false,
+            album: false,
+            duration: true,
+            codec: false,
+            bitrate: false,
+        }
+    }
+}
+
+impl LibraryColumns {
+    pub fn enabled(self, column: LibraryColumn) -> bool {
+        match column {
+            LibraryColumn::Artist => self.artist,
+            LibraryColumn::Album => self.album,
+            LibraryColumn::Duration => self.duration,
+            LibraryColumn::Codec => self.codec,
+            LibraryColumn::Bitrate => self.bitrate,
+        }
+    }
+
+    pub(crate) fn toggle(&mut self, column: LibraryColumn) {
+        let enabled = match column {
+            LibraryColumn::Artist => &mut self.artist,
+            LibraryColumn::Album => &mut self.album,
+            LibraryColumn::Duration => &mut self.duration,
+            LibraryColumn::Codec => &mut self.codec,
+            LibraryColumn::Bitrate => &mut self.bitrate,
+        };
+        *enabled = !*enabled;
+    }
+}
+
 pub(crate) const DEFAULT_PAGE_SIZE: u32 = 64;
 pub(crate) const DEFAULT_SCAN_MAX_DEPTH: u32 = 64;
 
@@ -147,6 +231,7 @@ pub struct Config {
     pub log_retention_weeks: u32,
     /// Default number of rows fetched by GUI and TUI paginated views.
     pub page_size: u32,
+    pub library_columns: LibraryColumns,
     /// UI font family; defaults to sans-serif, including empty saved values.
     pub ui_font: String,
     pub ui_scale: f32,
@@ -235,6 +320,7 @@ impl Default for Config {
             log_to_file: false,
             log_retention_weeks: 4,
             page_size: DEFAULT_PAGE_SIZE,
+            library_columns: LibraryColumns::default(),
             ui_font: "sans-serif".to_owned(),
             ui_scale: 1.0,
             layout_snap_enabled: true,
@@ -611,6 +697,55 @@ mod tests {
     use super::*;
 
     #[test]
+    fn library_column_selections_preserve_partial_defaults_and_round_trip() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        for (contents, expected) in [
+            ("", LibraryColumns::default()),
+            (
+                "[interface.library_columns]\nartist = true\n",
+                LibraryColumns {
+                    artist: true,
+                    ..LibraryColumns::default()
+                },
+            ),
+            (
+                "[interface.library_columns]\nduration = false\n",
+                LibraryColumns {
+                    duration: false,
+                    ..LibraryColumns::default()
+                },
+            ),
+            (
+                "[interface.library_columns]\nartist = false\nalbum = false\nduration = false\ncodec = false\nbitrate = false\n",
+                LibraryColumns {
+                    artist: false,
+                    album: false,
+                    duration: false,
+                    codec: false,
+                    bitrate: false,
+                },
+            ),
+            (
+                "[interface.library_columns]\nartist = true\nalbum = true\nduration = false\ncodec = true\nbitrate = true\n",
+                LibraryColumns {
+                    artist: true,
+                    album: true,
+                    duration: false,
+                    codec: true,
+                    bitrate: true,
+                },
+            ),
+        ] {
+            fs::write(&path, contents).unwrap();
+            let config = Config::load(&path).unwrap();
+            assert_eq!(config.library_columns, expected);
+            config.save(&path).unwrap();
+            assert_eq!(Config::load(&path).unwrap(), config);
+        }
+    }
+
+    #[test]
     fn grouped_file_defaults_partial_tables_and_font_normalization() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
@@ -742,6 +877,13 @@ mod tests {
             log_level: LogLevel::Debug,
             log_to_file: true,
             log_retention_weeks: 8,
+            library_columns: LibraryColumns {
+                artist: true,
+                album: true,
+                duration: false,
+                codec: true,
+                bitrate: true,
+            },
             ui_font: "Noto Sans".to_owned(),
             ui_scale: 1.5,
             layout_snap_enabled: false,
@@ -931,6 +1073,14 @@ mod tests {
             "visualizations.waveform.cursor_color = 123456",
             "visualizations.spectrum.style = 'diagonal'",
             "playback.repeat = 'forever'",
+            "interface.library_columns = false",
+            "interface.library_columns.artist = 'true'",
+            "interface.library_columns.album = 1",
+            "interface.library_columns.duration = []",
+            "interface.library_columns.codec = 'flac'",
+            "interface.library_columns.bitrate = 320",
+            "interface.library_columns.title = true",
+            "library.library_columns.duration = false",
         ] {
             fs::write(&path, contents).unwrap();
             assert!(

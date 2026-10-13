@@ -51,6 +51,7 @@ file_group!(Interface, InterfaceView {
     tray_enabled => tray_enabled: bool,
     mpris_enabled => mpris_enabled: bool,
     page_size => page_size: u32,
+    library_columns => library_columns: LibraryColumns,
     font => ui_font: String,
     scale => ui_scale: f32,
     layout_snap_enabled => layout_snap_enabled: bool,

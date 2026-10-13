@@ -1,7 +1,7 @@
 use crate::{
     analysis::{AnalysisControl, AnalysisFrame, DisplayDemand},
     audio::{self, AudioCommand, AudioEngine, AudioEvent},
-    config::Config,
+    config::{Config, LibraryColumn},
     library::{self, M3uItem, ScanResult},
     logging,
     model::*,
@@ -53,6 +53,7 @@ pub(crate) enum Navigation {
 pub(crate) enum GuiConfigChange {
     ToggleStillMode,
     ToggleWaveformSeek,
+    ToggleLibraryColumn(LibraryColumn),
     AddLibraryRoot(std::path::PathBuf),
     Settings(Config),
 }
@@ -1791,6 +1792,139 @@ mod tests {
     }
 
     #[test]
+    fn library_column_toggles_merge_latest_config_without_audio_side_effects() {
+        let (_directory, mut core) = fixture();
+        core.command(Command::Volume { value: 0.25 }).unwrap();
+        core.command(Command::Shuffle { enabled: true }).unwrap();
+        core.command(Command::Repeat {
+            mode: RepeatMode::All,
+        })
+        .unwrap();
+        core.state.system.selected_device = Some("pending-output".into());
+        let config = Arc::make_mut(&mut core.state.system.config);
+        config.ui_scale = 1.25;
+        config.waveform_seek_enabled = false;
+        let audio = recording_audio(&mut core);
+        let mut expected = core.state.system.config.as_ref().clone();
+        expected.volume = 0.25;
+        expected.shuffle = true;
+        expected.repeat = RepeatMode::All;
+        expected.output_device = Some("pending-output".into());
+        for (column, columns) in [
+            (
+                LibraryColumn::Duration,
+                crate::config::LibraryColumns {
+                    artist: false,
+                    album: false,
+                    duration: false,
+                    codec: false,
+                    bitrate: false,
+                },
+            ),
+            (
+                LibraryColumn::Artist,
+                crate::config::LibraryColumns {
+                    artist: true,
+                    album: false,
+                    duration: false,
+                    codec: false,
+                    bitrate: false,
+                },
+            ),
+            (
+                LibraryColumn::Album,
+                crate::config::LibraryColumns {
+                    artist: true,
+                    album: true,
+                    duration: false,
+                    codec: false,
+                    bitrate: false,
+                },
+            ),
+            (
+                LibraryColumn::Codec,
+                crate::config::LibraryColumns {
+                    artist: true,
+                    album: true,
+                    duration: false,
+                    codec: true,
+                    bitrate: false,
+                },
+            ),
+            (
+                LibraryColumn::Bitrate,
+                crate::config::LibraryColumns {
+                    artist: true,
+                    album: true,
+                    duration: false,
+                    codec: true,
+                    bitrate: true,
+                },
+            ),
+            (
+                LibraryColumn::Artist,
+                crate::config::LibraryColumns {
+                    artist: false,
+                    album: true,
+                    duration: false,
+                    codec: true,
+                    bitrate: true,
+                },
+            ),
+        ] {
+            core.update_gui_config(GuiConfigChange::ToggleLibraryColumn(column))
+                .unwrap();
+            expected.library_columns = columns;
+            assert_eq!(*core.state.system.config, expected);
+            assert_eq!(
+                Config::load(&core.state.system.config_path).unwrap(),
+                expected
+            );
+            assert_eq!(core.state.playback.volume, expected.volume);
+            assert_eq!(core.state.playback.shuffle, expected.shuffle);
+            assert_eq!(core.state.playback.repeat, expected.repeat);
+            assert_eq!(core.state.system.selected_device, expected.output_device);
+            assert!(!core.flush_config(true).unwrap());
+            core.publish();
+            assert_eq!(*core.shared.read().system.config, expected);
+            assert!(matches!(
+                audio.try_recv(),
+                Err(crossbeam_channel::TryRecvError::Empty)
+            ));
+        }
+    }
+
+    #[test]
+    fn library_column_failed_save_does_not_publish_selection_or_deliver_audio() {
+        let (_directory, mut core) = fixture();
+        let audio = recording_audio(&mut core);
+        let previous = core.state.system.config.clone();
+        std::fs::create_dir(&core.state.system.config_path).unwrap();
+        core.update_gui_config(GuiConfigChange::ToggleLibraryColumn(
+            LibraryColumn::Duration,
+        ))
+        .unwrap_err();
+        assert_eq!(*core.state.system.config, *previous);
+        core.publish();
+        assert_eq!(*core.shared.read().system.config, *previous);
+        assert!(core.state.system.last_error.is_some());
+        assert!(matches!(
+            audio.try_recv(),
+            Err(crossbeam_channel::TryRecvError::Empty)
+        ));
+        std::fs::remove_dir(&core.state.system.config_path).unwrap();
+        core.update_gui_config(GuiConfigChange::ToggleLibraryColumn(
+            LibraryColumn::Duration,
+        ))
+        .unwrap();
+        assert!(!core.state.system.config.library_columns.duration);
+        assert_eq!(
+            Config::load(&core.state.system.config_path).unwrap(),
+            *core.state.system.config
+        );
+    }
+
+    #[test]
     fn desktop_config_edits_preserve_live_playback_and_merge_roots() {
         let (directory, mut core) = fixture();
         core.command(Command::Volume { value: 0.25 }).unwrap();
@@ -1826,7 +1960,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_apply_resolves_unedited_playback_fields_at_execution() {
+    fn settings_apply_resolves_unedited_playback_and_library_columns_at_execution() {
         let (_directory, mut core) = fixture();
         let mut draft = core.state.system.config.as_ref().clone();
         draft.volume = 0.4;
@@ -1835,15 +1969,22 @@ mod tests {
             mode: RepeatMode::One,
         })
         .unwrap();
+        for column in LibraryColumn::ALL {
+            core.update_gui_config(GuiConfigChange::ToggleLibraryColumn(column))
+                .unwrap();
+        }
+        let columns = core.state.system.config.library_columns;
         core.update_gui_config(GuiConfigChange::Settings(draft))
             .unwrap();
         assert!(core.state.playback.shuffle);
         assert_eq!(core.state.playback.repeat, RepeatMode::One);
         assert_eq!(core.state.playback.volume, 0.4);
+        assert_eq!(core.state.system.config.library_columns, columns);
         let saved = Config::load(&core.state.system.config_path).unwrap();
         assert!(saved.shuffle);
         assert_eq!(saved.repeat, RepeatMode::One);
         assert_eq!(saved.volume, 0.4);
+        assert_eq!(saved.library_columns, columns);
     }
 
     #[test]

@@ -9,6 +9,7 @@ pub(super) enum PanelMenuPage {
     AudioVisualizerStyle,
     ConfirmClearQueue,
     Playlists,
+    LibraryColumns,
 }
 
 #[derive(Clone, Copy)]
@@ -564,6 +565,7 @@ impl Render for GuiApp {
             let is_queue = panel_kind == Some("queue");
             let is_waveform = panel_kind == Some("waveform");
             let is_audio_visualizer = panel_kind == Some("audio_visualizer");
+            let is_library = panel_kind == Some("library");
             let has_selected_queue = self.browser.queue.ready() && self.browser.queue.len() > 0;
             let mut menu = context_menu_container("panel-context-menu").on_mouse_down_out(
                 cx.listener(|this, _, _, cx| {
@@ -574,6 +576,22 @@ impl Render for GuiApp {
             );
             match state.page {
                 PanelMenuPage::Main => {
+                    if is_library {
+                        menu = menu
+                            .child(menu_item(
+                                "library-columns-menu",
+                                "Track information  ›",
+                                cx,
+                                move |this, _, cx| {
+                                    this.panel_menu = Some(PanelMenu {
+                                        page: PanelMenuPage::LibraryColumns,
+                                        ..state
+                                    });
+                                    cx.notify();
+                                },
+                            ))
+                            .child(div().h(px(1.)).mx_2().my_1().bg(rgb(BORDER)));
+                    }
                     if is_waveform && !self.state.system.config.still_mode {
                         menu = menu.child(menu_item(
                             "load-full-waveform",
@@ -807,6 +825,41 @@ impl Render for GuiApp {
                                 },
                             ))
                         });
+                }
+                PanelMenuPage::LibraryColumns => {
+                    menu = menu
+                        .child(menu_item(
+                            "library-columns-back",
+                            "‹ Back",
+                            cx,
+                            move |this, _, cx| {
+                                this.panel_menu = Some(PanelMenu {
+                                    page: PanelMenuPage::Main,
+                                    ..state
+                                });
+                                cx.notify();
+                            },
+                        ))
+                        .child(div().h(px(1.)).mx_2().my_1().bg(rgb(BORDER)));
+                    for column in crate::config::LibraryColumn::ALL {
+                        let enabled = self.state.system.config.library_columns.enabled(column);
+                        menu = menu.child(
+                            menu_item(column.key(), column.label(), cx, move |this, _, cx| {
+                                if let Err(error) = this.handle.update_gui_config(
+                                    crate::core::GuiConfigChange::ToggleLibraryColumn(column),
+                                ) {
+                                    this.error = Some(format!("{error:#}"));
+                                }
+                                cx.notify();
+                            })
+                            .child(
+                                div()
+                                    .ml_auto()
+                                    .text_color(rgb(if enabled { ACCENT } else { MUTED }))
+                                    .child(if enabled { "✓" } else { "" }),
+                            ),
+                        );
+                    }
                 }
                 PanelMenuPage::AudioVisualizerStyle => {
                     menu = menu

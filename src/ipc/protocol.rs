@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub(super) const PROTOCOL_VERSION: u8 = 11;
+pub(super) const PROTOCOL_VERSION: u8 = 12;
 pub(super) const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub(super) const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub(super) const MAX_CLIENTS: usize = 16;
@@ -864,6 +864,8 @@ pub(super) struct WireConfig {
     log_to_file: bool,
     log_retention_weeks: u32,
     page_size: u32,
+    /// Artist, album, duration, codec, bitrate in fixed wire order.
+    library_columns: [bool; 5],
     ui_font: String,
     ui_scale: f32,
     layout_snap_enabled: bool,
@@ -938,6 +940,13 @@ impl From<&crate::config::Config> for WireConfig {
             log_to_file: value.log_to_file,
             log_retention_weeks: value.log_retention_weeks,
             page_size: value.page_size,
+            library_columns: [
+                value.library_columns.artist,
+                value.library_columns.album,
+                value.library_columns.duration,
+                value.library_columns.codec,
+                value.library_columns.bitrate,
+            ],
             ui_font: value.ui_font.clone(),
             ui_scale: value.ui_scale,
             layout_snap_enabled: value.layout_snap_enabled,
@@ -1014,6 +1023,13 @@ impl From<WireConfig> for crate::config::Config {
             log_to_file: value.log_to_file,
             log_retention_weeks: value.log_retention_weeks,
             page_size: value.page_size,
+            library_columns: crate::config::LibraryColumns {
+                artist: value.library_columns[0],
+                album: value.library_columns[1],
+                duration: value.library_columns[2],
+                codec: value.library_columns[3],
+                bitrate: value.library_columns[4],
+            },
             ui_font: value.ui_font,
             ui_scale: value.ui_scale,
             layout_snap_enabled: value.layout_snap_enabled,

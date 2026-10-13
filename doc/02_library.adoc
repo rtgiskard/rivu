@@ -136,9 +136,20 @@ order, including roots with no matching tracks. Each folder header expands or
 collapses independently; its contents are recursive, sorted flat tracks rather
 than subdirectory rows. Track text uses one level of indentation below the root,
 independent of the track's actual directory depth. Tree tracks retain their
-directory-level indentation. Both views show artist/album, duration, codec, and
-bitrate in kbps on a secondary line. Unknown technical values appear as `—`;
-narrow rows truncate text and track tooltips expose the full title and detail.
+directory-level indentation. Both views use single-line rows. Right-click the
+Library panel and open `Track information` to choose Artist, Album, Duration,
+Codec, and Bitrate columns. Only Duration is enabled initially. Columns appear
+in that fixed order and align independently of tree depth. Disabling every
+column leaves the name without reserved track-information space. The selection
+is shared by both views and saved across restarts.
+
+Directory loading, empty, and unavailable status remains visible independently
+of track-information columns. Narrow rows truncate text with `..`; hover a name
+or its information to read the full title or directory path above the full
+track information or directory status. Tooltip text wraps rather than truncates;
+directories with no status omit the second part. Tooltips retain artist, album,
+duration, codec, bitrate, and missing-file warnings even when those columns are
+disabled. Unknown technical values appear as `—`.
 
 Root headers in both views show the number of scanned library tracks beneath
 that root, including missing files. These counts do not change with search,

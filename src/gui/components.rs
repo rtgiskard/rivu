@@ -468,18 +468,50 @@ struct TrackTooltip {
 }
 
 impl Render for TrackTooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let width = (window.viewport_size().width - px(UI_INSET * 2.)).max(px(0.));
         super::column()
-            .w(gpui::px(560.))
+            .w(px(560.).min(width))
             .px(gpui::px(UI_INSET))
             .py_2()
             .bg(rgb(PANEL))
             .border_1()
             .border_color(rgb(BORDER))
             .text_color(rgb(TEXT))
-            .child(div().w_full().flex_shrink_0().child(self.title.clone()))
-            .child(caption(self.detail.clone()).w_full().flex_shrink_0())
+            .whitespace_normal()
+            .child(
+                div()
+                    .w_full()
+                    .flex_shrink_0()
+                    .whitespace_normal()
+                    .child(self.title.clone()),
+            )
+            .when(!self.detail.is_empty(), |view| {
+                view.child(
+                    caption(self.detail.clone())
+                        .w_full()
+                        .flex_shrink_0()
+                        .whitespace_normal(),
+                )
+            })
     }
+}
+
+/// Full, wrapping row information, independent of the visible row layout.
+pub(crate) fn row_tooltip(
+    view: Stateful<Div>,
+    title: impl Into<SharedString>,
+    detail: impl Into<SharedString>,
+) -> Stateful<Div> {
+    let title = title.into();
+    let detail = detail.into();
+    view.tooltip(move |_, cx| {
+        cx.new(|_| TrackTooltip {
+            title: title.clone(),
+            detail: detail.clone(),
+        })
+        .into()
+    })
 }
 
 /// Standard two-line row text with an overflow tooltip.
@@ -490,7 +522,7 @@ pub(crate) fn row_text(
 ) -> Stateful<Div> {
     let title = title.into();
     let detail = detail.into();
-    super::column()
+    let view = super::column()
         .id(id)
         .flex_1()
         .gap_0()
@@ -502,12 +534,6 @@ pub(crate) fn row_text(
                 .truncate()
                 .child(title.clone()),
         )
-        .child(caption(detail.clone()).truncate())
-        .tooltip(move |_, cx| {
-            cx.new(|_| TrackTooltip {
-                title: title.clone(),
-                detail: detail.clone(),
-            })
-            .into()
-        })
+        .child(caption(detail.clone()).truncate());
+    row_tooltip(view, title, detail)
 }

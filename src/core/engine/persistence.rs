@@ -7,6 +7,7 @@ impl Core {
             // execution, not before enqueueing behind pending playback commands.
             config.shuffle = self.state.playback.shuffle;
             config.repeat = self.state.playback.repeat;
+            config.library_columns = self.state.system.config.library_columns;
             return self.command(Command::Configure { config });
         }
         let mut config = self.state.system.config.as_ref().clone();
@@ -16,6 +17,7 @@ impl Core {
             GuiConfigChange::ToggleWaveformSeek => {
                 config.waveform_seek_enabled = !config.waveform_seek_enabled
             }
+            GuiConfigChange::ToggleLibraryColumn(column) => config.library_columns.toggle(column),
             GuiConfigChange::AddLibraryRoot(path) => {
                 let path = library::logical_path(&path)?;
                 if config.library_roots.contains(&path) {

@@ -1,7 +1,10 @@
 pub(super) mod tree;
 
 use super::{GuiApp, ListFocus, icon_button, list_viewport, row};
-use crate::model::{Command, DirectoryRow};
+use crate::{
+    config::{LibraryColumn, LibraryColumns},
+    model::{Command, DirectoryRow, LibraryRow},
+};
 use gpui::{AnyElement, Context, Render, Window, div, prelude::*, px, uniform_list};
 use std::{path::Path, sync::Arc};
 
@@ -41,6 +44,74 @@ pub(super) fn track_detail(track: &crate::model::LibraryRow) -> String {
         detail.push_str(" · File missing");
     }
     detail
+}
+
+const LIBRARY_ROW_HEIGHT: f32 = 28.0;
+
+fn track_columns(track: &LibraryRow, columns: LibraryColumns) -> Option<gpui::Div> {
+    if !LibraryColumn::ALL
+        .into_iter()
+        .any(|column| columns.enabled(column))
+    {
+        return None;
+    }
+    // Preferred widths depend only on the selected fields, never row content or depth.
+    let mut cells = row().gap_0().min_w_0();
+    let mut width = 0.0;
+    for column in LibraryColumn::ALL {
+        if !columns.enabled(column) {
+            continue;
+        }
+        let (value, cell_width): (gpui::SharedString, f32) = match column {
+            LibraryColumn::Artist => (
+                if track.artist.is_empty() {
+                    "—".into()
+                } else {
+                    track.artist.clone().into()
+                },
+                9.0,
+            ),
+            LibraryColumn::Album => (
+                if track.album.is_empty() {
+                    "—".into()
+                } else {
+                    track.album.clone().into()
+                },
+                9.0,
+            ),
+            LibraryColumn::Duration => (
+                track
+                    .duration
+                    .map_or_else(|| "—".into(), |value| super::format_time(value).into()),
+                4.0,
+            ),
+            LibraryColumn::Codec => (
+                if track.codec.is_empty() {
+                    "—".into()
+                } else {
+                    track.codec.clone().into()
+                },
+                5.0,
+            ),
+            LibraryColumn::Bitrate => (
+                track.bitrate_bps.map_or_else(
+                    || "—".into(),
+                    |value| format!("{:.1} kbps", value as f64 / 1000.0).into(),
+                ),
+                6.0,
+            ),
+        };
+        width += cell_width;
+        cells = cells.child(
+            super::caption(value)
+                .w(gpui::rems(cell_width))
+                .min_w_0()
+                .px_1()
+                .truncate()
+                .text_overflow(gpui::TextOverflow::Truncate("..".into())),
+        );
+    }
+    Some(cells.w(gpui::rems(width)).flex_initial())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -126,7 +197,7 @@ impl Render for LibraryDragPreview {
 fn tree_guides(tree: &DirectoryTree, index: usize) -> gpui::Div {
     let mut guides = div().absolute().inset_0();
     tree.visit_guides(index, |column, continues, current| {
-        let left = gpui::rems(1.0 + column as f32 * 1.25);
+        let left = gpui::rems(0.5 + column as f32 * 1.25);
         if continues || current {
             guides = std::mem::replace(&mut guides, div()).child(
                 div()
@@ -345,33 +416,46 @@ impl GuiApp {
                                     let failed = status == BranchStatus::Error;
                                     let placeholder = super::tree_row(
                                         gpui::ElementId::named_usize("library-loading", index),
-                                        depth,
+                                        0,
                                         false,
                                     )
-                                    .h(px(48.0 * ui_scale.max(0.5)))
-                                    .relative()
-                                    .child(tree_guides(this.browser.library.tree(), index))
+                                    .h(px(LIBRARY_ROW_HEIGHT * ui_scale.max(0.5)))
+                                    .gap_0()
+                                    .overflow_hidden()
                                     .child(
-                                        div().text_color(gpui::rgb(super::MUTED)).child(
-                                            if failed { "Unavailable" } else { "Loading…" },
-                                        ),
-                                    )
-                                    .when(failed, |view| {
-                                        view.child(icon_button(
-                                            gpui::ElementId::named_usize("library-retry", index),
-                                            "󰑐",
-                                            "Retry loading folder",
-                                            cx,
-                                            move |this, _, cx| {
-                                                this.browser.library.retry_directory(&branch);
-                                                this.request_directory_page(
-                                                    branch.clone(),
-                                                    offset,
-                                                    cx,
-                                                );
-                                            },
-                                        ))
-                                    });
+                                        div()
+                                            .relative()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .h_full()
+                                            .overflow_hidden()
+                                            .child(tree_guides(this.browser.library.tree(), index))
+                                            .child(
+                                                row()
+                                                    .h_full()
+                                                    .pl(gpui::rems(depth as f32 * 1.25))
+                                                    .child(
+                                                        super::caption(if failed { "Unavailable" } else { "Loading…" })
+                                                            .min_w_0()
+                                                            .truncate(),
+                                                    )
+                                                    .when(failed, |view| {
+                                                        view.child(
+                                                            icon_button(
+                                                                gpui::ElementId::named_usize("library-retry", index),
+                                                                "󰑐",
+                                                                "Retry loading folder",
+                                                                cx,
+                                                                move |this, _, cx| {
+                                                                    this.browser.library.retry_directory(&branch);
+                                                                    this.request_directory_page(branch.clone(), offset, cx);
+                                                                },
+                                                            )
+                                                            .size(px(24.0 * ui_scale.max(0.5))),
+                                                        )
+                                                    }),
+                                            ),
+                                    );
                                     return Some(placeholder.into_any_element());
                                 }
                             };
@@ -429,96 +513,128 @@ impl GuiApp {
                                 ))
                             });
                             let title = gpui::SharedString::from(title);
-                            let row_view = super::tree_row(
-                                gpui::ElementId::named_usize("library-node", index),
-                                visible.depth,
-                                selected,
-                            )
-                            .h(px(48.0 * ui_scale.max(0.5)))
-                            .relative()
-                            .child(tree_guides(this.browser.library.tree(), index))
-                            .when(visible.branch.is_some(), |view| {
-                                view.child(
-                                    div()
-                                        .flex_shrink_0()
-                                        .font_family(super::fonts::SYMBOLS_FAMILY)
-                                        .child(if visible.expanded { "󰅀" } else { "󰅂" }),
-                                )
-                            })
-                            .child(
-                                div()
-                                    .flex_shrink_0()
-                                    .text_sm()
-                                    .font_family(super::fonts::SYMBOLS_FAMILY)
-                                    .child(if let Some(branch) = &visible.branch {
-                                        if this.browser.library.tree().expanded(branch) {
-                                            "󰝰"
-                                        } else {
-                                            "󰉋"
-                                        }
-                                    } else {
-                                        "󰈙"
-                                    }),
-                            )
-                            .child(
-                                super::row_text(
-                                    gpui::ElementId::named_usize("library-node-text", index),
-                                    title.clone(),
-                                    detail,
-                                )
-                                .flex_1()
-                                .min_w_0(),
-                            )
-                            .when(visible.depth == 0 && path.is_some(), |view| {
-                                let count = this
-                                    .browser
-                                    .library
-                                    .root_count(path.as_deref().expect("root path"));
-                                view.child(
+                            let tooltip_title = path.as_ref().map_or_else(
+                                || title.clone(),
+                                |path| path.display().to_string().into(),
+                            );
+                            let name_content = row()
+                                .w_full()
+                                .h_full()
+                                .gap_1()
+                                .pl(gpui::rems(visible.depth as f32 * 1.25))
+                                .child(
                                     div()
                                         .flex_shrink_0()
                                         .text_sm()
-                                        .text_color(gpui::rgb(super::MUTED))
-                                        .child(count.map_or_else(
-                                            || "—".to_owned(),
-                                            |total| total.to_string(),
-                                        )),
+                                        .font_family(super::fonts::SYMBOLS_FAMILY)
+                                        .child(if let Some(branch) = &visible.branch {
+                                            if this.browser.library.tree().expanded(branch) {
+                                                "󰝰"
+                                            } else {
+                                                "󰉋"
+                                            }
+                                        } else {
+                                            "󰈙"
+                                        }),
                                 )
-                                .when(
-                                    this.browser.library.root_counts_failed(),
-                                    |view| {
-                                        view.child(icon_button(
-                                            gpui::ElementId::named_usize(
-                                                "library-count-retry",
-                                                index,
-                                            ),
-                                            "󰑐",
-                                            "Retry scanned track counts",
-                                            cx,
-                                            |this, _, cx| this.request_root_counts(cx),
-                                        ))
-                                    },
+                                .child(
+                                    row()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .gap_1()
+                                        .overflow_hidden()
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .text_sm()
+                                                .truncate()
+                                                .text_overflow(gpui::TextOverflow::Truncate("..".into()))
+                                                .child(title.clone())
+                                                .when(path.is_none(), |view| view.flex_1()),
+                                        )
+                                        .when(path.is_some() && !detail.is_empty(), |view| {
+                                            view.child(super::caption(detail.clone()).min_w_0().truncate()
+                                                .text_overflow(gpui::TextOverflow::Truncate("..".into())))
+                                        })
+                                        .when(matches!(entry, DirectoryRow::Track(track) if track.missing), |view| {
+                                            view.child(
+                                                div()
+                                                    .flex_shrink_0()
+                                                    .text_sm()
+                                                    .font_family(super::fonts::SYMBOLS_FAMILY)
+                                                    .text_color(gpui::rgb(super::ERROR))
+                                                    .child("󰌶"),
+                                            )
+                                        }),
                                 )
-                            })
-                            .when_some(scan, |v, scan| v.child(scan))
-                            .when_some(
-                                match entry {
-                                    DirectoryRow::Track(track) => Some((track.id, track.favorite)),
-                                    DirectoryRow::Directory { .. } => None,
-                                },
-                                |view, (track_id, favorite)| {
-                                    view.group("library-track-row").child(
-                                        this.library_favorite_toggle(
-                                            gpui::ElementId::named_usize(
-                                                "library-tree-favorite",
-                                                index,
-                                            ),
-                                            track_id,
-                                            favorite,
-                                            cx,
-                                        ),
+                                .when(visible.depth == 0 && path.is_some(), |view| {
+                                    let count = this.browser.library.root_count(path.as_deref().expect("root path"));
+                                    view.child(
+                                        super::caption(count.map_or_else(|| "—".to_owned(), |total| total.to_string()))
+                                            .flex_shrink_0(),
                                     )
-                                },
+                                    .when(this.browser.library.root_counts_failed(), |view| {
+                                        view.child(
+                                            icon_button(
+                                                gpui::ElementId::named_usize("library-count-retry", index),
+                                                "󰑐",
+                                                "Retry scanned track counts",
+                                                cx,
+                                                |this, _, cx| this.request_root_counts(cx),
+                                            )
+                                            .size(px(24.0 * ui_scale.max(0.5))),
+                                        )
+                                    })
+                                })
+                                .when_some(scan, |view, scan| {
+                                    view.child(scan.size(px(24.0 * ui_scale.max(0.5))))
+                                })
+                                .when_some(
+                                    match entry {
+                                        DirectoryRow::Track(track) => Some((track.id, track.favorite)),
+                                        DirectoryRow::Directory { .. } => None,
+                                    },
+                                    |view, (track_id, favorite)| {
+                                        view.child(
+                                            this.library_favorite_toggle(
+                                                gpui::ElementId::named_usize("library-tree-favorite", index),
+                                                track_id,
+                                                favorite,
+                                                cx,
+                                            )
+                                            .size(px(24.0 * ui_scale.max(0.5))),
+                                        )
+                                    },
+                                );
+                            let name_cell = div()
+                                .w(gpui::rems(14.0))
+                                .flex_auto()
+                                .min_w_0()
+                                .h_full()
+                                .relative()
+                                .overflow_hidden()
+                                .child(tree_guides(this.browser.library.tree(), index))
+                                .child(name_content);
+                            let row_view = super::components::row_tooltip(
+                                super::tree_row(
+                                    gpui::ElementId::named_usize("library-node", index),
+                                    0,
+                                    selected,
+                                )
+                                .h(px(LIBRARY_ROW_HEIGHT * ui_scale.max(0.5)))
+                                .gap_0()
+                                .overflow_hidden()
+                                .group("library-track-row")
+                                .child(name_cell)
+                                .when_some(
+                                    match entry {
+                                        DirectoryRow::Track(track) => track_columns(track, this.state.system.config.library_columns),
+                                        DirectoryRow::Directory { .. } => None,
+                                    },
+                                    |view, columns| view.child(columns),
+                                ),
+                                tooltip_title,
+                                detail,
                             )
                             .when(!this.library_range_pending(), |view| {
                                 let app = cx.entity();

@@ -454,10 +454,29 @@ fn partial_state_wire_round_trip_omits_unrequested_sections() {
 }
 
 #[test]
-fn system_config_wire_adapter_preserves_optional_fields() {
-    for output_device in [None, Some("USB audio output".to_owned())] {
+fn system_config_wire_adapter_preserves_optional_fields_and_library_columns() {
+    for (output_device, library_columns) in [
+        (
+            None,
+            crate::config::LibraryColumns {
+                duration: false,
+                ..Default::default()
+            },
+        ),
+        (
+            Some("USB audio output".to_owned()),
+            crate::config::LibraryColumns {
+                artist: true,
+                album: true,
+                duration: false,
+                codec: true,
+                bitrate: true,
+            },
+        ),
+    ] {
         let config = Arc::new(crate::config::Config {
             output_device,
+            library_columns,
             ..Default::default()
         });
         let system = crate::model::SystemState {
@@ -544,12 +563,31 @@ fn request_round_trip_uses_explicit_message_types() {
 }
 
 #[test]
-fn configure_request_round_trip_preserves_optional_config_field() {
-    for output_device in [None, Some("USB audio output".to_owned())] {
+fn configure_request_round_trip_preserves_optional_config_field_and_library_columns() {
+    for (output_device, library_columns) in [
+        (
+            None,
+            crate::config::LibraryColumns {
+                duration: false,
+                ..Default::default()
+            },
+        ),
+        (
+            Some("USB audio output".to_owned()),
+            crate::config::LibraryColumns {
+                artist: true,
+                album: true,
+                duration: false,
+                codec: true,
+                bitrate: true,
+            },
+        ),
+    ] {
         let config = crate::config::Config {
             audio_visualizer_grid: output_device.is_some(),
             audio_visualizer_labels: output_device.is_none(),
             output_device,
+            library_columns,
             ..Default::default()
         };
         let request = WireRequest::Command(WireCommand::from(Command::Configure {
