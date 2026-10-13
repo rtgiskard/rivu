@@ -263,6 +263,10 @@ A successful playback start creates or updates one recent entry per track,
 ordered newest first. Paused time and failed loads do not advance activity.
 History records the last playback activity, not necessarily a counted play;
 it is not a per-play log. Timestamps are Unix seconds in JSON.
+Recent entries reflect edited titles and current play counts without reopening
+the view. Crossing the counting threshold refreshes the recent entry while
+playback continues; editing its title does not change its activity timestamp or
+recency order.
 
 `rivu library history --limit N` prints up to N retained rows in human mode.
 For the JSON history shape and `--limit` behavior, see <<_cli_output,CLI output>>.

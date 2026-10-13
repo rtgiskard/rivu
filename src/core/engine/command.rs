@@ -196,6 +196,17 @@ impl Core {
                     decoder_hint,
                 )? {
                     self.refresh_affected_queue_tracks(&[track_id])?;
+                    if title.is_some()
+                        && self
+                            .state
+                            .library
+                            .history
+                            .iter()
+                            .any(|entry| entry.track_id == track_id)
+                    {
+                        let track = self.store.track(track_id)?.context("Track not found")?;
+                        self.refresh_history_track(&track);
+                    }
                     self.state.library.revision = self.state.library.revision.wrapping_add(1);
                 }
             }

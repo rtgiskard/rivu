@@ -4099,4 +4099,67 @@ mod tests {
             assert_eq!(*core.shared.read().system.config, expected);
         }
     }
+
+    #[test]
+    fn metadata_edit_refreshes_published_history_without_rewriting_old_snapshots() {
+        let (_directory, mut core) = fixture();
+        playing(&mut core, 1);
+        playing(&mut core, 2);
+        core.publish();
+        let before = core.shared.read().library.history.clone();
+        let before_ids = before.iter().map(|row| row.track_id).collect::<Vec<_>>();
+        let before_played_at = before
+            .iter()
+            .find(|row| row.track_id == 1)
+            .unwrap()
+            .played_at;
+        core.command(Command::EditTrack {
+            track_id: 1,
+            title: Some("Renamed history".to_owned()),
+            artist: None,
+            album: None,
+            decoder_hint: None,
+        })
+        .unwrap();
+        core.publish();
+        let published = core.shared.read().library.history.clone();
+        let row = published.iter().find(|row| row.track_id == 1).unwrap();
+        assert_eq!(row.title, "Renamed history");
+        assert_eq!(row.played_at, before_played_at);
+        assert_eq!(
+            published.iter().map(|row| row.track_id).collect::<Vec<_>>(),
+            before_ids
+        );
+        assert_eq!(
+            published
+                .iter()
+                .find(|row| row.track_id == 2)
+                .unwrap()
+                .title,
+            "Track 2"
+        );
+        assert_eq!(
+            before.iter().find(|row| row.track_id == 1).unwrap().title,
+            "Track 1"
+        );
+    }
+
+    #[test]
+    fn crossing_play_threshold_refreshes_published_history_count_during_playback() {
+        let (_directory, mut core) = fixture();
+        playing(&mut core, 1);
+        core.publish();
+        let before = core.shared.read().library.history.clone();
+        progress(&mut core, 2.0, 2.0);
+        core.publish();
+        assert_eq!(core.shared.read().library.history[0].play_count, 0);
+        progress(&mut core, 3.0, 3.0);
+        core.publish();
+        let published = core.shared.read().library.history.clone();
+        assert_eq!(published[0].play_count, 1);
+        assert_eq!(published[0].track_id, 1);
+        assert_eq!(published[0].played_at, before[0].played_at);
+        assert_eq!(before[0].play_count, 0);
+        assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
+    }
 }

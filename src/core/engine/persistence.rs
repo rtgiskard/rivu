@@ -111,6 +111,7 @@ impl Core {
 
     pub(in crate::core) fn update_track_stats(&mut self, track_id: i64) -> Result<()> {
         let track = self.store.track(track_id)?.context("Track not found")?;
+        self.refresh_history_track(&track);
         self.state.queue = self.store.queue_projection(self.queue_ids.len())?;
         if self
             .state
@@ -122,6 +123,25 @@ impl Core {
         }
         self.state.library.revision = self.state.library.revision.wrapping_add(1);
         Ok(())
+    }
+
+    pub(in crate::core) fn refresh_history_track(&mut self, track: &Track) {
+        let Some(index) = self
+            .state
+            .library
+            .history
+            .iter()
+            .position(|entry| entry.track_id == track.id)
+        else {
+            return;
+        };
+        let entry = &self.state.library.history[index];
+        if entry.title == track.title && entry.play_count == track.play_count {
+            return;
+        }
+        let entry = &mut Arc::make_mut(&mut self.state.library.history)[index];
+        entry.title.clone_from(&track.title);
+        entry.play_count = track.play_count;
     }
 
     pub(in crate::core) fn reload_playlists(&mut self) -> Result<()> {
