@@ -1,5 +1,5 @@
 use crate::{
-    analysis::{AnalysisControl, AnalysisFrame, VisualizerDemand},
+    analysis::{AnalysisControl, AnalysisFrame, DisplayDemand},
     audio::{self, AudioCommand, AudioEngine, AudioEvent},
     config::Config,
     library::{self, M3uItem, ScanResult},
@@ -129,9 +129,13 @@ pub struct CoreHandle {
 }
 
 impl CoreHandle {
-    /// Request optional plots without reopening output or changing the IPC schema.
-    pub(crate) fn set_visualizer_demand(&self, demand: VisualizerDemand) {
-        self.analysis_control.set_visualizer_demand(demand);
+    /// Publish complete display demand without entering the business command queue.
+    pub(crate) fn set_display_demand(&self, demand: DisplayDemand) {
+        self.analysis_control.set_display_demand(demand);
+    }
+
+    pub(crate) fn analysis_frame_is_current(&self, frame: &AnalysisFrame) -> bool {
+        frame.display_token == self.analysis_control.display_token()
     }
 
     /// Coalesce a GUI consumer frame into at most one pending analysis job.
@@ -634,6 +638,162 @@ mod tests {
         };
         core.enqueue(&[1, 2, 2, 3, 4]).unwrap();
         (directory, core)
+    }
+
+    fn display_fixture() -> (
+        CoreHandle,
+        crate::analysis::AnalysisWorker,
+        Receiver<Request>,
+    ) {
+        let analysis = Arc::new(RwLock::new(AnalysisFrame::default()));
+        let worker = crate::analysis::AnalysisWorker::new(analysis.clone()).unwrap();
+        worker.configure(crate::analysis::AnalysisSettings {
+            fps: 60,
+            fft_size: 512,
+            window: crate::config::AnalysisWindow::None,
+        });
+        worker.set_playback_active(true);
+        let (sender, receiver) = bounded(1);
+        let handle = CoreHandle {
+            state: Arc::new(RwLock::new(CoreState::default())),
+            analysis,
+            analysis_control: worker.control.clone(),
+            waveform: Arc::new(RwLock::new(audio::WaveformFrame::default())),
+            sender,
+            wakeup: Arc::new(RwLock::new(None)),
+            gui_opener: Arc::new(RwLock::new(None)),
+            subscribers: Arc::new(RwLock::new(Vec::new())),
+            raise_requested: Arc::new(AtomicBool::new(false)),
+        };
+        (handle, worker, receiver)
+    }
+
+    fn display_wait(ready: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !ready() {
+            assert!(Instant::now() < deadline, "display transition timed out");
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn display_samples(
+        producer: &mut ringbuf::HeapProd<crate::analysis::TapFrame>,
+        worker: &crate::analysis::AnalysisWorker,
+        demand_token: u64,
+        count: usize,
+        samples: [f32; 2],
+    ) {
+        use ringbuf::traits::Producer;
+        for _ in 0..count {
+            assert!(
+                producer
+                    .try_push(crate::analysis::TapFrame {
+                        samples,
+                        epoch: worker.control.epoch.load(Ordering::Acquire),
+                        demand_token,
+                        gap: false,
+                    })
+                    .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn display_off_clears_results_with_a_saturated_business_queue_and_reopens() {
+        let (handle, worker, _receiver) = display_fixture();
+        let demand = DisplayDemand {
+            enabled: true,
+            visualizer: crate::analysis::VisualizerDemand {
+                stereo_density: true,
+                ..Default::default()
+            },
+        };
+        handle.set_display_demand(demand);
+        let mut producer = worker.producer();
+        display_samples(
+            &mut producer,
+            &worker,
+            worker.control.display_token(),
+            512,
+            [0.5; 2],
+        );
+        handle.request_analysis_frame();
+        display_wait(|| handle.analysis.read().settings.is_some());
+        handle.send(Command::DismissError).unwrap();
+        // This is the pre-fix close path: its off request is rejected at capacity.
+        assert!(handle.send(Command::Analysis { enabled: false }).is_err());
+        handle.set_display_demand(DisplayDemand::default());
+        display_wait(|| handle.analysis.read().settings.is_none());
+        {
+            let frame = handle.analysis.read();
+            assert!(frame.spectrum_db.is_empty());
+            assert_eq!(frame.visualizer.density.capacity(), 0);
+            assert_eq!(frame.visualizer.demand, Default::default());
+        }
+        handle.set_display_demand(demand);
+        display_samples(
+            &mut producer,
+            &worker,
+            worker.control.display_token(),
+            512,
+            [0.0; 2],
+        );
+        handle.request_analysis_frame();
+        display_wait(|| handle.analysis.read().settings.is_some());
+        let frame = handle.analysis.read();
+        assert!(handle.analysis_frame_is_current(&frame));
+        assert_eq!(frame.visualizer.demand, demand.visualizer);
+        assert_eq!([frame.rms_left, frame.rms_right], [0.0; 2]);
+    }
+
+    #[test]
+    fn display_quick_off_on_rejects_in_flight_and_queued_old_spectrum() {
+        use ringbuf::traits::Observer;
+        let (handle, worker, _receiver) = display_fixture();
+        let demand = DisplayDemand {
+            enabled: true,
+            ..Default::default()
+        };
+        handle.set_display_demand(demand);
+        let old_token = worker.control.display_token();
+        let mut producer = worker.producer();
+        display_samples(&mut producer, &worker, old_token, 512, [0.25; 2]);
+        handle.request_analysis_frame();
+        display_wait(|| handle.analysis.read().settings.is_some());
+        let held_frame = handle.analysis.write();
+        let sequence = held_frame.sequence;
+        display_samples(&mut producer, &worker, old_token, 512, [1.0; 2]);
+        handle.request_analysis_frame();
+        display_wait(|| producer.occupied_len() == 0);
+        handle.set_display_demand(DisplayDemand::default());
+        handle.set_display_demand(demand);
+        assert!(!handle.analysis_frame_is_current(&held_frame));
+        drop(held_frame);
+        display_wait(|| handle.analysis.read().sequence > sequence);
+        assert_eq!(handle.analysis.read().settings, None);
+        display_samples(&mut producer, &worker, old_token, 512, [1.0; 2]);
+        display_samples(
+            &mut producer,
+            &worker,
+            worker.control.display_token(),
+            511,
+            [0.0; 2],
+        );
+        handle.request_analysis_frame();
+        display_wait(|| producer.occupied_len() == 0);
+        assert_eq!(handle.analysis.read().settings, None);
+        display_samples(
+            &mut producer,
+            &worker,
+            worker.control.display_token(),
+            1,
+            [0.0; 2],
+        );
+        handle.request_analysis_frame();
+        display_wait(|| handle.analysis.read().settings.is_some());
+        let frame = handle.analysis.read();
+        assert!(handle.analysis_frame_is_current(&frame));
+        assert_eq!([frame.rms_left, frame.rms_right], [0.0; 2]);
     }
 
     #[test]

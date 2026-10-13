@@ -71,7 +71,6 @@ pub(super) struct Worker {
     device: Option<String>,
     volume: f32,
     media_read_buffer_len: usize,
-    wanted_analysis: bool,
     still_mode: bool,
     ffmpeg_enabled: bool,
     pipewire_auto_mix: bool,
@@ -101,7 +100,6 @@ impl Worker {
             device: None,
             volume: 0.7,
             media_read_buffer_len,
-            wanted_analysis: false,
             still_mode: false,
             ffmpeg_enabled: false,
             pipewire_auto_mix: true,
@@ -114,20 +112,17 @@ impl Worker {
         send_event(&self.events, &self.shutdown, event);
     }
     fn stop(&mut self) -> (u64, f64) {
-        self.analyzer.set_enabled(false);
+        self.analyzer.set_playback_active(false);
         if let Some(mut playback) = self.playback.take() {
             self.last_snapshot = (playback.generation(), playback.close());
         }
         self.last_snapshot
     }
     fn refresh_analysis(&self) {
-        self.analyzer.set_enabled(
-            self.wanted_analysis
-                && !self.still_mode
-                && self
-                    .playback
-                    .as_ref()
-                    .is_some_and(|playback| !playback.paused()),
+        self.analyzer.set_playback_active(
+            self.playback
+                .as_ref()
+                .is_some_and(|playback| !playback.paused()),
         );
     }
     fn playback_options(
@@ -167,10 +162,6 @@ impl Worker {
             AudioCommand::StopAndSnapshot(reply) => {
                 let snapshot = self.stop();
                 let _ = reply.send(snapshot);
-            }
-            AudioCommand::Analysis(enabled) => {
-                self.wanted_analysis = enabled;
-                self.refresh_analysis();
             }
             AudioCommand::StillMode(enabled) => {
                 self.analyzer.set_still_mode(enabled);
@@ -449,7 +440,7 @@ mod tests {
             65536,
         );
         worker.command(AudioCommand::Volume(0.3));
-        worker.command(AudioCommand::Analysis(true));
+        worker.analyzer.control.set_display_enabled(true);
         worker.command(AudioCommand::StillMode(true));
         let revision = waveform.read().revision;
         assert!(revision > completed.revision);
@@ -457,7 +448,6 @@ mod tests {
             AudioCommand::StillMode(true),
             AudioCommand::Seek(0.5),
             AudioCommand::Pause(true),
-            AudioCommand::Analysis(true),
             AudioCommand::AnalysisSettings(crate::analysis::AnalysisSettings::from(
                 &crate::config::Config::default(),
             )),
@@ -468,7 +458,7 @@ mod tests {
             assert_eq!(worker.volume, 0.3);
             assert!(worker.device.is_none());
             assert!(worker.playback.is_none());
-            assert!(worker.wanted_analysis);
+            assert!(!worker.analyzer.control.accepts_audio());
         }
         worker.command(AudioCommand::StillMode(false));
         assert_eq!(waveform.read().retained_capacity_bytes(), 0);
@@ -494,7 +484,6 @@ mod tests {
                 device: None,
                 auto_mix: false,
             },
-            AudioCommand::Analysis(false),
             AudioCommand::StillMode(true),
             AudioCommand::MediaReadBuffer(2),
             AudioCommand::FfmpegEnabled(false),

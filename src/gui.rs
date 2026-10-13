@@ -1184,6 +1184,9 @@ impl GuiApp {
         }
         {
             let frame = self.handle.analysis.read();
+            if !self.handle.analysis_frame_is_current(&frame) {
+                return;
+            }
             if frame.sequence == self.analysis_sequence
                 && !(self.analysis_needs_refresh && self.analysis_staging.settings.is_some())
             {
@@ -1260,7 +1263,6 @@ impl GuiApp {
                 }
             }
         }
-        self.handle.set_visualizer_demand(demand);
         let analysis_visible = self.window_visible
             && active_panels.iter().any(|panel| {
                 matches!(
@@ -1273,15 +1275,12 @@ impl GuiApp {
             self.analysis_needs_refresh |=
                 spectrum_restored || spectrum_changed || audio_visualizer_changed;
         }
-        if analysis_visible != self.analysis_worker_enabled {
-            self.analysis_worker_enabled = analysis_visible;
-            self.send(
-                Command::Analysis {
-                    enabled: analysis_visible,
-                },
-                cx,
-            );
-        }
+        self.analysis_worker_enabled = analysis_visible;
+        self.handle
+            .set_display_demand(crate::analysis::DisplayDemand {
+                enabled: analysis_visible,
+                visualizer: demand,
+            });
         self.sync_waveform(cx);
     }
 

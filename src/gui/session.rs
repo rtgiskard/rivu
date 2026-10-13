@@ -1,7 +1,7 @@
 //! Window ownership and release of visual subscriptions and analysis demand.
 
 use super::GuiApp;
-use crate::{artwork::ArtworkManager, core::CoreHandle, model::Command};
+use crate::{artwork::ArtworkManager, core::CoreHandle};
 use anyhow::Result;
 use gpui::*;
 use std::{
@@ -107,8 +107,7 @@ impl UiSession {
     fn clear_window_state(&self) {
         self.handle.clear_wakeup();
         self.handle
-            .set_visualizer_demand(crate::analysis::VisualizerDemand::default());
-        let _ = self.handle.send(Command::Analysis { enabled: false });
+            .set_display_demand(crate::analysis::DisplayDemand::default());
     }
 
     pub(crate) fn release_window(&mut self) {

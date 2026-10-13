@@ -252,7 +252,7 @@ impl Core {
                 self.state.system.selected_device = name;
             }
             Command::Analysis { enabled } => {
-                self.audio(AudioCommand::Analysis(enabled))?;
+                self.engine.analysis_control.set_display_enabled(enabled);
                 return Ok(());
             }
             Command::DismissError => {

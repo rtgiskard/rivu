@@ -388,7 +388,8 @@ impl OutputCallback {
             let _ = self.shared.wakeup.try_send(());
         }
         let volume = f32::from_bits(self.shared.volume.load(Ordering::Relaxed));
-        let analyze = self.control.enabled.load(Ordering::Relaxed);
+        let demand_token = self.control.display_token();
+        let analyze = self.control.accepts_audio_for(demand_token);
         let epoch = self.control.epoch.load(Ordering::Relaxed);
         let source_channels = self.analysis_weights.len();
         // Snapshot availability: valid frames form one prefix, even if the
@@ -438,6 +439,7 @@ impl OutputCallback {
                                 TapFrame {
                                     samples,
                                     epoch,
+                                    demand_token,
                                     gap: gap && index == 0,
                                 }
                             },
@@ -560,7 +562,13 @@ mod tests {
         callback.render(&mut [0.0_f32; 51], timestamp(0, 20));
         let (tap, mut analysis) = HeapRb::new(frames).split();
         callback.tap = tap;
-        callback.control.enabled.store(true, Ordering::Release);
+        {
+            callback
+                .control
+                .playback_active
+                .store(true, Ordering::Release);
+            callback.control.set_display_enabled(true);
+        };
         let input: Vec<_> = (0..frames)
             .flat_map(|i| {
                 let value = i as f32 / frames as f32;
@@ -599,7 +607,13 @@ mod tests {
         let (mut output, mut callback, _analyzer) = test_output(192_000, false);
         let (tap, mut samples) = HeapRb::new(1).split();
         callback.tap = tap;
-        callback.control.enabled.store(true, Ordering::Release);
+        {
+            callback
+                .control
+                .playback_active
+                .store(true, Ordering::Release);
+            callback.control.set_display_enabled(true);
+        };
         output.push(&[0.5; 6]);
         callback.render(&mut [0.0_f32; 6], timestamp(0, 20));
         assert!(!samples.try_pop().unwrap().gap);
@@ -625,13 +639,20 @@ mod tests {
         tap.push_iter((0..3).map(|_| TapFrame {
             samples: [0.0; 2],
             epoch: 0,
+            demand_token: 0,
             gap: false,
         }));
         for _ in 0..3 {
             samples.try_pop().unwrap();
         }
         callback.tap = tap;
-        callback.control.enabled.store(true, Ordering::Release);
+        {
+            callback
+                .control
+                .playback_active
+                .store(true, Ordering::Release);
+            callback.control.set_display_enabled(true);
+        };
         callback.control.epoch.store(17, Ordering::Release);
         output.push(&vec![0.5; frames * 2]);
         callback.render(&mut vec![0.0_f32; frames * 2], timestamp(0, 20));
@@ -1013,12 +1034,24 @@ mod tests {
         let (mut output, mut callback, _analyzer) =
             test_output_layout(1000, false, &source, &source, 64);
         let frame = [0.1_f32, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
-        callback.control.enabled.store(true, Ordering::Release);
+        {
+            callback
+                .control
+                .playback_active
+                .store(true, Ordering::Release);
+            callback.control.set_display_enabled(true);
+        };
         output.push(&frame);
         let mut data = [0.0_f32; 8];
         callback.render(&mut data, timestamp(0, 10));
         assert_eq!(data, frame);
-        callback.control.enabled.store(false, Ordering::Release);
+        {
+            callback
+                .control
+                .playback_active
+                .store(false, Ordering::Release);
+            callback.control.set_display_enabled(false);
+        };
         output.push(&frame);
         callback.render(&mut data, timestamp(1, 11));
         assert_eq!(data, frame);

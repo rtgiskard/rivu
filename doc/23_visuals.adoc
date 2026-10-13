@@ -38,6 +38,13 @@ normal low-FPS/high-sample-rate operation where every ordinary request interval
 can exceed the ring capacity. Recovery is cancelable, never replays the backlog,
 and does not keep polling after the request ends.
 
+The display enable flag and optional-payload demand are submitted as one
+coalesced control state, independently of the core business-command queue.
+Closing a window relinquishes that demand even when the command queue is full.
+Playback activity and Still Mode remain separate execution gates; requesting a
+display never resumes playback or overrides Still Mode. Destructive demand
+transitions invalidate queued input and late frame publication.
+
 Stream resets, analysis restarts, dropped samples, FFT/window changes, and
 optional-payload demand transitions break signal continuity. Views reject
 frames from stale analysis settings and reset envelopes or simulations at a

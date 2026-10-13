@@ -22,8 +22,6 @@ pub struct VisualizerDemand {
 }
 
 impl VisualizerDemand {
-    const MASK: u64 = 7;
-
     fn from_bits(bits: u64) -> Self {
         Self {
             stereo_density: bits & 1 != 0,
@@ -36,6 +34,28 @@ impl VisualizerDemand {
         u64::from(self.stereo_density)
             | (u64::from(self.spatial_spectrum) << 1)
             | (u64::from(self.band_energy) << 2)
+    }
+}
+
+/// Complete coalesced demand from the display consumer, independent of playback.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DisplayDemand {
+    pub enabled: bool,
+    pub visualizer: VisualizerDemand,
+}
+
+impl DisplayDemand {
+    const MASK: u64 = 15;
+
+    fn from_bits(bits: u64) -> Self {
+        Self {
+            enabled: bits & 8 != 0,
+            visualizer: VisualizerDemand::from_bits(bits),
+        }
+    }
+
+    fn bits(self) -> u64 {
+        self.visualizer.bits() | (u64::from(self.enabled) << 3)
     }
 }
 
@@ -136,6 +156,7 @@ impl DensityField {
 #[derive(Clone, Debug, Default)]
 pub struct AnalysisFrame {
     pub sequence: u64,
+    pub(crate) display_token: u64,
     /// Changes whenever a window cannot continue the preceding signal.
     pub generation: u64,
     /// Absent until the first publication; identifies the FFT producing this frame.
@@ -181,20 +202,22 @@ impl AnalysisSettings {
 pub(crate) struct TapFrame {
     pub samples: [f32; 2],
     pub epoch: u64,
+    /// Complete display transition identity captured by the audio callback.
+    pub demand_token: u64,
     /// The preceding tap frame was dropped; never bridge this gap in an FFT.
     pub gap: bool,
 }
 
 pub(crate) struct AnalysisControl {
-    pub enabled: AtomicBool,
+    pub playback_active: AtomicBool,
     settings: RwLock<AnalysisSettings>,
     /// Playback/output sample rate used to map FFT bins to frequencies.
     pub sample_rate: AtomicU32,
     /// Even epochs are stable; odd epochs mark sample-rate reset in progress.
     pub epoch: AtomicU64,
     shutdown: AtomicBool,
-    // Three demand bits and their transition epoch form one coherent snapshot.
-    visualizer_demand: AtomicU64,
+    // Complete display demand and its transition identity are one snapshot.
+    display_demand: AtomicU64,
     // One consumer permit, never an accumulating queue of analysis jobs.
     frame_requested: AtomicBool,
     // Overflow invalidates the queued prefix before a later gap-marked tap arrives.
@@ -206,8 +229,7 @@ pub(crate) struct AnalysisControl {
 
 impl AnalysisControl {
     pub(crate) fn request_frame(&self) {
-        if self.enabled.load(Ordering::Acquire)
-            && self.still_mode.load(Ordering::Acquire) & 1 == 0
+        if self.accepts_audio()
             && !self.frame_requested.swap(true, Ordering::AcqRel)
             && let Some(worker) = self.worker_thread.get()
         {
@@ -215,20 +237,46 @@ impl AnalysisControl {
         }
     }
 
-    pub(crate) fn set_visualizer_demand(&self, demand: VisualizerDemand) {
+    pub(crate) fn display_token(&self) -> u64 {
+        self.display_demand.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn accepts_audio(&self) -> bool {
+        self.accepts_audio_for(self.display_token())
+    }
+
+    pub(crate) fn accepts_audio_for(&self, demand_token: u64) -> bool {
+        self.playback_active.load(Ordering::Acquire)
+            && DisplayDemand::from_bits(demand_token).enabled
+            && self.still_mode.load(Ordering::Acquire) & 1 == 0
+    }
+
+    pub(crate) fn set_display_demand(&self, demand: DisplayDemand) {
+        self.update_display_demand(|_| demand);
+    }
+
+    // The public Analysis command changes only enablement, not plot selection.
+    pub(crate) fn set_display_enabled(&self, enabled: bool) {
+        self.update_display_demand(|demand| DisplayDemand { enabled, ..demand });
+    }
+
+    fn update_display_demand(&self, update: impl Fn(DisplayDemand) -> DisplayDemand) {
         if self
-            .visualizer_demand
+            .display_demand
             .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                (VisualizerDemand::from_bits(current) != demand).then(|| {
-                    (current & !VisualizerDemand::MASK).wrapping_add(VisualizerDemand::MASK + 1)
+                let demand = update(DisplayDemand::from_bits(current));
+                (DisplayDemand::from_bits(current) != demand).then(|| {
+                    (current & !DisplayDemand::MASK).wrapping_add(DisplayDemand::MASK + 1)
                         | demand.bits()
                 })
             })
             .is_ok()
-            && let Some(worker) = self.worker_thread.get()
         {
-            // Relinquish storage even when analysis is disabled or paused.
-            worker.unpark();
+            self.frame_requested.store(false, Ordering::Release);
+            if let Some(worker) = self.worker_thread.get() {
+                // Release old results/storage even with no outstanding frame request.
+                worker.unpark();
+            }
         }
     }
 }
@@ -247,12 +295,12 @@ impl AnalysisWorker {
     fn with_capacity(shared: Arc<RwLock<AnalysisFrame>>, capacity: usize) -> std::io::Result<Self> {
         let ring = Arc::new(HeapRb::new(capacity));
         let control = Arc::new(AnalysisControl {
-            enabled: AtomicBool::new(false),
+            playback_active: AtomicBool::new(false),
             settings: RwLock::new(AnalysisSettings::from(&Config::default())),
             sample_rate: AtomicU32::new(48_000),
             epoch: AtomicU64::new(0),
             shutdown: AtomicBool::new(false),
-            visualizer_demand: AtomicU64::new(0),
+            display_demand: AtomicU64::new(0),
             frame_requested: AtomicBool::new(false),
             tap_overflow: AtomicBool::new(false),
             worker_thread: OnceLock::new(),
@@ -273,8 +321,8 @@ impl AnalysisWorker {
     pub fn producer(&self) -> HeapProd<TapFrame> {
         HeapProd::new(self.ring.clone())
     }
-    pub fn set_enabled(&self, enabled: bool) {
-        if self.control.enabled.swap(enabled, Ordering::AcqRel) != enabled {
+    pub fn set_playback_active(&self, enabled: bool) {
+        if self.control.playback_active.swap(enabled, Ordering::AcqRel) != enabled {
             self.control.frame_requested.store(false, Ordering::Release);
             // A quick disable/enable must invalidate queued samples even if the
             // analysis thread never observes the disabled state.
@@ -309,7 +357,7 @@ impl AnalysisWorker {
             .sample_rate
             .store(sample_rate, Ordering::Release);
         self.control.epoch.fetch_add(1, Ordering::AcqRel);
-        if self.control.enabled.load(Ordering::Acquire)
+        if self.control.accepts_audio()
             && let Some(worker) = &self.worker
         {
             worker.thread().unpark();
@@ -325,7 +373,7 @@ impl AnalysisWorker {
             self.control.frame_requested.store(false, Ordering::Release);
             self.control.epoch.fetch_add(2, Ordering::AcqRel);
             drop(current);
-            if self.control.enabled.load(Ordering::Acquire)
+            if self.control.accepts_audio()
                 && let Some(worker) = &self.worker
             {
                 worker.thread().unpark();
@@ -677,23 +725,24 @@ fn analyze(
             thread::park();
             continue;
         }
-        let current_demand_token = control.visualizer_demand.load(Ordering::Acquire);
-        let demand = VisualizerDemand::from_bits(current_demand_token);
+        let current_demand_token = control.display_token();
+        let display = DisplayDemand::from_bits(current_demand_token);
+        let demand = if display.enabled {
+            display.visualizer
+        } else {
+            VisualizerDemand::default()
+        };
         if demand_token != current_demand_token {
             demand_token = current_demand_token;
+            // Invalidate every old result, including spectrum-only frames, even
+            // when an off/on transition was coalesced before this worker ran.
+            discard_analysis(&mut analyzer, &shared);
             analyzer.set_visualizer_demand(demand);
-            // A quick away/back transition must not revive old plot history or
-            // publish a partially old FFT window under a newly requested demand.
-            analyzer.reset();
             let mut frame = shared.write();
-            frame.visualizer = VisualizerFrame {
-                demand,
-                ..VisualizerFrame::default()
-            };
-            frame.generation = analyzer.generation;
-            frame.settings = None;
+            frame.visualizer.demand = demand;
+            frame.display_token = current_demand_token;
         }
-        if !control.enabled.load(Ordering::Acquire) {
+        if !control.accepts_audio() {
             consumer.clear();
             analyzer.reset();
             thread::park();
@@ -770,9 +819,9 @@ fn analyze(
                 if analyzer.filled == analyzer.rolling.len()
                     || Instant::now() >= deadline
                     || control.shutdown.load(Ordering::Acquire)
-                    || !control.enabled.load(Ordering::Acquire)
+                    || !control.accepts_audio()
                     || control.epoch.load(Ordering::Acquire) != current_epoch
-                    || control.visualizer_demand.load(Ordering::Acquire) != current_demand_token
+                    || control.display_token() != current_demand_token
                     || control.still_mode.load(Ordering::Acquire) != current_still_token
                 {
                     break;
@@ -790,7 +839,7 @@ fn analyze(
             }
             remaining -= count;
             for frame in &incoming[..count] {
-                if frame.epoch == current_epoch {
+                if frame.epoch == current_epoch && frame.demand_token == current_demand_token {
                     accepted += 1;
                     analyzer.push_tap(frame);
                 }
@@ -810,14 +859,15 @@ fn analyze(
             let rms = analyzer.transform();
             let mut frame = shared.write();
             if control.epoch.load(Ordering::Acquire) == current_epoch
-                && control.enabled.load(Ordering::Acquire)
+                && control.accepts_audio()
                 && *control.settings.read() == settings
-                && control.visualizer_demand.load(Ordering::Acquire) == current_demand_token
+                && control.display_token() == current_demand_token
                 && control.still_mode.load(Ordering::Acquire) == current_still_token
                 && !control.tap_overflow.load(Ordering::Acquire)
                 && !control.shutdown.load(Ordering::Acquire)
             {
                 analyzer.publish(&mut frame, rms, sample_time);
+                frame.display_token = current_demand_token;
             }
         }
     }
@@ -865,30 +915,25 @@ mod tests {
     fn demand_flags_and_transition_epoch_are_packed_coherently() {
         let worker = AnalysisWorker::new(Arc::new(RwLock::new(AnalysisFrame::default()))).unwrap();
         let mut previous = 0;
-        for bits in 0..=VisualizerDemand::MASK {
-            let demand = VisualizerDemand::from_bits(bits);
+        for bits in 0..=DisplayDemand::MASK {
+            let demand = DisplayDemand::from_bits(bits);
             assert_eq!(demand.bits(), bits);
-            worker.control.set_visualizer_demand(demand);
-            let token = worker.control.visualizer_demand.load(Ordering::Acquire);
-            assert_eq!(VisualizerDemand::from_bits(token), demand);
+            worker.control.set_display_demand(demand);
+            let token = worker.control.display_token();
+            assert_eq!(DisplayDemand::from_bits(token), demand);
             if bits != 0 {
-                assert_eq!(token & !VisualizerDemand::MASK, previous + 8);
+                assert_eq!(token & !DisplayDemand::MASK, previous + 16);
             }
-            previous = token & !VisualizerDemand::MASK;
-            worker.control.set_visualizer_demand(demand);
-            assert_eq!(
-                worker.control.visualizer_demand.load(Ordering::Acquire),
-                token
-            );
+            previous = token & !DisplayDemand::MASK;
+            worker.control.set_display_demand(demand);
+            assert_eq!(worker.control.display_token(), token);
         }
-        let before = worker.control.visualizer_demand.load(Ordering::Acquire);
+        let before = worker.control.display_token();
+        worker.control.set_display_demand(DisplayDemand::default());
         worker
             .control
-            .set_visualizer_demand(VisualizerDemand::default());
-        worker.control.set_visualizer_demand(ALL_DEMAND);
-        let after = worker.control.visualizer_demand.load(Ordering::Acquire);
-        assert_eq!(VisualizerDemand::from_bits(after), ALL_DEMAND);
-        assert_eq!(after, before + 16);
+            .set_display_demand(DisplayDemand::from_bits(DisplayDemand::MASK));
+        assert_eq!(worker.control.display_token(), before + 32);
     }
 
     #[test]
@@ -1276,16 +1321,23 @@ mod tests {
             fft_size: 512,
             window: AnalysisWindow::None,
         });
-        worker.control.set_visualizer_demand(DENSITY_DEMAND);
-        worker.set_enabled(true);
+        worker.control.set_display_demand(DisplayDemand {
+            enabled: true,
+            visualizer: DENSITY_DEMAND,
+        });
+        set_test_playback(&worker, true);
         let mut producer = worker.producer();
         let mut sequence = 0;
         for samples in [[0.7, -0.7], [0.5, 0.5]] {
             if sequence != 0 {
-                worker
-                    .control
-                    .set_visualizer_demand(VisualizerDemand::default());
-                worker.control.set_visualizer_demand(DENSITY_DEMAND);
+                worker.control.set_display_demand(DisplayDemand {
+                    enabled: true,
+                    visualizer: VisualizerDemand::default(),
+                });
+                worker.control.set_display_demand(DisplayDemand {
+                    enabled: true,
+                    visualizer: DENSITY_DEMAND,
+                });
             }
             let epoch = worker.control.epoch.load(Ordering::Acquire);
             for _ in 0..512 {
@@ -1294,6 +1346,7 @@ mod tests {
                         .try_push(TapFrame {
                             samples,
                             epoch,
+                            demand_token: worker.control.display_token(),
                             gap: false,
                         })
                         .is_ok()
@@ -1303,7 +1356,7 @@ mod tests {
             let deadline = Instant::now() + Duration::from_secs(3);
             loop {
                 let frame = shared.read();
-                if frame.sequence > sequence {
+                if frame.sequence > sequence && frame.settings.is_some() {
                     assert_eq!(frame.visualizer.demand, DENSITY_DEMAND);
                     if sequence != 0 {
                         assert_eq!(frame.visualizer.density[128 * DENSITY_SIDE + 217], 0.0);
@@ -1330,16 +1383,27 @@ mod tests {
             fft_size: 512,
             window: AnalysisWindow::None,
         });
-        worker.control.set_visualizer_demand(DENSITY_DEMAND);
-        worker.set_enabled(true);
+        worker.control.set_display_demand(DisplayDemand {
+            enabled: true,
+            visualizer: DENSITY_DEMAND,
+        });
+        set_test_playback(&worker, true);
         let mut producer = worker.producer();
         let epoch = worker.control.epoch.load(Ordering::Acquire);
-        push_window(&mut producer, epoch, [0.7, -0.7]);
+        push_window(
+            &mut producer,
+            epoch,
+            worker.control.display_token(),
+            [0.7, -0.7],
+        );
         worker.control.request_frame();
         wait_for_frame(&shared, |frame| frame.settings.is_some());
         let previous = shared.read().clone();
 
-        worker.control.set_visualizer_demand(ALL_DEMAND);
+        worker.control.set_display_demand(DisplayDemand {
+            enabled: true,
+            visualizer: ALL_DEMAND,
+        });
         wait_for_frame(&shared, |frame| {
             frame.visualizer.demand == ALL_DEMAND && frame.settings.is_none()
         });
@@ -1348,6 +1412,7 @@ mod tests {
                 producer
                     .try_push(TapFrame {
                         epoch,
+                        demand_token: worker.control.display_token(),
                         ..TapFrame::default()
                     })
                     .is_ok()
@@ -1356,18 +1421,19 @@ mod tests {
         worker.control.request_frame();
         wait_for_frame(&shared, |_| producer.occupied_len() == 0);
         thread::sleep(Duration::from_millis(50));
-        assert_eq!(shared.read().sequence, previous.sequence);
+        assert_eq!(shared.read().sequence, previous.sequence + 1);
         assert_eq!(shared.read().settings, None);
         assert!(
             producer
                 .try_push(TapFrame {
                     epoch,
+                    demand_token: worker.control.display_token(),
                     ..TapFrame::default()
                 })
                 .is_ok()
         );
         worker.control.request_frame();
-        wait_for_frame(&shared, |frame| frame.sequence > previous.sequence);
+        wait_for_frame(&shared, |frame| frame.settings.is_some());
         {
             let frame = shared.read();
             assert_eq!(frame.visualizer.demand, ALL_DEMAND);
@@ -1386,10 +1452,11 @@ mod tests {
             assert_eq!(frame.visualizer.band_rms, [0.0; 3]);
         }
 
-        worker.set_enabled(false);
-        worker
-            .control
-            .set_visualizer_demand(VisualizerDemand::default());
+        set_test_playback(&worker, false);
+        worker.control.set_display_demand(DisplayDemand {
+            enabled: true,
+            visualizer: VisualizerDemand::default(),
+        });
         wait_for_frame(&shared, |frame| {
             frame.visualizer.demand == VisualizerDemand::default() && frame.settings.is_none()
         });
@@ -1399,7 +1466,12 @@ mod tests {
         assert_eq!(frame.visualizer.band_rms, [0.0; 3]);
     }
 
-    fn push_window(producer: &mut HeapProd<TapFrame>, epoch: u64, samples: [f32; 2]) {
+    fn push_window(
+        producer: &mut HeapProd<TapFrame>,
+        epoch: u64,
+        demand_token: u64,
+        samples: [f32; 2],
+    ) {
         use ringbuf::traits::Producer;
         for _ in 0..512 {
             assert!(
@@ -1407,10 +1479,18 @@ mod tests {
                     .try_push(TapFrame {
                         samples,
                         epoch,
+                        demand_token,
                         gap: false
                     })
                     .is_ok()
             );
+        }
+    }
+
+    fn set_test_playback(worker: &AnalysisWorker, active: bool) {
+        worker.set_playback_active(active);
+        if active {
+            worker.control.set_display_enabled(true);
         }
     }
 
@@ -1437,10 +1517,15 @@ mod tests {
             window: AnalysisWindow::None,
         });
         worker.reset(192_000);
-        worker.set_enabled(true);
+        set_test_playback(&worker, true);
         let mut producer = worker.producer();
         let epoch = worker.control.epoch.load(Ordering::Acquire);
-        push_window(&mut producer, epoch, [0.25; 2]);
+        push_window(
+            &mut producer,
+            epoch,
+            worker.control.display_token(),
+            [0.25; 2],
+        );
         worker.control.request_frame();
         wait_until(|| producer.occupied_len() == 0);
         for _ in 0..32768 {
@@ -1449,6 +1534,7 @@ mod tests {
                     .try_push(TapFrame {
                         samples: [1.0; 2],
                         epoch,
+                        demand_token: worker.control.display_token(),
                         gap: false
                     })
                     .is_ok()
@@ -1463,6 +1549,7 @@ mod tests {
                     .try_push(TapFrame {
                         samples: [0.0; 2],
                         epoch,
+                        demand_token: worker.control.display_token(),
                         gap: index == 0
                     })
                     .is_ok()
@@ -1483,18 +1570,28 @@ mod tests {
             fft_size: 512,
             window: AnalysisWindow::None,
         });
-        worker.set_enabled(true);
+        set_test_playback(&worker, true);
         let mut producer = worker.producer();
         let epoch = worker.control.epoch.load(Ordering::Acquire);
-        push_window(&mut producer, epoch, [0.25; 2]);
+        push_window(
+            &mut producer,
+            epoch,
+            worker.control.display_token(),
+            [0.25; 2],
+        );
         thread::sleep(Duration::from_millis(250));
-        assert_eq!(shared.read().sequence, 0);
+        assert_eq!(shared.read().settings, None);
         assert_eq!(producer.occupied_len(), 512);
 
         worker.control.request_frame();
         wait_for_frame(&shared, |frame| frame.settings.is_some());
         let first_sequence = shared.read().sequence;
-        push_window(&mut producer, epoch, [0.5; 2]);
+        push_window(
+            &mut producer,
+            epoch,
+            worker.control.display_token(),
+            [0.5; 2],
+        );
         for _ in 0..100 {
             worker.control.request_frame();
         }
@@ -1504,7 +1601,12 @@ mod tests {
         assert_eq!(shared.read().sequence, first_sequence + 1);
 
         // Extra requests must not remain as an accumulating job queue.
-        push_window(&mut producer, epoch, [0.75; 2]);
+        push_window(
+            &mut producer,
+            epoch,
+            worker.control.display_token(),
+            [0.75; 2],
+        );
         thread::sleep(Duration::from_millis(250));
         assert_eq!(shared.read().sequence, first_sequence + 1);
         assert_eq!(producer.occupied_len(), 512);
@@ -1519,15 +1621,28 @@ mod tests {
             fft_size: 1024,
             window: AnalysisWindow::None,
         });
-        worker.control.set_visualizer_demand(DENSITY_DEMAND);
-        worker.set_enabled(true);
+        worker.control.set_display_demand(DisplayDemand {
+            enabled: true,
+            visualizer: DENSITY_DEMAND,
+        });
+        set_test_playback(&worker, true);
         let mut producer = worker.producer();
         let epoch = worker.control.epoch.load(Ordering::Acquire);
-        push_window(&mut producer, epoch, [1.0, 0.0]);
+        push_window(
+            &mut producer,
+            epoch,
+            worker.control.display_token(),
+            [1.0, 0.0],
+        );
         worker.control.request_frame();
         wait_until(|| producer.occupied_len() == 0);
         assert_eq!(shared.read().settings, None);
-        push_window(&mut producer, epoch, [0.0, 1.0]);
+        push_window(
+            &mut producer,
+            epoch,
+            worker.control.display_token(),
+            [0.0, 1.0],
+        );
         worker.control.request_frame();
         wait_for_frame(&shared, |frame| frame.settings.is_some());
         let frame = shared.read();
@@ -1552,12 +1667,25 @@ mod tests {
             fft_size: 512,
             window: AnalysisWindow::None,
         });
-        worker.control.set_visualizer_demand(DENSITY_DEMAND);
-        worker.set_enabled(true);
+        worker.control.set_display_demand(DisplayDemand {
+            enabled: true,
+            visualizer: DENSITY_DEMAND,
+        });
+        set_test_playback(&worker, true);
         let mut producer = worker.producer();
         let epoch = worker.control.epoch.load(Ordering::Acquire);
-        push_window(&mut producer, epoch, [1.0, 0.0]);
-        push_window(&mut producer, epoch, [0.0, 1.0]);
+        push_window(
+            &mut producer,
+            epoch,
+            worker.control.display_token(),
+            [1.0, 0.0],
+        );
+        push_window(
+            &mut producer,
+            epoch,
+            worker.control.display_token(),
+            [0.0, 1.0],
+        );
         worker.control.request_frame();
         wait_for_frame(&shared, |frame| frame.settings.is_some());
         let frame = shared.read();
@@ -1580,16 +1708,34 @@ mod tests {
             fft_size: 512,
             window: AnalysisWindow::None,
         });
-        worker.control.set_visualizer_demand(DENSITY_DEMAND);
-        worker.set_enabled(true);
+        worker.control.set_display_demand(DisplayDemand {
+            enabled: true,
+            visualizer: DENSITY_DEMAND,
+        });
+        set_test_playback(&worker, true);
         let mut producer = worker.producer();
         let epoch = worker.control.epoch.load(Ordering::Acquire);
-        push_window(&mut producer, epoch, [0.75; 2]);
+        push_window(
+            &mut producer,
+            epoch,
+            worker.control.display_token(),
+            [0.75; 2],
+        );
         worker.control.request_frame();
         wait_for_frame(&shared, |frame| frame.settings.is_some());
         let previous = shared.read().clone();
-        push_window(&mut producer, epoch, [1.0; 2]);
-        push_window(&mut producer, epoch, [1.0; 2]);
+        push_window(
+            &mut producer,
+            epoch,
+            worker.control.display_token(),
+            [1.0; 2],
+        );
+        push_window(
+            &mut producer,
+            epoch,
+            worker.control.display_token(),
+            [1.0; 2],
+        );
         assert!(producer.try_push(TapFrame::default()).is_err());
         worker.control.tap_overflow.store(true, Ordering::Release);
         worker.control.request_frame();
@@ -1604,6 +1750,7 @@ mod tests {
                     .try_push(TapFrame {
                         samples: [0.0; 2],
                         epoch,
+                        demand_token: worker.control.display_token(),
                         gap: index == 0,
                     })
                     .is_ok()
@@ -1616,6 +1763,7 @@ mod tests {
             producer
                 .try_push(TapFrame {
                     epoch,
+                    demand_token: worker.control.display_token(),
                     ..TapFrame::default()
                 })
                 .is_ok()
@@ -1636,27 +1784,47 @@ mod tests {
             fft_size: 512,
             window: AnalysisWindow::None,
         });
-        worker.set_enabled(true);
+        set_test_playback(&worker, true);
         let mut producer = worker.producer();
         let epoch = worker.control.epoch.load(Ordering::Acquire);
-        push_window(&mut producer, epoch, [0.25; 2]);
+        push_window(
+            &mut producer,
+            epoch,
+            worker.control.display_token(),
+            [0.25; 2],
+        );
         worker.control.request_frame();
         wait_for_frame(&shared, |frame| frame.settings.is_some());
         let sequence = shared.read().sequence;
         let held_frame = shared.write();
-        push_window(&mut producer, epoch, [1.0; 2]);
+        push_window(
+            &mut producer,
+            epoch,
+            worker.control.display_token(),
+            [1.0; 2],
+        );
         worker.control.request_frame();
         wait_until(|| producer.occupied_len() == 0);
         worker.control.request_frame();
-        worker.set_enabled(false);
-        worker.set_enabled(true);
+        set_test_playback(&worker, false);
+        set_test_playback(&worker, true);
         drop(held_frame);
         thread::sleep(Duration::from_millis(50));
         assert_eq!(shared.read().sequence, sequence);
         assert!(!worker.control.frame_requested.load(Ordering::Acquire));
-        push_window(&mut producer, epoch, [1.0; 2]);
+        push_window(
+            &mut producer,
+            epoch,
+            worker.control.display_token(),
+            [1.0; 2],
+        );
         let current_epoch = worker.control.epoch.load(Ordering::Acquire);
-        push_window(&mut producer, current_epoch, [0.0; 2]);
+        push_window(
+            &mut producer,
+            current_epoch,
+            worker.control.display_token(),
+            [0.0; 2],
+        );
         worker.control.request_frame();
         wait_for_frame(&shared, |frame| frame.sequence > sequence);
         assert_eq!(shared.read().rms_left, 0.0);
@@ -1673,11 +1841,12 @@ mod tests {
                 fft_size: 512,
                 window: AnalysisWindow::None,
             });
-            worker.set_enabled(true);
+            set_test_playback(&worker, true);
             let mut producer = worker.producer();
             push_window(
                 &mut producer,
                 worker.control.epoch.load(Ordering::Acquire),
+                worker.control.display_token(),
                 [0.0; 2],
             );
             worker.control.request_frame();
@@ -1707,13 +1876,21 @@ mod tests {
             window: AnalysisWindow::None,
         };
         worker.configure(settings);
-        worker.control.set_visualizer_demand(ALL_DEMAND);
-        worker.set_enabled(true);
+        worker.control.set_display_demand(DisplayDemand {
+            enabled: true,
+            visualizer: ALL_DEMAND,
+        });
+        set_test_playback(&worker, true);
         let mut producer = worker.producer();
         let old_epoch = worker.control.epoch.load(Ordering::Acquire);
-        push_window(&mut producer, old_epoch, [0.5, -0.5]);
+        push_window(
+            &mut producer,
+            old_epoch,
+            worker.control.display_token(),
+            [0.5, -0.5],
+        );
         worker.control.request_frame();
-        wait_for_frame(&shared, |frame| frame.sequence > 0);
+        wait_for_frame(&shared, |frame| frame.settings.is_some());
         let previous = shared.read().clone();
         worker.set_still_mode(true);
         wait_for_frame(&shared, |frame| frame.sequence > previous.sequence);
@@ -1732,19 +1909,34 @@ mod tests {
             assert_eq!(shared.read().visualizer.demand, VisualizerDemand::default());
             assert_eq!(shared.read().visualizer.density.capacity(), 0);
             assert_eq!(shared.read().visualizer.spatial.capacity(), 0);
-            worker.control.set_visualizer_demand(BAND_ENERGY_DEMAND);
-            worker.control.set_visualizer_demand(ALL_DEMAND);
+            worker.control.set_display_demand(DisplayDemand {
+                enabled: true,
+                visualizer: BAND_ENERGY_DEMAND,
+            });
+            worker.control.set_display_demand(DisplayDemand {
+                enabled: true,
+                visualizer: ALL_DEMAND,
+            });
         }
         worker.set_still_mode(false);
         wait_for_frame(&shared, |frame| frame.sequence > suspended_sequence);
-        let resumed_sequence = shared.read().sequence;
         assert!(shared.read().frequencies_hz.is_empty());
         // A complete stale window must not contribute to the new result.
-        push_window(&mut producer, old_epoch, [1.0; 2]);
+        push_window(
+            &mut producer,
+            old_epoch,
+            worker.control.display_token(),
+            [1.0; 2],
+        );
         let epoch = worker.control.epoch.load(Ordering::Acquire);
-        push_window(&mut producer, epoch, [0.0; 2]);
+        push_window(
+            &mut producer,
+            epoch,
+            worker.control.display_token(),
+            [0.0; 2],
+        );
         worker.control.request_frame();
-        wait_for_frame(&shared, |frame| frame.sequence > resumed_sequence);
+        wait_for_frame(&shared, |frame| frame.settings.is_some());
         let frame = shared.read();
         assert_eq!(frame.settings, Some(settings));
         assert_eq!(frame.frequencies_hz.len(), frame.spectrum_db.len());
@@ -1789,15 +1981,15 @@ mod tests {
             window: AnalysisWindow::None,
         };
         worker.configure(settings);
-        worker.set_enabled(true);
+        set_test_playback(&worker, true);
         let mut producer = worker.producer();
         let mut previous = AnalysisFrame::default();
         for transition in 0..5 {
             match transition {
                 1 => worker.reset(48_000),
                 2 => {
-                    worker.set_enabled(false);
-                    worker.set_enabled(true);
+                    set_test_playback(&worker, false);
+                    set_test_playback(&worker, true);
                 }
                 4 => {
                     settings.window = AnalysisWindow::Hann;
@@ -1813,6 +2005,7 @@ mod tests {
                         .try_push(TapFrame {
                             samples: [value, -value],
                             epoch,
+                            demand_token: worker.control.display_token(),
                             gap: transition == 3 && index == 0,
                         })
                         .is_ok()
@@ -1822,7 +2015,7 @@ mod tests {
             let deadline = Instant::now() + Duration::from_secs(2);
             let current = loop {
                 let frame = shared.read();
-                if frame.sequence != previous.sequence {
+                if frame.sequence != previous.sequence && frame.settings.is_some() {
                     break frame.clone();
                 }
                 drop(frame);
@@ -2001,6 +2194,6 @@ mod tests {
             worker.configure(invalid);
             assert_eq!(*worker.control.settings.read(), settings);
         }
-        assert!(!worker.control.enabled.load(Ordering::Acquire));
+        assert!(!worker.control.accepts_audio());
     }
 }

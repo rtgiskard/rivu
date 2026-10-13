@@ -167,7 +167,6 @@ pub enum AudioCommand {
         device: Option<String>,
         auto_mix: bool,
     },
-    Analysis(bool),
     /// Drop visualization results/storage and suspend their work, preserving playback.
     StillMode(bool),
     MediaReadBuffer(u32),
