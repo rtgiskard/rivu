@@ -547,6 +547,7 @@ impl GuiApp {
         let settings = cx.new(|cx| {
             settings::Settings::new(
                 handle.clone(),
+                Arc::clone(&artwork_manager),
                 Arc::clone(&state.system.devices),
                 state.system.ffmpeg_status.clone(),
                 state.system.mpris_status.clone(),

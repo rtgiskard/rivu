@@ -166,6 +166,8 @@ supported image, then the bundled icon. Local images are cached under the data
 directory's `artwork/` and exposed through `mpris:artUrl` when available. A cold
 lookup initially shows the fallback; background loading updates the selected
 preview and desktop metadata when ready. Cache failures do not prevent playback.
+Use link:01_config.adoc#_artwork_cache_maintenance[Settings artwork maintenance]
+to inspect disk usage and manually clean expired, unprotected cover files.
 
 MPRIS supports transport, volume, shuffle, and repeat; only rate `1.0` is supported.
 Relative `Seek` beyond a known end advances when a next occurrence is available;

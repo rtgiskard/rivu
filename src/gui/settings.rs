@@ -7,6 +7,7 @@ use super::{
     row, section_group, status_message, toggle_button, two_column,
 };
 use crate::{
+    artwork::{ArtworkCacheReport, ArtworkManager},
     config::{
         AnalysisWindow, AudioVisualizerOptions, AudioVisualizerStyle, Config, LogLevel, RgbColor,
         SpectrumStyle, VisualizationPalette,
@@ -15,7 +16,10 @@ use crate::{
 };
 use anyhow::{Context as _, Result};
 use gpui::{prelude::*, *};
-use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc, str::FromStr, sync::Arc};
+use std::{
+    cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc, str::FromStr, sync::Arc,
+    time::Duration,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettingChoice {
@@ -367,6 +371,12 @@ impl EventEmitter<SettingsEvent> for Settings {}
 /// Unsaved preferences stay independent from live playback snapshots.
 pub(super) struct Settings {
     handle: AppHandle,
+    artwork_manager: Arc<ArtworkManager>,
+    artwork_cache_age: Entity<Input>,
+    artwork_cache_age_revision: u64,
+    artwork_cache_busy: Option<(u64, bool)>,
+    artwork_cache_report: Option<(u64, bool, ArtworkCacheReport)>,
+    artwork_cache_error: Option<String>,
     devices: Arc<Vec<String>>,
     ffmpeg_status: String,
     mpris_status: String,
@@ -396,6 +406,7 @@ pub(super) struct Settings {
 impl Settings {
     pub(super) fn new(
         handle: AppHandle,
+        artwork_manager: Arc<ArtworkManager>,
         devices: Arc<Vec<String>>,
         ffmpeg_status: String,
         mpris_status: String,
@@ -403,8 +414,23 @@ impl Settings {
         cx: &mut Context<Self>,
     ) -> Self {
         let config = handle.config_snapshot();
+        let artwork_cache_age = cx.new(|cx| Input::new("30", "Age in days", cx));
+        let artwork_cache_subscription = cx.subscribe(&artwork_cache_age, |this, _, event, cx| {
+            if matches!(event, InputEvent::Changed { .. }) {
+                this.artwork_cache_age_revision = this.artwork_cache_age_revision.wrapping_add(1);
+                this.artwork_cache_report = None;
+                this.artwork_cache_error = None;
+                cx.notify();
+            }
+        });
         Self {
             handle,
+            artwork_manager,
+            artwork_cache_age,
+            artwork_cache_age_revision: 0,
+            artwork_cache_busy: None,
+            artwork_cache_report: None,
+            artwork_cache_error: None,
             devices,
             ffmpeg_status,
             mpris_status,
@@ -414,7 +440,7 @@ impl Settings {
             measured: Rc::new(RefCell::new(HashMap::new())),
             scrolls: HashMap::new(),
             active_scroll: None,
-            _subscriptions: Vec::new(),
+            _subscriptions: vec![artwork_cache_subscription],
             draft: config.as_ref().clone(),
             inputs: HashMap::new(),
             initialized: false,
@@ -712,6 +738,8 @@ impl Settings {
         self.draft = config.clone();
         self.applying = false;
         self.feedback = None;
+        self.artwork_cache_report = None;
+        self.artwork_cache_error = None;
         self.fill(cx);
     }
 
@@ -1316,6 +1344,182 @@ impl Settings {
         cx.notify();
     }
 
+    fn maintain_artwork_cache(&mut self, clean: bool, cx: &mut Context<Self>) {
+        if self.artwork_cache_busy.is_some() {
+            return;
+        }
+        let age = self.artwork_cache_age.read(cx).text().trim();
+        let days = age
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+            .then(|| age.parse::<u64>().ok())
+            .flatten()
+            .filter(|days| *days > 0);
+        let Some((days, seconds)) =
+            days.and_then(|days| days.checked_mul(86_400).map(|seconds| (days, seconds)))
+        else {
+            self.artwork_cache_report = None;
+            self.artwork_cache_error = Some(format!(
+                "Enter a positive whole number of days (1–{}), then try again.",
+                u64::MAX / 86_400
+            ));
+            cx.notify();
+            return;
+        };
+        self.artwork_cache_busy = Some((days, clean));
+        self.artwork_cache_report = None;
+        self.artwork_cache_error = None;
+        let session = self.session;
+        let age_revision = self.artwork_cache_age_revision;
+        let manager = Arc::clone(&self.artwork_manager);
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { manager.maintain(Duration::from_secs(seconds), clean) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                // Keep the busy guard across close/reopen, but never reuse an old session's feedback.
+                this.artwork_cache_busy = None;
+                if this.active
+                    && this.session == session
+                    && this.artwork_cache_age_revision == age_revision
+                {
+                    match result {
+                        Ok(report) => this.artwork_cache_report = Some((days, clean, report)),
+                        Err(error) => {
+                            this.artwork_cache_error = Some(format!(
+                                "Could not read the artwork cache: {error}. Check directory access and try again."
+                            ));
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn artwork_cache_settings(&self, cx: &mut Context<Self>) -> Div {
+        let busy = self.artwork_cache_busy.is_some();
+        let mut content = column()
+            .gap_2()
+            .child(caption(
+                "Manual maintenance only. Changes take effect immediately; Apply is not required."
+            ))
+            .child(
+                row()
+                    .items_end()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(
+                        form_field(
+                            "Expire files older than (days)",
+                            div()
+                                .id("settings-artwork-cache-age")
+                                .child(self.artwork_cache_age.clone()),
+                        )
+                        .min_w(px(180.))
+                        .flex_1(),
+                    )
+                    .child(
+                        button(
+                            "settings-artwork-cache-calculate",
+                            "Calculate usage",
+                            cx,
+                            |this, _, cx| this.maintain_artwork_cache(false, cx),
+                        )
+                        .when(busy, |control| control.opacity(0.4).cursor_default()),
+                    )
+                    .child(
+                        button(
+                            "settings-artwork-cache-clean",
+                            "Clean expired",
+                            cx,
+                            |this, _, cx| this.maintain_artwork_cache(true, cx),
+                        )
+                        .when(busy, |control| control.opacity(0.4).cursor_default()),
+                    ),
+            )
+            .child(caption(
+                "Uses file modification age. Artwork still held in memory is protected; missing artwork is regenerated when needed."
+            ));
+        if let Some((days, clean)) = self.artwork_cache_busy {
+            content = content.child(status_message(
+                format!(
+                    "{} artwork cache (older than {days} days)…",
+                    if clean { "Cleaning" } else { "Calculating" }
+                ),
+                StatusKind::Info,
+            ));
+        }
+        if let Some((days, clean, report)) = &self.artwork_cache_report {
+            content = content
+                .child(status_message(
+                    format!(
+                        "{} complete · threshold: older than {days} days{}",
+                        if *clean {
+                            "Cleanup"
+                        } else {
+                            "Usage calculation"
+                        },
+                        if *clean {
+                            " · totals measured before cleanup"
+                        } else {
+                            ""
+                        },
+                    ),
+                    if report.failed_files == 0 {
+                        StatusKind::Success
+                    } else {
+                        StatusKind::Error
+                    },
+                ))
+                .child(caption(format!(
+                    "Total: {} files · {} bytes",
+                    report.files, report.bytes
+                )))
+                .child(caption(format!(
+                    "Expired candidates (including protected): {} files · {} bytes",
+                    report.expired_files, report.expired_bytes
+                )))
+                .child(caption(format!(
+                    "Protected skips: {} files · {} bytes",
+                    report.protected_files, report.protected_bytes
+                )))
+                .child(caption(format!(
+                    "Removed: {} files · {} bytes",
+                    report.removed_files, report.removed_bytes
+                )))
+                .child(status_message(
+                    format!("File failures: {}", report.failed_files),
+                    if report.failed_files == 0 {
+                        StatusKind::Info
+                    } else {
+                        StatusKind::Error
+                    },
+                ));
+            if let Some(error) = &report.first_error {
+                content = content.child(
+                    copyable_message("copy-artwork-cache-file-error", error.clone(), cx)
+                        .text_color(rgb(ERROR)),
+                );
+            }
+            if report.failed_files > 0 {
+                content = content.child(caption(
+                    "Check file permissions or directory access, then retry the action.",
+                ));
+            }
+        }
+        if let Some(error) = &self.artwork_cache_error {
+            content = content.child(
+                copyable_message("copy-artwork-cache-error", error.clone(), cx)
+                    .text_color(rgb(ERROR)),
+            );
+        }
+        settings_group("Artwork cache", content)
+    }
+
     fn general_settings(&mut self, cx: &mut Context<Self>) -> Div {
         let chosen_device: SharedString = self
             .draft
@@ -1567,6 +1771,7 @@ impl Settings {
             .child(audio)
             .child(interface)
             .child(logging)
+            .child(self.artwork_cache_settings(cx))
     }
 
     fn visual_settings_tabs(&self, cx: &mut Context<Self>) -> Div {

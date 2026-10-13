@@ -204,6 +204,28 @@ message, or click its copy icon to copy it.
 
 See link:../readme.adoc[README] for application lifecycle and host behavior.
 
+=== Artwork cache maintenance
+
+Settings → General → Artwork cache provides manual maintenance of embedded
+cover files. Enter a positive whole number in `Expire files older than (days)`
+(initially 30), then choose `Calculate usage` or `Clean expired`. Neither opening
+Settings nor starting Rivu scans this directory. These actions run immediately
+in the background, do not require Apply, and are not undone by Discard.
+
+The report shows file counts and encoded bytes for total usage, expired
+candidates, protected files, successful removals, and failures. Cleanup totals
+describe usage before deletion. Age is based on file modification time, not
+recent playback; reusing a file does not update its age. Resident lookup results
+protect their files, including results still used by GUI or MPRIS. Protected
+files are skipped even when expired; the bundled icon and audio files are never
+removed. A removed cover is regenerated on demand.
+
+Inspect reported errors and retry after fixing access or permissions. Maintenance
+has no automatic schedule or total-capacity guarantee, and the age input is not
+saved to `config.toml`. Ownership and retention rationale are documented in
+link:22_cache.adoc#_artwork_lookup_retention[Artwork lookup retention].
+
+
 == Layout
 
 The desktop stores named layouts and the current selection in `layout.json` in

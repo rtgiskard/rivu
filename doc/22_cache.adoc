@@ -134,40 +134,45 @@ publishing MPRIS metadata; a late result can warm the cache, never replace a
 newer identity. MPRIS signals metadata after artwork becomes available, including
 an initial cold load without another playback update.
 
-The manager retains at most 64 track IDs with FIFO eviction; a changed
-fingerprint replaces that ID's entry. Loads for a resident ID and fingerprint
-share one probe outside the cache lock. Cache-only reads neither insert entries
-nor probe on misses. Eviction releases only the manager's lookup reference:
-callers already probing remain valid, but revisiting an evicted key can start
-a new probe. Late completions cannot replace newer entries.
+The lookup key is track ID plus source fingerprint. Resident requests for the
+same identity share one probe outside the lookup lock. Consumers hold the lookup
+result itself, so loading, GUI, and MPRIS references keep that version resident.
+A changed fingerprint creates a new version without discarding an old version
+still in use. The GUI retires replaced results after the next window-frame
+boundary; MPRIS retains its published result until replacement or shutdown, and
+its property getter retains the returned result until the next read or shutdown.
+There is no separate file lease counter or session-wide visited-file registry.
 
-Content-addressed files have a separate fixed budget: at most 128 files and
-64 MiB of encoded image bytes under `artwork/cache`, with an 8 MiB limit per
-new embedded image. The bundled fallback is stored separately and is not part
-of that disposable-content budget. Identical image bytes reuse one file,
-independent of track identity. These limits are not visualization settings or
-user configuration knobs.
+Lookup retention targets 64 entries. FIFO eviction selects only idle results;
+active results can temporarily exceed that target. Idle overflow is trimmed on
+subsequent loads. Cache-only reads neither insert entries nor probe on misses.
+Revisiting an evicted identity requires another source probe. Late completions
+cannot replace a newer identity, even when both resolve to identical image bytes.
 
-Completed lookup records do not pin files. URI/path consumers acquire explicit
-leases: the GUI keeps its current preview lease, retiring replaced leases at a
-subsequent window-frame boundary and releasing remaining leases on window
-destruction; MPRIS metadata keeps its published lease until replacement or
-service shutdown. A property read also keeps its returned lease until the next
-metadata read or service shutdown. In-flight loads retain a lease through
-completion acceptance. No collection can retire a leased file, even if its
-track lookup has been evicted or its fingerprint replaced.
+Encoded images use immutable content-hash filenames under `artwork/cache`.
+Identical bytes reuse an existing file, independent of track identity; files
+provide paths for GPUI and URLs for external MPRIS consumers. Each newly extracted
+image is limited to 8 MiB. The bundled fallback is stored separately. There is
+no automatic file-count or total-byte budget, startup directory inventory, or
+automatic cleanup. No persistent track-to-image index is restored after restart:
+the first source probe discovers the image hash, then reuses its file if present.
 
-Startup inventories the previous session's files and collects excess oldest
-unleased content. Existing blocking artwork loaders collect before admitting
-new content; lease release itself performs no filesystem work. If active leases
-prevent fitting an image, that best-effort load uses the fallback instead of
-exceeding either budget. Released content becomes collectible on the next
-admission; it need not be deleted immediately. Retired lookup results become
-cache misses and are reloaded on the existing background paths. Neither render
-nor an MPRIS property getter inventories, probes, deletes, or waits for disk I/O.
-Filesystem failures remain best-effort: undeletable legacy files can prevent
-recovery to the budget, and no new content is admitted until enough space can
-be reclaimed.
+Only explicit link:01_config.adoc#_artwork_cache_maintenance[Settings maintenance]
+enumerates disposable files. Statistics and cleanup use modification age, not
+last-access age; normal reuse does not touch timestamps. Cleanup skips every
+file referenced by a resident lookup result, including idle cached results and
+active old versions. Multiple track identities may protect the same file.
+Released results merely become evictable; neither release nor eviction performs
+filesystem work. Disk usage can grow until the user requests maintenance, and
+age-based cleanup does not enforce a global capacity limit.
+
+Background acquisition and per-file removal share a synchronization gate through
+lookup registration, preventing cleanup from deleting a file during first use.
+Directory traversal and deletion never hold the lookup mutex over filesystem I/O;
+render and MPRIS property reads remain cache-only and do not wait for that gate.
+Maintenance ignores symlinks and unrelated names, reports inspection/deletion
+failures, and leaves the fallback and audio sources untouched. These file and
+lookup rules do not bound GPUI's independent decoded-image asset cache.
 
 == Font data and glyphs
 

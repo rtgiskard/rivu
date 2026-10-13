@@ -3,7 +3,7 @@
 //! Playback changes come from the core subscription, never a library polling loop.
 
 use crate::{
-    artwork::{ArtworkIdentity, ArtworkLease, ArtworkManager},
+    artwork::{Artwork, ArtworkIdentity, ArtworkManager},
     core::AppHandle,
     model::{Command, PlaybackStatus, RepeatMode},
     projection::MprisSnapshot,
@@ -61,7 +61,7 @@ impl Mpris {
                 Player {
                     handle: handle.clone(),
                     artwork: artwork.clone(),
-                    artwork_lease: parking_lot::Mutex::new(None),
+                    artwork_result: parking_lot::Mutex::new(None),
                 },
             )?
             .build()
@@ -194,7 +194,7 @@ impl Root {
 struct Player {
     handle: AppHandle,
     artwork: Arc<ArtworkManager>,
-    artwork_lease: parking_lot::Mutex<Option<ArtworkLease>>,
+    artwork_result: parking_lot::Mutex<Option<Artwork>>,
 }
 
 impl Player {
@@ -358,7 +358,7 @@ impl Player {
     #[zbus(property)]
     fn metadata(&self) -> Metadata {
         let track = TrackMetadata::from_snapshot(&self.handle.mpris_snapshot(), &self.artwork);
-        *self.artwork_lease.lock() = track.as_ref().and_then(|track| track.art_url.clone());
+        *self.artwork_result.lock() = track.as_ref().and_then(|track| track.art_url.clone());
         metadata_map(track.as_ref())
     }
 
@@ -538,7 +538,7 @@ struct TrackMetadata {
     album: String,
     url: String,
     length: Option<i64>,
-    art_url: Option<ArtworkLease>,
+    art_url: Option<Artwork>,
 }
 
 impl TrackMetadata {
@@ -615,7 +615,7 @@ fn publish_artwork(
         return Ok(());
     }
     let identity = ArtworkIdentity::for_track(track);
-    let lease = artwork.load(track);
+    let result = artwork.load(track);
     let current = handle.mpris_snapshot();
     if current.shutting_down
         || !current
@@ -627,7 +627,7 @@ fn publish_artwork(
     *loaded = Some(identity);
     let mut next = TrackMetadata::from_snapshot(&current, artwork);
     if let Some(next) = &mut next {
-        next.art_url = lease;
+        next.art_url = result;
     }
     if *metadata != next {
         let mut changed: HashMap<&str, Value<'_>> = HashMap::new();

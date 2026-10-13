@@ -1,7 +1,7 @@
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 use crate::{
-    artwork::{ArtworkIdentity, ArtworkLease},
+    artwork::{Artwork as LoadedArtwork, ArtworkIdentity},
     model::Track,
 };
 
@@ -17,12 +17,12 @@ pub(super) struct ArtworkView(Rc<RefCell<ArtworkViewState>>);
 
 #[derive(Default)]
 struct ArtworkViewState {
-    current: Option<ArtworkLease>,
-    retired: Vec<ArtworkLease>,
+    current: Option<LoadedArtwork>,
+    retired: Vec<LoadedArtwork>,
 }
 
 impl ArtworkView {
-    fn replace(&self, next: Option<ArtworkLease>) {
+    fn replace(&self, next: Option<LoadedArtwork>) {
         let mut state = self.0.borrow_mut();
         if state.current == next {
             return;
@@ -33,7 +33,7 @@ impl ArtworkView {
     }
 
     pub(super) fn path(&self) -> Option<Arc<std::path::Path>> {
-        self.0.borrow().current.as_ref().map(ArtworkLease::path)
+        self.0.borrow().current.as_ref().map(LoadedArtwork::path)
     }
 
     pub(super) fn release_retired(&self, window: &mut Window) {
