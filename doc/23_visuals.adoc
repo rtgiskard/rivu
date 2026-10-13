@@ -78,8 +78,9 @@ does not imply zero analysis work.
 Still Mode overrides visualization demand at both GUI and audio-worker
 boundaries. It stops the output tap and parks analysis without reopening
 playback. Entry discards shared analysis results, Spectrogram history, stereo
-fields, fractal scenes, and progressive and shared waveform bins. FFT plans and
-working buffers remain reusable, but their sampling window is reset.
+fields, fractal scenes, progressive and shared waveform bins, and any completed
+GUI full-waveform preview. FFT plans and working buffers remain reusable, but
+their sampling window is reset.
 
 Settings, source identity, playback timeline, and accounting survive. Mode
 transitions invalidate queued samples and publications even across quick on/off
@@ -106,6 +107,9 @@ cancellation flag and a shared suspension generation reject late completions,
 including requests registered before the worker has processed resumption, so
 old scans cannot restore discarded data or report an intentional cancellation
 as a waveform-load failure.
+An installed full preview is checked against the same suspension generation as
+an in-flight result, including while the window is hidden. Returning from Still
+Mode cannot restore that preview or automatically start another full scan.
 
 == Waveform
 
@@ -115,6 +119,12 @@ timelines expand by coarsening existing bins, preserving bounded memory at the
 cost of preview resolution. An undecoded interval is distinct from decoded
 silence. Peaks can survive disjoint visits, but RMS represents a contiguous
 sample interval rather than repeatedly counting seeked or replayed samples.
+
+Each native or FFmpeg decode call uses one work budget across packet skipping,
+seek discards, and codec buffering. Exhausting the budget yields control, not EOF;
+playback and full-waveform callers can continue on a later call. This bounds
+decode-loop work per call, not the duration of a single demux syscall or other
+blocking file/container/codec operation.
 
 A completed explicit full-track scan takes precedence in the GUI, without
 replacing the audio worker's progressive buffer. The GUI retains one bounded

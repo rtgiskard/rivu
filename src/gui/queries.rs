@@ -9,6 +9,7 @@ pub(super) enum ViewRequestKind {
     Summaries,
     Entries,
     Selection,
+    EntrySelection,
     Queue,
 }
 
@@ -43,14 +44,22 @@ impl ViewRequests {
         self.generations.get(&kind) == Some(&generation)
     }
 
+    pub(super) fn pending(&self, kind: ViewRequestKind) -> bool {
+        self.generations.contains_key(&kind)
+    }
+
     pub(super) fn cancel(&mut self, kind: ViewRequestKind) {
         self.generations.remove(&kind);
     }
 
     fn invalidate_pages(&mut self) {
         // Existence lookups are not pages; changing page size cannot supersede them.
-        self.generations
-            .retain(|kind, _| *kind == ViewRequestKind::Selection);
+        self.generations.retain(|kind, _| {
+            matches!(
+                kind,
+                ViewRequestKind::Selection | ViewRequestKind::EntrySelection
+            )
+        });
     }
 }
 
@@ -69,6 +78,7 @@ impl GuiApp {
                     .spawn(async move { handle.query(Query::LibraryRootCounts { roots: batch }) })
                     .await;
                 let _ = this.update(cx, |this, cx| {
+                    this.refresh(cx);
                     if !this.browser.library.counts_current(
                         generation,
                         &this.state.system.config.library_roots,
@@ -130,6 +140,7 @@ impl GuiApp {
             let revisions = response.revisions;
             let result = response.result;
             let _ = this.update(cx, |this, cx| {
+                this.refresh(cx);
                 if !this.browser.requests.is_current(kind, generation) {
                     return;
                 }
@@ -167,6 +178,9 @@ impl GuiApp {
                             }
                         }
                         ViewRequestKind::Selection => this.request_playlist_selection(cx),
+                        ViewRequestKind::EntrySelection => {
+                            unreachable!("entry selection uses its own lookup")
+                        }
                         ViewRequestKind::Queue => unreachable!("queue pages use their own worker"),
                     }
                     return;
@@ -278,6 +292,7 @@ impl GuiApp {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                this.refresh(cx);
                 if !this.browser.library.directory_request_pending(
                     &branch,
                     generation,
@@ -366,6 +381,7 @@ impl GuiApp {
     ) {
         self.browser.playlists.prepare_entries(playlist_id);
         self.load_playlist_entries(playlist_id, offset, cx);
+        self.request_entry_selection(cx);
     }
 
     fn load_playlist_entries(&mut self, playlist_id: i64, offset: usize, cx: &mut Context<Self>) {
@@ -377,6 +393,63 @@ impl GuiApp {
         let query = self.browser.playlists.prepare_page(true, offset, page_size);
         let generation = self.browser.requests.next_generation();
         self.request_view(query, generation, cx);
+    }
+
+    pub(super) fn request_entry_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(playlist_id) = self.browser.playlists.entries().playlist_id else {
+            return;
+        };
+        let Some(entry_id) = self.browser.playlists.selected_entry() else {
+            return;
+        };
+        let generation = self.browser.requests.next_generation();
+        let kind = ViewRequestKind::EntrySelection;
+        self.browser.requests.begin(kind, generation);
+        let revision = self.state.library.playlist_revision;
+        let handle = self.handle.clone();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(80))
+                .await;
+            if !this
+                .update(cx, |this, _| {
+                    this.browser.requests.is_current(kind, generation)
+                        && this.browser.playlists.entries().playlist_id == Some(playlist_id)
+                        && this.browser.playlists.selected_entry() == Some(entry_id)
+                })
+                .unwrap_or(false)
+            {
+                return;
+            }
+            let response = cx
+                .background_executor()
+                .spawn(async move { handle.query(Query::PlaylistEntry { entry_id }) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                // Hidden windows still synchronize business state before accepting results.
+                this.refresh(cx);
+                if !this.browser.requests.is_current(kind, generation)
+                    || this.browser.playlists.entries().playlist_id != Some(playlist_id)
+                    || this.browser.playlists.selected_entry() != Some(entry_id)
+                {
+                    return;
+                }
+                if response.revisions.playlist != revision {
+                    this.request_entry_selection(cx);
+                    return;
+                }
+                this.browser.requests.cancel(kind);
+                match response.result {
+                    Ok(ViewResponse::PlaylistEntry(entry)) => {
+                        this.browser.playlists.accept_entry_lookup(entry_id, entry);
+                    }
+                    Err(error) => this.error = Some(error.to_string()),
+                    _ => this.error = Some("Unexpected playlist selection response".into()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub(super) fn ensure_playlist_range(

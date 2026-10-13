@@ -72,6 +72,7 @@ struct ManualRequest {
 
 struct FullPreview {
     source: Rc<Source>,
+    suspension_generation: u64,
     frame: WaveformFrame,
 }
 
@@ -264,6 +265,7 @@ impl WaveformPlot {
     }
 
     fn clear_cache(&mut self) {
+        self.paint_tiles.clear();
         for columns in self.columns.values_mut() {
             columns.values.clear();
             columns.layer_key = None;
@@ -406,8 +408,8 @@ impl WaveformPlot {
                 } else {
                     center + (center * level).max(1.0)
                 };
-                let y = y.round() as u32;
-                if y < height {
+                if height != 0 {
+                    let y = (y.round() as u32).min(height - 1);
                     let [red, green, blue] = palette.lookup_mapped_rgb(waveform_color_level(level));
                     for x in x0..x1 {
                         pixels.put_pixel(x - x_start, y, image::Rgba([blue, green, red, 255]));
@@ -714,15 +716,34 @@ impl Waveform {
     /// The caller chooses the playing track, or the selected track before play.
     /// Metadata, display settings and visibility do not change source identity.
     pub(in crate::gui) fn sync(&mut self, track: Option<&Track>, cx: &mut Context<Self>) {
-        if !self.enabled {
-            return;
-        }
-        let source_changed = self.sync_source(track);
-        let revision = self.shared.read().revision;
-        if source_changed || self.revision != Some(revision) {
-            self.revision = Some(revision);
+        if self.sync_state(track) {
             cx.notify();
         }
+    }
+
+    fn sync_state(&mut self, track: Option<&Track>) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        let source_changed = self.sync_source(track);
+        let (revision, suspension_generation) = {
+            let shared = self.shared.read();
+            (shared.revision, shared.suspension_generation())
+        };
+        let suspended = self
+            .manual
+            .as_ref()
+            .is_some_and(|request| request.suspension_generation != suspension_generation)
+            || self
+                .full
+                .as_ref()
+                .is_some_and(|full| full.suspension_generation != suspension_generation);
+        if suspended {
+            self.cancel_full();
+        }
+        let changed = source_changed || suspended || self.revision != Some(revision);
+        self.revision = Some(revision);
+        changed
     }
 
     fn sync_source(&mut self, track: Option<&Track>) -> bool {
@@ -886,6 +907,7 @@ impl Waveform {
             result.complete = true;
             completed = Some(Rc::new(FullPreview {
                 source: Rc::clone(&request.source),
+                suspension_generation: request.suspension_generation,
                 frame: result,
             }));
             Ok(())
@@ -902,7 +924,10 @@ impl Waveform {
     }
 
     fn display_frame<'a>(&'a self, progressive: &'a WaveformFrame) -> &'a WaveformFrame {
-        self.full.as_ref().map_or(progressive, |full| &full.frame)
+        self.full
+            .as_ref()
+            .filter(|full| full.suspension_generation == progressive.suspension_generation())
+            .map_or(progressive, |full| &full.frame)
     }
 
     fn manual_message(&self) -> Option<SharedString> {
@@ -1009,10 +1034,19 @@ impl Waveform {
             return panel.into_any_element();
         };
         let status = self.manual_message();
-        let (message, label_duration) = {
+        let (message, label_duration, full) = {
             let shared = self.shared.read();
             let frame = self.display_frame(&shared);
-            (preview_message(source, frame), timeline(frame, duration))
+            let full = self
+                .full
+                .as_ref()
+                .filter(|full| full.suspension_generation == shared.suspension_generation())
+                .map(Rc::clone);
+            (
+                preview_message(source, frame),
+                timeline(frame, duration),
+                full,
+            )
         };
         if let Some(message) = message {
             if let Some(generation) = self.remove_interaction_panel(panel_id) {
@@ -1024,7 +1058,6 @@ impl Waveform {
                 ))
                 .into_any_element();
         }
-        let full = self.full.as_ref().map(Rc::clone);
         let source = full.as_ref().map_or_else(
             || Rc::clone(self.source.as_ref().expect("preview source is present")),
             |full| Rc::clone(&full.source),
@@ -1096,14 +1129,16 @@ impl Waveform {
                                 );
                                 let mut waveform = waveform.borrow_mut();
                                 let (_revision, progress) = {
-                                    let shared_frame;
-                                    let frame = if let Some(full) = &full {
-                                        &full.frame
-                                    } else {
-                                        shared_frame = shared.read();
-                                        &*shared_frame
-                                    };
-                                    // Only progressive bins can change between layout and paint.
+                                    let shared_frame = shared.read();
+                                    let frame = full
+                                        .as_ref()
+                                        .filter(|full| {
+                                            full.suspension_generation
+                                                == shared_frame.suspension_generation()
+                                        })
+                                        .map_or(&*shared_frame, |full| &full.frame);
+                                    // The shared generation also guards a full preview captured
+                                    // before a Still Mode transition between layout and paint.
                                     if !source.matches_target(frame) {
                                         return;
                                     }
@@ -1345,6 +1380,35 @@ mod tests {
             }
         }
         assert_eq!(pixel(1, 49)[3], 0, "Peak-only data must not invent RMS");
+    }
+
+    #[test]
+    fn full_and_near_full_stereo_peaks_reach_valid_edge_pixels() {
+        let palette = super::super::visuals::active_palette_lut(
+            crate::config::VisualizationPalette::Deadbeef,
+        );
+        let levels = [1.0, 0.999];
+        let columns = levels.map(|level| WaveformColumn {
+            left_rms: None,
+            left_peak: Some(level),
+            right_rms: None,
+            right_peak: Some(level),
+        });
+        for height in [1, 2, 99, 100] {
+            let image = WaveformPlot::build_tile(&columns, 0, 2, 2, height, &palette);
+            let bytes = image.as_bytes(0).unwrap();
+            for (x, level) in levels.into_iter().enumerate() {
+                let [red, green, blue] = palette.lookup_mapped_rgb(waveform_color_level(level));
+                for y in [0, height as usize - 1] {
+                    let offset = (y * 2 + x) * 4;
+                    assert_eq!(&bytes[offset..offset + 4], &[blue, green, red, 255]);
+                }
+                if height > 2 {
+                    let center = (height as usize / 2 * 2 + x) * 4;
+                    assert_eq!(bytes[center + 3], 0, "Peak-only data must not invent RMS");
+                }
+            }
+        }
     }
 
     #[test]
@@ -1863,6 +1927,77 @@ mod tests {
             assert_eq!(waveform.shared.read().peaks.capacity(), 0);
             assert_eq!(waveform.shared.read().revision, revision);
         }
+    }
+
+    #[test]
+    fn backend_still_on_off_retires_completed_full_preview_without_rescanning() {
+        let mut waveform = preview(frame(vec![Some(0.25), None]));
+        let track = track("track.flac", DecoderHint::Auto);
+        assert!(waveform.sync_state(Some(&track)));
+        let (request, _) = waveform.start_full(DecoderHint::Auto);
+        assert!(waveform.finish_full(request, Ok(frame(vec![Some(0.5), Some(0.75)]))));
+        let completed = Rc::downgrade(waveform.full.as_ref().unwrap());
+        let palette = super::super::visuals::active_palette_lut(
+            crate::config::VisualizationPalette::Deadbeef,
+        );
+        let cached = {
+            let shared = waveform.shared.read();
+            let full = waveform.display_frame(&shared);
+            assert!(full.complete);
+            assert_eq!(full.peaks, vec![Some(0.5), Some(0.75)]);
+            let mut plot = waveform.plot.borrow_mut();
+            plot.columns(1, 100, full);
+            plot.update_tiles(
+                1,
+                LayerKey {
+                    source: Rc::clone(&waveform.full.as_ref().unwrap().source),
+                    width: 100,
+                    height: 40,
+                    rms_gain: 1.0_f32.to_bits(),
+                    peak_gain: 1.0_f32.to_bits(),
+                    peak_gamma: 1.0_f32.to_bits(),
+                    palette: crate::config::VisualizationPalette::Deadbeef,
+                },
+                true,
+                &palette,
+            );
+            Arc::downgrade(&plot.columns[&1].tiles[0].image)
+        };
+        {
+            let mut shared = waveform.shared.write();
+            shared.set_still_mode(true);
+            shared.set_still_mode(false);
+        }
+        assert!(
+            waveform.enabled,
+            "GUI did not observe the intermediate Still Mode"
+        );
+        {
+            let shared = waveform.shared.read();
+            assert!(std::ptr::eq(waveform.display_frame(&shared), &*shared));
+        }
+        assert!(waveform.sync_state(Some(&track)));
+        assert!(completed.upgrade().is_none());
+        assert!(waveform.full.is_none());
+        assert!(waveform.manual.is_none());
+        assert!(waveform.manual_error.is_none());
+        {
+            let mut plot = waveform.plot.borrow_mut();
+            assert!(plot.columns[&1].values.is_empty());
+            assert!(plot.columns[&1].tiles.is_empty());
+            assert!(plot.paint_tiles.is_empty());
+            assert!(
+                cached.upgrade().is_some(),
+                "images must survive until the frame boundary"
+            );
+            let mut released = 0;
+            plot.release_images(|_| released += 1);
+            assert_eq!(released, 4);
+            assert!(cached.upgrade().is_none());
+        }
+        assert!(!waveform.sync_state(Some(&track)));
+        assert!(waveform.manual.is_none(), "ordinary sync must not rescan");
+        assert!(waveform.full.is_none());
     }
 
     #[test]

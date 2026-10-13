@@ -42,6 +42,10 @@ its name and selected entry. See link:02_library.adoc#_paged_views[Library] for
 scrolling and query failure behavior.
 Deleting the selected playlist from another client clears its playlist and entry
 selection on refresh. Empty playlists and unloaded pages do not imply deletion.
+When refreshed pages invalidate a selected entry's position, the GUI resolves
+its current location by entry ID rather than reusing the old row index. Entry
+mutations remain unavailable while that lookup is pending or failed; a failed
+lookup requires explicit Retry. Confirmed entry removal clears its selection.
 
 == Import and export
 
@@ -50,9 +54,11 @@ media and CUE sheets must lie within configured logical roots; see
 link:02_library.adoc#_roots_and_scanning[Library scan boundaries and errors].
 Imports scan referenced sources before creating the playlist and may create
 partial playlists: `--wait` reports scan errors even when readable tracks were
-saved. Import fails if no entries resolve to accessible library tracks. Without
-`--name`, the playlist name comes from the imported file's name without its
-extension. Another import or scan cannot start while scanning is active.
+saved. Only identities successfully read or validly reused by that import's scan
+can enter its playlist; an old library row does not make a failed source eligible.
+Import fails if no entries resolve successfully. Without `--name`, the playlist
+name comes from the imported file's name without its extension. Another import
+or scan cannot start while scanning is active.
 
 Listings and exports include every entry, not only the visible rows. For listing
 changes and retry behavior, see link:02_library.adoc#_paged_views[Paged views].
@@ -70,7 +76,9 @@ Import accepts UTF-8, including BOM, and resolves entries relative to the playli
 file. Ordinary audio and complete CUE sheets may be mixed. Export writes standard
 UTF-8 M3U with paths relative to the destination directory; that directory must
 already exist. Export errors leave an existing destination untouched. Paths that
-cannot be represented as UTF-8 are rejected.
+cannot be represented as UTF-8 or contain CR/LF line breaks are rejected before
+creating the destination file. CR/LF in title or artist metadata is replaced with
+spaces so it cannot introduce additional M3U lines.
 
 === CUE import
 

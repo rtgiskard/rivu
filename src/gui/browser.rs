@@ -17,7 +17,8 @@ use super::{
     queries::ViewRequests,
 };
 use crate::model::{
-    DirectoryRow, HistoryEntry, LibrarySort, Page, PlaylistEntryRow, PlaylistSummary, Query,
+    Command, DirectoryRow, HistoryEntry, LibrarySort, Page, PlaylistEntryLocation,
+    PlaylistEntryRow, PlaylistSummary, Query,
 };
 use gpui::ScrollStrategy;
 use selection::LibrarySelection;
@@ -70,6 +71,8 @@ impl BrowserState {
     pub(super) fn remove_playlist_selection(&mut self) {
         self.requests
             .cancel(super::queries::ViewRequestKind::Entries);
+        self.requests
+            .cancel(super::queries::ViewRequestKind::EntrySelection);
         self.playlists.remove_selected();
     }
 
@@ -501,12 +504,19 @@ pub(super) struct PlaylistEntriesBuffer {
     pub(super) scroll: gpui::UniformListScrollHandle,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum PlaylistEntryAction {
+    Play,
+    Move(bool),
+}
+
 #[derive(Default)]
 pub(super) struct PlaylistBrowser {
     summaries: PlaylistSummaryBuffer,
     entries: PlaylistEntriesBuffer,
     selected: Option<i64>,
     selected_entry: Option<i64>,
+    entry_details: Option<PlaylistEntryLocation>,
     selected_name: String,
 }
 
@@ -592,6 +602,7 @@ impl PlaylistBrowser {
         let changed = self.selected != Some(id);
         if changed {
             self.selected_entry = None;
+            self.entry_details = None;
         }
         self.selected = Some(id);
         self.selected_name = name;
@@ -602,6 +613,7 @@ impl PlaylistBrowser {
     pub(super) fn clear_selection(&mut self) {
         self.selected = None;
         self.selected_entry = None;
+        self.entry_details = None;
         self.selected_name.clear();
         self.summaries.rows.pin(None);
     }
@@ -613,11 +625,28 @@ impl PlaylistBrowser {
 
     pub(super) fn take_entry(&mut self) -> Option<i64> {
         self.entries.rows.pin(None);
+        self.entry_details = None;
         self.selected_entry.take()
     }
 
     pub(super) fn select_entry(&mut self, id: i64, index: usize) {
         self.selected_entry = Some(id);
+        self.entry_details = self
+            .entries
+            .rows
+            .get(index)
+            .filter(|row| row.id == id)
+            .and_then(|row| {
+                self.entries
+                    .playlist_id
+                    .map(|playlist_id| PlaylistEntryLocation {
+                        id,
+                        playlist_id,
+                        position: index,
+                        track_id: row.track_id,
+                        total: self.entries.total,
+                    })
+            });
         self.entries.rows.pin(Some(index));
     }
 
@@ -631,6 +660,7 @@ impl PlaylistBrowser {
         } else {
             self.entries.rows.invalidate();
         }
+        self.entry_details = None;
         self.entries.playlist_id = Some(id);
     }
 
@@ -638,6 +668,7 @@ impl PlaylistBrowser {
         // Eviction is not deletion; identities survive unloaded pages.
         if self.selected.is_none() || self.entries.playlist_id != self.selected {
             self.selected_entry = None;
+            self.entry_details = None;
         }
     }
 
@@ -671,6 +702,51 @@ impl PlaylistBrowser {
         {
             self.entries.rows.pin(Some(index));
         }
+    }
+
+    /// Compact identity lookup survives page eviction without retaining a whole playlist.
+    pub(super) fn accept_entry_lookup(&mut self, id: i64, details: Option<PlaylistEntryLocation>) {
+        if self.selected_entry != Some(id) {
+            return;
+        }
+        let details = details
+            .filter(|entry| entry.id == id && Some(entry.playlist_id) == self.entries.playlist_id);
+        self.entries
+            .rows
+            .pin(details.as_ref().map(|entry| entry.position));
+        if let Some(details) = details.as_ref() {
+            self.entries.total = details.total;
+        } else {
+            self.take_entry();
+        }
+        self.entry_details = details;
+    }
+
+    pub(super) fn entry_action(&self, action: PlaylistEntryAction) -> Option<Command> {
+        let entry_id = self.selected_entry?;
+        let details = self.entry_details.as_ref()?;
+        match action {
+            PlaylistEntryAction::Play => Some(Command::Play {
+                track_id: details.track_id,
+            }),
+            PlaylistEntryAction::Move(down) => {
+                let target = if down {
+                    details.position.saturating_add(1)
+                } else {
+                    details.position.saturating_sub(1)
+                };
+                (target != details.position && target < details.total).then_some(
+                    Command::MovePlaylistEntry {
+                        entry_id,
+                        index: target,
+                    },
+                )
+            }
+        }
+    }
+
+    pub(super) fn entry_ready(&self) -> bool {
+        self.entry_details.is_some()
     }
 }
 
@@ -1170,5 +1246,178 @@ mod tests {
         assert_eq!(playlists.selected(), None);
         assert_eq!(playlists.selected_entry(), None);
         assert_eq!(playlists.entries().playlist_id, None);
+    }
+    #[test]
+    fn refreshed_offviewport_entry_plays_and_moves_by_identity_without_cached_pages() {
+        let mut playlists = PlaylistBrowser::default();
+        playlists.select(1, "one".into(), 0);
+        playlists.prepare_entries(1);
+        playlists.select_entry(41, 3);
+        playlists.prepare_page(true, 8_000, 20);
+        playlists.accept_entries(Page {
+            total: 10_000,
+            rows: (8_000..8_020)
+                .map(|index| PlaylistEntryRow {
+                    id: index as i64,
+                    track_id: index as i64,
+                    title: format!("entry {index}"),
+                    artist: String::new(),
+                    album: String::new(),
+                    missing: false,
+                })
+                .collect(),
+        });
+        playlists.demand_page(true, 8_000..8_010, 20);
+        playlists.prepare_entries(1);
+        assert_eq!(playlists.selected_entry(), Some(41));
+        assert!(!playlists.entry_ready());
+        assert!(playlists.entry_action(PlaylistEntryAction::Play).is_none());
+        // The one identity result restores actions without restoring offscreen payload.
+        playlists.accept_entry_lookup(
+            41,
+            Some(PlaylistEntryLocation {
+                id: 41,
+                playlist_id: 1,
+                position: 7_000,
+                track_id: 99,
+                total: 10_000,
+            }),
+        );
+        assert!(playlists.entry_ready());
+        assert!(matches!(
+            playlists.entry_action(PlaylistEntryAction::Play),
+            Some(Command::Play { track_id: 99 })
+        ));
+        assert_eq!(playlists.entries.rows.visible().start, 8_000);
+        assert!(playlists.entries.rows.iter().next().is_none());
+        assert!(matches!(
+            playlists.entry_action(PlaylistEntryAction::Move(true)),
+            Some(Command::MovePlaylistEntry {
+                entry_id: 41,
+                index: 7_001
+            })
+        ));
+        playlists.prepare_entries(1);
+        assert!(
+            playlists
+                .entry_action(PlaylistEntryAction::Move(false))
+                .is_none()
+        );
+        playlists.accept_entry_lookup(
+            41,
+            Some(PlaylistEntryLocation {
+                id: 41,
+                playlist_id: 1,
+                position: 6_000,
+                track_id: 99,
+                total: 10_000,
+            }),
+        );
+        assert!(matches!(
+            playlists.entry_action(PlaylistEntryAction::Move(false)),
+            Some(Command::MovePlaylistEntry {
+                entry_id: 41,
+                index: 5_999
+            })
+        ));
+        assert_eq!(playlists.take_entry(), Some(41));
+        assert!(!playlists.entry_ready());
+    }
+
+    #[test]
+    fn missing_entry_clears_selection_not_an_unloaded_page() {
+        let mut playlists = PlaylistBrowser::default();
+        playlists.select(1, "one".into(), 0);
+        playlists.prepare_entries(1);
+        playlists.select_entry(41, 3);
+        assert!(playlists.entry_action(PlaylistEntryAction::Play).is_none());
+        playlists.accept_entry_lookup(40, None);
+        assert_eq!(playlists.selected_entry(), Some(41));
+        playlists.accept_entry_lookup(41, None);
+        assert_eq!(playlists.selected_entry(), None);
+        assert_eq!(playlists.take_entry(), None);
+        assert!(!playlists.entry_ready());
+        assert_eq!(playlists.selected(), Some(1));
+    }
+
+    #[test]
+    fn entry_move_boundaries_and_changed_membership_reject_stale_actions() {
+        let mut playlists = PlaylistBrowser::default();
+        playlists.select(1, "one".into(), 0);
+        playlists.prepare_entries(1);
+        playlists.select_entry(41, 0);
+        playlists.accept_entry_lookup(
+            41,
+            Some(PlaylistEntryLocation {
+                id: 41,
+                playlist_id: 1,
+                position: 0,
+                track_id: 99,
+                total: 1,
+            }),
+        );
+        assert!(
+            playlists
+                .entry_action(PlaylistEntryAction::Move(false))
+                .is_none()
+        );
+        assert!(
+            playlists
+                .entry_action(PlaylistEntryAction::Move(true))
+                .is_none()
+        );
+        playlists.prepare_entries(1);
+        assert!(!playlists.entry_ready());
+        assert!(playlists.entry_action(PlaylistEntryAction::Play).is_none());
+        playlists.accept_entry_lookup(
+            41,
+            Some(PlaylistEntryLocation {
+                id: 41,
+                playlist_id: 2,
+                position: 0,
+                track_id: 99,
+                total: 1,
+            }),
+        );
+        assert_eq!(playlists.selected_entry(), None);
+        assert!(playlists.entry_action(PlaylistEntryAction::Play).is_none());
+    }
+
+    #[test]
+    fn snapshot_revision_reconciliation_finishes_root_and_directory_requests_without_rendering() {
+        let mut library = LibraryBrowser::default();
+        let roots = vec![std::path::PathBuf::from("/music")];
+        let (old, _) = library.begin_root_counts(&roots, 7);
+        let branch = TreeBranch::default();
+        library.prepare_directory(branch.clone(), 0, 20, 1);
+        let (current, batches) = library.begin_root_counts(&roots, 8);
+        library.refresh_tree(20);
+        library.prepare_directory(branch.clone(), 0, 20, 2);
+        assert_eq!(batches, [0]);
+        assert!(library.begin_root_counts(&roots, 8).1.is_empty());
+        assert!(!library.counts_current(old, &roots, 8));
+        assert!(!library.directory_request_pending(&branch, 1, None, None, false, None));
+        library.fail_root_counts(old, 0);
+        library.fail_directory(&branch, 1);
+        library.accept_root_counts(
+            current,
+            0,
+            vec![crate::model::LibraryRootCount {
+                path: roots[0].clone(),
+                total: 0,
+            }],
+        );
+        library.accept_directory(
+            &branch,
+            2,
+            Page {
+                total: 0,
+                rows: Vec::new(),
+            },
+        );
+        assert_eq!(library.root_count(&roots[0]), Some(0));
+        assert!(library.begin_root_counts(&roots, 8).1.is_empty());
+        assert!(library.demand_directories(0..1).is_empty());
+        assert!(!library.directory_request_pending(&branch, 2, None, None, false, None));
     }
 }

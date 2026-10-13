@@ -160,6 +160,16 @@ fn chooser_path(files: &SelectedFiles) -> Option<PathBuf> {
         .and_then(|uri| uri.to_file_path().ok())
 }
 
+fn chooser_result<T>(
+    result: std::result::Result<T, ashpd::Error>,
+) -> std::result::Result<Option<T>, ashpd::Error> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled)) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 fn copyable_message<T: 'static>(
     id: impl Into<ElementId>,
     message: String,
@@ -261,6 +271,20 @@ enum HistorySort {
 enum ListFocus {
     Library,
     Queue,
+}
+
+fn visible_list_focus(
+    preferred: Option<ListFocus>,
+    visible: impl Iterator<Item = ListFocus>,
+) -> Option<ListFocus> {
+    let mut first = None;
+    for focus in visible {
+        first.get_or_insert(focus);
+        if Some(focus) == preferred {
+            return Some(focus);
+        }
+    }
+    first
 }
 
 #[derive(Clone, Copy)]
@@ -446,17 +470,18 @@ impl GuiApp {
     }
 
     fn active_list_focus(&self) -> Option<ListFocus> {
-        self.browser.focus().or_else(|| {
+        visible_list_focus(
+            self.browser.focus(),
             self.layouts
                 .current()
                 .active_panels()
                 .into_iter()
-                .find_map(|panel| match panel.kind.as_str() {
+                .filter_map(|panel| match panel.kind.as_str() {
                     "library" => Some(ListFocus::Library),
                     "queue" => Some(ListFocus::Queue),
                     _ => None,
-                })
-        })
+                }),
+        )
     }
 
     fn directory_row_selected(&self, row: &crate::model::DirectoryRow) -> bool {
@@ -709,7 +734,10 @@ impl GuiApp {
         cx.spawn_in(window, async move |this, cx| {
             while wake_receiver.next().await.is_some() {
                 if this
-                    .update_in(cx, |this, window, cx| this.request_frame(window, cx))
+                    .update_in(cx, |this, window, cx| {
+                        this.refresh(cx);
+                        this.request_frame(window, cx);
+                    })
                     .is_err()
                 {
                     break;
@@ -835,12 +863,13 @@ impl GuiApp {
                 .await
                 .and_then(|request| request.response());
             let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok(files) => {
+                match chooser_result(result) {
+                    Ok(Some(files)) => {
                         if let Some(path) = chooser_path(&files) {
                             this.send(Command::ImportPlaylist { path, name: None }, cx);
                         }
                     }
+                    Ok(None) => return,
                     Err(error) => this.error = Some(format!("Opening playlist: {error}")),
                 }
                 cx.notify();
@@ -859,12 +888,13 @@ impl GuiApp {
                 .await
                 .and_then(|request| request.response());
             let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok(files) => {
+                match chooser_result(result) {
+                    Ok(Some(files)) => {
                         if let Some(path) = chooser_path(&files) {
                             this.send(Command::ExportPlaylist { playlist_id, path }, cx);
                         }
                     }
+                    Ok(None) => return,
                     Err(error) => {
                         this.error = Some(format!("Opening playlist destination: {error}"))
                     }
@@ -885,8 +915,8 @@ impl GuiApp {
                 .await
                 .and_then(|request| request.response());
             let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok(files) => {
+                match chooser_result(result) {
+                    Ok(Some(files)) => {
                         if let Some(path) = chooser_path(&files)
                             && let Err(error) = this.handle.update_gui_config(
                                 crate::core::GuiConfigChange::AddLibraryRoot(path),
@@ -895,6 +925,7 @@ impl GuiApp {
                             this.error = Some(format!("{error:#}"));
                         }
                     }
+                    Ok(None) => return,
                     Err(error) => this.error = Some(format!("Opening library folder: {error}")),
                 }
                 cx.notify();
@@ -1949,5 +1980,28 @@ impl GuiApp {
                 }),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::{ListFocus, visible_list_focus};
+
+    #[test]
+    fn keyboard_focus_uses_only_visible_lists_after_tab_switch() {
+        assert!(
+            visible_list_focus(Some(ListFocus::Queue), [ListFocus::Library].into_iter())
+                == Some(ListFocus::Library)
+        );
+        assert!(visible_list_focus(Some(ListFocus::Queue), [].into_iter()).is_none());
+        assert!(
+            visible_list_focus(
+                Some(ListFocus::Queue),
+                [ListFocus::Library, ListFocus::Queue].into_iter()
+            ) == Some(ListFocus::Queue)
+        );
+        assert!(
+            visible_list_focus(None, [ListFocus::Library].into_iter()) == Some(ListFocus::Library)
+        );
     }
 }

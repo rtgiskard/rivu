@@ -1,9 +1,9 @@
 use super::{
     ACCENT, BORDER, Dragging, Field, GuiApp, HIGHLIGHT, HistorySort, ListFocus, MUTED, Measured,
-    StatusKind, TEXT, UI_INSET, ViewRequestKind, active_control, artwork_preview, button, column,
-    form_field, format_time, icon_button, library::LibraryDrag, list_viewport, metadata_item,
-    paged, panel_header, panel_surface, panel_toolbar, row, row_text, section_group,
-    sortable_header, status_message, two_column,
+    StatusKind, TEXT, UI_INSET, ViewRequestKind, active_control, artwork_preview,
+    browser::PlaylistEntryAction, button, column, form_field, format_time, icon_button,
+    library::LibraryDrag, list_viewport, metadata_item, paged, panel_header, panel_surface,
+    panel_toolbar, row, row_text, section_group, sortable_header, status_message, two_column,
 };
 pub(super) use super::{TRACK_HEIGHT, caption, list_row};
 use crate::{
@@ -870,31 +870,26 @@ impl GuiApp {
     }
 
     fn move_selected_playlist_entry(&mut self, down: bool, cx: &mut Context<Self>) {
-        let Some(entry_id) = self.browser.playlists.selected_entry() else {
-            return;
-        };
-        let Some(index) = self
-            .browser
-            .playlists
-            .entries()
-            .rows
-            .position(|entry| entry.id == entry_id)
-        else {
-            return;
-        };
-        let target = if down {
-            index.saturating_add(1)
-        } else {
-            index.saturating_sub(1)
-        };
-        if target != index && target < self.browser.playlists.entries().total {
-            self.send(
-                Command::MovePlaylistEntry {
-                    entry_id,
-                    index: target,
-                },
-                cx,
-            );
+        self.selected_playlist_entry_action(PlaylistEntryAction::Move(down), cx);
+    }
+
+    fn selected_playlist_entry_action(
+        &mut self,
+        action: PlaylistEntryAction,
+        cx: &mut Context<Self>,
+    ) {
+        self.refresh(cx);
+        if let Some(command) = self.browser.playlists.entry_action(action) {
+            self.send(command, cx);
+        } else if !self.browser.playlists.entry_ready()
+            && !self
+                .browser
+                .requests
+                .pending(ViewRequestKind::EntrySelection)
+        {
+            // The refreshed identity is pending; no mutation has been accepted yet.
+            self.request_entry_selection(cx);
+            cx.notify();
         }
     }
 
@@ -1093,27 +1088,53 @@ impl GuiApp {
                         ))
                         .child(caption("Playlist").text_xs().text_color(rgb(MUTED)))
                         .child(div().w(px(1.)).h(px(20.)).bg(rgb(BORDER)))
-                        .when(self.browser.playlists.selected_entry().is_some(), |bar| {
+                        .when(
+                            self.browser.playlists.selected_entry().is_some()
+                                && !self.browser.playlists.entry_ready(),
+                            |bar| {
+                                let pending = self
+                                    .browser
+                                    .requests
+                                    .pending(ViewRequestKind::EntrySelection);
+                                bar.child(status_message(
+                                    if pending {
+                                        "Refreshing selection…"
+                                    } else {
+                                        "Selection unavailable"
+                                    },
+                                    StatusKind::Info,
+                                ))
+                                .when(!pending, |bar| {
+                                    bar.child(button(
+                                        "retry-playlist-entry",
+                                        "Retry",
+                                        cx,
+                                        |this, _, cx| {
+                                            this.refresh(cx);
+                                            if !this
+                                                .browser
+                                                .requests
+                                                .pending(ViewRequestKind::EntrySelection)
+                                            {
+                                                this.request_entry_selection(cx);
+                                            }
+                                            cx.notify();
+                                        },
+                                    ))
+                                })
+                            },
+                        )
+                        .when(self.browser.playlists.entry_ready(), |bar| {
                             bar.child(icon_button(
                                 ("entry-play", panel_id),
                                 "󰐊",
                                 "Play selected track",
                                 cx,
                                 move |this, _, cx| {
-                                    let track_id = this
-                                        .browser
-                                        .playlists
-                                        .entries()
-                                        .rows
-                                        .iter()
-                                        .find(|entry| {
-                                            Some(entry.id)
-                                                == this.browser.playlists.selected_entry()
-                                        })
-                                        .map(|entry| entry.track_id);
-                                    if let Some(track_id) = track_id {
-                                        this.send(Command::Play { track_id }, cx);
-                                    }
+                                    this.selected_playlist_entry_action(
+                                        PlaylistEntryAction::Play,
+                                        cx,
+                                    );
                                 },
                             ))
                             .child(icon_button(
@@ -1122,6 +1143,10 @@ impl GuiApp {
                                 "Remove selected entry",
                                 cx,
                                 move |this, _, cx| {
+                                    this.refresh(cx);
+                                    if !this.browser.playlists.entry_ready() {
+                                        return;
+                                    }
                                     if let Some(entry_id) = this.browser.playlists.take_entry() {
                                         this.send(Command::RemovePlaylistEntry { entry_id }, cx);
                                     }
@@ -1181,6 +1206,9 @@ impl GuiApp {
                                     .on_click(cx.listener(
                                         move |this, event: &gpui::ClickEvent, window, cx| {
                                             this.focus_layout(window, cx);
+                                            this.browser
+                                                .requests
+                                                .cancel(ViewRequestKind::EntrySelection);
                                             this.browser.playlists.select_entry(id, index);
                                             this.request_track(track_id, cx);
                                             if event.click_count() == 2 {
