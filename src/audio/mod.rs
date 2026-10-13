@@ -80,7 +80,8 @@ mod ffmpeg {
             &mut self,
             _: &mut Vec<f32>,
             _: Option<&AtomicBool>,
-        ) -> Result<Option<f64>> {
+            _: &mut usize,
+        ) -> Result<super::source::DecodeStep<f64>> {
             bail!("FFmpeg extension is not compiled; rebuild with --features ffmpeg")
         }
 
@@ -132,7 +133,7 @@ pub fn waveform(
 use crate::analysis::{AnalysisControl, AnalysisFrame, AnalysisSettings, AnalysisWorker};
 use crate::model::{DecoderHint, MediaInfo};
 use anyhow::{Context, Result};
-use crossbeam_channel::{Receiver, Sender, bounded};
+use crossbeam_channel::{Receiver, Sender, after, bounded, select};
 use parking_lot::{Mutex, RwLock};
 use std::{
     path::{Path, PathBuf},
@@ -251,12 +252,36 @@ impl AudioEngine {
         }
         self.commands.send(command).context("Audio worker stopped")
     }
-    pub fn stop_and_snapshot(&self) -> Result<(u64, f64)> {
-        let (send, receive) = bounded(1);
-        self.send(AudioCommand::StopAndSnapshot(send))?;
-        receive
-            .recv_timeout(Duration::from_secs(5))
-            .context("Audio output did not stop")
+}
+
+/// Preserve command order while freeing reverse-channel capacity until stop is acknowledged.
+pub(crate) fn stop_and_snapshot(
+    commands: &Sender<AudioCommand>,
+    events: &Receiver<AudioEvent>,
+    mut observe: impl FnMut(AudioEvent),
+) -> Result<(u64, f64)> {
+    let (reply, stopped) = bounded(1);
+    let deadline = after(Duration::from_secs(5));
+    loop {
+        select! {
+            send(commands, AudioCommand::StopAndSnapshot(reply)) -> sent => {
+                sent.context("Audio worker stopped")?;
+                break;
+            }
+            recv(events) -> event => {
+                observe(event.context("Audio worker stopped before stop was submitted")?);
+            }
+            recv(deadline) -> _ => anyhow::bail!("Audio output did not stop before the deadline"),
+        }
+    }
+    loop {
+        select! {
+            recv(stopped) -> snapshot => return snapshot.context("Audio worker stopped before acknowledging stop"),
+            recv(events) -> event => {
+                observe(event.context("Audio worker stopped before acknowledging stop")?);
+            }
+            recv(deadline) -> _ => anyhow::bail!("Audio output did not stop before the deadline"),
+        }
     }
 }
 impl Drop for AudioEngine {

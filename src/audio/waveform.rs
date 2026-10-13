@@ -375,12 +375,14 @@ impl WaveformFrame {
         let intervals = [
             self.rms_prefixes[left].take(),
             self.bin_statistics(left),
-            self.rms_prefixes[right].take(),
-            self.bin_statistics(right),
+            self.rms_prefixes.get_mut(right).and_then(Option::take),
+            (right < self.peaks.len())
+                .then(|| self.bin_statistics(right))
+                .flatten(),
         ];
         let (primary, prefix) = compact_statistics(intervals);
         for peaks in [&mut self.peaks, &mut self.left_peaks, &mut self.right_peaks] {
-            peaks[index] = match (peaks[left], peaks[right]) {
+            peaks[index] = match (peaks[left], peaks.get(right).copied().flatten()) {
                 (Some(left), Some(right)) => Some(left.max(right)),
                 (left, right) => left.or(right),
             };
@@ -473,7 +475,7 @@ impl WaveformFrame {
         if self.suspended || self.complete {
             return;
         }
-        if self.duration.is_none() && end_seconds.is_finite() && end_seconds > 0.0 {
+        if end_seconds.is_finite() && end_seconds > 0.0 {
             self.duration = Some(end_seconds);
             if let Some(last) = self.peaks.iter().rposition(Option::is_some) {
                 let bins = last + 1;
@@ -533,24 +535,26 @@ impl WaveformFrame {
             return;
         }
         let mut changed = false;
-        if self.duration.is_none() {
-            // Doubling merges adjacent bins exactly, unlike arbitrary rescaling
-            // which would misplace or lose old peaks. Empty bins stay unknown.
-            while end_seconds > self.span_seconds {
-                for index in 0..MAX_BINS / 2 {
+        // Metadata duration may be an estimate. Grow the bounded timeline for
+        // actual decoded PCM, retaining pairwise peak and RMS statistics.
+        if end_seconds > self.span_seconds + 0.5 / rate {
+            self.duration = None;
+            while end_seconds > self.span_seconds + 0.5 / rate {
+                let retained = self.peaks.len().div_ceil(2);
+                for index in 0..retained {
                     self.compact_bin(index);
                 }
-                self.peaks[MAX_BINS / 2..].fill(None);
-                self.rms[MAX_BINS / 2..].fill(None);
-                self.rms_counts[MAX_BINS / 2..].fill(0);
-                self.left_peaks[MAX_BINS / 2..].fill(None);
-                self.right_peaks[MAX_BINS / 2..].fill(None);
-                self.left_rms[MAX_BINS / 2..].fill(None);
-                self.right_rms[MAX_BINS / 2..].fill(None);
-                self.left_rms_counts[MAX_BINS / 2..].fill(0);
-                self.right_rms_counts[MAX_BINS / 2..].fill(0);
-                self.rms_spans[MAX_BINS / 2..].fill(None);
-                self.rms_prefixes[MAX_BINS / 2..].fill(None);
+                self.peaks[retained..].fill(None);
+                self.rms[retained..].fill(None);
+                self.rms_counts[retained..].fill(0);
+                self.left_peaks[retained..].fill(None);
+                self.right_peaks[retained..].fill(None);
+                self.left_rms[retained..].fill(None);
+                self.right_rms[retained..].fill(None);
+                self.left_rms_counts[retained..].fill(0);
+                self.right_rms_counts[retained..].fill(0);
+                self.rms_spans[retained..].fill(None);
+                self.rms_prefixes[retained..].fill(None);
                 self.span_seconds *= 2.0;
                 changed = true;
                 *dirty = Some(0..self.peaks.len());
@@ -1352,6 +1356,52 @@ mod tests {
         assert_eq!(frame.peaks[400], Some(0.25));
         assert_eq!(frame.peaks[0], Some(2.0));
         assert_eq!(frame.max_peak, 2.0);
+    }
+
+    #[test]
+    fn underestimated_duration_grows_small_and_maximal_bins_without_losing_statistics() {
+        for (rate, estimated_frames) in [(5_u32, 5_usize), (8_000, MAX_BINS)] {
+            let estimate = estimated_frames as f64 / rate as f64;
+            let samples: Vec<f32> = (0..estimated_frames * 3)
+                .map(|index| (index % 17) as f32 / 16.0)
+                .collect();
+            let mut actual = frame(Some(estimate), rate);
+            for (index, sample) in samples.iter().enumerate() {
+                actual.push(index as f64 / rate as f64, &[*sample], rate, 1);
+                assert!(!actual.complete);
+                assert!(actual.peaks.len() <= MAX_BINS);
+            }
+            assert_eq!(actual.span_seconds, estimate * 4.0);
+            for (index, samples) in samples.chunks(4).enumerate() {
+                let peak = samples.iter().copied().fold(0.0_f32, f32::max);
+                let energy = samples
+                    .iter()
+                    .map(|sample| f64::from(*sample).powi(2))
+                    .sum::<f64>();
+                assert_eq!(actual.peaks[index], Some(peak));
+                assert_eq!(actual.rms_counts[index], samples.len() as u64);
+                let rms = (energy / samples.len() as f64).sqrt() as f32;
+                assert!((actual.rms[index].unwrap() - rms).abs() < 1e-6);
+            }
+            let end = samples.len() as f64 / rate as f64;
+            actual.finish_scan(end);
+            assert!(actual.complete);
+            assert_eq!(actual.duration, Some(end));
+            assert!(actual.span_seconds >= end);
+            assert!(actual.peaks.len() <= MAX_BINS);
+        }
+    }
+
+    #[test]
+    fn actual_eof_replaces_an_overestimated_duration() {
+        let mut actual = frame(Some(10.0), 10);
+        actual.push(0.0, &[0.25; 20], 10, 1);
+        actual.finish_scan(2.0);
+        assert_eq!(actual.duration, Some(2.0));
+        assert_eq!(actual.span_seconds, 2.0);
+        assert_eq!(actual.peaks, vec![Some(0.25); 20]);
+        assert_eq!(actual.rms_counts, vec![1; 20]);
+        assert!(actual.complete);
     }
 
     #[test]

@@ -411,6 +411,41 @@ mod tests {
     use crossbeam_channel::bounded;
 
     #[test]
+    fn stop_snapshot_drains_backpressured_lifecycle_events_before_acknowledging() {
+        let (commands, receive) = bounded(1);
+        commands.send(AudioCommand::Volume(0.4)).unwrap();
+        let (events, event_receive) = bounded(1);
+        events.send(AudioEvent::Ended { generation: 1 }).unwrap();
+        let (shutdown, cancelled) = bounded(0);
+        let analyzer = AnalysisWorker::new(Arc::new(RwLock::new(
+            crate::analysis::AnalysisFrame::default(),
+        )))
+        .unwrap();
+        let worker = Worker::new(
+            receive,
+            events,
+            cancelled,
+            analyzer,
+            Arc::new(RwLock::new(WaveformFrame::default())),
+            1024,
+        );
+        let worker = std::thread::spawn(move || {
+            worker.event(AudioEvent::Ended { generation: 2 });
+            worker.run();
+        });
+        let mut retired = Vec::new();
+        let snapshot = crate::audio::stop_and_snapshot(&commands, &event_receive, |event| {
+            if let AudioEvent::Ended { generation } = event {
+                retired.push(generation);
+            }
+        });
+        drop(shutdown);
+        worker.join().unwrap();
+        assert_eq!(snapshot.unwrap(), (0, 0.0));
+        assert_eq!(retired, [1, 2]);
+    }
+
+    #[test]
     fn still_mode_discards_stopped_waveforms_without_changing_playback_policy() {
         let (_send, commands) = bounded(1);
         let (events, _receive) = bounded(1);
