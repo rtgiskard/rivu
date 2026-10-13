@@ -470,8 +470,6 @@ mod tests {
             assert!(worker.playback.is_none());
             assert!(worker.wanted_analysis);
         }
-        waveform.write().install_full(completed);
-        assert_eq!(waveform.read().retained_capacity_bytes(), 0);
         worker.command(AudioCommand::StillMode(false));
         assert_eq!(waveform.read().retained_capacity_bytes(), 0);
         assert_eq!(waveform.read().revision, revision);

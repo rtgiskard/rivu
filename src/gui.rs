@@ -18,7 +18,7 @@ mod visualization;
 use crate::{
     config::{AudioVisualizerOptions, AudioVisualizerStyle},
     core::AppHandle,
-    model::{Command, PlaybackStatus},
+    model::{Command, PlaybackStatus, Query, Track},
     projection::GuiSnapshot,
 };
 use anyhow::Result;
@@ -261,6 +261,80 @@ pub(super) enum DragDestination {
     Queue,
     Playlist(i64),
 }
+#[derive(Default)]
+struct FullWaveformRequest {
+    generation: u64,
+    target: Option<FullWaveformTarget>,
+}
+
+struct FullWaveformTarget {
+    track_id: i64,
+    path: PathBuf,
+    cue_range: Option<(u64, Option<u64>)>,
+}
+
+impl FullWaveformTarget {
+    fn cue_range(track: &Track) -> Option<(u64, Option<u64>)> {
+        track
+            .cue
+            .as_ref()
+            .map(|cue| (cue.start_frame, cue.end_frame))
+    }
+
+    fn matches_source(&self, track: &Track) -> bool {
+        self.path == track.path && self.cue_range == Self::cue_range(track)
+    }
+
+    fn matches(&self, track: &Track) -> bool {
+        self.track_id == track.id && self.matches_source(track)
+    }
+}
+
+impl FullWaveformRequest {
+    fn begin(&mut self, track: &Track) -> u64 {
+        self.invalidate();
+        self.target = Some(FullWaveformTarget {
+            track_id: track.id,
+            path: track.path.clone(),
+            cue_range: FullWaveformTarget::cue_range(track),
+        });
+        self.generation
+    }
+
+    fn invalidate(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.target = None;
+    }
+
+    fn retain_target(&mut self, track: Option<&Track>, still_mode: bool) {
+        if self
+            .target
+            .as_ref()
+            .is_some_and(|target| still_mode || track.is_none_or(|track| !target.matches(track)))
+        {
+            self.invalidate();
+        }
+    }
+
+    fn saved_hint_changed(&mut self, track: &Track) {
+        if self
+            .target
+            .as_ref()
+            .is_some_and(|target| target.matches_source(track))
+        {
+            self.invalidate();
+        }
+    }
+
+    fn accepts(&self, generation: u64, track: Option<&Track>) -> bool {
+        self.generation == generation
+            && self
+                .target
+                .as_ref()
+                .is_some_and(|target| track.is_some_and(|track| target.matches(track)))
+    }
+}
+
 pub(super) struct GuiApp {
     handle: AppHandle,
     state: GuiSnapshot,
@@ -294,6 +368,7 @@ pub(super) struct GuiApp {
     layout_action: Option<layout::layout_manager::Action>,
     panel_menu: Option<PanelMenu>,
     waveform: Entity<visualization::Waveform>,
+    full_waveform_request: FullWaveformRequest,
     analysis_worker_enabled: bool,
     analysis_sequence: u64,
     analysis_staging: crate::analysis::AnalysisFrame,
@@ -666,6 +741,7 @@ impl GuiApp {
             layout_action: None,
             panel_menu: None,
             waveform,
+            full_waveform_request: FullWaveformRequest::default(),
             analysis_worker_enabled: false,
             analysis_sequence: 0,
             analysis_staging: crate::analysis::AnalysisFrame::default(),
@@ -970,6 +1046,7 @@ impl GuiApp {
             self.state = state;
             self.browser.history.sync(&self.state.library.history);
             self.sync_metadata_default(cx);
+            self.sync_full_waveform_request();
             self.browser.playlists.reconcile_selection();
             if playlist_changed || page_size_changed {
                 self.request_playlist_selection(cx);
@@ -1200,7 +1277,15 @@ impl GuiApp {
         self.sync_waveform(cx);
     }
 
+    fn sync_full_waveform_request(&mut self) {
+        self.full_waveform_request.retain_target(
+            self.state.current_track().or(self.metadata.track()),
+            self.state.system.config.still_mode,
+        );
+    }
+
     fn sync_waveform(&mut self, cx: &mut Context<Self>) {
+        self.sync_full_waveform_request();
         let enabled = !self.state.system.config.still_mode;
         let panels = if enabled {
             self.layouts.current().active_panels()
@@ -1218,13 +1303,52 @@ impl GuiApp {
         });
     }
     fn load_full_waveform(&mut self, cx: &mut Context<Self>) {
+        self.refresh(cx);
         if self.state.system.config.still_mode {
             return;
         }
-        let track = self.state.current_track().or(self.metadata.track());
+        let Some(track) = self.state.current_track().or(self.metadata.track()) else {
+            return;
+        };
+        let track_id = track.id;
+        let generation = self.full_waveform_request.begin(track);
         self.waveform.update(cx, |waveform, cx| {
-            waveform.load_full(track, &self.state.system.config, cx);
+            waveform.cancel_full_request(cx);
         });
+        let handle = self.handle.clone();
+        cx.spawn(async move |this, cx| {
+            let response = cx
+                .background_executor()
+                .spawn(async move { handle.query(Query::Track { track_id }) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                // Core changes also arrive while hidden, without a rendered frame.
+                this.refresh(cx);
+                this.sync_full_waveform_request();
+                if !this.full_waveform_request.accepts(
+                    generation,
+                    this.state.current_track().or(this.metadata.track()),
+                ) {
+                    return;
+                }
+                match response.result {
+                    Ok(crate::response::ViewResponse::Track(Some(track)))
+                        if this.full_waveform_request.accepts(generation, Some(&track)) =>
+                    {
+                        this.waveform.update(cx, |waveform, cx| {
+                            waveform.load_full(Some(&track), &this.state.system.config, cx);
+                        });
+                    }
+                    Err(error) => {
+                        this.error = Some(error.to_string());
+                        cx.notify();
+                    }
+                    _ => {}
+                }
+                this.full_waveform_request.invalidate();
+            });
+        })
+        .detach();
     }
     fn persist_layout(&mut self, cx: &mut Context<Self>) {
         self.interaction.clear_docking_preview();

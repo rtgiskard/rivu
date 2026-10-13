@@ -242,6 +242,23 @@ impl MetadataSession {
         Some((token, command))
     }
 
+    /// Capture the committed source before an acknowledgement can outlive this editor.
+    fn submitted_hint_change(&self, command: &Command) -> Option<Track> {
+        let Command::EditTrack {
+            decoder_hint: Some(hint),
+            ..
+        } = command
+        else {
+            return None;
+        };
+        let track = self.track.as_ref()?;
+        (track.decoder_hint != *hint).then(|| {
+            let mut track = track.clone();
+            track.decoder_hint = *hint;
+            track
+        })
+    }
+
     /// Never writes widgets: edits typed while saving remain the active draft.
     pub(super) fn complete_save(
         &mut self,
@@ -309,6 +326,7 @@ impl GuiApp {
         if self.metadata.select(id) {
             self.set_metadata_values(MetadataValues::default(), cx);
         }
+        self.sync_full_waveform_request();
         let token = self.metadata.begin_load(id);
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
@@ -392,6 +410,7 @@ impl GuiApp {
         let Some((token, command)) = self.metadata.begin_save(values.as_draft()) else {
             return;
         };
+        let hint_change = self.metadata.submitted_hint_change(&command);
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
             let ack = cx
@@ -399,6 +418,15 @@ impl GuiApp {
                 .spawn(async move { handle.request_ack(command) })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                // A successful save changes the scan source even after editor selection moved.
+                if ack.ok
+                    && let Some(track) = hint_change.as_ref()
+                {
+                    this.full_waveform_request.saved_hint_changed(track);
+                    this.waveform.update(cx, |waveform, cx| {
+                        waveform.saved_hint_changed(track, cx);
+                    });
+                }
                 if !this.metadata.complete_save(token, values, ack.ok) {
                     return;
                 }
@@ -501,6 +529,7 @@ mod tests {
         assert!(!session.dirty(playing.as_draft()));
     }
 
+    use super::super::FullWaveformRequest;
     use super::*;
 
     fn track(id: i64, title: &str) -> Track {
@@ -540,6 +569,129 @@ mod tests {
         session
             .accept_load(token, Some(track(id, title)), values("").as_draft())
             .unwrap()
+    }
+
+    #[test]
+    fn changed_hint_ack_keeps_original_source_after_editor_switch() {
+        let mut session = MetadataSession::default();
+        let baseline = load(&mut session, 1, "original");
+        let mut original = track(1, "original");
+        original.path = "album.flac".into();
+        original.cue = Some(crate::model::CueSegment {
+            sheet: "album.cue".into(),
+            number: 1,
+            start_frame: 75,
+            end_frame: Some(750),
+        });
+        let token = session.begin_load(1);
+        session.accept_load(token, Some(original.clone()), baseline.as_draft());
+        let submitted = MetadataValues {
+            decoder_hint: DecoderHint::Ffmpeg,
+            ..baseline
+        };
+        let (save, command) = session.begin_save(submitted.as_draft()).unwrap();
+        let committed = session.submitted_hint_change(&command).unwrap();
+        assert_eq!(committed.path, original.path);
+        assert_eq!(committed.cue, original.cue);
+        assert_eq!(committed.decoder_hint, DecoderHint::Ffmpeg);
+        let mut request = FullWaveformRequest::default();
+        let generation = request.begin(&original);
+
+        load(&mut session, 2, "other");
+        assert!(!session.complete_save(save, submitted, true));
+        request.saved_hint_changed(&committed);
+        assert!(!request.accepts(generation, Some(&original)));
+        assert_eq!(session.track().unwrap().id, 2);
+        assert_eq!(session.track().unwrap().decoder_hint, DecoderHint::Auto);
+    }
+
+    #[test]
+    fn tag_save_and_already_committed_hint_do_not_invalidate_scans() {
+        let mut session = MetadataSession::default();
+        let baseline = load(&mut session, 1, "original");
+        let (save, command) = session.begin_save(values("new title").as_draft()).unwrap();
+        assert!(session.submitted_hint_change(&command).is_none());
+        assert!(session.complete_save(save, values("new title"), false));
+
+        let submitted = MetadataValues {
+            decoder_hint: DecoderHint::Native,
+            ..baseline
+        };
+        let token = session.begin_load(1);
+        let mut remote = track(1, "original");
+        remote.decoder_hint = DecoderHint::Native;
+        session.accept_load(token, Some(remote), submitted.as_draft());
+        let (_, command) = session.begin_save(submitted.as_draft()).unwrap();
+        assert!(matches!(
+            &command,
+            Command::EditTrack {
+                decoder_hint: Some(DecoderHint::Native),
+                ..
+            }
+        ));
+        assert!(session.submitted_hint_change(&command).is_none());
+    }
+
+    #[test]
+    fn explicit_waveform_queries_use_latest_request_and_allow_fresh_saved_hint() {
+        let original = track(1, "original");
+        let mut request = FullWaveformRequest::default();
+        let first = request.begin(&original);
+        let latest = request.begin(&original);
+        let mut committed = original.clone();
+        committed.decoder_hint = DecoderHint::Ffmpeg;
+        committed.title = "updated tags".into();
+        request.retain_target(Some(&original), false);
+        assert!(!request.accepts(first, Some(&committed)));
+        assert!(request.accepts(latest, Some(&committed)));
+        assert!(!request.accepts(latest, Some(&track(2, "other"))));
+        committed.path = "moved.flac".into();
+        assert!(!request.accepts(latest, Some(&committed)));
+    }
+
+    #[test]
+    fn explicit_waveform_queries_do_not_revive_after_target_or_still_mode_changes() {
+        let original = track(1, "original");
+        let other = track(2, "other");
+        let mut request = FullWaveformRequest::default();
+        for (target, still_mode) in [
+            (Some(&other), false),
+            (None, false),
+            (Some(&original), true),
+        ] {
+            let generation = request.begin(&original);
+            request.retain_target(target, still_mode);
+            request.retain_target(Some(&original), false);
+            assert!(!request.accepts(generation, Some(&original)));
+        }
+    }
+
+    #[test]
+    fn saved_hint_invalidates_only_the_matching_path_and_cue_range() {
+        let mut original = track(1, "original");
+        original.path = "album.flac".into();
+        original.cue = Some(crate::model::CueSegment {
+            sheet: "album.cue".into(),
+            number: 1,
+            start_frame: 75,
+            end_frame: Some(750),
+        });
+        let mut request = FullWaveformRequest::default();
+        let generation = request.begin(&original);
+        let mut committed = original.clone();
+        committed.path = "other.flac".into();
+        request.saved_hint_changed(&committed);
+        assert!(request.accepts(generation, Some(&original)));
+        committed.path.clone_from(&original.path);
+        committed.cue.as_mut().unwrap().end_frame = Some(1500);
+        request.saved_hint_changed(&committed);
+        assert!(request.accepts(generation, Some(&original)));
+        assert!(!request.accepts(generation, Some(&committed)));
+        committed.cue.clone_from(&original.cue);
+        committed.id = 99;
+        committed.decoder_hint = DecoderHint::Native;
+        request.saved_hint_changed(&committed);
+        assert!(!request.accepts(generation, Some(&original)));
     }
 
     #[test]

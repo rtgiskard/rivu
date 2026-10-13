@@ -61,8 +61,11 @@ with tag edits; an unsaved selection does not affect playback or waveform decodi
 
 The saved choice survives rescans and restart, is independent for each CUE subtrack,
 and applies to the next track open or explicit full-waveform request. Saving it
-does not reopen current playback. Waveforms from different hints are not reused;
-saving a changed hint cancels an in-flight full-waveform request without restarting it.
+does not reopen current playback. Saving a changed hint cancels an in-flight
+full-waveform request and discards its completed preview, without restarting it;
+this also applies while the window is hidden. Explicit loading reads the latest
+saved hint and replaces any pending request. Its result is independent of the
+playing decoder and does not mix with the progressive playback waveform.
 
 In Auto mode, once FFmpeg is loaded and enabled, future WAVE opens use its format
 recognition; ordinary PCM still uses the native decoder. Recognition is not proof

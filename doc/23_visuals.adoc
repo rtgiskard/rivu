@@ -109,12 +109,17 @@ cost of preview resolution. An undecoded interval is distinct from decoded
 silence. Peaks can survive disjoint visits, but RMS represents a contiguous
 sample interval rather than repeatedly counting seeked or replayed samples.
 
-A completed explicit full-track scan takes precedence over an in-flight
-progressive update. Source identity is the file and optional playback range,
-not metadata or panel visibility. A source change cancels the explicit scan;
-ordinary display changes do not start a decoder. This keeps the preview from
-regressing after a complete result becomes available and avoids background
-full-track reads merely to display a panel.
+A completed explicit full-track scan takes precedence in the GUI, without
+replacing the audio worker's progressive buffer. The GUI retains one bounded
+full result; playback continues to update its own bounded buffer. Rendering
+selects one result rather than copying or combining bins between decoders.
+Display identity is the file and optional playback range. A target change
+cancels the explicit scan; ordinary metadata and panel visibility changes do
+not start a decoder. Saving a changed decoder hint cancels the matching request
+and retires its full result, leaving playback untouched. A subsequent explicit
+load reads the latest saved hint and replaces any pending request. Request
+generation, captured decode identity and suspension generation reject stale
+results independently of the playback buffer's hint or revision.
 
 RMS fills extend above and below the centerline for the respective stereo
 channels. Each display column has its own gradient endpoint, preserving color

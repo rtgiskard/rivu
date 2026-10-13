@@ -226,7 +226,7 @@ impl WaveformAccumulator {
 
     /// The only operation requiring the shared write lock. At most MAX_BINS
     /// bins are copied (all bins only after timeline doubling); no PCM is read.
-    /// A manually installed complete scan always wins over in-flight playback.
+    /// Completed progressive envelopes remain stable until their source resets.
     pub(super) fn publish(&mut self, shared: &mut WaveformFrame) {
         if shared.path != self.frame.path
             || shared.range != self.frame.range
@@ -348,19 +348,6 @@ impl WaveformFrame {
         }
         self.channel_weights.clear();
         self.channel_weights.extend_from_slice(weights);
-    }
-
-    /// The caller validates source identity and request generation before
-    /// publishing a manual full scan. Preserve the shared version sequence.
-    pub fn install_full(&mut self, mut frame: Self) {
-        if self.suspended {
-            return;
-        }
-        frame.revision = self.revision.wrapping_add(1);
-        frame.suspended = self.suspended;
-        frame.suspension_generation = self.suspension_generation;
-        frame.complete = true;
-        *self = frame;
     }
 
     fn bin_statistics(&self, index: usize) -> Option<RmsPrefix> {
@@ -806,7 +793,6 @@ mod tests {
         shared.set_channel_weights(&[[1.0, 0.0], [0.0, 1.0]]);
         shared.push(0.0, &[0.75; 1600], 8_000, 2);
         let mut pending = WaveformAccumulator::new(shared.clone());
-        let manual = shared.clone();
         let retained = shared.retained_capacity_bytes();
         assert!(retained > 0);
         let revision = shared.revision;
@@ -830,7 +816,6 @@ mod tests {
             shared.set_channel_weights(&[[1.0, 0.0]]);
             shared.push(0.0, &[1.0], 8_000, 1);
             shared.finish_scan(2.0);
-            shared.install_full(manual.clone());
             pending.publish(&mut shared);
             assert_eq!(shared.revision, suspended_revision);
             assert_eq!(shared.retained_capacity_bytes(), 0);
@@ -853,7 +838,6 @@ mod tests {
         assert!(shared.peaks.iter().flatten().all(|peak| *peak == 0.0));
         assert_eq!(shared.rms_counts.iter().sum::<u64>(), 160);
         assert!(shared.retained_capacity_bytes() <= retained);
-        shared.install_full(manual);
         assert_eq!(shared.suspension_generation(), 1);
         shared.set_still_mode(true);
         assert_eq!(shared.suspension_generation(), 2);
@@ -896,18 +880,10 @@ mod tests {
     }
 
     #[test]
-    fn local_publication_preserves_manual_completion_and_source_switch() {
+    fn local_publication_rejects_source_switch() {
         let mut shared = frame(Some(4.0), 1);
         let mut accumulator = WaveformAccumulator::new(shared.clone());
         accumulator.push(0.0, &[2.0], 1, 1);
-        let mut manual = frame(Some(4.0), 1);
-        manual.push(0.0, &[0.25, 0.5, 0.75, 1.0], 1, 1);
-        shared.install_full(manual);
-        let expected = shared.clone();
-        accumulator.publish(&mut shared);
-        accumulator.push(1.0, &[3.0], 1, 1);
-        accumulator.publish(&mut shared);
-        assert_same_bins(&shared, &expected);
         shared.select(
             Path::new("other.wav"),
             None,
@@ -1164,39 +1140,6 @@ mod tests {
         assert_eq!(frame.duration, None);
         assert_eq!(frame.revision, revision);
         assert!(frame.peaks[1..26].iter().all(Option::is_none));
-    }
-
-    #[test]
-    fn full_scan_install_preserves_versions_and_skips_playback_recomputation() {
-        let mut live = frame(Some(4.0), 1);
-        live.push(0.0, &[0.25], 1, 1);
-        let revision = live.revision;
-        let mut full = frame(Some(4.0), 1);
-        full.push(0.0, &[0.5, 0.0, 0.75, 0.25], 1, 1);
-        live.install_full(full);
-        assert_eq!(live.revision, revision + 1);
-        assert!(live.complete);
-        live.push(0.0, &[2.0], 1, 1);
-        live.select(
-            Path::new("track.wav"),
-            None,
-            DecoderHint::Auto,
-            Some(4.0),
-            1,
-        );
-        assert_eq!(live.revision, revision + 1);
-        live.finish_scan(4.0);
-        assert_eq!(live.revision, revision + 1);
-        assert_eq!(live.peaks, [Some(0.5), Some(0.0), Some(0.75), Some(0.25)]);
-        live.select(
-            Path::new("other.wav"),
-            None,
-            DecoderHint::Auto,
-            Some(4.0),
-            1,
-        );
-        assert!(!live.complete);
-        assert!(live.peaks.iter().all(Option::is_none));
     }
 
     #[test]
