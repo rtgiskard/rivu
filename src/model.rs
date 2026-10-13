@@ -498,7 +498,6 @@ pub enum Query {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum Command {
-    ShowWindow,
     OptimizeDatabase,
     SetFavorite {
         track_ids: Vec<i64>,
@@ -630,7 +629,6 @@ pub enum Command {
     MprisStatus {
         status: String,
     },
-    Shutdown,
     DismissScanResult,
     CancelScan {
         id: u64,

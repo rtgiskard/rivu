@@ -5,6 +5,7 @@ use super::{
 };
 use crate::core::CoreHandle;
 use crate::{
+    app::{AppCommand, AppHandle},
     model::{Command, Query},
     response::{Ack, QueryResponse, StateRevisions},
 };
@@ -110,7 +111,7 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn start(owner: &SocketOwner, handle: CoreHandle) -> Result<Self> {
+    pub(crate) fn start(owner: &SocketOwner, handle: CoreHandle, app: AppHandle) -> Result<Self> {
         let path = owner.path.clone();
         let worker_listener = owner.listener.try_clone()?;
         let (shutdown, shutdown_rx) = watch::channel(false);
@@ -162,7 +163,7 @@ impl Server {
             };
             tracing::info!(path = %worker_path.display(), "ipc_server_started");
             let _ = ready_tx.send(Ok(()));
-            runtime.block_on(run_server(listener, handle, revision_rx, shutdown_rx));
+            runtime.block_on(run_server(listener, handle, app, revision_rx, shutdown_rx));
             let _ = bridge.join();
         })?;
         match ready_rx.recv() {
@@ -196,8 +197,8 @@ impl Drop for Server {
         }
     }
 }
-async fn run_command(handle: &CoreHandle, command: Command) -> Result<Ack> {
-    let duration = if matches!(command, Command::OptimizeDatabase) {
+async fn run_command(app: &AppHandle, command: AppCommand) -> Result<Ack> {
+    let duration = if matches!(command, AppCommand::Core(Command::OptimizeDatabase)) {
         Duration::from_secs(120)
     } else {
         Duration::from_secs(15)
@@ -205,8 +206,8 @@ async fn run_command(handle: &CoreHandle, command: Command) -> Result<Ack> {
     timeout(
         duration,
         tokio::task::spawn_blocking({
-            let handle = handle.clone();
-            move || handle.request_ack(command)
+            let app = app.clone();
+            move || app.request_ack(command)
         }),
     )
     .await
@@ -267,6 +268,7 @@ async fn wait_for_revisions(
 async fn serve_connection(
     mut stream: UnixStream,
     handle: CoreHandle,
+    app: AppHandle,
     instance_id: u32,
     mut updates: watch::Receiver<StateRevisions>,
     mut shutdown: watch::Receiver<bool>,
@@ -275,6 +277,9 @@ async fn serve_connection(
     let mut write_buffer = Vec::new();
     let mut session = SessionState::Unbound;
     loop {
+        if *shutdown.borrow() {
+            return Ok(());
+        }
         let bytes = if session.is_bound() {
             tokio::select! {
                 frame = read_frame(&mut stream, MAX_REQUEST, &mut pending) => frame?,
@@ -376,7 +381,7 @@ async fn serve_connection(
                 write_frame_buffered(&mut stream, &response, &mut write_buffer).await?;
             }
             WireRequest::Command(command) => {
-                let command = match Command::try_from(command) {
+                let command = match AppCommand::try_from(command) {
                     Ok(command) => command,
                     Err(error) => {
                         tracing::warn!(error = %error, "ipc_invalid_command");
@@ -389,7 +394,7 @@ async fn serve_connection(
                         continue;
                     }
                 };
-                let response = match run_command(&handle, command).await {
+                let response = match run_command(&app, command).await {
                     Ok(response) => WireResponse::Ack(response),
                     Err(error) => {
                         tracing::warn!(error = %error, "ipc_command_failed");
@@ -430,6 +435,7 @@ async fn serve_connection(
 async fn run_server(
     listener: UnixListener,
     handle: CoreHandle,
+    app: AppHandle,
     updates: watch::Receiver<StateRevisions>,
     mut shutdown: watch::Receiver<bool>,
 ) {
@@ -455,6 +461,7 @@ async fn run_server(
                     clients.push(tokio::spawn(serve_connection(
                         stream,
                         handle.clone(),
+                        app.clone(),
                         instance_id,
                         revisions.clone(),
                         shutdown.clone(),
@@ -470,9 +477,16 @@ async fn run_server(
             changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() { break; } }
         }
     }
+    // Idle sessions observe shutdown; accepted operations finish their reply
+    // before App retires the socket and releases instance authority.
+    let _ = timeout(Duration::from_secs(120), async {
+        for task in &mut clients {
+            let _ = task.await;
+        }
+    })
+    .await;
     for task in clients {
         task.abort();
-        let _ = task.await;
     }
 }
 

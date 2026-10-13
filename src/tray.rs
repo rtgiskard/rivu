@@ -1,4 +1,5 @@
 use crate::{
+    app::AppHandle,
     artwork::DEFAULT_IMAGE,
     core::CoreHandle,
     model::{Command, PlaybackStatus, RepeatMode},
@@ -82,7 +83,7 @@ pub(crate) struct TrayController {
 }
 
 impl TrayController {
-    pub(crate) fn start(handle: CoreHandle) -> Result<Option<Self>> {
+    pub(crate) fn start(handle: CoreHandle, app: AppHandle) -> Result<Option<Self>> {
         let (stop, stop_receiver) = bounded(1);
         let (ready_sender, ready_receiver) = bounded(1);
         let data = Arc::new(RwLock::new(TrayData {
@@ -91,7 +92,7 @@ impl TrayController {
         }));
         let worker = match thread::Builder::new()
             .name("rivu-tray".into())
-            .spawn(move || run_bus(handle, data, stop_receiver, ready_sender))
+            .spawn(move || run_bus(handle, app, data, stop_receiver, ready_sender))
         {
             Ok(worker) => worker,
             Err(error) => {
@@ -132,6 +133,7 @@ impl Drop for TrayController {
 
 fn run_bus(
     handle: CoreHandle,
+    app: AppHandle,
     data: Arc<RwLock<TrayData>>,
     stop: Receiver<()>,
     ready: Sender<std::result::Result<(), String>>,
@@ -145,11 +147,12 @@ fn run_bus(
         INSTANCE_COUNTER.fetch_add(1, Ordering::Relaxed)
     );
     let item = StatusNotifierItem {
-        handle: handle.clone(),
+        app: app.clone(),
         data: Arc::clone(&data),
     };
     let menu = DbusMenu {
         handle: handle.clone(),
+        app,
         data: Arc::clone(&data),
     };
     let connection = match Builder::session()
@@ -331,7 +334,7 @@ fn emit_update(
 }
 
 struct StatusNotifierItem {
-    handle: CoreHandle,
+    app: AppHandle,
     data: Arc<RwLock<TrayData>>,
 }
 
@@ -446,7 +449,7 @@ impl StatusNotifierItem {
 
 impl StatusNotifierItem {
     fn raise(&self) -> fdo::Result<()> {
-        self.handle
+        self.app
             .raise()
             .map_err(|error| fdo::Error::Failed(error.to_string()))
     }
@@ -517,6 +520,7 @@ fn owned_value(value: String) -> OwnedValue {
 
 struct DbusMenu {
     handle: CoreHandle,
+    app: AppHandle,
     data: Arc<RwLock<TrayData>>,
 }
 
@@ -636,15 +640,13 @@ impl DbusMenu {
 impl DbusMenu {
     fn activate(&self, id: i32) {
         if id == 1 {
-            if let Err(error) = self.handle.raise() {
+            if let Err(error) = self.app.raise() {
                 tracing::warn!(error = %error, "tray_raise_failed");
             }
             return;
         }
         if id == 9 {
-            // This is the D-Bus worker, not the UI or audio thread. Quit must
-            // wait for request capacity rather than disappear under load.
-            if let Err(error) = self.handle.request_shutdown() {
+            if let Err(error) = self.app.request_shutdown() {
                 tracing::warn!(error = %error, "tray_quit_failed");
             }
             return;
@@ -772,13 +774,15 @@ mod tests {
             crate::core::Runtime::start(directory.path(), &directory.path().join("config.toml"))
                 .unwrap();
         let handle = runtime.handle.clone();
-        assert!(!handle.can_raise());
+        let app = AppHandle::new(&runtime, false);
+        assert!(!app.can_raise());
         let menu = DbusMenu {
             data: Arc::new(RwLock::new(TrayData {
                 snapshot: handle.tray_snapshot(),
                 menu_revision: 1,
             })),
             handle: handle.clone(),
+            app,
         };
         assert_eq!(
             menu.about_to_show_group(vec![0, 1, 2, 9, 99, -1]),

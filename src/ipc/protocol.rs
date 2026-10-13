@@ -1,4 +1,5 @@
 use crate::{
+    app::AppCommand,
     model::{Command, DatabaseOptimization, DecoderHint, Query, ScanProgress, SystemState},
     response::{Ack, QueryResponse, StateResponse, StateRevisions, StateSections},
 };
@@ -577,10 +578,30 @@ impl TryFrom<WireQuery> for Query {
     }
 }
 
+impl From<AppCommand> for WireCommand {
+    fn from(value: AppCommand) -> Self {
+        match value {
+            AppCommand::ShowWindow => Self::ShowWindow,
+            AppCommand::Shutdown => Self::Shutdown,
+            AppCommand::Core(command) => command.into(),
+        }
+    }
+}
+
+impl TryFrom<WireCommand> for AppCommand {
+    type Error = anyhow::Error;
+    fn try_from(value: WireCommand) -> Result<Self> {
+        Ok(match value {
+            WireCommand::ShowWindow => Self::ShowWindow,
+            WireCommand::Shutdown => Self::Shutdown,
+            command => Self::Core(Command::try_from(command)?),
+        })
+    }
+}
+
 impl From<Command> for WireCommand {
     fn from(value: Command) -> Self {
         match value {
-            Command::ShowWindow => Self::ShowWindow,
             Command::OptimizeDatabase => Self::OptimizeDatabase,
             Command::SetFavorite {
                 track_ids,
@@ -682,7 +703,6 @@ impl From<Command> for WireCommand {
                 config: WireConfig::from(&config),
             },
             Command::MprisStatus { status } => Self::MprisStatus { status },
-            Command::Shutdown => Self::Shutdown,
             Command::CreatePlaylistFromQueue { name } => Self::CreatePlaylistFromQueue { name },
         }
     }
@@ -693,7 +713,7 @@ impl TryFrom<WireCommand> for Command {
 
     fn try_from(value: WireCommand) -> Result<Self> {
         Ok(match value {
-            WireCommand::ShowWindow => Self::ShowWindow,
+            WireCommand::ShowWindow => bail!("ShowWindow is an application request"),
             WireCommand::OptimizeDatabase => Self::OptimizeDatabase,
             WireCommand::SetFavorite {
                 track_ids,
@@ -795,7 +815,7 @@ impl TryFrom<WireCommand> for Command {
                 config: config.into(),
             },
             WireCommand::MprisStatus { status } => Self::MprisStatus { status },
-            WireCommand::Shutdown => Self::Shutdown,
+            WireCommand::Shutdown => bail!("Shutdown is an application request"),
             WireCommand::CreatePlaylistFromQueue { name } => Self::CreatePlaylistFromQueue { name },
         })
     }

@@ -307,7 +307,6 @@ impl Core {
                 self.state.system.config = Arc::new(config);
                 tracing::info!("configuration_updated");
             }
-            Command::ShowWindow => return self.request_raise(),
             Command::MprisStatus { status } => {
                 self.state.system.mpris_status = status;
                 return Ok(());
@@ -329,10 +328,6 @@ impl Core {
                 self.state.system.database_optimization = Some(self.store.optimize()?);
                 // Current state is already persisted; finalization does not rewrite queue rows.
                 return Ok(());
-            }
-            Command::Shutdown => {
-                self.state.system.shutting_down = true;
-                self.stop()?;
             }
         }
         Ok(())

@@ -428,6 +428,13 @@ fn run() -> Result<()> {
             );
             Ok(())
         }
+        Action::Quit => {
+            let ack = ipc::request_ack(&socket, &rivu::app::AppCommand::Shutdown)?;
+            if !ack.ok {
+                bail!("{}", ack.error.as_deref().unwrap_or("Command failed"));
+            }
+            Ok(())
+        }
         action => {
             let (command, wait_scan) = translate(action)?;
             let mut session = ipc::client_session(&socket)?;
@@ -889,10 +896,10 @@ fn translate(action: Action) -> Result<(Command, bool)> {
         },
         Action::Library(LibraryAction::CleanMissing) => Command::RemoveMissingTracks,
         Action::Playback(PlaybackAction::Device { name }) => Command::Device { name },
-        Action::Quit => Command::Shutdown,
         Action::Gui { .. }
         | Action::Serve { .. }
         | Action::Tui
+        | Action::Quit
         | Action::Playback(PlaybackAction::Devices)
         | Action::Library(
             LibraryAction::List { .. }

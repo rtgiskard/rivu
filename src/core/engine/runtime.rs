@@ -1,10 +1,30 @@
 use super::*;
 
 impl Core {
-    pub(in crate::core) fn run(&mut self, requests: Receiver<Request>) {
+    pub(in crate::core) fn run(
+        &mut self,
+        requests: Receiver<Request>,
+        shutdown: Receiver<()>,
+        control: &RuntimeControl,
+    ) {
         let config_ticks = crossbeam_channel::tick(Duration::from_millis(100));
         loop {
             select! {
+                recv(shutdown) -> _ => {
+                    self.state.system.shutting_down = true;
+                    let result = self.stop();
+                    if let Err(error) = &result {
+                        self.state.system.last_error = Some(format!("{error:#}"));
+                    }
+                    self.publish();
+                    control.acknowledge(Ack {
+                        ok: result.is_ok(),
+                        error: result.err().map(|error| format!("{error:#}")),
+                        revision: self.state.system.revision,
+                        scan_id: None,
+                    });
+                    break;
+                }
                 recv(requests) -> request => {
                     let Ok(request) = request else { break; };
                     match request.operation {
@@ -18,14 +38,12 @@ impl Core {
                             }
                         }
                         Operation::Command(command) => {
-                            let shutdown = matches!(&command, Command::Shutdown);
                             let starts_scan = matches!(&command, Command::Scan { .. } | Command::ImportPlaylist { .. });
-                            let changed = !matches!(&command, Command::ShowWindow);
                             let result = self.command(command);
                             if let Err(error) = &result {
                                 self.state.system.last_error = Some(format!("{error:#}"));
                             }
-                            if changed || result.is_err() { self.publish(); }
+                            self.publish();
                             let scan_id = if result.is_ok() && starts_scan { self.active_scan.as_ref().map(|task| task.status.id) } else { None };
                             if let Some(reply) = request.reply {
                                 let _ = reply.send(CoreResponse::Ack(Ack {
@@ -35,7 +53,6 @@ impl Core {
                                     scan_id,
                                 }));
                             }
-                            if shutdown { break; }
                         }
                         Operation::GuiConfig(change) => {
                             let result = self.update_gui_config(change);
@@ -98,9 +115,6 @@ impl Core {
         self.state.playback.status = PlaybackStatus::Stopped;
         self.state.system.shutting_down = true;
         self.publish();
-        if let Some(callback) = self.gui_opener.read().clone() {
-            callback();
-        }
     }
 
     pub(in crate::core) fn publish(&mut self) {
@@ -149,15 +163,6 @@ impl Core {
         if let Some(callback) = callback {
             callback();
         }
-    }
-    pub(in crate::core) fn request_raise(&self) -> Result<()> {
-        let opener = self.gui_opener.read();
-        let callback = opener
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Rivu has no graphical host"))?;
-        self.raise_requested.store(true, Ordering::Release);
-        callback();
-        Ok(())
     }
     pub(in crate::core) fn audio(&self, command: AudioCommand) -> Result<()> {
         self.engine

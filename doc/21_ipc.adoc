@@ -53,9 +53,11 @@ needs table lookups, but moving or compacting entries does not rewrite the rever
 index in addition to the ordering index. Dense capture alone can be slower; the
 choice reduces storage and favors complete deletion/compaction and movement.
 
-The GUI, tray, and MPRIS service use `CoreHandle` and purpose-specific
-projections. CLI and TUI clients use the local IPC socket. Both paths reach the
-same command and query boundary. The GUI's shared analysis and waveform data
+The GUI, tray, and MPRIS service use `CoreHandle` for business commands and
+purpose-specific projections. Opening a window and quitting the application use
+the separate App-owned control endpoint. CLI and TUI clients use the local IPC
+socket; its dispatcher separates application requests from core commands and
+queries while preserving the wire format. Shared analysis and waveform data
 are in-process resources, not IPC state sections.
 
 The graphical host has three lifetime boundaries within one process:
@@ -71,6 +73,13 @@ The graphical host has three lifetime boundaries within one process:
   window. Closing releases window demand and subscriptions, not application
   services. Background results use weak UI references and may finish without
   delivering to a closed view.
+
+Window-opening requests coalesce at the App endpoint and remain pending until
+the graphical host is ready. Core completion explicitly notifies App, including
+completion before GUI registration and core panic; it does not reuse a window
+opener callback. Shutdown uses a bounded lifecycle signal independent of the
+business queue. IPC shutdown acknowledgements are drained before transport and
+socket retirement, and service joins occur outside GPUI quit callbacks.
 
 These boundaries do not introduce internal IPC or require destroying and
 reinitializing GPUI. Framework-global resources remain resident; no headless

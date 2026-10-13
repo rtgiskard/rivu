@@ -13,15 +13,12 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, bounded};
-use parking_lot::RwLock;
+use parking_lot::{Condvar, Mutex, RwLock};
 use rand::seq::SliceRandom;
 use std::{
     collections::{HashSet, VecDeque},
     path::Path,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::Arc,
     thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -123,9 +120,7 @@ pub struct CoreHandle {
     pub waveform: Arc<RwLock<audio::WaveformFrame>>,
     sender: Sender<Request>,
     wakeup: Arc<RwLock<Option<Wakeup>>>,
-    gui_opener: Arc<RwLock<Option<Wakeup>>>,
     subscribers: Arc<RwLock<Vec<Sender<()>>>>,
-    raise_requested: Arc<AtomicBool>,
 }
 
 impl CoreHandle {
@@ -167,15 +162,6 @@ impl CoreHandle {
             })
             .context("Rivu is busy or stopped")
     }
-    /// Enqueue graceful shutdown, waiting for request capacity off the UI thread.
-    pub fn request_shutdown(&self) -> Result<()> {
-        self.sender
-            .send(Request {
-                operation: Operation::Command(Command::Shutdown),
-                reply: None,
-            })
-            .context("Rivu is stopped")
-    }
     pub fn is_shutting_down(&self) -> bool {
         self.state.read().system.shutting_down
     }
@@ -202,17 +188,6 @@ impl CoreHandle {
         *self.wakeup.write() = None;
         self.notify_subscribers();
     }
-    pub fn set_gui_opener(&self, callback: impl Fn() + Send + Sync + 'static) {
-        *self.gui_opener.write() = Some(Arc::new(callback));
-        self.notify_subscribers();
-    }
-    pub fn clear_gui_opener(&self) {
-        *self.gui_opener.write() = None;
-        self.notify_subscribers();
-    }
-    pub fn can_raise(&self) -> bool {
-        self.gui_opener.read().is_some()
-    }
     fn notify_subscribers(&self) {
         self.subscribers.write().retain(|sender| {
             !matches!(
@@ -225,18 +200,6 @@ impl CoreHandle {
         let (sender, receiver) = bounded(1);
         self.subscribers.write().push(sender);
         receiver
-    }
-    pub fn raise(&self) -> Result<()> {
-        let opener = self.gui_opener.read();
-        let callback = opener
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Rivu has no graphical host"))?;
-        self.raise_requested.store(true, Ordering::Release);
-        callback();
-        Ok(())
-    }
-    pub fn take_raise_request(&self) -> bool {
-        self.raise_requested.swap(false, Ordering::AcqRel)
     }
     /// Query metadata and rows are produced in the same Core dispatch.
     pub fn query(&self, query: Query) -> QueryResponse {
@@ -318,8 +281,112 @@ impl CoreHandle {
     }
 }
 
+/// Runtime lifecycle control, separate from business requests and view wakeups.
+#[derive(Clone)]
+pub(crate) struct RuntimeControl {
+    shutdown: Sender<()>,
+    completion: Arc<Completion>,
+}
+
+#[derive(Default)]
+struct Completion {
+    state: Mutex<CompletionState>,
+    acknowledged: Condvar,
+}
+
+#[derive(Default)]
+struct CompletionState {
+    ack: Option<Ack>,
+    finished: bool,
+    callback: Option<Wakeup>,
+}
+
+impl RuntimeControl {
+    fn new() -> (Self, Receiver<()>) {
+        let (shutdown, receiver) = bounded(1);
+        (
+            Self {
+                shutdown,
+                completion: Arc::new(Completion::default()),
+            },
+            receiver,
+        )
+    }
+
+    pub(crate) fn request_shutdown(&self) -> Result<()> {
+        match self.shutdown.try_send(()) {
+            Ok(()) | Err(crossbeam_channel::TrySendError::Full(())) => Ok(()),
+            Err(crossbeam_channel::TrySendError::Disconnected(())) => {
+                anyhow::bail!("Rivu is stopped")
+            }
+        }
+    }
+
+    pub(crate) fn shutdown_ack(&self, revision: impl Fn() -> u64) -> Ack {
+        let requested = self.request_shutdown();
+        let mut state = self.completion.state.lock();
+        let deadline = Instant::now() + Duration::from_secs(12);
+        while requested.is_ok() && state.ack.is_none() && !state.finished {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            self.completion.acknowledged.wait_for(&mut state, remaining);
+        }
+        state.ack.clone().unwrap_or_else(|| Ack {
+            ok: false,
+            error: Some(
+                if state.finished {
+                    "Core stopped before shutdown acknowledgement"
+                } else {
+                    "Core shutdown acknowledgement unavailable"
+                }
+                .into(),
+            ),
+            revision: revision(),
+            scan_id: None,
+        })
+    }
+
+    fn acknowledge(&self, ack: Ack) {
+        self.completion.state.lock().ack = Some(ack);
+        self.completion.acknowledged.notify_all();
+    }
+
+    pub(crate) fn set_completion_callback(&self, callback: impl Fn() + Send + Sync + 'static) {
+        let callback: Wakeup = Arc::new(callback);
+        let mut state = self.completion.state.lock();
+        state.callback = Some(Arc::clone(&callback));
+        let finished = state.finished;
+        drop(state);
+        if finished {
+            callback();
+        }
+    }
+
+    fn complete(&self) {
+        let mut state = self.completion.state.lock();
+        state.finished = true;
+        let callback = state.callback.clone();
+        drop(state);
+        self.completion.acknowledged.notify_all();
+        if let Some(callback) = callback {
+            callback();
+        }
+    }
+}
+
+// Runs on normal return and panic, including failure before Core::run starts.
+struct CompletionGuard(RuntimeControl);
+impl Drop for CompletionGuard {
+    fn drop(&mut self) {
+        self.0.complete();
+    }
+}
+
 pub struct Runtime {
     pub handle: CoreHandle,
+    pub(crate) control: RuntimeControl,
     worker: Option<JoinHandle<()>>,
 }
 impl Runtime {
@@ -343,9 +410,9 @@ impl Runtime {
         let engine = AudioEngine::new(config.media_read_buffer_mb)?;
         tracing::info!("audio_engine_ready");
         let (sender, receiver) = bounded(64);
+        let (control, shutdown_receiver) = RuntimeControl::new();
         let shared = Arc::new(RwLock::new(CoreState::default()));
         let wakeup = Arc::new(RwLock::new(None));
-        let gui_opener = Arc::new(RwLock::new(None));
         let subscribers = Arc::new(RwLock::new(Vec::new()));
         let initial = {
             let mut state = CoreState::default();
@@ -365,14 +432,13 @@ impl Runtime {
             waveform: Arc::clone(&engine.waveform),
             sender,
             wakeup: wakeup.clone(),
-            gui_opener: gui_opener.clone(),
             subscribers: subscribers.clone(),
-            raise_requested: Arc::new(AtomicBool::new(false)),
         };
-        let raise_requested = handle.raise_requested.clone();
+        let worker_control = control.clone();
         let worker = thread::Builder::new()
             .name("rivu-core".into())
             .spawn(move || {
+                let _completion = CompletionGuard(worker_control.clone());
                 let (scan_tx, scan_rx) = bounded(1);
                 let mut core = Core {
                     store,
@@ -380,9 +446,7 @@ impl Runtime {
                     state: initial,
                     shared,
                     wakeup,
-                    gui_opener,
                     subscribers,
-                    raise_requested,
                     generation: 0,
                     queue_ids: Vec::new(),
                     playback: None,
@@ -427,10 +491,11 @@ impl Runtime {
                 let _ = core.engine.commands.send(AudioCommand::AnalysisSettings(
                     core.state.system.config.as_ref().into(),
                 ));
-                core.run(receiver);
+                core.run(receiver, shutdown_receiver, &worker_control);
             })?;
         Ok(Self {
             handle,
+            control,
             worker: Some(worker),
         })
     }
@@ -454,7 +519,7 @@ impl Drop for Runtime {
             .as_ref()
             .is_some_and(|worker| !worker.is_finished())
         {
-            let _ = self.handle.request_shutdown();
+            let _ = self.control.request_shutdown();
         }
         let _ = self.join();
     }
@@ -506,9 +571,7 @@ struct Core {
     state: CoreState,
     shared: Arc<RwLock<CoreState>>,
     wakeup: Arc<RwLock<Option<Wakeup>>>,
-    gui_opener: Arc<RwLock<Option<Wakeup>>>,
     subscribers: Arc<RwLock<Vec<Sender<()>>>>,
-    raise_requested: Arc<AtomicBool>,
     generation: u64,
     // The only full queue projection: compact occurrence IDs, never shared with clients.
     queue_ids: Vec<u64>,
@@ -554,6 +617,47 @@ fn now() -> i64 {
 mod tests {
     use super::*;
     use crate::library::ScanRecord;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn runtime_completion_notifies_on_panic_and_reconciles_late_registration() {
+        let (control, _shutdown) = RuntimeControl::new();
+        let (wake, wakes) = bounded(1);
+        control.set_completion_callback(move || {
+            let _ = wake.try_send(());
+        });
+        let worker_control = control.clone();
+        assert!(
+            thread::spawn(move || {
+                let _completion = CompletionGuard(worker_control);
+                panic!("core worker failure");
+            })
+            .join()
+            .is_err()
+        );
+        assert_eq!(wakes.try_recv(), Ok(()));
+        let (late, late_wakes) = bounded(1);
+        control.set_completion_callback(move || {
+            let _ = late.try_send(());
+        });
+        assert_eq!(late_wakes.try_recv(), Ok(()));
+        let ack = control.shutdown_ack(|| 17);
+        assert!(!ack.ok);
+        assert_eq!(ack.revision, 17);
+    }
+
+    #[test]
+    fn lifecycle_shutdown_coalesces_without_business_queue_capacity() {
+        let (control, shutdown) = RuntimeControl::new();
+        for _ in 0..1000 {
+            control.request_shutdown().unwrap();
+        }
+        assert_eq!(shutdown.try_recv(), Ok(()));
+        assert_eq!(
+            shutdown.try_recv(),
+            Err(crossbeam_channel::TryRecvError::Empty)
+        );
+    }
 
     // An idle real audio worker handles stop/snapshot, but these tests never load
     // audio. Missing-file errors expose the selected entry without opening output.
@@ -620,9 +724,7 @@ mod tests {
             shared: Arc::new(RwLock::new(state.clone())),
             state,
             wakeup: Arc::new(RwLock::new(None)),
-            gui_opener: Arc::new(RwLock::new(None)),
             subscribers: Arc::new(RwLock::new(Vec::new())),
-            raise_requested: Arc::new(AtomicBool::new(false)),
             generation: 1,
             queue_ids: Vec::new(),
             playback: None,
@@ -638,6 +740,10 @@ mod tests {
         };
         core.enqueue(&[1, 2, 2, 3, 4]).unwrap();
         (directory, core)
+    }
+    fn run_until_disconnected(core: &mut Core, requests: Receiver<Request>) {
+        let (control, shutdown) = RuntimeControl::new();
+        core.run(requests, shutdown, &control);
     }
 
     fn display_fixture() -> (
@@ -661,9 +767,7 @@ mod tests {
             waveform: Arc::new(RwLock::new(audio::WaveformFrame::default())),
             sender,
             wakeup: Arc::new(RwLock::new(None)),
-            gui_opener: Arc::new(RwLock::new(None)),
             subscribers: Arc::new(RwLock::new(Vec::new())),
-            raise_requested: Arc::new(AtomicBool::new(false)),
         };
         (handle, worker, receiver)
     }
@@ -1249,7 +1353,7 @@ mod tests {
         .unwrap();
         let (sender, receiver) = bounded(1);
         drop(sender);
-        core.run(receiver);
+        run_until_disconnected(&mut core, receiver);
         let state = core.shared.read();
         assert!(state.system.shutting_down);
         assert!(state.system.last_error.is_some());
@@ -1534,13 +1638,8 @@ mod tests {
                 reply: Some(reply),
             })
             .unwrap();
-        requests
-            .send(Request {
-                operation: Operation::Command(Command::Shutdown),
-                reply: None,
-            })
-            .unwrap();
-        core.run(receiver);
+        drop(requests);
+        run_until_disconnected(&mut core, receiver);
         let CoreResponse::Ack(ack) = ack.recv().unwrap() else {
             panic!("Expected ack");
         };
@@ -3337,74 +3436,6 @@ mod tests {
         assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
         assert_eq!(core.state.queue.current_id, None);
         missing(&mut core, Command::Resume, 2);
-    }
-    #[test]
-    fn show_window_rejects_without_host_and_preserves_playback_state() {
-        let (_directory, mut core) = fixture();
-        core.state.playback.status = PlaybackStatus::Playing;
-        core.state.playback.position = 12.5;
-        let queue = core
-            .store
-            .queue_page(0, MAX_QUERY_ROWS)
-            .unwrap()
-            .rows
-            .iter()
-            .map(|entry| (entry.id, entry.track_id))
-            .collect::<Vec<_>>();
-        let error = core.command(Command::ShowWindow).unwrap_err();
-        assert!(error.to_string().contains("graphical host"));
-        assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
-        assert_eq!(core.state.playback.position, 12.5);
-        assert_eq!(queue_entries(&core), queue);
-    }
-
-    #[test]
-    fn show_window_notifies_registered_host_without_changing_playback() {
-        let (_directory, mut core) = fixture();
-        core.state.playback.status = PlaybackStatus::Paused;
-        core.state.playback.position = 7.25;
-        let queue = core
-            .store
-            .queue_page(0, MAX_QUERY_ROWS)
-            .unwrap()
-            .rows
-            .iter()
-            .map(|entry| (entry.id, entry.track_id))
-            .collect::<Vec<_>>();
-        let called = Arc::new(AtomicBool::new(false));
-        let signal = called.clone();
-        *core.gui_opener.write() = Some(Arc::new(move || {
-            signal.store(true, Ordering::Release);
-        }));
-        core.command(Command::ShowWindow).unwrap();
-        assert!(called.load(Ordering::Acquire));
-        assert!(core.raise_requested.swap(false, Ordering::AcqRel));
-        assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
-        assert_eq!(core.state.playback.position, 7.25);
-        assert_eq!(queue_entries(&core), queue);
-    }
-
-    #[test]
-    fn shutdown_wakes_registered_host_after_publishing_stopped_state() {
-        let (_directory, mut core) = fixture();
-        let shared = core.shared.clone();
-        let observed = Arc::new(AtomicBool::new(false));
-        let signal = observed.clone();
-        *core.gui_opener.write() = Some(Arc::new(move || {
-            let state = shared.read();
-            if state.system.shutting_down && state.playback.status == PlaybackStatus::Stopped {
-                signal.store(true, Ordering::Release);
-            }
-        }));
-        let (sender, receiver) = bounded(1);
-        sender
-            .send(Request {
-                operation: Operation::Command(Command::Shutdown),
-                reply: None,
-            })
-            .unwrap();
-        core.run(receiver);
-        assert!(observed.load(Ordering::Acquire));
     }
     #[test]
     fn shutdown_cancels_and_disconnects_a_backpressured_scan_worker() {

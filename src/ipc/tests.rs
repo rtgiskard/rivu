@@ -1,9 +1,57 @@
 use super::*;
 use crate::{
+    app::{AppCommand, AppHandle},
     model::{Command, Query},
     response::{Ack, QueryResponse, StateResponse, StateRevisions, StateSections},
 };
 use std::sync::Arc;
+
+#[test]
+fn app_commands_route_over_ipc_without_changing_business_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let config_path = directory.path().join("config.toml");
+    crate::config::Config {
+        media_read_buffer_mb: 1,
+        ffmpeg_enabled: false,
+        ..Default::default()
+    }
+    .save(&config_path)
+    .unwrap();
+    let socket = directory.path().join("rivu.sock");
+    let owner = SocketOwner::acquire(&socket).unwrap();
+    let mut runtime = crate::core::Runtime::start(directory.path(), &config_path).unwrap();
+    let app = AppHandle::new(&runtime, false);
+    let server = Server::start(&owner, runtime.handle.clone(), app).unwrap();
+    let mut client = client_session(&socket).unwrap();
+    // A query fences asynchronous startup before comparing published state.
+    client.query(&Query::ScanTask { id: 0 }).unwrap();
+    let before = client.get_state(StateSections::ALL).unwrap();
+    let rejected = client.request_ack(&AppCommand::ShowWindow).unwrap();
+    assert!(!rejected.ok);
+    assert!(
+        rejected
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("graphical host")
+    );
+    assert_eq!(rejected.revision, before.system.as_ref().unwrap().revision);
+    let after = client.get_state(StateSections::ALL).unwrap();
+    assert_eq!(
+        serde_json::to_value(before).unwrap(),
+        serde_json::to_value(after).unwrap()
+    );
+    let ack = client.request_ack(&AppCommand::Shutdown).unwrap();
+    assert!(ack.ok);
+    runtime.join().unwrap();
+    assert!(runtime.handle.is_shutting_down());
+    assert!(ack.revision <= runtime.handle.revision());
+    drop(server);
+    assert!(socket.exists());
+    assert!(SocketOwner::acquire(&socket).is_err());
+    drop(owner);
+    assert!(!socket.exists());
+}
 
 #[test]
 fn scan_task_query_and_cancel_wire_round_trip_preserve_id() {
@@ -268,7 +316,8 @@ fn library_root_queries_run_through_real_owner_and_ipc_session() {
     let socket = directory.path().join("rivu.sock");
     let owner = SocketOwner::acquire(&socket).unwrap();
     let mut runtime = Runtime::start(directory.path(), &config_path).unwrap();
-    let server = Server::start(&owner, runtime.handle.clone()).unwrap();
+    let app = AppHandle::new(&runtime, false);
+    let server = Server::start(&owner, runtime.handle.clone(), app.clone()).unwrap();
     assert!(SocketOwner::acquire(&socket).is_err());
     let mut session = client_session(&socket).unwrap();
     let count_query = Query::LibraryRootCounts {
@@ -335,7 +384,7 @@ fn library_root_queries_run_through_real_owner_and_ipc_session() {
     // Stopping transport does not release the runtime's instance acquisition.
     assert!(socket.exists());
     assert!(SocketOwner::acquire(&socket).is_err());
-    runtime.handle.request_shutdown().unwrap();
+    app.request_shutdown().unwrap();
     runtime.join().unwrap();
     drop(owner);
     assert!(!socket.exists());

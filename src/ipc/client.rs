@@ -3,7 +3,8 @@ use super::{
     state_response, unpack_error, unpack_hello, write_request_frame_buffered,
 };
 use crate::{
-    model::{Command, Query},
+    app::AppCommand,
+    model::Query,
     response::{Ack, QueryResponse, StateResponse, StateRevisions, StateSections},
 };
 use anyhow::{Context, Result, bail};
@@ -162,9 +163,10 @@ impl ClientSession {
         }
     }
 
-    pub fn request_ack(&mut self, command: &Command) -> Result<Ack> {
+    pub fn request_ack(&mut self, command: &(impl Clone + Into<AppCommand>)) -> Result<Ack> {
         self.ensure_handshake()?;
-        let request = WireRequest::Command(WireCommand::from(command.clone()));
+        let command: AppCommand = command.clone().into();
+        let request = WireRequest::Command(WireCommand::from(command));
         match unpack_error(self.exchange(&request)?)? {
             WireResponse::Ack(response) => Ok(response),
             _ => bail!("IPC response was not an acknowledgement"),
@@ -202,6 +204,6 @@ pub fn get_state(path: &Path, sections: StateSections) -> Result<StateResponse> 
     client_session(path)?.get_state(sections)
 }
 
-pub fn request_ack(path: &Path, command: &Command) -> Result<Ack> {
+pub fn request_ack(path: &Path, command: &(impl Clone + Into<AppCommand>)) -> Result<Ack> {
     client_session(path)?.request_ack(command)
 }

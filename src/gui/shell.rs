@@ -488,7 +488,10 @@ impl Render for GuiApp {
                         cx,
                         |this, _, cx| {
                             this.app_menu_open = false;
-                            this.send(Command::Shutdown, cx);
+                            if let Some(session) = this.session.upgrade() {
+                                session.borrow().request_shutdown();
+                            }
+                            cx.notify();
                         },
                     )),
             );

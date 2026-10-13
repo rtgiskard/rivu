@@ -3,11 +3,12 @@
 
 use crate::{
     artwork::ArtworkManager,
-    core::{CoreHandle, Runtime},
+    core::{CoreHandle, Runtime, RuntimeControl},
     gui::{self, session::UiSession},
     ipc,
     model::Command,
     mpris,
+    response::Ack,
     tray::TrayController,
 };
 use anyhow::{Context, Result, anyhow, bail};
@@ -20,10 +21,159 @@ use signal_hook::{
 };
 use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc, thread};
 
+/// Application requests are never business commands or core view state.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Inline business commands avoid an extra allocation during application request conversion"
+)]
+#[derive(Clone, Debug)]
+pub enum AppCommand {
+    Core(Command),
+    ShowWindow,
+    Shutdown,
+}
+
+impl From<Command> for AppCommand {
+    fn from(command: Command) -> Self {
+        Self::Core(command)
+    }
+}
+
+#[derive(Default)]
+struct ControlState {
+    graphical: bool,
+    raise_pending: bool,
+    shutting_down: bool,
+    wakeup: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+/// Cloneable application endpoint, owned by App across window lifetimes.
+#[derive(Clone)]
+pub(crate) struct AppHandle {
+    core: CoreHandle,
+    runtime: RuntimeControl,
+    state: Arc<parking_lot::Mutex<ControlState>>,
+}
+
+impl AppHandle {
+    pub(crate) fn new(runtime: &Runtime, graphical: bool) -> Self {
+        let state = Arc::new(parking_lot::Mutex::new(ControlState {
+            graphical,
+            ..ControlState::default()
+        }));
+        let completion_state = Arc::clone(&state);
+        runtime.control.set_completion_callback(move || {
+            let mut state = completion_state.lock();
+            state.shutting_down = true;
+            state.raise_pending = false;
+            let wakeup = state.wakeup.clone();
+            drop(state);
+            if let Some(wakeup) = wakeup {
+                wakeup();
+            }
+        });
+        Self {
+            core: runtime.handle.clone(),
+            runtime: runtime.control.clone(),
+            state,
+        }
+    }
+
+    pub(crate) fn can_raise(&self) -> bool {
+        let state = self.state.lock();
+        state.graphical && !state.shutting_down
+    }
+
+    pub(crate) fn raise(&self) -> Result<()> {
+        let mut state = self.state.lock();
+        if !state.graphical {
+            bail!("Rivu has no graphical host");
+        }
+        if state.shutting_down {
+            bail!("Rivu is shutting down");
+        }
+        let wakeup = if state.raise_pending {
+            None
+        } else {
+            state.wakeup.clone()
+        };
+        state.raise_pending = true;
+        drop(state);
+        if let Some(wakeup) = wakeup {
+            wakeup();
+        }
+        Ok(())
+    }
+
+    /// Constant-capacity shutdown signal; never blocks a GPUI callback.
+    pub(crate) fn request_shutdown(&self) -> Result<()> {
+        let mut state = self.state.lock();
+        if state.shutting_down {
+            return Ok(());
+        }
+        state.shutting_down = true;
+        state.raise_pending = false;
+        let wakeup = state.wakeup.clone();
+        drop(state);
+        let result = self.runtime.request_shutdown();
+        if let Some(wakeup) = wakeup {
+            wakeup();
+        }
+        result
+    }
+
+    fn is_shutting_down(&self) -> bool {
+        self.state.lock().shutting_down
+    }
+
+    fn set_wakeup(&self, callback: impl Fn() + Send + Sync + 'static) {
+        let wakeup: Arc<dyn Fn() + Send + Sync> = Arc::new(callback);
+        let mut state = self.state.lock();
+        state.wakeup = Some(Arc::clone(&wakeup));
+        let pending = state.raise_pending || state.shutting_down;
+        drop(state);
+        if pending {
+            wakeup();
+        }
+    }
+
+    fn withdraw_gui(&self) {
+        let mut state = self.state.lock();
+        state.graphical = false;
+        state.raise_pending = false;
+        state.wakeup = None;
+    }
+
+    fn take_raise_request(&self) -> bool {
+        let mut state = self.state.lock();
+        std::mem::take(&mut state.raise_pending) && !state.shutting_down
+    }
+
+    pub(crate) fn request_ack(&self, command: AppCommand) -> Ack {
+        match command {
+            AppCommand::Core(command) => self.core.request_ack(command),
+            AppCommand::ShowWindow => {
+                let result = self.raise();
+                Ack {
+                    ok: result.is_ok(),
+                    error: result.err().map(|error| error.to_string()),
+                    revision: self.core.revision(),
+                    scan_id: None,
+                }
+            }
+            AppCommand::Shutdown => {
+                let _ = self.request_shutdown();
+                self.runtime.shutdown_ack(|| self.core.revision())
+            }
+        }
+    }
+}
+
 /// Owns one instance's core runtime, external services, and optional GUI session.
 /// Closing a window releases the session's view, never the application services.
 /// App retains socket acquisition until core, media, and transport have stopped.
 pub struct App {
+    handle: AppHandle,
     runtime: Runtime,
     _signals: ShutdownSignals,
     media: Option<MediaWorker>,
@@ -50,7 +200,7 @@ impl App {
     /// Import paths must already be resolved against the calling client's cwd.
     pub fn open_gui(data_dir: PathBuf, config_path: PathBuf, paths: Vec<PathBuf>) -> Result<()> {
         let socket = data_dir.join("rivu.sock");
-        match ipc::request_ack(&socket, &Command::ShowWindow) {
+        match ipc::request_ack(&socket, &AppCommand::ShowWindow) {
             Ok(ack) if ack.ok => {
                 if !paths.is_empty() {
                     let ack = ipc::request_ack(
@@ -85,10 +235,12 @@ impl App {
         let signals = Signals::new([SIGINT, SIGTERM]).context("Registering shutdown signals")?;
         let socket_owner = ipc::SocketOwner::acquire(&data_dir.join("rivu.sock"))?;
         let runtime = Runtime::start(&data_dir, &config_path)?;
-        let signals = ShutdownSignals::start(signals, runtime.handle.clone())?;
-        let server = ipc::Server::start(&socket_owner, runtime.handle.clone())?;
+        let handle = AppHandle::new(&runtime, graphical);
+        let signals = ShutdownSignals::start(signals, handle.clone())?;
+        let server = ipc::Server::start(&socket_owner, runtime.handle.clone(), handle.clone())?;
         let artwork = Arc::new(ArtworkManager::new(&data_dir));
         let mut app = Self {
+            handle,
             runtime,
             _signals: signals,
             media: None,
@@ -100,7 +252,7 @@ impl App {
         };
         app.media = Some(MediaWorker::start(
             app.runtime.handle.clone(),
-            graphical,
+            app.handle.clone(),
             Arc::clone(&app.artwork),
         )?);
         if !paths.is_empty() {
@@ -113,6 +265,7 @@ impl App {
             app.gui = Some(GuiState {
                 session: UiSession::new(
                     app.runtime.handle.clone(),
+                    app.handle.clone(),
                     data_dir.join("layout.json"),
                     Arc::clone(&app.artwork),
                 ),
@@ -152,9 +305,9 @@ impl App {
         if self.gui.as_ref().is_none_or(|gui| gui.quitting) {
             return;
         }
-        if self.runtime.handle.is_shutting_down() {
+        if self.handle.is_shutting_down() {
             self.quit_gui(cx);
-        } else if self.runtime.handle.take_raise_request() {
+        } else if self.handle.take_raise_request() {
             self.show_window(cx);
         }
     }
@@ -167,8 +320,9 @@ impl App {
             return;
         }
         gui.quitting = true;
+        let _ = self.handle.request_shutdown();
         // Withdraw CanRaise and stop producers before releasing the UI receiver.
-        self.runtime.handle.clear_gui_opener();
+        self.handle.withdraw_gui();
         gui.wake_task.take();
         gui.window_closed.take();
         gui.app_quit.take();
@@ -184,7 +338,7 @@ impl App {
 
     fn run_gui(mut self) -> Result<()> {
         if self.runtime.handle.config_snapshot().tray_enabled {
-            self.tray = TrayController::start(self.runtime.handle.clone())?;
+            self.tray = TrayController::start(self.runtime.handle.clone(), self.handle.clone())?;
         }
         let app = Rc::new(RefCell::new(self));
         let gpui_owner = Rc::clone(&app);
@@ -202,10 +356,10 @@ impl App {
                 // cannot retain the application after the event loop returns.
                 let closed_owner = Rc::downgrade(&gpui_owner);
                 let window_closed = cx.on_window_closed(move |_, id| {
-                    if let Some(app) = closed_owner.upgrade() {
-                        if let Some(gui) = app.borrow().gui.as_ref() {
-                            gui.session.borrow_mut().window_closed(id);
-                        }
+                    if let Some(app) = closed_owner.upgrade()
+                        && let Some(gui) = app.borrow().gui.as_ref()
+                    {
+                        gui.session.borrow_mut().window_closed(id);
                     }
                 });
                 let quit_owner = Rc::downgrade(&gpui_owner);
@@ -220,7 +374,7 @@ impl App {
                 // handles Raise and shutdown even when no window exists.
                 let (wake_sender, mut wake_receiver) = mpsc::channel::<()>(1);
                 let wake_sender = parking_lot::Mutex::new(wake_sender);
-                gpui_owner.borrow().runtime.handle.set_gui_opener(move || {
+                gpui_owner.borrow().handle.set_wakeup(move || {
                     let _ = wake_sender.lock().try_send(());
                 });
                 let request_owner = Rc::downgrade(&gpui_owner);
@@ -239,10 +393,10 @@ impl App {
                 gui.wake_task = Some(wake_task);
 
                 // Reconcile signals and Raise accepted before registration.
-                if app.runtime.handle.is_shutting_down() {
+                if app.handle.is_shutting_down() {
                     app.quit_gui(cx);
                 } else {
-                    app.runtime.handle.take_raise_request();
+                    app.handle.take_raise_request();
                     app.show_window(cx);
                 }
             });
@@ -251,22 +405,7 @@ impl App {
         app.shutdown_gui();
         drop(app.tray.take());
         // Blocking core acknowledgment and worker joins are outside GPUI.
-        let shutdown = if !app.runtime.handle.is_shutting_down() {
-            let response = app.runtime.handle.request_ack(Command::Shutdown);
-            if response.ok {
-                Ok(())
-            } else {
-                Err(anyhow!(
-                    "{}",
-                    response
-                        .error
-                        .as_deref()
-                        .unwrap_or("Could not shut down Rivu")
-                ))
-            }
-        } else {
-            Ok(())
-        };
+        let shutdown = app.handle.request_shutdown();
         let error = app
             .gui
             .as_mut()
@@ -278,7 +417,7 @@ impl App {
 
     fn finish(&mut self, interface_result: Result<()>) -> Result<()> {
         if interface_result.is_err() {
-            let _ = self.runtime.handle.request_shutdown();
+            let _ = self.handle.request_shutdown();
         }
         let join_result = self.runtime.join();
         // Keep IPC/socket acquisition alive through core join and MPRIS stop.
@@ -293,7 +432,7 @@ impl Drop for App {
         self.shutdown_gui();
         drop(self.tray.take());
         if !self.runtime.is_finished() {
-            let _ = self.runtime.handle.request_shutdown();
+            let _ = self.handle.request_shutdown();
         }
         let _ = self.runtime.join();
         drop(self.media.take());
@@ -306,7 +445,7 @@ struct ShutdownSignals {
 }
 
 impl ShutdownSignals {
-    fn start(mut signals: Signals, core: CoreHandle) -> Result<Self> {
+    fn start(mut signals: Signals, app: AppHandle) -> Result<Self> {
         let handle = signals.handle();
         let worker = thread::Builder::new()
             .name("rivu-signals".into())
@@ -314,7 +453,7 @@ impl ShutdownSignals {
                 // Coalesce signals; wait for capacity only in this worker.
                 if let Some(signal) = signals.forever().next() {
                     tracing::info!(signal, "shutdown_signal_received");
-                    let _ = core.request_shutdown();
+                    let _ = app.request_shutdown();
                 }
             })?;
         Ok(Self {
@@ -339,7 +478,7 @@ struct MediaWorker {
 }
 
 impl MediaWorker {
-    fn start(handle: CoreHandle, graphical: bool, artwork: Arc<ArtworkManager>) -> Result<Self> {
+    fn start(handle: CoreHandle, app: AppHandle, artwork: Arc<ArtworkManager>) -> Result<Self> {
         let changes = handle.subscribe();
         let (stop, stop_receiver) = bounded(1);
         let worker = thread::Builder::new()
@@ -357,7 +496,7 @@ impl MediaWorker {
                         let status = if enabled {
                             match mpris::Mpris::start(
                                 handle.clone(),
-                                graphical,
+                                app.clone(),
                                 Arc::clone(&artwork),
                             ) {
                                 Ok(started) => {
@@ -402,6 +541,109 @@ impl Drop for MediaWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn runtime_fixture() -> (tempfile::TempDir, Runtime) {
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        crate::config::Config {
+            media_read_buffer_mb: 1,
+            ffmpeg_enabled: false,
+            ..Default::default()
+        }
+        .save(&config)
+        .unwrap();
+        let runtime = Runtime::start(directory.path(), &config).unwrap();
+        (directory, runtime)
+    }
+
+    #[test]
+    fn raises_coalesce_across_registration_and_shutdown_withdraws_host() {
+        let (_directory, mut runtime) = runtime_fixture();
+        let app = AppHandle::new(&runtime, true);
+        for _ in 0..1000 {
+            app.raise().unwrap();
+        }
+        let (wake, wakes) = bounded(1);
+        app.set_wakeup(move || {
+            let _ = wake.try_send(());
+        });
+        assert_eq!(wakes.try_recv(), Ok(()));
+        assert!(app.take_raise_request());
+        assert!(!app.take_raise_request());
+        app.raise().unwrap();
+        assert_eq!(wakes.try_recv(), Ok(()));
+        app.request_shutdown().unwrap();
+        assert!(!app.can_raise());
+        assert!(app.raise().is_err());
+        assert!(!app.take_raise_request());
+        runtime.join().unwrap();
+    }
+
+    #[test]
+    fn completion_reconciles_before_and_after_ui_registration() {
+        for register_first in [false, true] {
+            let (_directory, mut runtime) = runtime_fixture();
+            let app = AppHandle::new(&runtime, true);
+            let (wake, wakes) = bounded(1);
+            let callback = move || {
+                let _ = wake.try_send(());
+            };
+            if register_first {
+                app.set_wakeup(callback.clone());
+            }
+            // Core completion, not an App shutdown request, must wake its owner.
+            runtime.control.request_shutdown().unwrap();
+            runtime.join().unwrap();
+            if !register_first {
+                app.set_wakeup(callback);
+            }
+            assert_eq!(wakes.try_recv(), Ok(()));
+            assert!(app.is_shutting_down());
+            assert!(!app.can_raise());
+        }
+    }
+
+    #[test]
+    fn app_endpoint_created_after_core_completion_reconciles_shutdown() {
+        let (_directory, mut runtime) = runtime_fixture();
+        runtime.control.request_shutdown().unwrap();
+        runtime.join().unwrap();
+        let app = AppHandle::new(&runtime, true);
+        assert!(app.is_shutting_down());
+        assert!(!app.can_raise());
+        assert!(app.raise().is_err());
+    }
+
+    #[test]
+    fn ipc_shutdown_ack_survives_app_teardown_before_socket_retirement() {
+        let directory = tempfile::tempdir().unwrap();
+        let data_dir = directory.path().to_path_buf();
+        let config_path = data_dir.join("config.toml");
+        crate::config::Config {
+            media_read_buffer_mb: 1,
+            ffmpeg_enabled: false,
+            mpris_enabled: false,
+            tray_enabled: false,
+            ..Default::default()
+        }
+        .save(&config_path)
+        .unwrap();
+        let socket = data_dir.join("rivu.sock");
+        let (ready, started) = bounded(1);
+        let worker = thread::spawn(move || {
+            let app = App::start(data_dir, config_path, Vec::new(), false)?;
+            ready.send(()).unwrap();
+            app.run()
+        });
+        started
+            .recv_timeout(std::time::Duration::from_secs(15))
+            .unwrap();
+        let ack = ipc::request_ack(&socket, &AppCommand::Shutdown).unwrap();
+        assert!(ack.ok);
+        worker.join().unwrap().unwrap();
+        assert!(!socket.exists());
+        assert!(ipc::SocketOwner::acquire(&socket).is_ok());
+    }
 
     #[test]
     fn duplicate_start_does_not_touch_runtime_storage_or_configuration() {

@@ -1,7 +1,7 @@
 //! Window ownership and release of visual subscriptions and analysis demand.
 
 use super::GuiApp;
-use crate::{artwork::ArtworkManager, core::CoreHandle};
+use crate::{app::AppHandle, artwork::ArtworkManager, core::CoreHandle};
 use anyhow::Result;
 use gpui::*;
 use std::{
@@ -13,6 +13,7 @@ use std::{
 
 pub(crate) struct UiSession {
     handle: CoreHandle,
+    app: AppHandle,
     layout_path: PathBuf,
     artwork_manager: Arc<ArtworkManager>,
     self_weak: Weak<RefCell<UiSession>>,
@@ -22,18 +23,26 @@ pub(crate) struct UiSession {
 impl UiSession {
     pub(crate) fn new(
         handle: CoreHandle,
+        app: AppHandle,
         layout_path: PathBuf,
         artwork_manager: Arc<ArtworkManager>,
     ) -> Rc<RefCell<Self>> {
         Rc::new_cyclic(|self_weak| {
             RefCell::new(Self {
                 handle,
+                app,
                 layout_path,
                 artwork_manager,
                 self_weak: self_weak.clone(),
                 window: None,
             })
         })
+    }
+
+    pub(crate) fn request_shutdown(&self) {
+        if let Err(error) = self.app.request_shutdown() {
+            tracing::warn!(%error, "gui_quit_failed");
+        }
     }
 
     pub(crate) fn show_window(&mut self, cx: &mut App) -> Result<()> {

@@ -3,6 +3,7 @@
 //! Playback changes come from the core subscription, never a library polling loop.
 
 use crate::{
+    app::{AppCommand, AppHandle},
     artwork::{Artwork, ArtworkIdentity, ArtworkManager},
     core::CoreHandle,
     model::{Command, PlaybackStatus, RepeatMode},
@@ -37,14 +38,14 @@ pub struct Mpris {
 }
 
 impl Mpris {
-    pub fn start(
+    pub(crate) fn start(
         handle: CoreHandle,
-        can_raise: bool,
+        app: AppHandle,
         artwork: Arc<ArtworkManager>,
     ) -> Result<Self> {
         let updates = handle.subscribe();
         let initial = handle.mpris_snapshot();
-        let initial_can_raise = can_raise && handle.can_raise();
+        let initial_can_raise = app.can_raise();
         // Builder uses DoNotQueue: another Rivu must fail, not silently wait for
         // the name or replace the running player's controls.
         let connection = Builder::session()
@@ -53,13 +54,7 @@ impl Mpris {
             .allow_name_replacements(false)
             .replace_existing_names(false)
             .method_timeout(Duration::from_secs(5))
-            .serve_at(
-                OBJECT_PATH,
-                Root {
-                    handle: handle.clone(),
-                    raise_supported: can_raise,
-                },
-            )?
+            .serve_at(OBJECT_PATH, Root { app: app.clone() })?
             .serve_at(
                 OBJECT_PATH,
                 Player {
@@ -92,7 +87,7 @@ impl Mpris {
                         recv(updates) -> update => {
                             if update.is_err() { break; }
                             let current = handle.mpris_snapshot();
-                            let current_can_raise = can_raise && handle.can_raise();
+                            let current_can_raise = app.can_raise();
                             if let Err(error) = publish_changes(
                                 &bus,
                                 &previous,
@@ -139,20 +134,19 @@ impl Drop for Mpris {
 }
 
 struct Root {
-    handle: CoreHandle,
-    raise_supported: bool,
+    app: AppHandle,
 }
 
 #[zbus::interface(name = "org.mpris.MediaPlayer2")]
 impl Root {
     fn raise(&self) -> fdo::Result<()> {
-        if !self.raise_supported || !self.handle.can_raise() {
+        if !self.app.can_raise() {
             return Err(fdo::Error::NotSupported(
                 "Rivu has no graphical host".into(),
             ));
         }
-        self.handle.raise().map_err(|error| {
-            if !self.handle.can_raise() {
+        self.app.raise().map_err(|error| {
+            if !self.app.can_raise() {
                 fdo::Error::NotSupported("Rivu has no graphical host".into())
             } else {
                 fdo::Error::Failed(error.to_string())
@@ -161,7 +155,14 @@ impl Root {
     }
 
     fn quit(&self) -> fdo::Result<()> {
-        request(&self.handle, Command::Shutdown).map(|_| ())
+        let ack = self.app.request_ack(AppCommand::Shutdown);
+        if ack.ok {
+            Ok(())
+        } else {
+            Err(fdo::Error::Failed(
+                ack.error.unwrap_or_else(|| "Shutdown failed".into()),
+            ))
+        }
     }
 
     #[zbus(property(emits_changed_signal = "const"))]
@@ -171,7 +172,7 @@ impl Root {
 
     #[zbus(property)]
     fn can_raise(&self) -> bool {
-        self.raise_supported && self.handle.can_raise()
+        self.app.can_raise()
     }
 
     #[zbus(property(emits_changed_signal = "const"))]
