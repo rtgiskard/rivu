@@ -961,6 +961,13 @@ fn write_test_response(stream: &mut std::os::unix::net::UnixStream, response: Wi
 }
 
 pub(crate) fn complete_test_handshake(stream: &mut std::os::unix::net::UnixStream) {
+    complete_test_handshake_for_instance(stream, 1);
+}
+
+pub(crate) fn complete_test_handshake_for_instance(
+    stream: &mut std::os::unix::net::UnixStream,
+    instance_id: u32,
+) {
     let timeout = Some(std::time::Duration::from_secs(5));
     stream.set_read_timeout(timeout).unwrap();
     stream.set_write_timeout(timeout).unwrap();
@@ -968,7 +975,7 @@ pub(crate) fn complete_test_handshake(stream: &mut std::os::unix::net::UnixStrea
     write_test_response(
         stream,
         WireResponse::Hello(HelloResponse {
-            instance_id: 1u32.to_le_bytes(),
+            instance_id: instance_id.to_le_bytes(),
             state: wire_state(StateResponse {
                 revisions: StateRevisions::default(),
                 playback: None,
@@ -1060,6 +1067,7 @@ fn client_session_reuses_connection_after_command_and_request_rejections() {
         reply_test_query(&mut stream, playlist_test_response(7));
     });
     let mut session = client_session(&socket).unwrap();
+    session.bind_instance(1).unwrap();
     let query = Query::PlaylistSummaries {
         offset: 0,
         limit: 20,
@@ -1129,6 +1137,7 @@ fn client_session_discards_partial_failed_response_before_next_explicit_request(
         );
     });
     let mut session = client_session(&socket).unwrap();
+    session.bind_instance(1).unwrap();
     assert!(
         session
             .request_ack(&Command::CreatePlaylist {
@@ -1147,8 +1156,12 @@ fn client_session_discards_partial_failed_response_before_next_explicit_request(
 }
 
 #[test]
-fn cancelling_client_session_closes_pending_watch_without_a_response() {
-    use std::{io::Read, os::unix::net::UnixListener, sync::atomic::Ordering};
+fn cancelling_client_session_closes_pending_watch_with_partial_response() {
+    use std::{
+        io::{Read, Write},
+        os::unix::net::UnixListener,
+        sync::atomic::Ordering,
+    };
 
     let directory = socket_test_directory();
     let socket = directory.path().join("watch.sock");
@@ -1157,6 +1170,9 @@ fn cancelling_client_session_closes_pending_watch_without_a_response() {
     let (cancelled, notify) = session.cancellation();
     let client = std::thread::spawn(move || {
         session.get_state(StateSections::default()).unwrap();
+        session
+            .bind_instance(session.instance_id().unwrap())
+            .unwrap();
         session.watch_until(StateRevisions::default())
     });
     let mut stream = listener.accept().unwrap().0;
@@ -1165,10 +1181,178 @@ fn cancelling_client_session_closes_pending_watch_without_a_response() {
         read_test_request(&mut stream),
         WireRequest::Watch(_)
     ));
+    // Cancellation discards a partial response, not just an idle watch socket.
+    stream.write_all(&[10, 0, 0, 0, PROTOCOL_VERSION]).unwrap();
     cancelled.store(true, Ordering::Release);
     notify.notify_waiters();
     assert!(client.join().unwrap().unwrap().is_none());
-    assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+    let closed = stream.read(&mut [0]);
+    assert!(
+        matches!(closed, Ok(0))
+            || matches!(closed, Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset)
+    );
+}
+
+#[test]
+fn peer_authorization_checks_kernel_uid_not_socket_access_or_group() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = socket_test_directory();
+    let socket = directory.path().join("permissive.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o666)).unwrap();
+    let _client = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+    let accepted = listener.accept().unwrap().0;
+    accepted.set_nonblocking(true).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .unwrap();
+    let _entered = runtime.enter();
+    let accepted = tokio::net::UnixStream::from_std(accepted).unwrap();
+    let uid = unsafe { libc::geteuid() };
+    assert_eq!(accepted.peer_cred().unwrap().uid(), uid);
+    assert!(server::authorize_peer(&accepted, uid).is_ok());
+    assert!(server::authorize_peer(&accepted, uid.wrapping_add(1)).is_err());
+    // A peer that can connect is not authorized merely by sharing its group.
+    assert_eq!(accepted.peer_cred().unwrap().gid(), unsafe {
+        libc::getegid()
+    });
+}
+
+#[test]
+fn socket_owner_keeps_private_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = socket_test_directory();
+    let socket = directory.path().join("private.sock");
+    let _owner = SocketOwner::acquire(&socket).unwrap();
+    assert_eq!(
+        std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
+#[test]
+fn pinned_session_rejects_initial_replacement_before_commands_queries_or_state() {
+    use std::{io::Read, os::unix::net::UnixListener};
+    let directory = socket_test_directory();
+    let socket = directory.path().join("replaced.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = std::thread::spawn(move || {
+        for _ in 0..3 {
+            let mut stream = listener.accept().unwrap().0;
+            complete_test_handshake_for_instance(&mut stream, 2);
+            assert_eq!(
+                stream.read(&mut [0]).unwrap(),
+                0,
+                "old baseline sent an operation to B"
+            );
+        }
+    });
+    let mut session = client_session(&socket).unwrap();
+    session.bind_instance(1).unwrap();
+    let error = session
+        .request_ack(&Command::CreatePlaylist {
+            name: "A-only".into(),
+        })
+        .unwrap_err();
+    assert!(error.is::<InstanceChanged>());
+    let error = session
+        .query(&Query::PlaylistSummaries {
+            offset: 0,
+            limit: 10,
+        })
+        .unwrap_err();
+    assert!(error.is::<InstanceChanged>());
+    let error = session.get_state(StateSections::ALL).unwrap_err();
+    assert!(error.is::<InstanceChanged>());
+    assert_eq!(session.instance_id(), None);
+    server.join().unwrap();
+}
+
+#[test]
+fn pinned_session_rejects_reconnected_instance_without_replaying_failed_mutation() {
+    use std::{
+        io::{Read, Write},
+        os::unix::net::UnixListener,
+    };
+    let directory = socket_test_directory();
+    let socket = directory.path().join("reconnect.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = std::thread::spawn(move || {
+        let mut stream = listener.accept().unwrap().0;
+        complete_test_handshake(&mut stream);
+        assert!(
+            matches!(read_test_command(&mut stream), Command::CreatePlaylist { name } if name == "first")
+        );
+        stream.write_all(&[10, 0, 0, 0, PROTOCOL_VERSION]).unwrap();
+        drop(stream);
+        let mut stream = listener.accept().unwrap().0;
+        complete_test_handshake_for_instance(&mut stream, 2);
+        assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+    });
+    let mut session = client_session(&socket).unwrap();
+    session.bind_instance(1).unwrap();
+    assert!(
+        session
+            .request_ack(&Command::CreatePlaylist {
+                name: "first".into()
+            })
+            .is_err()
+    );
+    let error = session
+        .request_ack(&Command::CreatePlaylist {
+            name: "second".into(),
+        })
+        .unwrap_err();
+    assert!(error.is::<InstanceChanged>());
+    server.join().unwrap();
+}
+
+#[test]
+fn independent_cli_session_can_explicitly_reconnect_to_a_new_instance() {
+    use std::os::unix::net::UnixListener;
+    let directory = socket_test_directory();
+    let socket = directory.path().join("cli-reconnect.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = std::thread::spawn(move || {
+        let mut stream = listener.accept().unwrap().0;
+        complete_test_handshake(&mut stream);
+        read_test_command(&mut stream);
+        drop(stream);
+        let mut stream = listener.accept().unwrap().0;
+        complete_test_handshake_for_instance(&mut stream, 2);
+        assert!(
+            matches!(read_test_command(&mut stream), Command::CreatePlaylist { name } if name == "second")
+        );
+        reply_test_ack(
+            &mut stream,
+            Ack {
+                ok: true,
+                error: None,
+                revision: 2,
+                scan_id: None,
+            },
+        );
+    });
+    let mut session = client_session(&socket).unwrap();
+    assert!(
+        session
+            .request_ack(&Command::CreatePlaylist {
+                name: "first".into()
+            })
+            .is_err()
+    );
+    assert_eq!(session.instance_id(), None);
+    assert!(
+        session
+            .request_ack(&Command::CreatePlaylist {
+                name: "second".into()
+            })
+            .unwrap()
+            .ok
+    );
+    assert_eq!(session.instance_id(), Some(2));
+    server.join().unwrap();
 }
 
 #[test]

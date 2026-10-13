@@ -34,6 +34,9 @@ Track-ID mutations serialize each input list once. Library deletion validates
 before playback-side effects, then consumes the prepared input in the same
 serialized core dispatch. Stopping playback can update statistics, not catalog
 identities; reference deletion and gap compaction remain transactional.
+The audio stop acknowledgement supplies its final position and confirmed heard
+time independently of lifecycle-event delivery. Event-channel backpressure does
+not delay that snapshot, and later events cannot account for the same heard time twice.
 Count-only pages omit row projection; queue and playlist totals do not join
 track metadata. Equivalent normalized root prefixes are counted once per request,
 then expanded to the original paths and order. Root aggregation state is
@@ -152,9 +155,11 @@ Invalid headers, unknown message types, incompatible versions, malformed
 Postcard payloads, and trailing payload bytes within the frame limit receive an
 Error response and close that connection; other client sessions remain usable.
 
-The socket is created with owner-only permissions (`0600`). There is no separate
-credential exchange: the socket's filesystem access boundary controls who may
-issue commands. Before opening the data database, saving configuration, or
+The socket has owner-only permissions (`0600`) before it starts listening.
+The server also checks kernel-provided peer credentials and accepts only peers
+with the same effective UID, even if filesystem permissions would allow another
+user to connect; no application-level credential exchange is required.
+Before opening the data database, saving configuration, or
 starting audio workers, startup acquires a nonblocking advisory lock on the
 stable `rivu.sock.lock` file and binds a real listener. The lock file is retained
 after shutdown: unlinking it while Rivu is running would break the shared-inode
@@ -195,9 +200,14 @@ result but drains the active exchange before sending only the latest pending
 query. Exiting the TUI closes an in-flight socket wait, including command and
 handshake waits, without waiting for a response.
 The Watch worker's first Hello requests all state sections and supplies the
-initial TUI snapshot. Until it arrives, the screen stays in a loading state
-that accepts `q`; no separate foreground state request is made. Initial
-connection or handshake errors restore the terminal before returning the error.
+initial TUI snapshot and instance identity. Command and query sessions must bind
+to that same Hello instance before issuing requests. Until the snapshot arrives,
+the screen stays in a loading state that accepts `q`; no separate foreground
+state request is made. Command and query sessions can reconnect only to the
+same pinned instance; the Watch worker does not automatically reconnect. A
+changed instance is fatal, without replaying queued commands against a
+replacement server. Fatal connection, handshake, and instance-identity failures
+restore the terminal before returning the error.
 
 == Message types
 

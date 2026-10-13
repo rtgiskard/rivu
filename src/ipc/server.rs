@@ -85,6 +85,8 @@ impl SocketOwner {
             _lock: lock,
         };
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        // bind creates a listening socket before chmod. Connections queued in
+        // that window still have to pass the peer UID check before any Hello.
         owner.listener.set_nonblocking(true)?;
         Ok(owner)
     }
@@ -345,7 +347,7 @@ async fn serve_connection(
                     state: wire_state(handle.state(sections)),
                 });
                 write_frame_buffered(&mut stream, &response, &mut write_buffer).await?;
-                session = SessionState::Bound;
+                session = SessionState::Bound(instance_id);
             }
             WireRequest::State(sections) => {
                 let response = WireResponse::State(wire_state(handle.state(sections)));
@@ -432,6 +434,14 @@ async fn serve_connection(
     }
 }
 
+pub(super) fn authorize_peer(stream: &UnixStream, owner_uid: u32) -> Result<()> {
+    anyhow::ensure!(
+        stream.peer_cred()?.uid() == owner_uid,
+        "IPC peer UID is not the owner UID"
+    );
+    Ok(())
+}
+
 async fn run_server(
     listener: UnixListener,
     handle: CoreHandle,
@@ -444,6 +454,9 @@ async fn run_server(
     while instance_id == UNKNOWN_INSTANCE {
         instance_id = rng.random();
     }
+    // Effective UID owns the socket and is the only accepted principal. Group
+    // membership and even an unexpectedly permissive socket do not grant IPC.
+    let owner_uid = unsafe { libc::geteuid() };
     let mut clients = Vec::new();
     let revisions = updates;
     loop {
@@ -456,6 +469,10 @@ async fn run_server(
                         continue;
                     }
                 };
+                if let Err(error) = authorize_peer(&stream, owner_uid) {
+                    tracing::warn!(%error, "ipc_peer_rejected");
+                    continue;
+                }
                 clients.retain(|task: &tokio::task::JoinHandle<Result<()>>| !task.is_finished());
                 if clients.len() < MAX_CLIENTS {
                     clients.push(tokio::spawn(serve_connection(
