@@ -314,10 +314,12 @@ struct QueryJob {
     cancelled: Arc<AtomicBool>,
 }
 
+type QueryCompletion = (QueryRequest, Result<QueryResult, String>);
+
 struct QueryWorker {
     sender: Option<Sender<()>>,
     pending: Arc<Mutex<Option<QueryJob>>>,
-    latest: Arc<Mutex<Option<(QueryRequest, Result<QueryResult, String>)>>>,
+    latest: Arc<Mutex<Option<QueryCompletion>>>,
     cancellation: Option<Arc<AtomicBool>>,
     shutdown: Arc<AtomicBool>,
     shutdown_notify: Arc<tokio::sync::Notify>,
@@ -1341,6 +1343,10 @@ fn move_selection_page(
     }
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Key actions are consumed immediately; boxing commands would allocate per command key"
+)]
 enum KeyAction {
     Quit,
     Search,
@@ -2534,8 +2540,10 @@ mod tests {
         assert_eq!(tree.entries.selection.selected(), Some(34));
         assert_eq!(tree.entries.selection.offset(), 30);
 
-        let mut playlists = PagedList::default();
-        playlists.selection = ListState::default().with_selected(Some(34)).with_offset(30);
+        let mut playlists = PagedList {
+            selection: ListState::default().with_selected(Some(34)).with_offset(30),
+            ..PagedList::default()
+        };
         playlists.set_viewport(10);
         playlists.insert(
             0,

@@ -71,6 +71,10 @@ pub struct QueryRevisions {
     pub queue: u64,
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Single-track query results stay inline without an extra allocation on read and decode"
+)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ViewResponse {
     LibraryPage(Page<LibraryRow>),

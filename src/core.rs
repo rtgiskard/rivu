@@ -27,6 +27,10 @@ use std::{
 };
 
 type Wakeup = Arc<dyn Fn() + Send + Sync>;
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Keep one-shot query replies inline instead of allocating a response box"
+)]
 enum CoreResponse {
     Query(QueryResponse),
     Ack(Ack),
@@ -37,6 +41,10 @@ enum Operation {
     GuiConfig(GuiConfigChange),
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Inline configuration transfer avoids another allocation in the bounded request channel"
+)]
 pub(crate) enum GuiConfigChange {
     ToggleStillMode,
     ToggleWaveformSeek,

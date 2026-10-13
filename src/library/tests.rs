@@ -436,7 +436,7 @@ fn missing_requests_keep_normalized_logical_roots_and_progress_paths() -> Result
             }
         },
     )?;
-    assert_eq!(result.roots, [expected.clone()]);
+    assert_eq!(result.roots.as_slice(), std::slice::from_ref(&expected));
     assert_eq!(result.errors.len(), 1);
     assert_eq!(progress_paths, [expected]);
     Ok(())
@@ -465,7 +465,7 @@ fn linked_root_keeps_alias_in_records_roots_and_progress() -> Result<()> {
         },
     )?;
     assert!(result.errors.is_empty(), "{:?}", result.errors);
-    assert_eq!(result.roots, [alias.clone()]);
+    assert_eq!(result.roots.as_slice(), std::slice::from_ref(&alias));
     assert_eq!(result.records.len(), 1);
     assert_eq!(result.records[0].path, alias.join("audio.wav"));
     assert!(!progress_paths.is_empty());
@@ -892,8 +892,7 @@ fn cue_sources_require_logical_membership_in_any_configured_root() -> Result<()>
     assert!(result.suppressed_sources.is_empty());
     let metadata = events
         .iter()
-        .filter(|(phase, ..)| matches!(phase, &ScanPhase::ReadingMetadata))
-        .last()
+        .rfind(|(phase, ..)| matches!(phase, &ScanPhase::ReadingMetadata))
         .unwrap();
     assert_eq!(metadata.1, 1);
     assert_eq!(metadata.2, Some(1));
@@ -987,10 +986,16 @@ fn ordinary_scan_rehashes_same_size_wav_after_pre_epoch_mtime_change() -> Result
     assert!(rescanned.errors.is_empty(), "{:?}", rescanned.errors);
     assert_eq!(rescanned.records[0].size, original.records[0].size);
     assert_eq!(rescanned.records[0].modified_ns, -1_000_000_000);
-    assert_ne!(rescanned.records[0].fingerprint, original.records[0].fingerprint);
+    assert_ne!(
+        rescanned.records[0].fingerprint,
+        original.records[0].fingerprint
+    );
     store.apply_scan(&rescanned)?;
     assert_eq!(store.track_id_for_source(&audio, None)?, Some(id));
-    assert_eq!(store.track(id)?.unwrap().fingerprint, rescanned.records[0].fingerprint);
+    assert_eq!(
+        store.track(id)?.unwrap().fingerprint,
+        rescanned.records[0].fingerprint
+    );
     Ok(())
 }
 
@@ -1019,14 +1024,20 @@ fn epoch_zero_reuses_cache_while_forced_scan_rehashes() -> Result<()> {
     let ordinary = scan_paths(std::slice::from_ref(&audio), &known, false)?;
     assert!(ordinary.errors.is_empty(), "{:?}", ordinary.errors);
     assert_eq!(ordinary.records[0].modified_ns, 0);
-    assert_eq!(ordinary.records[0].fingerprint, original.records[0].fingerprint);
+    assert_eq!(
+        ordinary.records[0].fingerprint,
+        original.records[0].fingerprint
+    );
 
     // The owner implements force by supplying no reusable source snapshots.
     let forced = scan_paths(std::slice::from_ref(&audio), &[], false)?;
     assert!(forced.errors.is_empty(), "{:?}", forced.errors);
     assert_eq!(forced.records[0].size, original.records[0].size);
     assert_eq!(forced.records[0].modified_ns, 0);
-    assert_ne!(forced.records[0].fingerprint, original.records[0].fingerprint);
+    assert_ne!(
+        forced.records[0].fingerprint,
+        original.records[0].fingerprint
+    );
     Ok(())
 }
 

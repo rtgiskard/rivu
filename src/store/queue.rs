@@ -88,15 +88,14 @@ impl Store {
 
     pub(crate) fn queue_track_id(&self, id: u64) -> Result<i64> {
         let id = i64::try_from(id).context("Queue entry ID exceeds database range")?;
-        Ok(self
-            .conn
+        self.conn
             .query_row(
                 "SELECT track_id FROM queue_entries WHERE id=?1",
                 [id],
                 |row| row.get(0),
             )
             .optional()?
-            .context("Queue entry not found")?)
+            .context("Queue entry not found")
     }
 
     pub(crate) fn queued_track(&self, track_id: i64) -> Result<Option<u64>> {

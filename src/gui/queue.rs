@@ -461,8 +461,10 @@ mod tests {
     }
     #[test]
     fn selection_changes_cancel_pending_navigation_and_range_results() {
-        let mut queue = QueueSelection::default();
-        queue.revision = 7;
+        let mut queue = QueueSelection {
+            revision: 7,
+            ..QueueSelection::default()
+        };
         let generation = queue.generation;
         queue.select(identity(1, 0), false);
         assert!(!queue.current(generation, 7));

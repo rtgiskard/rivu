@@ -411,9 +411,11 @@ fn system_config_wire_adapter_preserves_optional_fields() {
             output_device,
             ..Default::default()
         });
-        let mut system = crate::model::SystemState::default();
-        system.config = config.clone();
-        system.revision = 42;
+        let system = crate::model::SystemState {
+            config: config.clone(),
+            revision: 42,
+            ..crate::model::SystemState::default()
+        };
         let mut encoded = Vec::new();
         encode_response_frame_into(
             &WireResponse::State(wire_state(StateResponse {

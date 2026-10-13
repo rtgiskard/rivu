@@ -731,6 +731,10 @@ fn append_arc(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The primitive takes arc geometry and paint parameters directly without a one-use wrapper"
+)]
 /// GPUI paths do not expose a blur filter. Three translucent, widening strokes
 /// provide a bounded soft halo without allocating an image or adding a post-pass.
 fn paint_glow_arc(
@@ -1091,9 +1095,11 @@ mod tests {
     fn other_view_overrides_do_not_reset_radial_display() {
         let mut radial = AudioVisualizer::new();
         radial.update(&frame());
-        let mut config = Config::default();
-        config.spectrum_db_range = Some(40.0);
-        config.spectrogram_db_range = Some(100.0);
+        let config = Config {
+            spectrum_db_range: Some(40.0),
+            spectrogram_db_range: Some(100.0),
+            ..Config::default()
+        };
         radial.configure(&config);
         let data = radial.data.borrow();
         assert_eq!(data.displayed, vec![0.5; 4]);

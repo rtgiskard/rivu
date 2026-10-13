@@ -100,6 +100,10 @@ impl Store {
         Ok(Page { total, rows })
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep the view-page filter and paging contract with one additional root path"
+    )]
     pub fn library_root_page(
         &self,
         path: &Path,

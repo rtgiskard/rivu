@@ -965,8 +965,10 @@ mod tests {
     fn visualization_ranges_inherit_and_preserve_explicit_overrides() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
-        let mut config = Config::default();
-        config.visualization_db_range = 85.0;
+        let mut config = Config {
+            visualization_db_range: 85.0,
+            ..Config::default()
+        };
         assert_eq!(config.spectrum_db_range(), 85.0);
         assert_eq!(config.spectrogram_db_range(), 85.0);
         assert_eq!(config.audio_visualizer_db_range(), 85.0);
