@@ -1,12 +1,32 @@
 use super::positions::{PositionScope, close_gaps, move_entry};
 use super::tracks::{SOURCE_FILTER, validate_encoded_track_ids};
 use super::{Store, batch_limit, changed};
-use crate::model::{Batch, Page, PlaylistEntryCursor, PlaylistEntryRow, PlaylistSummary};
+use crate::model::{
+    Batch, Page, PlaylistEntryCursor, PlaylistEntryLocation, PlaylistEntryRow, PlaylistSummary,
+};
 use anyhow::{Context, Result, anyhow, bail};
 use rusqlite::{OptionalExtension, Transaction, params};
 use std::path::PathBuf;
 
 impl Store {
+    pub fn playlist_entry(&self, entry_id: i64) -> Result<Option<PlaylistEntryLocation>> {
+        // Positions are contiguous. The covering playlist_order index supplies the last
+        // position without counting or projecting the entire playlist.
+        Ok(self.conn.query_row(
+            "SELECT e.id,e.playlist_id,e.track_id,e.position,
+                    (SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=e.playlist_id)
+             FROM playlist_entries e WHERE e.id=?1",
+            [entry_id],
+            |row| Ok(PlaylistEntryLocation {
+                id: row.get(0)?,
+                playlist_id: row.get(1)?,
+                track_id: row.get(2)?,
+                position: row.get::<_, i64>(3)? as usize,
+                total: row.get::<_, i64>(4)? as usize,
+            }),
+        ).optional()?)
+    }
+
     pub fn playlist_summary_page(
         &self,
         offset: usize,
@@ -346,6 +366,49 @@ fn valid_name(s: &str) -> Result<()> {
 mod deletion_tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn playlist_entry_location_tracks_reorder_and_deletion_by_identity() -> Result<()> {
+        let store = Store::open(Path::new(":memory:"))?;
+        store.conn.execute_batch(
+            "INSERT INTO tracks(id,path) VALUES (1,'one'),(2,'two'),(3,'three');
+             INSERT INTO playlists(id,name) VALUES (10,'first'),(20,'second');
+             INSERT INTO playlist_entries(id,playlist_id,track_id,position) VALUES
+                (100,10,1,0),(101,10,2,1),(102,10,3,2),(200,20,1,0);",
+        )?;
+        let expected = PlaylistEntryLocation {
+            id: 102,
+            playlist_id: 10,
+            track_id: 3,
+            position: 2,
+            total: 3,
+        };
+        assert_eq!(store.playlist_entry(102)?, Some(expected));
+        store.move_playlist_entry(102, 0)?;
+        assert_eq!(
+            store.playlist_entry(102)?,
+            Some(PlaylistEntryLocation {
+                position: 0,
+                ..expected
+            })
+        );
+        store.remove_playlist_entry(100)?;
+        assert_eq!(
+            store.playlist_entry(102)?,
+            Some(PlaylistEntryLocation {
+                position: 0,
+                total: 2,
+                ..expected
+            })
+        );
+        assert_eq!(store.playlist_entry(200)?.unwrap().total, 1);
+        store.remove_playlist_entry(102)?;
+        assert_eq!(store.playlist_entry(102)?, None);
+        assert_eq!(store.playlist_entry(999)?, None);
+        store.delete_playlist(20)?;
+        assert_eq!(store.playlist_entry(200)?, None);
+        Ok(())
+    }
 
     #[test]
     fn remove_playlist_entry_preserves_identity_and_other_references() -> Result<()> {

@@ -134,24 +134,28 @@ impl Core {
         }
         Ok(())
     }
+    fn retiring_audio_event(&mut self, generation: u64, event: AudioEvent) -> Result<()> {
+        match event {
+            AudioEvent::Started {
+                generation: event_generation,
+                info,
+            } if event_generation == generation => self.playback_started(info)?,
+            AudioEvent::Progress {
+                generation: event_generation,
+                position_seconds,
+                listened_seconds,
+            } if event_generation == generation => {
+                self.playback_progress(position_seconds, listened_seconds)?;
+            }
+            // Retiring terminal events cannot advance, recursively stop, or revive playback.
+            _ => {}
+        }
+        Ok(())
+    }
+
     pub(in crate::core) fn drain_playback_events(&mut self, generation: u64) -> Result<()> {
         while let Ok(event) = self.engine.events.try_recv() {
-            match event {
-                AudioEvent::Started {
-                    generation: event_generation,
-                    info,
-                } if event_generation == generation => self.playback_started(info)?,
-                AudioEvent::Progress {
-                    generation: event_generation,
-                    position_seconds,
-                    listened_seconds,
-                } if event_generation == generation => {
-                    self.playback_progress(position_seconds, listened_seconds)?;
-                }
-                // The output is retiring: terminal events must never advance
-                // the queue, recursively stop the worker, or revive playback.
-                _ => {}
-            }
+            self.retiring_audio_event(generation, event)?;
         }
         Ok(())
     }
@@ -159,15 +163,16 @@ impl Core {
         &mut self,
         snapshot: Result<Option<(u64, f64)>>,
         natural: bool,
+        bookkeeping: Result<()>,
     ) -> Result<()> {
         let generation = self.generation;
         // A request can beat a queued Started even though the worker has already
         // played audio. Acknowledged stops make that queued bookkeeping safe to
         // consume before generation fencing; errors still fence below.
         let bookkeeping = if snapshot.is_ok() {
-            self.drain_playback_events(generation)
+            bookkeeping.and_then(|()| self.drain_playback_events(generation))
         } else {
-            Ok(())
+            bookkeeping
         };
         // Fence queued events even when stopping or saving the count fails.
         self.generation = self.generation.wrapping_add(1);
@@ -223,9 +228,22 @@ impl Core {
         self.playback = None;
         result
     }
+    pub(in crate::core) fn stop_playback(&mut self, natural: bool) -> Result<()> {
+        let commands = self.engine.commands.clone();
+        let events = self.engine.events.clone();
+        let generation = self.generation;
+        let mut bookkeeping = Ok(());
+        let snapshot = audio::stop_and_snapshot(&commands, &events, |event| {
+            if bookkeeping.is_ok() {
+                bookkeeping = self.retiring_audio_event(generation, event);
+            }
+        })
+        .map(Some);
+        self.finish_playback(snapshot, natural, bookkeeping)
+    }
+
     pub(in crate::core) fn stop(&mut self) -> Result<()> {
-        let snapshot = self.engine.stop_and_snapshot().map(Some);
-        self.finish_playback(snapshot, false)
+        self.stop_playback(false)
     }
     pub(in crate::core) fn advance(&mut self, natural: bool) -> Result<()> {
         self.advance_with_status(natural, PlaybackStatus::Playing)
@@ -238,7 +256,11 @@ impl Core {
             Navigation::Previous => self.previous_with_status(status),
         }
     }
-    fn advance_with_status(&mut self, natural: bool, status: PlaybackStatus) -> Result<()> {
+    pub(in crate::core) fn advance_with_status(
+        &mut self,
+        natural: bool,
+        status: PlaybackStatus,
+    ) -> Result<()> {
         if self.queue_ids.is_empty() {
             return self.stop();
         }
@@ -313,11 +335,12 @@ impl Core {
         if self.state.playback.status == PlaybackStatus::Stopped {
             bail!("Nothing is playing");
         }
-        let seconds = self
+        let end = self
             .state
-            .playback
-            .duration
-            .map_or(seconds, |duration| seconds.min(duration));
+            .current_track()
+            .and_then(|track| track.cue.as_ref())
+            .and_then(|cue| cue.end_seconds().map(|end| end - cue.start_seconds()));
+        let seconds = end.map_or(seconds, |end| seconds.min(end));
         self.audio(AudioCommand::Seek(seconds))?;
         self.state.playback.position = seconds;
         self.state.playback.seek_revision = self.state.playback.seek_revision.wrapping_add(1);

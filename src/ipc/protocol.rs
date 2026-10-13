@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub(super) const PROTOCOL_VERSION: u8 = 11;
+pub(super) const PROTOCOL_VERSION: u8 = 12;
 pub(super) const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub(super) const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub(super) const MAX_CLIENTS: usize = 16;
@@ -67,12 +67,12 @@ impl TryFrom<u8> for ResponseType {
 }
 pub(super) enum SessionState {
     Unbound,
-    Bound,
+    Bound(u32),
 }
 
 impl SessionState {
     pub(super) fn is_bound(&self) -> bool {
-        matches!(self, Self::Bound)
+        matches!(self, Self::Bound(_))
     }
 }
 
@@ -167,6 +167,9 @@ pub(super) enum WireQuery {
     },
     QueueEntries {
         queue_ids: Vec<u64>,
+    },
+    PlaylistEntry {
+        entry_id: i64,
     },
 }
 
@@ -441,6 +444,7 @@ impl From<Query> for WireQuery {
                 expected,
             },
             Query::QueueEntries { queue_ids } => Self::QueueEntries { queue_ids },
+            Query::PlaylistEntry { entry_id } => Self::PlaylistEntry { entry_id },
         }
     }
 }
@@ -574,6 +578,7 @@ impl TryFrom<WireQuery> for Query {
                 expected,
             },
             WireQuery::QueueEntries { queue_ids } => Self::QueueEntries { queue_ids },
+            WireQuery::PlaylistEntry { entry_id } => Self::PlaylistEntry { entry_id },
         })
     }
 }

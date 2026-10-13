@@ -938,6 +938,65 @@ mod tests {
     }
 
     #[test]
+    fn pause_accepted_before_queued_eof_keeps_next_and_repeat_one_paused() {
+        for repeat in [RepeatMode::Off, RepeatMode::One] {
+            let (_directory, mut core) = navigation_fixture(PlaybackStatus::Playing);
+            core.state.playback.repeat = repeat;
+            let expected = core.queue_ids[if repeat == RepeatMode::One { 1 } else { 2 }];
+            let generation = core.generation;
+            let commands = recording_audio(&mut core);
+            core.command(Command::Pause).unwrap();
+            core.audio_event(AudioEvent::Ended { generation }).unwrap();
+            assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
+            assert_eq!(core.state.queue.current_id, Some(expected));
+            let loads: Vec<_> = commands
+                .try_iter()
+                .filter_map(|command| match command {
+                    AudioCommand::Load { paused, .. } => Some(paused),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(loads, [true]);
+            core.audio_event(AudioEvent::Ended { generation }).unwrap();
+            assert_eq!(core.state.queue.current_id, Some(expected));
+            assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
+        }
+    }
+
+    #[test]
+    fn identical_shuffle_setter_preserves_previous_occurrence_history() {
+        let (_directory, mut core) = navigation_fixture(PlaybackStatus::Paused);
+        core.state.playback.shuffle = true;
+        let previous = core.queue_ids[3];
+        let current = core.state.queue.current_id.unwrap();
+        core.played = vec![previous, current];
+        core.played_cursor = 2;
+        let _commands = recording_audio(&mut core);
+        core.command(Command::Shuffle { enabled: true }).unwrap();
+        core.navigate(Navigation::Previous).unwrap();
+        assert_eq!(core.state.queue.current_id, Some(previous));
+        assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
+        assert_eq!(core.played, [previous, current]);
+        assert_eq!(core.played_cursor, 1);
+    }
+
+    #[test]
+    fn seek_uses_explicit_cue_end_not_estimated_whole_track_duration() {
+        let (_directory, mut core) = navigation_fixture(PlaybackStatus::Paused);
+        let _commands = recording_audio(&mut core);
+        core.seek(25.0).unwrap();
+        assert_eq!(core.state.playback.position, 25.0);
+        Arc::make_mut(core.state.current_track.as_mut().unwrap()).cue = Some(CueSegment {
+            sheet: "album.cue".into(),
+            number: 1,
+            start_frame: 75,
+            end_frame: Some(300),
+        });
+        core.seek(25.0).unwrap();
+        assert_eq!(core.state.playback.position, 3.0);
+    }
+
+    #[test]
     fn queued_pause_is_authoritative_for_navigation_not_the_callers_snapshot() {
         let (_directory, mut core) = navigation_fixture(PlaybackStatus::Playing);
         let expected = core.queue_ids[2];
@@ -1689,6 +1748,103 @@ mod tests {
         );
         assert_eq!(core.state.library.track_total, 4);
         assert_eq!(core.state.library.playlist_total, 0);
+    }
+
+    #[test]
+    fn failed_cue_import_never_reuses_old_entries_but_keeps_readable_items() {
+        for readable in [false, true] {
+            let (directory, mut core) = fixture();
+            let sheet = directory.path().join("album.cue");
+            let media = core
+                .store
+                .known_files()
+                .unwrap()
+                .into_iter()
+                .find(|file| file.track_id == 1)
+                .unwrap()
+                .media
+                .unwrap();
+            let old = ScanRecord {
+                path: directory.path().join("1.wav"),
+                size: 1,
+                modified_ns: 1,
+                fingerprint: None,
+                cue: Some(crate::model::CueSegment {
+                    sheet: sheet.clone(),
+                    number: 1,
+                    start_frame: 0,
+                    end_frame: Some(75),
+                }),
+                media: media.clone(),
+            };
+            core.store
+                .apply_scan(&ScanResult {
+                    records: vec![old],
+                    ..ScanResult::default()
+                })
+                .unwrap();
+            let old_id = core
+                .store
+                .track_id_for_source(&sheet, Some(1))
+                .unwrap()
+                .unwrap();
+            let path = directory.path().join("2.wav");
+            let scan = ScanFinished {
+                id: 0,
+                result: Ok(ScanResult {
+                    records: if readable {
+                        vec![ScanRecord {
+                            path: path.clone(),
+                            size: 1,
+                            modified_ns: 1,
+                            fingerprint: None,
+                            cue: None,
+                            media,
+                        }]
+                    } else {
+                        vec![]
+                    },
+                    errors: vec!["CUE sheet could not be read".into()],
+                    ..ScanResult::default()
+                }),
+                import: Some((
+                    "partial".into(),
+                    vec![
+                        M3uItem {
+                            path: sheet,
+                            name: None,
+                            cue_track: Some(1),
+                        },
+                        M3uItem {
+                            path,
+                            name: None,
+                            cue_track: None,
+                        },
+                    ],
+                )),
+                progress: ScanProgress {
+                    phase: ScanPhase::Completed,
+                    processed: 2,
+                    total: Some(2),
+                    errors: 1,
+                    path: None,
+                },
+            };
+            let result = core.finish_scan(scan);
+            assert!(core.store.track(old_id).unwrap().is_some());
+            if readable {
+                assert!(!result.unwrap());
+                let rows = core
+                    .store
+                    .playlist_entries_page(1, 0, MAX_QUERY_ROWS)
+                    .unwrap()
+                    .rows;
+                assert_eq!(rows.iter().map(|row| row.track_id).collect::<Vec<_>>(), [2]);
+            } else {
+                assert!(result.is_err());
+                assert_eq!(core.state.library.playlist_total, 0);
+            }
+        }
     }
 
     #[test]
@@ -2748,7 +2904,7 @@ mod tests {
         assert_eq!(core.playback.as_ref().unwrap().heard, 20.0);
         assert_eq!(play_count(&core, 1), 1);
         let generation = core.generation;
-        core.finish_playback(Ok(Some((generation, 20.0))), false)
+        core.finish_playback(Ok(Some((generation, 20.0))), false, Ok(()))
             .unwrap();
         assert_eq!(
             core.store.history(200).unwrap()[0].played_at,
@@ -2814,7 +2970,7 @@ mod tests {
             progress(&mut core, 2.0, 2.0);
             let generation = core.generation;
             let snapshot_generation = if stale { generation - 1 } else { generation };
-            core.finish_playback(Ok(Some((snapshot_generation, heard))), false)
+            core.finish_playback(Ok(Some((snapshot_generation, heard))), false, Ok(()))
                 .unwrap();
             assert_eq!(play_count(&core, 1), expected);
             assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
@@ -2864,7 +3020,7 @@ mod tests {
             sender
                 .send(AudioEvent::DecoderStopped { generation })
                 .unwrap();
-            core.finish_playback(Ok(Some((generation, heard))), false)
+            core.finish_playback(Ok(Some((generation, heard))), false, Ok(()))
                 .unwrap();
             assert_eq!(play_count(&core, 1), expected);
             assert_eq!(core.store.history(200).unwrap().len(), 1);
@@ -2896,7 +3052,7 @@ mod tests {
         sender.send(AudioEvent::Ended { generation }).unwrap();
         core.store.remove_tracks(&[1]).unwrap();
         assert!(
-            core.finish_playback(Ok(Some((generation, 10.0))), false)
+            core.finish_playback(Ok(Some((generation, 10.0))), false, Ok(()))
                 .is_err()
         );
         assert_eq!(core.generation, generation.wrapping_add(1));
@@ -3161,26 +3317,16 @@ mod tests {
     fn m3u_playlist_deduplicates_in_first_occurrence_order_without_deduplicating_queue() {
         let (directory, mut core) = fixture();
         for track_id in [1, 2, 3] {
-            std::fs::write(&core.track(track_id).unwrap().path, []).unwrap();
+            write_pcm(&core.track(track_id).unwrap().path);
         }
         let path = directory.path().join("duplicates.m3u");
         std::fs::write(&path, "2.wav\n1.wav\n2.wav\n3.wav\n1.wav\n").unwrap();
-        core.finish_scan(ScanFinished {
-            id: 0,
-            result: Ok(ScanResult::default()),
-            import: Some((
-                "First occurrences".into(),
-                library::import_playlist(&path).unwrap(),
-            )),
-            progress: ScanProgress {
-                phase: ScanPhase::ReadingMetadata,
-                processed: 0,
-                total: Some(0),
-                errors: 0,
-                path: None,
-            },
+        core.command(Command::ImportPlaylist {
+            path,
+            name: Some("First occurrences".into()),
         })
         .unwrap();
+        assert!(settle_scan(&mut core));
         let playlist_id = core.store.playlist_summary_page(0, 1).unwrap().rows[0].id;
         assert_eq!(
             core.store

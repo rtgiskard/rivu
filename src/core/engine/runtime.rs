@@ -322,6 +322,9 @@ impl Core {
                 *limit,
             )?),
             Query::Track { track_id } => ViewResponse::Track(self.store.track(*track_id)?),
+            Query::PlaylistEntry { entry_id } => {
+                ViewResponse::PlaylistEntry(self.store.playlist_entry(*entry_id)?)
+            }
             Query::LibraryStats => ViewResponse::LibraryStats(self.store.library_stats()?),
             Query::TrackBatch {
                 query,

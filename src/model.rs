@@ -163,6 +163,16 @@ pub struct PlaylistEntryRow {
     pub missing: bool,
 }
 
+/// Stable entry identity and current absolute position, without metadata or page residency.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaylistEntryLocation {
+    pub id: i64,
+    pub playlist_id: i64,
+    pub track_id: i64,
+    pub position: usize,
+    pub total: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LibraryStats {
     pub total: usize,
@@ -492,6 +502,9 @@ pub enum Query {
     },
     QueueEntries {
         queue_ids: Vec<u64>,
+    },
+    PlaylistEntry {
+        entry_id: i64,
     },
 }
 

@@ -123,12 +123,14 @@ impl Core {
             Command::RandomizeQueue => self.randomize_queue(&mut rand::rng())?,
             Command::DeduplicateQueue => self.deduplicate_queue()?,
             Command::Shuffle { enabled } => {
-                self.state.playback.shuffle = enabled;
-                self.played.clear();
-                self.played_cursor = 0;
-                if let Some(id) = self.state.queue.current_id {
-                    self.played.push(id);
-                    self.played_cursor = 1;
+                if self.state.playback.shuffle != enabled {
+                    self.state.playback.shuffle = enabled;
+                    self.played.clear();
+                    self.played_cursor = 0;
+                    if let Some(id) = self.state.queue.current_id {
+                        self.played.push(id);
+                        self.played_cursor = 1;
+                    }
                 }
             }
             Command::Repeat { mode } => self.state.playback.repeat = mode,

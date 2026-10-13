@@ -15,15 +15,20 @@ using playback history when shuffling.
 With Shuffle enabled, each Next independently chooses a queue occurrence with
 equal probability, including the current one. Immediate repeats are expected;
 duplicate occurrences increase their track's chances. Previous follows playback
-history; Next draws afresh even after Previous. Repeat One repeats the current
-occurrence at natural EOF but does not constrain explicit Next.
+history; Next draws afresh even after Previous. Setting Shuffle to its current
+value preserves that history. Repeat One repeats the current occurrence at
+natural EOF but does not constrain explicit Next.
 CUE playback uses the original source without splitting or transcoding it.
 Positions and seeks are relative to the subtrack; pregap directives do not
 synthesize silence absent from the source.
+Ordinary audio plays to actual decoder EOF; an estimated metadata duration is
+not a playback cutoff. An explicit CUE subtrack end remains a hard playback bound.
 
-Seek targets must be finite and non-negative; a known duration clamps them to
-the end. Seeking to the end follows normal queue completion; seeking while
-paused keeps playback paused. Pause also pauses live analysis. Listening
+Seek targets must be finite and non-negative. Ordinary file seeks are not clamped
+by estimated metadata duration; completion requires actual decoder EOF. Only an
+explicit CUE end bounds the seek target. Seeking while paused keeps playback
+paused. A late EOF notification after pausing does not restart playback or
+automatically advance the queue. Pause also pauses live analysis. Listening
 statistics use confirmed heard time; see link:02_library.adoc[Library].
 
 == Output devices and speaker layouts
@@ -39,7 +44,9 @@ rerouting. Select an available sink and start playback again to recover.
 
 Multichannel output preserves speaker identities. `playback.pipewire_auto_mix` is enabled
 by default and permits PipeWire remixing; disable it to require a compatible
-sink layout without remixing. Unsupported routes report an error.
+sink layout without remixing. Both modes validate the actual selected sink and
+its negotiated speaker layout, including changes to links while playing.
+Unsupported routes report an error rather than using an unrelated compatible sink.
 
 == Optional FFmpeg decoder
 
@@ -49,6 +56,9 @@ support a source, not during startup or status queries. Opening a track whose
 decoder hint is FFmpeg also loads the extension directly. Decoder status shows
 `not loaded` until a load is attempted; missing or incompatible libraries are
 reported when needed, and the load result is retained until restart.
+Native support is checked through the first packet decode: an unsupported
+format at that point also permits Auto fallback. Corrupt input and cancellation
+do not trigger a decoder fallback.
 
 Track details provides a *Decoder hint* selection. Use *Save* to commit it together
 with tag edits; an unsaved selection does not affect playback or waveform decoding:
