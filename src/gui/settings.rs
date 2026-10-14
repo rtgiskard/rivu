@@ -702,7 +702,10 @@ impl Settings {
                 })
                 .into()
             });
-        field.form(control).min_w(px(180.)).opacity(0.45)
+        column()
+            .min_w(px(180.))
+            .child(field.form(control).opacity(0.45))
+            .child(caption(reason).whitespace_normal())
     }
 
     fn value(&self, field: Field, cx: &App) -> String {
@@ -1213,7 +1216,14 @@ impl Settings {
         let config = match self.parse(cx) {
             Ok(config) => config,
             Err(error) => {
-                self.feedback = Some(Err(format!("Invalid settings: {error:#}")));
+                let recovery = if self.draft.spectrum_style == SpectrumStyle::Solid
+                    || !self.draft.spectrum_peaks
+                {
+                    " Retained inactive values are also validated. In Visualizations → Spectrum, choose a non-Solid Style to correct bar count, width or gap; enable Peak markers to correct marker hold or gravity."
+                } else {
+                    ""
+                };
+                self.feedback = Some(Err(format!("Invalid settings: {error:#}{recovery}")));
                 cx.notify();
                 return;
             }
@@ -1991,10 +2001,10 @@ impl Settings {
                 .child(self.measurement(Measured::SettingsStyle));
                 column().gap_3()
                     .child(settings_group("Appearance", column().gap_2()
-                        .child(two_column(form_field("Style", style).min_w(px(180.)), settings.field_state(Field::SpectrumBars, !solid, "Unavailable with Solid; uses pixel density.", cx)))
+                        .child(two_column(form_field("Style", style).min_w(px(180.)), settings.field_state(Field::SpectrumBars, !solid, "Retained with Solid. Choose another Style to edit.", cx)))
                         .child(two_column(
-                            settings.field_state(Field::SpectrumBarWidth, !solid, "Unavailable with Solid; uses pixel density.", cx),
-                            settings.field_state(Field::SpectrumGap, !solid, "Unavailable with Solid; has no bar gaps.", cx),
+                            settings.field_state(Field::SpectrumBarWidth, !solid, "Retained with Solid. Choose another Style to edit.", cx),
+                            settings.field_state(Field::SpectrumGap, !solid, "Retained with Solid. Choose another Style to edit.", cx),
                         ))
                         .child(settings.single(Field::SpectrumDb))
                         .child(row().flex_wrap().gap_2()

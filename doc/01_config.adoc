@@ -222,6 +222,11 @@ settings. Invalid input, an unavailable output device, or a save failure is
 reported in settings. Settings opened for one Audio Visualizer instance instead
 apply only that instance's style, reference lines, and labels to `layout.json`;
 applying fails if the instance no longer exists.
+Inactive Spectrum fields retain their values and are still validated by Apply.
+If a retained value is invalid, open Visualizations → Spectrum: choose a Style
+other than Solid to edit bar count, width, or gap, or enable Peak markers to
+edit marker hold or gravity. Correct the value, then restore the desired style
+or toggle and apply again. Disabling a field does not discard or repair its value.
 
 Saving library roots does not scan or enqueue tracks; use `Scan paths` in Library.
 Display-only changes do not reopen audio. Hover an error to read its complete
