@@ -1,8 +1,10 @@
 use super::positions::{PositionScope, close_gaps, move_entry};
+use super::rows::{TRACK_COLUMNS, track_from_row};
 use super::tracks::{SOURCE_FILTER, validate_encoded_track_ids};
 use super::{Store, batch_limit, changed};
 use crate::model::{
     Batch, Page, PlaylistEntryCursor, PlaylistEntryLocation, PlaylistEntryRow, PlaylistSummary,
+    Track,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use rusqlite::{OptionalExtension, Transaction, params};
@@ -199,6 +201,58 @@ impl Store {
                 missing: row.get::<_, i64>(6)? != 0,
             });
             last_cursor = Some(cursor);
+        }
+        let next = has_more.then_some(last_cursor).flatten();
+        Ok(Batch { rows, next })
+    }
+
+    pub(crate) fn playlist_track_batch(
+        &self,
+        playlist_id: i64,
+        after: Option<PlaylistEntryCursor>,
+        limit: usize,
+    ) -> Result<Batch<Track, PlaylistEntryCursor>> {
+        let limit = batch_limit(limit)?;
+        let exists = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM playlists WHERE id=?1)",
+            [playlist_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !exists {
+            bail!("Playlist not found");
+        }
+        // The derived table reuses the full Track projection and decoder. A LEFT JOIN
+        // keeps orphan entries visible so export fails rather than skipping them.
+        let suffix = if after.is_some() {
+            " AND (e.position,e.id)>(?2,?3) ORDER BY e.position,e.id LIMIT ?4"
+        } else {
+            " ORDER BY e.position,e.id LIMIT ?2"
+        };
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT t.*,e.position AS entry_position,e.id AS entry_id
+             FROM playlist_entries e LEFT JOIN (SELECT {TRACK_COLUMNS} FROM tracks) t
+             ON t.id=e.track_id WHERE e.playlist_id=?1{suffix}"
+        ))?;
+        let mut db_rows = if let Some(after) = after {
+            stmt.query(params![playlist_id, after.position, after.id, limit + 1])?
+        } else {
+            stmt.query(params![playlist_id, limit + 1])?
+        };
+        let mut rows = Vec::with_capacity(limit as usize);
+        let mut last_cursor = None;
+        let mut has_more = false;
+        while let Some(row) = db_rows.next()? {
+            if rows.len() == limit as usize {
+                has_more = true;
+                break;
+            }
+            row.get::<_, Option<i64>>(0)?
+                .context("Playlist contains a missing library track")?;
+            rows.push(track_from_row(row)?);
+            last_cursor = Some(PlaylistEntryCursor {
+                position: row.get("entry_position")?,
+                id: row.get("entry_id")?,
+            });
         }
         let next = has_more.then_some(last_cursor).flatten();
         Ok(Batch { rows, next })
@@ -650,6 +704,95 @@ mod request_tests {
         assert!(store.move_playlist_entry(i64::MAX, 0).is_err());
         assert_eq!(positioned_entries(&store, id)?, moved);
         assert_eq!(positioned_entries(&store, other)?, other_before);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::*;
+    use crate::model::MAX_QUERY_ROWS;
+    use std::path::Path;
+
+    #[test]
+    fn track_batches_preserve_order_across_the_row_bound() -> Result<()> {
+        let store = Store::open(Path::new(":memory:"))?;
+        let total = MAX_QUERY_ROWS + 3;
+        store.conn.execute(
+            "WITH RECURSIVE ids(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM ids WHERE id<?1)
+             INSERT INTO tracks(id,path) SELECT id,'track-'||id FROM ids",
+            [total as i64],
+        )?;
+        store
+            .conn
+            .execute("INSERT INTO playlists(id,name) VALUES(1,'ordered')", [])?;
+        store.conn.execute(
+            "INSERT INTO playlist_entries(id,playlist_id,track_id,position)
+             SELECT ?1-id+1000,1,id,?1-id FROM tracks",
+            [total as i64],
+        )?;
+        let first = store.playlist_track_batch(1, None, MAX_QUERY_ROWS)?;
+        assert_eq!(first.rows.len(), MAX_QUERY_ROWS);
+        assert_eq!(
+            first.rows.iter().map(|track| track.id).collect::<Vec<_>>(),
+            (4..=total as i64).rev().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            first.next,
+            Some(PlaylistEntryCursor {
+                position: MAX_QUERY_ROWS as i64 - 1,
+                id: MAX_QUERY_ROWS as i64 + 999,
+            })
+        );
+        let tail = store.playlist_track_batch(1, first.next, MAX_QUERY_ROWS)?;
+        assert_eq!(
+            tail.rows.iter().map(|track| track.id).collect::<Vec<_>>(),
+            [3, 2, 1]
+        );
+        assert!(tail.next.is_none());
+        // A full final batch must terminate without an extra empty-page fetch.
+        let exact_tail = store.playlist_track_batch(1, first.next, 3)?;
+        assert_eq!(exact_tail.rows, tail.rows);
+        assert!(exact_tail.next.is_none());
+        let exhausted = store.playlist_track_batch(
+            1,
+            Some(PlaylistEntryCursor {
+                position: total as i64 - 1,
+                id: total as i64 + 999,
+            }),
+            MAX_QUERY_ROWS,
+        )?;
+        assert!(exhausted.rows.is_empty());
+        assert!(exhausted.next.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn track_batches_distinguish_empty_unknown_and_orphaned_playlists() -> Result<()> {
+        let store = Store::open(Path::new(":memory:"))?;
+        let empty = store.create_playlist("empty")?;
+        let batch = store.playlist_track_batch(empty, None, 1)?;
+        assert!(batch.rows.is_empty());
+        assert!(batch.next.is_none());
+        assert!(store.playlist_track_batch(i64::MAX, None, 1).is_err());
+        assert!(store.playlist_track_batch(empty, None, 0).is_err());
+        assert!(
+            store
+                .playlist_track_batch(empty, None, MAX_QUERY_ROWS + 1)
+                .is_err()
+        );
+        store.conn.execute_batch(
+            "INSERT INTO tracks(id,path) VALUES(1,'one'),(3,'three');
+             INSERT INTO playlist_entries(id,playlist_id,track_id,position)
+             VALUES(10,1,1,0),(20,1,2,1),(30,1,3,2);",
+        )?;
+        // An orphan in the lookahead must produce a cursor, not a false end of stream.
+        let first = store.playlist_track_batch(empty, None, 1)?;
+        assert_eq!(first.rows[0].id, 1);
+        assert!(first.next.is_some());
+        for (after, limit) in [(None, 3), (first.next, 1)] {
+            assert!(store.playlist_track_batch(empty, after, limit).is_err());
+        }
         Ok(())
     }
 }

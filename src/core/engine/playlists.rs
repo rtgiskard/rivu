@@ -60,22 +60,17 @@ impl Core {
 
     pub(in crate::core) fn export_playlist(&self, playlist_id: i64, path: &Path) -> Result<()> {
         let mut after = None;
-        let mut rows: Vec<PlaylistEntryRow> = Vec::new();
-        let mut index = 0;
+        let mut rows = Vec::new().into_iter();
         let mut done = false;
         let tracks = std::iter::from_fn(|| {
             loop {
-                if index < rows.len() {
-                    let row = &rows[index];
-                    index += 1;
-                    return Some(self.store.track(row.track_id).and_then(|track| {
-                        track.context("Playlist contains a missing library track")
-                    }));
+                if let Some(track) = rows.next() {
+                    return Some(Ok(track));
                 }
                 if done {
                     return None;
                 }
-                let batch = match self.store.playlist_entry_batch(
+                let batch = match self.store.playlist_track_batch(
                     playlist_id,
                     after,
                     crate::model::MAX_QUERY_ROWS,
@@ -85,8 +80,7 @@ impl Core {
                 };
                 after = batch.next;
                 done = after.is_none();
-                rows = batch.rows;
-                index = 0;
+                rows = batch.rows.into_iter();
             }
         });
         library::export_m3u(path, tracks)

@@ -55,6 +55,13 @@ Queue and playlist entry pages seek by their contiguous position rather than
 skipping an OFFSET prefix. Playlist entry totals use the indexed maximum position;
 this relies on the same Store-owned contiguous-order invariant.
 
+Playlist export reads full tracks in playlist order with bounded keyset batches,
+without entry-summary projection, per-track queries, or the interactive track
+cache. Each batch retains at most 256 decoded tracks; a lookahead row determines
+continuation. Missing library references fail export rather than disappearing
+from the sequence. The existing M3U writer still validates CUE runs across batch
+boundaries and replaces the destination only after successful output.
+
 Directory and root queries use BINARY path ranges: a normalized nonempty prefix
 ends in `/`, and replacing that delimiter with `0` gives its exclusive upper
 bound. These ranges preserve literal characters, case, Unicode, and component
