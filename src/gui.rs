@@ -601,6 +601,9 @@ impl GuiApp {
                     this.focus_layout(window, cx);
                     cx.notify();
                 }
+                settings::SettingsEvent::ReviewDuplicates => {
+                    this.open_duplicate_review(window, cx);
+                }
                 settings::SettingsEvent::ApplyVisualizer {
                     panel_id,
                     options,
@@ -1724,7 +1727,7 @@ impl GuiApp {
                     .find(|panel| panel.id == active)
                     .is_none_or(|panel| panel.show_tab_bar);
                 let mut tabs = row()
-                    .h(gpui::rems(1.375))
+                    .h(gpui::rems(1.75))
                     .flex_shrink_0()
                     .px(gpui::px(UI_INSET))
                     .py(px(1.))

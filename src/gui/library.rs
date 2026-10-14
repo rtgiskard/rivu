@@ -24,11 +24,11 @@ pub(super) fn track_detail(track: &crate::model::LibraryRow) -> String {
     }
     match track.duration {
         Some(duration) => detail.push_str(&super::format_time(duration)),
-        None => detail.push('—'),
+        None => detail.push('-'),
     }
     detail.push_str(" · ");
     detail.push_str(if track.codec.is_empty() {
-        "—"
+        "-"
     } else {
         &track.codec
     });
@@ -38,7 +38,7 @@ pub(super) fn track_detail(track: &crate::model::LibraryRow) -> String {
             use std::fmt::Write;
             let _ = write!(detail, "{:.1} kbps", value as f64 / 1000.0);
         }
-        None => detail.push('—'),
+        None => detail.push('-'),
     }
     if track.missing {
         detail.push_str(" · File missing");
@@ -55,63 +55,54 @@ fn track_columns(track: &LibraryRow, columns: LibraryColumns) -> Option<gpui::Di
     {
         return None;
     }
-    // Preferred widths depend only on the selected fields, never row content or depth.
-    let mut cells = row().gap_0().min_w_0();
-    let mut width = 0.0;
+    // Text fields share shrinkable space; scalar fields keep their intrinsic width.
+    // Caption text is 0.75rem, so gap_3/px_3 leave one em between columns.
+    let mut cells = row().gap_3().px_3().min_w_0().flex_initial();
     for column in LibraryColumn::ALL {
         if !columns.enabled(column) {
             continue;
         }
-        let (value, cell_width): (gpui::SharedString, f32) = match column {
-            LibraryColumn::Artist => (
+        let value: gpui::SharedString = match column {
+            LibraryColumn::Artist => {
                 if track.artist.is_empty() {
-                    "—".into()
+                    "-".into()
                 } else {
                     track.artist.clone().into()
-                },
-                9.0,
-            ),
-            LibraryColumn::Album => (
+                }
+            }
+            LibraryColumn::Album => {
                 if track.album.is_empty() {
-                    "—".into()
+                    "-".into()
                 } else {
                     track.album.clone().into()
-                },
-                9.0,
-            ),
-            LibraryColumn::Duration => (
-                track
-                    .duration
-                    .map_or_else(|| "—".into(), |value| super::format_time(value).into()),
-                4.0,
-            ),
-            LibraryColumn::Codec => (
+                }
+            }
+            LibraryColumn::Duration => track
+                .duration
+                .map_or_else(|| "-".into(), |value| super::format_time(value).into()),
+            LibraryColumn::Codec => {
                 if track.codec.is_empty() {
-                    "—".into()
+                    "-".into()
                 } else {
                     track.codec.clone().into()
-                },
-                5.0,
-            ),
-            LibraryColumn::Bitrate => (
-                track.bitrate_bps.map_or_else(
-                    || "—".into(),
-                    |value| format!("{:.1} kbps", value as f64 / 1000.0).into(),
-                ),
-                6.0,
+                }
+            }
+            LibraryColumn::Bitrate => track.bitrate_bps.map_or_else(
+                || "-".into(),
+                |value| format!("{:.1} kbps", value as f64 / 1000.0).into(),
             ),
         };
-        width += cell_width;
-        cells = cells.child(
-            super::caption(value)
-                .w(gpui::rems(cell_width))
-                .min_w_0()
-                .px_1()
-                .truncate()
-                .text_overflow(gpui::TextOverflow::Truncate("..".into())),
-        );
+        let cell = super::caption(value).truncate();
+        cells = cells.child(match column {
+            LibraryColumn::Artist | LibraryColumn::Album => {
+                cell.max_w(gpui::rems(6.0)).flex_initial().min_w_0()
+            }
+            LibraryColumn::Duration | LibraryColumn::Codec | LibraryColumn::Bitrate => {
+                cell.flex_shrink_0()
+            }
+        });
     }
-    Some(cells.w(gpui::rems(width)).flex_initial())
+    Some(cells)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -590,25 +581,7 @@ impl GuiApp {
                                 })
                                 .when_some(scan, |view, scan| {
                                     view.child(scan.min_h_0().size(px(24.0 * ui_scale.max(0.5))))
-                                })
-                                .when_some(
-                                    match entry {
-                                        DirectoryRow::Track(track) => Some((track.id, track.favorite)),
-                                        DirectoryRow::Directory { .. } => None,
-                                    },
-                                    |view, (track_id, favorite)| {
-                                        view.child(
-                                            this.library_favorite_toggle(
-                                                gpui::ElementId::named_usize("library-tree-favorite", index),
-                                                track_id,
-                                                favorite,
-                                                cx,
-                                            )
-                                            .min_h_0()
-                                            .size(px(24.0 * ui_scale.max(0.5))),
-                                        )
-                                    },
-                                );
+                                });
                             let name_cell = div()
                                 .w(gpui::rems(14.0))
                                 .flex_auto()
@@ -635,6 +608,25 @@ impl GuiApp {
                                         DirectoryRow::Directory { .. } => None,
                                     },
                                     |view, columns| view.child(columns),
+                                )
+                                .when_some(
+                                    match entry {
+                                        DirectoryRow::Track(track) => Some((track.id, track.favorite)),
+                                        DirectoryRow::Directory { .. } => None,
+                                    },
+                                    |view, (track_id, favorite)| {
+                                        view.child(
+                                            this.library_favorite_toggle(
+                                                gpui::ElementId::named_usize("library-tree-favorite", index),
+                                                track_id,
+                                                favorite,
+                                                cx,
+                                            )
+                                            .flex_shrink_0()
+                                            .min_h_0()
+                                            .size(px(24.0 * ui_scale.max(0.5))),
+                                        )
+                                    },
                                 ),
                                 tooltip_title,
                                 detail,

@@ -594,25 +594,17 @@ impl Render for GuiApp {
             match state.page {
                 PanelMenuPage::Main => {
                     if is_library {
-                        menu = menu
-                            .child(menu_item(
-                                "library-columns-menu",
-                                "Track information  ›",
-                                cx,
-                                move |this, _, cx| {
-                                    this.panel_menu = Some(PanelMenu {
-                                        page: PanelMenuPage::LibraryColumns,
-                                        ..state
-                                    });
-                                    cx.notify();
-                                },
-                            ))
-                            .child(div().h(px(1.)).mx_2().my_1().bg(rgb(BORDER)));
                         menu = menu.child(menu_item(
-                            "library-same-files",
-                            "Same files / Relocation candidates…",
+                            "library-columns-menu",
+                            "Track information  ›",
                             cx,
-                            |this, window, cx| this.open_duplicate_review(window, cx),
+                            move |this, _, cx| {
+                                this.panel_menu = Some(PanelMenu {
+                                    page: PanelMenuPage::LibraryColumns,
+                                    ..state
+                                });
+                                cx.notify();
+                            },
                         ));
                     }
                     if is_waveform && !self.state.system.config.still_mode {

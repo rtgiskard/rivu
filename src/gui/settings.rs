@@ -359,6 +359,7 @@ enum Measured {
 
 pub(super) enum SettingsEvent {
     Closed,
+    ReviewDuplicates,
     ApplyVisualizer {
         panel_id: u64,
         options: AudioVisualizerOptions,
@@ -401,6 +402,12 @@ pub(super) struct Settings {
     page: SettingsPage,
     visual_page: VisualPage,
     visualizer_panel: Option<u64>,
+}
+
+impl Focusable for Settings {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
 }
 
 impl Settings {
@@ -1651,12 +1658,25 @@ impl Settings {
         );
         let library = settings_group(
             "Library",
-            row()
-                .items_start()
-                .flex_wrap()
-                .gap_3()
-                .child(self.field(Field::Roots).flex_1().min_w(px(260.)))
-                .child(self.field(Field::ScanMaxDepth).flex_1().min_w(px(220.))),
+            column()
+                .gap_2()
+                .child(
+                    row()
+                        .items_start()
+                        .flex_wrap()
+                        .gap_3()
+                        .child(self.field(Field::Roots).flex_1().min_w(px(260.)))
+                        .child(self.field(Field::ScanMaxDepth).flex_1().min_w(px(220.))),
+                )
+                .child(row().child(button(
+                    "settings-same-files",
+                    "Same files / Relocation candidates…",
+                    cx,
+                    |this, _, cx| {
+                        this.dropdown.close();
+                        cx.emit(SettingsEvent::ReviewDuplicates);
+                    },
+                ))),
         );
         let playback = settings_group(
             "Playback",

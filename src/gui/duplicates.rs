@@ -96,7 +96,11 @@ impl GuiApp {
         self.duplicate_review.epoch = self.duplicate_review.epoch.wrapping_add(1);
         self.duplicate_review.invalidate();
         self.duplicate_review.busy = None;
-        self.focus_layout(window, cx);
+        if self.settings_open {
+            self.settings.focus_handle(cx).focus(window, cx);
+        } else {
+            self.focus_layout(window, cx);
+        }
         cx.notify();
     }
 
@@ -458,26 +462,32 @@ impl GuiApp {
                 let hash = group.fingerprint.clone();
                 let selected = review.fingerprint.as_ref() == Some(&hash);
                 groups = groups.child(active_control(
-                    button(
-                        ("duplicate-group", index),
-                        format!(
-                            "{} · {} files · {} missing / {} present (last scan)",
-                            &hash[..hash.len().min(12)],
-                            group.total_members,
-                            group.missing_members,
-                            group.present_members
-                        ),
-                        cx,
-                        move |this, _, cx| {
-                            if this.duplicate_review.busy.is_none() {
-                                this.duplicate_review.feedback = None;
-                                this.request_duplicate_members(hash.clone(), 0, cx);
-                                cx.notify();
-                            }
-                        },
-                    )
+                    button(("duplicate-group", index), "", cx, move |this, _, cx| {
+                        if this.duplicate_review.busy.is_none() {
+                            this.duplicate_review.feedback = None;
+                            this.request_duplicate_members(hash.clone(), 0, cx);
+                            cx.notify();
+                        }
+                    })
                     .w_full()
                     .justify_start()
+                    .child(
+                        column()
+                            .min_w_0()
+                            .gap_1()
+                            .child(div().text_sm().child(format!(
+                                "{} · {} files",
+                                &group.fingerprint[..group.fingerprint.len().min(12)],
+                                group.total_members
+                            )))
+                            .child(
+                                caption(format!(
+                                    "{} missing · {} present at last scan",
+                                    group.missing_members, group.present_members
+                                ))
+                                .whitespace_normal(),
+                            ),
+                    )
                     .when(busy, |view| view.opacity(0.5)),
                     selected,
                 ));
@@ -496,13 +506,27 @@ impl GuiApp {
 
         let mut members = column().flex_shrink_0().gap_2();
         if let Some(fingerprint) = &review.fingerprint {
-            members = members.child(caption(format!("Historical cached BLAKE3: {fingerprint}")));
+            let fingerprint = fingerprint.clone();
+            members = members.child(
+                caption(format!("Cached BLAKE3: {fingerprint}"))
+                    .id("review-fingerprint")
+                    .truncate()
+                    .tooltip(move |_, cx| {
+                        cx.new(|_| ButtonTooltip {
+                            text: format!(
+                                "Historical cached BLAKE3 (not fresh verification): {fingerprint}"
+                            )
+                            .into(),
+                        })
+                        .into()
+                    }),
+            );
         }
         if review.members_loading {
             members = members.child(caption("Loading file metadata and checking paths…"));
         } else if review.fingerprint.is_none() {
             members = members.child(caption(
-                "Select a group to inspect its paths. This list is read-only.",
+                "Select a group, then choose a missing old record and an existing destination.",
             ));
         } else if review.members.is_empty() {
             members = members.child(caption(
@@ -551,22 +575,47 @@ impl GuiApp {
                 } else {
                     BORDER
                 }))
-                .child(div().text_sm().child(track.path.display().to_string()))
+                .child(
+                    div()
+                        .id(("review-path", id as u64))
+                        .text_sm()
+                        .truncate()
+                        .child(track.path.display().to_string())
+                        .tooltip({
+                            let path = track.path.display().to_string();
+                            move |_, cx| {
+                                cx.new(|_| ButtonTooltip {
+                                    text: path.clone().into(),
+                                })
+                                .into()
+                            }
+                        }),
+                )
                 .child(caption(format!(
-                    "ID {id} · {existence} · last scan: {} · {} bytes · cached mtime(ns): {}",
+                    "#{id} · {existence} · last scan: {}",
                     if track.missing { "missing" } else { "present" },
-                    value.file_size,
-                    value.modified_ns
                 )))
                 .child(caption(format!(
-                    "Title: {} · Artist: {} · Album: {} · Duration: {}",
-                    track.title,
-                    track.artist,
-                    track.album,
+                    "{} bytes · cached mtime(ns): {}",
+                    value.file_size, value.modified_ns
+                )))
+                .child(caption(format!("Title: {}", track.title)))
+                .child(caption(format!(
+                    "Artist: {} · Album: {} · Duration: {}",
+                    if track.artist.is_empty() {
+                        "-"
+                    } else {
+                        &track.artist
+                    },
+                    if track.album.is_empty() {
+                        "-"
+                    } else {
+                        &track.album
+                    },
                     track
                         .duration
                         .map(format_time)
-                        .unwrap_or_else(|| "Unknown".into())
+                        .unwrap_or_else(|| "-".into())
                 )))
                 .child(caption(format!(
                     "Favorite: {} · Overrides: {} · Plays: {} · Last played: {last_played}",
@@ -581,16 +630,13 @@ impl GuiApp {
                     } else {
                         "Relocation eligible"
                     }
-                )))
-                .child(caption(
-                    "Hash: historical cached BLAKE3 — NOT freshly verified",
-                ));
-            let mut actions = panel_toolbar();
+                )));
+            let mut actions = panel_toolbar().flex_wrap();
             if selectable_source {
                 actions = actions.child(active_control(
                     button(
                         ("review-source", id as u64),
-                        "Select missing old identity",
+                        "Use as old record",
                         cx,
                         move |this, _, cx| {
                             if this.duplicate_review.busy.is_none()
@@ -614,7 +660,7 @@ impl GuiApp {
                 actions = actions.child(active_control(
                     button(
                         ("review-target", id as u64),
-                        "Select present destination",
+                        "Use as destination",
                         cx,
                         move |this, _, cx| {
                             if this.duplicate_review.busy.is_none()
@@ -649,7 +695,12 @@ impl GuiApp {
                 cx,
             ));
         }
-        let mut decisions = column().gap_2();
+        let mut decisions = column()
+            .id("review-decisions")
+            .flex_shrink_0()
+            .max_h(rems(14.))
+            .overflow_y_scroll()
+            .gap_2();
         if let Some(source) = &review.source {
             decisions = decisions.child(caption(format!(
                 "Old identity #{}: {}",
@@ -666,9 +717,9 @@ impl GuiApp {
         }
         if review.confirming {
             decisions = decisions.child(status_message("Confirm relocation? Preserve the old ID, favorite, overrides, play history and references at the selected destination. The destination row must have no user state/references. Rivu rehashes its full bytes and revalidates the database before commit. No audio files are deleted.", StatusKind::Info))
-                .child(panel_toolbar()
-                    .child(button("review-confirm", "Confirm and verify destination", cx, |this, _, cx| this.submit_duplicate_action(false, cx)))
-                    .child(button("review-back", "Back", cx, |this, _, cx| { this.duplicate_review.confirming = false; cx.notify(); })));
+                .child(panel_toolbar().flex_wrap()
+                    .child(button("review-confirm", "Confirm relocation and verify", cx, |this, _, cx| this.submit_duplicate_action(false, cx)))
+                    .child(icon_button("review-back", "󰁍", "Back to selection", cx, |this, _, cx| { this.duplicate_review.confirming = false; cx.notify(); })));
         } else if !busy {
             let can_relocate = review.source.is_some()
                 && review
@@ -677,6 +728,7 @@ impl GuiApp {
                     .is_some_and(|target| !has_target_state(target));
             decisions = decisions.child(
                 panel_toolbar()
+                    .flex_wrap()
                     .when(can_relocate, |view| {
                         view.child(button(
                             "review-relocate",
@@ -724,10 +776,10 @@ impl GuiApp {
             .on_mouse_down(MouseButton::Middle, cx.listener(|_, _, _, cx| cx.stop_propagation()))
             .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.stop_propagation()))
             .child(column().id("duplicate-review-card").w(relative(0.94)).h(relative(0.92)).min_w_0().min_h_0()
-                .p_4().gap_3().bg(rgb(PANEL)).border_1().border_color(rgb(BORDER)).rounded_md()
-                .child(panel_header("Same files / Relocation candidates", "Ordinary files only. Groups use historical cached hashes; no CUE operations or file deletion."))
-                .child(panel_toolbar()
-                    .child(button("review-refresh", "Refresh", cx, |this, _, cx| {
+                .p_3().gap_2().overflow_hidden().bg(rgb(PANEL)).border_1().border_color(rgb(BORDER)).rounded_md()
+                .child(row().flex_shrink_0()
+                    .child(div().flex_1().min_w_0().child(panel_header("Same files / Relocation candidates", "Review ordinary files with matching cached content. No audio files are deleted.")))
+                    .child(icon_button("review-refresh", "󰑐", "Refresh same-file groups", cx, |this, _, cx| {
                         if this.duplicate_review.busy.is_none() {
                             this.duplicate_review.invalidate();
                             this.duplicate_review.fingerprint = None;
@@ -736,12 +788,16 @@ impl GuiApp {
                             cx.notify();
                         }
                     }).when(busy, |view| view.opacity(0.5)))
-                    .child(button("review-close", "Close / defer", cx, |this, window, cx| this.close_duplicate_review(window, cx))))
+                    .child(icon_button("review-close", "", "Close; undecided files stay unchanged. Requests cancellation of ongoing verification; completed changes cannot be undone.", cx, |this, window, cx| this.close_duplicate_review(window, cx))))
                 .child(row().flex_1().min_h_0().items_stretch()
-                    .child(column().id("duplicate-groups-scroll").w(relative(0.32)).min_h_0().overflow_y_scroll().child(groups))
-                    .child(column().id("duplicate-members-scroll").flex_1().min_w_0().min_h_0().overflow_y_scroll().child(members)))
+                    .child(column().w(relative(0.30)).min_w_0().min_h_0().gap_2()
+                        .child(caption("Same-content groups").flex_shrink_0())
+                        .child(column().id("duplicate-groups-scroll").flex_1().min_h_0().overflow_y_scroll().child(groups)))
+                    .child(column().flex_1().min_w_0().min_h_0().gap_2()
+                        .child(caption("Files and relocation roles").flex_shrink_0())
+                        .child(column().id("duplicate-members-scroll").flex_1().min_w_0().min_h_0().overflow_y_scroll().child(members))))
                 .child(decisions)
-                .child(caption("Close defers undecided pairs and requests cancellation of ongoing verification. Keep independent is a saved decision, not a merge.")))
+                .child(caption("Cached hashes identify candidates, not proof. Keep independent saves a decision; it does not merge records.").flex_shrink_0()))
     }
 
     fn review_pager(
@@ -758,18 +814,13 @@ impl GuiApp {
             if total == 0 { 0 } else { offset + 1 },
             (offset + size).min(total)
         )));
-        for (next, label) in [
-            (offset.saturating_sub(size), "Previous"),
-            (offset + size, "Next"),
+        for (next, icon, hint, previous) in [
+            (offset.saturating_sub(size), "󰁍", "Previous page", true),
+            (offset + size, "󰁔", "Next page", false),
         ] {
-            let enabled = !disabled
-                && (if label == "Previous" {
-                    offset > 0
-                } else {
-                    next < total
-                });
+            let enabled = !disabled && (if previous { offset > 0 } else { next < total });
             pager = pager.child(
-                button(
+                icon_button(
                     (
                         if groups {
                             "review-group-page"
@@ -778,7 +829,8 @@ impl GuiApp {
                         },
                         next,
                     ),
-                    label,
+                    icon,
+                    hint,
                     cx,
                     move |this, _, cx| {
                         if !enabled || this.duplicate_review.busy.is_some() {

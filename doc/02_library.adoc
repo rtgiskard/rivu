@@ -74,12 +74,13 @@ unique new destination with matching content. Exact paths take precedence.
 Ambiguous copies retain separate IDs and the missing identity's user state;
 scan order never chooses a destination. CUE matching is unchanged.
 
-Use the Library panel menu's `Same files / Relocation candidates` action to
-inspect paged ordinary-file groups. Historical cached BLAKE3 hashes identify
-candidates, not fresh proof. Rows show paths, current existence, scan state,
-metadata, favorites, overrides, history and playlist/queue reference counts.
+Use Settings → General → Library → `Same files / Relocation candidates` to
+inspect paged ordinary-file groups. Closing the review returns to Settings
+without applying or discarding its unsaved edits. Historical cached BLAKE3 hashes
+identify candidates, not fresh proof. Rows show paths, current existence, scan
+state, metadata, favorites, overrides, history and playlist/queue reference counts.
 Choose a missing old identity and a present destination, then review and confirm.
-`Close / defer` leaves undecided pairs unchanged. `Keep destination independent`
+The close icon leaves undecided pairs unchanged. `Keep destination independent`
 persists a decision that excludes that row from automatic and manual relocation,
 including after rescanning. No audio files are deleted.
 
@@ -179,8 +180,8 @@ rivu library clean-missing
 
 == Desktop selection and directory tree
 
-Hover a track to access its favorite toggle. Toggling a favorite does not change
-the selection or start playback; double-click a track to play it.
+Hover a track to access its favorite toggle in the rightmost column. Toggling a
+favorite does not change the selection or start playback; double-click a track to play it.
 
 The Library toolbar shows the current entry or selection count. Its append and
 remove actions become available when tracks are selected; selecting only folders
@@ -194,8 +195,9 @@ independent of the track's actual directory depth. Tree tracks retain their
 directory-level indentation. Both views use single-line rows. Right-click the
 Library panel and open `Track information` to choose Artist, Album, Duration,
 Codec, and Bitrate columns. Only Duration is enabled initially. Columns appear
-in that fixed order and align independently of tree depth. Disabling every
-column leaves the name without reserved track-information space. The selection
+in that fixed order, with compact content-dependent widths independent of tree
+depth. Long Artist and Album values are truncated; hover the row for full details.
+Disabling every column leaves the name without reserved track-information space. The selection
 is shared by both views and saved across restarts.
 
 Directory loading, empty, and unavailable status remains visible independently
@@ -204,7 +206,7 @@ or its information to read the full title or directory path above the full
 track information or directory status. Tooltip text wraps rather than truncates;
 directories with no status omit the second part. Tooltips retain artist, album,
 duration, codec, bitrate, and missing-file warnings even when those columns are
-disabled. Unknown technical values appear as `—`.
+disabled. Missing values appear as `-`.
 
 Root headers in both views show the number of scanned library tracks beneath
 that root, including missing files. These counts do not change with search,
