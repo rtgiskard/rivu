@@ -1684,9 +1684,10 @@ impl GuiApp {
                     .find(|panel| panel.id == active)
                     .is_none_or(|panel| panel.show_tab_bar);
                 let mut tabs = row()
-                    .h(px(36.))
+                    .h(gpui::rems(1.375))
                     .flex_shrink_0()
                     .px(gpui::px(UI_INSET))
+                    .py(px(1.))
                     .gap_1()
                     .border_b_1()
                     .border_color(rgb(BORDER));
@@ -1705,10 +1706,11 @@ impl GuiApp {
                             .id(("tab", panel_id))
                             .relative()
                             .flex()
+                            .h_full()
                             .items_center()
                             .gap_2()
                             .px_2()
-                            .py_1()
+                            .py_0()
                             .rounded_sm()
                             .text_xs()
                             .when(!self.layouts.current().locked, |view| view.cursor_move())
@@ -1751,18 +1753,22 @@ impl GuiApp {
                             .child(title)
                             .child(self.measurement(Measured::Tab(panel_id)))
                             .when(!self.layouts.current().locked, |view| {
-                                view.child(components::quiet_icon_button(icon_button(
-                                    ("close", panel_id),
-                                    "",
-                                    "Remove panel",
-                                    cx,
-                                    move |this, _, cx| {
-                                        if this.layouts.current().locked {
-                                            return;
-                                        }
-                                        this.remove_layout_panel(panel_id, cx);
-                                    },
-                                )))
+                                view.child(
+                                    components::quiet_icon_button(icon_button(
+                                        ("close", panel_id),
+                                        "",
+                                        "Remove panel",
+                                        cx,
+                                        move |this, _, cx| {
+                                            if this.layouts.current().locked {
+                                                return;
+                                            }
+                                            this.remove_layout_panel(panel_id, cx);
+                                        },
+                                    ))
+                                    .size(gpui::rems(1.))
+                                    .min_h_0(),
+                                )
                             }),
                     );
                 }
