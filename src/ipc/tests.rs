@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 #[test]
 fn app_commands_route_over_ipc_without_changing_business_state() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = socket_test_directory();
     let config_path = directory.path().join("config.toml");
     crate::config::Config {
         media_read_buffer_mb: 1,
@@ -17,12 +17,11 @@ fn app_commands_route_over_ipc_without_changing_business_state() {
     }
     .save(&config_path)
     .unwrap();
-    let socket = directory.path().join("rivu.sock");
-    let owner = SocketOwner::acquire(&socket).unwrap();
+    let owner = SocketOwner::acquire(directory.path()).unwrap();
     let mut runtime = crate::core::Runtime::start(directory.path(), &config_path).unwrap();
     let app = AppHandle::new(&runtime, false);
     let server = Server::start(&owner, runtime.handle.clone(), app).unwrap();
-    let mut client = client_session(&socket).unwrap();
+    let mut client = client_session(directory.path()).unwrap();
     // A query fences asynchronous startup before comparing published state.
     client.query(&Query::ScanTask { id: 0 }).unwrap();
     let before = client.get_state(StateSections::ALL).unwrap();
@@ -47,10 +46,9 @@ fn app_commands_route_over_ipc_without_changing_business_state() {
     assert!(runtime.handle.is_shutting_down());
     assert!(ack.revision <= runtime.handle.revision());
     drop(server);
-    assert!(socket.exists());
-    assert!(SocketOwner::acquire(&socket).is_err());
+    assert!(SocketOwner::acquire(directory.path()).is_err());
     drop(owner);
-    assert!(!socket.exists());
+    assert!(SocketOwner::acquire(directory.path()).is_ok());
 }
 
 #[test]
@@ -281,7 +279,7 @@ fn library_root_queries_run_through_real_owner_and_ipc_session() {
         response::{QueryError, ViewResponse},
         store::Store,
     };
-    let directory = tempfile::tempdir().unwrap();
+    let directory = socket_test_directory();
     let root = directory.path().join("音楽");
     let nested = root.join("夏");
     let empty = directory.path().join("empty");
@@ -313,13 +311,12 @@ fn library_root_queries_run_through_real_owner_and_ipc_session() {
     }
     .save(&config_path)
     .unwrap();
-    let socket = directory.path().join("rivu.sock");
-    let owner = SocketOwner::acquire(&socket).unwrap();
+    let owner = SocketOwner::acquire(directory.path()).unwrap();
     let mut runtime = Runtime::start(directory.path(), &config_path).unwrap();
     let app = AppHandle::new(&runtime, false);
     let server = Server::start(&owner, runtime.handle.clone(), app.clone()).unwrap();
-    assert!(SocketOwner::acquire(&socket).is_err());
-    let mut session = client_session(&socket).unwrap();
+    assert!(SocketOwner::acquire(directory.path()).is_err());
+    let mut session = client_session(directory.path()).unwrap();
     let count_query = Query::LibraryRootCounts {
         roots: vec![root.clone(), nested.clone(), empty],
     };
@@ -382,12 +379,11 @@ fn library_root_queries_run_through_real_owner_and_ipc_session() {
     drop(session);
     drop(server);
     // Stopping transport does not release the runtime's instance acquisition.
-    assert!(socket.exists());
-    assert!(SocketOwner::acquire(&socket).is_err());
+    assert!(SocketOwner::acquire(directory.path()).is_err());
     app.request_shutdown().unwrap();
     runtime.join().unwrap();
     drop(owner);
-    assert!(!socket.exists());
+    assert!(SocketOwner::acquire(directory.path()).is_ok());
 }
 
 #[test]
@@ -1060,8 +1056,8 @@ fn client_session_reuses_connection_after_command_and_request_rejections() {
     use std::os::unix::net::UnixListener;
 
     let directory = socket_test_directory();
-    let socket = directory.path().join("session.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
+    let listener =
+        UnixListener::bind_addr(&super::endpoint::address(directory.path()).unwrap()).unwrap();
     let server = std::thread::spawn(move || {
         let mut stream = listener.accept().unwrap().0;
         complete_test_handshake(&mut stream);
@@ -1097,7 +1093,7 @@ fn client_session_reuses_connection_after_command_and_request_rejections() {
         ));
         reply_test_query(&mut stream, playlist_test_response(7));
     });
-    let mut session = client_session(&socket).unwrap();
+    let mut session = client_session(directory.path()).unwrap();
     let query = Query::PlaylistSummaries {
         offset: 0,
         limit: 20,
@@ -1128,8 +1124,8 @@ fn client_session_discards_partial_failed_response_before_next_explicit_request(
     use std::{io::Write, os::unix::net::UnixListener};
 
     let directory = socket_test_directory();
-    let socket = directory.path().join("reconnect.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
+    let listener =
+        UnixListener::bind_addr(&super::endpoint::address(directory.path()).unwrap()).unwrap();
     let server = std::thread::spawn(move || {
         let mut stream = listener.accept().unwrap().0;
         complete_test_handshake(&mut stream);
@@ -1166,7 +1162,7 @@ fn client_session_discards_partial_failed_response_before_next_explicit_request(
             },
         );
     });
-    let mut session = client_session(&socket).unwrap();
+    let mut session = client_session(directory.path()).unwrap();
     assert!(
         session
             .request_ack(&Command::CreatePlaylist {
@@ -1189,9 +1185,9 @@ fn cancelling_client_session_closes_pending_watch_without_a_response() {
     use std::{io::Read, os::unix::net::UnixListener, sync::atomic::Ordering};
 
     let directory = socket_test_directory();
-    let socket = directory.path().join("watch.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
-    let mut session = client_session(&socket).unwrap();
+    let listener =
+        UnixListener::bind_addr(&super::endpoint::address(directory.path()).unwrap()).unwrap();
+    let mut session = client_session(directory.path()).unwrap();
     let (cancelled, notify) = session.cancellation();
     let client = std::thread::spawn(move || {
         session.get_state(StateSections::default()).unwrap();
@@ -1210,51 +1206,72 @@ fn cancelling_client_session_closes_pending_watch_without_a_response() {
 }
 
 #[test]
-fn instance_acquisition_never_removes_a_live_or_non_socket_path() {
+fn instance_acquisition_creates_directory_without_socket_or_lock_files() {
     let directory = socket_test_directory();
-    let socket = directory.path().join("owned.sock");
-    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-    assert!(SocketOwner::acquire(&socket).is_err());
-    assert!(std::os::unix::net::UnixStream::connect(&socket).is_ok());
-    drop(listener);
-    std::fs::remove_file(&socket).unwrap();
-    std::fs::write(&socket, b"not a socket").unwrap();
-    assert!(SocketOwner::acquire(&socket).is_err());
-    assert_eq!(std::fs::read(&socket).unwrap(), b"not a socket");
+    let data_dir = directory.path().join("data");
+    let owner = SocketOwner::acquire(&data_dir).unwrap();
+    assert!(data_dir.is_dir());
+    assert_eq!(std::fs::read_dir(&data_dir).unwrap().count(), 0);
+    assert!(SocketOwner::acquire(&data_dir).is_err());
+    let address = super::endpoint::address(&data_dir).unwrap();
+    assert!(std::os::unix::net::UnixStream::connect_addr(&address).is_ok());
+    drop(owner);
+    assert_eq!(std::fs::read_dir(&data_dir).unwrap().count(), 0);
+    assert!(std::os::unix::net::UnixStream::connect_addr(&address).is_err());
+    assert!(SocketOwner::acquire(&data_dir).is_ok());
 }
 
 #[test]
-fn bound_owner_serializes_stale_recovery_and_only_retires_its_own_inode() {
+fn directory_aliases_share_instance_ownership_and_transport() {
     let directory = socket_test_directory();
-    let socket = directory.path().join("owned.sock");
-    drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
-    let owner = SocketOwner::acquire(&socket).unwrap();
-    assert!(SocketOwner::acquire(&socket).is_err());
-    assert!(std::os::unix::net::UnixStream::connect(&socket).is_ok());
-    // A replacement created outside Rivu is not the owner's retirement target.
-    std::fs::remove_file(&socket).unwrap();
-    let replacement = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let data_dir = directory.path().join("data");
+    let owner = SocketOwner::acquire(&data_dir).unwrap();
+    let symlink = directory.path().join("alias");
+    std::os::unix::fs::symlink(&data_dir, &symlink).unwrap();
+    let current_dir = std::env::current_dir().unwrap();
+    let relative = data_dir.strip_prefix(&current_dir).unwrap();
+    for alias in [symlink.as_path(), relative] {
+        assert!(SocketOwner::acquire(alias).is_err());
+        let address = super::endpoint::address(alias).unwrap();
+        assert!(std::os::unix::net::UnixStream::connect_addr(&address).is_ok());
+    }
     drop(owner);
-    assert!(std::os::unix::net::UnixStream::connect(&socket).is_ok());
-    drop(replacement);
-    std::fs::remove_file(&socket).unwrap();
-    let owner = SocketOwner::acquire(&socket).unwrap();
+    let owner = SocketOwner::acquire(&symlink).unwrap();
+    assert!(SocketOwner::acquire(&data_dir).is_err());
     drop(owner);
-    assert!(!socket.exists());
-    assert!(SocketOwner::acquire(&socket).is_ok());
+    assert!(SocketOwner::acquire(relative).is_ok());
+}
+
+#[test]
+fn distinct_data_directories_acquire_independent_instances() {
+    let directory = socket_test_directory();
+    let first = directory.path().join("first");
+    let second = directory.path().join("second");
+    let first_owner = SocketOwner::acquire(&first).unwrap();
+    let second_owner = SocketOwner::acquire(&second).unwrap();
+    for data_dir in [&first, &second] {
+        assert!(SocketOwner::acquire(data_dir).is_err());
+        let address = super::endpoint::address(data_dir).unwrap();
+        assert!(std::os::unix::net::UnixStream::connect_addr(&address).is_ok());
+    }
+    drop(first_owner);
+    let first_owner = SocketOwner::acquire(&first).unwrap();
+    assert!(SocketOwner::acquire(&second).is_err());
+    drop(second_owner);
+    assert!(SocketOwner::acquire(&second).is_ok());
+    drop(first_owner);
 }
 
 #[test]
 fn simultaneous_starters_acquire_one_real_listener() {
     let directory = socket_test_directory();
-    let socket = directory.path().join("race.sock");
     let barrier = std::sync::Barrier::new(8);
     std::thread::scope(|scope| {
         let handles: Vec<_> = (0..8)
             .map(|_| {
                 scope.spawn(|| {
                     barrier.wait();
-                    SocketOwner::acquire(&socket)
+                    SocketOwner::acquire(directory.path())
                 })
             })
             .collect();
@@ -1263,9 +1280,11 @@ fn simultaneous_starters_acquire_one_real_listener() {
             .filter_map(|thread| thread.join().unwrap().ok())
             .collect();
         assert_eq!(owners.len(), 1);
-        assert!(std::os::unix::net::UnixStream::connect(&socket).is_ok());
+        let address = super::endpoint::address(directory.path()).unwrap();
+        assert!(std::os::unix::net::UnixStream::connect_addr(&address).is_ok());
     });
-    assert!(!socket.exists());
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    assert!(SocketOwner::acquire(directory.path()).is_ok());
 }
 
 #[test]

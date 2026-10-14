@@ -152,24 +152,35 @@ Invalid headers, unknown message types, incompatible versions, malformed
 Postcard payloads, and trailing payload bytes within the frame limit receive an
 Error response and close that connection; other client sessions remain usable.
 
-The socket is created with owner-only permissions (`0600`). There is no separate
-credential exchange: the socket's filesystem access boundary controls who may
-issue commands. Before opening the data database, saving configuration, or
-starting audio workers, startup acquires a nonblocking advisory lock on the
-stable `rivu.sock.lock` file and binds a real listener. The lock file is retained
-after shutdown: unlinking it while Rivu is running would break the shared-inode
-locking boundary. Concurrent Rivu starters therefore cannot both recover a
-stale socket or initialize the same data directory.
+IPC uses one Linux abstract Unix stream socket for both communication and
+exclusive data-directory ownership. No `rivu.sock` or `rivu.sock.lock` file is
+created. The abstract name is the five bytes `rivu.` followed by the directory's
+device number and inode number, each encoded as an eight-byte big-endian integer.
+The leading abstract-namespace NUL is not part of that name. Following directory
+symlinks and using filesystem identity makes relative paths, symlinks, and bind
+mount aliases reach the same instance; distinct directories have independent
+addresses. The data directory must remain in place for the instance lifetime.
 
-Startup refuses to replace a non-socket path or an accepting socket, and
-recovers a stale socket only after connection refusal, under that lock. Only a
-successful bind grants ownership of the socket pathname. The application keeps
-that owner until runtime shutdown, including all IPC worker startup failures;
-the serving worker owns only a cloned listening descriptor, not that owner.
-Failures and shutdown use the same retirement path. It unlinks only a pathname
-whose device/inode still matches the bound socket. Failed bind or failed
-competing startup cannot unlink another listener, and an externally replaced
-pathname is left untouched.
+Abstract sockets have no filesystem permissions. Both endpoints read kernel
+`SO_PEERCRED` credentials and reject a peer whose UID differs from their effective
+UID, before exchanging protocol frames. The server checks credentials before
+admitting a client to its bounded session set. This protects commands and state,
+not availability: another user can occupy the public abstract name and prevent
+startup, but cannot impersonate the server to a client.
+
+Before opening the database, saving configuration, or starting audio workers,
+startup creates the data directory if necessary and binds the real listener.
+Only a successful bind grants instance ownership. App retains its listening
+descriptor through runtime and IPC teardown, including partial startup failures;
+the serving worker holds a clone. The kernel releases the address after the last
+listening descriptor closes, including on process death. No stale-file recovery
+or pathname cleanup is needed.
+
+Ownership is scoped to a Linux network namespace. Instances in different network
+namespaces must not share a data directory. Stop older Rivu versions before
+upgrading: their pathname socket and file lock do not coordinate with this
+transport. There is no legacy fallback. Old socket/lock files are ignored and
+may be removed after all old instances have stopped.
 
 The transport retains partial input across cancelled reads and keeps frames
 independent. Sessions process requests serially; frames have no request IDs or

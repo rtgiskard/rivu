@@ -166,8 +166,9 @@ typical Linux installation: `~/.local/share/rivu`) and
 `--config` is not also supplied, the config becomes `DIR/config.toml`.
 
 The data directory contains `library.db` (library and playback state),
-`rivu.sock` (the local IPC endpoint), `layout.json` (desktop layout), and
-the `artwork/` cache. When file logging is enabled, weekly logs are stored in
+`layout.json` (desktop layout), and the `artwork/` cache. IPC uses a Linux abstract
+Unix socket without socket or lock files; see link:doc/21_ipc.adoc[IPC] for access,
+namespace, and upgrade constraints. When file logging is enabled, weekly logs are stored in
 `logs/` and old files are retained according to `logging.retention_weeks`. Stop the
 core before operating on `library.db`; see link:doc/02_library.adoc[Library] for
 database maintenance and reset behavior.

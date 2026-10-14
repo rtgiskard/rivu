@@ -37,7 +37,7 @@ use std::{
 
 /// Connect to an existing core over IPC. This never creates an audio engine and
 /// quitting the screen only restores the terminal; the server keeps playing.
-pub fn run(socket_path: &Path) -> Result<()> {
+pub fn run(data_dir: &Path) -> Result<()> {
     enable_raw_mode().context("enable terminal raw mode")?;
     let mut stdout = io::stdout();
     if let Err(error) = execute!(stdout, EnterAlternateScreen) {
@@ -53,7 +53,7 @@ pub fn run(socket_path: &Path) -> Result<()> {
             return Err(error.into());
         }
     };
-    let result = run_loop(socket_path, &mut terminal);
+    let result = run_loop(data_dir, &mut terminal);
     let cleanup = restore_terminal(&mut terminal);
     match result {
         Err(error) => Err(error),
@@ -102,8 +102,8 @@ impl Drop for Watcher {
     }
 }
 
-fn spawn_watcher(socket_path: &Path) -> Watcher {
-    let socket_path = socket_path.to_owned();
+fn spawn_watcher(data_dir: &Path) -> Watcher {
+    let data_dir = data_dir.to_owned();
     let (sender, receiver) = bounded(1);
     let latest = Arc::new(Mutex::new(None));
     let latest_worker = Arc::clone(&latest);
@@ -112,7 +112,7 @@ fn spawn_watcher(socket_path: &Path) -> Watcher {
     let cancel_notify = Arc::new(tokio::sync::Notify::new());
     let thread_notify = Arc::clone(&cancel_notify);
     let worker = std::thread::spawn(move || {
-        let Ok(mut session) = ipc::client_session_with_cancel(&socket_path, stop, thread_notify)
+        let Ok(mut session) = ipc::client_session_with_cancel(&data_dir, stop, thread_notify)
         else {
             *latest_worker.lock() = Some(Err("TUI state watcher could not initialize".into()));
             let _ = sender.try_send(());
@@ -209,8 +209,8 @@ impl Drop for CommandWorker {
     }
 }
 
-fn spawn_command_worker(socket_path: &Path) -> CommandWorker {
-    let socket_path = socket_path.to_owned();
+fn spawn_command_worker(data_dir: &Path) -> CommandWorker {
+    let data_dir = data_dir.to_owned();
     let (sender, receiver) = bounded::<Command>(8);
     let (stopping, stop_receiver) = bounded::<()>(1);
     let (result_sender, results) = bounded::<Result<Ack, String>>(8);
@@ -220,7 +220,7 @@ fn spawn_command_worker(socket_path: &Path) -> CommandWorker {
     let stop_notify = Arc::clone(&shutdown_notify);
     let worker = std::thread::spawn(move || {
         let mut session =
-            ipc::client_session_with_cancel(&socket_path, Arc::clone(&stop), stop_notify)
+            ipc::client_session_with_cancel(&data_dir, Arc::clone(&stop), stop_notify)
                 .map_err(|error| format!("{error:#}"));
         while let Ok(command) = receiver.recv() {
             if stop.load(Ordering::Acquire) {
@@ -360,8 +360,8 @@ impl Drop for QueryWorker {
     }
 }
 
-fn spawn_query_worker(socket_path: &Path) -> QueryWorker {
-    let socket_path = socket_path.to_owned();
+fn spawn_query_worker(data_dir: &Path) -> QueryWorker {
+    let data_dir = data_dir.to_owned();
     let (sender, receiver) = bounded(1);
     let pending = Arc::new(Mutex::new(None::<QueryJob>));
     let requests = Arc::clone(&pending);
@@ -373,7 +373,7 @@ fn spawn_query_worker(socket_path: &Path) -> QueryWorker {
     let stop_notify = Arc::clone(&shutdown_notify);
     let worker = std::thread::spawn(move || {
         let mut session =
-            ipc::client_session_with_cancel(&socket_path, Arc::clone(&stopping), stop_notify)
+            ipc::client_session_with_cancel(&data_dir, Arc::clone(&stopping), stop_notify)
                 .map_err(|error| format!("{error:#}"));
         while receiver.recv().is_ok() {
             if stopping.load(Ordering::Acquire) {
@@ -411,10 +411,10 @@ fn spawn_query_worker(socket_path: &Path) -> QueryWorker {
     }
 }
 
-fn run_loop(socket_path: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
-    let updates = spawn_watcher(socket_path);
-    let commands = spawn_command_worker(socket_path);
-    let mut queries = spawn_query_worker(socket_path);
+fn run_loop(data_dir: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+    let updates = spawn_watcher(data_dir);
+    let commands = spawn_command_worker(data_dir);
+    let mut queries = spawn_query_worker(data_dir);
     let mut tui = None::<TuiState>;
     let mut redraw = true;
     let mut immediate_redraw = true;
@@ -1724,10 +1724,10 @@ mod tests {
     fn watcher_shutdown_closes_stalled_initial_handshake() {
         use std::{io::Read, os::unix::net::UnixListener};
 
-        let directory = ipc::tests::socket_test_directory();
-        let socket = directory.path().join("stalled-hello.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
-        let watcher = spawn_watcher(&socket);
+        let directory = tempfile::tempdir().unwrap();
+        let listener =
+            UnixListener::bind_addr(&ipc::endpoint::address(directory.path()).unwrap()).unwrap();
+        let watcher = spawn_watcher(directory.path());
         let mut stream = listener.accept().unwrap().0;
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
@@ -1751,8 +1751,8 @@ mod tests {
 
     #[test]
     fn watcher_reports_initial_connection_failure_to_loading_consumer() {
-        let directory = ipc::tests::socket_test_directory();
-        let watcher = spawn_watcher(&directory.path().join("absent.sock"));
+        let directory = tempfile::tempdir().unwrap();
+        let watcher = spawn_watcher(directory.path());
         watcher
             .receiver
             .recv_timeout(Duration::from_secs(5))
@@ -2275,14 +2275,14 @@ mod tests {
     fn replacing_queries_keeps_one_stalled_socket_until_worker_shutdown() {
         use std::{io::Read, os::unix::net::UnixListener};
 
-        let directory = ipc::tests::socket_test_directory();
-        let socket = directory.path().join("stalled-query.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let listener =
+            UnixListener::bind_addr(&ipc::endpoint::address(directory.path()).unwrap()).unwrap();
         let (connected, accepted) = bounded(1);
         let server = std::thread::spawn(move || {
             connected.send(listener.accept().unwrap().0).unwrap();
         });
-        let mut worker = spawn_query_worker(&socket);
+        let mut worker = spawn_query_worker(directory.path());
         let state = TuiSnapshot::default();
         let ui = UiState {
             view: View::Playlists(PagedList::default()),
@@ -2333,9 +2333,9 @@ mod tests {
         use ipc::tests::{complete_test_handshake, read_test_query, reply_test_query};
         use std::os::unix::net::UnixListener;
 
-        let directory = ipc::tests::socket_test_directory();
-        let socket = directory.path().join("drained-query.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let listener =
+            UnixListener::bind_addr(&ipc::endpoint::address(directory.path()).unwrap()).unwrap();
         let (started, active) = bounded(1);
         let (release, resume) = bounded(1);
         let server = std::thread::spawn(move || {
@@ -2366,7 +2366,7 @@ mod tests {
                 );
             }
         });
-        let mut worker = spawn_query_worker(&socket);
+        let mut worker = spawn_query_worker(directory.path());
         let request = QueryRequest {
             kind: QueryKind::Queue,
             offset: 0,
@@ -2402,9 +2402,9 @@ mod tests {
         use ipc::tests::{complete_test_handshake, read_test_command, reply_test_ack};
         use std::os::unix::net::UnixListener;
 
-        let directory = ipc::tests::socket_test_directory();
-        let socket = directory.path().join("command-error.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let listener =
+            UnixListener::bind_addr(&ipc::endpoint::address(directory.path()).unwrap()).unwrap();
         let server = std::thread::spawn(move || {
             let mut stream = listener.accept().unwrap().0;
             complete_test_handshake(&mut stream);
@@ -2428,7 +2428,7 @@ mod tests {
                 },
             );
         });
-        let worker = spawn_command_worker(&socket);
+        let worker = spawn_command_worker(directory.path());
         worker
             .sender
             .as_ref()
@@ -2468,9 +2468,9 @@ mod tests {
         use ipc::tests::{complete_test_handshake, read_test_command};
         use std::{io::Read, os::unix::net::UnixListener};
 
-        let directory = ipc::tests::socket_test_directory();
-        let socket = directory.path().join("stalled-command.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let listener =
+            UnixListener::bind_addr(&ipc::endpoint::address(directory.path()).unwrap()).unwrap();
         let (started, active) = bounded(1);
         let server = std::thread::spawn(move || {
             let mut stream = listener.accept().unwrap().0;
@@ -2480,7 +2480,7 @@ mod tests {
             );
             started.send(stream).unwrap();
         });
-        let worker = spawn_command_worker(&socket);
+        let worker = spawn_command_worker(directory.path());
         worker
             .sender
             .as_ref()

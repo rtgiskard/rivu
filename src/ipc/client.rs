@@ -24,7 +24,7 @@ use tokio::{net::UnixStream, runtime::Builder, time::timeout};
 /// the failed request is never replayed because its mutation may have executed.
 pub struct ClientSession {
     runtime: tokio::runtime::Runtime,
-    path: PathBuf,
+    data_dir: PathBuf,
     stream: Option<UnixStream>,
     cancelled: Arc<AtomicBool>,
     cancel_notify: Arc<tokio::sync::Notify>,
@@ -41,23 +41,23 @@ fn client_runtime() -> Result<tokio::runtime::Runtime> {
         .context("creating IPC runtime")
 }
 
-/// Create a session that connects and handshakes on its first request.
-pub fn client_session(path: &Path) -> Result<ClientSession> {
+/// Create a session for a data directory; connect and handshake on its first request.
+pub fn client_session(data_dir: &Path) -> Result<ClientSession> {
     client_session_with_cancel(
-        path,
+        data_dir,
         Arc::new(AtomicBool::new(false)),
         Arc::new(tokio::sync::Notify::new()),
     )
 }
 
 pub fn client_session_with_cancel(
-    path: &Path,
+    data_dir: &Path,
     cancelled: Arc<AtomicBool>,
     cancel_notify: Arc<tokio::sync::Notify>,
 ) -> Result<ClientSession> {
     Ok(ClientSession {
         runtime: client_runtime()?,
-        path: path.to_owned(),
+        data_dir: data_dir.to_owned(),
         stream: None,
         cancelled,
         cancel_notify,
@@ -102,10 +102,10 @@ impl ClientSession {
                 _ = &mut notified => bail!("IPC request cancelled"),
                 response = async {
                     if self.stream.is_none() {
-                        self.stream = Some(UnixStream::connect(&self.path).await.with_context(|| {
+                        self.stream = Some(super::endpoint::connect(&self.data_dir).await.with_context(|| {
                             format!(
                                 "Cannot connect to Rivu at {}. Start `rivu` or `rivu serve` first.",
-                                self.path.display()
+                                self.data_dir.display()
                             )
                         })?);
                     }
@@ -196,14 +196,14 @@ impl ClientSession {
     }
 }
 
-pub fn query(path: &Path, query: &Query) -> Result<QueryResponse> {
-    client_session(path)?.query(query)
+pub fn query(data_dir: &Path, query: &Query) -> Result<QueryResponse> {
+    client_session(data_dir)?.query(query)
 }
 
-pub fn get_state(path: &Path, sections: StateSections) -> Result<StateResponse> {
-    client_session(path)?.get_state(sections)
+pub fn get_state(data_dir: &Path, sections: StateSections) -> Result<StateResponse> {
+    client_session(data_dir)?.get_state(sections)
 }
 
-pub fn request_ack(path: &Path, command: &(impl Clone + Into<AppCommand>)) -> Result<Ack> {
-    client_session(path)?.request_ack(command)
+pub fn request_ack(data_dir: &Path, command: &(impl Clone + Into<AppCommand>)) -> Result<Ack> {
+    client_session(data_dir)?.request_ack(command)
 }

@@ -201,12 +201,11 @@ impl App {
     /// Show an existing instance, or start a graphical application if none exists.
     /// Import paths must already be resolved against the calling client's cwd.
     pub fn open_gui(data_dir: PathBuf, config_path: PathBuf, paths: Vec<PathBuf>) -> Result<()> {
-        let socket = data_dir.join("rivu.sock");
-        match ipc::request_ack(&socket, &AppCommand::ShowWindow) {
+        match ipc::request_ack(&data_dir, &AppCommand::ShowWindow) {
             Ok(ack) if ack.ok => {
                 if !paths.is_empty() {
                     let ack = ipc::request_ack(
-                        &socket,
+                        &data_dir,
                         &Command::Scan {
                             paths,
                             force: false,
@@ -234,7 +233,7 @@ impl App {
         paths: Vec<PathBuf>,
         graphical: bool,
     ) -> Result<Self> {
-        let socket_owner = ipc::SocketOwner::acquire(&data_dir.join("rivu.sock"))?;
+        let socket_owner = ipc::SocketOwner::acquire(&data_dir)?;
         let signals = Signals::new([SIGINT, SIGTERM]).context("Registering shutdown signals")?;
         let config = Config::load(&config_path)?;
         let session = logging::Session::start(&data_dir, &config)?;
@@ -645,7 +644,6 @@ mod tests {
         }
         .save(&config_path)
         .unwrap();
-        let socket = data_dir.join("rivu.sock");
         let (ready, started) = bounded(1);
         let worker = thread::spawn(move || {
             let app = App::start(data_dir, config_path, Vec::new(), false)?;
@@ -655,18 +653,16 @@ mod tests {
         started
             .recv_timeout(std::time::Duration::from_secs(15))
             .unwrap();
-        let ack = ipc::request_ack(&socket, &AppCommand::Shutdown).unwrap();
+        let ack = ipc::request_ack(directory.path(), &AppCommand::Shutdown).unwrap();
         assert!(ack.ok);
         worker.join().unwrap().unwrap();
-        assert!(!socket.exists());
-        assert!(ipc::SocketOwner::acquire(&socket).is_ok());
+        assert!(ipc::SocketOwner::acquire(directory.path()).is_ok());
     }
 
     #[test]
     fn duplicate_start_does_not_touch_runtime_storage_or_configuration() {
         let directory = tempfile::tempdir().unwrap();
-        let socket = directory.path().join("rivu.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let owner = ipc::SocketOwner::acquire(directory.path()).unwrap();
         let config = directory.path().join("config.toml");
         std::fs::write(&config, b"invalid config intentionally").unwrap();
         assert!(
@@ -683,8 +679,13 @@ mod tests {
             std::fs::read(config).unwrap(),
             b"invalid config intentionally"
         );
-        assert!(std::os::unix::net::UnixStream::connect(socket).is_ok());
-        drop(listener);
+        assert!(
+            std::os::unix::net::UnixStream::connect_addr(
+                &ipc::endpoint::address(directory.path()).unwrap()
+            )
+            .is_ok()
+        );
+        drop(owner);
     }
 
     #[test]
@@ -693,8 +694,6 @@ mod tests {
         let config = directory.path().join("config.toml");
         std::fs::write(&config, b"invalid config intentionally").unwrap();
         assert!(App::start(directory.path().to_owned(), config, Vec::new(), false).is_err());
-        let socket = directory.path().join("rivu.sock");
-        assert!(!socket.exists());
-        assert!(ipc::SocketOwner::acquire(&socket).is_ok());
+        assert!(ipc::SocketOwner::acquire(directory.path()).is_ok());
     }
 }

@@ -1,4 +1,5 @@
 mod client;
+pub(crate) mod endpoint;
 mod protocol;
 mod server;
 mod transport;

@@ -250,7 +250,6 @@ fn run() -> Result<()> {
             .map(|dirs| dirs.data_dir().to_path_buf())
             .unwrap_or_else(|| PathBuf::from(".rivu"))
     });
-    let socket = data_dir.join("rivu.sock");
     let action = args.action.unwrap_or(Action::Gui { paths: Vec::new() });
     match action {
         Action::Gui { paths } => App::open_gui(
@@ -265,7 +264,7 @@ fn run() -> Result<()> {
             false,
         )?
         .run(),
-        Action::Tui => terminal::run(&socket),
+        Action::Tui => terminal::run(&data_dir),
         Action::Library(LibraryAction::Probe { path, enhanced }) => {
             let probe_config = config::Config::load(&config_path)?;
             let ffmpeg_enabled = probe_config.ffmpeg_enabled || enhanced;
@@ -333,16 +332,16 @@ fn run() -> Result<()> {
             Ok(())
         }
         Action::Library(LibraryAction::Status) => {
-            let response = ipc::get_state(&socket, StateSections::ALL)?;
+            let response = ipc::get_state(&data_dir, StateSections::ALL)?;
             show_state(&response, args.json)
         }
         Action::Library(LibraryAction::List {
             query,
             favorites,
             missing,
-        }) => list_library(&socket, args.json, query, favorites, missing),
+        }) => list_library(&data_dir, args.json, query, favorites, missing),
         Action::Library(LibraryAction::Stats) => {
-            let response = ipc::query(&socket, &Query::LibraryStats)?;
+            let response = ipc::query(&data_dir, &Query::LibraryStats)?;
             let ViewResponse::LibraryStats(stats) = response.result.map_err(anyhow::Error::from)?
             else {
                 bail!("Statistics query returned an unexpected response");
@@ -356,7 +355,7 @@ fn run() -> Result<()> {
         }
         Action::Library(LibraryAction::History { limit }) => {
             let response = ipc::get_state(
-                &socket,
+                &data_dir,
                 StateSections {
                     library: true,
                     ..StateSections::default()
@@ -374,8 +373,8 @@ fn run() -> Result<()> {
             }
             Ok(())
         }
-        Action::Queue(QueueAction::List) => list_queue(&socket, args.json),
-        Action::Playlist(PlaylistAction::List) => list_playlists(&socket, args.json),
+        Action::Queue(QueueAction::List) => list_queue(&data_dir, args.json),
+        Action::Playlist(PlaylistAction::List) => list_playlists(&data_dir, args.json),
         Action::Library(LibraryAction::Edit {
             track_id,
             title,
@@ -389,16 +388,16 @@ fn run() -> Result<()> {
                 album,
                 decoder_hint: None,
             };
-            let ack = ipc::request_ack(&socket, &command)?;
+            let ack = ipc::request_ack(&data_dir, &command)?;
             show_ack(&ack, args.json)
         }
         Action::Library(LibraryAction::Optimize) => {
-            let ack = ipc::request_ack(&socket, &Command::OptimizeDatabase)?;
+            let ack = ipc::request_ack(&data_dir, &Command::OptimizeDatabase)?;
             if !ack.ok {
                 return show_ack(&ack, args.json);
             }
             let response = ipc::get_state(
-                &socket,
+                &data_dir,
                 StateSections {
                     system: true,
                     ..StateSections::default()
@@ -429,7 +428,7 @@ fn run() -> Result<()> {
             Ok(())
         }
         Action::Quit => {
-            let ack = ipc::request_ack(&socket, &rivu::app::AppCommand::Shutdown)?;
+            let ack = ipc::request_ack(&data_dir, &rivu::app::AppCommand::Shutdown)?;
             if !ack.ok {
                 bail!("{}", ack.error.as_deref().unwrap_or("Command failed"));
             }
@@ -437,7 +436,7 @@ fn run() -> Result<()> {
         }
         action => {
             let (command, wait_scan) = translate(action)?;
-            let mut session = ipc::client_session(&socket)?;
+            let mut session = ipc::client_session(&data_dir)?;
             let ack = session.request_ack(&command)?;
             if !ack.ok {
                 bail!("{}", ack.error.as_deref().unwrap_or("Command failed"));
@@ -481,8 +480,8 @@ fn run() -> Result<()> {
     }
 }
 
-fn list_queue(socket: &Path, json: bool) -> Result<()> {
-    let mut session = ipc::client_session(socket)?;
+fn list_queue(data_dir: &Path, json: bool) -> Result<()> {
+    let mut session = ipc::client_session(data_dir)?;
     let state = session.get_state(StateSections {
         queue: true,
         ..StateSections::default()
@@ -547,13 +546,13 @@ fn list_queue(socket: &Path, json: bool) -> Result<()> {
 }
 
 fn list_library(
-    socket: &Path,
+    data_dir: &Path,
     json: bool,
     query: Option<String>,
     favorites: bool,
     missing: bool,
 ) -> Result<()> {
-    let mut session = ipc::client_session(socket)?;
+    let mut session = ipc::client_session(data_dir)?;
     let _ = session.get_state(StateSections::default())?;
     let mut after = None;
     let mut expected = None;
@@ -622,8 +621,8 @@ fn list_library(
     Ok(())
 }
 
-fn list_playlists(socket: &Path, json: bool) -> Result<()> {
-    let mut session = ipc::client_session(socket)?;
+fn list_playlists(data_dir: &Path, json: bool) -> Result<()> {
+    let mut session = ipc::client_session(data_dir)?;
     let _ = session.get_state(StateSections::default())?;
     let mut expected = None;
     let mut after = None;
