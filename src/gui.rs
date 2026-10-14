@@ -1094,6 +1094,10 @@ impl GuiApp {
                 self.state.library.structure_revision != state.library.structure_revision;
             let playlist_changed =
                 self.state.library.playlist_revision != state.library.playlist_revision;
+            let playlist_refresh = self
+                .browser
+                .playlists
+                .refresh_changes(&self.state.library, &state.library);
             let queue_changed = self.state.queue.revision != state.queue.revision;
             let roots_changed =
                 self.state.system.config.library_roots != state.system.config.library_roots;
@@ -1158,14 +1162,16 @@ impl GuiApp {
                     self.request_track(id, cx);
                 }
             }
-            if !page_size_changed
-                && (library_changed || library_structure_changed || playlist_changed)
-            {
-                self.request_playlist_summaries(
-                    self.browser.playlists.summaries().rows.visible().start,
-                    cx,
-                );
-                if let Some(id) = self.browser.playlists.entries().playlist_id {
+            if !page_size_changed {
+                if playlist_refresh.summaries {
+                    self.request_playlist_summaries(
+                        self.browser.playlists.summaries().rows.visible().start,
+                        cx,
+                    );
+                }
+                if playlist_refresh.entries
+                    && let Some(id) = self.browser.playlists.entries().playlist_id
+                {
                     self.request_playlist_entries(
                         id,
                         self.browser.playlists.entries().rows.visible().start,

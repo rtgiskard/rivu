@@ -367,7 +367,8 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
-    pub fn move_playlist_entry(&self, id: i64, index: usize) -> Result<bool> {
+    /// Returns the owning playlist only after an actual committed reorder.
+    pub fn move_playlist_entry(&self, id: i64, index: usize) -> Result<Option<i64>> {
         let tx = self.conn.unchecked_transaction()?;
         let (pid, old): (i64, i64) = tx
             .query_row(
@@ -386,11 +387,11 @@ impl Store {
             bail!("playlist index out of range");
         }
         if old == index as i64 {
-            return Ok(false);
+            return Ok(None);
         }
         move_entry(&tx, PositionScope::Playlist(pid), id, old, index as i64)?;
         tx.commit()?;
-        Ok(true)
+        Ok(Some(pid))
     }
 }
 
@@ -440,7 +441,7 @@ mod deletion_tests {
             total: 3,
         };
         assert_eq!(store.playlist_entry(102)?, Some(expected));
-        store.move_playlist_entry(102, 0)?;
+        assert_eq!(store.move_playlist_entry(102, 0)?, Some(10));
         assert_eq!(
             store.playlist_entry(102)?,
             Some(PlaylistEntryLocation {
@@ -677,7 +678,7 @@ mod request_tests {
         let other = store.create_playlist_with_tracks("other", &[4, 3])?;
         let other_before = positioned_entries(&store, other)?;
         let initial = positioned_entries(&store, id)?;
-        assert!(store.move_playlist_entry(initial[1].0, 3)?);
+        assert_eq!(store.move_playlist_entry(initial[1].0, 3)?, Some(id));
         assert_eq!(
             positioned_entries(&store, id)?,
             vec![
@@ -687,7 +688,7 @@ mod request_tests {
                 (initial[1].0, 2, 3)
             ]
         );
-        assert!(store.move_playlist_entry(initial[1].0, 0)?);
+        assert_eq!(store.move_playlist_entry(initial[1].0, 0)?, Some(id));
         let moved = positioned_entries(&store, id)?;
         assert_eq!(
             moved,
@@ -698,7 +699,7 @@ mod request_tests {
                 (initial[3].0, 4, 3)
             ]
         );
-        assert!(!store.move_playlist_entry(initial[1].0, 0)?);
+        assert_eq!(store.move_playlist_entry(initial[1].0, 0)?, None);
         assert!(store.move_playlist_entry(initial[1].0, 4).is_err());
         assert!(store.move_playlist_entry(initial[1].0, usize::MAX).is_err());
         assert!(store.move_playlist_entry(i64::MAX, 0).is_err());

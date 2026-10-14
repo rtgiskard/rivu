@@ -393,7 +393,7 @@ fn playlist_deduplicates_additions_and_preserves_first_order() {
         ids
     );
     assert_eq!(entries[0].id, first_entry);
-    s.move_playlist_entry(entries[2].id, 0).unwrap();
+    assert_eq!(s.move_playlist_entry(entries[2].id, 0).unwrap(), Some(pl));
     s.remove_playlist_entry(first_entry).unwrap();
     drop(s);
     assert_eq!(
@@ -527,7 +527,10 @@ fn deleting_tracks_keeps_playlist_reordering_contiguous() {
         .unwrap();
     let before = playlist_entries(&store, playlist);
     store.remove_tracks(&[tracks[0].id]).unwrap();
-    store.move_playlist_entry(before[2].id, 0).unwrap();
+    assert_eq!(
+        store.move_playlist_entry(before[2].id, 0).unwrap(),
+        Some(playlist)
+    );
     assert_eq!(
         playlist_entries(&store, playlist)
             .iter()
@@ -2239,7 +2242,10 @@ fn bulk_missing_cleanup_spans_pages_and_preserves_playlist_reordering() {
     let page = store.playlist_entries_page(playlist, 0, 1).unwrap();
     assert_eq!(page.total, 500);
     assert_eq!(page.rows[0].track_id, 1000);
-    store.move_playlist_entry(page.rows[0].id, 499).unwrap();
+    assert_eq!(
+        store.move_playlist_entry(page.rows[0].id, 499).unwrap(),
+        Some(playlist)
+    );
     assert_eq!(
         store.playlist_entries_page(playlist, 499, 1).unwrap().rows[0].track_id,
         1000

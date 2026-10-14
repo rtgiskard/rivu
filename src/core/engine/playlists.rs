@@ -52,8 +52,11 @@ impl Core {
         entry_id: i64,
         index: usize,
     ) -> Result<()> {
-        if self.store.move_playlist_entry(entry_id, index)? {
-            self.reload_playlists()?;
+        if let Some(playlist_id) = self.store.move_playlist_entry(entry_id, index)? {
+            let revision = Arc::make_mut(&mut self.state.library.playlist_entry_revisions)
+                .entry(playlist_id)
+                .or_default();
+            *revision = revision.wrapping_add(1);
         }
         Ok(())
     }

@@ -813,6 +813,9 @@ fn list_playlists(data_dir: &Path, json: bool) -> Result<()> {
                 )?;
             }
             let mut entry_after = None;
+            // Catalog validity spans the listing; entry order is scoped to this
+            // playlist and captured by its first batch.
+            let mut entry_expected = expected;
             let mut entry_index = 0usize;
             let mut first_entry = true;
             loop {
@@ -820,8 +823,9 @@ fn list_playlists(data_dir: &Path, json: bool) -> Result<()> {
                     playlist_id: playlist.id,
                     after: entry_after,
                     limit: MAX_QUERY_ROWS,
-                    expected,
+                    expected: entry_expected,
                 })?;
+                entry_expected = Some(response.revisions);
                 let view = match listing_result(response.result)? {
                     Some(view) => view,
                     None => return Ok(()),

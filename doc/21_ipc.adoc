@@ -189,7 +189,7 @@ The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
 Bodies use Postcard serialization without COBS framing. The current protocol
-version is `14`; clients and servers must use matching wire schemas. The four-byte
+version is `15`; clients and servers must use matching wire schemas. The four-byte
 frame length remains little-endian; body integers follow Postcard's encoding.
 
 Request frame content is limited to 4 MiB
@@ -325,6 +325,17 @@ scan status and requested playlist imports still complete. Empty or existing-onl
 playlist additions and same-position moves preserve playlist query validity;
 missing identities still fail validation.
 
+The Library section carries the catalog/membership epoch `playlist_revision` and
+`playlist_entry_revisions`, a playlist-ID-keyed map of reorder equality tokens.
+An actual entry move advances only its owning playlist's token: catalog summaries,
+other playlists, and library-content/structure tokens remain valid. It does not
+read catalog totals. Repeated moves reuse the same map key. Catalog/membership
+changes advance the epoch and clear scoped tokens, so the map contains at most
+the extant playlists reordered since that epoch. An absent key means zero within
+the current epoch, never validity across an epoch change. Every reorder still
+advances the Library state-section token so external clients and coalesced watches
+receive the affected playlist identity, not just a GUI-local command hint.
+
 Playback-statistics writes return count and activity time directly to the Core.
 The bounded track cache and current/recent snapshots receive these scalar changes
 without reloading complete metadata. Count threshold and activity timing remain
@@ -338,9 +349,15 @@ next request; disconnect or server shutdown terminates the wait.
 
 Query responses contain the requested projection and its data revisions, not a
 full client state or queue snapshot. Rows and query revisions come from the same
-core dispatch. Library-content, directory-structure, playlist, and queue-content
-revisions are separate from the four state-section tokens. Command acknowledgements contain
-success or an error and the core's publication revision, not replacement state.
+core dispatch. Library-content, directory-structure, playlist-catalog, per-playlist
+entry-order, and queue-content revisions are separate from the four state-section
+tokens. Entry page/batch and successful entry-location responses attach
+`revisions.playlist_entries = {playlist_id, revision}`; other queries and missing
+entry lookups attach no entry token. Consumers compare entry identity/token plus
+library-content and catalog epoch before accepting late entry results. A missing
+entry lookup also requires its captured target and revision baseline to remain
+current. Command acknowledgements contain success or an error and the core's
+publication revision, not replacement state.
 
 Interactive pages return an exact filtered total and at most 256 rows; larger
 limits are clamped, and `limit = 0` returns the count without rows. Offset pages
@@ -386,15 +403,21 @@ frontends must not query storage from rendering.
 
 To traverse consistently, the caller captures the first batch's query revisions
 and supplies them as `expected` on later requests. Track batches check library
-content; playlist batches check both library and playlist revisions. A mismatch
-returns the typed `QueryError::RevisionChanged`; clients must match that variant,
-not parse diagnostic text. Other query failures return `QueryError::Message`.
-Without `expected`, the server does not enforce traversal consistency. This uses
-bounded results and explicit restart rather than retaining a database snapshot
-for an arbitrarily slow client.
+content; playlist-summary batches check library content and the catalog epoch.
+Playlist-entry batches additionally check their playlist-specific entry token;
+reordering a different playlist does not interrupt traversal. A catalog baseline
+without an entry token may start an entry traversal (`after = None`), but cannot
+continue one. The CLI retains its catalog baseline while capturing each
+playlist's entry baseline separately. A mismatch returns the typed
+`QueryError::RevisionChanged`; clients must match that variant, not parse
+diagnostic text. Other query failures return `QueryError::Message`. Without
+`expected`, the server does not enforce traversal consistency. This uses bounded
+results and explicit restart rather than retaining a database snapshot for an
+arbitrarily slow client.
 
-Playlist-only edits advance the playlist revision without changing library-content
-or directory-structure revisions, so an existing track traversal remains valid.
+Playlist-only edits leave library-content and directory-structure revisions
+unchanged, so an existing track traversal remains valid. Catalog/membership edits
+advance the playlist epoch; pure reorders advance only the affected entry token.
 Importing a playlist can still invalidate track queries because its scan updates
 the library before the playlist is created. If playlist creation fails after a
 successful scan, the committed library changes remain visible.

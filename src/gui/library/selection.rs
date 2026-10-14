@@ -320,11 +320,7 @@ impl LibrarySelection {
 enum RangeStep {
     Idle,
     Selected(LibraryNode),
-    Query {
-        token: u64,
-        slice: Slice,
-        query: Query,
-    },
+    Query { token: u64, slice: Slice },
 }
 
 impl LibraryBrowser {
@@ -464,17 +460,23 @@ impl LibraryBrowser {
                 self.range_selection.pending = Some(job);
                 continue;
             }
-            let query = job.query(&slice);
             let token = job.token;
             self.range_selection.active = Some(token);
             self.range_selection.pending = Some(job);
-            return Ok(RangeStep::Query {
-                token,
-                slice,
-                query,
-            });
+            return Ok(RangeStep::Query { token, slice });
         }
         Ok(RangeStep::Idle)
+    }
+
+    fn range_query(&self, token: u64, slice: &Slice) -> Query {
+        // Dispatch follows advance_range synchronously; the owner retains the
+        // frozen scope rather than carrying the full Query in RangeStep.
+        self.range_selection
+            .pending
+            .as_ref()
+            .filter(|job| job.token == token)
+            .expect("dispatching the current pending range")
+            .query(slice)
     }
 
     fn complete_range(
@@ -575,11 +577,8 @@ impl GuiApp {
             }
             Ok(RangeStep::Idle) => {}
             Ok(RangeStep::Selected(endpoint)) => self.finish_library_selection(&endpoint, cx),
-            Ok(RangeStep::Query {
-                token,
-                slice,
-                query,
-            }) => {
+            Ok(RangeStep::Query { token, slice }) => {
+                let query = self.browser.library.range_query(token, &slice);
                 let handle = self.handle.clone();
                 cx.spawn(async move |this, cx| {
                     let response = cx
@@ -702,7 +701,7 @@ mod tests {
         library
             .start_selection(&LibraryNode::Track(30), 31, true, false, (7, 3), 20)
             .unwrap();
-        let RangeStep::Query { token, slice, .. } = library.advance_range((7, 3), &roots).unwrap()
+        let RangeStep::Query { token, slice } = library.advance_range((7, 3), &roots).unwrap()
         else {
             panic!("uncached range needs a batch")
         };
@@ -736,6 +735,7 @@ mod tests {
                         structure: 3,
                         playlist: 0,
                         queue: 0,
+                        playlist_entries: None,
                     },
                     result: Ok(ViewResponse::LibraryPage(Page {
                         total: 100,
@@ -748,14 +748,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(library.selected(), &HashSet::from([1]));
-        let RangeStep::Query {
-            token,
-            slice,
-            query,
-        } = library.advance_range((7, 3), &roots).unwrap()
+        let RangeStep::Query { token, slice } = library.advance_range((7, 3), &roots).unwrap()
         else {
             panic!("replacement starts after old batch")
         };
+        let query = library.range_query(token, &slice);
         assert!(
             matches!(query, Query::LibraryRootPage { path, query: Some(query), offset: 50, limit: 1, .. }
             if path == branch.path() && query == "replacement")
@@ -770,6 +767,7 @@ mod tests {
                         structure: 3,
                         playlist: 0,
                         queue: 0,
+                        playlist_entries: None,
                     },
                     result: Ok(ViewResponse::LibraryPage(Page {
                         total: 100,
@@ -857,11 +855,8 @@ mod tests {
         let mut requests = Vec::new();
         loop {
             match library.advance_range((7, 3), &roots).unwrap() {
-                RangeStep::Query {
-                    token,
-                    slice,
-                    query,
-                } => {
+                RangeStep::Query { token, slice } => {
+                    let query = library.range_query(token, &slice);
                     let Query::LibraryRootPage {
                         path,
                         offset,
@@ -884,6 +879,7 @@ mod tests {
                                     structure: 3,
                                     playlist: 0,
                                     queue: 0,
+                                    playlist_entries: None,
                                 },
                                 result: Ok(ViewResponse::LibraryPage(Page {
                                     total: 3,
@@ -1044,6 +1040,7 @@ mod tests {
                             structure: 3,
                             playlist: 0,
                             queue: 0,
+                            playlist_entries: None,
                         },
                         result: Ok(ViewResponse::DirectoryPage(page)),
                     },
@@ -1095,14 +1092,12 @@ mod tests {
         library
             .start_selection(&LibraryNode::Track(3), 4, true, false, (7, 3), 2)
             .unwrap();
-        let RangeStep::Query {
-            token,
-            slice,
-            query,
-        } = library.advance_range((7, 3), &["/music".into()]).unwrap()
+        let RangeStep::Query { token, slice } =
+            library.advance_range((7, 3), &["/music".into()]).unwrap()
         else {
             panic!("uncached filtered rows require a range query")
         };
+        let query = library.range_query(token, &slice);
         assert!(matches!(
             query,
             Query::DirectoryPage {
@@ -1130,6 +1125,7 @@ mod tests {
                         structure: 3,
                         playlist: 0,
                         queue: 0,
+                        playlist_entries: None,
                     },
                     result: Ok(ViewResponse::DirectoryPage(Page {
                         total: 4,
@@ -1179,6 +1175,7 @@ mod tests {
                         structure: 3,
                         playlist: 0,
                         queue: 0,
+                        playlist_entries: None,
                     },
                     result: Ok(ViewResponse::LibraryPage(Page {
                         total: 10_000,
@@ -1203,6 +1200,7 @@ mod tests {
                 structure: 3,
                 playlist: 0,
                 queue: 0,
+                playlist_entries: None,
             },
             result: Ok(ViewResponse::LibraryPage(Page {
                 total: 10_000,
@@ -1409,6 +1407,7 @@ mod tests {
                         structure: 3,
                         playlist: 0,
                         queue: 0,
+                        playlist_entries: None,
                     },
                     result: Ok(ViewResponse::DirectoryPage(Page {
                         total: slice.total,
@@ -1477,6 +1476,7 @@ mod tests {
                         structure: 3,
                         playlist: 0,
                         queue: 0,
+                        playlist_entries: None,
                     },
                     result: Ok(ViewResponse::DirectoryPage(Page {
                         total: 1,

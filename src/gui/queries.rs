@@ -2,7 +2,11 @@
 //! GuiApp retains the entity and the single frame scheduler.
 
 use super::*;
-use crate::{model::Query, response::ViewResponse};
+use crate::{
+    model::Query,
+    projection::GuiLibrarySnapshot,
+    response::{PlaylistEntryRevision, QueryRevisions, ViewResponse},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum ViewRequestKind {
@@ -21,6 +25,38 @@ impl ViewRequestKind {
             Query::PlaylistSummaryBatch { .. } => Self::Selection,
             _ => return None,
         })
+    }
+
+    fn revisions_match(
+        self,
+        revisions: QueryRevisions,
+        library: &GuiLibrarySnapshot,
+        playlist_id: Option<i64>,
+    ) -> bool {
+        if revisions.library != library.revision || revisions.playlist != library.playlist_revision
+        {
+            return false;
+        }
+        if !matches!(self, Self::Entries | Self::EntrySelection) {
+            return true;
+        }
+        let entries = playlist_id.map(|playlist_id| PlaylistEntryRevision {
+            playlist_id,
+            revision: library
+                .playlist_entry_revisions
+                .get(&playlist_id)
+                .copied()
+                .unwrap_or(0),
+        });
+        match self {
+            Self::Entries => entries.is_some() && revisions.playlist_entries == entries,
+            // Missing entries have no identity to attach a token to; the captured
+            // request baseline and catalog epoch still guard deletion results.
+            Self::EntrySelection => revisions
+                .playlist_entries
+                .is_none_or(|revision| Some(revision) == entries),
+            _ => true,
+        }
     }
 }
 
@@ -162,7 +198,11 @@ impl GuiApp {
                         return;
                     }
                 };
-                if revisions.playlist != this.state.library.playlist_revision {
+                if !kind.revisions_match(
+                    revisions,
+                    &this.state.library,
+                    this.browser.playlists.entries().playlist_id,
+                ) {
                     match kind {
                         ViewRequestKind::Summaries => this.request_playlist_summaries(
                             this.browser.playlists.summaries().offset,
@@ -405,7 +445,15 @@ impl GuiApp {
         let generation = self.browser.requests.next_generation();
         let kind = ViewRequestKind::EntrySelection;
         self.browser.requests.begin(kind, generation);
-        let revision = self.state.library.playlist_revision;
+        let library_revision = self.state.library.revision;
+        let catalog_revision = self.state.library.playlist_revision;
+        let entry_revision = self
+            .state
+            .library
+            .playlist_entry_revisions
+            .get(&playlist_id)
+            .copied()
+            .unwrap_or(0);
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
             cx.background_executor()
@@ -434,7 +482,22 @@ impl GuiApp {
                 {
                     return;
                 }
-                if response.revisions.playlist != revision {
+                if this.state.library.revision != library_revision
+                    || this.state.library.playlist_revision != catalog_revision
+                    || this
+                        .state
+                        .library
+                        .playlist_entry_revisions
+                        .get(&playlist_id)
+                        .copied()
+                        .unwrap_or(0)
+                        != entry_revision
+                    || !kind.revisions_match(
+                        response.revisions,
+                        &this.state.library,
+                        Some(playlist_id),
+                    )
+                {
                     this.request_entry_selection(cx);
                     return;
                 }
@@ -548,5 +611,77 @@ impl GuiApp {
                 cx,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ViewRequestKind, ViewRequests};
+    use crate::{
+        projection::GuiLibrarySnapshot,
+        response::{PlaylistEntryRevision, QueryRevisions},
+    };
+    use std::sync::Arc;
+
+    #[test]
+    fn playlist_queries_reject_relevant_reorders_not_other_playlists() {
+        let mut library = GuiLibrarySnapshot::default();
+        let catalog = QueryRevisions::default();
+        let old = QueryRevisions {
+            playlist_entries: Some(PlaylistEntryRevision {
+                playlist_id: 1,
+                revision: 0,
+            }),
+            ..catalog
+        };
+        Arc::make_mut(&mut library.playlist_entry_revisions).insert(2, 1);
+        assert!(ViewRequestKind::Summaries.revisions_match(catalog, &library, Some(1)));
+        assert!(ViewRequestKind::Selection.revisions_match(catalog, &library, Some(1)));
+        assert!(ViewRequestKind::Entries.revisions_match(old, &library, Some(1)));
+        assert!(ViewRequestKind::EntrySelection.revisions_match(old, &library, Some(1)));
+        Arc::make_mut(&mut library.playlist_entry_revisions).insert(1, 1);
+        assert!(ViewRequestKind::Summaries.revisions_match(catalog, &library, Some(1)));
+        assert!(!ViewRequestKind::Entries.revisions_match(old, &library, Some(1)));
+        assert!(!ViewRequestKind::EntrySelection.revisions_match(old, &library, Some(1)));
+        let current = QueryRevisions {
+            playlist_entries: Some(PlaylistEntryRevision {
+                playlist_id: 1,
+                revision: 1,
+            }),
+            ..catalog
+        };
+        assert!(ViewRequestKind::Entries.revisions_match(current, &library, Some(1)));
+        assert!(!ViewRequestKind::Entries.revisions_match(current, &library, Some(2)));
+        let before_metadata = library.clone();
+        library.revision += 1;
+        assert!(!ViewRequestKind::Entries.revisions_match(current, &library, Some(1)));
+        assert!(!ViewRequestKind::Summaries.revisions_match(catalog, &library, Some(1)));
+        library = before_metadata;
+        library.playlist_revision += 1;
+        library.playlist_entry_revisions = Arc::default();
+        // Epoch change rejects the old zero token even after the scoped map resets.
+        assert!(!ViewRequestKind::Entries.revisions_match(old, &library, Some(1)));
+        assert!(!ViewRequestKind::EntrySelection.revisions_match(catalog, &library, Some(1)));
+    }
+
+    #[test]
+    fn entry_refresh_supersedes_entry_results_without_cancelling_catalog_requests() {
+        let mut requests = ViewRequests::default();
+        for kind in [
+            ViewRequestKind::Summaries,
+            ViewRequestKind::Selection,
+            ViewRequestKind::Entries,
+            ViewRequestKind::EntrySelection,
+        ] {
+            requests.begin(kind, 1);
+        }
+        requests.begin(ViewRequestKind::Entries, 2);
+        requests.begin(ViewRequestKind::EntrySelection, 3);
+        assert!(requests.is_current(ViewRequestKind::Summaries, 1));
+        assert!(requests.is_current(ViewRequestKind::Selection, 1));
+        assert!(!requests.is_current(ViewRequestKind::Entries, 1));
+        assert!(!requests.is_current(ViewRequestKind::EntrySelection, 1));
+        assert!(requests.is_current(ViewRequestKind::Entries, 2));
+        assert!(requests.is_current(ViewRequestKind::EntrySelection, 3));
     }
 }

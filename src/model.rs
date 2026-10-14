@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::{path::PathBuf, sync::Arc};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 /// Shared client state assembled from sectioned IPC responses.
 /// UI-specific projections borrow this contract; it contains no view state.
@@ -258,8 +258,12 @@ pub struct LibrarySnapshot {
     /// Changes only when the library tree or visible row ordering may change.
     #[serde(default)]
     pub structure_revision: u64,
+    /// Catalog and membership epoch; pure entry reorders leave it unchanged.
     #[serde(default)]
     pub playlist_revision: u64,
+    /// Reorder tokens for playlists changed since the last catalog epoch.
+    #[serde(default)]
+    pub playlist_entry_revisions: Arc<BTreeMap<i64, u64>>,
     #[serde(default)]
     pub history: Arc<Vec<HistoryEntry>>,
 }
@@ -383,6 +387,7 @@ impl Default for LibrarySnapshot {
             revision: 0,
             structure_revision: 0,
             playlist_revision: 0,
+            playlist_entry_revisions: Arc::default(),
             history: Arc::new(Vec::new()),
         }
     }

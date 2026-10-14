@@ -510,6 +510,12 @@ pub(super) enum PlaylistEntryAction {
     Move(bool),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct PlaylistRefresh {
+    pub(super) summaries: bool,
+    pub(super) entries: bool,
+}
+
 #[derive(Default)]
 pub(super) struct PlaylistBrowser {
     summaries: PlaylistSummaryBuffer,
@@ -521,6 +527,22 @@ pub(super) struct PlaylistBrowser {
 }
 
 impl PlaylistBrowser {
+    pub(super) fn refresh_changes(
+        &self,
+        previous: &crate::projection::GuiLibrarySnapshot,
+        next: &crate::projection::GuiLibrarySnapshot,
+    ) -> PlaylistRefresh {
+        let summaries = previous.revision != next.revision
+            || previous.structure_revision != next.structure_revision
+            || previous.playlist_revision != next.playlist_revision;
+        let entries = self.entries.playlist_id.is_some_and(|id| {
+            summaries
+                || previous.playlist_entry_revisions.get(&id)
+                    != next.playlist_entry_revisions.get(&id)
+        });
+        PlaylistRefresh { summaries, entries }
+    }
+
     pub(super) fn summaries(&self) -> &PlaylistSummaryBuffer {
         &self.summaries
     }
@@ -1247,6 +1269,76 @@ mod tests {
         assert_eq!(playlists.selected_entry(), None);
         assert_eq!(playlists.entries().playlist_id, None);
     }
+    #[test]
+    fn playlist_reorder_refresh_is_scoped_and_preserves_catalog_payload() {
+        use crate::projection::GuiLibrarySnapshot;
+        let mut playlists = PlaylistBrowser::default();
+        playlists.select(1, "one".into(), 0);
+        playlists.prepare_entries(1);
+        playlists.prepare_page(false, 0, 20);
+        playlists.accept_summaries(Page {
+            total: 1,
+            rows: vec![PlaylistSummary {
+                id: 1,
+                name: "one".into(),
+                entry_count: 10_000,
+            }],
+        });
+        playlists.select_entry(41, 3);
+        let previous = GuiLibrarySnapshot::default();
+        let mut next = previous.clone();
+        Arc::make_mut(&mut next.playlist_entry_revisions).insert(2, 1);
+        assert_eq!(
+            playlists.refresh_changes(&previous, &next),
+            PlaylistRefresh {
+                summaries: false,
+                entries: false,
+            }
+        );
+        Arc::make_mut(&mut next.playlist_entry_revisions).insert(1, 1);
+        let refresh = playlists.refresh_changes(&previous, &next);
+        assert_eq!(
+            refresh,
+            PlaylistRefresh {
+                summaries: false,
+                entries: true
+            }
+        );
+        if refresh.entries {
+            playlists.prepare_entries(1);
+        }
+        assert_eq!(playlists.summaries.rows.get(0).unwrap().name, "one");
+        assert_eq!(playlists.selected_entry(), Some(41));
+        assert!(!playlists.entry_ready());
+        let coalesced = next.clone();
+        Arc::make_mut(&mut next.playlist_entry_revisions).insert(2, 2);
+        assert_eq!(
+            playlists.refresh_changes(&coalesced, &next),
+            PlaylistRefresh {
+                summaries: false,
+                entries: false,
+            }
+        );
+        next.playlist_revision += 1;
+        next.playlist_entry_revisions = Arc::default();
+        assert_eq!(
+            playlists.refresh_changes(&coalesced, &next),
+            PlaylistRefresh {
+                summaries: true,
+                entries: true,
+            }
+        );
+        let before_metadata = next.clone();
+        next.revision += 1;
+        assert_eq!(
+            playlists.refresh_changes(&before_metadata, &next),
+            PlaylistRefresh {
+                summaries: true,
+                entries: true,
+            }
+        );
+    }
+
     #[test]
     fn refreshed_offviewport_entry_plays_and_moves_by_identity_without_cached_pages() {
         let mut playlists = PlaylistBrowser::default();

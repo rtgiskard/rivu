@@ -30,12 +30,9 @@ impl Core {
                     let Ok(request) = request else { break; };
                     match request.operation {
                         Operation::Query(query) => {
-                            let result = self.view(&query);
+                            let response = self.query_response(&query);
                             if let Some(reply) = request.reply {
-                                let _ = reply.send(CoreResponse::Query(QueryResponse {
-                                    revisions: self.state.query_revisions(),
-                                    result,
-                                }));
+                                let _ = reply.send(CoreResponse::Query(response));
                             }
                         }
                         Operation::Command(command) => {
@@ -217,8 +214,34 @@ impl Core {
         }
         Ok(())
     }
+    pub(in crate::core) fn query_response(&self, query: &Query) -> QueryResponse {
+        let result = self.view(query);
+        let playlist_id = match (query, &result) {
+            (
+                Query::PlaylistEntries { playlist_id, .. }
+                | Query::PlaylistEntryBatch { playlist_id, .. },
+                _,
+            ) => Some(*playlist_id),
+            (Query::PlaylistEntry { .. }, Ok(ViewResponse::PlaylistEntry(Some(entry)))) => {
+                Some(entry.playlist_id)
+            }
+            _ => None,
+        };
+        QueryResponse {
+            revisions: playlist_id
+                .map(|id| self.state.playlist_query_revisions(id))
+                .unwrap_or_else(|| self.state.query_revisions()),
+            result,
+        }
+    }
+
     pub(in crate::core) fn view(&self, query: &Query) -> Result<ViewResponse, QueryError> {
-        let current = self.state.query_revisions();
+        let current = match query {
+            Query::PlaylistEntryBatch { playlist_id, .. } => {
+                self.state.playlist_query_revisions(*playlist_id)
+            }
+            _ => self.state.query_revisions(),
+        };
         if let Query::QueueBatch {
             expected: Some(expected),
             ..
@@ -236,6 +259,19 @@ impl Core {
         if let Some(expected) = expected
             && (expected.library != current.library
                 || (playlist && expected.playlist != current.playlist))
+        {
+            return Err(QueryError::RevisionChanged);
+        }
+        if let Query::PlaylistEntryBatch {
+            after,
+            expected: Some(expected),
+            ..
+        } = query
+            && match expected.playlist_entries {
+                Some(revision) => Some(revision) != current.playlist_entries,
+                // A catalog baseline may start an entry traversal, never continue it.
+                None => after.is_some(),
+            }
         {
             return Err(QueryError::RevisionChanged);
         }

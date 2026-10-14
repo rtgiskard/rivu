@@ -7,8 +7,8 @@ use crate::{
     model::*,
     projection::{GuiSnapshot, MprisSnapshot, TraySnapshot},
     response::{
-        Ack, PlaybackSnapshot, QueryError, QueryResponse, QueryRevisions, StateResponse,
-        StateRevisions, StateSections, ViewResponse,
+        Ack, PlaybackSnapshot, PlaylistEntryRevision, QueryError, QueryResponse, QueryRevisions,
+        StateResponse, StateRevisions, StateSections, ViewResponse,
     },
     store::Store,
 };
@@ -82,6 +82,22 @@ impl CoreState {
             structure: self.library.structure_revision,
             playlist: self.library.playlist_revision,
             queue: self.queue.revision,
+            playlist_entries: None,
+        }
+    }
+
+    pub(crate) fn playlist_query_revisions(&self, playlist_id: i64) -> QueryRevisions {
+        QueryRevisions {
+            playlist_entries: Some(PlaylistEntryRevision {
+                playlist_id,
+                revision: self
+                    .library
+                    .playlist_entry_revisions
+                    .get(&playlist_id)
+                    .copied()
+                    .unwrap_or(0),
+            }),
+            ..self.query_revisions()
         }
     }
 
@@ -101,6 +117,10 @@ impl CoreState {
             library: self.library.revision != previous.library.revision
                 || self.library.structure_revision != previous.library.structure_revision
                 || self.library.playlist_revision != previous.library.playlist_revision
+                || !Arc::ptr_eq(
+                    &self.library.playlist_entry_revisions,
+                    &previous.library.playlist_entry_revisions,
+                )
                 || self.library.track_total != previous.library.track_total
                 || self.library.playlist_total != previous.library.playlist_total
                 || !Arc::ptr_eq(&self.library.history, &previous.library.history),
@@ -2060,13 +2080,6 @@ mod tests {
                 },
                 2,
             ),
-            (
-                Command::MovePlaylistEntry {
-                    entry_id: 2,
-                    index: 0,
-                },
-                2,
-            ),
             (Command::RemovePlaylistEntry { entry_id: 1 }, 2),
             (Command::DeletePlaylist { playlist_id: 1 }, 1),
             (Command::DeletePlaylist { playlist_id: 2 }, 0),
@@ -2707,7 +2720,7 @@ mod tests {
         })
         .unwrap();
         let entry_id = core.store.playlist_entries_page(1, 0, 1).unwrap().rows[0].id;
-        let expected = core.state.query_revisions();
+        let expected = core.state.playlist_query_revisions(1);
         let query = Query::PlaylistEntryBatch {
             playlist_id: 1,
             after: None,
@@ -2736,7 +2749,7 @@ mod tests {
             Command::MovePlaylistEntry { entry_id, index: 0 },
         ] {
             core.command(command).unwrap();
-            assert_eq!(core.state.query_revisions(), expected);
+            assert_eq!(core.state.playlist_query_revisions(1), expected);
             assert!(core.view(&query).is_ok());
         }
         for command in [
@@ -2768,7 +2781,7 @@ mod tests {
             },
         ] {
             assert!(core.command(command).is_err());
-            assert_eq!(core.state.query_revisions(), expected);
+            assert_eq!(core.state.playlist_query_revisions(1), expected);
             assert_eq!(core.store.playlist_track_ids(1, 10).unwrap(), [1, 2]);
         }
         for command in [
@@ -2783,7 +2796,8 @@ mod tests {
             },
             Command::MovePlaylistEntry { entry_id, index: 3 },
         ] {
-            let before = core.state.query_revisions();
+            let reordered = matches!(command, Command::MovePlaylistEntry { .. });
+            let before = core.state.playlist_query_revisions(1);
             let query = Query::PlaylistEntryBatch {
                 playlist_id: 1,
                 after: None,
@@ -2791,13 +2805,221 @@ mod tests {
                 expected: Some(before),
             };
             core.command(command).unwrap();
-            let after = core.state.query_revisions();
-            assert_ne!(after.playlist, before.playlist);
+            let after = core.state.playlist_query_revisions(1);
+            if reordered {
+                assert_eq!(after.playlist, before.playlist);
+                assert_ne!(after.playlist_entries, before.playlist_entries);
+            } else {
+                assert_ne!(after.playlist, before.playlist);
+            }
             assert_eq!(after.library, before.library);
             assert_eq!(after.queue, before.queue);
             assert_eq!(core.view(&query).unwrap_err(), QueryError::RevisionChanged);
         }
         assert_eq!(core.store.playlist_track_ids(1, 10).unwrap(), [2, 3, 4, 1]);
+    }
+
+    #[test]
+    fn playlist_reorders_preserve_catalog_and_other_playlist_queries() {
+        let (_directory, mut core) = fixture();
+        for (name, tracks) in [("one", vec![1, 2, 3]), ("two", vec![2, 3, 4])] {
+            core.command(Command::CreatePlaylistWithTracks {
+                name: name.into(),
+                track_ids: tracks,
+            })
+            .unwrap();
+        }
+        core.publish();
+        let before = core.state.revisions;
+        let summaries = Query::PlaylistSummaries {
+            offset: 0,
+            limit: 2,
+        };
+        let catalog = core.query_response(&summaries);
+        let first_entry = core.store.playlist_entries_page(1, 0, 1).unwrap().rows[0].id;
+        let old_lookup = core.query_response(&Query::PlaylistEntry {
+            entry_id: first_entry,
+        });
+        let batch = |playlist_id, after, expected| Query::PlaylistEntryBatch {
+            playlist_id,
+            after,
+            limit: 1,
+            expected,
+        };
+        let first = core.query_response(&batch(1, None, Some(catalog.revisions)));
+        let other = core.query_response(&batch(2, None, Some(catalog.revisions)));
+        let Ok(ViewResponse::PlaylistEntryBatch(entries)) = &first.result else {
+            panic!("expected first entry batch");
+        };
+        let continuation = entries.next;
+        let old_snapshot = GuiSnapshot::from_core(&core.state);
+        core.command(Command::MovePlaylistEntry {
+            entry_id: first_entry,
+            index: 2,
+        })
+        .unwrap();
+        core.publish();
+        assert_eq!(
+            core.state.revisions.changed_since(before),
+            StateSections {
+                library: true,
+                ..StateSections::default()
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(core.query_response(&summaries)).unwrap(),
+            serde_json::to_value(&catalog).unwrap(),
+        );
+        assert!(old_snapshot.library.playlist_entry_revisions.is_empty());
+        assert_eq!(core.state.library.playlist_entry_revisions.len(), 1);
+        assert_eq!(core.state.query_revisions(), catalog.revisions);
+        assert_eq!(
+            core.view(&batch(1, continuation, Some(first.revisions)))
+                .unwrap_err(),
+            QueryError::RevisionChanged
+        );
+        assert!(core.view(&batch(2, None, Some(other.revisions))).is_ok());
+        // A summary baseline cannot silently continue an entry traversal.
+        assert_eq!(
+            core.view(&batch(1, continuation, Some(catalog.revisions)))
+                .unwrap_err(),
+            QueryError::RevisionChanged
+        );
+        let fresh = core.query_response(&Query::PlaylistEntry {
+            entry_id: first_entry,
+        });
+        assert_ne!(
+            fresh.revisions.playlist_entries,
+            old_lookup.revisions.playlist_entries
+        );
+        assert!(
+            matches!(fresh.result, Ok(ViewResponse::PlaylistEntry(Some(entry)))
+            if entry.id == first_entry && entry.position == 2)
+        );
+        assert!(
+            core.view(&Query::PlaylistSummaryBatch {
+                after: Some(1),
+                limit: 1,
+                expected: Some(catalog.revisions),
+            })
+            .is_ok()
+        );
+        assert!(
+            core.view(&Query::TrackBatch {
+                query: None,
+                favorite: None,
+                missing: None,
+                after: None,
+                limit: 1,
+                expected: Some(catalog.revisions),
+            })
+            .is_ok()
+        );
+
+        let current = core.state.playlist_query_revisions(1);
+        let other_entry = core.store.playlist_entries_page(2, 0, 1).unwrap().rows[0].id;
+        // Two mutations may coalesce into one snapshot; both scoped tokens survive.
+        for index in [2, 1] {
+            core.command(Command::MovePlaylistEntry {
+                entry_id: other_entry,
+                index,
+            })
+            .unwrap();
+        }
+        core.publish();
+        assert!(core.view(&batch(1, None, Some(current))).is_ok());
+        assert_eq!(
+            core.view(&batch(2, None, Some(other.revisions)))
+                .unwrap_err(),
+            QueryError::RevisionChanged
+        );
+        assert_eq!(core.state.library.playlist_entry_revisions.len(), 2);
+        assert_eq!(core.state.query_revisions(), catalog.revisions);
+        // A token for another playlist is never an entry-order baseline.
+        assert_eq!(
+            core.view(&batch(2, None, Some(current))).unwrap_err(),
+            QueryError::RevisionChanged
+        );
+    }
+
+    #[test]
+    fn playlist_catalog_epochs_and_metadata_reject_old_entry_results() {
+        let (_directory, mut core) = fixture();
+        core.command(Command::CreatePlaylistWithTracks {
+            name: "one".into(),
+            track_ids: vec![1, 2, 3],
+        })
+        .unwrap();
+        let removed = core.store.playlist_entries_page(1, 0, 1).unwrap().rows[0].id;
+        for command in [
+            Command::CreatePlaylist { name: "two".into() },
+            Command::RenamePlaylist {
+                playlist_id: 1,
+                name: "renamed".into(),
+            },
+            Command::AddPlaylist {
+                playlist_id: 1,
+                track_ids: vec![4],
+            },
+            Command::RemovePlaylistEntry { entry_id: removed },
+            Command::DeletePlaylist { playlist_id: 1 },
+        ] {
+            let page = core.store.playlist_entries_page(1, 0, 1).unwrap();
+            core.command(Command::MovePlaylistEntry {
+                entry_id: page.rows[0].id,
+                index: page.total - 1,
+            })
+            .unwrap();
+            let expected = core.state.playlist_query_revisions(1);
+            core.command(command).unwrap();
+            assert_ne!(core.state.library.playlist_revision, expected.playlist);
+            assert_eq!(core.state.library.revision, expected.library);
+            assert!(core.state.library.playlist_entry_revisions.is_empty());
+            assert_eq!(
+                core.view(&Query::PlaylistEntryBatch {
+                    playlist_id: 1,
+                    after: None,
+                    limit: 1,
+                    expected: Some(expected),
+                })
+                .unwrap_err(),
+                QueryError::RevisionChanged
+            );
+        }
+        core.command(Command::AddPlaylist {
+            playlist_id: 2,
+            track_ids: vec![1, 2],
+        })
+        .unwrap();
+        let expected = core.state.playlist_query_revisions(2);
+        core.command(Command::EditTrack {
+            track_id: 1,
+            title: Some("edited".into()),
+            artist: None,
+            album: None,
+            decoder_hint: None,
+        })
+        .unwrap();
+        assert_ne!(core.state.library.revision, expected.library);
+        assert_eq!(
+            core.view(&Query::PlaylistEntryBatch {
+                playlist_id: 2,
+                after: None,
+                limit: 1,
+                expected: Some(expected),
+            })
+            .unwrap_err(),
+            QueryError::RevisionChanged
+        );
+        let response = core.query_response(&Query::PlaylistEntries {
+            playlist_id: 2,
+            offset: 0,
+            limit: 1,
+        });
+        assert!(
+            matches!(response.result, Ok(ViewResponse::PlaylistEntries(page))
+            if page.rows[0].title == "edited")
+        );
     }
 
     #[test]

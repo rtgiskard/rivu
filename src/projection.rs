@@ -6,7 +6,7 @@ use crate::{
         QueueState, RepeatMode, Track,
     },
 };
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Clone, Debug, Default)]
 pub struct GuiSnapshot {
@@ -24,6 +24,7 @@ pub struct GuiLibrarySnapshot {
     pub revision: u64,
     pub structure_revision: u64,
     pub playlist_revision: u64,
+    pub playlist_entry_revisions: Arc<BTreeMap<i64, u64>>,
     pub history: Arc<Vec<HistoryEntry>>,
 }
 
@@ -53,6 +54,7 @@ impl GuiSnapshot {
                 revision: state.library.revision,
                 structure_revision: state.library.structure_revision,
                 playlist_revision: state.library.playlist_revision,
+                playlist_entry_revisions: Arc::clone(&state.library.playlist_entry_revisions),
                 history: Arc::clone(&state.library.history),
             },
             queue: state.queue.clone(),
@@ -95,6 +97,7 @@ pub struct TuiLibrarySnapshot {
     pub revision: u64,
     pub structure_revision: u64,
     pub playlist_revision: u64,
+    pub playlist_entry_revisions: Arc<BTreeMap<i64, u64>>,
 }
 
 #[derive(Clone, Debug)]
@@ -127,6 +130,7 @@ impl TuiSnapshot {
                 revision: state.library.revision,
                 structure_revision: state.library.structure_revision,
                 playlist_revision: state.library.playlist_revision,
+                playlist_entry_revisions: Arc::clone(&state.library.playlist_entry_revisions),
             },
             queue: state.queue.clone(),
             current_track: state.current_track.clone(),

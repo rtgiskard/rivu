@@ -257,6 +257,7 @@ fn library_root_responses_wire_round_trip_preserves_projection_and_revisions() {
                 structure: 6,
                 playlist: 7,
                 queue: 8,
+                playlist_entries: None,
             },
             result: Ok(result),
         };
@@ -384,6 +385,135 @@ fn library_root_queries_run_through_real_owner_and_ipc_session() {
     runtime.join().unwrap();
     drop(owner);
     assert!(SocketOwner::acquire(directory.path()).is_ok());
+}
+
+#[test]
+fn playlist_reorder_scoped_revisions_cross_ipc_without_catalog_invalidation() {
+    use crate::{
+        config::Config,
+        core::Runtime,
+        response::{PlaylistEntryRevision, QueryError, ViewResponse},
+        store::Store,
+    };
+    let directory = socket_test_directory();
+    let database = directory.path().join("library.db");
+    drop(Store::open(&database).unwrap());
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO tracks(id,path,raw_title) VALUES (1,'one.wav','One'),(2,'two.wav','Two');
+         INSERT INTO playlists(id,name) VALUES (10,'one'),(20,'two');
+         INSERT INTO playlist_entries(id,playlist_id,track_id,position)
+         VALUES (101,10,1,0),(102,10,2,1),(201,20,1,0),(202,20,2,1);",
+        )
+        .unwrap();
+    drop(connection);
+    let config_path = directory.path().join("config.toml");
+    Config {
+        media_read_buffer_mb: 1,
+        ffmpeg_enabled: false,
+        ..Config::default()
+    }
+    .save(&config_path)
+    .unwrap();
+    let owner = SocketOwner::acquire(directory.path()).unwrap();
+    let mut runtime = Runtime::start(directory.path(), &config_path).unwrap();
+    let app = AppHandle::new(&runtime, false);
+    let server = Server::start(&owner, runtime.handle.clone(), app.clone()).unwrap();
+    let mut session = client_session(directory.path()).unwrap();
+    let summaries = Query::PlaylistSummaries {
+        offset: 0,
+        limit: 2,
+    };
+    let catalog = session.query(&summaries).unwrap();
+    let batch = |playlist_id, expected| Query::PlaylistEntryBatch {
+        playlist_id,
+        after: None,
+        limit: 1,
+        expected,
+    };
+    let first = session.query(&batch(10, Some(catalog.revisions))).unwrap();
+    let other = session.query(&batch(20, Some(catalog.revisions))).unwrap();
+    let sections = StateSections {
+        library: true,
+        ..StateSections::default()
+    };
+    let before = session.get_state(sections).unwrap();
+    assert!(
+        session
+            .request_ack(&Command::MovePlaylistEntry {
+                entry_id: 101,
+                index: 1
+            })
+            .unwrap()
+            .ok
+    );
+    let after = session.get_state(sections).unwrap();
+    assert_ne!(before.revisions.library, after.revisions.library);
+    let library = after.library.unwrap();
+    assert_eq!(library.playlist_revision, catalog.revisions.playlist);
+    assert_eq!(library.revision, catalog.revisions.library);
+    assert_eq!(library.playlist_entry_revisions.get(&10), Some(&1));
+    assert_eq!(library.playlist_entry_revisions.len(), 1);
+    assert_eq!(
+        serde_json::to_value(session.query(&summaries).unwrap()).unwrap(),
+        serde_json::to_value(catalog).unwrap()
+    );
+    assert_eq!(
+        session
+            .query(&batch(10, Some(first.revisions)))
+            .unwrap()
+            .result
+            .unwrap_err(),
+        QueryError::RevisionChanged
+    );
+    assert!(
+        session
+            .query(&batch(20, Some(other.revisions)))
+            .unwrap()
+            .result
+            .is_ok()
+    );
+    let selected = session
+        .query(&Query::PlaylistEntry { entry_id: 101 })
+        .unwrap();
+    assert_eq!(
+        selected.revisions.playlist_entries,
+        Some(PlaylistEntryRevision {
+            playlist_id: 10,
+            revision: 1
+        })
+    );
+    assert!(
+        matches!(selected.result, Ok(ViewResponse::PlaylistEntry(Some(entry)))
+        if entry.position == 1 && entry.id == 101)
+    );
+    let expected = selected.revisions;
+    assert!(
+        session
+            .request_ack(&Command::RenamePlaylist {
+                playlist_id: 10,
+                name: "renamed".into()
+            })
+            .unwrap()
+            .ok
+    );
+    let library = session.get_state(sections).unwrap().library.unwrap();
+    assert_ne!(library.playlist_revision, expected.playlist);
+    assert!(library.playlist_entry_revisions.is_empty());
+    assert_eq!(
+        session
+            .query(&batch(10, Some(expected)))
+            .unwrap()
+            .result
+            .unwrap_err(),
+        QueryError::RevisionChanged
+    );
+    drop(session);
+    drop(server);
+    app.request_shutdown().unwrap();
+    runtime.join().unwrap();
+    drop(owner);
 }
 
 #[test]

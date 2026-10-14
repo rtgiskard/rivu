@@ -158,6 +158,11 @@ impl Core {
     pub(in crate::core) fn reload_playlists(&mut self) -> Result<()> {
         self.state.library.playlist_total = self.store.playlist_summary_page(0, 0)?.total;
         self.state.library.playlist_revision = self.state.library.playlist_revision.wrapping_add(1);
+        // Catalog changes supersede all scoped reorder tokens. Retention is bounded
+        // by playlists reordered within this epoch, including across coalesced watches.
+        if !self.state.library.playlist_entry_revisions.is_empty() {
+            self.state.library.playlist_entry_revisions = Arc::default();
+        }
         Ok(())
     }
 

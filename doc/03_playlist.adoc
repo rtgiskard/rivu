@@ -60,6 +60,11 @@ When refreshed pages invalidate a selected entry's position, the GUI resolves
 its current location by entry ID rather than reusing the old row index. Entry
 mutations remain unavailable while that lookup is pending or failed; a failed
 lookup requires explicit Retry. Confirmed entry removal clears its selection.
+Moving an entry refreshes only that playlist's entries and selected entry location;
+the unchanged playlist catalog and library views stay loaded. This also applies
+to moves submitted by another client. Renaming, creating, deleting, or changing
+membership still refreshes playlist catalogs, and track metadata edits refresh
+displayed entry metadata.
 
 == Import and export
 
