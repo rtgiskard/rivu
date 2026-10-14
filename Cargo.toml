@@ -69,3 +69,8 @@ strip = "symbols"
 [patch.crates-io]
 # GPUI schedules nested idle callbacks; use its pinned nonblocking dispatcher.
 calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee14c40066d64777e2a36b6ffcc22590" }
+
+# Pinned GPUI extensions: GPU image transforms and caller-authored path textures.
+[patch."https://github.com/zed-industries/zed"]
+gpui = { path = "vendor/gpui" }
+gpui_wgpu = { path = "vendor/gpui_wgpu" }
