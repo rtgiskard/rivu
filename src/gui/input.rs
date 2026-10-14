@@ -769,6 +769,7 @@ impl Element for InputElement {
 impl Render for Input {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focused = self.enabled && self.focus_handle.is_focused(window);
+        let scale = window.rem_size() / px(16.);
         div()
             .flex()
             .key_context("Input")
@@ -800,16 +801,16 @@ impl Render for Input {
             .when(!self.enabled, |view| view.opacity(0.4))
             .border_1()
             .border_color(if focused { rgb(ACCENT) } else { rgb(BORDER) })
-            .rounded(px(5.))
-            .line_height(px(20.))
-            .text_size(px(14.))
+            .rounded(px(5.) * scale)
+            .line_height(px(20.) * scale)
+            .text_size(px(14.) * scale)
             .child(
                 div()
-                    .h(px(34.))
+                    .h(px(34.) * scale)
                     .w_full()
                     .overflow_hidden()
-                    .p(px(7.))
-                    .pr(self.trailing_space)
+                    .p(px(7.) * scale)
+                    .pr(self.trailing_space * scale)
                     .child(InputElement { input: cx.entity() }),
             )
     }
