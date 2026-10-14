@@ -1,9 +1,10 @@
 use super::{
     ACCENT, BORDER, Dragging, Field, GuiApp, HIGHLIGHT, HistorySort, ListFocus, MUTED, Measured,
     StatusKind, TEXT, UI_INSET, ViewRequestKind, active_control, artwork_preview,
-    browser::PlaylistEntryAction, button, column, form_field, format_time, icon_button,
-    library::LibraryDrag, list_viewport, metadata_item, paged, panel_header, panel_surface,
-    panel_toolbar, row, row_text, section_group, sortable_header, status_message, two_column,
+    browser::PlaylistEntryAction, button, column, components::quiet_icon_button, form_field,
+    format_time, icon_button, library::LibraryDrag, list_viewport, metadata_item, paged,
+    panel_header, panel_surface, panel_toolbar, row, row_text, section_group, sortable_header,
+    status_message,
 };
 pub(super) use super::{TRACK_HEIGHT, caption, list_row};
 use crate::{
@@ -121,7 +122,7 @@ impl GuiApp {
             .flex_wrap()
             .justify_center()
             .child(active_control(
-                icon_button(
+                quiet_icon_button(icon_button(
                     ("shuffle", panel_id),
                     "󰒟",
                     if self.state.playback.shuffle {
@@ -138,21 +139,21 @@ impl GuiApp {
                             cx,
                         )
                     },
-                )
-                .size(gpui::rems(3.))
-                .text_2xl(),
+                ))
+                .rounded_full()
+                .text_lg(),
                 self.state.playback.shuffle,
             ))
             .child(
-                icon_button(
+                quiet_icon_button(icon_button(
                     ("previous", panel_id),
                     "󰒮",
                     "Previous track (p)",
                     cx,
                     |this, _, cx| this.send(Command::Previous, cx),
-                )
-                .size(gpui::rems(3.))
-                .text_2xl(),
+                ))
+                .rounded_full()
+                .text_lg(),
             )
             .child(
                 icon_button(
@@ -170,24 +171,26 @@ impl GuiApp {
                     cx,
                     |this, _, cx| this.send(Command::Toggle, cx),
                 )
-                .size(gpui::rems(3.))
-                .text_2xl()
+                .size(gpui::rems(2.5))
+                .rounded_full()
+                .border_0()
+                .text_xl()
                 .bg(rgb(HIGHLIGHT))
                 .text_color(rgb(ACCENT)),
             )
             .child(
-                icon_button(
+                quiet_icon_button(icon_button(
                     ("next", panel_id),
                     "󰒭",
                     "Next track (n)",
                     cx,
                     |this, _, cx| this.send(Command::Next, cx),
-                )
-                .size(gpui::rems(3.))
-                .text_2xl(),
+                ))
+                .rounded_full()
+                .text_lg(),
             )
             .child(active_control(
-                icon_button(
+                quiet_icon_button(icon_button(
                     ("repeat", panel_id),
                     if self.state.playback.repeat == RepeatMode::One {
                         "󰑘"
@@ -208,9 +211,9 @@ impl GuiApp {
                         };
                         this.send(Command::Repeat { mode }, cx);
                     },
-                )
-                .size(gpui::rems(3.))
-                .text_2xl(),
+                ))
+                .rounded_full()
+                .text_lg(),
                 self.state.playback.repeat != RepeatMode::Off,
             ));
         let volume_control = row()
