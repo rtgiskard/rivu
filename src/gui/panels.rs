@@ -274,7 +274,7 @@ impl GuiApp {
                 self.state.playback.repeat != RepeatMode::Off,
             ));
         let volume_control = row()
-            .w(gpui::rems(10.75))
+            .w(gpui::rems(8.6))
             .max_w(gpui::relative(1.))
             .flex_shrink_0()
             .child(
