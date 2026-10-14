@@ -473,9 +473,10 @@ impl GuiApp {
                     .justify_start()
                     .child(
                         column()
+                            .flex_1()
                             .min_w_0()
                             .gap_1()
-                            .child(div().text_sm().child(format!(
+                            .child(div().text_sm().truncate().child(format!(
                                 "{} · {} files",
                                 &group.fingerprint[..group.fingerprint.len().min(12)],
                                 group.total_members
