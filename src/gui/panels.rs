@@ -2139,6 +2139,8 @@ impl GuiApp {
             },
         )
         .pr_2()
+        .py_1()
+        .rounded_sm()
     }
 
     pub(super) fn history_panel(
@@ -2148,25 +2150,45 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let history_len = self.browser.history.len();
-        let header =
-            row()
-                .items_center()
-                .gap_0()
-                .px_2()
-                .h(gpui::rems(2.25))
-                .flex_shrink_0()
-                .min_w_0()
-                .overflow_hidden()
-                .border_b_1()
-                .border_color(rgb(BORDER))
-                .child(caption("#").w(gpui::relative(0.08)).pr_2().flex_shrink_0())
-                .child(self.history_sort_button(panel_id, "Track", HistorySort::Title, cx))
-                .child(div().w(gpui::relative(0.2)).h_full().flex_shrink_0().child(
-                    self.history_sort_button(panel_id, "Play count", HistorySort::Plays, cx),
-                ))
-                .child(div().w(gpui::relative(0.3)).h_full().flex_shrink_0().child(
-                    self.history_sort_button(panel_id, "Last played", HistorySort::Recent, cx),
-                ));
+        let header = row()
+            .items_center()
+            .gap_0()
+            .px_2()
+            .py_1()
+            .h(gpui::rems(2.625))
+            .flex_shrink_0()
+            .min_w_0()
+            .overflow_hidden()
+            .border_b_1()
+            .border_color(rgb(BORDER))
+            .child(caption("#").w(gpui::relative(0.08)).pr_2().flex_shrink_0())
+            .child(self.history_sort_button(panel_id, "Track", HistorySort::Title, cx))
+            .child(
+                div()
+                    .flex()
+                    .w(gpui::relative(0.2))
+                    .h_full()
+                    .flex_shrink_0()
+                    .child(self.history_sort_button(
+                        panel_id,
+                        "Play count",
+                        HistorySort::Plays,
+                        cx,
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .w(gpui::relative(0.3))
+                    .h_full()
+                    .flex_shrink_0()
+                    .child(self.history_sort_button(
+                        panel_id,
+                        "Last played",
+                        HistorySort::Recent,
+                        cx,
+                    )),
+            );
         let scroll = self.scroll_views.list(("history", panel_id));
         panel_surface(("history-panel", panel_id))
             .child(panel_header(
