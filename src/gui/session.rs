@@ -102,7 +102,7 @@ impl UiSession {
                 GuiApp::new(handle, layout_path, artwork_manager, session, window, cx)
             });
         }) {
-            tracing::error!(%error, "Could not reload Rivu window; use Show window to retry");
+            tracing::error!(%error, "Could not reload Rivu window; activate the tray icon or use rivu gui to retry");
             self.window_closed(window.window_id());
         }
     }

@@ -546,7 +546,7 @@ impl DbusMenu {
     ) -> fdo::Result<Vec<(i32, HashMap<String, OwnedValue>)>> {
         let snapshot = self.data.read().snapshot.clone();
         let ids = if ids.is_empty() {
-            (1..=9).collect()
+            (2..=9).collect()
         } else {
             ids
         };
@@ -581,7 +581,7 @@ impl DbusMenu {
     fn event_group(&self, events: Vec<(i32, String, OwnedValue, u32)>) -> Vec<i32> {
         let mut invalid = Vec::new();
         for (id, event, _, _) in events {
-            if !(1..=9).contains(&id) && id != 0 {
+            if !(2..=9).contains(&id) && id != 0 {
                 invalid.push(id);
             } else if event == "clicked" {
                 self.activate(id);
@@ -609,7 +609,7 @@ impl DbusMenu {
             // Force the static root layout to be loaded instead of leaving an
             // empty host-side cache.
             Ok(true)
-        } else if (1..=9).contains(&id) {
+        } else if (2..=9).contains(&id) {
             Ok(false)
         } else {
             Err(fdo::Error::InvalidArgs("Unknown menu item".into()))
@@ -639,12 +639,6 @@ impl DbusMenu {
 
 impl DbusMenu {
     fn activate(&self, id: i32) {
-        if id == 1 {
-            if let Err(error) = self.app.raise() {
-                tracing::warn!(error = %error, "tray_raise_failed");
-            }
-            return;
-        }
         if id == 9 {
             if let Err(error) = self.app.request_shutdown() {
                 tracing::warn!(error = %error, "tray_quit_failed");
@@ -682,7 +676,6 @@ fn menu_items(snapshot: &TraySnapshot) -> Vec<MenuLayout> {
         "Play"
     };
     vec![
-        MenuLayout::item(1, "Show window"),
         MenuLayout::item(2, play_label),
         MenuLayout::item(3, "Previous"),
         MenuLayout::item(4, "Next"),
@@ -713,7 +706,7 @@ fn menu_properties(
     id: i32,
     requested: &[String],
 ) -> Option<HashMap<String, OwnedValue>> {
-    if !(1..=9).contains(&id) {
+    if !(2..=9).contains(&id) {
         return None;
     }
     let play_label = if snapshot.status == PlaybackStatus::Playing {
@@ -722,7 +715,6 @@ fn menu_properties(
         "Play"
     };
     let (label, item_type) = match id {
-        1 => ("Show window", "standard"),
         2 => (play_label, "standard"),
         3 => ("Previous", "standard"),
         4 => ("Next", "standard"),
@@ -786,14 +778,15 @@ mod tests {
         };
         assert_eq!(
             menu.about_to_show_group(vec![0, 1, 2, 9, 99, -1]),
-            (vec![0], vec![99, -1]),
+            (vec![0], vec![1, 99, -1]),
         );
         assert_eq!(
             menu.event_group(vec![
+                (1, "clicked".into(), OwnedValue::from(0_i32), 0),
                 (99, "clicked".into(), OwnedValue::from(0_i32), 0),
                 (9, "clicked".into(), OwnedValue::from(0_i32), 0),
             ]),
-            vec![99],
+            vec![1, 99],
         );
         runtime.join().unwrap();
         assert!(handle.is_shutting_down());

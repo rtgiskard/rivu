@@ -160,7 +160,7 @@ controls; closing only the window does not.
 `interface.tray_enabled` controls tray startup and takes effect after restarting the
 graphical host, not merely reopening its window. The tray requires a session
 D-Bus and a StatusNotifier-compatible desktop host. If unavailable, the GUI and
-playback remain usable. Its menu offers Show window, Play/Pause, Previous, Next,
+playback remain usable. Its menu offers Play/Pause, Previous, Next,
 Shuffle, Repeat, and Quit. Repeat follows the cycle described under
 <<_transport_and_timing,Transport and timing>>.
 

@@ -301,7 +301,7 @@ impl App {
         match gui.session.borrow_mut().show_window(cx) {
             Ok(()) => gui.error = None,
             Err(error) => {
-                tracing::error!(%error, "Could not open Rivu window; use Show window to retry");
+                tracing::error!(%error, "Could not open Rivu window; activate the tray icon or use rivu gui to retry");
                 gui.error = Some(error.context("Could not open Rivu window"));
             }
         }
