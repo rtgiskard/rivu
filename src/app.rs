@@ -15,7 +15,7 @@ use crate::{
 use anyhow::{Context, Result, anyhow, bail};
 use crossbeam_channel::{bounded, select};
 use futures::{StreamExt, channel::mpsc};
-use gpui::{App as GpuiApp, QuitMode, Subscription, Task};
+use gpui::{App as GpuiApp, GraphicalEnvironment, QuitMode, Subscription, Task, WindowingRequest};
 use signal_hook::{
     consts::{SIGINT, SIGTERM},
     iterator::{Handle as SignalHandle, Signals},
@@ -190,6 +190,9 @@ struct GuiState {
     window_closed: Option<Subscription>,
     app_quit: Option<Subscription>,
     wake_task: Option<Task<()>>,
+    windowing_task: Option<Task<()>>,
+    environment: Option<GraphicalEnvironment>,
+    headless: bool,
     error: Option<anyhow::Error>,
     quitting: bool,
 }
@@ -274,6 +277,9 @@ impl App {
                 window_closed: None,
                 app_quit: None,
                 wake_task: None,
+                windowing_task: None,
+                environment: None,
+                headless: false,
                 error: None,
                 quitting: false,
             });
@@ -303,15 +309,93 @@ impl App {
         }
     }
 
-    fn handle_requests(&mut self, cx: &mut GpuiApp) {
-        if self.gui.as_ref().is_none_or(|gui| gui.quitting) {
+    fn handle_requests(owner: &Rc<RefCell<Self>>, cx: &mut GpuiApp) {
+        let mut app = owner.borrow_mut();
+        let Some(gui) = app.gui.as_ref().filter(|gui| !gui.quitting) else {
+            return;
+        };
+        if app.handle.is_shutting_down() {
+            app.quit_gui(cx);
             return;
         }
-        if self.handle.is_shutting_down() {
-            self.quit_gui(cx);
-        } else if self.handle.take_raise_request() {
-            self.show_window(cx);
+        // Leave Raise pending while a connection switch is in flight. Its
+        // completion reconciles the coalesced request, including a late Quit.
+        if gui.windowing_task.is_some() || !app.handle.take_raise_request() {
+            return;
         }
+        if gui.headless {
+            let environment = gui
+                .environment
+                .clone()
+                .expect("detached display environment");
+            drop(app);
+            Self::switch_display(owner, WindowingRequest::Windowed(environment), cx);
+        } else {
+            app.show_window(cx);
+        }
+    }
+
+    fn idle_display(owner: &Rc<RefCell<Self>>, cx: &mut GpuiApp) {
+        let app = owner.borrow();
+        let Some(gui) = app.gui.as_ref() else {
+            return;
+        };
+        if gui.quitting
+            || gui.headless
+            || gui.windowing_task.is_some()
+            || gui.environment.is_none()
+            || gui.session.borrow().has_window()
+            || app.handle.is_shutting_down()
+        {
+            return;
+        }
+        let raising = app.handle.state.lock().raise_pending;
+        drop(app);
+        if raising {
+            Self::handle_requests(owner, cx);
+        } else {
+            Self::switch_display(owner, WindowingRequest::Headless, cx);
+        }
+    }
+
+    fn switch_display(owner: &Rc<RefCell<Self>>, request: WindowingRequest, cx: &mut GpuiApp) {
+        let headless = matches!(request, WindowingRequest::Headless);
+        let transition = cx.request_windowing(request);
+        let weak_owner = Rc::downgrade(owner);
+        let task = cx.spawn(async move |cx| {
+            let result = transition.await;
+            cx.update(|cx| {
+                let Some(owner) = weak_owner.upgrade() else {
+                    return;
+                };
+                let mut app = owner.borrow_mut();
+                let gui = app.gui.as_mut().expect("graphical application");
+                gui.windowing_task.take();
+                match result {
+                    Ok(()) => {
+                        gui.headless = headless;
+                        if !headless && !app.handle.is_shutting_down() {
+                            app.show_window(cx);
+                        }
+                    }
+                    Err(error) if headless => {
+                        tracing::warn!(%error, "Could not release the idle display connection");
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "Could not reconnect the display; activate the tray icon or use rivu gui to retry");
+                        gui.error = Some(error.context("Could not reconnect the display"));
+                    }
+                }
+                drop(app);
+                Self::handle_requests(&owner, cx);
+            });
+        });
+        owner
+            .borrow_mut()
+            .gui
+            .as_mut()
+            .expect("graphical application")
+            .windowing_task = Some(task);
     }
 
     fn shutdown_gui(&mut self) {
@@ -326,6 +410,7 @@ impl App {
         // Withdraw CanRaise and stop producers before releasing the UI receiver.
         self.handle.withdraw_gui();
         gui.wake_task.take();
+        gui.windowing_task.take();
         gui.window_closed.take();
         gui.app_quit.take();
         gui.session.borrow_mut().release_window();
@@ -357,11 +442,19 @@ impl App {
                 // App owns these listeners across window close; weak captures
                 // cannot retain the application after the event loop returns.
                 let closed_owner = Rc::downgrade(&gpui_owner);
-                let window_closed = cx.on_window_closed(move |_, id| {
-                    if let Some(app) = closed_owner.upgrade()
-                        && let Some(gui) = app.borrow().gui.as_ref()
-                    {
-                        gui.session.borrow_mut().window_closed(id);
+                let window_closed = cx.on_window_closed(move |cx, id| {
+                    if let Some(owner) = closed_owner.upgrade() {
+                        if let Some(gui) = owner.borrow().gui.as_ref() {
+                            gui.session.borrow_mut().window_closed(id);
+                        }
+                        // The close observer still runs inside the removed
+                        // Window's stack frame. Detach only after it is dropped.
+                        let owner = Rc::downgrade(&owner);
+                        cx.defer(move |cx| {
+                            if let Some(owner) = owner.upgrade() {
+                                Self::idle_display(&owner, cx);
+                            }
+                        });
                     }
                 });
                 let quit_owner = Rc::downgrade(&gpui_owner);
@@ -385,11 +478,12 @@ impl App {
                         let Some(app) = request_owner.upgrade() else {
                             break;
                         };
-                        cx.update(|cx| app.borrow_mut().handle_requests(cx));
+                        cx.update(|cx| Self::handle_requests(&app, cx));
                     }
                 });
                 let mut app = gpui_owner.borrow_mut();
                 let gui = app.gui.as_mut().expect("graphical application");
+                gui.environment = cx.graphical_environment();
                 gui.window_closed = Some(window_closed);
                 gui.app_quit = Some(app_quit);
                 gui.wake_task = Some(wake_task);

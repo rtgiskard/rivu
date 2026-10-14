@@ -87,6 +87,17 @@ and images from hidden or removed panels are retired through the window
 lifecycle, without requiring those panels to paint again. Window closure
 releases the remaining retained images.
 
+After the window is destroyed, the application switches the graphical platform
+to headless mode, releasing the display connection and its shared GPU context.
+Reopening reconnects to the original display before creating a new window;
+requests arriving during a connection switch are coalesced. A failed reconnect
+leaves the application running so another open request can retry.
+
+Playback, IPC, tray, MPRIS, and accepted business operations remain independent
+of this transition. The GPUI event loop, executors, font system, and application
+caches remain available; this is not full framework teardown. No allocator trim
+is performed, and closing the window does not promise serve-level process memory.
+
 An image cannot be dropped merely because the application has stopped reusing
 it: a submitted scene can still reference it. Replaced cached waveform and
 Spectrogram images retire at a subsequent window-frame boundary; transient
