@@ -6,7 +6,9 @@ use anyhow::{Context, Result, bail, ensure};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 use std::io::{self, Write};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::time::timeout;
 
 fn decode_message_header(bytes: &[u8], limit: usize) -> Result<(u8, &[u8])> {
     ensure!(bytes.len() >= 2, "IPC message header is truncated");
@@ -233,18 +235,25 @@ pub(super) async fn read_frame<S: AsyncRead + Unpin>(
     Ok(pending.split_to(length).freeze())
 }
 
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub(super) async fn write_frame_buffered<S: AsyncWrite + Unpin>(
     stream: &mut S,
     value: &WireResponse,
     buffer: &mut Vec<u8>,
 ) -> Result<()> {
     encode_response_frame_into(value, buffer)?;
-    stream
-        .write_all(buffer)
-        .await
-        .context("Writing IPC frame")?;
-    stream.flush().await.context("Flushing IPC frame")?;
-    Ok(())
+    // Finish accepted replies, including shutdown acknowledgements, but never
+    // let a nonreading peer hold a session (or server teardown) indefinitely.
+    timeout(WRITE_TIMEOUT, async {
+        stream
+            .write_all(buffer)
+            .await
+            .context("Writing IPC frame")?;
+        stream.flush().await.context("Flushing IPC frame")
+    })
+    .await
+    .context("IPC response write timed out")?
 }
 
 pub(super) async fn write_error_frame<S: AsyncWrite + Unpin>(
@@ -302,4 +311,70 @@ pub(super) fn unpack_hello(response: WireResponse) -> Result<HelloResponse> {
         bail!("IPC response was not a Hello response")
     };
     validate_hello(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        pin::Pin,
+        task::{Context as TaskContext, Poll},
+    };
+
+    #[tokio::test(start_paused = true)]
+    async fn response_write_timeout_ends_a_partial_frame_when_peer_stops_reading() {
+        let (mut stream, mut peer) = tokio::io::duplex(8);
+        let mut encoded = Vec::new();
+        let error = write_frame_buffered(
+            &mut stream,
+            &WireResponse::Error("response".into()),
+            &mut encoded,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<tokio::time::error::Elapsed>()
+                .is_some()
+        );
+        drop(stream);
+        let mut received = Vec::new();
+        peer.read_to_end(&mut received).await.unwrap();
+        assert!(received.len() < encoded.len());
+        assert_eq!(received, encoded[..received.len()]);
+    }
+
+    struct PendingFlush;
+
+    impl AsyncWrite for PendingFlush {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut TaskContext<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(Ok(bytes.len()))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+            Poll::Pending
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn response_write_deadline_includes_flush() {
+        let error = write_frame_buffered(
+            &mut PendingFlush,
+            &WireResponse::Error("response".into()),
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<tokio::time::error::Elapsed>()
+                .is_some()
+        );
+    }
 }

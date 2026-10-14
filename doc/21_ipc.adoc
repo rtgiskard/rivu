@@ -382,8 +382,13 @@ Core request capacity is bounded to 64 queued operations. Requests waiting for
 capacity or a result can fail as unavailable; UI fire-and-forget sends report
 `Rivu is busy or stopped` rather than blocking. The server bounds query and
 ordinary command dispatch waits to 15 seconds, with 120 seconds for database
-optimization. Clients allow 120 seconds for each non-Watch response read,
-including Hello; persistent sessions keep the same limit as one-shot requests.
+optimization. Each server response write, including Hello, Error, busy replies,
+and shutdown acknowledgements, has a five-second completion deadline covering
+both write and flush. A stalled write closes that connection; it does not block
+teardown indefinitely. Accepted operations still finish their replies during
+shutdown rather than cancelling acknowledgements when shutdown starts.
+Clients allow 120 seconds for each non-Watch response read, including Hello;
+persistent sessions keep the same limit as one-shot requests.
 
 A timeout or client disconnect is not command cancellation: an operation
 already queued at the core may still execute. An unsuccessful acknowledgement
