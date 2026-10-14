@@ -125,12 +125,20 @@ fn scan_task_status_wire_round_trip_preserves_all_phases() {
 #[test]
 fn directory_query_wire_round_trip_preserves_filter_and_page() {
     use std::path::Path;
-    for favorite in [None, Some(true), Some(false)] {
+    for (favorite, missing) in [None, Some(true), Some(false)]
+        .into_iter()
+        .flat_map(|favorite| {
+            [None, Some(true), Some(false)]
+                .into_iter()
+                .map(move |missing| (favorite, missing))
+        })
+    {
         for query in [None, Some(""), Some("Été_100%")] {
             let request = WireRequest::Query(WireQuery::from(Query::DirectoryPage {
                 path: "/music".into(),
                 query: query.map(str::to_owned),
                 favorite,
+                missing,
                 offset: 7,
                 limit: 11,
             }));
@@ -143,6 +151,7 @@ fn directory_query_wire_round_trip_preserves_filter_and_page() {
                 path,
                 query: decoded_query,
                 favorite: decoded_favorite,
+                missing: decoded_missing,
                 offset,
                 limit,
             } = Query::try_from(wire).unwrap()
@@ -152,6 +161,7 @@ fn directory_query_wire_round_trip_preserves_filter_and_page() {
             assert_eq!(path, Path::new("/music"));
             assert_eq!(decoded_query.as_deref(), query);
             assert_eq!(decoded_favorite, favorite);
+            assert_eq!(decoded_missing, missing);
             assert_eq!((offset, limit), (7, 11));
         }
     }

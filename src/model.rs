@@ -469,6 +469,7 @@ pub enum Query {
         path: PathBuf,
         query: Option<String>,
         favorite: Option<bool>,
+        missing: Option<bool>,
         offset: usize,
         limit: usize,
     },

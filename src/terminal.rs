@@ -332,6 +332,7 @@ impl QueryRequest {
                 path: path.clone(),
                 query: None,
                 favorite: None,
+                missing: None,
                 offset,
                 limit,
             },

@@ -235,24 +235,23 @@ not zero; failed counts offer a retry control. Counts refresh after library
 changes such as scans. Overlapping roots count their own recursive contents
 independently and can show the same track in more than one group.
 
-Search and the favorites filter apply to both the flat list and directory tree
-without switching views. Tree search shows matching tracks and their ancestor
-directories; combining search with favorites shows only matching favorite tracks.
-Configured roots remain visible even when they have no matches. Changing or
-clearing the search refreshes the current view. Changing a track's favorite state
-refreshes the filtered tree. The missing filter still switches to the flat list.
-Directory tree switching is unavailable while the missing filter is active;
-turn it off to switch views again.
+Search, favorites, and the missing filter apply to both the flat list and directory
+tree without switching views, and can be combined. Tree filtering shows only
+tracks matching every active filter and their ancestor directories. Configured
+roots remain visible even when they have no matches. Changing or clearing a filter
+refreshes the current view; tree and flat-list switching remains available while
+filters are active. Changing a track's favorite or missing state refreshes the
+filtered tree.
 
 Dragging a directory adds its full contents, not only tracks matching the
-display filter. To add only matching or favorite tracks, select and drag the track rows.
+display filter. To add only matching, favorite, or missing tracks, select and drag the track rows.
 
 Click selects one row; Ctrl/Command-click toggles it. Shift-click selects the
 inclusive range from the original anchor, and Ctrl/Command-Shift-click adds that
 range. Changing the endpoint keeps the original anchor. Range selection includes
 unloaded rows; selection actions and dragging are disabled while it loads.
-Changing or clearing search cancels a loading range; its old results cannot change
-the selection for the new search.
+Changing search, favorites, or the missing filter cancels a loading range; its old
+results cannot change the selection for the new filters.
 Batch track actions and library dragging use stable track-ID order.
 
 Dragging a selected row carries the selection at drag start; dragging an

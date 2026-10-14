@@ -323,6 +323,7 @@ impl GuiApp {
                             path: request_path,
                             query: request_query,
                             favorite,
+                            missing,
                             offset,
                             limit: page_size,
                         }
@@ -596,7 +597,6 @@ impl GuiApp {
     }
 
     pub(super) fn refresh_filter(&mut self, cx: &mut Context<Self>) {
-        // The missing filter retains its flat-view behavior.
         self.browser.library.refresh_filter();
         let query = self.value(Field::Search, cx).trim().to_lowercase();
         self.browser.library.prepare_query(query);

@@ -2820,6 +2820,106 @@ mod tests {
     }
 
     #[test]
+    fn directory_missing_query_composes_filters_ancestors_and_exact_pages() {
+        use crate::model::DirectoryRow;
+        let (directory, core) = fixture_with_database(Some(10.0), true);
+        let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+        connection
+            .execute_batch(
+                "UPDATE tracks SET path='/music/a/deep/missing.wav', raw_title='Needle Nested', favorite=1, missing=1 WHERE id=1;
+                 UPDATE tracks SET path='/music/a/deep/present.wav', raw_title='Needle Present', favorite=1, missing=0 WHERE id=2;
+                 UPDATE tracks SET path='/music/b/deep/missing.wav', raw_title='Needle Other', favorite=0, missing=1 WHERE id=3;
+                 UPDATE tracks SET path='/music/direct.wav', raw_title='Needle Direct', favorite=1, missing=1 WHERE id=4;
+                 INSERT INTO tracks(id,path,raw_title,favorite,missing) VALUES
+                 (5,'/music/present/only.wav','Other',0,0),
+                 (6,'/music/hidden/deep/missing.wav','Other',1,1);",
+            )
+            .unwrap();
+        let page = |path: &str, query: Option<&str>, favorite, missing, offset, limit| {
+            let response = core.query_response(&Query::DirectoryPage {
+                path: path.into(),
+                query: query.map(str::to_owned),
+                favorite,
+                missing,
+                offset,
+                limit,
+            });
+            let Ok(ViewResponse::DirectoryPage(page)) = response.result else {
+                panic!("expected directory page");
+            };
+            page
+        };
+        let directory_row = |path: &str| DirectoryRow::Directory { path: path.into() };
+        for (missing, paths, track_ids) in [
+            (true, vec!["/music/a", "/music/b", "/music/hidden"], vec![4]),
+            (false, vec!["/music/a", "/music/present"], vec![]),
+        ] {
+            let all = page("/music", None, None, Some(missing), 0, 10);
+            assert_eq!(all.total, paths.len() + track_ids.len());
+            assert_eq!(
+                &all.rows[..paths.len()],
+                paths
+                    .iter()
+                    .map(|path| directory_row(path))
+                    .collect::<Vec<_>>()
+            );
+            for (row, id) in all.rows[paths.len()..].iter().zip(track_ids) {
+                assert!(
+                    matches!(row, DirectoryRow::Track(row) if row.id == id && row.missing == missing)
+                );
+            }
+            for offset in 0..all.total {
+                let single = page("/music", None, None, Some(missing), offset, 1);
+                assert_eq!(single.total, all.total);
+                assert_eq!(single.rows, all.rows[offset..offset + 1]);
+            }
+            for (offset, limit) in [(0, 0), (all.total, 10), (usize::MAX, 10)] {
+                let empty = page("/music", None, None, Some(missing), offset, limit);
+                assert_eq!(empty.total, all.total);
+                assert!(empty.rows.is_empty());
+            }
+        }
+        for missing in [true, false] {
+            let selected = page("/music", Some("NEEDLE"), Some(true), Some(missing), 0, 10);
+            assert_eq!(selected.total, if missing { 2 } else { 1 });
+            assert_eq!(selected.rows[0], directory_row("/music/a"));
+            if missing {
+                assert!(
+                    matches!(&selected.rows[1], DirectoryRow::Track(row) if row.id == 4 && row.favorite && row.missing)
+                );
+            }
+            let ancestor = page("/music/a", Some("needle"), Some(true), Some(missing), 0, 10);
+            assert_eq!(ancestor.total, 1);
+            assert_eq!(ancestor.rows, [directory_row("/music/a/deep")]);
+            let leaf = page(
+                "/music/a/deep",
+                Some("needle"),
+                Some(true),
+                Some(missing),
+                0,
+                10,
+            );
+            assert_eq!(leaf.total, 1);
+            let expected_id = if missing { 1 } else { 2 };
+            assert!(
+                matches!(&leaf.rows[..], [DirectoryRow::Track(row)] if row.id == expected_id && row.favorite && row.missing == missing)
+            );
+            let count = page("/music", Some("needle"), Some(true), Some(missing), 0, 0);
+            assert_eq!(count.total, selected.total);
+            assert!(count.rows.is_empty());
+            let absent = page("/music", Some("absent"), Some(true), Some(missing), 0, 10);
+            assert_eq!(absent.total, 0);
+            assert!(absent.rows.is_empty());
+        }
+        let non_favorite = page("/music", Some("needle"), Some(false), Some(true), 0, 10);
+        assert_eq!(non_favorite.total, 1);
+        assert_eq!(non_favorite.rows, [directory_row("/music/b")]);
+        let absent = page("/music/hidden", None, None, Some(false), 0, 10);
+        assert_eq!(absent.total, 0);
+        assert!(absent.rows.is_empty());
+    }
+
+    #[test]
     fn playlist_reorders_preserve_catalog_and_other_playlist_queries() {
         let (_directory, mut core) = fixture();
         for (name, tracks) in [("one", vec![1, 2, 3]), ("two", vec![2, 3, 4])] {
@@ -3470,7 +3570,7 @@ mod tests {
         );
         let page = core
             .store
-            .directory_page(&link, None, None, 0, MAX_QUERY_ROWS)
+            .directory_page(&link, None, None, None, 0, MAX_QUERY_ROWS)
             .unwrap();
         assert_eq!(page.total, 1);
         assert!(matches!(&page.rows[0], DirectoryRow::Track(row) if row.id == id));
@@ -3505,7 +3605,7 @@ mod tests {
             assert_eq!(core.track(id).unwrap().path, path);
             assert_eq!(
                 core.store
-                    .directory_page(alias, None, None, 0, MAX_QUERY_ROWS)
+                    .directory_page(alias, None, None, None, 0, MAX_QUERY_ROWS)
                     .unwrap()
                     .total,
                 1
@@ -3660,7 +3760,14 @@ mod tests {
         assert_eq!(entries.rows[0].track_id, logical_id);
         let page = core
             .store
-            .directory_page(&alias.join("unused/.."), None, None, 0, MAX_QUERY_ROWS)
+            .directory_page(
+                &alias.join("unused/.."),
+                None,
+                None,
+                None,
+                0,
+                MAX_QUERY_ROWS,
+            )
             .unwrap();
         assert_eq!(page.total, 1);
         assert!(matches!(&page.rows[0], DirectoryRow::Track(row) if row.id == logical_id));

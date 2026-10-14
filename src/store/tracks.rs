@@ -246,6 +246,7 @@ impl Store {
         path: &Path,
         query: Option<&str>,
         favorite: Option<bool>,
+        missing: Option<bool>,
         offset: usize,
         limit: usize,
     ) -> Result<Page<crate::model::DirectoryRow>> {
@@ -292,11 +293,11 @@ impl Store {
         if limit == 0 {
             // A single consumer needs no materialized children or page machinery.
             sql.push_str(count_tail);
-            let total = self.conn.query_row(
-                &sql,
-                params![query, favorite, None::<bool>, prefix],
-                |row| row.get::<_, i64>(0),
-            )? as usize;
+            let total =
+                self.conn
+                    .query_row(&sql, params![query, favorite, missing, prefix], |row| {
+                        row.get::<_, i64>(0)
+                    })? as usize;
             return Ok(Page {
                 total,
                 rows: Vec::new(),
@@ -309,7 +310,7 @@ impl Store {
         let mut result = stmt.query(params![
             query,
             favorite,
-            None::<bool>,
+            missing,
             prefix,
             limit.min(crate::model::MAX_QUERY_ROWS) as i64,
             offset.min(i64::MAX as usize) as i64
@@ -849,7 +850,7 @@ mod request_tests {
     fn directory_pages_distinguish_filesystem_root_from_empty_prefix() -> Result<()> {
         use crate::model::DirectoryRow;
         let store = Store::open(Path::new(":memory:"))?;
-        let empty = store.directory_page(Path::new(""), None, None, 0, 10)?;
+        let empty = store.directory_page(Path::new(""), None, None, None, 0, 10)?;
         assert_eq!(empty.total, 0);
         assert!(empty.rows.is_empty());
         store.conn.execute_batch(
@@ -857,7 +858,7 @@ mod request_tests {
              (1,'/music/one.wav'),(2,'/z.wav'),(3,'relative/one.wav'),
              (4,'standalone.wav'),(5,'relative0/outside.wav');",
         )?;
-        let all = store.directory_page(Path::new(""), None, None, 0, 10)?;
+        let all = store.directory_page(Path::new(""), None, None, None, 0, 10)?;
         assert_eq!(all.total, 4);
         assert_eq!(
             &all.rows[..3],
@@ -872,7 +873,7 @@ mod request_tests {
             ]
         );
         assert!(matches!(&all.rows[3], DirectoryRow::Track(row) if row.id == 4));
-        let root = store.directory_page(Path::new("/"), None, None, 0, 10)?;
+        let root = store.directory_page(Path::new("/"), None, None, None, 0, 10)?;
         assert_eq!(root.total, 2);
         assert_eq!(
             root.rows[0],
@@ -883,7 +884,8 @@ mod request_tests {
         assert!(matches!(&root.rows[1], DirectoryRow::Track(row) if row.id == 2));
         for (path, total) in [("", 4), ("/", 2)] {
             for (offset, limit) in [(0, 0), (total, 10)] {
-                let page = store.directory_page(Path::new(path), None, None, offset, limit)?;
+                let page =
+                    store.directory_page(Path::new(path), None, None, None, offset, limit)?;
                 assert_eq!(page.total, total);
                 assert!(page.rows.is_empty());
             }
@@ -920,7 +922,7 @@ mod request_tests {
                 page.rows.iter().map(|row| row.id).collect::<Vec<_>>(),
                 [included]
             );
-            let tree = store.directory_page(path, None, None, 0, 10)?;
+            let tree = store.directory_page(path, None, None, None, 0, 10)?;
             assert_eq!(tree.total, 1);
             assert!(matches!(&tree.rows[..], [DirectoryRow::Track(row)] if row.id == included));
             let queue_before = store.queue_state()?.total;

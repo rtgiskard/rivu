@@ -388,6 +388,17 @@ about 1.53 MiB for 200,000 occurrences); client state frames remain constant-siz
 Shuffle navigation retains at most 4096 successful occurrence starts for
 Previous; it does not maintain a nonrepeating shuffle cycle.
 
+`DirectoryPage {path, query, favorite, missing, offset, limit}` returns immediate
+directory children and tracks as `Page<DirectoryRow>`. Search, favorite, and missing
+predicates compose and filter tracks before directory grouping, counting, and
+paging; a descendant match keeps its ancestor directories visible. `favorite` and
+`missing` are optional booleans: omitted means unrestricted, `true` selects set
+rows, and `false` selects unset rows. GUI configured-root entries remain visible
+independently of these filters. Directory page and range-selection consumers
+discard results when the captured filters, view, request generation, or library
+and structure revisions no longer match. Filtering display rows does not restrict
+directory source expansion: dragging a directory still adds its complete contents.
+
 `LibraryRootPage` returns the same display projection and filtered total as
 `LibraryPage`, scoped recursively to one root. It preserves the library's search,
 favorite/missing filters, and sort order. Root paths use the existing lexical

@@ -594,25 +594,20 @@ impl GuiApp {
                         .into()
                     }),
             )
-            .child(disabled_control(
-                icon_button(
-                    ("library-view", panel_id),
-                    if self.browser.library.tree_active() {
-                        "󰉋"
-                    } else {
-                        "󰉢"
-                    },
-                    if self.browser.library.missing_only() {
-                        "Turn off the missing filter to use directory tree view"
-                    } else if self.browser.library.tree_active() {
-                        "Switch to flat list view"
-                    } else {
-                        "Switch to directory tree view"
-                    },
-                    cx,
-                    |this, _, cx| this.toggle_library_view(cx),
-                ),
-                self.browser.library.missing_only(),
+            .child(icon_button(
+                ("library-view", panel_id),
+                if self.browser.library.tree_active() {
+                    "󰉋"
+                } else {
+                    "󰉢"
+                },
+                if self.browser.library.tree_active() {
+                    "Switch to flat list view"
+                } else {
+                    "Switch to directory tree view"
+                },
+                cx,
+                |this, _, cx| this.toggle_library_view(cx),
             ))
             .child(active_control(
                 icon_button(
