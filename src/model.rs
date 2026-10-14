@@ -482,6 +482,10 @@ pub enum Query {
         offset: usize,
         limit: usize,
     },
+    PlaylistEntryLocations {
+        playlist_id: i64,
+        entry_ids: Vec<i64>,
+    },
     Track {
         track_id: i64,
     },
@@ -650,6 +654,17 @@ pub enum Command {
     MovePlaylistEntry {
         entry_id: i64,
         index: usize,
+    },
+    RemovePlaylistEntries {
+        playlist_id: i64,
+        entry_ids: Vec<i64>,
+        expected_revision: u64,
+    },
+    MovePlaylistEntries {
+        playlist_id: i64,
+        entry_ids: Vec<i64>,
+        before_entry_id: Option<i64>,
+        expected_revision: u64,
     },
     ImportPlaylist {
         path: PathBuf,

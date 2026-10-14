@@ -790,7 +790,7 @@ impl UiState {
                         .playlist_entry_revisions
                         .get(playlist_id)
                         .copied()
-                        .unwrap_or(0),
+                        .unwrap_or(state.library.playlist_revision),
                 })
             }
             _ => None,

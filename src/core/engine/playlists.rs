@@ -53,10 +53,57 @@ impl Core {
         index: usize,
     ) -> Result<()> {
         if let Some(playlist_id) = self.store.move_playlist_entry(entry_id, index)? {
-            let revision = Arc::make_mut(&mut self.state.library.playlist_entry_revisions)
-                .entry(playlist_id)
-                .or_default();
-            *revision = revision.wrapping_add(1);
+            self.advance_playlist_entry_revision(playlist_id);
+        }
+        Ok(())
+    }
+    fn advance_playlist_entry_revision(&mut self, playlist_id: i64) {
+        let baseline = self.state.library.playlist_revision;
+        let revision = Arc::make_mut(&mut self.state.library.playlist_entry_revisions)
+            .entry(playlist_id)
+            .or_insert(baseline);
+        *revision = revision.wrapping_add(1);
+    }
+
+    fn check_playlist_entry_revision(&self, playlist_id: i64, expected: u64) -> Result<()> {
+        let current = self
+            .state
+            .playlist_query_revisions(playlist_id)
+            .playlist_entries
+            .expect("scoped playlist revision")
+            .revision;
+        if current != expected {
+            bail!("Playlist entry revision changed");
+        }
+        Ok(())
+    }
+
+    pub(in crate::core) fn remove_playlist_entries(
+        &mut self,
+        playlist_id: i64,
+        entry_ids: &[i64],
+        expected_revision: u64,
+    ) -> Result<()> {
+        self.check_playlist_entry_revision(playlist_id, expected_revision)?;
+        if self.store.remove_playlist_entries(playlist_id, entry_ids)? {
+            self.reload_playlists()?;
+        }
+        Ok(())
+    }
+
+    pub(in crate::core) fn move_playlist_entries(
+        &mut self,
+        playlist_id: i64,
+        entry_ids: &[i64],
+        before_entry_id: Option<i64>,
+        expected_revision: u64,
+    ) -> Result<()> {
+        self.check_playlist_entry_revision(playlist_id, expected_revision)?;
+        if self
+            .store
+            .move_playlist_entries(playlist_id, entry_ids, before_entry_id)?
+        {
+            self.advance_playlist_entry_revision(playlist_id);
         }
         Ok(())
     }

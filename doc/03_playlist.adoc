@@ -52,14 +52,24 @@ Selecting a playlist shows its tracks below the catalog. The catalog fits its
 content up to about one third of the available list area, leaving the remainder
 for tracks; a short track list can also shrink. With no selection, the catalog
 uses the remaining panel space. Track rows use the Queue's numbering and text
-layout. Double-click a track to play it individually. Hover a track to reveal
-the library favorite toggle and Remove from playlist. Favorite changes are
-shared with Library and Queue; they do not change playlist order or playback.
-Once loading completes, an empty playlist shows its empty state. Drag one track
-onto another to move that entry to the
-target position; this saves playlist order without changing the queue. Drags
-carry entry identity and playlist revisions, and are rejected after the playlist
-changes or the selection switches, including switching away and back.
+layout. Click a track to select it; Ctrl/Cmd-click toggles individual entries.
+Shift-click selects the inclusive range from the anchor, including unloaded pages;
+Ctrl/Cmd+Shift-click adds that range to the existing selection. The track count
+shows the selection size. Toolbar controls remove selected entries together or
+set/clear their shared Library favorites. Hover controls for Play, Favorite, and
+Remove target only that row, never the group. Double-click or Enter plays the
+active track individually. With playlist tracks focused, arrows move the active
+track, Shift+arrows extend a range, Ctrl/Cmd+A selects every entry, and Delete
+removes the selection. These keys do not target the playlist catalog or steal
+focus from inputs, dialogs, or another panel.
+
+Once loading completes, an empty playlist shows its empty state. Drag a selected
+track to move the selected group in its original playlist order; dragging an
+unselected track moves only that entry. Dropping on a row inserts before that
+entry; dropping below the rows appends. Dropping on a selected target does nothing.
+This saves playlist order without changing the queue. Drags carry stable entry
+identities and playlist revisions, and are rejected after the playlist changes
+or the selection switches, including switching away and back.
 
 To save selected queue tracks under a chosen name, use the Queue panel menu's
 Add to playlist → Save selected queue as new playlist action. It opens its own
@@ -76,18 +86,21 @@ is available for a failed selection load without moving the queue controls.
 
 Playlist catalogs, entries, and the Queue panel's playlist-destination menu
 load rows automatically while scrolling. Entry numbering and drag reordering use
-absolute playlist positions. Scrolling away from the selected playlist preserves
-its name and selected entry. See link:02_library.adoc#_paged_views[Library] for
-scrolling and query failure behavior.
-Deleting the selected playlist from another client clears its playlist and entry
-selection on refresh. Empty playlists and unloaded pages do not imply deletion.
-When refreshed pages invalidate a selected entry's position, the GUI resolves
-its current location by entry ID rather than reusing the old row index. A pending
-or failed lookup is shown in the track toolbar without moving the list; a failed
-lookup offers Retry. Loaded track rows
-remain directly actionable by entry ID with revision checks for removal and
-reordering. Confirmed entry removal clears its selection when selected.
-Moving an entry refreshes only that playlist's entries and selected entry location;
+absolute playlist positions. Scrolling away preserves selected entry identities,
+not their metadata pages. See link:02_library.adoc#_paged_views[Library] for
+scrolling and query failure behavior. Switching playlists clears track selection.
+Deleting the selected playlist from another client clears its selection on
+refresh. Empty playlists and unloaded pages do not imply deletion.
+
+Ranges stream bounded metadata pages and commit only after the complete range
+is available. A failed range leaves the previous selection intact. Refreshes
+resolve selected, active, and anchor identities in bounded lookup batches,
+relocate still-existing entries, and discard missing entries. Stale range and
+lookup results cannot overwrite a newer selection or playlist revision. Pending
+or failed selection loads disable group actions and show status with Retry;
+loaded row controls stay row-local. Bulk removal is revision-checked and atomic;
+a failed command leaves selection intact until an authoritative refresh.
+Moving entries refreshes only that playlist's entries and selected locations;
 the unchanged playlist catalog and library views stay loaded. This also applies
 to moves submitted by another client. Renaming, creating, deleting, or changing
 membership still refreshes playlist catalogs, and track metadata edits refresh

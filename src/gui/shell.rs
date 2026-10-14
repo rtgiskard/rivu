@@ -161,6 +161,22 @@ impl Render for GuiApp {
                     return;
                 }
                 let modifiers = event.keystroke.modifiers;
+                if this.active_list_focus() == Some(ListFocus::PlaylistTracks)
+                    && !modifiers.alt
+                    && !modifiers.function
+                {
+                    let multi = modifiers.control || modifiers.platform;
+                    if key == "a" && multi && !modifiers.shift {
+                        this.select_all_playlist_entries(cx);
+                        cx.stop_propagation();
+                        return;
+                    }
+                    if matches!(key, "up" | "down") && modifiers.shift {
+                        this.navigate_playlist(key == "down", true, multi, cx);
+                        cx.stop_propagation();
+                        return;
+                    }
+                }
                 let unmodified = !modifiers.control
                     && !modifiers.platform
                     && !modifiers.alt

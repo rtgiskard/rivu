@@ -104,6 +104,7 @@ pub enum ViewResponse {
     DuplicateGroups(Page<crate::store::DuplicateGroup>),
     DuplicateMembers(Page<crate::store::DuplicateMember>),
     RelocationTask(crate::model::RelocationTaskStatus),
+    PlaylistEntryLocations(Vec<PlaylistEntryLocation>),
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QueryError {

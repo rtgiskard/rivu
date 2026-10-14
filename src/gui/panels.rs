@@ -45,19 +45,38 @@ fn metadata_group(title: &'static str, content: impl IntoElement) -> Div {
     section_group(title, content)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct PlaylistDrag {
     playlist_id: i64,
-    entry_id: i64,
-    position: usize,
+    source_id: i64,
+    // GPUI keeps the original on_drag value; the constructor creates only its preview.
+    entry_ids: std::rc::Rc<std::cell::OnceCell<Vec<i64>>>,
     revision: u64,
     catalog_revision: u64,
     selection_generation: u64,
 }
 
+impl PlaylistDrag {
+    fn command(&self, target: Option<i64>) -> Option<Command> {
+        let entry_ids = self.entry_ids.get()?;
+        if entry_ids.is_empty() || target.is_some_and(|id| entry_ids.contains(&id)) {
+            return None;
+        }
+        Some(Command::MovePlaylistEntries {
+            playlist_id: self.playlist_id,
+            entry_ids: entry_ids.clone(),
+            before_entry_id: target,
+            expected_revision: self.revision,
+        })
+    }
+}
+
 impl gpui::Render for PlaylistDrag {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        super::drag_preview("Move playlist entry")
+        super::drag_preview(format!(
+            "Move {} playlist entries",
+            self.entry_ids.get().map_or(0, Vec::len)
+        ))
     }
 }
 
@@ -1091,16 +1110,12 @@ impl GuiApp {
             .into_any_element()
     }
 
-    fn playlist_revision(&self, id: i64) -> u64 {
-        self.state
-            .library
-            .playlist_entry_revisions
-            .get(&id)
-            .copied()
-            .unwrap_or(0)
-    }
-
-    fn move_playlist_entry(&mut self, drag: &PlaylistDrag, target_id: i64, cx: &mut Context<Self>) {
+    fn move_playlist_entries(
+        &mut self,
+        drag: &PlaylistDrag,
+        target_id: Option<i64>,
+        cx: &mut Context<Self>,
+    ) {
         self.refresh(cx);
         if self.browser.playlists.selected() != Some(drag.playlist_id)
             || self.browser.playlists.entries().playlist_id != Some(drag.playlist_id)
@@ -1110,23 +1125,8 @@ impl GuiApp {
         {
             return;
         }
-        let Some(index) = self
-            .browser
-            .playlists
-            .entries()
-            .rows
-            .position(|row| row.id == target_id)
-        else {
-            return;
-        };
-        if index != drag.position {
-            self.send(
-                Command::MovePlaylistEntry {
-                    entry_id: drag.entry_id,
-                    index,
-                },
-                cx,
-            );
+        if let Some(command) = drag.command(target_id) {
+            self.send(command, cx);
         }
     }
 
@@ -1395,13 +1395,8 @@ impl GuiApp {
     ) -> AnyElement {
         let playlist_id = self.browser.playlists.selected();
         let selection_entry = self.browser.playlists.selected_entry();
-        let selection_unavailable = playlist_id.is_some()
-            && selection_entry.is_some()
-            && !self.browser.playlists.entry_ready();
-        let selection_pending = self
-            .browser
-            .requests
-            .pending(ViewRequestKind::EntrySelection);
+        let selection_unavailable = !self.browser.playlists.track_selection.ready();
+        let selection_pending = self.browser.playlists.track_selection.busy;
         let selection_message = if !selection_unavailable {
             ""
         } else if selection_pending {
@@ -1439,13 +1434,10 @@ impl GuiApp {
                             this.refresh(cx);
                             if this.browser.playlists.selected() == playlist_id
                                 && this.browser.playlists.selected_entry() == selection_entry
-                                && !this.browser.playlists.entry_ready()
-                                && !this
-                                    .browser
-                                    .requests
-                                    .pending(ViewRequestKind::EntrySelection)
+                                && !this.browser.playlists.track_selection.ready()
+                                && !this.browser.playlists.track_selection.busy
                             {
-                                this.request_entry_selection(cx);
+                                this.refresh_entry_selection(cx);
                                 cx.notify();
                             }
                         },
@@ -1598,10 +1590,11 @@ impl GuiApp {
                             let catalog_revision = this.state.library.playlist_revision;
                             let selection_generation =
                                 this.browser.playlists.selection_generation();
+                            let drag_owner = cx.entity().downgrade();
                             let drag = PlaylistDrag {
                                 playlist_id,
-                                entry_id: id,
-                                position: index,
+                                source_id: id,
+                                entry_ids: Default::default(),
                                 revision,
                                 catalog_revision,
                                 selection_generation,
@@ -1623,7 +1616,7 @@ impl GuiApp {
                                 detail,
                                 index,
                                 false,
-                                this.browser.playlists.selected_entry() == Some(id),
+                                this.browser.playlists.track_selection.contains(id),
                             )
                             .group("playlist-track-row")
                             .child(this.track_favorite_toggle(
@@ -1633,6 +1626,20 @@ impl GuiApp {
                                 e.favorite,
                                 cx,
                             ))
+                            .child(
+                                quiet_icon_button(icon_button(
+                                    ("playlist-entry-play", id as u64),
+                                    "󰐊",
+                                    "Play this track",
+                                    cx,
+                                    move |this, _, cx| this.send(Command::Play { track_id }, cx),
+                                ))
+                                .opacity(0.)
+                                .group_hover("playlist-track-row", |style| style.opacity(1.))
+                                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation()
+                                }),
+                            )
                             .child(
                                 quiet_icon_button(icon_button(
                                     ("playlist-entry-remove", id as u64),
@@ -1648,11 +1655,12 @@ impl GuiApp {
                                         {
                                             return;
                                         }
-                                        if this.browser.playlists.selected_entry() == Some(id) {
-                                            this.browser.playlists.take_entry();
-                                        }
                                         this.send(
-                                            Command::RemovePlaylistEntry { entry_id: id },
+                                            Command::RemovePlaylistEntries {
+                                                playlist_id,
+                                                entry_ids: vec![id],
+                                                expected_revision: revision,
+                                            },
                                             cx,
                                         );
                                     },
@@ -1663,25 +1671,63 @@ impl GuiApp {
                                     cx.stop_propagation()
                                 }),
                             )
+                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                cx.listener(move |this, _, window, cx| {
+                                    this.focus_layout(window, cx);
+                                    this.browser.focus_list(ListFocus::PlaylistTracks);
+                                }),
+                            )
                             .on_click(cx.listener(
                                 move |this, event: &gpui::ClickEvent, window, cx| {
                                     this.focus_layout(window, cx);
-                                    this.browser.focus_playlists();
-                                    this.browser
-                                        .requests
-                                        .cancel(ViewRequestKind::EntrySelection);
-                                    this.browser.playlists.select_entry(id, index);
-                                    this.request_track(track_id, cx);
+                                    this.browser.focus_list(ListFocus::PlaylistTracks);
+                                    let modifiers = event.modifiers();
+                                    this.select_playlist_entry(
+                                        id,
+                                        index,
+                                        modifiers.shift,
+                                        modifiers.control || modifiers.platform,
+                                        cx,
+                                    );
                                     if event.click_count() == 2 {
                                         this.send(Command::Play { track_id }, cx);
                                     }
                                     cx.notify();
                                 },
                             ))
-                            .on_drag(drag, |drag, _, _, cx| cx.new(|_| *drag))
+                            .on_drag(drag, move |drag, _, _, cx| {
+                                let drag = drag.clone();
+                                drag.entry_ids.get_or_init(|| {
+                                    drag_owner
+                                        .update(cx, |this, cx| {
+                                            if !this
+                                                .browser
+                                                .playlists
+                                                .track_selection
+                                                .contains(drag.source_id)
+                                            {
+                                                this.select_playlist_entry(
+                                                    drag.source_id,
+                                                    index,
+                                                    false,
+                                                    false,
+                                                    cx,
+                                                );
+                                            }
+                                            this.browser
+                                                .playlists
+                                                .track_selection
+                                                .drag_ids(drag.source_id)
+                                        })
+                                        .unwrap_or_default()
+                                });
+                                cx.new(|_| drag)
+                            })
                             .on_drop(cx.listener(move |this, drag: &PlaylistDrag, window, cx| {
                                 window.prevent_default();
-                                this.move_playlist_entry(drag, id, cx);
+                                cx.stop_propagation();
+                                this.move_playlist_entries(drag, Some(id), cx);
                             }))
                             .drag_over::<PlaylistDrag>(|style, _, _, _| style.bg(rgb(HIGHLIGHT)))
                             .into_any_element()
@@ -1692,6 +1738,10 @@ impl GuiApp {
             .with_decoration(paged::viewport_demand(
                 cx.processor(|this, range, _, cx| this.ensure_entry_range(range, cx)),
             ))
+            .on_drop(cx.listener(|this, drag: &PlaylistDrag, window, cx| {
+                window.prevent_default();
+                this.move_playlist_entries(drag, None, cx);
+            }))
             .h_full()
             .min_h_0()
             .w_full()
@@ -1703,11 +1753,28 @@ impl GuiApp {
                 entries.into_any_element()
             };
             lists = lists.child(
-                list_viewport(entries)
-                    .flex_none()
-                    .flex_shrink_1()
-                    .h(px(entries_len.max(1) as f32 * TRACK_HEIGHT + 2.))
-                    .max_h(gpui::relative(1.)),
+                column()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        list_viewport(entries)
+                            .flex_none()
+                            .flex_shrink_1()
+                            .h(px(entries_len.max(1) as f32 * TRACK_HEIGHT + 2.))
+                            .max_h(gpui::relative(1.)),
+                    )
+                    .child(
+                        div()
+                            .id(("playlist-append", panel_id))
+                            .flex_1()
+                            .min_h(px(16.))
+                            .w_full()
+                            .on_drop(cx.listener(|this, drag: &PlaylistDrag, window, cx| {
+                                window.prevent_default();
+                                this.move_playlist_entries(drag, None, cx);
+                            }))
+                            .drag_over::<PlaylistDrag>(|style, _, _, _| style.bg(rgb(HIGHLIGHT))),
+                    ),
             );
         }
         panel_surface(("playlists-panel", panel_id))
@@ -1725,11 +1792,16 @@ impl GuiApp {
             }))
             .child(panel_header(
                 "Playlists",
-                format!("{} playlists", self.browser.playlists.summaries().total),
+                format!(
+                    "{} playlists · {} selected tracks",
+                    self.browser.playlists.summaries().total,
+                    self.browser.playlists.track_selection.len()
+                ),
             ))
             .child(
                 row()
-                    .h(gpui::rems(2.))
+                    .min_h(gpui::rems(2.))
+                    .flex_wrap()
                     .flex_shrink_0()
                     .child(icon_button(
                         ("playlist-create", panel_id),
@@ -1768,6 +1840,40 @@ impl GuiApp {
                         ),
                         playlist_id.is_none(),
                     ))
+                    .when(self.browser.playlists.track_selection.len() > 0, |tools| {
+                        let disabled = !self.browser.playlists.track_selection.ready();
+                        tools
+                            .child(disabled_control(
+                                icon_button(
+                                    ("playlist-remove-selected", panel_id),
+                                    "",
+                                    "Remove selected entries",
+                                    cx,
+                                    |this, _, cx| this.remove_playlist_selection(cx),
+                                ),
+                                disabled,
+                            ))
+                            .child(disabled_control(
+                                icon_button(
+                                    ("playlist-favorite-selected", panel_id),
+                                    "󰋑",
+                                    "Favorite selected tracks",
+                                    cx,
+                                    |this, _, cx| this.favorite_playlist_selection(true, cx),
+                                ),
+                                disabled,
+                            ))
+                            .child(disabled_control(
+                                icon_button(
+                                    ("playlist-unfavorite-selected", panel_id),
+                                    "󰋕",
+                                    "Unfavorite selected tracks",
+                                    cx,
+                                    |this, _, cx| this.favorite_playlist_selection(false, cx),
+                                ),
+                                disabled,
+                            ))
+                    })
                     .child(selection_status),
             )
             .child(lists)
@@ -2273,5 +2379,49 @@ impl GuiApp {
                 ),
             ))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod playlist_drag_tests {
+    use super::{Command, PlaylistDrag};
+
+    #[test]
+    fn group_drop_uses_stable_target_and_original_order_or_append() {
+        let drag = PlaylistDrag {
+            playlist_id: 8,
+            source_id: 40,
+            entry_ids: Default::default(),
+            revision: 19,
+            catalog_revision: 12,
+            selection_generation: 4,
+        };
+        // The preview constructor fills a shared snapshot, but drop consumes the original value.
+        let preview = drag.clone();
+        preview.entry_ids.set(vec![7, 40, 2]).unwrap();
+        drop(preview);
+        for target in [Some(99), None] {
+            let Some(Command::MovePlaylistEntries {
+                playlist_id,
+                entry_ids,
+                before_entry_id,
+                expected_revision,
+            }) = drag.command(target)
+            else {
+                panic!("expected group command");
+            };
+            assert_eq!(playlist_id, 8);
+            assert_eq!(entry_ids, vec![7, 40, 2]);
+            assert_eq!(before_entry_id, target);
+            assert_eq!(expected_revision, 19);
+        }
+        for target in [7, 40, 2] {
+            assert!(drag.command(Some(target)).is_none());
+        }
+        let empty = PlaylistDrag {
+            entry_ids: Default::default(),
+            ..drag
+        };
+        assert!(empty.command(None).is_none());
     }
 }

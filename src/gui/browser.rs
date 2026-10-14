@@ -81,8 +81,6 @@ impl BrowserState {
             .cancel(super::queries::ViewRequestKind::Selection);
         self.requests
             .cancel(super::queries::ViewRequestKind::Entries);
-        self.requests
-            .cancel(super::queries::ViewRequestKind::EntrySelection);
         self.playlists.clear_selection();
     }
 
@@ -543,8 +541,7 @@ pub(super) struct PlaylistBrowser {
     summaries: PlaylistSummaryBuffer,
     entries: PlaylistEntriesBuffer,
     selected: Option<i64>,
-    selected_entry: Option<i64>,
-    entry_details: Option<PlaylistEntryLocation>,
+    pub(super) track_selection: super::playlist_selection::EntrySelection,
     selected_name: String,
     selection_generation: u64,
 }
@@ -640,15 +637,14 @@ impl PlaylistBrowser {
         self.selection_generation
     }
     pub(super) fn selected_entry(&self) -> Option<i64> {
-        self.selected_entry
+        self.track_selection.active.map(|row| row.id)
     }
 
     pub(super) fn select(&mut self, id: i64, name: String, index: usize) -> bool {
         let changed = self.selected != Some(id);
         if changed {
             self.selection_generation = self.selection_generation.wrapping_add(1);
-            self.selected_entry = None;
-            self.entry_details = None;
+            self.track_selection.clear();
         }
         self.selected = Some(id);
         self.selected_name = name;
@@ -659,59 +655,59 @@ impl PlaylistBrowser {
     pub(super) fn clear_selection(&mut self) {
         self.selection_generation = self.selection_generation.wrapping_add(1);
         self.selected = None;
-        self.selected_entry = None;
-        self.entry_details = None;
+        self.track_selection.clear();
         self.selected_name.clear();
         self.summaries.rows.pin(None);
         self.entries = PlaylistEntriesBuffer::default();
     }
 
-    pub(super) fn take_entry(&mut self) -> Option<i64> {
-        self.entries.rows.pin(None);
-        self.entry_details = None;
-        self.selected_entry.take()
-    }
-
+    #[cfg(test)]
     pub(super) fn select_entry(&mut self, id: i64, index: usize) {
-        self.selected_entry = Some(id);
-        self.entry_details = self
+        let track_id = self
             .entries
             .rows
             .get(index)
             .filter(|row| row.id == id)
-            .and_then(|row| {
-                self.entries
-                    .playlist_id
-                    .map(|playlist_id| PlaylistEntryLocation {
-                        id,
-                        playlist_id,
-                        position: index,
-                        track_id: row.track_id,
-                        total: self.entries.total,
-                    })
-            });
-        self.entries.rows.pin(Some(index));
+            .map(|row| row.track_id)
+            .unwrap_or(0);
+        self.track_selection.select(
+            super::playlist_selection::EntryIdentity {
+                id,
+                track_id,
+                position: index,
+            },
+            false,
+        );
+        self.sync_active_entry();
+    }
+
+    pub(super) fn sync_active_entry(&mut self) {
+        self.entries.rows.pin(
+            self.track_selection
+                .active
+                .filter(|_| self.track_selection.ready())
+                .map(|row| row.position),
+        );
     }
 
     pub(super) fn prepare_entries(&mut self, id: i64) {
         let changed = self.entries.playlist_id != Some(id);
         if changed {
-            self.selected_entry = None;
+            self.track_selection.clear();
             self.entries.rows.clear();
             self.entries.total = 0;
             self.entries.scroll.scroll_to_item(0, ScrollStrategy::Top);
         } else {
             self.entries.rows.invalidate();
         }
-        self.entry_details = None;
+        self.track_selection.invalidate();
         self.entries.playlist_id = Some(id);
     }
 
     pub(super) fn reconcile_selection(&mut self) {
         // Eviction is not deletion; identities survive unloaded pages.
         if self.selected.is_none() || self.entries.playlist_id != self.selected {
-            self.selected_entry = None;
-            self.entry_details = None;
+            self.track_selection.clear();
         }
     }
 
@@ -741,32 +737,29 @@ impl PlaylistBrowser {
         if let Some(index) = self
             .entries
             .rows
-            .position(|row| Some(row.id) == self.selected_entry)
+            .position(|row| Some(row.id) == self.selected_entry())
         {
             self.entries.rows.pin(Some(index));
         }
     }
 
-    /// Compact identity lookup survives page eviction without retaining a whole playlist.
-    pub(super) fn accept_entry_lookup(&mut self, id: i64, details: Option<PlaylistEntryLocation>) {
-        if self.selected_entry != Some(id) {
-            return;
+    pub(super) fn accept_entry_locations(&mut self, mut rows: Vec<PlaylistEntryLocation>) {
+        rows.retain(|row| Some(row.playlist_id) == self.entries.playlist_id);
+        if let Some(row) = rows.first() {
+            self.entries.total = row.total;
+            self.entries.rows.set_total(row.total);
         }
-        let details = details
-            .filter(|entry| entry.id == id && Some(entry.playlist_id) == self.entries.playlist_id);
-        self.entries
-            .rows
-            .pin(details.as_ref().map(|entry| entry.position));
-        if let Some(details) = details.as_ref() {
-            self.entries.total = details.total;
-        } else {
-            self.take_entry();
-        }
-        self.entry_details = details;
+        self.track_selection.reconcile(
+            rows.iter()
+                .map(super::playlist_selection::EntryIdentity::from)
+                .collect(),
+        );
+        self.sync_active_entry();
     }
 
+    #[cfg(test)]
     pub(super) fn entry_ready(&self) -> bool {
-        self.entry_details.is_some()
+        self.track_selection.active.is_some() && self.track_selection.ready()
     }
 }
 
@@ -1510,44 +1503,38 @@ mod tests {
         assert_eq!(playlists.selected_entry(), Some(41));
         assert!(!playlists.entry_ready());
         // The one identity result restores actions without restoring offscreen payload.
-        playlists.accept_entry_lookup(
-            41,
-            Some(PlaylistEntryLocation {
-                id: 41,
-                playlist_id: 1,
-                position: 7_000,
-                track_id: 99,
-                total: 10_000,
-            }),
-        );
+        playlists.accept_entry_locations(vec![PlaylistEntryLocation {
+            id: 41,
+            playlist_id: 1,
+            position: 7_000,
+            track_id: 99,
+            total: 10_000,
+        }]);
         assert!(playlists.entry_ready());
         assert_eq!(
-            playlists.entry_details.as_ref().map(|entry| entry.track_id),
+            playlists.track_selection.active.map(|entry| entry.track_id),
             Some(99)
         );
         assert_eq!(playlists.entries.rows.visible().start, 8_000);
         assert!(playlists.entries.rows.iter().next().is_none());
         assert_eq!(
-            playlists.entry_details.as_ref().map(|entry| entry.position),
+            playlists.track_selection.active.map(|entry| entry.position),
             Some(7_000)
         );
         playlists.prepare_entries(1);
         assert!(!playlists.entry_ready());
-        playlists.accept_entry_lookup(
-            41,
-            Some(PlaylistEntryLocation {
-                id: 41,
-                playlist_id: 1,
-                position: 6_000,
-                track_id: 99,
-                total: 10_000,
-            }),
-        );
+        playlists.accept_entry_locations(vec![PlaylistEntryLocation {
+            id: 41,
+            playlist_id: 1,
+            position: 6_000,
+            track_id: 99,
+            total: 10_000,
+        }]);
         assert_eq!(
-            playlists.entry_details.as_ref().map(|entry| entry.position),
+            playlists.track_selection.active.map(|entry| entry.position),
             Some(6_000)
         );
-        assert_eq!(playlists.take_entry(), Some(41));
+        playlists.track_selection.remove(41);
         assert!(!playlists.entry_ready());
     }
 
@@ -1557,12 +1544,11 @@ mod tests {
         playlists.select(1, "one".into(), 0);
         playlists.prepare_entries(1);
         playlists.select_entry(41, 3);
+        playlists.prepare_entries(1);
         assert!(!playlists.entry_ready());
-        playlists.accept_entry_lookup(40, None);
         assert_eq!(playlists.selected_entry(), Some(41));
-        playlists.accept_entry_lookup(41, None);
+        playlists.accept_entry_locations(Vec::new());
         assert_eq!(playlists.selected_entry(), None);
-        assert_eq!(playlists.take_entry(), None);
         assert!(!playlists.entry_ready());
         assert_eq!(playlists.selected(), Some(1));
     }
@@ -1573,29 +1559,23 @@ mod tests {
         playlists.select(1, "one".into(), 0);
         playlists.prepare_entries(1);
         playlists.select_entry(41, 0);
-        playlists.accept_entry_lookup(
-            41,
-            Some(PlaylistEntryLocation {
-                id: 41,
-                playlist_id: 1,
-                position: 0,
-                track_id: 99,
-                total: 1,
-            }),
-        );
+        playlists.accept_entry_locations(vec![PlaylistEntryLocation {
+            id: 41,
+            playlist_id: 1,
+            position: 0,
+            track_id: 99,
+            total: 1,
+        }]);
         assert!(playlists.entry_ready());
         playlists.prepare_entries(1);
         assert!(!playlists.entry_ready());
-        playlists.accept_entry_lookup(
-            41,
-            Some(PlaylistEntryLocation {
-                id: 41,
-                playlist_id: 2,
-                position: 0,
-                track_id: 99,
-                total: 1,
-            }),
-        );
+        playlists.accept_entry_locations(vec![PlaylistEntryLocation {
+            id: 41,
+            playlist_id: 2,
+            position: 0,
+            track_id: 99,
+            total: 1,
+        }]);
         assert_eq!(playlists.selected_entry(), None);
     }
 

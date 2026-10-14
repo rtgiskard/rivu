@@ -13,7 +13,6 @@ pub(super) enum ViewRequestKind {
     Summaries,
     Entries,
     Selection,
-    EntrySelection,
     Queue,
 }
 
@@ -37,7 +36,7 @@ impl ViewRequestKind {
         {
             return false;
         }
-        if !matches!(self, Self::Entries | Self::EntrySelection) {
+        if self != Self::Entries {
             return true;
         }
         let entries = playlist_id.map(|playlist_id| PlaylistEntryRevision {
@@ -46,15 +45,10 @@ impl ViewRequestKind {
                 .playlist_entry_revisions
                 .get(&playlist_id)
                 .copied()
-                .unwrap_or(0),
+                .unwrap_or(library.playlist_revision),
         });
         match self {
             Self::Entries => entries.is_some() && revisions.playlist_entries == entries,
-            // Missing entries have no identity to attach a token to; the captured
-            // request baseline and catalog epoch still guard deletion results.
-            Self::EntrySelection => revisions
-                .playlist_entries
-                .is_none_or(|revision| Some(revision) == entries),
             _ => true,
         }
     }
@@ -98,12 +92,8 @@ impl ViewRequests {
 
     fn invalidate_pages(&mut self) {
         // Existence lookups are not pages; changing page size cannot supersede them.
-        self.generations.retain(|kind, _| {
-            matches!(
-                kind,
-                ViewRequestKind::Selection | ViewRequestKind::EntrySelection
-            )
-        });
+        self.generations
+            .retain(|kind, _| matches!(kind, ViewRequestKind::Selection));
     }
 }
 
@@ -226,9 +216,6 @@ impl GuiApp {
                             }
                         }
                         ViewRequestKind::Selection => this.request_playlist_selection(cx),
-                        ViewRequestKind::EntrySelection => {
-                            unreachable!("entry selection uses its own lookup")
-                        }
                         ViewRequestKind::Queue => unreachable!("queue pages use their own worker"),
                     }
                     return;
@@ -430,7 +417,7 @@ impl GuiApp {
     ) {
         self.browser.playlists.prepare_entries(playlist_id);
         self.load_playlist_entries(playlist_id, offset, cx);
-        self.request_entry_selection(cx);
+        self.refresh_entry_selection(cx);
     }
 
     fn load_playlist_entries(&mut self, playlist_id: i64, offset: usize, cx: &mut Context<Self>) {
@@ -442,86 +429,6 @@ impl GuiApp {
         let query = self.browser.playlists.prepare_page(true, offset, page_size);
         let generation = self.browser.requests.next_generation();
         self.request_view(query, generation, cx);
-    }
-
-    pub(super) fn request_entry_selection(&mut self, cx: &mut Context<Self>) {
-        let Some(playlist_id) = self.browser.playlists.entries().playlist_id else {
-            return;
-        };
-        let Some(entry_id) = self.browser.playlists.selected_entry() else {
-            return;
-        };
-        let generation = self.browser.requests.next_generation();
-        let kind = ViewRequestKind::EntrySelection;
-        self.browser.requests.begin(kind, generation);
-        let library_revision = self.state.library.revision;
-        let catalog_revision = self.state.library.playlist_revision;
-        let entry_revision = self
-            .state
-            .library
-            .playlist_entry_revisions
-            .get(&playlist_id)
-            .copied()
-            .unwrap_or(0);
-        let handle = self.handle.clone();
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(80))
-                .await;
-            if !this
-                .update(cx, |this, _| {
-                    this.browser.requests.is_current(kind, generation)
-                        && this.browser.playlists.entries().playlist_id == Some(playlist_id)
-                        && this.browser.playlists.selected_entry() == Some(entry_id)
-                })
-                .unwrap_or(false)
-            {
-                return;
-            }
-            let response = cx
-                .background_executor()
-                .spawn(async move { handle.query(Query::PlaylistEntry { entry_id }) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                // Hidden windows still synchronize business state before accepting results.
-                this.refresh(cx);
-                if !this.browser.requests.is_current(kind, generation)
-                    || this.browser.playlists.entries().playlist_id != Some(playlist_id)
-                    || this.browser.playlists.selected_entry() != Some(entry_id)
-                {
-                    return;
-                }
-                if this.state.library.revision != library_revision
-                    || this.state.library.playlist_revision != catalog_revision
-                    || this
-                        .state
-                        .library
-                        .playlist_entry_revisions
-                        .get(&playlist_id)
-                        .copied()
-                        .unwrap_or(0)
-                        != entry_revision
-                    || !kind.revisions_match(
-                        response.revisions,
-                        &this.state.library,
-                        Some(playlist_id),
-                    )
-                {
-                    this.request_entry_selection(cx);
-                    return;
-                }
-                this.browser.requests.cancel(kind);
-                match response.result {
-                    Ok(ViewResponse::PlaylistEntry(entry)) => {
-                        this.browser.playlists.accept_entry_lookup(entry_id, entry);
-                    }
-                    Err(error) => this.error = Some(error.to_string()),
-                    _ => this.error = Some("Unexpected playlist selection response".into()),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
     }
 
     pub(super) fn ensure_playlist_range(
@@ -646,11 +553,9 @@ mod tests {
         assert!(ViewRequestKind::Summaries.revisions_match(catalog, &library, Some(1)));
         assert!(ViewRequestKind::Selection.revisions_match(catalog, &library, Some(1)));
         assert!(ViewRequestKind::Entries.revisions_match(old, &library, Some(1)));
-        assert!(ViewRequestKind::EntrySelection.revisions_match(old, &library, Some(1)));
         Arc::make_mut(&mut library.playlist_entry_revisions).insert(1, 1);
         assert!(ViewRequestKind::Summaries.revisions_match(catalog, &library, Some(1)));
         assert!(!ViewRequestKind::Entries.revisions_match(old, &library, Some(1)));
-        assert!(!ViewRequestKind::EntrySelection.revisions_match(old, &library, Some(1)));
         let current = QueryRevisions {
             playlist_entries: Some(PlaylistEntryRevision {
                 playlist_id: 1,
@@ -669,7 +574,6 @@ mod tests {
         library.playlist_entry_revisions = Arc::default();
         // Epoch change rejects the old zero token even after the scoped map resets.
         assert!(!ViewRequestKind::Entries.revisions_match(old, &library, Some(1)));
-        assert!(!ViewRequestKind::EntrySelection.revisions_match(catalog, &library, Some(1)));
     }
 
     #[test]
@@ -679,18 +583,14 @@ mod tests {
             ViewRequestKind::Summaries,
             ViewRequestKind::Selection,
             ViewRequestKind::Entries,
-            ViewRequestKind::EntrySelection,
         ] {
             requests.begin(kind, 1);
         }
         requests.begin(ViewRequestKind::Entries, 2);
-        requests.begin(ViewRequestKind::EntrySelection, 3);
         assert!(requests.is_current(ViewRequestKind::Summaries, 1));
         assert!(requests.is_current(ViewRequestKind::Selection, 1));
         assert!(!requests.is_current(ViewRequestKind::Entries, 1));
-        assert!(!requests.is_current(ViewRequestKind::EntrySelection, 1));
         assert!(requests.is_current(ViewRequestKind::Entries, 2));
-        assert!(requests.is_current(ViewRequestKind::EntrySelection, 3));
     }
 
     #[test]
@@ -766,7 +666,6 @@ mod tests {
             ViewRequestKind::Summaries,
             ViewRequestKind::Selection,
             ViewRequestKind::Entries,
-            ViewRequestKind::EntrySelection,
         ] {
             browser.requests.begin(kind, 1);
         }
@@ -795,7 +694,6 @@ mod tests {
             ViewRequestKind::Summaries,
             ViewRequestKind::Selection,
             ViewRequestKind::Entries,
-            ViewRequestKind::EntrySelection,
         ] {
             assert!(!browser.requests.pending(kind));
             assert!(!browser.requests.finish(kind, 1));
@@ -809,11 +707,7 @@ mod tests {
         browser.playlists.select(41, "selected".into(), 0);
         browser.playlists.prepare_entries(41);
         browser.playlists.prepare_page(true, 0, 20);
-        for kind in [
-            ViewRequestKind::Selection,
-            ViewRequestKind::Entries,
-            ViewRequestKind::EntrySelection,
-        ] {
+        for kind in [ViewRequestKind::Selection, ViewRequestKind::Entries] {
             browser.requests.begin(kind, 1);
         }
 
@@ -821,11 +715,7 @@ mod tests {
         assert_eq!(browser.playlists.selected(), None);
         assert_eq!(browser.playlists.entries().playlist_id, None);
         assert!(browser.playlists.entries().rows.is_empty());
-        for kind in [
-            ViewRequestKind::Selection,
-            ViewRequestKind::Entries,
-            ViewRequestKind::EntrySelection,
-        ] {
+        for kind in [ViewRequestKind::Selection, ViewRequestKind::Entries] {
             assert!(!browser.requests.pending(kind));
             assert!(!browser.requests.finish(kind, 1));
         }

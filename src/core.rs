@@ -95,7 +95,7 @@ impl CoreState {
                     .playlist_entry_revisions
                     .get(&playlist_id)
                     .copied()
-                    .unwrap_or(0),
+                    .unwrap_or(self.library.playlist_revision),
             }),
             ..self.query_revisions()
         }
@@ -2709,6 +2709,191 @@ mod tests {
                 Some("Unreadable source")
             );
         }
+    }
+
+    #[test]
+    fn playlist_group_commands_reject_stale_intents_and_preserve_noop_revisions() {
+        let (_directory, mut core) = fixture();
+        for name in ["one", "two"] {
+            core.command(Command::CreatePlaylistWithTracks {
+                name: name.into(),
+                track_ids: vec![1, 2, 3, 4],
+            })
+            .unwrap();
+        }
+        let entries = core.store.playlist_entries_page(1, 0, 4).unwrap().rows;
+        let ids: Vec<_> = entries.iter().map(|row| row.id).collect();
+        let baseline = core.state.playlist_query_revisions(1);
+        let token = baseline.playlist_entries.unwrap().revision;
+        for command in [
+            Command::RemovePlaylistEntries {
+                playlist_id: 1,
+                entry_ids: vec![],
+                expected_revision: token,
+            },
+            Command::MovePlaylistEntries {
+                playlist_id: 1,
+                entry_ids: vec![ids[0], ids[1]],
+                before_entry_id: Some(ids[2]),
+                expected_revision: token,
+            },
+            Command::MovePlaylistEntries {
+                playlist_id: 1,
+                entry_ids: vec![ids[0], ids[2]],
+                before_entry_id: Some(ids[2]),
+                expected_revision: token,
+            },
+        ] {
+            core.command(command).unwrap();
+            assert_eq!(core.state.playlist_query_revisions(1), baseline);
+        }
+        for command in [
+            Command::RemovePlaylistEntries {
+                playlist_id: 1,
+                entry_ids: vec![ids[0], i64::MAX],
+                expected_revision: token,
+            },
+            Command::MovePlaylistEntries {
+                playlist_id: 1,
+                entry_ids: vec![ids[0]],
+                before_entry_id: Some(i64::MAX),
+                expected_revision: token,
+            },
+            Command::MovePlaylistEntries {
+                playlist_id: 999,
+                entry_ids: vec![],
+                before_entry_id: None,
+                expected_revision: token,
+            },
+        ] {
+            assert!(core.command(command).is_err());
+            assert_eq!(core.state.playlist_query_revisions(1), baseline);
+            assert_eq!(
+                core.store.playlist_entries_page(1, 0, 4).unwrap().rows,
+                entries
+            );
+        }
+        let other = core.store.playlist_entries_page(2, 0, 1).unwrap().rows[0].id;
+        core.command(Command::MovePlaylistEntry {
+            entry_id: other,
+            index: 3,
+        })
+        .unwrap();
+        assert_eq!(core.state.playlist_query_revisions(1), baseline);
+        core.command(Command::MovePlaylistEntries {
+            playlist_id: 1,
+            entry_ids: vec![ids[2], ids[0]],
+            before_entry_id: None,
+            expected_revision: token,
+        })
+        .unwrap();
+        let reordered = core.state.playlist_query_revisions(1);
+        assert_eq!(reordered.playlist, baseline.playlist);
+        assert_ne!(reordered.playlist_entries, baseline.playlist_entries);
+        assert_eq!(core.store.playlist_track_ids(1, 4).unwrap(), [2, 4, 1, 3]);
+        for command in [
+            Command::RemovePlaylistEntries {
+                playlist_id: 1,
+                entry_ids: vec![ids[0]],
+                expected_revision: token,
+            },
+            Command::MovePlaylistEntries {
+                playlist_id: 1,
+                entry_ids: vec![],
+                before_entry_id: None,
+                expected_revision: token,
+            },
+        ] {
+            assert!(core.command(command).is_err());
+            assert_eq!(core.state.playlist_query_revisions(1), reordered);
+            assert_eq!(core.store.playlist_track_ids(1, 4).unwrap(), [2, 4, 1, 3]);
+        }
+        core.command(Command::RemovePlaylistEntries {
+            playlist_id: 1,
+            entry_ids: vec![ids[2], ids[0]],
+            expected_revision: reordered.playlist_entries.unwrap().revision,
+        })
+        .unwrap();
+        let removed = core.state.playlist_query_revisions(1);
+        assert_ne!(removed.playlist, reordered.playlist);
+        assert_ne!(removed.playlist_entries, reordered.playlist_entries);
+        assert_eq!(core.store.playlist_track_ids(1, 4).unwrap(), [2, 4]);
+        assert!(
+            core.command(Command::RemovePlaylistEntries {
+                playlist_id: 1,
+                entry_ids: vec![ids[1]],
+                expected_revision: token,
+            })
+            .is_err()
+        );
+        assert!(
+            core.command(Command::MovePlaylistEntries {
+                playlist_id: 1,
+                entry_ids: vec![ids[1]],
+                before_entry_id: None,
+                expected_revision: reordered.playlist_entries.unwrap().revision,
+            })
+            .is_err()
+        );
+        assert_eq!(core.store.playlist_track_ids(1, 4).unwrap(), [2, 4]);
+        assert_eq!(core.state.playlist_query_revisions(1), removed);
+    }
+
+    #[test]
+    fn playlist_location_batches_publish_scoped_tokens_even_for_empty_results() {
+        let (_directory, mut core) = fixture();
+        core.command(Command::CreatePlaylistWithTracks {
+            name: "mix".into(),
+            track_ids: vec![1, 2],
+        })
+        .unwrap();
+        let entry = core.store.playlist_entries_page(1, 0, 1).unwrap().rows[0].id;
+        let query = Query::PlaylistEntryLocations {
+            playlist_id: 1,
+            entry_ids: vec![entry, i64::MAX],
+        };
+        let before = core.query_response(&query);
+        assert_eq!(before.revisions, core.state.playlist_query_revisions(1));
+        assert!(
+            matches!(before.result, Ok(ViewResponse::PlaylistEntryLocations(rows)) if rows.len() == 1 && rows[0].position == 0)
+        );
+        let empty = core.query_response(&Query::PlaylistEntryLocations {
+            playlist_id: 1,
+            entry_ids: vec![i64::MAX],
+        });
+        assert_eq!(empty.revisions, before.revisions);
+        assert!(
+            matches!(empty.result, Ok(ViewResponse::PlaylistEntryLocations(rows)) if rows.is_empty())
+        );
+        let oversized = core.query_response(&Query::PlaylistEntryLocations {
+            playlist_id: 1,
+            entry_ids: vec![entry; MAX_QUERY_ROWS + 1],
+        });
+        assert_eq!(oversized.revisions, before.revisions);
+        assert!(matches!(oversized.result, Err(QueryError::Message(_))));
+        core.command(Command::AddPlaylist {
+            playlist_id: 1,
+            track_ids: vec![3],
+        })
+        .unwrap();
+        assert!(
+            core.command(Command::MovePlaylistEntries {
+                playlist_id: 1,
+                entry_ids: vec![entry],
+                before_entry_id: None,
+                expected_revision: before.revisions.playlist_entries.unwrap().revision,
+            })
+            .is_err()
+        );
+        assert_eq!(core.store.playlist_track_ids(1, 4).unwrap(), [1, 2, 3]);
+        let current = core.query_response(&query);
+        assert_ne!(
+            current.revisions.playlist_entries,
+            before.revisions.playlist_entries
+        );
+        assert!(
+            matches!(current.result, Ok(ViewResponse::PlaylistEntryLocations(rows)) if rows[0].total == 3)
+        );
     }
 
     #[test]

@@ -81,6 +81,84 @@ fn scan_task_query_and_cancel_wire_round_trip_preserve_id() {
 }
 
 #[test]
+fn playlist_group_requests_and_locations_round_trip_stable_identities() {
+    let query = Query::PlaylistEntryLocations {
+        playlist_id: 10,
+        entry_ids: vec![42, i64::MAX, 42],
+    };
+    let expected = serde_json::to_value(&query).unwrap();
+    let mut encoded = Vec::new();
+    encode_request_frame_into(&WireRequest::Query(WireQuery::from(query)), &mut encoded).unwrap();
+    let WireRequest::Query(wire) = decode_request_frame(&encoded[4..]).unwrap() else {
+        panic!("expected query");
+    };
+    assert_eq!(
+        serde_json::to_value(Query::try_from(wire).unwrap()).unwrap(),
+        expected
+    );
+    for command in [
+        Command::RemovePlaylistEntries {
+            playlist_id: 10,
+            entry_ids: vec![42, i64::MAX],
+            expected_revision: u64::MAX,
+        },
+        Command::MovePlaylistEntries {
+            playlist_id: 10,
+            entry_ids: vec![42, 43],
+            before_entry_id: Some(44),
+            expected_revision: 17,
+        },
+        Command::MovePlaylistEntries {
+            playlist_id: 10,
+            entry_ids: vec![],
+            before_entry_id: None,
+            expected_revision: 0,
+        },
+    ] {
+        let expected = serde_json::to_value(&command).unwrap();
+        encode_request_frame_into(
+            &WireRequest::Command(WireCommand::from(command)),
+            &mut encoded,
+        )
+        .unwrap();
+        let WireRequest::Command(wire) = decode_request_frame(&encoded[4..]).unwrap() else {
+            panic!("expected command");
+        };
+        assert_eq!(
+            serde_json::to_value(Command::try_from(wire).unwrap()).unwrap(),
+            expected
+        );
+    }
+    let response = QueryResponse {
+        revisions: crate::response::QueryRevisions {
+            library: 5,
+            structure: 6,
+            playlist: 7,
+            queue: 8,
+            playlist_entries: Some(crate::response::PlaylistEntryRevision {
+                playlist_id: 10,
+                revision: 9,
+            }),
+        },
+        result: Ok(crate::response::ViewResponse::PlaylistEntryLocations(vec![
+            crate::model::PlaylistEntryLocation {
+                id: 42,
+                playlist_id: 10,
+                track_id: 11,
+                position: 1000,
+                total: 2000,
+            },
+        ])),
+    };
+    let expected = serde_json::to_value(&response).unwrap();
+    encode_response_frame_into(&WireResponse::Query(response), &mut encoded).unwrap();
+    let WireResponse::Query(decoded) = decode_response_frame(&encoded[4..]).unwrap() else {
+        panic!("expected query response");
+    };
+    assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
+}
+
+#[test]
 fn scan_task_status_wire_round_trip_preserves_all_phases() {
     use crate::{
         model::{ScanPhase, ScanProgress, ScanTaskStatus},
@@ -451,9 +529,11 @@ fn playlist_reorder_scoped_revisions_cross_ipc_without_catalog_invalidation() {
     let before = session.get_state(sections).unwrap();
     assert!(
         session
-            .request_ack(&Command::MovePlaylistEntry {
-                entry_id: 101,
-                index: 1
+            .request_ack(&Command::MovePlaylistEntries {
+                playlist_id: 10,
+                entry_ids: vec![101],
+                before_entry_id: None,
+                expected_revision: first.revisions.playlist_entries.unwrap().revision,
             })
             .unwrap()
             .ok
@@ -463,7 +543,16 @@ fn playlist_reorder_scoped_revisions_cross_ipc_without_catalog_invalidation() {
     let library = after.library.unwrap();
     assert_eq!(library.playlist_revision, catalog.revisions.playlist);
     assert_eq!(library.revision, catalog.revisions.library);
-    assert_eq!(library.playlist_entry_revisions.get(&10), Some(&1));
+    let moved_token = first
+        .revisions
+        .playlist_entries
+        .unwrap()
+        .revision
+        .wrapping_add(1);
+    assert_eq!(
+        library.playlist_entry_revisions.get(&10),
+        Some(&moved_token)
+    );
     assert_eq!(library.playlist_entry_revisions.len(), 1);
     assert_eq!(
         serde_json::to_value(session.query(&summaries).unwrap()).unwrap(),
@@ -491,12 +580,55 @@ fn playlist_reorder_scoped_revisions_cross_ipc_without_catalog_invalidation() {
         selected.revisions.playlist_entries,
         Some(PlaylistEntryRevision {
             playlist_id: 10,
-            revision: 1
+            revision: moved_token
         })
     );
     assert!(
         matches!(selected.result, Ok(ViewResponse::PlaylistEntry(Some(entry)))
         if entry.position == 1 && entry.id == 101)
+    );
+    let locations = session
+        .query(&Query::PlaylistEntryLocations {
+            playlist_id: 10,
+            entry_ids: vec![101, 201, i64::MAX],
+        })
+        .unwrap();
+    assert_eq!(locations.revisions, selected.revisions);
+    assert!(
+        matches!(locations.result, Ok(ViewResponse::PlaylistEntryLocations(rows)) if rows.len() == 1 && rows[0].id == 101 && rows[0].position == 1)
+    );
+    assert!(
+        !session
+            .request_ack(&Command::RemovePlaylistEntries {
+                playlist_id: 10,
+                entry_ids: vec![101],
+                expected_revision: first.revisions.playlist_entries.unwrap().revision,
+            })
+            .unwrap()
+            .ok
+    );
+    assert!(
+        session
+            .request_ack(&Command::RemovePlaylistEntries {
+                playlist_id: 10,
+                entry_ids: vec![101],
+                expected_revision: moved_token,
+            })
+            .unwrap()
+            .ok
+    );
+    let removed = session
+        .query(&Query::PlaylistEntryLocations {
+            playlist_id: 10,
+            entry_ids: vec![101],
+        })
+        .unwrap();
+    assert!(
+        matches!(removed.result, Ok(ViewResponse::PlaylistEntryLocations(rows)) if rows.is_empty())
+    );
+    assert_ne!(
+        removed.revisions.playlist_entries,
+        selected.revisions.playlist_entries
     );
     let expected = selected.revisions;
     assert!(

@@ -184,6 +184,10 @@ pub(super) enum WireQuery {
     RelocationTask {
         id: u64,
     },
+    PlaylistEntryLocations {
+        playlist_id: i64,
+        entry_ids: Vec<i64>,
+    },
 }
 
 /// Binary command wire format. Variant order is a protocol contract; append only.
@@ -334,6 +338,17 @@ pub(super) enum WireCommand {
     KeepTrackIndependent {
         track_id: i64,
     },
+    RemovePlaylistEntries {
+        playlist_id: i64,
+        entry_ids: Vec<i64>,
+        expected_revision: u64,
+    },
+    MovePlaylistEntries {
+        playlist_id: i64,
+        entry_ids: Vec<i64>,
+        before_entry_id: Option<i64>,
+        expected_revision: u64,
+    },
 }
 
 pub(super) fn wire_usize(value: u64, field: &str) -> Result<usize> {
@@ -398,6 +413,13 @@ impl From<Query> for WireQuery {
                 playlist_id,
                 offset: offset as u64,
                 limit: limit as u64,
+            },
+            Query::PlaylistEntryLocations {
+                playlist_id,
+                entry_ids,
+            } => Self::PlaylistEntryLocations {
+                playlist_id,
+                entry_ids,
             },
             Query::Track { track_id } => Self::Track { track_id },
             Query::LibraryStats => Self::LibraryStats,
@@ -548,6 +570,13 @@ impl TryFrom<WireQuery> for Query {
                 playlist_id,
                 offset: wire_usize(offset, "offset")?,
                 limit: wire_usize(limit, "limit")?,
+            },
+            WireQuery::PlaylistEntryLocations {
+                playlist_id,
+                entry_ids,
+            } => Self::PlaylistEntryLocations {
+                playlist_id,
+                entry_ids,
             },
             WireQuery::Track { track_id } => Self::Track { track_id },
             WireQuery::LibraryStats => Self::LibraryStats,
@@ -736,6 +765,26 @@ impl From<Command> for WireCommand {
                 entry_id,
                 index: index as u64,
             },
+            Command::RemovePlaylistEntries {
+                playlist_id,
+                entry_ids,
+                expected_revision,
+            } => Self::RemovePlaylistEntries {
+                playlist_id,
+                entry_ids,
+                expected_revision,
+            },
+            Command::MovePlaylistEntries {
+                playlist_id,
+                entry_ids,
+                before_entry_id,
+                expected_revision,
+            } => Self::MovePlaylistEntries {
+                playlist_id,
+                entry_ids,
+                before_entry_id,
+                expected_revision,
+            },
             Command::ImportPlaylist { path, name } => Self::ImportPlaylist { path, name },
             Command::ExportPlaylist { playlist_id, path } => {
                 Self::ExportPlaylist { playlist_id, path }
@@ -856,6 +905,26 @@ impl TryFrom<WireCommand> for Command {
             WireCommand::MovePlaylistEntry { entry_id, index } => Self::MovePlaylistEntry {
                 entry_id,
                 index: wire_usize(index, "index")?,
+            },
+            WireCommand::RemovePlaylistEntries {
+                playlist_id,
+                entry_ids,
+                expected_revision,
+            } => Self::RemovePlaylistEntries {
+                playlist_id,
+                entry_ids,
+                expected_revision,
+            },
+            WireCommand::MovePlaylistEntries {
+                playlist_id,
+                entry_ids,
+                before_entry_id,
+                expected_revision,
+            } => Self::MovePlaylistEntries {
+                playlist_id,
+                entry_ids,
+                before_entry_id,
+                expected_revision,
             },
             WireCommand::ImportPlaylist { path, name } => Self::ImportPlaylist { path, name },
             WireCommand::ExportPlaylist { playlist_id, path } => {

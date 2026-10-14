@@ -219,7 +219,8 @@ impl Core {
         let playlist_id = match (query, &result) {
             (
                 Query::PlaylistEntries { playlist_id, .. }
-                | Query::PlaylistEntryBatch { playlist_id, .. },
+                | Query::PlaylistEntryBatch { playlist_id, .. }
+                | Query::PlaylistEntryLocations { playlist_id, .. },
                 _,
             ) => Some(*playlist_id),
             (Query::PlaylistEntry { .. }, Ok(ViewResponse::PlaylistEntry(Some(entry)))) => {
@@ -400,6 +401,13 @@ impl Core {
             Query::PlaylistEntry { entry_id } => {
                 ViewResponse::PlaylistEntry(self.store.playlist_entry(*entry_id)?)
             }
+            Query::PlaylistEntryLocations {
+                playlist_id,
+                entry_ids,
+            } => ViewResponse::PlaylistEntryLocations(
+                self.store
+                    .playlist_entry_locations(*playlist_id, entry_ids)?,
+            ),
             Query::LibraryStats => ViewResponse::LibraryStats(self.store.library_stats()?),
             Query::TrackBatch {
                 query,

@@ -10,6 +10,7 @@ mod metadata;
 mod paged;
 mod panels;
 mod playlist_editor;
+mod playlist_selection;
 mod queries;
 mod queue;
 mod scrolling;
@@ -275,6 +276,7 @@ enum HistorySort {
 enum ListFocus {
     Library,
     Queue,
+    PlaylistTracks,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -501,7 +503,15 @@ impl GuiApp {
                 .filter_map(|panel| match panel.kind.as_str() {
                     "library" => Some(BrowserFocus::List(ListFocus::Library)),
                     "queue" => Some(BrowserFocus::List(ListFocus::Queue)),
-                    "playlists" => Some(BrowserFocus::Playlists),
+                    "playlists" => Some(
+                        if self.browser.focus()
+                            == Some(BrowserFocus::List(ListFocus::PlaylistTracks))
+                        {
+                            BrowserFocus::List(ListFocus::PlaylistTracks)
+                        } else {
+                            BrowserFocus::Playlists
+                        },
+                    ),
                     "history" => Some(BrowserFocus::History),
                     _ => None,
                 }),
@@ -526,6 +536,7 @@ impl GuiApp {
                 self.navigate_library_tree(down, cx);
             }
             ListFocus::Queue => self.navigate_queue(down, cx),
+            ListFocus::PlaylistTracks => self.navigate_playlist(down, false, false, cx),
         }
     }
 
@@ -543,10 +554,26 @@ impl GuiApp {
                     self.send(Command::PlayQueue { queue_id }, cx);
                 }
             }
+            ListFocus::PlaylistTracks => {
+                if self.browser.playlists.track_selection.ready()
+                    && let Some(row) = self.browser.playlists.track_selection.active
+                {
+                    self.send(
+                        Command::Play {
+                            track_id: row.track_id,
+                        },
+                        cx,
+                    );
+                }
+            }
         }
     }
 
     fn remove_focused_queue(&mut self, focus: ListFocus, cx: &mut Context<Self>) {
+        if focus == ListFocus::PlaylistTracks {
+            self.remove_playlist_selection(cx);
+            return;
+        }
         if focus != ListFocus::Queue {
             return;
         }
@@ -2069,6 +2096,23 @@ mod state_tests {
         assert!(
             visible_list_focus(None, [BrowserFocus::List(ListFocus::Library)].into_iter())
                 == Some(ListFocus::Library)
+        );
+        assert!(
+            visible_list_focus(
+                Some(BrowserFocus::List(ListFocus::PlaylistTracks)),
+                [
+                    BrowserFocus::List(ListFocus::Queue),
+                    BrowserFocus::List(ListFocus::PlaylistTracks)
+                ]
+                .into_iter(),
+            ) == Some(ListFocus::PlaylistTracks)
+        );
+        assert!(
+            visible_list_focus(
+                Some(BrowserFocus::List(ListFocus::PlaylistTracks)),
+                [BrowserFocus::History].into_iter(),
+            )
+            .is_none()
         );
     }
 

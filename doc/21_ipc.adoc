@@ -331,9 +331,11 @@ An actual entry move advances only its owning playlist's token: catalog summarie
 other playlists, and library-content/structure tokens remain valid. It does not
 read catalog totals. Repeated moves reuse the same map key. Catalog/membership
 changes advance the epoch and clear scoped tokens, so the map contains at most
-the extant playlists reordered since that epoch. An absent key means zero within
-the current epoch, never validity across an epoch change. Every reorder still
-advances the Library state-section token so external clients and coalesced watches
+the extant playlists reordered since that epoch. An absent key uses the catalog
+epoch as its entry token. Catalog changes advance the epoch past all scoped tokens
+before clearing the map, so a previously issued scalar mutation token cannot
+become valid again after a membership change. Consumers still compare both tokens.
+Every reorder still advances the Library state-section token so external clients and coalesced watches
 receive the affected playlist identity, not just a GUI-local command hint.
 
 Playback-statistics writes return count and activity time directly to the Core.
@@ -351,11 +353,12 @@ Query responses contain the requested projection and its data revisions, not a
 full client state or queue snapshot. Rows and query revisions come from the same
 core dispatch. Library-content, directory-structure, playlist-catalog, per-playlist
 entry-order, and queue-content revisions are separate from the four state-section
-tokens. Entry page/batch and successful entry-location responses attach
+tokens. Entry page/batch, scoped `PlaylistEntryLocations` responses (including empty
+results), and successful single-entry location responses attach
 `revisions.playlist_entries = {playlist_id, revision}`; other queries and missing
-entry lookups attach no entry token. Consumers compare entry identity/token plus
-library-content and catalog epoch before accepting late entry results. A missing
-entry lookup also requires its captured target and revision baseline to remain
+single-entry lookups attach no entry token. Consumers compare entry identity/token
+plus library-content and catalog epoch before accepting late entry results. A missing
+single-entry lookup also requires its captured target and revision baseline to remain
 current. Command acknowledgements contain success or an error and the core's
 publication revision, not replacement state.
 
@@ -377,6 +380,34 @@ interrupt traversal. `QueueEntries {queue_ids}` resolves at most 256 occurrence 
 omits removed IDs, deduplicates repeated IDs, and returns rows in queue order.
 The query response's `revisions.queue` is captured with the rows; clients discard
 late results if the active queue-content revision no longer matches.
+
+`PlaylistEntryLocations {playlist_id, entry_ids}` resolves at most 256 stable entry
+IDs to compact `{id, playlist_id, track_id, position, total}` records in current
+playlist order, without loading track metadata. Repeated IDs are deduplicated;
+missing IDs and IDs belonging to other playlists are omitted. Empty requests
+return no rows, while a nonexistent playlist or oversized input returns a query
+error. Split larger selections into bounded requests and discard completions when
+the playlist, request generation, or captured revision baseline changes.
+
+`RemovePlaylistEntries {playlist_id, entry_ids, expected_revision}` removes a
+selection atomically and closes its position gaps. `MovePlaylistEntries
+{playlist_id, entry_ids, before_entry_id, expected_revision}` moves the selected
+entries together, preserving their original playlist order regardless of submitted
+ID order; `before_entry_id = None` appends the group. The target is a stable entry
+identity in the same playlist, not a row index. Moving onto a selected target or
+requesting an already-current order is a no-op.
+
+Both commands compare `expected_revision` with that playlist's current scalar
+entry token at core dispatch, before storage mutation. A nonexistent playlist,
+missing/foreign selected ID, missing/foreign move target, or stale token fails
+without changing membership or positions. Duplicate selected IDs are applied
+once. Empty selections still validate the playlist, revision, and move target;
+valid empty selections and other no-ops do not advance revisions. Mutations are
+SQL transactions retaining only selected positions in Rust, not complete playlist
+metadata or an all-entry vector. Actual group moves advance only their playlist's
+scoped token; group removal advances the membership epoch. The existing
+single-entry commands retain their distinct CLI contracts. Bulk favorites use
+the existing atomic `SetFavorite {track_ids, favorite}` command.
 
 `EnqueueSources` expands directories and explicit track IDs directly in SQL with
 no total queue cap. `CreatePlaylistFromQueue {name}` atomically saves the complete

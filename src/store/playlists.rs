@@ -28,6 +28,39 @@ impl Store {
             }),
         ).optional()?)
     }
+    pub fn playlist_entry_locations(
+        &self,
+        playlist_id: i64,
+        entry_ids: &[i64],
+    ) -> Result<Vec<PlaylistEntryLocation>> {
+        anyhow::ensure!(
+            entry_ids.len() <= crate::model::MAX_QUERY_ROWS,
+            "Playlist entry query exceeds {} IDs",
+            crate::model::MAX_QUERY_ROWS
+        );
+        let total: i64 = self.conn.query_row(
+            "SELECT (SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=?1) FROM playlists WHERE id=?1",
+            [playlist_id],
+            |row| row.get(0),
+        ).optional()?.context("Playlist not found")?;
+        let ids = serde_json::to_string(entry_ids)?;
+        let mut statement = self.conn.prepare(
+            "SELECT id,track_id,position FROM playlist_entries
+             WHERE playlist_id=?1 AND id IN (SELECT value FROM json_each(?2))
+             ORDER BY position,id",
+        )?;
+        Ok(statement
+            .query_map(params![playlist_id, ids], |row| {
+                Ok(PlaylistEntryLocation {
+                    id: row.get(0)?,
+                    playlist_id,
+                    track_id: row.get(1)?,
+                    position: row.get::<_, i64>(2)? as usize,
+                    total: total as usize,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
 
     pub fn playlist_summary_page(
         &self,
@@ -395,6 +428,106 @@ impl Store {
         tx.commit()?;
         Ok(Some(pid))
     }
+
+    pub fn remove_playlist_entries(&self, playlist_id: i64, entry_ids: &[i64]) -> Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        let ids = serde_json::to_string(entry_ids)?;
+        let selected = selected_entries(&tx, playlist_id, &ids)?;
+        if selected.is_empty() {
+            return Ok(false);
+        }
+        tx.execute(
+            "DELETE FROM playlist_entries WHERE playlist_id=?1 AND id IN (SELECT value FROM json_each(?2))",
+            params![playlist_id, ids],
+        )?;
+        close_gaps(&tx, &selected, PositionScope::Playlist(playlist_id))?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Move stable occurrences as a group in their original playlist order.
+    /// Rust retains only selected positions, never the whole playlist or metadata.
+    pub fn move_playlist_entries(
+        &self,
+        playlist_id: i64,
+        entry_ids: &[i64],
+        before_entry_id: Option<i64>,
+    ) -> Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        let ids = serde_json::to_string(entry_ids)?;
+        let selected = selected_entries(&tx, playlist_id, &ids)?;
+        let target: i64 = match before_entry_id {
+            Some(id) => tx
+                .query_row(
+                    "SELECT position FROM playlist_entries WHERE playlist_id=?1 AND id=?2",
+                    params![playlist_id, id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .context("Playlist target entry does not exist in this playlist")?,
+            None => tx.query_row(
+                "SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=?1",
+                [playlist_id],
+                |row| row.get(0),
+            )?,
+        };
+        if selected.is_empty() || selected.binary_search(&target).is_ok() {
+            return Ok(false);
+        }
+        let count = i64::try_from(selected.len())?;
+        let insertion = target - selected.partition_point(|&position| position < target) as i64;
+        if selected
+            .iter()
+            .enumerate()
+            .all(|(ordinal, &position)| position == insertion + ordinal as i64)
+        {
+            return Ok(false);
+        }
+        // Temporarily park selected rows outside the nonnegative position domain.
+        // The shared gap closer then touches survivors only, once per original interval.
+        tx.execute(
+            "WITH selected AS MATERIALIZED (
+                SELECT id,-row_number() OVER (ORDER BY position,id) AS parked
+                FROM playlist_entries WHERE playlist_id=?1
+                AND id IN (SELECT value FROM json_each(?2))
+             ) UPDATE playlist_entries SET position=selected.parked
+               FROM selected WHERE playlist_entries.id=selected.id",
+            params![playlist_id, ids],
+        )?;
+        close_gaps(&tx, &selected, PositionScope::Playlist(playlist_id))?;
+        tx.execute(
+            "UPDATE playlist_entries SET position=position+?1 WHERE playlist_id=?2 AND position>=?3",
+            params![count, playlist_id, insertion],
+        )?;
+        tx.execute(
+            "UPDATE playlist_entries SET position=?1-position-1 WHERE playlist_id=?2 AND position<0",
+            params![insertion, playlist_id],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+}
+
+fn selected_entries(tx: &Transaction<'_>, playlist_id: i64, ids: &str) -> Result<Vec<i64>> {
+    exists_playlist(tx, playlist_id)?;
+    let invalid: Option<i64> = tx
+        .query_row(
+            "SELECT value FROM json_each(?2) WHERE NOT EXISTS
+         (SELECT 1 FROM playlist_entries WHERE playlist_id=?1 AND id=value) LIMIT 1",
+            params![playlist_id, ids],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(id) = invalid {
+        bail!("playlist entry {id} does not exist in playlist {playlist_id}");
+    }
+    let mut statement = tx.prepare(
+        "SELECT position FROM playlist_entries WHERE playlist_id=?1
+         AND id IN (SELECT value FROM json_each(?2)) ORDER BY position,id",
+    )?;
+    Ok(statement
+        .query_map(params![playlist_id, ids], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 fn append_tracks(tx: &Transaction<'_>, id: i64, tracks: &[i64]) -> Result<usize> {
@@ -796,6 +929,169 @@ mod export_tests {
         for (after, limit) in [(None, 3), (first.next, 1)] {
             assert!(store.playlist_track_batch(empty, after, limit).is_err());
         }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod group_tests {
+    use super::*;
+    use std::path::Path;
+
+    fn fixture() -> Result<Store> {
+        let store = Store::open(Path::new(":memory:"))?;
+        store.conn.execute_batch(
+            "INSERT INTO tracks(id,path) VALUES (1,'one'),(2,'two'),(3,'three'),(4,'four'),(5,'five'),(6,'six');
+             INSERT INTO playlists(id,name) VALUES (10,'first'),(20,'second');
+             INSERT INTO playlist_entries(id,playlist_id,track_id,position) VALUES
+             (100,10,1,0),(101,10,2,1),(102,10,3,2),(103,10,4,3),(104,10,5,4),(105,10,6,5),(200,20,1,0);",
+        )?;
+        Ok(store)
+    }
+
+    fn order(store: &Store, playlist_id: i64) -> Result<Vec<i64>> {
+        let mut statement = store.conn.prepare(
+            "SELECT id,position FROM playlist_entries WHERE playlist_id=?1 ORDER BY position,id",
+        )?;
+        let rows = statement
+            .query_map([playlist_id], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (index, &(_, position)) in rows.iter().enumerate() {
+            assert_eq!(position, index as i64);
+        }
+        Ok(rows.into_iter().map(|(id, _)| id).collect())
+    }
+
+    #[test]
+    fn noncontiguous_groups_move_before_after_and_to_end_in_source_order() -> Result<()> {
+        for (target, expected) in [
+            (Some(100), vec![101, 103, 100, 102, 104, 105]),
+            (Some(102), vec![100, 101, 103, 102, 104, 105]),
+            (Some(105), vec![100, 102, 104, 101, 103, 105]),
+            (None, vec![100, 102, 104, 105, 101, 103]),
+        ] {
+            let store = fixture()?;
+            assert!(store.move_playlist_entries(10, &[103, 101, 103], target)?);
+            assert_eq!(order(&store, 10)?, expected);
+            assert_eq!(order(&store, 20)?, [200]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn group_noops_validate_every_identity_and_target() -> Result<()> {
+        let store = fixture()?;
+        let before = order(&store, 10)?;
+        for (ids, target) in [
+            (vec![], None),
+            (vec![101, 102], Some(103)),
+            (vec![105], None),
+            (vec![101, 103], Some(103)),
+            (vec![100, 101, 102, 103, 104, 105], None),
+        ] {
+            assert!(!store.move_playlist_entries(10, &ids, target)?);
+            assert_eq!(order(&store, 10)?, before);
+        }
+        assert!(!store.remove_playlist_entries(10, &[])?);
+        for (playlist, ids, target) in [
+            (999, vec![], None),
+            (10, vec![101, 999], Some(101)),
+            (10, vec![101, 200], Some(101)),
+            (10, vec![], Some(999)),
+            (10, vec![101], Some(200)),
+        ] {
+            assert!(store.move_playlist_entries(playlist, &ids, target).is_err());
+            assert_eq!(order(&store, 10)?, before);
+            assert_eq!(order(&store, 20)?, [200]);
+        }
+        for (playlist, ids) in [(999, vec![]), (10, vec![101, 999]), (10, vec![101, 200])] {
+            assert!(store.remove_playlist_entries(playlist, &ids).is_err());
+            assert_eq!(order(&store, 10)?, before);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn group_removal_closes_gaps_once_and_preserves_other_references() -> Result<()> {
+        let store = fixture()?;
+        store
+            .conn
+            .execute_batch("INSERT INTO queue_entries(id,track_id,position) VALUES (300,2,0);")?;
+        assert!(store.remove_playlist_entries(10, &[103, 101, 103])?);
+        assert_eq!(order(&store, 10)?, [100, 102, 104, 105]);
+        assert_eq!(order(&store, 20)?, [200]);
+        assert_eq!(
+            store.conn.query_row(
+                "SELECT track_id FROM queue_entries WHERE id=300",
+                [],
+                |row| row.get::<_, i64>(0)
+            )?,
+            2
+        );
+        assert!(store.track(2)?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn group_mutation_failure_rolls_back_intermediate_positions_and_deletes() -> Result<()> {
+        let store = fixture()?;
+        let before = order(&store, 10)?;
+        store.conn.execute_batch(
+            "CREATE TRIGGER reject_restore BEFORE UPDATE OF position ON playlist_entries
+             WHEN OLD.position<0 AND NEW.position>=0 BEGIN SELECT RAISE(ABORT,'reject restore'); END;",
+        )?;
+        assert!(store.move_playlist_entries(10, &[101, 103], None).is_err());
+        assert_eq!(order(&store, 10)?, before);
+        store.conn.execute_batch(
+            "DROP TRIGGER reject_restore;
+             CREATE TRIGGER reject_gap BEFORE UPDATE OF position ON playlist_entries
+             BEGIN SELECT RAISE(ABORT,'reject gap'); END;",
+        )?;
+        assert!(store.remove_playlist_entries(10, &[101, 103]).is_err());
+        assert_eq!(order(&store, 10)?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn compact_locations_are_bounded_scoped_and_survive_reordering() -> Result<()> {
+        let store = fixture()?;
+        store.conn.execute_batch(
+            "INSERT INTO playlists(id,name) VALUES (30,'large');
+             WITH RECURSIVE entries(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM entries WHERE n<1000)
+             INSERT INTO playlist_entries(id,playlist_id,track_id,position) SELECT 1000+n,30,1000+n,n-1 FROM entries;",
+        )?;
+        let ids: Vec<_> = (1001..=1000 + crate::model::MAX_QUERY_ROWS as i64).collect();
+        let locations = store.playlist_entry_locations(30, &ids)?;
+        assert_eq!(locations.len(), crate::model::MAX_QUERY_ROWS);
+        assert!(
+            locations
+                .iter()
+                .enumerate()
+                .all(|(index, row)| row.position == index && row.total == 1000)
+        );
+        assert!(
+            store
+                .playlist_entry_locations(30, &vec![1001; crate::model::MAX_QUERY_ROWS + 1])
+                .is_err()
+        );
+        assert!(store.playlist_entry_locations(999, &[]).is_err());
+        assert!(store.playlist_entry_locations(30, &[])?.is_empty());
+        assert_eq!(
+            store
+                .playlist_entry_locations(10, &[103, 200, 999, 103])?
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            [103]
+        );
+        store.move_playlist_entries(10, &[103], Some(100))?;
+        let row = store.playlist_entry_locations(10, &[103])?.remove(0);
+        assert_eq!(
+            (row.id, row.track_id, row.position, row.total),
+            (103, 4, 0, 6)
+        );
         Ok(())
     }
 }

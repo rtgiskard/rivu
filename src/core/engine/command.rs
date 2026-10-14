@@ -176,6 +176,26 @@ impl Core {
             Command::MovePlaylistEntry { entry_id, index } => {
                 self.move_playlist_entry(entry_id, index)?;
             }
+            Command::RemovePlaylistEntries {
+                playlist_id,
+                entry_ids,
+                expected_revision,
+            } => {
+                self.remove_playlist_entries(playlist_id, &entry_ids, expected_revision)?;
+            }
+            Command::MovePlaylistEntries {
+                playlist_id,
+                entry_ids,
+                before_entry_id,
+                expected_revision,
+            } => {
+                self.move_playlist_entries(
+                    playlist_id,
+                    &entry_ids,
+                    before_entry_id,
+                    expected_revision,
+                )?;
+            }
             Command::ImportPlaylist { path, name } => {
                 if self.active_scan.is_some() {
                     bail!("A library scan is already running");
