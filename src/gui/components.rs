@@ -252,14 +252,19 @@ pub(crate) fn toggle_button<T: 'static>(
     )
 }
 
-/// Standard label/value row used by track metadata panels.
-pub(crate) fn metadata_item(label: impl Into<SharedString>, value: impl Into<SharedString>) -> Div {
+/// Label/value row with a label width shared by its metadata column.
+pub(crate) fn metadata_item(
+    label: impl Into<SharedString>,
+    value: impl Into<SharedString>,
+    label_width: gpui::Pixels,
+) -> Div {
+    // Captions use 0.75rem, so 1.5rem is a 2em label/value gap.
     super::row()
         .items_start()
-        .gap_2()
+        .gap(gpui::rems(1.5))
         .flex_1()
         .min_w_0()
-        .child(caption(label).w(gpui::px(92.)).flex_shrink_0())
+        .child(caption(label).w(label_width).flex_shrink_0())
         .child(
             div()
                 .flex_1()
@@ -270,13 +275,22 @@ pub(crate) fn metadata_item(label: impl Into<SharedString>, value: impl Into<Sha
         )
 }
 
-/// Standard embedded artwork preview row for metadata panels.
-pub(crate) fn artwork_preview(image: gpui::Img) -> Div {
-    super::row()
-        .items_start()
+/// Full-row artwork with a centered preview occupying 70% of the card content.
+pub(crate) fn artwork_preview(image: gpui::Img, aspect_ratio: Option<f32>) -> Div {
+    super::column()
+        .w_full()
         .gap_2()
-        .child(caption("Album artwork").w(px(92.)).flex_shrink_0())
-        .child(image.size(px(128.)))
+        .child(caption("Album artwork"))
+        .child(
+            div().flex().justify_center().child(
+                div()
+                    .relative()
+                    .w(gpui::relative(0.7))
+                    .flex_shrink_0()
+                    .when_some(aspect_ratio, |view, ratio| view.aspect_ratio(ratio))
+                    .child(image.absolute().size_full()),
+            ),
+        )
 }
 
 /// Menu item with shared application event handling.

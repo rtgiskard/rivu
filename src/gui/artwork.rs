@@ -43,6 +43,14 @@ impl ArtworkView {
         Some(img(image.read(cx).artwork.path()).image_cache(image))
     }
 
+    pub(super) fn aspect_ratio(&self, cx: &App) -> Option<f32> {
+        let state = self.0.borrow();
+        let image = state.current.as_ref()?.read(cx);
+        let decoded = image.item.as_ref()?.get()?.ok()?;
+        let size = decoded.size(0);
+        Some(size.width.0 as f32 / size.height.0 as f32)
+    }
+
     pub(super) fn release_retired(&self, window: &mut Window) {
         let retired = std::mem::take(&mut self.0.borrow_mut().retired);
         if !retired.is_empty() {

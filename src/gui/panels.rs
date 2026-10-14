@@ -15,12 +15,28 @@ use gpui::{
     AnyElement, Context, Div, SharedString, Window, div, prelude::*, px, rgb, uniform_list,
 };
 
-fn metadata_pair(label: &'static str, value: impl Into<SharedString>) -> Div {
-    metadata_item(label, value)
+fn metadata_rows(
+    rows: impl IntoIterator<Item = [(&'static str, SharedString); 2]>,
+    label_widths: [gpui::Pixels; 2],
+) -> Div {
+    column()
+        .gap_1()
+        .children(rows.into_iter().map(|[first, second]| {
+            metadata_row(
+                metadata_item(first.0, first.1, label_widths[0]),
+                metadata_item(second.0, second.1, label_widths[1]),
+            )
+        }))
 }
 
 fn metadata_row(first: Div, second: Div) -> Div {
-    two_column(first, second)
+    div()
+        .grid()
+        .grid_cols(2)
+        .gap_4()
+        .items_start()
+        .child(first.min_w_0())
+        .child(second.min_w_0())
 }
 
 fn metadata_group(title: &'static str, content: impl IntoElement) -> Div {
@@ -1276,7 +1292,7 @@ impl GuiApp {
     pub(super) fn metadata_panel(
         &mut self,
         panel_id: u64,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         self.prepare_artwork(cx);
@@ -1295,6 +1311,120 @@ impl GuiApp {
                 .strip_prefix("Last played · ")
                 .unwrap_or(&last_played)
                 .to_owned();
+            let file: [[(&'static str, SharedString); 2]; 1] = [[
+                ("File path", file_path.into()),
+                (
+                    "Availability",
+                    if track.missing {
+                        "Missing"
+                    } else {
+                        "Available"
+                    }
+                    .into(),
+                ),
+            ]];
+            let metadata: [[(&'static str, SharedString); 2]; 3] = [
+                [
+                    (
+                        "Codec",
+                        if track.codec.is_empty() {
+                            "—".into()
+                        } else {
+                            track.codec.clone().into()
+                        },
+                    ),
+                    (
+                        "Sample rate",
+                        if track.sample_rate == 0 {
+                            "—".into()
+                        } else {
+                            format!("{} Hz", track.sample_rate).into()
+                        },
+                    ),
+                ],
+                [
+                    (
+                        "Channels",
+                        if track.channels == 0 {
+                            "—".into()
+                        } else {
+                            track.channels.to_string().into()
+                        },
+                    ),
+                    (
+                        "Duration",
+                        track
+                            .duration
+                            .map_or("—".into(), |value| format_time(value).into()),
+                    ),
+                ],
+                [
+                    (
+                        "Bitrate",
+                        track.bitrate_bps.map_or("—".into(), |value| {
+                            format!("{:.1} kbps", value as f64 / 1000.0).into()
+                        }),
+                    ),
+                    (
+                        "Bits/sample",
+                        track
+                            .bits_per_sample
+                            .map_or("—".into(), |value| value.to_string().into()),
+                    ),
+                ],
+            ];
+            let disc: (&'static str, SharedString) = (
+                "Disc",
+                track
+                    .disc_number
+                    .map_or("—".into(), |value| value.to_string().into()),
+            );
+            let tags: [[(&'static str, SharedString); 2]; 2] = [
+                [
+                    (
+                        "Track",
+                        track
+                            .track_number
+                            .map_or("—".into(), |value| value.to_string().into()),
+                    ),
+                    (
+                        "Release",
+                        track.release_date.as_deref().unwrap_or("—").into(),
+                    ),
+                ],
+                [
+                    ("Play count", track.play_count.to_string().into()),
+                    ("Last played", last_played.into()),
+                ],
+            ];
+            // Measure the actual labels once per render using the same font and
+            // text-xs size as captions; GPUI caches the shaped lines. Every card
+            // shares these two widths, so values and column boundaries stay aligned.
+            let label_widths = std::array::from_fn(|index| {
+                file.iter()
+                    .chain(&metadata)
+                    .chain(&tags)
+                    .map(|fields| fields[index].0)
+                    .chain((index == 1).then_some(disc.0))
+                    .map(|label| {
+                        let run = gpui::TextRun {
+                            len: label.len(),
+                            font: self.ui_font.clone(),
+                            color: rgb(MUTED).into(),
+                            background_color: None,
+                            underline: None,
+                            strikethrough: None,
+                        };
+                        let line = window.text_system().shape_line(
+                            label.into(),
+                            window.rem_size() * 0.75,
+                            &[run],
+                            None,
+                        );
+                        line.width().ceil()
+                    })
+                    .fold(px(0.), gpui::Pixels::max)
+            });
             let scroll = self.scroll_views.content(("metadata", panel_id));
             let details = div()
                 .id(("metadata-details", panel_id))
@@ -1354,71 +1484,8 @@ impl GuiApp {
                                         ),
                                 ),
                         )
-                        .child(metadata_group(
-                            "File",
-                            metadata_row(
-                                metadata_pair("File path", file_path),
-                                metadata_pair(
-                                    "Availability",
-                                    if track.missing {
-                                        "Missing"
-                                    } else {
-                                        "Available"
-                                    },
-                                ),
-                            ),
-                        ))
-                        .child(metadata_group(
-                            "Metadata",
-                            column()
-                                .gap_1()
-                                .child(metadata_row(
-                                    metadata_pair(
-                                        "Codec",
-                                        if track.codec.is_empty() {
-                                            "—".to_owned()
-                                        } else {
-                                            track.codec.clone()
-                                        },
-                                    ),
-                                    metadata_pair(
-                                        "Sample rate",
-                                        if track.sample_rate == 0 {
-                                            "—".to_owned()
-                                        } else {
-                                            format!("{} Hz", track.sample_rate)
-                                        },
-                                    ),
-                                ))
-                                .child(metadata_row(
-                                    metadata_pair(
-                                        "Channels",
-                                        if track.channels == 0 {
-                                            "—".to_owned()
-                                        } else {
-                                            track.channels.to_string()
-                                        },
-                                    ),
-                                    metadata_pair(
-                                        "Duration",
-                                        track.duration.map_or("—".into(), format_time),
-                                    ),
-                                ))
-                                .child(metadata_row(
-                                    metadata_pair(
-                                        "Bitrate",
-                                        track.bitrate_bps.map_or("—".into(), |value| {
-                                            format!("{:.1} kbps", value as f64 / 1000.0)
-                                        }),
-                                    ),
-                                    metadata_pair(
-                                        "Bits/sample",
-                                        track
-                                            .bits_per_sample
-                                            .map_or("—".into(), |value| value.to_string()),
-                                    ),
-                                )),
-                        ))
+                        .child(metadata_group("File", metadata_rows(file, label_widths)))
+                        .child(metadata_group("Metadata", metadata_rows(metadata, label_widths)))
                         .child(metadata_group(
                             "Decoder hint",
                             column()
@@ -1464,31 +1531,14 @@ impl GuiApp {
                                 ))
                                 .child(metadata_row(
                                     self.panel_field(Field::Album, "Album"),
-                                    metadata_pair(
-                                        "Disc",
-                                        track
-                                            .disc_number
-                                            .map_or("—".into(), |value| value.to_string()),
-                                    ),
+                                    metadata_item(disc.0, disc.1, label_widths[1]),
                                 ))
-                                .child(metadata_row(
-                                    metadata_pair(
-                                        "Track",
-                                        track
-                                            .track_number
-                                            .map_or("—".into(), |value| value.to_string()),
-                                    ),
-                                    metadata_pair(
-                                        "Release",
-                                        track.release_date.as_deref().unwrap_or("—"),
-                                    ),
-                                ))
-                                .child(metadata_row(
-                                    metadata_pair("Play count", track.play_count.to_string()),
-                                    metadata_pair("Last played", last_played),
-                                ))
+                                .child(metadata_rows(tags, label_widths).gap_2())
                                 .when_some(self.artwork_view.image(cx), |tags, image| {
-                                    tags.child(artwork_preview(image))
+                                    tags.child(artwork_preview(
+                                        image,
+                                        self.artwork_view.aspect_ratio(cx),
+                                    ))
                                 }),
                         )),
                 );
@@ -1502,7 +1552,6 @@ impl GuiApp {
         panel_id: u64,
         label: &'static str,
         sort: HistorySort,
-        width: Option<gpui::Pixels>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let active = self.browser.history.sort() == sort;
@@ -1516,13 +1565,14 @@ impl GuiApp {
             label,
             active,
             self.browser.history.descending(),
-            width,
+            None,
             cx,
             move |this, _, cx| {
                 this.browser.history.set_sort(sort);
                 cx.notify();
             },
         )
+        .pr_2()
     }
 
     pub(super) fn history_panel(
@@ -1532,32 +1582,25 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let history_len = self.browser.history.len();
-        let header = row()
-            .items_center()
-            .gap_2()
-            .px_2()
-            .h(gpui::rems(2.25))
-            .flex_shrink_0()
-            .min_w_0()
-            .overflow_hidden()
-            .border_b_1()
-            .border_color(rgb(BORDER))
-            .child(caption("#").w(px(32.)).flex_shrink_0())
-            .child(self.history_sort_button(panel_id, "Track", HistorySort::Title, None, cx))
-            .child(self.history_sort_button(
-                panel_id,
-                "Play count",
-                HistorySort::Plays,
-                Some(px(84.)),
-                cx,
-            ))
-            .child(self.history_sort_button(
-                panel_id,
-                "Last played",
-                HistorySort::Recent,
-                Some(px(148.)),
-                cx,
-            ));
+        let header =
+            row()
+                .items_center()
+                .gap_0()
+                .px_2()
+                .h(gpui::rems(2.25))
+                .flex_shrink_0()
+                .min_w_0()
+                .overflow_hidden()
+                .border_b_1()
+                .border_color(rgb(BORDER))
+                .child(caption("#").w(gpui::relative(0.08)).pr_2().flex_shrink_0())
+                .child(self.history_sort_button(panel_id, "Track", HistorySort::Title, cx))
+                .child(div().w(gpui::relative(0.2)).h_full().flex_shrink_0().child(
+                    self.history_sort_button(panel_id, "Play count", HistorySort::Plays, cx),
+                ))
+                .child(div().w(gpui::relative(0.3)).h_full().flex_shrink_0().child(
+                    self.history_sort_button(panel_id, "Last played", HistorySort::Recent, cx),
+                ));
         let scroll = self.scroll_views.list(("history", panel_id));
         panel_surface(("history-panel", panel_id))
             .child(panel_header(
@@ -1589,28 +1632,33 @@ impl GuiApp {
                                             ("history-entry", id as u64),
                                             this.browser.library.selected().contains(&id),
                                         )
+                                        .gap_0()
                                         .child(
                                             caption((index + 1).to_string())
-                                                .w(px(32.))
+                                                .w(gpui::relative(0.08))
+                                                .pr_2()
                                                 .flex_shrink_0(),
                                         )
                                         .child(
                                             div()
                                                 .flex_1()
                                                 .min_w_0()
+                                                .pr_2()
                                                 .text_sm()
                                                 .truncate()
                                                 .child(title),
                                         )
                                         .child(
                                             caption(item.play_count.to_string())
-                                                .w(px(84.))
+                                                .w(gpui::relative(0.2))
+                                                .pr_2()
                                                 .flex_shrink_0()
                                                 .truncate(),
                                         )
                                         .child(
                                             caption(last_played.to_owned())
-                                                .w(px(148.))
+                                                .w(gpui::relative(0.3))
+                                                .pr_2()
                                                 .flex_shrink_0()
                                                 .truncate(),
                                         )
