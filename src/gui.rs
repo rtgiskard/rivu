@@ -98,12 +98,14 @@ const PANELS: &[PanelSpec] = &[
     PanelSpec {
         kind: "library",
         title: "Library",
-        render: |app, panel, window, cx| app.library_panel(panel.id, window, cx),
+        render: |app, panel, window, cx| {
+            app.library_panel(panel.id, panel.show_tab_bar, window, cx)
+        },
     },
     PanelSpec {
         kind: "queue",
         title: "Queue",
-        render: |app, panel, window, cx| app.queue_panel(panel.id, window, cx),
+        render: |app, panel, window, cx| app.queue_panel(panel.id, panel.show_tab_bar, window, cx),
     },
     PanelSpec {
         kind: "playlists",

@@ -423,11 +423,16 @@ impl GuiApp {
     pub(super) fn library_panel(
         &mut self,
         panel_id: u64,
+        tab_bar_visible: bool,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let total = self.browser.library.tree().root_total();
         let tools = panel_toolbar()
+            .when(!tab_bar_visible, |tools| {
+                tools.child(div().text_sm().text_color(rgb(TEXT)).child("Library"))
+            })
+            .child(caption(format!("{total} entries")).flex_shrink_0())
             .child(icon_button(
                 ("library-view", panel_id),
                 if self.browser.library.tree_active() {
@@ -557,9 +562,13 @@ impl GuiApp {
                 ));
         }
         let mut panel = panel_surface(("library-panel", panel_id))
-            .child(panel_header("Library", format!("{total} entries")))
-            .child(self.panel_field(Field::Search, "Search title, artist or album"))
             .child(tools)
+            .child(
+                div()
+                    .w_full()
+                    .flex_shrink_0()
+                    .child(self.input(Field::Search)),
+            )
             .when(has_selection, |panel| panel.child(selection_tools));
         if self.state.system.scan_progress.is_some() || self.state.system.scanning {
             panel = panel.child(self.library_scan_status(panel_id, cx));
@@ -659,6 +668,7 @@ impl GuiApp {
     pub(super) fn queue_panel(
         &mut self,
         panel_id: u64,
+        tab_bar_visible: bool,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -666,6 +676,25 @@ impl GuiApp {
         let selected_index =
             selected_id.and_then(|id| self.browser.queue.identity(id).map(|row| row.position));
         let selection_count = self.browser.queue.len();
+        let header = row()
+            .flex_shrink_0()
+            .when(!tab_bar_visible, |header| {
+                header.child(div().text_sm().text_color(rgb(TEXT)).child("Queue"))
+            })
+            .child(
+                caption(format!(
+                    "{} queued · {} selected",
+                    self.state.queue.total, selection_count,
+                ))
+                .flex_shrink_0()
+                .id(("queue-count", panel_id))
+                .tooltip(|_, cx| {
+                    cx.new(|_| super::ButtonTooltip {
+                        text: "Drag an entry onto its new position".into(),
+                    })
+                    .into()
+                }),
+            );
         let mut tools = panel_toolbar().min_h(px(32.));
         if self.state.queue.total > 0 {
             tools = tools.child(
@@ -766,13 +795,7 @@ impl GuiApp {
                 this.resolve_library_drag(drag.nodes(), super::DragDestination::Queue, cx);
             }))
             .drag_over::<LibraryDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
-            .child(panel_header(
-                "Queue",
-                format!(
-                    "{} queued · {} selected · drag an entry onto its new position",
-                    self.state.queue.total, selection_count,
-                ),
-            ))
+            .child(header)
             .when(self.state.queue.total > 0, |panel| panel.child(tools))
             .child(list_viewport(
                 uniform_list(
