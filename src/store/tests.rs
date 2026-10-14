@@ -568,7 +568,7 @@ fn metadata_refresh_preserves_favorites_and_unknown_values() {
     assert!(store.set_favorite(&[id, 999], false).is_err());
     assert!(all_tracks(&store)[0].favorite);
     assert_eq!(
-        store.known_files(&[PathBuf::from("/")]).unwrap()[0]
+        store.stored_scan_files(&[PathBuf::from("/")]).unwrap()[0]
             .media
             .as_ref()
             .unwrap()
@@ -699,7 +699,7 @@ fn shared_source_segments_keep_independent_ids_overrides_stats_and_missing_state
         );
         assert!(!after[index].missing);
     }
-    let known = store.known_files(&[PathBuf::from("/")]).unwrap();
+    let known = store.stored_scan_files(&[PathBuf::from("/")]).unwrap();
     let known = known.iter().find(|r| r.track_id == ids[1]).unwrap();
     assert_eq!(known.cue, changed.cue);
     assert_eq!(known.media.as_ref().unwrap().title, "New raw title");

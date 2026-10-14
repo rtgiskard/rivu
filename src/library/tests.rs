@@ -10,6 +10,16 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
+fn known_source(known: &[KnownFile]) -> impl FnMut(&Path) -> Result<Option<KnownFile>> + '_ {
+    move |path| {
+        Ok(known
+            .iter()
+            .filter(|file| file.path == path)
+            .min_by_key(|file| file.cue.is_some())
+            .cloned())
+    }
+}
+
 fn scan_paths(paths: &[PathBuf], known: &[KnownFile], ffmpeg_enabled: bool) -> Result<ScanResult> {
     let library_roots: Vec<_> = paths
         .iter()
@@ -28,7 +38,7 @@ fn scan_paths(paths: &[PathBuf], known: &[KnownFile], ffmpeg_enabled: bool) -> R
         .collect();
     super::scan_paths(
         paths,
-        known,
+        known_source(known),
         ffmpeg_enabled,
         &library_roots,
         crate::config::Config::default().scan_max_depth,
@@ -55,6 +65,11 @@ fn new_and_retargeted_cue_sheets_reuse_known_sources_outside_request_scope() -> 
             "Cached {}",
             record.path.file_stem().unwrap().to_str().unwrap()
         );
+        record.fingerprint = Some(
+            blake3::hash(record.media.artist.as_bytes())
+                .to_hex()
+                .to_string(),
+        );
     }
     let store = crate::store::Store::open(Path::new(":memory:"))?;
     store.apply_scan(&baseline)?;
@@ -73,10 +88,9 @@ fn new_and_retargeted_cue_sheets_reuse_known_sources_outside_request_scope() -> 
         } else {
             sheets.clone()
         };
-        let known = store.known_files(std::slice::from_ref(&requested))?;
         let scan = super::scan_paths(
             &[requested],
-            &known,
+            |path| store.known_source(path),
             false,
             &[directory.path().to_path_buf()],
             crate::config::Config::default().scan_max_depth,
@@ -86,6 +100,15 @@ fn new_and_retargeted_cue_sheets_reuse_known_sources_outside_request_scope() -> 
         assert!(scan.errors.is_empty(), "{:?}", scan.errors);
         assert_eq!(scan.records.len(), 1);
         assert_eq!(scan.records[0].media.artist, format!("Cached {name}"));
+        assert_eq!(
+            scan.records[0].fingerprint,
+            baseline
+                .records
+                .iter()
+                .find(|record| record.path == scan.records[0].path)
+                .unwrap()
+                .fingerprint,
+        );
         store.apply_scan(&scan)?;
     }
     Ok(())
@@ -115,7 +138,7 @@ fn scan_paths_at_depth(
         .collect();
     super::scan_paths(
         paths,
-        known,
+        known_source(known),
         ffmpeg_enabled,
         &library_roots,
         max_depth,
@@ -164,7 +187,7 @@ fn cancellation_is_shared_and_discards_discovery_or_accumulated_records() -> Res
         assert!(owner.check().is_ok());
         let outcome = super::scan_paths(
             std::slice::from_ref(&root),
-            &[],
+            |_| Ok(None),
             false,
             std::slice::from_ref(&root),
             1,
@@ -188,7 +211,7 @@ fn cancellation_is_shared_and_discards_discovery_or_accumulated_records() -> Res
     assert!(
         super::scan_paths(
             std::slice::from_ref(&root),
-            &[],
+            |_| Ok(None),
             false,
             std::slice::from_ref(&root),
             1,
@@ -479,7 +502,7 @@ fn missing_requests_keep_normalized_logical_roots_and_progress_paths() -> Result
     let mut progress_paths = Vec::new();
     let result = super::scan_paths(
         &[requested],
-        &[],
+        |_| Ok(None),
         false,
         &[directory.path().to_path_buf()],
         crate::config::Config::default().scan_max_depth,
@@ -507,7 +530,7 @@ fn linked_root_keeps_alias_in_records_roots_and_progress() -> Result<()> {
     let mut progress_paths = Vec::new();
     let result = super::scan_paths(
         &[alias.join("unused/../.")],
-        &[],
+        |_| Ok(None),
         false,
         std::slice::from_ref(&alias),
         crate::config::Config::default().scan_max_depth,
@@ -622,7 +645,7 @@ fn cue_in_linked_tree_keeps_sheet_and_source_aliases_across_roots() -> Result<()
     )?;
     let result = super::scan_paths(
         std::slice::from_ref(&root),
-        &[],
+        |_| Ok(None),
         false,
         &[root.clone(), other_root],
         crate::config::Config::default().scan_max_depth,
@@ -662,7 +685,7 @@ fn scan_progress_reports_deduplicated_candidates_and_suppressed_tasks() -> Resul
     let mut events = Vec::new();
     let result = super::scan_paths(
         &paths,
-        &[],
+        |_| Ok(None),
         false,
         &library_roots,
         crate::config::Config::default().scan_max_depth,
@@ -814,7 +837,7 @@ fn scan_depth_zero_is_rejected_by_library_api() -> Result<()> {
     let root = logical_path(directory.path())?;
     let error = super::scan_paths(
         std::slice::from_ref(&root),
-        &[],
+        |_| Ok(None),
         false,
         std::slice::from_ref(&root),
         0,
@@ -919,7 +942,7 @@ fn cue_sources_require_logical_membership_in_any_configured_root() -> Result<()>
     let library_roots = vec![logical_path(inside.path())?];
     let control = super::scan_paths(
         std::slice::from_ref(&sheet),
-        &[],
+        |_| Ok(None),
         false,
         &[logical_path(inside.path())?, logical_path(outside.path())?],
         crate::config::Config::default().scan_max_depth,
@@ -932,7 +955,7 @@ fn cue_sources_require_logical_membership_in_any_configured_root() -> Result<()>
     let mut events = Vec::new();
     let result = super::scan_paths(
         std::slice::from_ref(&sheet),
-        &[],
+        |_| Ok(None),
         false,
         &library_roots,
         crate::config::Config::default().scan_max_depth,
@@ -1026,7 +1049,7 @@ fn ordinary_scan_rehashes_same_size_wav_after_pre_epoch_mtime_change() -> Result
     let store = crate::store::Store::open(Path::new(":memory:"))?;
     store.apply_scan(&original)?;
     let id = store.track_id_for_source(&audio, None)?.unwrap();
-    let known = store.known_files(std::slice::from_ref(&audio))?;
+    let known = store.stored_scan_files(std::slice::from_ref(&audio))?;
     assert_eq!(known[0].modified_ns, -2_000_000_000);
 
     let mut contents = fs::read(&audio)?;

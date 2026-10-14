@@ -19,6 +19,31 @@ fn scan_message(progress: &ScanProgress) -> String {
         |path| format!("{phase} ({unit}): {}", path.display()),
     )
 }
+fn lookup_scan_source(
+    sender: &Sender<ScanEvent>,
+    id: u64,
+    path: &Path,
+    cancellation: &library::ScanCancellation,
+) -> Result<Option<library::KnownFile>> {
+    cancellation.check()?;
+    let (reply, receive) = bounded(1);
+    let event = ScanEvent::KnownSource {
+        id,
+        path: path.to_path_buf(),
+        reply,
+    };
+    crossbeam_channel::select_biased! {
+        recv(cancellation.cancelled()) -> _ => bail!("scan cancelled"),
+        send(sender, event) -> sent => sent.context("scan owner disconnected")?,
+    }
+    let result = crossbeam_channel::select_biased! {
+        recv(cancellation.cancelled()) -> _ => bail!("scan cancelled"),
+        recv(receive) -> result => result.context("scan source lookup disconnected")?,
+    };
+    cancellation.check()?;
+    result
+}
+
 impl Core {
     pub(in crate::core) fn scan(
         &mut self,
@@ -54,11 +79,6 @@ impl Core {
         }
         // Flush before accepting a task, never fail its acknowledgement afterward.
         self.save(false)?;
-        let known = if force {
-            Vec::new()
-        } else {
-            self.store.known_files(&paths)?
-        };
         let ffmpeg_enabled = config.ffmpeg_enabled;
         tracing::info!(
             paths = ?paths,
@@ -110,7 +130,13 @@ impl Core {
                 };
                 let result = library::scan_paths(
                     &paths,
-                    &known,
+                    |path| {
+                        if force {
+                            Ok(None)
+                        } else {
+                            lookup_scan_source(&sender, id, path, &worker_cancellation)
+                        }
+                    },
                     ffmpeg_enabled,
                     &config.library_roots,
                     config.scan_max_depth,
@@ -178,6 +204,18 @@ impl Core {
 
     pub(in crate::core) fn scan_event(&mut self, event: ScanEvent) {
         match event {
+            ScanEvent::KnownSource { id, path, reply } => {
+                let result = match self.active_scan.as_ref() {
+                    Some(task) if task.status.id == id => task
+                        .cancellation
+                        .check()
+                        .and_then(|()| self.store.known_source(&path)),
+                    _ => Err(anyhow::anyhow!("Scan task is not running")),
+                };
+                // The worker may have cancelled while this indexed read ran.
+                let _ = reply.try_send(result);
+                return;
+            }
             ScanEvent::Progress { id, progress } => {
                 let Some(task) = self
                     .active_scan

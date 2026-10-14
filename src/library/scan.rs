@@ -12,18 +12,44 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
 /// Cooperative cancellation shared by the scan owner and its filesystem worker.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct ScanCancellation {
-    cancelled: Arc<AtomicBool>,
+    state: Arc<CancellationState>,
+}
+
+#[derive(Debug)]
+struct CancellationState {
+    cancelled: AtomicBool,
+    sender: parking_lot::Mutex<Option<crossbeam_channel::Sender<()>>>,
+    receiver: crossbeam_channel::Receiver<()>,
+}
+
+impl Default for ScanCancellation {
+    fn default() -> Self {
+        let (sender, receiver) = crossbeam_channel::bounded(0);
+        Self {
+            state: Arc::new(CancellationState {
+                cancelled: AtomicBool::new(false),
+                sender: parking_lot::Mutex::new(Some(sender)),
+                receiver,
+            }),
+        }
+    }
 }
 
 impl ScanCancellation {
     pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Relaxed);
+        self.state.cancelled.store(true, Ordering::Relaxed);
+        // Disconnecting wakes every wait without consuming a one-shot signal.
+        self.state.sender.lock().take();
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Relaxed)
+        self.state.cancelled.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn cancelled(&self) -> &crossbeam_channel::Receiver<()> {
+        &self.state.receiver
     }
 
     pub fn check(&self) -> Result<()> {
@@ -187,13 +213,14 @@ impl ScanResult {
 /// Scan directories, audio files and CUE sheets without touching audio output.
 /// CUE metadata is always reread; only unchanged full-source probe results may
 /// be reused. Failed sheets contribute no partial tracks or source suppression.
+/// `known_source` looks up only a source actually encountered by this scan.
 /// `library_roots` are normalized absolute logical paths, as published by the core.
 /// `max_depth` is relative to each requested directory, which is itself depth 0.
 /// Cancellation returns an error, never a partial result. Checks surround blocking
-/// probes, but an in-flight probe itself is not interruptible.
+/// probes and lookups, but an in-flight probe itself is not interruptible.
 pub fn scan_paths(
     paths: &[PathBuf],
-    known: &[KnownFile],
+    mut known_source: impl FnMut(&Path) -> Result<Option<KnownFile>>,
     ffmpeg_enabled: bool,
     library_roots: &[PathBuf],
     max_depth: u32,
@@ -203,13 +230,6 @@ pub fn scan_paths(
     cancellation.check()?;
     if max_depth == 0 {
         bail!("scan max depth must be at least 1");
-    }
-    let mut known_by_path: HashMap<&Path, &KnownFile> = HashMap::with_capacity(known.len());
-    for item in known {
-        let cached = known_by_path.entry(item.path.as_path()).or_insert(item);
-        if cached.cue.is_some() && item.cue.is_none() {
-            *cached = item;
-        }
     }
     let mut files = HashSet::new();
     let mut explicit_audio = HashSet::new();
@@ -392,7 +412,7 @@ pub fn scan_paths(
         cancellation.check()?;
         match scan_cue(
             sheet,
-            &known_by_path,
+            &mut known_source,
             &mut sources,
             ffmpeg_enabled,
             library_roots,
@@ -438,12 +458,7 @@ pub fn scan_paths(
         // CUE sheets are finished, so ordinary files can consume their source snapshot.
         let record = match sources.remove(path) {
             Some(record) => record.map_err(|error| anyhow!("{error}")),
-            None => scan_file(
-                path,
-                known_by_path.get(path.as_path()).copied(),
-                ffmpeg_enabled,
-                cancellation,
-            ),
+            None => lookup_and_scan_file(path, &mut known_source, ffmpeg_enabled, cancellation),
         };
         cancellation.check()?;
         match record {
@@ -492,7 +507,7 @@ pub fn scan_paths(
 
 fn source_record<'a>(
     path: PathBuf,
-    known: &HashMap<&Path, &KnownFile>,
+    known_source: &mut impl FnMut(&Path) -> Result<Option<KnownFile>>,
     sources: &'a mut HashMap<PathBuf, std::result::Result<ScanRecord, String>>,
     ffmpeg_enabled: bool,
     cancellation: &ScanCancellation,
@@ -501,13 +516,8 @@ fn source_record<'a>(
     sources
         .entry(path)
         .or_insert_with_key(|path| {
-            scan_file(
-                path,
-                known.get(path.as_path()).copied(),
-                ffmpeg_enabled,
-                cancellation,
-            )
-            .map_err(|error| format!("{error:#}"))
+            lookup_and_scan_file(path, known_source, ffmpeg_enabled, cancellation)
+                .map_err(|error| format!("{error:#}"))
         })
         .as_ref()
         .map_err(|error| anyhow!("{error}"))
@@ -515,7 +525,7 @@ fn source_record<'a>(
 
 fn scan_cue(
     path: &Path,
-    known: &HashMap<&Path, &KnownFile>,
+    known_source: &mut impl FnMut(&Path) -> Result<Option<KnownFile>>,
     sources: &mut HashMap<PathBuf, std::result::Result<ScanRecord, String>>,
     ffmpeg_enabled: bool,
     library_roots: &[PathBuf],
@@ -536,7 +546,7 @@ fn scan_cue(
                 source.display()
             );
         }
-        let source = source_record(source, known, sources, ffmpeg_enabled, cancellation)?;
+        let source = source_record(source, known_source, sources, ffmpeg_enabled, cancellation)?;
         let duration = source
             .media
             .duration
@@ -579,6 +589,18 @@ fn scan_cue(
     }
     cancellation.check()?;
     Ok(records)
+}
+
+fn lookup_and_scan_file(
+    path: &Path,
+    known_source: &mut impl FnMut(&Path) -> Result<Option<KnownFile>>,
+    ffmpeg_enabled: bool,
+    cancellation: &ScanCancellation,
+) -> Result<ScanRecord> {
+    cancellation.check()?;
+    let known = known_source(path);
+    cancellation.check()?;
+    scan_file(path, known?.as_ref(), ffmpeg_enabled, cancellation)
 }
 
 fn scan_file(

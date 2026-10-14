@@ -34,6 +34,20 @@ intent; an omitted field continues to follow rescanned metadata. No-op edits
 succeed for existing tracks and still reject unknown IDs. Queue-content validity
 is described in <<_revisions_and_watching,Revisions and watching>>.
 
+Scanning requests cached raw source metadata on demand through task-ID-tagged
+core events; it no longer copies a whole-library known-file snapshot at startup.
+An indexed exact-path query decodes at most one matching identity, preferring an
+ordinary file over CUE segments. Only unchanged ordinary identities authorize
+full-source probe reuse; unchanged CUE identities may still supply fingerprints.
+New or retargeted CUE sheets can request sources outside the scanned subtree,
+within configured roots. Shared sources reuse one result or error per scan.
+Force scans bypass these lookups. The cost is one owner round trip and one
+short-lived reply channel per distinct encountered source, not per unrelated
+library row; this favors scoped scans without promising higher whole-library
+throughput. Cancellation disconnects a notification channel to wake blocked
+lookup submission and reply waits without polling. Stale task IDs cannot obtain
+metadata or commit results for a replacement scan.
+
 Scan merging checks each eligible old CUE sheet's absence once per merge and
 indexes relocation candidates by fingerprint, segment number and frame bounds.
 Multiple compatible old identities remain ambiguous; exact identities still take

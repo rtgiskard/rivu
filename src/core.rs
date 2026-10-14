@@ -18,7 +18,7 @@ use parking_lot::{Condvar, Mutex, RwLock};
 use rand::seq::SliceRandom;
 use std::{
     collections::{HashSet, VecDeque},
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
     thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -609,7 +609,15 @@ struct ScanFinished {
     progress: ScanProgress,
 }
 enum ScanEvent {
-    Progress { id: u64, progress: ScanProgress },
+    Progress {
+        id: u64,
+        progress: ScanProgress,
+    },
+    KnownSource {
+        id: u64,
+        path: PathBuf,
+        reply: Sender<Result<Option<library::KnownFile>>>,
+    },
     Finished(ScanFinished),
 }
 const MAX_RETAINED_SCAN_RESULTS: usize = 32;
@@ -832,7 +840,7 @@ mod tests {
             ["old.wav", "target.wav", "other-copy.wav"].map(|name| directory.path().join(name));
         let media = core
             .store
-            .known_files(&[directory.path().to_path_buf()])
+            .stored_scan_files(&[directory.path().to_path_buf()])
             .unwrap()[0]
             .media
             .clone()
@@ -868,7 +876,7 @@ mod tests {
             .unwrap();
         let known = core
             .store
-            .known_files(&[directory.path().to_path_buf()])
+            .stored_scan_files(&[directory.path().to_path_buf()])
             .unwrap();
         let source = known
             .iter()
@@ -1082,7 +1090,7 @@ mod tests {
             let changed_id = if change_source { source } else { target };
             let known = core
                 .store
-                .known_files(&[directory.path().to_path_buf()])
+                .stored_scan_files(&[directory.path().to_path_buf()])
                 .unwrap()
                 .into_iter()
                 .find(|file| file.track_id == changed_id)
@@ -1928,7 +1936,7 @@ mod tests {
         let (directory, mut core) = fixture();
         let media = core
             .store
-            .known_files(&[directory.path().to_path_buf()])
+            .stored_scan_files(&[directory.path().to_path_buf()])
             .unwrap()[0]
             .media
             .clone()
@@ -1950,7 +1958,7 @@ mod tests {
         core.store.apply_scan(&result).unwrap();
         let ids: Vec<_> = core
             .store
-            .known_files(&[directory.path().to_path_buf()])
+            .stored_scan_files(&[directory.path().to_path_buf()])
             .unwrap()
             .into_iter()
             .filter(|known| {
@@ -2111,7 +2119,7 @@ mod tests {
             roots: vec![directory.path().to_path_buf()],
             records: core
                 .store
-                .known_files(&[directory.path().to_path_buf()])
+                .stored_scan_files(&[directory.path().to_path_buf()])
                 .unwrap()
                 .into_iter()
                 .map(|known| ScanRecord {
@@ -2182,7 +2190,7 @@ mod tests {
         let before = core.state.query_revisions();
         let mut media = core
             .store
-            .known_files(&[directory.path().to_path_buf()])
+            .stored_scan_files(&[directory.path().to_path_buf()])
             .unwrap()
             .into_iter()
             .find(|known| known.track_id == 1)
@@ -2239,7 +2247,7 @@ mod tests {
             let sheet = directory.path().join("album.cue");
             let media = core
                 .store
-                .known_files(&[directory.path().to_path_buf()])
+                .stored_scan_files(&[directory.path().to_path_buf()])
                 .unwrap()
                 .into_iter()
                 .find(|file| file.track_id == 1)
@@ -2953,6 +2961,40 @@ mod tests {
     }
 
     #[test]
+    fn scan_lookup_wait_observes_cancel_and_shutdown_without_committing() {
+        for shutdown in [false, true] {
+            let (directory, mut core) = fixture();
+            let path = directory.path().join("new.wav");
+            write_pcm(&path);
+            let total = core.state.library.track_total;
+            core.scan(vec![path], None, false).unwrap();
+            let id = core.active_scan.as_ref().unwrap().status.id;
+            let lookup = loop {
+                let event = core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                if matches!(event, ScanEvent::KnownSource { .. }) {
+                    break event;
+                }
+                core.scan_event(event);
+            };
+            // Keep the request alive without replying: cancellation must wake the
+            // worker even when owner disconnection cannot release its reply wait.
+            if shutdown {
+                core.shutdown_scan();
+            } else {
+                core.cancel_scan(id).unwrap();
+                assert!(!settle_scan(&mut core));
+            }
+            drop(lookup);
+            assert!(core.active_scan.is_none());
+            assert_eq!(core.state.library.track_total, total);
+            assert_eq!(
+                core.scan_results.back().unwrap().progress.phase,
+                ScanPhase::Cancelled
+            );
+        }
+    }
+
+    #[test]
     fn cancelling_finished_but_uncommitted_scan_discards_its_result() {
         let (directory, mut core) = fixture();
         let path = directory.path().join("new.wav");
@@ -2963,6 +3005,7 @@ mod tests {
         let finished = loop {
             match core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
                 ScanEvent::Progress { .. } => {}
+                event @ ScanEvent::KnownSource { .. } => core.scan_event(event),
                 ScanEvent::Finished(scan) => break scan,
             }
         };
@@ -2999,6 +3042,13 @@ mod tests {
             import: None,
             progress,
         }));
+        let (reply, receive) = bounded(1);
+        core.scan_event(ScanEvent::KnownSource {
+            id: 0,
+            path: directory.path().join("1.wav"),
+            reply,
+        });
+        assert!(receive.recv().unwrap().is_err());
         assert_eq!(core.active_scan.as_ref().unwrap().status, before);
         assert!(core.scan_results.is_empty());
         assert!(settle_scan(&mut core));
@@ -3536,7 +3586,7 @@ mod tests {
 
         let known = core
             .store
-            .known_files(&[directory.path().to_path_buf()])
+            .stored_scan_files(&[directory.path().to_path_buf()])
             .unwrap()
             .into_iter()
             .find(|file| file.track_id == 1)
@@ -3894,7 +3944,7 @@ mod tests {
         write_pcm(&path);
         let mut scanned = library::scan_paths(
             std::slice::from_ref(&path),
-            &[],
+            |_| Ok(None),
             false,
             &[_directory.path().to_path_buf()],
             core.state.system.config.scan_max_depth,

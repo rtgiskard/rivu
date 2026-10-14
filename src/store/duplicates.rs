@@ -430,7 +430,7 @@ mod tests {
                     .get::<_, i64>(0))?,
             1
         );
-        let known = store.known_files(&[PathBuf::from("/new")])?;
+        let known = store.stored_scan_files(&[PathBuf::from("/new")])?;
         assert_eq!(known[0].media.as_ref().unwrap().title, "Target");
         assert_eq!(known[0].size, prepared.target.file_size);
         assert_eq!(known[0].modified_ns, prepared.target.modified_ns);

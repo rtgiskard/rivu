@@ -3,7 +3,7 @@ use super::rows::{cue_from_row, fingerprint_from_row};
 use crate::library::{KnownFile, ScanResult, ScanUncertainty};
 use crate::model::{CueSegment, MediaInfo};
 use anyhow::{Context, Result, bail};
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -82,71 +82,75 @@ fn relocation_key<'a>(hash: &'a str, cue: Option<&CueSegment>) -> RelocationKey<
     }
 }
 
-impl Store {
-    /// Validate logical request scopes. Ordinary exact files use indexed reads;
-    /// directories and sheets keep the snapshot needed for arbitrary CUE sources.
-    pub fn known_files(&self, paths: &[PathBuf]) -> Result<Vec<KnownFile>> {
-        let (exact, prefixes) = scan_scope(paths)?;
-        let exact_files = paths.iter().all(|path| {
-            !path
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("cue"))
-                && fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
-        });
-        let columns = "id,path,file_size,modified_ns,fingerprint,raw_title,raw_artist,raw_album,
-                       duration,codec,channels,sample_rate,cue_sheet,cue_number,cue_start_frame,
-                       cue_end_frame,probe_version,bitrate_bps,track_number,disc_number,
-                       bits_per_sample,release_date";
-        let sql = if exact_files {
-            format!(
-                "SELECT {columns} FROM tracks WHERE id IN (
-                SELECT t.id FROM json_each(?1) AS scope
-                CROSS JOIN tracks AS t INDEXED BY tracks_directory
-                WHERE t.path=scope.value AND ?2 IS NOT NULL
-            ) ORDER BY id"
-            )
+#[cfg(test)]
+const KNOWN_COLUMNS: &str =
+    "id,path,file_size,modified_ns,fingerprint,raw_title,raw_artist,raw_album,
+    duration,codec,channels,sample_rate,cue_sheet,cue_number,cue_start_frame,
+    cue_end_frame,probe_version,bitrate_bps,track_number,disc_number,
+    bits_per_sample,release_date";
+
+fn known_file_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<KnownFile> {
+    Ok(KnownFile {
+        track_id: r.get(0)?,
+        path: PathBuf::from(r.get::<_, String>(1)?),
+        size: r.get::<_, i64>(2)? as u64,
+        modified_ns: r.get(3)?,
+        fingerprint: fingerprint_from_row(r, 4)?,
+        cue: cue_from_row(r, 12)?,
+        media: if r.get::<_, i64>(16)? == PROBE_VERSION {
+            Some(MediaInfo {
+                title: r.get(5)?,
+                artist: r.get(6)?,
+                album: r.get(7)?,
+                duration: r.get(8)?,
+                codec: r.get(9)?,
+                channels: r.get::<_, i64>(10)? as u16,
+                sample_rate: r.get::<_, i64>(11)? as u32,
+                bitrate_bps: r.get::<_, Option<i64>>(17)?.map(|value| value as u64),
+                track_number: r.get(18)?,
+                disc_number: r.get(19)?,
+                bits_per_sample: r.get(20)?,
+                release_date: r.get(21)?,
+            })
         } else {
-            // New or retargeted CUE sheets can reuse sources anywhere in the
-            // library; narrowing this requires changing the excluded CUE path.
-            format!(
-                "SELECT {columns} FROM tracks WHERE ?1 IS NOT NULL AND ?2 IS NOT NULL ORDER BY id"
-            )
-        };
-        let mut q = self.conn.prepare(&sql)?;
+            None
+        },
+    })
+}
+
+impl Store {
+    /// Read one reusable source snapshot, preferring an ordinary file identity.
+    /// Both branches seek existing path indexes; no unrelated row is decoded.
+    pub fn known_source(&self, path: &Path) -> Result<Option<KnownFile>> {
+        let path = path.to_str().context("Scan source path is not UTF-8")?;
+        let mut q = self.conn.prepare_cached(
+            "SELECT id,path,file_size,modified_ns,fingerprint,raw_title,raw_artist,raw_album,
+                    duration,codec,channels,sample_rate,cue_sheet,cue_number,cue_start_frame,
+                    cue_end_frame,probe_version,bitrate_bps,track_number,disc_number,
+                    bits_per_sample,release_date
+             FROM tracks WHERE id=COALESCE(
+                (SELECT id FROM tracks INDEXED BY tracks_directory
+                 WHERE path=?1 AND cue_sheet IS NULL ORDER BY id LIMIT 1),
+                (SELECT id FROM tracks INDEXED BY tracks_directory
+                 WHERE path=?1 ORDER BY id LIMIT 1)
+             )",
+        )?;
+        Ok(q.query_row([path], known_file_from_row).optional()?)
+    }
+
+    /// Inspect stored raw metadata for test fixtures, including every CUE identity.
+    #[cfg(test)]
+    pub(crate) fn stored_scan_files(&self, paths: &[PathBuf]) -> Result<Vec<KnownFile>> {
+        let (exact, prefixes) = scan_scope(paths)?;
+        let mut q = self.conn.prepare(&format!(
+            "SELECT {KNOWN_COLUMNS} FROM tracks WHERE id IN ({SCAN_SCOPE_IDS}) ORDER BY id"
+        ))?;
         Ok(q.query_map(
             params![
                 serde_json::to_string(&exact)?,
                 serde_json::to_string(&prefixes)?
             ],
-            |r| {
-                Ok(KnownFile {
-                    track_id: r.get(0)?,
-                    path: PathBuf::from(r.get::<_, String>(1)?),
-                    size: r.get::<_, i64>(2)? as u64,
-                    modified_ns: r.get(3)?,
-                    fingerprint: fingerprint_from_row(r, 4)?,
-                    cue: cue_from_row(r, 12)?,
-                    media: if r.get::<_, i64>(16)? == PROBE_VERSION {
-                        Some(MediaInfo {
-                            title: r.get(5)?,
-                            artist: r.get(6)?,
-                            album: r.get(7)?,
-                            duration: r.get(8)?,
-                            codec: r.get(9)?,
-                            channels: r.get::<_, i64>(10)? as u16,
-                            sample_rate: r.get::<_, i64>(11)? as u32,
-                            bitrate_bps: r.get::<_, Option<i64>>(17)?.map(|value| value as u64),
-                            track_number: r.get(18)?,
-                            disc_number: r.get(19)?,
-                            bits_per_sample: r.get(20)?,
-                            release_date: r.get(21)?,
-                        })
-                    } else {
-                        None
-                    },
-                })
-            },
+            known_file_from_row,
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?)
     }
@@ -641,7 +645,7 @@ mod tests {
         store.apply_scan(&scan).unwrap();
         assert_eq!(store.queue_state().unwrap(), state);
         assert_eq!(store.queue_page(0, 10).unwrap(), page);
-        let known = store.known_files(&scan.roots).unwrap();
+        let known = store.stored_scan_files(&scan.roots).unwrap();
         let raw = known[0].media.as_ref().unwrap();
         assert_eq!(raw.title, "New raw title");
         assert_eq!(raw.artist, "New raw artist");
@@ -801,7 +805,7 @@ mod tests {
             (None, None, None)
         );
         assert_eq!(track.release_date, None);
-        let known = store.known_files(&scan.roots).unwrap().remove(0);
+        let known = store.stored_scan_files(&scan.roots).unwrap().remove(0);
         assert_eq!(known.size, scan.records[0].size);
         assert_eq!(known.modified_ns, scan.records[0].modified_ns);
         // A stale probe must refresh even when every other assigned field matches.
@@ -812,9 +816,17 @@ mod tests {
                 [PROBE_VERSION - 1, id],
             )
             .unwrap();
-        assert!(store.known_files(&scan.roots).unwrap()[0].media.is_none());
+        assert!(
+            store.stored_scan_files(&scan.roots).unwrap()[0]
+                .media
+                .is_none()
+        );
         store.apply_scan(&scan).unwrap();
-        assert!(store.known_files(&scan.roots).unwrap()[0].media.is_some());
+        assert!(
+            store.stored_scan_files(&scan.roots).unwrap()[0]
+                .media
+                .is_some()
+        );
         assert_eq!(store.queue_state().unwrap(), state);
         assert_eq!(store.queue_page(0, 10).unwrap(), page);
     }
@@ -841,7 +853,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_file_known_metadata_excludes_unrelated_tracks_and_keeps_cue_rows() {
+    fn source_metadata_prefers_whole_file_and_falls_back_to_cue_identity() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("selected.wav");
         std::fs::write(&path, []).unwrap();
@@ -874,17 +886,23 @@ mod tests {
                 })
                 .unwrap()
         );
-        let known = store.known_files(std::slice::from_ref(&path)).unwrap();
-        assert_eq!(known.len(), 2);
-        assert!(known[0].cue.is_some());
-        assert!(known[1].cue.is_none());
-        assert!(known.iter().all(|known| known.path == path));
-        assert!(store.known_files(&[]).unwrap().is_empty());
+        let known = store.known_source(&path).unwrap().unwrap();
+        assert!(known.cue.is_none());
+        assert_eq!(known.path, path);
         assert!(
             store
-                .known_files(&[directory.path().join("../selected.wav")])
-                .is_err()
+                .known_source(&directory.path().join("missing.wav"))
+                .unwrap()
+                .is_none()
         );
+        store
+            .conn
+            .execute("DELETE FROM tracks WHERE id=?1", [known.track_id])
+            .unwrap();
+        let segment = store.known_source(&path).unwrap().unwrap();
+        assert!(segment.cue.is_some());
+        assert_eq!(segment.path, path);
+        assert_eq!(segment.fingerprint, known.fingerprint);
     }
 
     #[test]
