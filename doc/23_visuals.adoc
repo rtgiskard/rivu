@@ -307,11 +307,10 @@ line segments, and 12 pulse slots. Flow retains 96 filaments with at most 24
 points each and 2208 line segments. Both styles draw at most 27 light paths per
 panel; Flow limits each integration step to 1/120 second and each accepted-frame
 update to 60 steps. All integration, history fading, and respawn substeps are
-retained, but Flow rebuilds its render segments only once at the end of that
-update. Intermediate render segments are not simulation input; deferring their
-construction preserves the final trajectory and light levels. Beams retains
-its own geometry-dependent advancement path. A gap longer than half a second
-resets the scene instead of attempting unbounded catch-up.
+retained, but both styles rebuild their render segments only once at the end of
+that update. Intermediate render segments are not simulation input; deferring
+their construction preserves the final trajectory and light levels. A gap longer
+than half a second resets the scene instead of attempting unbounded catch-up.
 
 == Failure boundaries
 
