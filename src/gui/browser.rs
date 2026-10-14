@@ -453,6 +453,9 @@ impl LibraryBrowser {
     }
 
     pub(super) fn toggle_view(&mut self) {
+        if !self.tree_active && self.missing_only {
+            return;
+        }
         self.invalidate_projection();
         self.tree_active = !self.tree_active;
         self.tree.set_grouped(!self.tree_active);
@@ -1090,6 +1093,21 @@ mod tests {
             assert!(!library.tree_active());
             assert_eq!(library.buffer().missing, Some(true));
         }
+    }
+
+    #[test]
+    fn missing_filter_prevents_tree_mode_until_disabled() {
+        let mut library = LibraryBrowser::default();
+        library.toggle_missing();
+        library.refresh_filter();
+        library.toggle_view();
+        assert!(!library.tree_active());
+        assert_eq!(library.buffer().missing, Some(true));
+        library.toggle_missing();
+        library.refresh_filter();
+        library.toggle_view();
+        assert!(library.tree_active());
+        assert_eq!(library.buffer().missing, None);
     }
 
     #[test]

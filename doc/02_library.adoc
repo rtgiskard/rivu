@@ -241,6 +241,8 @@ directories; combining search with favorites shows only matching favorite tracks
 Configured roots remain visible even when they have no matches. Changing or
 clearing the search refreshes the current view. Changing a track's favorite state
 refreshes the filtered tree. The missing filter still switches to the flat list.
+Directory tree switching is unavailable while the missing filter is active;
+turn it off to switch views again.
 
 Dragging a directory adds its full contents, not only tracks matching the
 display filter. To add only matching or favorite tracks, select and drag the track rows.
