@@ -11,6 +11,9 @@ Scanning requires at least one configured `library.roots`. Add a directory with
 the GUI Library `+` button or set absolute directory paths in `config.toml`.
 Scan paths are normalized without resolving symlinks and must be at or below a
 configured root; a mixed inside/outside request is rejected before scanning.
+Cancelling a desktop file chooser is a normal no-op: it does not change
+configuration, submit a command, or clear or replace an existing error. This
+also applies to link:03_playlist.adoc#_import_and_export[playlist import and export] choosers.
 
 Symlinks are followed even when their targets are outside configured roots;
 logical aliases remain distinct library identities. Directory cycles are scan
@@ -44,6 +47,14 @@ Ordinary scans reuse valid metadata and fingerprints when file size and modifica
 time match; force scans reprobe and reread source content. Neither resets user edits.
 Representable pre-epoch modification times remain valid cache keys; unavailable or
 out-of-range times always bypass cache reuse.
+An unchanged result still completes its scan status and reports errors, but does
+not invalidate library, structure, playlist, or queue-content views. Playlist
+imports still create the requested playlist when the scanned tracks are unchanged.
+Exact ordinary-file requests read only that source's cached metadata. Directory
+and CUE requests retain the existing metadata snapshot so new or retargeted sheets
+can reuse sources outside the requested scope. Merging reads scoped identities
+and missing candidates, plus indexed fingerprint-compatible relocation candidates
+from anywhere in the library; relocation eligibility and ambiguity are unchanged.
 
 Cancellation is cooperative: discovery, files, CUE boundaries, and hash-read chunks
 check the scan owner's shared cancellation token. A blocking audio probe is checked
@@ -54,6 +65,46 @@ for merging, so even tracks read before cancellation are not saved.
 ----
 rivu library scan ~/Music --wait
 rivu library scan ~/Music --force --wait
+----
+
+== Same files and relocation
+
+Ordinary-file automatic relocation requires a unique missing old identity and a
+unique new destination with matching content. Exact paths take precedence.
+Ambiguous copies retain separate IDs and the missing identity's user state;
+scan order never chooses a destination. CUE matching is unchanged.
+
+Use the Library panel menu's `Same files / Relocation candidates` action to
+inspect paged ordinary-file groups. Historical cached BLAKE3 hashes identify
+candidates, not fresh proof. Rows show paths, current existence, scan state,
+metadata, favorites, overrides, history and playlist/queue reference counts.
+Choose a missing old identity and a present destination, then review and confirm.
+`Close / defer` leaves undecided pairs unchanged. `Keep destination independent`
+persists a decision that excludes that row from automatic and manual relocation,
+including after rescanning. No audio files are deleted.
+
+Confirmation starts one background full-file verification at a time. Rivu checks
+the destination's fresh hash and stable file identity, then revalidates database
+identities and source absence before committing atomically. The old ID, overrides,
+favorite, history and references survive at the destination; its redundant row
+is removed. Destinations with user state or references, active source/destination
+playback, changed files or database identities, and a reappearing source are
+rejected rather than merged. Correct the reported conflict before retrying.
+
+Closing the review requests cancellation of its ongoing verification. Cancellation
+before commit leaves identities unchanged; it cannot undo a completed commit.
+CLI acceptance supplies a task ID, not proof of success. `--wait` reports the
+final outcome; otherwise query status or cancel using that ID. The running core
+retains the latest 32 task results, not persistent task history.
+
+[source,sh]
+----
+rivu library duplicates
+rivu library duplicates --fingerprint FULL_BLAKE3 --offset 0 --limit 100
+rivu library relocate OLD_ID DESTINATION_ID --wait
+rivu library relocation-status TASK_ID
+rivu library cancel-relocation TASK_ID
+rivu library keep-independent DESTINATION_ID
 ----
 
 == CUE library tracks
@@ -194,9 +245,10 @@ including ranges that cross groups or unloaded pages. Selected root headers
 support directory rescanning and dragging with the same recursive semantics
 as tree directories; actions deduplicate overlapping track identities.
 
-After a scan saves its results, both views and root counts refresh automatically,
-including previously empty expanded folders, even if some files failed to import.
-Collapsed folders load updated contents when reopened.
+After a scan changes stored library data, both views and root counts refresh
+automatically, including previously empty expanded folders, even if some files
+failed to import. Unchanged scans preserve existing view revisions. Collapsed
+folders load updated contents when reopened.
 The scan status row offers a close button after completion or failure. Closing
 it hides the result and progress bar without changing imported tracks or the
 separate error message. A new scan shows progress again.
@@ -210,6 +262,8 @@ for reopening. Loading more rows does not clear selections or metadata drafts.
 Failed GUI loads offer a retry action; press `R` in the TUI to retry.
 Pending keyboard navigation is cancelled when library data, filters, or batch
 size change; an old row index is never applied to the refreshed collection.
+GUI row-navigation and selection keys target only a visible Library or Queue
+list; switching tabs does not let those keys act on the hidden list.
 
 The TUI Library tree starts at the configured library roots only, including empty
 roots. With no configured roots it is empty; it does not add a filesystem-root
@@ -282,19 +336,23 @@ Recent entries reflect edited titles and current play counts without reopening
 the view. Crossing the counting threshold refreshes the recent entry while
 playback continues; editing its title does not change its activity timestamp or
 recency order.
+The retained snapshot contains up to 256 recent tracks both after startup and
+after subsequent activity or catalog refreshes.
 
 `rivu library history --limit N` prints up to N retained rows in human mode.
 For the JSON history shape and `--limit` behavior, see <<_cli_output,CLI output>>.
 
 == SQLite maintenance
 
-Rivu uses version 9 library databases and automatically upgrades versions 7 and 8
-in one transaction, preserving library records, overrides, favorites, statistics,
-decoder hints, playlists, saved queue occurrences and current selection. Version-7
-tracks receive the Auto decoder hint. Other schemas are not upgraded automatically.
+Rivu uses version 10 library databases and automatically upgrades versions 7, 8
+and 9 in one transaction, preserving library records, overrides, favorites,
+statistics, decoder hints, playlists, saved queue occurrences and current
+selection. Version-7 tracks receive the Auto decoder hint. Other schemas are
+not upgraded automatically.
 Stop the core and back up the database before switching database-schema versions;
-older builds cannot open the upgraded database. Migration requires temporary disk
-space to rebuild track storage; use optimization afterward to reclaim free pages.
+older builds cannot open the upgraded database. Versions 7 and 8 require temporary
+disk space to rebuild track storage; use optimization afterward to reclaim free
+pages. Version 9 upgrades without rebuilding track storage.
 
 Stop the core before removing `library.db` and its `-wal`/`-shm` sidecars, then scan
 the music files again. This resets playlists, saved queue, favorites, metadata

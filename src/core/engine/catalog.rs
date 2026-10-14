@@ -57,7 +57,7 @@ impl Core {
         let known = if force {
             Vec::new()
         } else {
-            self.store.known_files()?
+            self.store.known_files(&paths)?
         };
         let ffmpeg_enabled = config.ffmpeg_enabled;
         tracing::info!(
@@ -290,12 +290,24 @@ impl Core {
     pub(in crate::core) fn finish_scan(&mut self, scan: ScanFinished) -> Result<bool> {
         let result = scan.result?;
         let successful = result.errors().is_empty();
-        self.store.apply_scan(&result)?;
-        self.reload(true)?;
+        if self.store.apply_scan(&result)? {
+            self.reload(true)?;
+        }
         if let Some((name, items)) = scan.import {
+            let accessible: HashSet<_> = result
+                .records
+                .iter()
+                .map(|record| match &record.cue {
+                    Some(cue) => (cue.sheet.as_path(), Some(cue.number)),
+                    None => (record.path.as_path(), None),
+                })
+                .collect();
             let mut ids = Vec::with_capacity(items.len());
             for item in items {
                 let path = library::logical_path(&item.path)?;
+                if !accessible.contains(&(path.as_path(), item.cue_track)) {
+                    continue;
+                }
                 if let Some(id) = self.store.track_id_for_source(&path, item.cue_track)? {
                     ids.push(id);
                 }
@@ -325,9 +337,9 @@ impl Core {
                 self.playback_progress(position_seconds, listened_seconds)?;
             }
             AudioEvent::Ended { generation } if generation == self.generation => {
-                let snapshot = self.engine.stop_and_snapshot().map(Some);
-                self.finish_playback(snapshot, true)?;
-                self.advance(true)?;
+                let status = self.state.playback.status;
+                self.stop_playback(true)?;
+                self.advance_with_status(true, status)?;
             }
             AudioEvent::Failed {
                 generation,
@@ -339,7 +351,7 @@ impl Core {
             AudioEvent::DecoderStopped { generation } if generation == self.generation => {
                 // The worker has already stopped and may still be sending
                 // events while handling Configure; do not wait on a command.
-                self.finish_playback(Ok(None), false)?;
+                self.finish_playback(Ok(None), false, Ok(()))?;
             }
             _ => {}
         }

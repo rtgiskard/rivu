@@ -84,9 +84,11 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
     first.map_or(Ok(()), Err)
 }
 
+type WatchedSnapshot = Result<(u32, ClientSnapshot), String>;
+
 struct Watcher {
     receiver: Receiver<()>,
-    latest: Arc<Mutex<Option<Result<ClientSnapshot, String>>>>,
+    latest: Arc<Mutex<Option<WatchedSnapshot>>>,
     stopping: Arc<AtomicBool>,
     cancel_notify: Arc<tokio::sync::Notify>,
     worker: Option<JoinHandle<()>>,
@@ -118,12 +120,19 @@ fn spawn_watcher(data_dir: &Path) -> Watcher {
             let _ = sender.try_send(());
             return;
         };
-        let mut state = match session.get_state(StateSections::ALL) {
-            Ok(response) => {
+        let initial = session.get_state(StateSections::ALL).and_then(|response| {
+            let instance_id = session
+                .instance_id()
+                .context("Missing IPC Hello identity")?;
+            session.bind_instance(instance_id)?;
+            Ok((instance_id, response))
+        });
+        let mut state = match initial {
+            Ok((instance_id, response)) => {
                 let mut state = ClientSnapshot::default();
                 let revisions = response.revisions;
                 response.apply_to(&mut state);
-                (state, revisions)
+                (state, revisions, instance_id)
             }
             Err(error) => {
                 *latest_worker.lock() = Some(Err(format!("TUI state handshake failed: {error:#}")));
@@ -131,7 +140,7 @@ fn spawn_watcher(data_dir: &Path) -> Watcher {
                 return;
             }
         };
-        *latest_worker.lock() = Some(Ok(state.0.clone()));
+        *latest_worker.lock() = Some(Ok((state.2, state.0.clone())));
         let _ = sender.try_send(());
         loop {
             match session.watch_until(state.1) {
@@ -145,7 +154,7 @@ fn spawn_watcher(data_dir: &Path) -> Watcher {
                                     .apply_sections(response.revisions, response.sections());
                                 response.apply_to(&mut state.0);
                                 let shutting_down = state.0.system.shutting_down;
-                                *latest_worker.lock() = Some(Ok(state.0.clone()));
+                                *latest_worker.lock() = Some(Ok((state.2, state.0.clone())));
                                 let disconnected = sender.try_send(()).is_err_and(|error| {
                                     matches!(
                                         error,
@@ -186,12 +195,36 @@ fn spawn_watcher(data_dir: &Path) -> Watcher {
     }
 }
 
+#[derive(Clone, Debug)]
+struct WorkerFailure {
+    message: String,
+    instance_changed: bool,
+}
+
+impl From<anyhow::Error> for WorkerFailure {
+    fn from(error: anyhow::Error) -> Self {
+        Self {
+            instance_changed: error.is::<ipc::InstanceChanged>(),
+            message: format!("{error:#}"),
+        }
+    }
+}
+
+impl WorkerFailure {
+    fn into_message(self) -> Result<String> {
+        if self.instance_changed {
+            return Err(anyhow::Error::msg(self.message));
+        }
+        Ok(self.message)
+    }
+}
+
 struct CommandWorker {
     sender: Option<Sender<Command>>,
     stopping: Option<Sender<()>>,
     shutdown: Arc<AtomicBool>,
     shutdown_notify: Arc<tokio::sync::Notify>,
-    results: Receiver<Result<Ack, String>>,
+    results: Receiver<Result<Ack, WorkerFailure>>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -209,11 +242,11 @@ impl Drop for CommandWorker {
     }
 }
 
-fn spawn_command_worker(data_dir: &Path) -> CommandWorker {
+fn spawn_command_worker(data_dir: &Path, instance_id: u32) -> CommandWorker {
     let data_dir = data_dir.to_owned();
     let (sender, receiver) = bounded::<Command>(8);
     let (stopping, stop_receiver) = bounded::<()>(1);
-    let (result_sender, results) = bounded::<Result<Ack, String>>(8);
+    let (result_sender, results) = bounded::<Result<Ack, WorkerFailure>>(8);
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_notify = Arc::new(tokio::sync::Notify::new());
     let stop = Arc::clone(&shutdown);
@@ -221,20 +254,26 @@ fn spawn_command_worker(data_dir: &Path) -> CommandWorker {
     let worker = std::thread::spawn(move || {
         let mut session =
             ipc::client_session_with_cancel(&data_dir, Arc::clone(&stop), stop_notify)
-                .map_err(|error| format!("{error:#}"));
+                .and_then(|mut session| {
+                    session.bind_instance(instance_id)?;
+                    Ok(session)
+                })
+                .map_err(WorkerFailure::from);
         while let Ok(command) = receiver.recv() {
             if stop.load(Ordering::Acquire) {
                 break;
             }
             let result = match &mut session {
-                Ok(session) => session
-                    .request_ack(&command)
-                    .map_err(|error| format!("{error:#}")),
+                Ok(session) => session.request_ack(&command).map_err(WorkerFailure::from),
                 Err(error) => Err(error.clone()),
             };
+            let instance_changed = result.as_ref().is_err_and(|error| error.instance_changed);
             crossbeam_channel::select! {
                 send(result_sender, result) -> _ => {}
                 recv(stop_receiver) -> _ => break,
+            }
+            if instance_changed {
+                break;
             }
         }
     });
@@ -314,7 +353,7 @@ struct QueryJob {
     cancelled: Arc<AtomicBool>,
 }
 
-type QueryCompletion = (QueryRequest, Result<QueryResult, String>);
+type QueryCompletion = (QueryRequest, Result<QueryResult, WorkerFailure>);
 
 struct QueryWorker {
     sender: Option<Sender<()>>,
@@ -360,7 +399,7 @@ impl Drop for QueryWorker {
     }
 }
 
-fn spawn_query_worker(data_dir: &Path) -> QueryWorker {
+fn spawn_query_worker(data_dir: &Path, instance_id: u32) -> QueryWorker {
     let data_dir = data_dir.to_owned();
     let (sender, receiver) = bounded(1);
     let pending = Arc::new(Mutex::new(None::<QueryJob>));
@@ -374,7 +413,11 @@ fn spawn_query_worker(data_dir: &Path) -> QueryWorker {
     let worker = std::thread::spawn(move || {
         let mut session =
             ipc::client_session_with_cancel(&data_dir, Arc::clone(&stopping), stop_notify)
-                .map_err(|error| format!("{error:#}"));
+                .and_then(|mut session| {
+                    session.bind_instance(instance_id)?;
+                    Ok(session)
+                })
+                .map_err(WorkerFailure::from);
         while receiver.recv().is_ok() {
             if stopping.load(Ordering::Acquire) {
                 break;
@@ -385,9 +428,12 @@ fn spawn_query_worker(data_dir: &Path) -> QueryWorker {
             let result = match &mut session {
                 Ok(session) => session
                     .query(&job.request.query())
-                    .map_err(|error| format!("{error:#}"))
+                    .map_err(WorkerFailure::from)
                     .and_then(|response| {
-                        let view = response.result.map_err(|error| error.to_string())?;
+                        let view = response.result.map_err(|error| WorkerFailure {
+                            message: error.to_string(),
+                            instance_changed: false,
+                        })?;
                         Ok(QueryResult {
                             revisions: response.revisions,
                             view,
@@ -395,8 +441,12 @@ fn spawn_query_worker(data_dir: &Path) -> QueryWorker {
                     }),
                 Err(error) => Err(error.clone()),
             };
-            if !job.cancelled.load(Ordering::Acquire) {
+            let instance_changed = result.as_ref().is_err_and(|error| error.instance_changed);
+            if instance_changed || !job.cancelled.load(Ordering::Acquire) {
                 *results.lock() = Some((job.request, result));
+            }
+            if instance_changed {
+                break;
             }
         }
     });
@@ -413,8 +463,7 @@ fn spawn_query_worker(data_dir: &Path) -> QueryWorker {
 
 fn run_loop(data_dir: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
     let updates = spawn_watcher(data_dir);
-    let commands = spawn_command_worker(data_dir);
-    let mut queries = spawn_query_worker(data_dir);
+    let mut workers = None;
     let mut tui = None::<TuiState>;
     let mut redraw = true;
     let mut immediate_redraw = true;
@@ -422,7 +471,13 @@ fn run_loop(data_dir: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>>) 
     loop {
         while updates.receiver.try_recv().is_ok() {}
         if let Some(update) = updates.latest.lock().take() {
-            let state = update.map_err(anyhow::Error::msg)?;
+            let (instance_id, state) = update.map_err(anyhow::Error::msg)?;
+            if workers.is_none() {
+                workers = Some((
+                    spawn_command_worker(data_dir, instance_id),
+                    spawn_query_worker(data_dir, instance_id),
+                ));
+            }
             let next = TuiSnapshot::from_client(&state, tui.as_ref().map(|tui| &tui.snapshot));
             match &mut tui {
                 Some(tui) => tui.apply_snapshot(next),
@@ -448,6 +503,7 @@ fn run_loop(data_dir: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>>) 
             }
             continue;
         };
+        let (commands, queries) = workers.as_mut().expect("Initial state starts TUI workers");
         while let Ok(result) = commands.results.try_recv() {
             match result {
                 Ok(ack) if !ack.ok => {
@@ -455,7 +511,7 @@ fn run_loop(data_dir: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>>) 
                         .set_message(Some(ack.error.unwrap_or_else(|| "Command rejected".into())));
                 }
                 Ok(_) => {}
-                Err(error) => tui.ui.set_message(Some(error)),
+                Err(error) => tui.ui.set_message(Some(error.into_message()?)),
             }
             redraw = true;
             immediate_redraw = true;
@@ -465,11 +521,17 @@ fn run_loop(data_dir: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>>) 
             immediate_redraw = true;
         }
         let latest = queries.latest.lock().take();
-        if let Some((request, result)) = latest
-            && tui.ui.apply_query(&tui.snapshot, &request, result)
-        {
-            redraw = true;
-            immediate_redraw = true;
+        if let Some((request, result)) = latest {
+            // Instance validity is independent of view/state revision validity:
+            // even a superseded query must exit on a replacement server.
+            let result = match result {
+                Ok(result) => Ok(result),
+                Err(error) => Err(error.into_message()?),
+            };
+            if tui.ui.apply_query(&tui.snapshot, &request, result) {
+                redraw = true;
+                immediate_redraw = true;
+            }
         }
         match tui.ui.query_request(&tui.snapshot) {
             Some(request) if tui.ui.requested.as_ref() != Some(&request) => {
@@ -2282,7 +2344,7 @@ mod tests {
         let server = std::thread::spawn(move || {
             connected.send(listener.accept().unwrap().0).unwrap();
         });
-        let mut worker = spawn_query_worker(directory.path());
+        let mut worker = spawn_query_worker(directory.path(), 1);
         let state = TuiSnapshot::default();
         let ui = UiState {
             view: View::Playlists(PagedList::default()),
@@ -2366,7 +2428,7 @@ mod tests {
                 );
             }
         });
-        let mut worker = spawn_query_worker(directory.path());
+        let mut worker = spawn_query_worker(directory.path(), 1);
         let request = QueryRequest {
             kind: QueryKind::Queue,
             offset: 0,
@@ -2425,10 +2487,11 @@ mod tests {
                     error: None,
                     revision: 2,
                     scan_id: None,
+                    relocation_id: None,
                 },
             );
         });
-        let worker = spawn_command_worker(directory.path());
+        let worker = spawn_command_worker(directory.path(), 1);
         worker
             .sender
             .as_ref()
@@ -2480,7 +2543,7 @@ mod tests {
             );
             started.send(stream).unwrap();
         });
-        let worker = spawn_command_worker(directory.path());
+        let worker = spawn_command_worker(directory.path(), 1);
         worker
             .sender
             .as_ref()
@@ -2500,6 +2563,211 @@ mod tests {
             .unwrap();
         drop(worker);
         assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn watcher_identity_binds_delayed_command_and_query_workers() {
+        use ipc::tests::{complete_test_handshake, complete_test_handshake_for_instance};
+        use std::{io::Read, os::unix::net::UnixListener};
+
+        let directory = tempfile::tempdir().unwrap();
+        let listener =
+            UnixListener::bind_addr(&ipc::endpoint::address(directory.path()).unwrap()).unwrap();
+        let server = std::thread::spawn(move || {
+            let mut watch = listener.accept().unwrap().0;
+            complete_test_handshake(&mut watch);
+            // Keep A's watch alive while lazy workers encounter B. Identical
+            // state revision tokens must not authorize this different instance.
+            for _ in 0..2 {
+                let mut stream = listener.accept().unwrap().0;
+                complete_test_handshake_for_instance(&mut stream, 2);
+                assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+            }
+        });
+        let watcher = spawn_watcher(directory.path());
+        watcher
+            .receiver
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        let (instance_id, _) = watcher.latest.lock().take().unwrap().unwrap();
+        assert_eq!(instance_id, 1);
+        let commands = spawn_command_worker(directory.path(), instance_id);
+        commands
+            .sender
+            .as_ref()
+            .unwrap()
+            .send(Command::CreatePlaylist {
+                name: "A-only".into(),
+            })
+            .unwrap();
+        let failure = commands
+            .results
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap_err();
+        assert!(failure.instance_changed);
+        assert!(
+            failure.into_message().is_err(),
+            "instance failure must leave the TUI loop"
+        );
+        let mut queries = spawn_query_worker(directory.path(), instance_id);
+        let request = QueryRequest {
+            kind: QueryKind::Queue,
+            offset: 0,
+            limit: 20,
+            view_revision: 0,
+            library_revision: 0,
+            structure_revision: 0,
+            playlist_revision: 0,
+            queue_revision: 0,
+        };
+        queries.request(request);
+        queries.sender.take();
+        queries.worker.take().unwrap().join().unwrap();
+        let (_, result) = queries.latest.lock().take().unwrap();
+        let failure = result.err().unwrap();
+        assert!(failure.instance_changed);
+        assert!(failure.into_message().is_err());
+        drop(commands);
+        drop(queries);
+        drop(watcher);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn command_worker_reconnection_rejects_replacement_instance() {
+        use ipc::tests::{
+            complete_test_handshake, complete_test_handshake_for_instance, read_test_command,
+        };
+        use std::{io::Read, os::unix::net::UnixListener};
+
+        let directory = tempfile::tempdir().unwrap();
+        let listener =
+            UnixListener::bind_addr(&ipc::endpoint::address(directory.path()).unwrap()).unwrap();
+        let server = std::thread::spawn(move || {
+            let mut stream = listener.accept().unwrap().0;
+            complete_test_handshake(&mut stream);
+            read_test_command(&mut stream);
+            drop(stream);
+            let mut stream = listener.accept().unwrap().0;
+            complete_test_handshake_for_instance(&mut stream, 2);
+            assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+        });
+        let worker = spawn_command_worker(directory.path(), 1);
+        for name in ["ambiguous", "old-baseline"] {
+            worker
+                .sender
+                .as_ref()
+                .unwrap()
+                .send(Command::CreatePlaylist { name: name.into() })
+                .unwrap();
+            let failure = worker
+                .results
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap_err();
+            assert_eq!(failure.instance_changed, name == "old-baseline");
+        }
+        drop(worker);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn superseded_query_still_reports_replacement_instance_as_fatal() {
+        use ipc::tests::complete_test_handshake_for_instance;
+        use std::{io::Read, os::unix::net::UnixListener};
+
+        let directory = tempfile::tempdir().unwrap();
+        let listener =
+            UnixListener::bind_addr(&ipc::endpoint::address(directory.path()).unwrap()).unwrap();
+        let (accepted, connected) = bounded(1);
+        let (release, resume) = bounded(1);
+        let server = std::thread::spawn(move || {
+            let mut stream = listener.accept().unwrap().0;
+            accepted.send(()).unwrap();
+            resume.recv_timeout(Duration::from_secs(5)).unwrap();
+            complete_test_handshake_for_instance(&mut stream, 2);
+            assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+        });
+        let mut worker = spawn_query_worker(directory.path(), 1);
+        worker.request(QueryRequest {
+            kind: QueryKind::Queue,
+            offset: 0,
+            limit: 20,
+            view_revision: 0,
+            library_revision: 0,
+            structure_revision: 0,
+            playlist_revision: 0,
+            queue_revision: 0,
+        });
+        connected.recv_timeout(Duration::from_secs(5)).unwrap();
+        worker.cancel();
+        release.send(()).unwrap();
+        worker.sender.take();
+        worker.worker.take().unwrap().join().unwrap();
+        let (_, result) = worker.latest.lock().take().unwrap();
+        let failure = result.err().unwrap();
+        assert!(failure.instance_changed);
+        assert!(failure.into_message().is_err());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn query_worker_reconnection_rejects_replacement_before_accepting_results() {
+        use ipc::tests::{
+            complete_test_handshake, complete_test_handshake_for_instance, read_test_query,
+        };
+        use std::{io::Read, os::unix::net::UnixListener};
+
+        let directory = tempfile::tempdir().unwrap();
+        let listener =
+            UnixListener::bind_addr(&ipc::endpoint::address(directory.path()).unwrap()).unwrap();
+        let (started, active) = bounded(1);
+        let (release, resume) = bounded(1);
+        let server = std::thread::spawn(move || {
+            let mut stream = listener.accept().unwrap().0;
+            complete_test_handshake(&mut stream);
+            assert!(matches!(
+                read_test_query(&mut stream),
+                Query::QueuePage { offset: 0, .. }
+            ));
+            started.send(()).unwrap();
+            resume.recv_timeout(Duration::from_secs(5)).unwrap();
+            drop(stream);
+            let mut stream = listener.accept().unwrap().0;
+            complete_test_handshake_for_instance(&mut stream, 2);
+            assert_eq!(
+                stream.read(&mut [0]).unwrap(),
+                0,
+                "B received a query from A's baseline"
+            );
+        });
+        let mut worker = spawn_query_worker(directory.path(), 1);
+        let request = QueryRequest {
+            kind: QueryKind::Queue,
+            offset: 0,
+            limit: 20,
+            view_revision: 0,
+            library_revision: 0,
+            structure_revision: 0,
+            playlist_revision: 0,
+            queue_revision: 0,
+        };
+        worker.request(request.clone());
+        active.recv_timeout(Duration::from_secs(5)).unwrap();
+        worker.request(QueryRequest {
+            offset: 20,
+            ..request
+        });
+        release.send(()).unwrap();
+        worker.sender.take();
+        worker.worker.take().unwrap().join().unwrap();
+        let (request, result) = worker.latest.lock().take().unwrap();
+        assert_eq!(request.offset, 20);
+        let failure = result.err().unwrap();
+        assert!(failure.instance_changed);
+        assert!(failure.into_message().is_err());
         server.join().unwrap();
     }
 

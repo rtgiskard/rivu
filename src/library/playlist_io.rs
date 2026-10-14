@@ -3,7 +3,7 @@ use crate::model::Track;
 use anyhow::{Context, Result, anyhow, bail};
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufWriter, Write};
+use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug)]
@@ -164,20 +164,15 @@ where
                 .duration
                 .map(|seconds| seconds.max(0.0).round() as i64)
                 .unwrap_or(-1);
-            if !track.artist.is_empty() && !track.title.is_empty() {
-                writeln!(
-                    writer,
-                    "#EXTINF:{duration},{} - {}",
-                    track.artist, track.title
-                )?;
-            } else {
-                let name = if track.artist.is_empty() {
-                    &track.title
-                } else {
-                    &track.artist
-                };
-                writeln!(writer, "#EXTINF:{duration},{name}")?;
+            write!(writer, "#EXTINF:{duration},")?;
+            if !track.artist.is_empty() {
+                write_single_line(&mut writer, &track.artist)?;
+                if !track.title.is_empty() {
+                    writer.write_all(b" - ")?;
+                }
             }
+            write_single_line(&mut writer, &track.title)?;
+            writer.write_all(b"\n")?;
             write_relative_path(&mut writer, parent, &track.path)?;
         }
         if let Some((sheet, _, _)) = cue_run {
@@ -194,6 +189,16 @@ where
     Ok(())
 }
 
+fn write_single_line(writer: &mut impl Write, text: &str) -> io::Result<()> {
+    for (index, part) in text.split(['\r', '\n']).enumerate() {
+        if index != 0 {
+            writer.write_all(b" ")?;
+        }
+        writer.write_all(part.as_bytes())?;
+    }
+    Ok(())
+}
+
 fn write_relative_path(writer: &mut impl Write, parent: &Path, track: &Path) -> Result<()> {
     let display_path = path_relative_to(parent, track);
     let text = display_path.to_str().ok_or_else(|| {
@@ -202,6 +207,12 @@ fn write_relative_path(writer: &mut impl Write, parent: &Path, track: &Path) -> 
             display_path.display()
         )
     })?;
+    if text.contains(['\r', '\n']) {
+        bail!(
+            "Standard M3U cannot represent a path containing CR or LF: {}",
+            display_path.display()
+        );
+    }
     // A leading hash is an M3U directive, not a filename, unless prefixed.
     if text.starts_with('#') {
         writer.write_all(b"./")?;

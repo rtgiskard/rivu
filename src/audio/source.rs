@@ -31,6 +31,21 @@ use symphonia::{
 };
 
 const PROBE_BUFFER_LEN: usize = 2 * BYTES_PER_MEBIBYTE;
+pub(super) const DECODE_WORK_BUDGET: usize = 64;
+
+#[derive(Debug, PartialEq)]
+pub(super) enum DecodeStep<T> {
+    Frames(T),
+    Yield,
+    Eof,
+}
+
+fn native_error(error: SymphoniaError) -> anyhow::Error {
+    match error {
+        SymphoniaError::Unsupported(message) => anyhow!(UnsupportedNative(message.to_string())),
+        error => error.into(),
+    }
+}
 
 pub(super) fn check_cancelled(cancelled: Option<&AtomicBool>) -> Result<()> {
     if cancelled.is_some_and(|cancelled| cancelled.load(Ordering::Relaxed)) {
@@ -373,7 +388,7 @@ impl Source {
         if info.sample_rate == 0 || layout.is_empty() {
             bail!("FFmpeg decoder returned incomplete audio metadata");
         }
-        let duration = info.duration;
+        // Container duration is only an estimate, never a decoder EOF.
         let mut source = Self {
             format: None,
             track: 0,
@@ -385,12 +400,12 @@ impl Source {
             info,
             probe_backend: ProbeBackend::Ffmpeg,
             range_start: 0.0,
-            range_end: duration,
+            range_end: None,
             seek_target: None,
             ready: false,
             exhausted: false,
         };
-        if !source.read_next(cancelled)? {
+        if !source.prime(cancelled)? {
             bail!("FFmpeg audio stream contains no samples");
         }
         source.ready = true;
@@ -525,12 +540,12 @@ impl Source {
             info,
             probe_backend: ProbeBackend::Native,
             range_start: 0.0,
-            range_end: media_duration,
+            range_end: None,
             seek_target: None,
             ready: false,
             exhausted: false,
         };
-        if !source.read_next(cancelled)? {
+        if !source.prime(cancelled)? {
             bail!("Audio track contains no decodable samples");
         }
         source.ready = true;
@@ -554,21 +569,11 @@ impl Source {
         {
             bail!("Invalid audio segment bounds");
         }
-        let end = match (range.end_seconds, self.range_end) {
-            (Some(end), Some(duration)) => {
-                if end > duration + 1.0 / 75.0 {
-                    bail!("Audio segment ends beyond the source duration");
-                }
-                Some(end.min(duration))
-            }
-            (end, duration) => end.or(duration),
-        };
-        if end.is_some_and(|end| range.start_seconds >= end) {
-            bail!("Audio segment starts at or beyond the source end");
-        }
+        let end = range.end_seconds;
+        let duration = end.or(self.info.duration);
         self.range_start = range.start_seconds;
         self.range_end = end;
-        self.info.duration = end.map(|end| end - range.start_seconds);
+        self.info.duration = duration.map(|end| (end - range.start_seconds).max(0.0));
         self.seek_with_cancel(0.0, cancelled)
     }
 
@@ -578,15 +583,10 @@ impl Source {
 
     fn seek_with_cancel(&mut self, target: f64, cancelled: Option<&AtomicBool>) -> Result<()> {
         check_cancelled(cancelled)?;
-        let target = self
-            .info
-            .duration
-            .map_or(target, |duration| target.min(duration))
-            .max(0.0);
+        let target = target.max(0.0);
         if self
-            .info
-            .duration
-            .is_some_and(|duration| target >= duration)
+            .range_end
+            .is_some_and(|end| self.range_start + target >= end)
         {
             self.frames.clear();
             self.ready = false;
@@ -648,21 +648,54 @@ impl Source {
 
     /// Returns PCM and its first sample's segment-relative decoded timestamp.
     /// The primed first packet is returned before advancing the decoder.
-    pub(super) fn next_frames(&mut self) -> Result<Option<(&[f32], f64)>> {
-        self.next_frames_with_cancel(None)
+    pub(super) fn next_frames_with_budget(
+        &mut self,
+        budget: &mut usize,
+    ) -> Result<DecodeStep<(&[f32], f64)>> {
+        self.next_frames_with_cancel(None, budget)
     }
 
     fn next_frames_with_cancel(
         &mut self,
         cancelled: Option<&AtomicBool>,
-    ) -> Result<Option<(&[f32], f64)>> {
+        budget: &mut usize,
+    ) -> Result<DecodeStep<(&[f32], f64)>> {
         check_cancelled(cancelled)?;
+        if *budget == 0 {
+            return Ok(DecodeStep::Yield);
+        }
         if self.ready {
+            *budget -= 1;
             self.ready = false;
-        } else if !self.read_next(cancelled)? {
+        } else {
+            match self.read_next(cancelled, budget)? {
+                DecodeStep::Frames(()) => (),
+                DecodeStep::Yield => return Ok(DecodeStep::Yield),
+                DecodeStep::Eof => return Ok(DecodeStep::Eof),
+            }
+        }
+        Ok(DecodeStep::Frames((&self.frames, self.frame_start)))
+    }
+
+    // Full-file test consumers deliberately drain successive finite rounds.
+    #[cfg(test)]
+    fn next_frames(&mut self) -> Result<Option<(&[f32], f64)>> {
+        if !self.ready && !self.prime(None)? {
             return Ok(None);
         }
+        self.ready = false;
         Ok(Some((&self.frames, self.frame_start)))
+    }
+
+    fn prime(&mut self, cancelled: Option<&AtomicBool>) -> Result<bool> {
+        loop {
+            let mut budget = DECODE_WORK_BUDGET;
+            match self.read_next(cancelled, &mut budget)? {
+                DecodeStep::Frames(()) => return Ok(true),
+                DecodeStep::Yield => continue,
+                DecodeStep::Eof => return Ok(false),
+            }
+        }
     }
 
     pub(super) fn uses_ffmpeg(&self) -> bool {
@@ -710,10 +743,13 @@ impl Source {
         frame.set_channel_weights(&weights);
         let mut end_seconds = 0.0_f64;
         loop {
-            let Some((samples, start_seconds)) = self.next_frames_with_cancel(Some(cancelled))?
-            else {
-                break;
-            };
+            let mut budget = DECODE_WORK_BUDGET;
+            let (samples, start_seconds) =
+                match self.next_frames_with_cancel(Some(cancelled), &mut budget)? {
+                    DecodeStep::Frames(frame) => frame,
+                    DecodeStep::Yield => continue,
+                    DecodeStep::Eof => break,
+                };
             frame.push(start_seconds, samples, sample_rate, channels);
             let end_frame =
                 (start_seconds * sample_rate as f64).round() + (samples.len() / channels) as f64;
@@ -724,19 +760,24 @@ impl Source {
         Ok(frame)
     }
 
-    fn read_ffmpeg_next(&mut self, cancelled: Option<&AtomicBool>) -> Result<bool> {
+    fn read_ffmpeg_next(
+        &mut self,
+        cancelled: Option<&AtomicBool>,
+        budget: &mut usize,
+    ) -> Result<DecodeStep<()>> {
         loop {
             check_cancelled(cancelled)?;
             let decoded = match &mut self.decode {
-                Decode::Ffmpeg(decoder) => decoder.next_frames(&mut self.frames, cancelled),
+                Decode::Ffmpeg(decoder) => decoder.next_frames(&mut self.frames, cancelled, budget),
                 _ => unreachable!(),
             };
             let packet_start = match decoded {
-                Ok(Some(timestamp)) => timestamp,
-                Ok(None) => {
+                Ok(DecodeStep::Frames(timestamp)) => timestamp,
+                Ok(DecodeStep::Yield) => return Ok(DecodeStep::Yield),
+                Ok(DecodeStep::Eof) => {
                     self.frames.clear();
                     self.exhausted = true;
-                    return Ok(false);
+                    return Ok(DecodeStep::Eof);
                 }
                 Err(error) => {
                     self.frames.clear();
@@ -760,7 +801,7 @@ impl Source {
                     .saturating_mul(channels);
                 if discard >= self.frames.len() {
                     if self.exhausted {
-                        return Ok(false);
+                        return Ok(DecodeStep::Eof);
                     }
                     continue;
                 }
@@ -771,35 +812,44 @@ impl Source {
             }
             if !self.frames.is_empty() {
                 self.frame_start = retained_start - self.range_start;
-                return Ok(true);
+                return Ok(DecodeStep::Frames(()));
             }
             if self.exhausted {
-                return Ok(false);
+                return Ok(DecodeStep::Eof);
             }
         }
     }
 
-    fn read_next(&mut self, cancelled: Option<&AtomicBool>) -> Result<bool> {
-        self.read_next_with_reader(cancelled, |format| format.next_packet())
+    fn read_next(
+        &mut self,
+        cancelled: Option<&AtomicBool>,
+        budget: &mut usize,
+    ) -> Result<DecodeStep<()>> {
+        self.read_next_with_reader(cancelled, budget, |format| format.next_packet())
     }
 
     fn read_next_with_reader(
         &mut self,
         cancelled: Option<&AtomicBool>,
+        budget: &mut usize,
         mut read: impl FnMut(
             &mut dyn FormatReader,
         )
             -> symphonia::core::errors::Result<Option<symphonia::core::packet::Packet>>,
-    ) -> Result<bool> {
+    ) -> Result<DecodeStep<()>> {
         check_cancelled(cancelled)?;
         if self.exhausted {
-            return Ok(false);
+            return Ok(DecodeStep::Eof);
         }
         if matches!(self.decode, Decode::Ffmpeg(_)) {
-            return self.read_ffmpeg_next(cancelled);
+            return self.read_ffmpeg_next(cancelled, budget);
         }
         loop {
             check_cancelled(cancelled)?;
+            if *budget == 0 {
+                return Ok(DecodeStep::Yield);
+            }
+            *budget -= 1;
             // Seeking can discard whole packets (including Opus preroll).
             // Never append the next packet onto samples already discarded.
             self.frames.clear();
@@ -811,7 +861,7 @@ impl Source {
             check_cancelled(cancelled)?;
             let Some(packet) = packet? else {
                 self.exhausted = true;
-                return Ok(false);
+                return Ok(DecodeStep::Eof);
             };
             if packet.track_id != self.track {
                 continue;
@@ -823,7 +873,7 @@ impl Source {
             );
             match &mut self.decode {
                 Decode::Native(decoder) => {
-                    let audio = decoder.decode(&packet)?;
+                    let audio = decoder.decode(&packet).map_err(native_error)?;
                     if audio.spec().rate() != self.info.sample_rate {
                         bail!("Sample rate changes within this track are unsupported");
                     }
@@ -876,7 +926,7 @@ impl Source {
                     .saturating_mul(self.layout.len());
                 if discard >= self.frames.len() {
                     if self.exhausted {
-                        return Ok(false);
+                        return Ok(DecodeStep::Eof);
                     }
                     continue;
                 }
@@ -887,10 +937,10 @@ impl Source {
             }
             if !self.frames.is_empty() {
                 self.frame_start = packet_start - self.range_start;
-                return Ok(true);
+                return Ok(DecodeStep::Frames(()));
             }
             if self.exhausted {
-                return Ok(false);
+                return Ok(DecodeStep::Eof);
             }
         }
     }
@@ -1099,10 +1149,16 @@ mod tests {
     }
 
     #[test]
-    fn seek_to_duration_is_exhausted_and_can_seek_back() {
+    fn seek_to_explicit_segment_end_is_exhausted_and_can_seek_back() {
         let file = opus_file();
         let mut source =
             Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Auto, false).unwrap();
+        source
+            .restrict(super::super::PlaybackRange {
+                start_seconds: 0.0,
+                end_seconds: source.info().duration,
+            })
+            .unwrap();
         let duration = source.info().duration.unwrap();
         for target in [duration, duration + 1.0] {
             source.seek(target).unwrap();
@@ -1131,6 +1187,177 @@ mod tests {
             file.write_all(&value.to_le_bytes()).unwrap();
         }
         file
+    }
+
+    #[test]
+    fn underestimated_metadata_does_not_limit_seek_cue_or_completed_waveform() {
+        let file = pcm_file();
+        let cancelled = AtomicBool::new(false);
+        for hint in [DecoderHint::Native, DecoderHint::Ffmpeg] {
+            if hint == DecoderHint::Ffmpeg && !cfg!(feature = "ffmpeg") {
+                continue;
+            }
+            let mut source = Source::open(file.path(), PROBE_BUFFER_LEN, hint, true).unwrap();
+            source.info.duration = Some(0.25);
+            source.seek(1.0).unwrap();
+            assert_eq!(decode_remaining(&mut source).len(), 44_100);
+            source.seek(0.0).unwrap();
+            let frame = source
+                .scan_waveform(file.path(), None, hint, &cancelled)
+                .unwrap();
+            assert!(frame.complete);
+            assert_eq!(frame.duration, Some(2.0));
+            assert!(frame.span_seconds >= 2.0);
+            source.info.duration = Some(0.25);
+            source
+                .restrict(super::super::PlaybackRange {
+                    start_seconds: 0.5,
+                    end_seconds: Some(1.5),
+                })
+                .unwrap();
+            assert_eq!(decode_remaining(&mut source).len(), 44_100);
+        }
+    }
+
+    #[test]
+    fn native_skipped_packets_yield_without_cancellation_or_eof() {
+        let file = pcm_file();
+        let mut source =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
+        source.seek(0.0).unwrap();
+        let mut budget = 7;
+        let mut packets = 0;
+        let step = source
+            .read_next_with_reader(None, &mut budget, |format| {
+                let mut packet = format.next_packet()?.expect("fixture has more packets");
+                packet.track_id = packet.track_id.wrapping_add(1);
+                packets += 1;
+                Ok(Some(packet))
+            })
+            .unwrap();
+        assert_eq!(step, DecodeStep::Yield);
+        assert_eq!(packets, 7);
+        assert_eq!(budget, 0);
+        assert!(!source.exhausted);
+        source.seek(0.0).unwrap();
+        let cancelled = AtomicBool::new(false);
+        let frame = source
+            .scan_waveform(file.path(), None, DecoderHint::Native, &cancelled)
+            .unwrap();
+        assert!(frame.complete);
+        assert_eq!(frame.duration, Some(2.0));
+    }
+
+    fn variable_adts_file() -> tempfile::NamedTempFile {
+        let mut file = tempfile::Builder::new().suffix(".aac").tempfile().unwrap();
+        // A zero-band mono SCE followed by ID_END is valid AAC-LC silence.
+        // Padding the first hundred frames biases ADTS's sampled bitrate:
+        // those frames occupy all four sample points, followed by a long tail
+        // of small frames that the estimate never inspects.
+        for index in 0..1100 {
+            let length = if index < 100 { 2000_usize } else { 11 };
+            let header = [
+                0xff,
+                0xf1,
+                0x50,
+                0x40 | ((length >> 11) as u8),
+                (length >> 3) as u8,
+                ((length & 7) as u8) << 5 | 0x1f,
+                0xfc,
+            ];
+            file.write_all(&header).unwrap();
+            file.write_all(&[0, 0, 0, 7]).unwrap();
+            file.write_all(&vec![0; length - 11]).unwrap();
+        }
+        file
+    }
+
+    #[test]
+    fn sampled_adts_duration_never_truncates_decoding_or_full_waveform() {
+        let file = variable_adts_file();
+        let actual_frames = 1100 * 1024;
+        let actual_duration = actual_frames as f64 / 44_100.0;
+        let mut source =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
+        assert!(source.info.duration.unwrap() < actual_duration / 2.0);
+        assert_eq!(decode_remaining(&mut source).len(), actual_frames);
+        let cancelled = AtomicBool::new(false);
+        let waveform =
+            Source::waveform(file.path(), None, DecoderHint::Native, 2, false, &cancelled).unwrap();
+        assert!(waveform.complete);
+        assert_eq!(waveform.duration, Some(actual_duration));
+        assert!(waveform.span_seconds >= actual_duration);
+        assert!(waveform.peaks.len() <= 1600);
+        source
+            .restrict(super::super::PlaybackRange {
+                start_seconds: 3.0,
+                end_seconds: Some(4.0),
+            })
+            .unwrap();
+        assert_eq!(decode_remaining(&mut source).len(), 44_100);
+        source.seek(0.5).unwrap();
+        assert_eq!(decode_remaining(&mut source).len(), 22_050);
+        let details = probe_details(file.path(), false, false).unwrap();
+        assert!(matches!(details.decoder_backend, ProbeBackend::Native));
+        assert!(details.info.duration.unwrap() < actual_duration / 2.0);
+    }
+
+    fn aac_packet_file(element: u8) -> tempfile::NamedTempFile {
+        let mut file = tempfile::Builder::new().suffix(".aac").tempfile().unwrap();
+        // MPEG-4 ADTS, AAC-LC, 44.1 kHz mono, 16-byte frames. The raw AAC
+        // element is deliberately unsupported or truncated, not a probe error.
+        for _ in 0..8 {
+            file.write_all(&[0xff, 0xf1, 0x50, 0x40, 0x02, 0x1f, 0xfc])
+                .unwrap();
+            file.write_all(&[element, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap();
+        }
+        file
+    }
+
+    #[test]
+    fn first_packet_unsupported_falls_back_but_corruption_and_cancellation_do_not() {
+        let unsupported = aac_packet_file(0x40); // ID_CCE, unsupported by native AAC.
+        let error = Source::open(
+            unsupported.path(),
+            PROBE_BUFFER_LEN,
+            DecoderHint::Native,
+            true,
+        )
+        .err()
+        .unwrap();
+        assert!(error.is::<UnsupportedNative>(), "{error:#}");
+        match Source::open(
+            unsupported.path(),
+            PROBE_BUFFER_LEN,
+            DecoderHint::Auto,
+            true,
+        ) {
+            Ok(source) => assert!(source.uses_ffmpeg()),
+            Err(error) => assert!(
+                error.to_string().contains("FFmpeg extension failed"),
+                "{error:#}"
+            ),
+        }
+        let corrupt = aac_packet_file(0);
+        let error = Source::open(corrupt.path(), PROBE_BUFFER_LEN, DecoderHint::Auto, true)
+            .err()
+            .unwrap();
+        assert!(!error.is::<UnsupportedNative>());
+        assert!(
+            !error.to_string().contains("FFmpeg extension failed"),
+            "{error:#}"
+        );
+        let cancelled = AtomicBool::new(true);
+        let error = Source::open_with_cancel(
+            unsupported.path(),
+            PROBE_BUFFER_LEN,
+            DecoderHint::Auto,
+            true,
+            Some(&cancelled),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.to_string(), "Waveform loading cancelled");
     }
 
     #[test]
@@ -1315,8 +1542,6 @@ mod tests {
         assert!(source.uses_ffmpeg());
         assert!(matches!(source.probe_backend, ProbeBackend::Ffmpeg));
         assert!(super::super::ffmpeg::load_attempted());
-        // Exercise decoder EOF rather than stopping at the metadata duration.
-        source.range_end = None;
         assert_ffmpeg_pcm(&mut source, &reference, 0.0);
         source.seek(0.2).unwrap();
         assert!(source.uses_ffmpeg());
@@ -1516,7 +1741,7 @@ mod tests {
             let cancelled = AtomicBool::new(false);
             let mut packets = 0;
             let error = source
-                .read_next_with_reader(Some(&cancelled), |format| {
+                .read_next_with_reader(Some(&cancelled), &mut 64, |format| {
                     let mut packet = format.next_packet()?.expect("fixture has more packets");
                     packets += 1;
                     if mode == 0 {

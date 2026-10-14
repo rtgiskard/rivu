@@ -3,7 +3,7 @@
 use super::{
     MediaInfo, PlaybackRange, WaveformFrame,
     output::{Output, OutputError},
-    source::Source,
+    source::{DECODE_WORK_BUDGET, DecodeStep, Source},
     waveform::{WaveformAccumulator, WaveformCoverage},
 };
 use crate::analysis::AnalysisWorker;
@@ -14,8 +14,6 @@ use parking_lot::RwLock;
 use std::{path::PathBuf, sync::Arc};
 
 const PENDING_BUFFER_CAPACITY: usize = 16_384;
-// Empty/tiny packets cannot turn one refill into an unlimited decode round.
-const MAX_DECODE_PACKETS_PER_FILL: usize = 64;
 
 pub(super) struct PlaybackOptions {
     pub(super) path: PathBuf,
@@ -139,10 +137,6 @@ impl Playback {
         create: impl FnOnce(&Source, bool) -> Result<Output>,
     ) -> Result<()> {
         let position = target.unwrap_or_else(|| self.position()).max(0.0);
-        let position = self
-            .info()
-            .duration
-            .map_or(position, |end| position.min(end));
         let heard = self.prior_heard + self.output.close();
         self.source.seek(position)?;
         let output = create(&self.source, self.paused)?;
@@ -207,11 +201,7 @@ impl Playback {
         self.prior_heard + self.output.heard()
     }
     pub(super) fn position(&self) -> f64 {
-        let value = self.base_position + self.output.position();
-        self.source
-            .info()
-            .duration
-            .map_or(value, |duration| value.min(duration))
+        self.base_position + self.output.position()
     }
     pub(super) fn refill_delay(&self) -> std::time::Duration {
         self.output.refill_delay(self.eof)
@@ -232,7 +222,7 @@ impl Playback {
         // Concurrent callback consumption belongs to the next refill, not this
         // prefix. Both submitted frames and decoded packets bound this round.
         let mut remaining_frames = self.output.vacant_frames();
-        let mut remaining_packets = MAX_DECODE_PACKETS_PER_FILL;
+        let mut remaining_packets = DECODE_WORK_BUDGET;
         while remaining_frames > 0 {
             if self.offset_frames < self.pending.len() / channels {
                 let end =
@@ -249,47 +239,52 @@ impl Playback {
             if self.eof || remaining_frames == 0 || remaining_packets == 0 {
                 break;
             }
-            remaining_packets -= 1;
             self.pending.clear();
             self.offset_frames = 0;
-            if let Some((frames, start_seconds)) = self.source.next_frames()? {
-                if !frames.len().is_multiple_of(channels) {
-                    bail!("Decoded audio ends in an incomplete interleaved frame");
-                }
-                if self.still_mode {
-                    if !frames.is_empty() {
-                        self.waveform_coverage.skip();
+            match self
+                .source
+                .next_frames_with_budget(&mut remaining_packets)?
+            {
+                DecodeStep::Frames((frames, start_seconds)) => {
+                    if !frames.len().is_multiple_of(channels) {
+                        bail!("Decoded audio ends in an incomplete interleaved frame");
                     }
-                } else if !frames.is_empty() {
-                    self.waveform_coverage.record(
-                        start_seconds,
-                        frames.len() / channels,
-                        sample_rate,
-                    );
-                    let accumulator = self.waveform_accumulator.get_or_insert_with(|| {
-                        let mut waveform = self.waveform.write();
-                        waveform.prepare_bins(sample_rate);
-                        let mut accumulator = WaveformAccumulator::new(waveform.clone());
-                        accumulator.set_channel_weights(&self.waveform_weights);
-                        accumulator
-                    });
-                    accumulator.push(start_seconds, frames, sample_rate, channels);
-                    accumulator.publish(&mut self.waveform.write());
+                    if self.still_mode {
+                        if !frames.is_empty() {
+                            self.waveform_coverage.skip();
+                        }
+                    } else if !frames.is_empty() {
+                        self.waveform_coverage.record(
+                            start_seconds,
+                            frames.len() / channels,
+                            sample_rate,
+                        );
+                        let accumulator = self.waveform_accumulator.get_or_insert_with(|| {
+                            let mut waveform = self.waveform.write();
+                            waveform.prepare_bins(sample_rate);
+                            let mut accumulator = WaveformAccumulator::new(waveform.clone());
+                            accumulator.set_channel_weights(&self.waveform_weights);
+                            accumulator
+                        });
+                        accumulator.push(start_seconds, frames, sample_rate, channels);
+                        accumulator.publish(&mut self.waveform.write());
+                    }
+                    // Submit PCM directly; retain only the packet tail that
+                    // did not fit, reusing its allocation on the next refill.
+                    let prefix = frames.len().min(remaining_frames * channels);
+                    let count = self.output.push(&frames[..prefix]);
+                    remaining_frames -= count;
+                    self.pending.extend_from_slice(&frames[count * channels..]);
+                    after_packet();
                 }
-                // Submit decoded PCM directly; retain only the packet tail that
-                // did not fit in the bounded output ring. At most one decoded
-                // packet is pending, and its allocation is reused on refill.
-                let prefix = frames.len().min(remaining_frames * channels);
-                let count = self.output.push(&frames[..prefix]);
-                remaining_frames -= count;
-                self.pending.extend_from_slice(&frames[count * channels..]);
-                after_packet();
-            } else {
-                if let Some(accumulator) = &mut self.waveform_accumulator {
-                    accumulator.finish(&self.waveform_coverage);
-                    accumulator.publish(&mut self.waveform.write());
+                DecodeStep::Yield => break,
+                DecodeStep::Eof => {
+                    if let Some(accumulator) = &mut self.waveform_accumulator {
+                        accumulator.finish(&self.waveform_coverage);
+                        accumulator.publish(&mut self.waveform.write());
+                    }
+                    self.eof = true;
                 }
-                self.eof = true;
             }
         }
         Ok(
@@ -620,9 +615,13 @@ mod tests {
         playback.output = output;
         let mut packets = 0;
         assert!(playback.fill_with(|| packets += 1).unwrap());
-        assert_eq!(packets, MAX_DECODE_PACKETS_PER_FILL);
+        assert_eq!(packets, DECODE_WORK_BUDGET);
         assert!(playback.output.vacant_frames() > 0);
         assert!(!playback.eof);
+        assert!(
+            !playback.waveform.read().complete,
+            "yield is not decoder EOF"
+        );
         assert!(!playback.fill().unwrap());
         assert!(playback.eof);
         let mut data = vec![0.0; 96_000];

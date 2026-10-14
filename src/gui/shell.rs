@@ -91,6 +91,13 @@ impl Render for GuiApp {
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = event.keystroke.key.as_str();
+                if this.duplicate_review.open {
+                    if key == "escape" {
+                        this.close_duplicate_review(window, cx);
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
                 if this.about_open {
                     if key == "escape" {
                         this.about_open = false;
@@ -198,6 +205,7 @@ impl Render for GuiApp {
             .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _, _| {
                 let modal = this.settings_open
                     || this.about_open
+                    || this.duplicate_review.open
                     || this.app_menu_open
                     || this.panel_menu.is_some()
                     || this.catalog_open;
@@ -570,9 +578,9 @@ impl Render for GuiApp {
                 .find(|panel| panel.id == state.panel_id)
                 .map(|panel| panel.kind.as_str());
             let is_queue = panel_kind == Some("queue");
+            let is_library = panel_kind == Some("library");
             let is_waveform = panel_kind == Some("waveform");
             let is_audio_visualizer = panel_kind == Some("audio_visualizer");
-            let is_library = panel_kind == Some("library");
             let has_selected_queue = self.browser.queue.ready() && self.browser.queue.len() > 0;
             let mut menu = context_menu_container("panel-context-menu")
                 .max_w((window.viewport_size().width - px(UI_INSET * 2.)).max(px(0.)))
@@ -600,6 +608,12 @@ impl Render for GuiApp {
                                 },
                             ))
                             .child(div().h(px(1.)).mx_2().my_1().bg(rgb(BORDER)));
+                        menu = menu.child(menu_item(
+                            "library-same-files",
+                            "Same files / Relocation candidates…",
+                            cx,
+                            |this, window, cx| this.open_duplicate_review(window, cx),
+                        ));
                     }
                     if is_waveform && !self.state.system.config.still_mode {
                         menu = menu.child(menu_item(
@@ -799,9 +813,10 @@ impl Render for GuiApp {
                         ));
                     }
                     menu = menu
-                        .when(is_queue || is_waveform || is_audio_visualizer, |view| {
-                            view.child(div().h(px(1.)).mx_2().my_1().bg(rgb(BORDER)))
-                        })
+                        .when(
+                            is_library || is_queue || is_waveform || is_audio_visualizer,
+                            |view| view.child(div().h(px(1.)).mx_2().my_1().bg(rgb(BORDER))),
+                        )
                         .when(self.layouts.current().locked, |view| {
                             view.child(
                                 div()
@@ -1113,6 +1128,9 @@ impl Render for GuiApp {
                     .clone()
                     .cached(gpui::StyleRefinement::default().absolute().size_full()),
             );
+        }
+        if self.duplicate_review.open {
+            app = app.child(self.duplicate_review_dialog(cx));
         }
         if self.about_open {
             static LOGO: std::sync::LazyLock<Arc<Image>> = std::sync::LazyLock::new(|| {

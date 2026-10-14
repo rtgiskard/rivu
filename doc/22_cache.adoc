@@ -128,6 +128,9 @@ manager is shared by MPRIS and every graphical window, including reopened and
 reloaded windows. Cache-only reads return completed artwork or the bundled icon
 without media I/O or waiting for a probe. Blocking loads run on GPUI's existing
 background executor and the existing MPRIS publisher, not new artwork threads.
+Cold source extraction accepts only regular files. Nonblocking opening rejects
+FIFOs without waiting for a writer, and the opened file is checked before probing.
+Regular-file probing and filesystem I/O can still block those background callers.
 
 The GUI keeps one active load and only the latest pending selection. Completions
 are matched by track ID and fingerprint before updating the selected preview or
@@ -167,10 +170,11 @@ Released results merely become evictable; neither release nor eviction performs
 filesystem work. Disk usage can grow until the user requests maintenance, and
 age-based cleanup does not enforce a global capacity limit.
 
-Background acquisition and per-file removal share a synchronization gate through
-lookup registration, preventing cleanup from deleting a file during first use.
-Directory traversal and deletion never hold the lookup mutex over filesystem I/O;
-render and MPRIS property reads remain cache-only and do not wait for that gate.
+Source opening and potentially slow extraction run outside the maintenance gate.
+Cache-file publication and lookup registration share that gate with per-file
+removal, preventing cleanup from deleting a file during first use. Directory
+traversal and deletion never hold the lookup mutex over filesystem I/O; render
+and MPRIS property reads remain cache-only and do not wait for that gate.
 Maintenance ignores symlinks and unrelated names, reports inspection/deletion
 failures, and leaves the fallback and audio sources untouched.
 

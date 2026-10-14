@@ -345,6 +345,7 @@ impl GuiApp {
                 .spawn(async move { handle.query(Query::Track { track_id: id }) })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                this.refresh(cx);
                 if !this.metadata.accepts_load(token) {
                     return;
                 }
@@ -899,6 +900,25 @@ mod tests {
             .accept_load(token, Some(track(2, "next")), values("").as_draft())
             .unwrap();
         assert_eq!(loaded.title, "next");
+        assert!(!session.dirty(loaded.as_draft()));
+    }
+    #[test]
+    fn snapshot_reload_supersedes_old_metadata_and_completes_without_a_frame() {
+        let mut session = MetadataSession::default();
+        session.select(1);
+        let old = session.begin_load(1);
+        let current = session.begin_load(1);
+        assert!(!session.accepts_load(old));
+        assert!(
+            session
+                .accept_load(old, Some(track(1, "stale")), values("").as_draft())
+                .is_none()
+        );
+        let loaded = session
+            .accept_load(current, Some(track(1, "current")), values("").as_draft())
+            .unwrap();
+        assert_eq!(loaded.title, "current");
+        assert_eq!(session.track().unwrap().title, "current");
         assert!(!session.dirty(loaded.as_draft()));
     }
 }

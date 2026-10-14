@@ -146,8 +146,10 @@ impl Core {
     }
 
     pub(in crate::core) fn deduplicate_queue(&mut self) -> Result<()> {
-        self.store.deduplicate_queue()?;
-        self.reload_queue()
+        if self.store.deduplicate_queue()? {
+            self.reload_queue()?;
+        }
+        Ok(())
     }
 
     pub(in crate::core) fn prune_queue_history(&mut self) {

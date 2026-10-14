@@ -11,11 +11,49 @@ use std::path::{Path, PathBuf};
 // Bump when probing semantics change; fingerprints remain reusable.
 const PROBE_VERSION: i64 = 3;
 
+// Keep equality and descendant branches separate so both path indexes can seek.
+// A slash-terminated prefix has the exclusive BINARY upper bound ending in '0'.
+const SCAN_SCOPE_IDS: &str = "
+    SELECT t.id FROM json_each(?1) AS scope
+    CROSS JOIN tracks AS t INDEXED BY tracks_directory WHERE t.path=scope.value
+    UNION
+    SELECT t.id FROM json_each(?2) AS scope
+    CROSS JOIN tracks AS t INDEXED BY tracks_directory
+    WHERE t.path>=scope.value AND t.path<(rtrim(scope.value,'/')||'0')
+    UNION
+    SELECT t.id FROM json_each(?1) AS scope
+    CROSS JOIN tracks AS t INDEXED BY tracks_cue
+    WHERE t.cue_sheet IS NOT NULL AND t.cue_sheet=scope.value
+    UNION
+    SELECT t.id FROM json_each(?2) AS scope
+    CROSS JOIN tracks AS t INDEXED BY tracks_cue
+    WHERE t.cue_sheet IS NOT NULL
+      AND t.cue_sheet>=scope.value AND t.cue_sheet<(rtrim(scope.value,'/')||'0')";
+
+fn scan_scope(paths: &[PathBuf]) -> Result<(HashSet<&str>, HashSet<String>)> {
+    let mut exact = HashSet::with_capacity(paths.len());
+    let mut prefixes = HashSet::with_capacity(paths.len());
+    for path in paths {
+        let normalized = crate::library::logical_path(path)?;
+        if normalized != *path {
+            bail!(
+                "Scan scope is not a normalized absolute path: {}",
+                path.display()
+            );
+        }
+        let path = path.to_str().context("Scan scope path is not UTF-8")?;
+        exact.insert(path);
+        prefixes.insert(format!("{}/", path.trim_end_matches('/')));
+    }
+    Ok((exact, prefixes))
+}
+
 struct Existing {
     id: i64,
     path: PathBuf,
     hash: Option<String>,
     cue: Option<CueSegment>,
+    independent: bool,
 }
 
 #[derive(Hash, PartialEq, Eq)]
@@ -31,40 +69,88 @@ fn identity<'a>(path: &'a Path, cue: Option<&'a CueSegment>) -> TrackIdentity<'a
     }
 }
 
+#[derive(Hash, PartialEq, Eq)]
+enum RelocationKey<'a> {
+    File(&'a str),
+    Cue(&'a str, u32, u64, Option<u64>),
+}
+
+fn relocation_key<'a>(hash: &'a str, cue: Option<&CueSegment>) -> RelocationKey<'a> {
+    match cue {
+        Some(cue) => RelocationKey::Cue(hash, cue.number, cue.start_frame, cue.end_frame),
+        None => RelocationKey::File(hash),
+    }
+}
+
 impl Store {
-    pub fn known_files(&self) -> Result<Vec<KnownFile>> {
-        let mut q=self.conn.prepare("SELECT id,path,file_size,modified_ns,fingerprint,raw_title,raw_artist,raw_album,duration,codec,channels,sample_rate,cue_sheet,cue_number,cue_start_frame,cue_end_frame,probe_version,bitrate_bps,track_number,disc_number,bits_per_sample,release_date FROM tracks")?;
-        Ok(q.query_map([], |r| {
-            Ok(KnownFile {
-                track_id: r.get(0)?,
-                path: PathBuf::from(r.get::<_, String>(1)?),
-                size: r.get::<_, i64>(2)? as u64,
-                modified_ns: r.get(3)?,
-                fingerprint: fingerprint_from_row(r, 4)?,
-                cue: cue_from_row(r, 12)?,
-                media: if r.get::<_, i64>(16)? == PROBE_VERSION {
-                    Some(MediaInfo {
-                        title: r.get(5)?,
-                        artist: r.get(6)?,
-                        album: r.get(7)?,
-                        duration: r.get(8)?,
-                        codec: r.get(9)?,
-                        channels: r.get::<_, i64>(10)? as u16,
-                        sample_rate: r.get::<_, i64>(11)? as u32,
-                        bitrate_bps: r.get::<_, Option<i64>>(17)?.map(|value| value as u64),
-                        track_number: r.get(18)?,
-                        disc_number: r.get(19)?,
-                        bits_per_sample: r.get(20)?,
-                        release_date: r.get(21)?,
-                    })
-                } else {
-                    None
-                },
-            })
-        })?
+    /// Validate logical request scopes. Ordinary exact files use indexed reads;
+    /// directories and sheets keep the snapshot needed for arbitrary CUE sources.
+    pub fn known_files(&self, paths: &[PathBuf]) -> Result<Vec<KnownFile>> {
+        let (exact, prefixes) = scan_scope(paths)?;
+        let exact_files = paths.iter().all(|path| {
+            !path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("cue"))
+                && fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
+        });
+        let columns = "id,path,file_size,modified_ns,fingerprint,raw_title,raw_artist,raw_album,
+                       duration,codec,channels,sample_rate,cue_sheet,cue_number,cue_start_frame,
+                       cue_end_frame,probe_version,bitrate_bps,track_number,disc_number,
+                       bits_per_sample,release_date";
+        let sql = if exact_files {
+            format!(
+                "SELECT {columns} FROM tracks WHERE id IN (
+                SELECT t.id FROM json_each(?1) AS scope
+                CROSS JOIN tracks AS t INDEXED BY tracks_directory
+                WHERE t.path=scope.value AND ?2 IS NOT NULL
+            ) ORDER BY id"
+            )
+        } else {
+            // New or retargeted CUE sheets can reuse sources anywhere in the
+            // library; narrowing this requires changing the excluded CUE path.
+            format!(
+                "SELECT {columns} FROM tracks WHERE ?1 IS NOT NULL AND ?2 IS NOT NULL ORDER BY id"
+            )
+        };
+        let mut q = self.conn.prepare(&sql)?;
+        Ok(q.query_map(
+            params![
+                serde_json::to_string(&exact)?,
+                serde_json::to_string(&prefixes)?
+            ],
+            |r| {
+                Ok(KnownFile {
+                    track_id: r.get(0)?,
+                    path: PathBuf::from(r.get::<_, String>(1)?),
+                    size: r.get::<_, i64>(2)? as u64,
+                    modified_ns: r.get(3)?,
+                    fingerprint: fingerprint_from_row(r, 4)?,
+                    cue: cue_from_row(r, 12)?,
+                    media: if r.get::<_, i64>(16)? == PROBE_VERSION {
+                        Some(MediaInfo {
+                            title: r.get(5)?,
+                            artist: r.get(6)?,
+                            album: r.get(7)?,
+                            duration: r.get(8)?,
+                            codec: r.get(9)?,
+                            channels: r.get::<_, i64>(10)? as u16,
+                            sample_rate: r.get::<_, i64>(11)? as u32,
+                            bitrate_bps: r.get::<_, Option<i64>>(17)?.map(|value| value as u64),
+                            track_number: r.get(18)?,
+                            disc_number: r.get(19)?,
+                            bits_per_sample: r.get(20)?,
+                            release_date: r.get(21)?,
+                        })
+                    } else {
+                        None
+                    },
+                })
+            },
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?)
     }
-    pub fn apply_scan(&self, result: &ScanResult) -> Result<()> {
+    pub fn apply_scan(&self, result: &ScanResult) -> Result<bool> {
         for r in &result.records {
             if r.path.to_str().is_none() {
                 bail!("scan path is not UTF-8: {}", r.path.display());
@@ -80,18 +166,70 @@ impl Store {
             }
         }
         let tx = self.conn.unchecked_transaction()?;
-        let mut q = tx.prepare("SELECT id,path,fingerprint,cue_sheet,cue_number,cue_start_frame,cue_end_frame FROM tracks")?;
-        let old: Vec<Existing> = q
-            .query_map([], |r| {
-                Ok(Existing {
-                    id: r.get(0)?,
-                    path: PathBuf::from(r.get::<_, String>(1)?),
-                    hash: fingerprint_from_row(r, 2)?,
-                    cue: cue_from_row(r, 3)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let (mut exact, prefixes) = scan_scope(&result.roots)?;
+        exact.extend(result.records.iter().map(|record| {
+            record
+                .cue
+                .as_ref()
+                .map_or(record.path.as_path(), |cue| cue.sheet.as_path())
+                .to_str()
+                .expect("scan record paths validated above")
+        }));
+        let mut selected = HashMap::new();
+        let read_existing = |r: &rusqlite::Row<'_>| {
+            Ok(Existing {
+                id: r.get(0)?,
+                path: PathBuf::from(r.get::<_, String>(1)?),
+                hash: fingerprint_from_row(r, 2)?,
+                cue: cue_from_row(r, 3)?,
+                independent: r.get(7)?,
+            })
+        };
+        let mut q = tx.prepare(&format!(
+            "SELECT id,path,fingerprint,cue_sheet,cue_number,cue_start_frame,cue_end_frame,relocation_independent
+             FROM tracks WHERE id IN ({SCAN_SCOPE_IDS})"
+        ))?;
+        for row in q.query_map(
+            params![
+                serde_json::to_string(&exact)?,
+                serde_json::to_string(&prefixes)?
+            ],
+            read_existing,
+        )? {
+            let row = row?;
+            selected.insert(row.id, row);
+        }
         drop(q);
+        let candidate_hashes: HashSet<&str> = result
+            .records
+            .iter()
+            .filter_map(|record| record.fingerprint.as_deref())
+            .collect();
+        let ordinary_candidate_hashes: HashSet<&str> = result
+            .records
+            .iter()
+            .filter(|record| record.cue.is_none())
+            .filter_map(|record| record.fingerprint.as_deref())
+            .collect();
+        let mut q = tx.prepare(
+            "SELECT id,path,fingerprint,cue_sheet,cue_number,cue_start_frame,cue_end_frame,relocation_independent
+             FROM tracks INDEXED BY tracks_fingerprint WHERE fingerprint=?1",
+        )?;
+        for hash in &candidate_hashes {
+            let hash = blake3::Hash::from_hex(hash).context("Invalid scan BLAKE3 fingerprint")?;
+            let mut rows = q.query([hash.as_bytes().as_slice()])?;
+            while let Some(row) = rows.next()? {
+                let id = row.get::<_, i64>(0)?;
+                if let std::collections::hash_map::Entry::Vacant(entry) = selected.entry(id) {
+                    entry.insert(read_existing(row)?);
+                }
+            }
+        }
+        drop(q);
+        // The original table scan visited integer primary keys in row order.
+        // Preserve that order for identities and global relocation candidates.
+        let mut old: Vec<Existing> = selected.into_values().collect();
+        old.sort_unstable_by_key(|record| record.id);
         let identities: HashSet<TrackIdentity<'_>> = result
             .records
             .iter()
@@ -101,11 +239,6 @@ impl Store {
             .suppressed_sources
             .iter()
             .map(PathBuf::as_path)
-            .collect();
-        let candidate_hashes: HashSet<&str> = result
-            .records
-            .iter()
-            .filter_map(|r| r.fingerprint.as_deref())
             .collect();
         let mut excluded_directories: HashSet<(&Path, &Path)> = result
             .skipped_directories
@@ -177,7 +310,10 @@ impl Store {
                 .any(|ancestor| excluded_directories.contains(&(root, ancestor)))
         };
         let mut byidentity = HashMap::new();
-        let mut byhash: HashMap<&str, Vec<&Existing>> = HashMap::new();
+        // None records ambiguity without allocating a candidate vector per segment.
+        let mut candidates_by_key: HashMap<RelocationKey<'_>, Option<&Existing>> = HashMap::new();
+        let mut absent_sheets = HashMap::new();
+        let mut absent_ordinary = HashSet::new();
         for record in &old {
             let key = identity(&record.path, record.cue.as_ref());
             let owner = record
@@ -188,12 +324,44 @@ impl Store {
                 && let Some(hash) = record.hash.as_deref()
                 && candidate_hashes.contains(hash)
                 && !unconfirmed(record)
-                && fs::symlink_metadata(owner)
-                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+                && match &record.cue {
+                    Some(cue) => *absent_sheets.entry(cue.sheet.as_path()).or_insert_with(|| {
+                        fs::symlink_metadata(owner)
+                            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+                    }),
+                    None => fs::symlink_metadata(owner)
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+                }
             {
-                byhash.entry(hash).or_default().push(record);
+                if record.cue.is_none() && ordinary_candidate_hashes.contains(hash) {
+                    absent_ordinary.insert(record.id);
+                }
+                if record.cue.is_some() || !record.independent {
+                    candidates_by_key
+                        .entry(relocation_key(hash, record.cue.as_ref()))
+                        .and_modify(|candidate| *candidate = None)
+                        .or_insert(Some(record));
+                }
             }
             byidentity.insert(key, record.id);
+        }
+        // Ordinary moves require uniqueness on both sides. Resolve exact paths
+        // first; never let scan order choose one of several newly found copies.
+        let mut new_ordinary: HashMap<&str, Option<&Path>> = HashMap::new();
+        for record in &result.records {
+            if record.cue.is_none()
+                && !byidentity.contains_key(&identity(&record.path, None))
+                && let Some(hash) = record.fingerprint.as_deref()
+            {
+                new_ordinary
+                    .entry(hash)
+                    .and_modify(|path| {
+                        if *path != Some(record.path.as_path()) {
+                            *path = None;
+                        }
+                    })
+                    .or_insert(Some(record.path.as_path()));
+            }
         }
         let mut seen = HashSet::new();
         tx.execute_batch(
@@ -234,22 +402,14 @@ impl Store {
             let key = identity(&r.path, r.cue.as_ref());
             let id = byidentity.get(&key).copied().or_else(|| {
                 r.fingerprint.as_deref().and_then(|hash| {
-                    let mut candidates =
-                        byhash
-                            .get(hash)?
-                            .iter()
-                            .filter(|old| match (&old.cue, &r.cue) {
-                                (None, None) => true,
-                                (Some(a), Some(b)) => {
-                                    a.number == b.number
-                                        && a.start_frame == b.start_frame
-                                        && a.end_frame == b.end_frame
-                                }
-                                _ => false,
-                            });
-                    let candidate = candidates.next()?;
-                    (candidates.next().is_none() && !seen.contains(&candidate.id))
-                        .then_some(candidate.id)
+                    if r.cue.is_none() && !new_ordinary.get(hash).is_some_and(Option::is_some) {
+                        return None;
+                    }
+                    let candidate = candidates_by_key
+                        .get(&relocation_key(hash, r.cue.as_ref()))
+                        .copied()
+                        .flatten()?;
+                    (!seen.contains(&candidate.id)).then_some(candidate.id)
                 })
             });
             let m = &r.media;
@@ -351,10 +511,11 @@ impl Store {
                 .map_or(o.path.as_path(), |cue| cue.sheet.as_path());
             if !seen.contains(&o.id)
                 && !(o.cue.is_none() && suppressed.contains(o.path.as_path()))
-                && result
+                && (result
                     .roots
                     .iter()
                     .any(|root| owner == root || owner.starts_with(root))
+                    || absent_ordinary.contains(&o.id))
                 && !unconfirmed(o)
             {
                 changed_tracks += mark_missing.execute([o.id])?;
@@ -365,7 +526,7 @@ impl Store {
         if changed_tracks != 0 {
             self.track_cache.borrow_mut().entries.clear();
         }
-        Ok(())
+        Ok(changed_tracks != 0)
     }
 }
 
@@ -407,7 +568,7 @@ mod tests {
             records: vec![record],
             ..ScanResult::default()
         };
-        store.apply_scan(&scan).unwrap();
+        assert!(store.apply_scan(&scan).unwrap());
         store.enqueue_sources(&["/music".into()], &[]).unwrap();
         let id = store.queue_page(0, 10).unwrap().rows[0].track_id;
         (store, scan, id)
@@ -427,7 +588,7 @@ mod tests {
         let state = store.queue_state().unwrap();
         let track = store.track(id).unwrap().unwrap();
         for _ in 0..2 {
-            store.apply_scan(&scan).unwrap();
+            assert!(!store.apply_scan(&scan).unwrap());
             assert_eq!(store.queue_state().unwrap(), state);
             assert_eq!(store.queue_page(0, 10).unwrap(), page);
             assert_eq!(store.track(id).unwrap().unwrap(), track);
@@ -480,7 +641,7 @@ mod tests {
         store.apply_scan(&scan).unwrap();
         assert_eq!(store.queue_state().unwrap(), state);
         assert_eq!(store.queue_page(0, 10).unwrap(), page);
-        let known = store.known_files().unwrap();
+        let known = store.known_files(&scan.roots).unwrap();
         let raw = known[0].media.as_ref().unwrap();
         assert_eq!(raw.title, "New raw title");
         assert_eq!(raw.artist, "New raw artist");
@@ -640,7 +801,7 @@ mod tests {
             (None, None, None)
         );
         assert_eq!(track.release_date, None);
-        let known = store.known_files().unwrap().remove(0);
+        let known = store.known_files(&scan.roots).unwrap().remove(0);
         assert_eq!(known.size, scan.records[0].size);
         assert_eq!(known.modified_ns, scan.records[0].modified_ns);
         // A stale probe must refresh even when every other assigned field matches.
@@ -651,9 +812,9 @@ mod tests {
                 [PROBE_VERSION - 1, id],
             )
             .unwrap();
-        assert!(store.known_files().unwrap()[0].media.is_none());
+        assert!(store.known_files(&scan.roots).unwrap()[0].media.is_none());
         store.apply_scan(&scan).unwrap();
-        assert!(store.known_files().unwrap()[0].media.is_some());
+        assert!(store.known_files(&scan.roots).unwrap()[0].media.is_some());
         assert_eq!(store.queue_state().unwrap(), state);
         assert_eq!(store.queue_page(0, 10).unwrap(), page);
     }
@@ -677,5 +838,376 @@ mod tests {
         assert_eq!(store.track(id).unwrap().unwrap().title, "Unqueued title");
         assert_eq!(store.queue_state().unwrap(), state);
         assert_eq!(store.queue_page(0, 10).unwrap(), page);
+    }
+
+    #[test]
+    fn exact_file_known_metadata_excludes_unrelated_tracks_and_keeps_cue_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("selected.wav");
+        std::fs::write(&path, []).unwrap();
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let mut whole = record();
+        whole.path = path.clone();
+        let mut segment = whole.clone();
+        segment.cue = Some(CueSegment {
+            sheet: directory.path().join("album.cue"),
+            number: 1,
+            start_frame: 0,
+            end_frame: Some(4500),
+        });
+        let mut records = vec![segment, whole];
+        for index in 0..128 {
+            let mut unrelated = record();
+            unrelated.path = directory.path().join(format!("other/{index}.wav"));
+            unrelated.fingerprint = Some(
+                blake3::hash(index.to_string().as_bytes())
+                    .to_hex()
+                    .to_string(),
+            );
+            records.push(unrelated);
+        }
+        assert!(
+            store
+                .apply_scan(&ScanResult {
+                    records,
+                    ..ScanResult::default()
+                })
+                .unwrap()
+        );
+        let known = store.known_files(std::slice::from_ref(&path)).unwrap();
+        assert_eq!(known.len(), 2);
+        assert!(known[0].cue.is_some());
+        assert!(known[1].cue.is_none());
+        assert!(known.iter().all(|known| known.path == path));
+        assert!(store.known_files(&[]).unwrap().is_empty());
+        assert!(
+            store
+                .known_files(&[directory.path().join("../selected.wav")])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn tiny_scan_relocates_global_identity_without_touching_unrelated_missing_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let old_path = directory.path().join("old/source.wav");
+        let requested = directory.path().join("tiny");
+        let mut original = record();
+        original.path = old_path.clone();
+        let mut unrelated = record();
+        unrelated.path = directory.path().join("tiny-neighbor/absent.wav");
+        unrelated.fingerprint = Some(blake3::hash(b"unrelated").to_hex().to_string());
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        store
+            .apply_scan(&ScanResult {
+                records: vec![original.clone(), unrelated.clone()],
+                ..ScanResult::default()
+            })
+            .unwrap();
+        let id = store.track_id_for_source(&old_path, None).unwrap().unwrap();
+        let unrelated_id = store
+            .track_id_for_source(&unrelated.path, None)
+            .unwrap()
+            .unwrap();
+        store.set_favorite(&[id], true).unwrap();
+        original.path = requested.join("音楽.wav");
+        let scan = ScanResult {
+            roots: vec![requested.clone()],
+            records: vec![original.clone()],
+            ..ScanResult::default()
+        };
+        assert!(store.apply_scan(&scan).unwrap());
+        assert_eq!(
+            store.track_id_for_source(&original.path, None).unwrap(),
+            Some(id)
+        );
+        assert!(store.track(id).unwrap().unwrap().favorite);
+        assert!(!store.track(unrelated_id).unwrap().unwrap().missing);
+        assert!(!store.apply_scan(&scan).unwrap());
+        let absent = ScanResult {
+            roots: vec![requested],
+            ..ScanResult::default()
+        };
+        assert!(store.apply_scan(&absent).unwrap());
+        assert!(store.track(id).unwrap().unwrap().missing);
+        assert!(!store.track(unrelated_id).unwrap().unwrap().missing);
+        assert!(!store.apply_scan(&absent).unwrap());
+        assert!(store.apply_scan(&scan).unwrap());
+        assert!(!store.track(id).unwrap().unwrap().missing);
+    }
+
+    #[test]
+    fn uncertain_global_candidate_and_failed_scan_preserve_existing_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut original = record();
+        original.path = directory.path().join("old/source.wav");
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        store
+            .apply_scan(&ScanResult {
+                records: vec![original.clone()],
+                ..ScanResult::default()
+            })
+            .unwrap();
+        let id = store
+            .track_id_for_source(&original.path, None)
+            .unwrap()
+            .unwrap();
+        store.enqueue_sources(&[], &[id]).unwrap();
+        let before = store.track(id).unwrap().unwrap();
+        let mut replacement = original.clone();
+        replacement.path = directory.path().join("new/source.wav");
+        let mut scan = ScanResult {
+            roots: vec![replacement.path.clone()],
+            records: vec![replacement.clone()],
+            uncertainties: vec![crate::library::ScanUncertainty::File(original.path.clone())],
+            ..ScanResult::default()
+        };
+        assert!(store.apply_scan(&scan).unwrap());
+        assert_eq!(store.track(id).unwrap().unwrap(), before);
+        let new_id = store
+            .track_id_for_source(&replacement.path, None)
+            .unwrap()
+            .unwrap();
+        assert_ne!(id, new_id);
+        let queue = store.queue_state().unwrap();
+        scan.records[0].media.title = "Must roll back".into();
+        let mut invalid = record();
+        invalid.path = directory.path().join("new/invalid.wav");
+        invalid.fingerprint = Some("invalid fingerprint".into());
+        scan.records.push(invalid);
+        assert!(store.apply_scan(&scan).is_err());
+        assert_eq!(
+            store.track(new_id).unwrap().unwrap().title,
+            replacement.media.title
+        );
+        assert_eq!(store.track(id).unwrap().unwrap(), before);
+        assert_eq!(store.queue_state().unwrap(), queue);
+        store
+            .conn
+            .execute_batch(
+                "CREATE TEMP TRIGGER reject_scan_insert BEFORE INSERT ON tracks
+             WHEN NEW.raw_title='Reject insert'
+             BEGIN SELECT RAISE(ABORT,'rejected scan insert'); END",
+            )
+            .unwrap();
+        let mut rejected = scan.records.pop().unwrap();
+        rejected.fingerprint = Some(blake3::hash(b"rejected").to_hex().to_string());
+        rejected.media.title = "Reject insert".into();
+        original.media.title = "Queued update must roll back".into();
+        scan.records.extend([original, rejected]);
+        assert!(store.apply_scan(&scan).is_err());
+        assert_eq!(
+            store.track(new_id).unwrap().unwrap().title,
+            replacement.media.title
+        );
+        assert_eq!(store.track(id).unwrap().unwrap(), before);
+        assert_eq!(store.queue_state().unwrap(), queue);
+    }
+
+    #[test]
+    fn one_missing_ordinary_source_and_two_new_copies_preserve_old_id_in_either_scan_order() {
+        for reverse in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let store = Store::open(Path::new(":memory:")).unwrap();
+            let mut original = record();
+            original.path = directory.path().join("old/source.wav");
+            store
+                .apply_scan(&ScanResult {
+                    records: vec![original.clone()],
+                    ..ScanResult::default()
+                })
+                .unwrap();
+            let id = store
+                .track_id_for_source(&original.path, None)
+                .unwrap()
+                .unwrap();
+            store.set_favorite(&[id], true).unwrap();
+            store.enqueue_tracks(&[id]).unwrap();
+            let queue_id = store.queue_ids().unwrap()[0];
+            let mut first = original.clone();
+            first.path = directory.path().join("new/first.wav");
+            let mut second = original.clone();
+            second.path = directory.path().join("new/second.wav");
+            let mut records = vec![first.clone(), second.clone()];
+            if reverse {
+                records.reverse();
+            }
+            let scan = ScanResult {
+                roots: vec![directory.path().join("new")],
+                records,
+                ..ScanResult::default()
+            };
+            store.apply_scan(&scan).unwrap();
+            let retained = store.track(id).unwrap().unwrap();
+            assert_eq!(retained.path, original.path);
+            assert!(retained.favorite);
+            assert!(retained.missing);
+            let first_id = store
+                .track_id_for_source(&first.path, None)
+                .unwrap()
+                .unwrap();
+            let second_id = store
+                .track_id_for_source(&second.path, None)
+                .unwrap()
+                .unwrap();
+            assert_ne!(first_id, id);
+            assert_ne!(second_id, id);
+            assert_ne!(first_id, second_id);
+            assert_eq!(store.queue_ids().unwrap(), [queue_id]);
+            let groups = store.duplicate_groups_page(0, 10).unwrap();
+            assert_eq!(groups.rows[0].missing_members, 1);
+            assert_eq!(groups.rows[0].present_members, 2);
+            assert!(!store.apply_scan(&scan).unwrap());
+            assert_eq!(store.track(id).unwrap().unwrap(), retained);
+        }
+    }
+
+    #[test]
+    fn two_missing_ordinary_sources_and_one_new_target_preserve_both_source_states() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let mut first = record();
+        first.path = directory.path().join("old/first.wav");
+        let mut second = first.clone();
+        second.path = directory.path().join("old/second.wav");
+        store
+            .apply_scan(&ScanResult {
+                records: vec![first.clone(), second.clone()],
+                ..ScanResult::default()
+            })
+            .unwrap();
+        let first_id = store
+            .track_id_for_source(&first.path, None)
+            .unwrap()
+            .unwrap();
+        let second_id = store
+            .track_id_for_source(&second.path, None)
+            .unwrap()
+            .unwrap();
+        store
+            .edit_track(first_id, Some("Owned title"), None, None, None)
+            .unwrap();
+        store.increment_play_count(second_id).unwrap();
+        let mut target = first.clone();
+        target.path = directory.path().join("new/target.wav");
+        store
+            .apply_scan(&ScanResult {
+                roots: vec![directory.path().join("new")],
+                records: vec![target.clone()],
+                ..ScanResult::default()
+            })
+            .unwrap();
+        let target_id = store
+            .track_id_for_source(&target.path, None)
+            .unwrap()
+            .unwrap();
+        assert_ne!(target_id, first_id);
+        assert_ne!(target_id, second_id);
+        assert_eq!(store.track(first_id).unwrap().unwrap().title, "Owned title");
+        assert_eq!(store.track(second_id).unwrap().unwrap().play_count, 1);
+        assert!(store.track(first_id).unwrap().unwrap().missing);
+        assert!(store.track(second_id).unwrap().unwrap().missing);
+        let prepared = store.prepare_relocation(first_id, target_id).unwrap();
+        store.commit_relocation(&prepared).unwrap();
+        assert_eq!(store.track(first_id).unwrap().unwrap().path, target.path);
+        assert_eq!(store.track(first_id).unwrap().unwrap().title, "Owned title");
+        assert_eq!(store.track(second_id).unwrap().unwrap().path, second.path);
+        assert_eq!(store.track(second_id).unwrap().unwrap().play_count, 1);
+    }
+
+    #[test]
+    fn exact_ordinary_identities_do_not_count_as_new_relocation_targets() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let mut original = record();
+        original.path = directory.path().join("old/source.wav");
+        let mut existing = original.clone();
+        existing.path = directory.path().join("new/existing.wav");
+        store
+            .apply_scan(&ScanResult {
+                records: vec![original.clone(), existing.clone()],
+                ..ScanResult::default()
+            })
+            .unwrap();
+        let source_id = store
+            .track_id_for_source(&original.path, None)
+            .unwrap()
+            .unwrap();
+        let existing_id = store
+            .track_id_for_source(&existing.path, None)
+            .unwrap()
+            .unwrap();
+        original.path = directory.path().join("new/moved.wav");
+        store
+            .apply_scan(&ScanResult {
+                roots: vec![directory.path().join("new")],
+                records: vec![existing.clone(), original.clone()],
+                ..ScanResult::default()
+            })
+            .unwrap();
+        assert_eq!(
+            store.track_id_for_source(&original.path, None).unwrap(),
+            Some(source_id)
+        );
+        assert_eq!(
+            store.track_id_for_source(&existing.path, None).unwrap(),
+            Some(existing_id)
+        );
+        assert_eq!(store.track_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn independent_ordinary_identity_is_never_automatically_reassigned_by_later_scan() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let mut original = record();
+        original.path = directory.path().join("old/source.wav");
+        store
+            .apply_scan(&ScanResult {
+                records: vec![original.clone()],
+                ..ScanResult::default()
+            })
+            .unwrap();
+        let id = store
+            .track_id_for_source(&original.path, None)
+            .unwrap()
+            .unwrap();
+        store.keep_independent(id).unwrap();
+        let mut copy = original.clone();
+        copy.path = directory.path().join("new/copy.wav");
+        store
+            .apply_scan(&ScanResult {
+                roots: vec![directory.path().join("new")],
+                records: vec![copy.clone()],
+                ..ScanResult::default()
+            })
+            .unwrap();
+        assert_ne!(
+            store.track_id_for_source(&copy.path, None).unwrap(),
+            Some(id)
+        );
+        assert_eq!(store.track(id).unwrap().unwrap().path, original.path);
+        assert!(store.track(id).unwrap().unwrap().missing);
+        store
+            .apply_scan(&ScanResult {
+                records: vec![original.clone(), copy],
+                ..ScanResult::default()
+            })
+            .unwrap();
+        assert_eq!(
+            store.track_id_for_source(&original.path, None).unwrap(),
+            Some(id)
+        );
+        let members = store
+            .duplicate_members_page(original.fingerprint.as_deref().unwrap(), 0, 10)
+            .unwrap();
+        assert!(
+            members
+                .rows
+                .iter()
+                .find(|member| member.track.id == id)
+                .unwrap()
+                .independent
+        );
     }
 }

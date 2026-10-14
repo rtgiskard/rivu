@@ -37,6 +37,60 @@ fn scan_paths(paths: &[PathBuf], known: &[KnownFile], ffmpeg_enabled: bool) -> R
     )
 }
 
+#[test]
+fn new_and_retargeted_cue_sheets_reuse_known_sources_outside_request_scope() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let sources = directory.path().join("sources");
+    let sheets = directory.path().join("sheets");
+    fs::create_dir_all(&sources)?;
+    fs::create_dir_all(&sheets)?;
+    let first = sources.join("first.wav");
+    let second = sources.join("second.wav");
+    wav(&first, 150)?;
+    wav(&second, 150)?;
+    let mut baseline = scan_paths(&[first, second], &[], false)?;
+    assert!(baseline.errors.is_empty(), "{:?}", baseline.errors);
+    for record in &mut baseline.records {
+        record.media.artist = format!(
+            "Cached {}",
+            record.path.file_stem().unwrap().to_str().unwrap()
+        );
+    }
+    let store = crate::store::Store::open(Path::new(":memory:"))?;
+    store.apply_scan(&baseline)?;
+    let sheet = sheets.join("album.cue");
+    for (index, name) in ["first", "second"].into_iter().enumerate() {
+        fs::write(
+            &sheet,
+            format!(
+                "FILE \"../sources/{name}.wav\" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n"
+            ),
+        )?;
+        // Exercise both explicit sheet and tiny directory requests. Neither
+        // may discard reusable whole-source metadata beyond the request root.
+        let requested = if index == 0 {
+            sheet.clone()
+        } else {
+            sheets.clone()
+        };
+        let known = store.known_files(std::slice::from_ref(&requested))?;
+        let scan = super::scan_paths(
+            &[requested],
+            &known,
+            false,
+            &[directory.path().to_path_buf()],
+            crate::config::Config::default().scan_max_depth,
+            &ScanCancellation::default(),
+            |_, _, _, _, _| {},
+        )?;
+        assert!(scan.errors.is_empty(), "{:?}", scan.errors);
+        assert_eq!(scan.records.len(), 1);
+        assert_eq!(scan.records[0].media.artist, format!("Cached {name}"));
+        store.apply_scan(&scan)?;
+    }
+    Ok(())
+}
+
 fn scan_paths_at_depth(
     paths: &[PathBuf],
     known: &[KnownFile],
@@ -972,7 +1026,7 @@ fn ordinary_scan_rehashes_same_size_wav_after_pre_epoch_mtime_change() -> Result
     let store = crate::store::Store::open(Path::new(":memory:"))?;
     store.apply_scan(&original)?;
     let id = store.track_id_for_source(&audio, None)?.unwrap();
-    let known = store.known_files()?;
+    let known = store.known_files(std::slice::from_ref(&audio))?;
     assert_eq!(known[0].modified_ns, -2_000_000_000);
 
     let mut contents = fs::read(&audio)?;
@@ -1504,6 +1558,106 @@ fn assert_playlist_roundtrip(path: &Path) -> Result<()> {
 fn m3u_roundtrip_preserves_hash_paths_and_first_track_order() -> Result<()> {
     let directory = tempfile::tempdir()?;
     assert_playlist_roundtrip(&directory.path().join("playlist.m3u8"))
+}
+
+#[test]
+fn m3u_metadata_line_breaks_preserve_imported_path_sequence() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let paths: Vec<_> = ["#first.wav", "second.wav", "third.wav"]
+        .into_iter()
+        .map(|name| directory.path().join(name))
+        .collect();
+    for path in &paths {
+        wav(path, 75)?;
+    }
+    let scan = scan_paths(&paths, &[], false)?;
+    assert!(scan.errors.is_empty(), "{:?}", scan.errors);
+    assert_eq!(scan.records.len(), 3);
+    let mut tracks: Vec<_> = scan
+        .records
+        .iter()
+        .enumerate()
+        .map(|(index, record)| track_from_record(index as i64 + 1, record))
+        .collect();
+    tracks[0].artist = "Artist\r\nextra.wav".into();
+    tracks[0].title = "Title\n#EXTINF:9,Injected\rTail".into();
+    tracks[1].artist.clear();
+    tracks[1].title = "Title only\r\nextra.wav".into();
+    tracks[2].artist = "Artist only\nextra.wav\rTail".into();
+    tracks[2].title.clear();
+    let sequence = [3, 1, 2];
+    let destination = directory.path().join("playlist.m3u8");
+    export_m3u(&destination, playlist_tracks(&sequence, &tracks))?;
+    let imported = import_m3u(&destination)?;
+    assert_eq!(imported.len(), sequence.len());
+    for (item, id) in imported.iter().zip(sequence) {
+        let expected = tracks.iter().find(|track| track.id == id).unwrap();
+        assert_eq!(item.path, expected.path);
+        assert_eq!(item.cue_track, None);
+    }
+    assert_eq!(
+        imported[0].name.as_deref(),
+        Some("Artist only extra.wav Tail")
+    );
+    assert_eq!(
+        imported[1].name.as_deref(),
+        Some("Artist  extra.wav - Title #EXTINF:9,Injected Tail")
+    );
+    assert_eq!(imported[2].name.as_deref(), Some("Title only  extra.wav"));
+    let text = fs::read_to_string(&destination)?;
+    assert!(!text.contains('\r'));
+    assert!(text.lines().any(|line| line == "./#first.wav"));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn m3u_path_line_breaks_preserve_existing_destination_bytes() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let audio = directory.path().join("audio.wav");
+    wav(&audio, 75)?;
+    let scan = scan_paths(std::slice::from_ref(&audio), &[], false)?;
+    assert!(scan.errors.is_empty(), "{:?}", scan.errors);
+    let valid = track_from_record(1, &scan.records[0]);
+    let destination = directory.path().join("existing.m3u8");
+    let original = b"original\0playlist\r\n\xff";
+    fs::write(&destination, original)?;
+    for name in ["bad\nextra.wav", "bad\rextra.wav"] {
+        let mut invalid = valid.clone();
+        invalid.id = 2;
+        invalid.path = directory.path().join(name);
+        fs::copy(&audio, &invalid.path)?;
+        let error = export_m3u(&destination, [Ok(valid.clone()), Ok(invalid)]).unwrap_err();
+        assert!(error.to_string().contains("path containing CR or LF"));
+        assert_eq!(fs::read(&destination)?, original);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn m3u_cue_sheet_line_breaks_preserve_existing_destination_bytes() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    wav(&directory.path().join("audio.wav"), 225)?;
+    let destination = directory.path().join("existing.m3u8");
+    let original = b"original\0playlist\r\n\xff";
+    fs::write(&destination, original)?;
+    for name in ["album\nextra.cue", "album\rextra.cue"] {
+        let sheet = directory.path().join(name);
+        two_track_sheet(&sheet)?;
+        let scan = scan_paths(std::slice::from_ref(&sheet), &[], false)?;
+        assert!(scan.errors.is_empty(), "{:?}", scan.errors);
+        assert_eq!(scan.records.len(), 2);
+        let tracks = scan
+            .records
+            .iter()
+            .enumerate()
+            .map(|(index, record)| Ok(track_from_record(index as i64 + 1, record)));
+        let error = export_m3u(&destination, tracks).unwrap_err();
+        assert!(error.to_string().contains("path containing CR or LF"));
+        assert_eq!(fs::read(&destination)?, original);
+    }
+    Ok(())
 }
 
 #[test]

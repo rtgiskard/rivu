@@ -7,7 +7,7 @@ impl Core {
         // pending state before spawning; never turn acceptance into an error later.
         if matches!(
             &command,
-            Command::Scan { .. } | Command::ImportPlaylist { .. }
+            Command::Scan { .. } | Command::ImportPlaylist { .. } | Command::RelocateTrack { .. }
         ) {
             return self.apply_command(command);
         }
@@ -22,6 +22,16 @@ impl Core {
         match command {
             Command::Scan { paths, force } => return self.scan(paths, None, force),
             Command::CancelScan { id } => self.cancel_scan(id)?,
+            Command::RelocateTrack {
+                source_id,
+                target_id,
+            } => return self.relocate_track(source_id, target_id),
+            Command::CancelRelocation { id } => self.cancel_relocation(id)?,
+            Command::KeepTrackIndependent { track_id } => {
+                if self.store.keep_independent(track_id)? {
+                    self.state.library.revision = self.state.library.revision.wrapping_add(1);
+                }
+            }
             Command::Play { track_id } => {
                 self.track(track_id)?;
                 let existing = self.store.queued_track(track_id)?;
@@ -123,12 +133,14 @@ impl Core {
             Command::RandomizeQueue => self.randomize_queue(&mut rand::rng())?,
             Command::DeduplicateQueue => self.deduplicate_queue()?,
             Command::Shuffle { enabled } => {
-                self.state.playback.shuffle = enabled;
-                self.played.clear();
-                self.played_cursor = 0;
-                if let Some(id) = self.state.queue.current_id {
-                    self.played.push(id);
-                    self.played_cursor = 1;
+                if self.state.playback.shuffle != enabled {
+                    self.state.playback.shuffle = enabled;
+                    self.played.clear();
+                    self.played_cursor = 0;
+                    if let Some(id) = self.state.queue.current_id {
+                        self.played.push(id);
+                        self.played_cursor = 1;
+                    }
                 }
             }
             Command::Repeat { mode } => self.state.playback.repeat = mode,
@@ -153,9 +165,12 @@ impl Core {
                 directories,
                 track_ids,
             } => {
-                self.store
-                    .add_playlist_sources(playlist_id, &directories, &track_ids)?;
-                self.reload_playlists()?;
+                if self
+                    .store
+                    .add_playlist_sources(playlist_id, &directories, &track_ids)?
+                {
+                    self.reload_playlists()?;
+                }
             }
             Command::RemovePlaylistEntry { entry_id } => self.remove_playlist_entry(entry_id)?,
             Command::MovePlaylistEntry { entry_id, index } => {

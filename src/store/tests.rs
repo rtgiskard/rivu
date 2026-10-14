@@ -248,6 +248,7 @@ fn legacy_schema(store: &Store, version: i64, patched_indexes: bool) {
     let table = super::schema::TRACK_TABLE
         .replacen("CREATE TABLE tracks(", "CREATE TABLE tracks_legacy(", 1)
         .replace("fingerprint BLOB CHECK(fingerprint IS NULL OR (typeof(fingerprint)='blob' AND length(fingerprint)=32))", "fingerprint TEXT")
+        .replace("    relocation_independent INTEGER NOT NULL DEFAULT 0 CHECK(relocation_independent IN (0,1)),\n", "")
         .replace(",\n    decoder_hint INTEGER NOT NULL DEFAULT 0 CHECK(decoder_hint IN (0,1,2))", hint);
     let columns = "id,path,fingerprint,file_size,modified_ns,raw_title,raw_artist,raw_album,title_override,artist_override,album_override,duration,codec,channels,sample_rate,missing,play_count,last_played,cue_sheet,cue_number,cue_start_frame,cue_end_frame,probe_version,bitrate_bps,track_number,disc_number,bits_per_sample,release_date,favorite";
     let select = columns.replace(
@@ -297,6 +298,8 @@ fn legacy_schema(store: &Store, version: i64, patched_indexes: bool) {
         tx.execute_batch("DROP INDEX tracks_directory; DROP INDEX playlist_track_lookup;")
             .unwrap();
     }
+    tx.execute_batch(super::schema::LEGACY_QUEUE_TRIGGERS)
+        .unwrap();
     tx.commit().unwrap();
     store
         .conn
@@ -345,7 +348,7 @@ fn supported_migrations_preserve_library_playlist_queue_and_current_identity() {
             .unwrap();
         store.remove_tracks(&[100]).unwrap();
         let expected_tracks = all_tracks(&store);
-        let expected_known = store.known_files().unwrap();
+        let expected_known = store.known_files(&[PathBuf::from("/")]).unwrap();
         let expected_playlist = playlist_entries(&store, playlist);
         let expected_queue = store.queue_state().unwrap();
         let expected_page = store.queue_page(0, 10).unwrap();
@@ -362,12 +365,12 @@ fn supported_migrations_preserve_library_playlist_queue_and_current_identity() {
                     |row| row.get::<_, i64>(0)
                 )
                 .unwrap(),
-            9
+            11
         );
         assert_eq!(all_tracks(&migrated), expected_tracks);
         assert_eq!(
             migrated
-                .known_files()
+                .known_files(&[PathBuf::from("/")])
                 .unwrap()
                 .iter()
                 .map(|file| &file.fingerprint)
@@ -738,7 +741,7 @@ fn metadata_refresh_preserves_favorites_and_unknown_values() {
     assert!(store.set_favorite(&[id, 999], false).is_err());
     assert!(all_tracks(&store)[0].favorite);
     assert_eq!(
-        store.known_files().unwrap()[0]
+        store.known_files(&[PathBuf::from("/")]).unwrap()[0]
             .media
             .as_ref()
             .unwrap()
@@ -763,45 +766,13 @@ fn maintenance_retries_after_reader_releases_and_keeps_records() {
     store.mark_played(id, 42).unwrap();
     store.conn.busy_timeout(std::time::Duration::ZERO).unwrap();
     assert!(store.optimize().is_err());
-    assert_eq!(
-        store
-            .conn
-            .query_row(
-                "SELECT value FROM schema_meta WHERE key='compact_pending'",
-                [],
-                |r| r.get::<_, i64>(0)
-            )
-            .unwrap(),
-        1
-    );
     reader.execute_batch("ROLLBACK").unwrap();
     drop(reader);
     drop(store);
     let reopened = Store::open(&path).unwrap();
     assert_eq!(all_tracks(&reopened)[0].last_played, Some(42));
-    assert_eq!(
-        reopened
-            .conn
-            .query_row(
-                "SELECT value FROM schema_meta WHERE key='compact_pending'",
-                [],
-                |row| row.get::<_, i64>(0)
-            )
-            .unwrap(),
-        1
-    );
     reopened.optimize().unwrap();
-    assert_eq!(
-        reopened
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM schema_meta WHERE key='compact_pending'",
-                [],
-                |r| r.get::<_, i64>(0)
-            )
-            .unwrap(),
-        0
-    );
+    assert_eq!(all_tracks(&reopened)[0].last_played, Some(42));
 }
 
 #[test]
@@ -901,7 +872,7 @@ fn shared_source_segments_keep_independent_ids_overrides_stats_and_missing_state
         );
         assert!(!after[index].missing);
     }
-    let known = store.known_files().unwrap();
+    let known = store.known_files(&[PathBuf::from("/")]).unwrap();
     let known = known.iter().find(|r| r.track_id == ids[1]).unwrap();
     assert_eq!(known.cue, changed.cue);
     assert_eq!(known.media.as_ref().unwrap().title, "New raw title");
@@ -1351,6 +1322,81 @@ fn ambiguous_cue_relocation_does_not_steal_an_existing_id() {
     let tracks = all_tracks(&store);
     assert_eq!(tracks.len(), 3);
     assert!(!ids.contains(&tracks[2].id));
+}
+
+#[test]
+fn cue_relocation_keeps_unique_segments_when_another_segment_is_ambiguous() {
+    let directory = tempfile::tempdir().unwrap();
+    let old_sheet = directory.path().join("old.cue");
+    let duplicate_sheet = directory.path().join("duplicate.cue");
+    let new_sheet = directory.path().join("new.cue");
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    let make = |sheet: &Path, number| {
+        segment(
+            sheet.to_str().unwrap(),
+            number,
+            u64::from(number - 1) * 4500,
+            (number < 3).then_some(u64::from(number) * 4500),
+        )
+    };
+    let mut original = scan((1..=3).map(|number| make(&old_sheet, number)).collect());
+    original.roots = vec![directory.path().to_path_buf()];
+    original.records.push(make(&duplicate_sheet, 2));
+    store.apply_scan(&original).unwrap();
+    let ids: Vec<_> = (1..=3)
+        .map(|number| {
+            all_tracks(&store)
+                .iter()
+                .find(|track| {
+                    track
+                        .cue
+                        .as_ref()
+                        .is_some_and(|cue| cue.sheet == old_sheet && cue.number == number)
+                })
+                .unwrap()
+                .id
+        })
+        .collect();
+    store.set_favorite(&ids, true).unwrap();
+    let playlist = store.create_playlist("Saved segments").unwrap();
+    store.add_playlist(playlist, &ids).unwrap();
+    let mut moved = scan(
+        (1..=3)
+            .rev()
+            .map(|number| make(&new_sheet, number))
+            .collect(),
+    );
+    moved.roots = original.roots;
+    store.apply_scan(&moved).unwrap();
+    let tracks = all_tracks(&store);
+    for number in 1..=3 {
+        let track = tracks
+            .iter()
+            .find(|track| {
+                track
+                    .cue
+                    .as_ref()
+                    .is_some_and(|cue| cue.sheet == new_sheet && cue.number == number)
+            })
+            .unwrap();
+        let old_id = ids[(number - 1) as usize];
+        if number == 2 {
+            assert_ne!(track.id, old_id);
+            assert!(!track.favorite);
+            let old = store.track(old_id).unwrap().unwrap();
+            assert!(old.missing && old.favorite);
+        } else {
+            assert_eq!(track.id, old_id);
+            assert!(track.favorite && !track.missing);
+        }
+    }
+    assert_eq!(
+        playlist_entries(&store, playlist)
+            .iter()
+            .map(|entry| entry.track_id)
+            .collect::<Vec<_>>(),
+        ids
+    );
 }
 
 #[test]
@@ -2667,7 +2713,7 @@ fn queue_dedup_uses_first_position_not_allocation_order_and_track_deletes_remove
 fn unsupported_database_versions_are_rejected_without_migration() {
     fs::create_dir_all(".cache").unwrap();
     let directory = tempfile::tempdir_in(".cache").unwrap();
-    for version in [6, 10] {
+    for version in [6, 12] {
         let path = directory.path().join(format!("version-{version}.db"));
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection

@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub(super) const PROTOCOL_VERSION: u8 = 12;
+pub(super) const PROTOCOL_VERSION: u8 = 14;
 pub(super) const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub(super) const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub(super) const MAX_CLIENTS: usize = 16;
@@ -67,12 +67,12 @@ impl TryFrom<u8> for ResponseType {
 }
 pub(super) enum SessionState {
     Unbound,
-    Bound,
+    Bound(u32),
 }
 
 impl SessionState {
     pub(super) fn is_bound(&self) -> bool {
-        matches!(self, Self::Bound)
+        matches!(self, Self::Bound(_))
     }
 }
 
@@ -167,6 +167,21 @@ pub(super) enum WireQuery {
     },
     QueueEntries {
         queue_ids: Vec<u64>,
+    },
+    PlaylistEntry {
+        entry_id: i64,
+    },
+    DuplicateGroups {
+        offset: u64,
+        limit: u64,
+    },
+    DuplicateMembers {
+        fingerprint: String,
+        offset: u64,
+        limit: u64,
+    },
+    RelocationTask {
+        id: u64,
     },
 }
 
@@ -308,6 +323,16 @@ pub(super) enum WireCommand {
     CreatePlaylistFromQueue {
         name: String,
     },
+    RelocateTrack {
+        source_id: i64,
+        target_id: i64,
+    },
+    CancelRelocation {
+        id: u64,
+    },
+    KeepTrackIndependent {
+        track_id: i64,
+    },
 }
 
 pub(super) fn wire_usize(value: u64, field: &str) -> Result<usize> {
@@ -441,6 +466,21 @@ impl From<Query> for WireQuery {
                 expected,
             },
             Query::QueueEntries { queue_ids } => Self::QueueEntries { queue_ids },
+            Query::PlaylistEntry { entry_id } => Self::PlaylistEntry { entry_id },
+            Query::DuplicateGroups { offset, limit } => Self::DuplicateGroups {
+                offset: offset as u64,
+                limit: limit as u64,
+            },
+            Query::DuplicateMembers {
+                fingerprint,
+                offset,
+                limit,
+            } => Self::DuplicateMembers {
+                fingerprint,
+                offset: offset as u64,
+                limit: limit as u64,
+            },
+            Query::RelocationTask { id } => Self::RelocationTask { id },
         }
     }
 }
@@ -574,6 +614,21 @@ impl TryFrom<WireQuery> for Query {
                 expected,
             },
             WireQuery::QueueEntries { queue_ids } => Self::QueueEntries { queue_ids },
+            WireQuery::PlaylistEntry { entry_id } => Self::PlaylistEntry { entry_id },
+            WireQuery::DuplicateGroups { offset, limit } => Self::DuplicateGroups {
+                offset: wire_usize(offset, "offset")?,
+                limit: wire_usize(limit, "limit")?,
+            },
+            WireQuery::DuplicateMembers {
+                fingerprint,
+                offset,
+                limit,
+            } => Self::DuplicateMembers {
+                fingerprint,
+                offset: wire_usize(offset, "offset")?,
+                limit: wire_usize(limit, "limit")?,
+            },
+            WireQuery::RelocationTask { id } => Self::RelocationTask { id },
         })
     }
 }
@@ -704,6 +759,15 @@ impl From<Command> for WireCommand {
             },
             Command::MprisStatus { status } => Self::MprisStatus { status },
             Command::CreatePlaylistFromQueue { name } => Self::CreatePlaylistFromQueue { name },
+            Command::RelocateTrack {
+                source_id,
+                target_id,
+            } => Self::RelocateTrack {
+                source_id,
+                target_id,
+            },
+            Command::CancelRelocation { id } => Self::CancelRelocation { id },
+            Command::KeepTrackIndependent { track_id } => Self::KeepTrackIndependent { track_id },
         }
     }
 }
@@ -817,6 +881,17 @@ impl TryFrom<WireCommand> for Command {
             WireCommand::MprisStatus { status } => Self::MprisStatus { status },
             WireCommand::Shutdown => bail!("Shutdown is an application request"),
             WireCommand::CreatePlaylistFromQueue { name } => Self::CreatePlaylistFromQueue { name },
+            WireCommand::RelocateTrack {
+                source_id,
+                target_id,
+            } => Self::RelocateTrack {
+                source_id,
+                target_id,
+            },
+            WireCommand::CancelRelocation { id } => Self::CancelRelocation { id },
+            WireCommand::KeepTrackIndependent { track_id } => {
+                Self::KeepTrackIndependent { track_id }
+            }
         })
     }
 }
@@ -1106,6 +1181,7 @@ pub(super) struct WireSystemState {
     ffmpeg_status: String,
     database_optimization: Option<DatabaseOptimization>,
     shutting_down: bool,
+    relocation_task: Option<crate::model::RelocationTaskStatus>,
 }
 
 impl From<SystemState> for WireSystemState {
@@ -1124,6 +1200,7 @@ impl From<SystemState> for WireSystemState {
             ffmpeg_status: value.ffmpeg_status,
             database_optimization: value.database_optimization,
             shutting_down: value.shutting_down,
+            relocation_task: value.relocation_task,
         }
     }
 }
@@ -1144,6 +1221,7 @@ impl From<WireSystemState> for SystemState {
             ffmpeg_status: value.ffmpeg_status,
             database_optimization: value.database_optimization,
             shutting_down: value.shutting_down,
+            relocation_task: value.relocation_task,
         }
     }
 }

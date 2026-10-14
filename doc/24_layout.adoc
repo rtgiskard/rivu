@@ -23,6 +23,12 @@ at larger interface scales.
 They apply only when creating a default layout: loading a saved tree retains
 its boundaries, including omitted or empty arrays that mean equal division.
 
+Hidden windows still reconcile core state. A query completion synchronizes the
+GUI snapshot before comparing query revisions, so rows from a current query are
+not rejected against a stale hidden-window snapshot. Visibility gates rendering
+and analysis demand, not state validity. Keyboard list actions target only a
+visible active panel; see link:02_library.adoc#_paged_views[Paged views].
+
 == Normalized trees and resource boundaries
 
 Leaves are nonempty tab groups with a valid active panel. Splits have two or more

@@ -155,6 +155,30 @@ enum LibraryAction {
     },
     /// Reclaim database space and refresh query statistics; stop playback and scans first.
     Optimize,
+    /// Read-only ordinary-file groups with matching historical content hashes.
+    Duplicates {
+        /// List members of one hash instead of group summaries.
+        #[arg(long)]
+        fingerprint: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
+    /// Explicitly preserve a missing old track's identity at a verified target.
+    Relocate {
+        source_id: i64,
+        target_id: i64,
+        /// Wait for fresh verification and the atomic database commit.
+        #[arg(long)]
+        wait: bool,
+    },
+    /// Read retained relocation verification/completion status.
+    RelocationStatus { id: u64 },
+    /// Cancel a pending relocation verification (never undo a committed one).
+    CancelRelocation { id: u64 },
+    /// Prevent this ordinary row from participating in future identity reuse.
+    KeepIndependent { track_id: i64 },
 }
 #[derive(Clone, Copy, ValueEnum)]
 enum Switch {
@@ -390,6 +414,132 @@ fn run() -> Result<()> {
             };
             let ack = ipc::request_ack(&data_dir, &command)?;
             show_ack(&ack, args.json)
+        }
+        Action::Library(LibraryAction::Duplicates {
+            fingerprint,
+            offset,
+            limit,
+        }) => {
+            let query = match fingerprint {
+                Some(fingerprint) => Query::DuplicateMembers {
+                    fingerprint,
+                    offset,
+                    limit,
+                },
+                None => Query::DuplicateGroups { offset, limit },
+            };
+            let view = ipc::query(&data_dir, &query)?
+                .result
+                .map_err(anyhow::Error::from)?;
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&view)?);
+            } else {
+                match view {
+                    ViewResponse::DuplicateGroups(page) => {
+                        println!(
+                            "Historical same-content groups: {} (cached hashes, not fresh verification)",
+                            page.total
+                        );
+                        for group in page.rows {
+                            println!(
+                                "{}\t{} members\t{} missing\t{} present",
+                                group.fingerprint,
+                                group.total_members,
+                                group.missing_members,
+                                group.present_members
+                            );
+                        }
+                    }
+                    ViewResponse::DuplicateMembers(page) => {
+                        println!("Historical same-content members: {}", page.total);
+                        for member in page.rows {
+                            println!(
+                                "{}\t{}\t{}\tfavorite={} overrides={} plays={} playlist_refs={} queue_refs={} independent={}",
+                                member.track.id,
+                                member.track.path.display(),
+                                if member.track.missing {
+                                    "missing (last scan)"
+                                } else {
+                                    "present (last scan)"
+                                },
+                                member.track.favorite,
+                                member.has_overrides,
+                                member.track.play_count,
+                                member.playlist_references,
+                                member.queue_references,
+                                member.independent
+                            );
+                        }
+                    }
+                    _ => bail!("Duplicate query returned an unexpected response"),
+                }
+            }
+            Ok(())
+        }
+        Action::Library(LibraryAction::RelocationStatus { id }) => {
+            let view = ipc::query(&data_dir, &Query::RelocationTask { id })?
+                .result
+                .map_err(anyhow::Error::from)?;
+            let ViewResponse::RelocationTask(task) = view else {
+                bail!("Unexpected relocation status response");
+            };
+            println!("{}", serde_json::to_string_pretty(&task)?);
+            Ok(())
+        }
+        Action::Library(LibraryAction::Relocate {
+            source_id,
+            target_id,
+            wait,
+        }) => {
+            let mut session = ipc::client_session(&data_dir)?;
+            let ack = session.request_ack(&Command::RelocateTrack {
+                source_id,
+                target_id,
+            })?;
+            if !ack.ok {
+                bail!("{}", ack.error.as_deref().unwrap_or("Relocation refused"));
+            }
+            let id = ack
+                .relocation_id
+                .context("Relocation startup omitted task ID")?;
+            if !wait {
+                if args.json {
+                    println!("{}", serde_json::to_string_pretty(&ack)?);
+                } else {
+                    println!("Relocation verification accepted: task {id}");
+                }
+                return Ok(());
+            }
+            loop {
+                thread::sleep(Duration::from_millis(200));
+                let view = session
+                    .query(&Query::RelocationTask { id })?
+                    .result
+                    .map_err(anyhow::Error::from)?;
+                let ViewResponse::RelocationTask(task) = view else {
+                    bail!("Unexpected relocation status response");
+                };
+                match task.phase {
+                    rivu::model::RelocationPhase::Verifying => continue,
+                    rivu::model::RelocationPhase::Completed => {
+                        if args.json {
+                            println!("{}", serde_json::to_string_pretty(&task)?);
+                        } else {
+                            println!(
+                                "Relocation committed: old track {source_id} now uses target {target_id}'s path"
+                            );
+                            if let Some(error) = task.error {
+                                eprintln!("{error}");
+                            }
+                        }
+                        return Ok(());
+                    }
+                    _ => bail!(
+                        "{}",
+                        task.error.as_deref().unwrap_or("Relocation cancelled")
+                    ),
+                }
+            }
         }
         Action::Library(LibraryAction::Optimize) => {
             let ack = ipc::request_ack(&data_dir, &Command::OptimizeDatabase)?;
@@ -894,6 +1044,10 @@ fn translate(action: Action) -> Result<(Command, bool)> {
             favorite: matches!(set, Switch::On),
         },
         Action::Library(LibraryAction::CleanMissing) => Command::RemoveMissingTracks,
+        Action::Library(LibraryAction::CancelRelocation { id }) => Command::CancelRelocation { id },
+        Action::Library(LibraryAction::KeepIndependent { track_id }) => {
+            Command::KeepTrackIndependent { track_id }
+        }
         Action::Playback(PlaybackAction::Device { name }) => Command::Device { name },
         Action::Gui { .. }
         | Action::Serve { .. }
@@ -906,7 +1060,10 @@ fn translate(action: Action) -> Result<(Command, bool)> {
             | LibraryAction::Status
             | LibraryAction::Stats
             | LibraryAction::History { .. }
-            | LibraryAction::Probe { .. },
+            | LibraryAction::Probe { .. }
+            | LibraryAction::Duplicates { .. }
+            | LibraryAction::Relocate { .. }
+            | LibraryAction::RelocationStatus { .. },
         ) => bail!("This action is not a playback command"),
     };
     Ok((command, wait))

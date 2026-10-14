@@ -19,6 +19,17 @@ use std::{
 };
 use tokio::{net::UnixStream, runtime::Builder, time::timeout};
 
+#[derive(Debug)]
+pub struct InstanceChanged;
+
+impl std::fmt::Display for InstanceChanged {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Rivu instance changed; reopen the TUI to use the new instance")
+    }
+}
+
+impl std::error::Error for InstanceChanged {}
+
 /// Serial IPC requests share a runtime, socket, handshake, and framing buffers.
 /// A failed exchange discards the socket; only a later request reconnects, and
 /// the failed request is never replayed because its mutation may have executed.
@@ -31,6 +42,7 @@ pub struct ClientSession {
     read_buffer: BytesMut,
     write_buffer: Vec<u8>,
     session: SessionState,
+    expected_instance: Option<u32>,
 }
 
 fn client_runtime() -> Result<tokio::runtime::Runtime> {
@@ -64,10 +76,36 @@ pub fn client_session_with_cancel(
         read_buffer: BytesMut::new(),
         write_buffer: Vec::new(),
         session: SessionState::Unbound,
+        expected_instance: None,
     })
 }
 
 impl ClientSession {
+    pub fn instance_id(&self) -> Option<u32> {
+        match self.session {
+            SessionState::Unbound => None,
+            SessionState::Bound(instance_id) => Some(instance_id),
+        }
+    }
+
+    /// Pin a related session to the watcher's initial Hello identity. Unlike
+    /// state revisions, this identity survives disconnects and rejects a new
+    /// server before any operation or its initial snapshot can be accepted.
+    pub fn bind_instance(&mut self, instance_id: u32) -> Result<()> {
+        anyhow::ensure!(instance_id != 0, "Cannot bind IPC instance 0");
+        if self
+            .expected_instance
+            .is_some_and(|expected| expected != instance_id)
+            || self
+                .instance_id()
+                .is_some_and(|current| current != instance_id)
+        {
+            return Err(InstanceChanged.into());
+        }
+        self.expected_instance = Some(instance_id);
+        Ok(())
+    }
+
     pub fn cancellation(&self) -> (Arc<AtomicBool>, Arc<tokio::sync::Notify>) {
         (self.cancelled.clone(), self.cancel_notify.clone())
     }
@@ -139,7 +177,15 @@ impl ClientSession {
             let response = self.exchange(&WireRequest::Hello(sections))?;
             return match unpack_hello(response) {
                 Ok(response) => {
-                    self.session = SessionState::Bound;
+                    let instance_id = u32::from_le_bytes(response.instance_id);
+                    if self
+                        .expected_instance
+                        .is_some_and(|expected| expected != instance_id)
+                    {
+                        self.disconnect();
+                        return Err(InstanceChanged.into());
+                    }
+                    self.session = SessionState::Bound(instance_id);
                     Ok(state_response(response.state))
                 }
                 Err(error) => {

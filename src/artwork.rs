@@ -6,7 +6,7 @@ use crate::model::Track;
 use parking_lot::{Mutex, RwLock};
 use std::{
     collections::{HashMap, VecDeque},
-    fs::{self, File},
+    fs::{self, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
@@ -341,7 +341,20 @@ impl ArtworkManager {
     }
 
     fn embedded_uri(&self, path: &Path) -> Option<Arc<ArtworkFile>> {
-        let file = File::open(path).ok()?;
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // A stale or replaced media path may be a FIFO with no writer.
+            options.custom_flags(libc::O_NONBLOCK);
+        }
+        let file = options.open(path).ok()?;
+        // Check the opened object, not the path, so replacement cannot turn a
+        // metadata-approved regular file into a blocking stream before probing.
+        if !file.metadata().ok()?.is_file() {
+            return None;
+        }
         let mut hint = Hint::new();
         if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
             hint.with_extension(extension);
@@ -467,6 +480,7 @@ fn write_image(path: &Path, data: &[u8]) -> io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
 
     fn track(path: PathBuf) -> Track {
         Track {
@@ -602,6 +616,45 @@ mod tests {
             }
         });
         assert_eq!(probes.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_without_writer_falls_back_and_releases_worker_and_maintenance() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("track.wav");
+        let name = std::ffi::CString::new(source.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: name is a live NUL-terminated path, and mkfifo retains no pointer.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let alias = directory.path().join("linked.wav");
+        std::os::unix::fs::symlink(&source, &alias).unwrap();
+        let manager = ArtworkManager::new(directory.path());
+        let fallback = result_uri(manager.default.clone());
+        let cache = directory.path().join("artwork/cache");
+        fs::create_dir_all(&cache).unwrap();
+        let expired = cache.join(format!("{}.png", "1".repeat(64)));
+        fs::write(&expired, b"old").unwrap();
+        let (complete, completed) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut selected = track(source);
+            let direct = result_uri(manager.load(&selected));
+            assert!(manager.is_loaded(&selected));
+            selected.id = 2;
+            selected.path = alias;
+            let linked = result_uri(manager.load(&selected));
+            assert!(manager.is_loaded(&selected));
+            let report = manager.maintain(Duration::ZERO, true).unwrap();
+            complete
+                .send((direct, linked, report.removed_files))
+                .unwrap();
+        });
+        // Do not join on failure: a regression must fail rather than hang the suite.
+        let (direct, linked, removed) = completed.recv_timeout(Duration::from_secs(2)).unwrap();
+        worker.join().unwrap();
+        assert_eq!(direct, fallback);
+        assert_eq!(linked, fallback);
+        assert_eq!(removed, 1);
+        assert!(!expired.exists());
     }
 
     #[test]

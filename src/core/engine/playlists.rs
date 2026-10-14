@@ -36,8 +36,10 @@ impl Core {
         playlist_id: i64,
         track_ids: Vec<i64>,
     ) -> Result<()> {
-        self.store.add_playlist(playlist_id, &track_ids)?;
-        self.reload_playlists()
+        if self.store.add_playlist(playlist_id, &track_ids)? {
+            self.reload_playlists()?;
+        }
+        Ok(())
     }
 
     pub(in crate::core) fn remove_playlist_entry(&mut self, entry_id: i64) -> Result<()> {
@@ -50,8 +52,10 @@ impl Core {
         entry_id: i64,
         index: usize,
     ) -> Result<()> {
-        self.store.move_playlist_entry(entry_id, index)?;
-        self.reload_playlists()
+        if self.store.move_playlist_entry(entry_id, index)? {
+            self.reload_playlists()?;
+        }
+        Ok(())
     }
 
     pub(in crate::core) fn export_playlist(&self, playlist_id: i64, path: &Path) -> Result<()> {

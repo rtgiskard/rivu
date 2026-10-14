@@ -160,6 +160,7 @@ impl AppHandle {
                     error: result.err().map(|error| error.to_string()),
                     revision: self.core.revision(),
                     scan_id: None,
+                    relocation_id: None,
                 }
             }
             AppCommand::Shutdown => {

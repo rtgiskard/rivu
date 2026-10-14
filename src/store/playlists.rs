@@ -1,12 +1,32 @@
 use super::positions::{PositionScope, close_gaps, move_entry};
 use super::tracks::{SOURCE_FILTER, validate_encoded_track_ids};
 use super::{Store, batch_limit, changed};
-use crate::model::{Batch, Page, PlaylistEntryCursor, PlaylistEntryRow, PlaylistSummary};
+use crate::model::{
+    Batch, Page, PlaylistEntryCursor, PlaylistEntryLocation, PlaylistEntryRow, PlaylistSummary,
+};
 use anyhow::{Context, Result, anyhow, bail};
 use rusqlite::{OptionalExtension, Transaction, params};
 use std::path::PathBuf;
 
 impl Store {
+    pub fn playlist_entry(&self, entry_id: i64) -> Result<Option<PlaylistEntryLocation>> {
+        // Positions are contiguous. The covering playlist_order index supplies the last
+        // position without counting or projecting the entire playlist.
+        Ok(self.conn.query_row(
+            "SELECT e.id,e.playlist_id,e.track_id,e.position,
+                    (SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=e.playlist_id)
+             FROM playlist_entries e WHERE e.id=?1",
+            [entry_id],
+            |row| Ok(PlaylistEntryLocation {
+                id: row.get(0)?,
+                playlist_id: row.get(1)?,
+                track_id: row.get(2)?,
+                position: row.get::<_, i64>(3)? as usize,
+                total: row.get::<_, i64>(4)? as usize,
+            }),
+        ).optional()?)
+    }
+
     pub fn playlist_summary_page(
         &self,
         offset: usize,
@@ -29,7 +49,7 @@ impl Store {
 
     fn playlist_summary_rows(&self, offset: usize, limit: usize) -> Result<Vec<PlaylistSummary>> {
         let mut stmt = self.conn.prepare(
-            "SELECT p.id,p.name,(SELECT COUNT(*) FROM playlist_entries e WHERE e.playlist_id=p.id)
+            "SELECT p.id,p.name,(SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries e WHERE e.playlist_id=p.id)
              FROM playlists p ORDER BY p.id LIMIT ?1 OFFSET ?2",
         )?;
         Ok(stmt
@@ -54,7 +74,7 @@ impl Store {
         playlist_id: i64,
         directories: &[PathBuf],
         track_ids: &[i64],
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
         if !tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM playlists WHERE id=?1)",
@@ -65,11 +85,11 @@ impl Store {
         }
         let (directories, ids) = self.source_parameters(directories, track_ids)?;
         // Assign positions in SQL; playlist size never determines Rust allocation.
-        tx.execute(&format!(
+        let inserted = tx.execute(&format!(
             "WITH selected AS (SELECT id FROM tracks WHERE ({SOURCE_FILTER}) AND NOT EXISTS (SELECT 1 FROM playlist_entries e WHERE e.playlist_id=?3 AND e.track_id=tracks.id)), ordered AS (SELECT id,row_number() OVER (ORDER BY id)-1 AS ordinal FROM selected) INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT ?3,id,(SELECT COALESCE(MAX(position),-1)+1 FROM playlist_entries WHERE playlist_id=?3)+ordinal FROM ordered"
         ), params![directories, ids, playlist_id])?;
         tx.commit()?;
-        Ok(())
+        Ok(inserted != 0)
     }
 
     pub fn playlist_summary_batch(
@@ -81,13 +101,13 @@ impl Store {
         let mut stmt = if after.is_some() {
             self.conn.prepare(
                 "SELECT p.id,p.name,
-                        (SELECT COUNT(*) FROM playlist_entries e WHERE e.playlist_id=p.id)
+                        (SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries e WHERE e.playlist_id=p.id)
                  FROM playlists p WHERE p.id>?1 ORDER BY p.id LIMIT ?2",
             )?
         } else {
             self.conn.prepare(
                 "SELECT p.id,p.name,
-                        (SELECT COUNT(*) FROM playlist_entries e WHERE e.playlist_id=p.id)
+                        (SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries e WHERE e.playlist_id=p.id)
                  FROM playlists p ORDER BY p.id LIMIT ?1",
             )?
         };
@@ -191,7 +211,7 @@ impl Store {
         limit: usize,
     ) -> Result<Page<PlaylistEntryRow>> {
         let total: i64 = self.conn.query_row(
-            "SELECT (SELECT COUNT(*) FROM playlist_entries WHERE playlist_id=?1) FROM playlists WHERE id=?1",
+            "SELECT (SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=?1) FROM playlists WHERE id=?1",
             [playlist_id],
             |r| r.get(0),
         ).optional()?.context("Playlist not found")?;
@@ -201,7 +221,7 @@ impl Store {
                 rows: Vec::new(),
             });
         }
-        let mut stmt = self.conn.prepare("SELECT e.id,e.track_id,COALESCE(t.title_override,t.raw_title),COALESCE(t.artist_override,t.raw_artist),COALESCE(t.album_override,t.raw_album),COALESCE(t.missing,1) FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id WHERE e.playlist_id=?1 ORDER BY e.position,e.id LIMIT ?2 OFFSET ?3")?;
+        let mut stmt = self.conn.prepare("SELECT e.id,e.track_id,COALESCE(t.title_override,t.raw_title),COALESCE(t.artist_override,t.raw_artist),COALESCE(t.album_override,t.raw_album),COALESCE(t.missing,1) FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id WHERE e.playlist_id=?1 AND e.position>=?3 ORDER BY e.position,e.id LIMIT ?2")?;
         let limit = limit.min(crate::model::MAX_QUERY_ROWS) as i64;
         let offset = offset.min(i64::MAX as usize) as i64;
         let rows = stmt
@@ -271,12 +291,12 @@ impl Store {
             id,
         )
     }
-    pub fn add_playlist(&self, id: i64, tracks: &[i64]) -> Result<()> {
+    pub fn add_playlist(&self, id: i64, tracks: &[i64]) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
         exists_playlist(&tx, id)?;
-        append_tracks(&tx, id, tracks)?;
+        let inserted = append_tracks(&tx, id, tracks)?;
         tx.commit()?;
-        Ok(())
+        Ok(inserted != 0)
     }
     pub fn remove_playlist_entry(&self, id: i64) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
@@ -293,7 +313,7 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
-    pub fn move_playlist_entry(&self, id: i64, index: usize) -> Result<()> {
+    pub fn move_playlist_entry(&self, id: i64, index: usize) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
         let (pid, old): (i64, i64) = tx
             .query_row(
@@ -304,24 +324,26 @@ impl Store {
             .optional()?
             .ok_or_else(|| anyhow!("playlist entry {id} does not exist"))?;
         let n: i64 = tx.query_row(
-            "SELECT COUNT(*)FROM playlist_entries WHERE playlist_id=?",
+            "SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=?",
             [pid],
             |r| r.get(0),
         )?;
         if index >= n as usize {
             bail!("playlist index out of range");
         }
+        if old == index as i64 {
+            return Ok(false);
+        }
         move_entry(&tx, PositionScope::Playlist(pid), id, old, index as i64)?;
         tx.commit()?;
-        Ok(())
+        Ok(true)
     }
 }
 
-fn append_tracks(tx: &Transaction<'_>, id: i64, tracks: &[i64]) -> Result<()> {
+fn append_tracks(tx: &Transaction<'_>, id: i64, tracks: &[i64]) -> Result<usize> {
     let tracks = serde_json::to_string(tracks)?;
     validate_encoded_track_ids(tx, &tracks)?;
-    tx.execute("WITH selected AS (SELECT value AS track_id,MIN(CAST(key AS INTEGER)) AS ordinal FROM json_each(?2) GROUP BY value), additions AS (SELECT track_id,ordinal FROM selected WHERE NOT EXISTS(SELECT 1 FROM playlist_entries WHERE playlist_id=?1 AND playlist_entries.track_id=selected.track_id)) INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT ?1,track_id,(SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=?1)+row_number() OVER (ORDER BY ordinal)-1 FROM additions ORDER BY ordinal", params![id, tracks])?;
-    Ok(())
+    Ok(tx.execute("WITH selected AS (SELECT value AS track_id,MIN(CAST(key AS INTEGER)) AS ordinal FROM json_each(?2) GROUP BY value), additions AS (SELECT track_id,ordinal FROM selected WHERE NOT EXISTS(SELECT 1 FROM playlist_entries WHERE playlist_id=?1 AND playlist_entries.track_id=selected.track_id)) INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT ?1,track_id,(SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=?1)+row_number() OVER (ORDER BY ordinal)-1 FROM additions ORDER BY ordinal", params![id, tracks])?)
 }
 
 fn exists_playlist(tx: &Transaction<'_>, id: i64) -> Result<()> {
@@ -346,6 +368,49 @@ fn valid_name(s: &str) -> Result<()> {
 mod deletion_tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn playlist_entry_location_tracks_reorder_and_deletion_by_identity() -> Result<()> {
+        let store = Store::open(Path::new(":memory:"))?;
+        store.conn.execute_batch(
+            "INSERT INTO tracks(id,path) VALUES (1,'one'),(2,'two'),(3,'three');
+             INSERT INTO playlists(id,name) VALUES (10,'first'),(20,'second');
+             INSERT INTO playlist_entries(id,playlist_id,track_id,position) VALUES
+                (100,10,1,0),(101,10,2,1),(102,10,3,2),(200,20,1,0);",
+        )?;
+        let expected = PlaylistEntryLocation {
+            id: 102,
+            playlist_id: 10,
+            track_id: 3,
+            position: 2,
+            total: 3,
+        };
+        assert_eq!(store.playlist_entry(102)?, Some(expected));
+        store.move_playlist_entry(102, 0)?;
+        assert_eq!(
+            store.playlist_entry(102)?,
+            Some(PlaylistEntryLocation {
+                position: 0,
+                ..expected
+            })
+        );
+        store.remove_playlist_entry(100)?;
+        assert_eq!(
+            store.playlist_entry(102)?,
+            Some(PlaylistEntryLocation {
+                position: 0,
+                total: 2,
+                ..expected
+            })
+        );
+        assert_eq!(store.playlist_entry(200)?.unwrap().total, 1);
+        store.remove_playlist_entry(102)?;
+        assert_eq!(store.playlist_entry(102)?, None);
+        assert_eq!(store.playlist_entry(999)?, None);
+        store.delete_playlist(20)?;
+        assert_eq!(store.playlist_entry(200)?, None);
+        Ok(())
+    }
 
     #[test]
     fn remove_playlist_entry_preserves_identity_and_other_references() -> Result<()> {
@@ -424,6 +489,74 @@ mod request_tests {
     }
 
     #[test]
+    fn appends_report_changes_without_skipping_validation() -> Result<()> {
+        let store = store()?;
+        let id = store.create_playlist_with_tracks("append", &[1, 2])?;
+        let before = store.playlist_entries_page(id, 0, 10)?.rows;
+        assert!(!store.add_playlist(id, &[])?);
+        assert!(!store.add_playlist(id, &[2, 1, 2])?);
+        assert!(!store.add_playlist_sources(id, &[], &[])?);
+        assert!(!store.add_playlist_sources(id, &[], &[1, 2])?);
+        assert!(store.add_playlist(i64::MAX, &[]).is_err());
+        assert!(store.add_playlist_sources(i64::MAX, &[], &[]).is_err());
+        assert!(store.add_playlist(id, &[1, i64::MAX]).is_err());
+        assert!(store.add_playlist_sources(id, &[], &[1, i64::MAX]).is_err());
+        assert_eq!(store.playlist_entries_page(id, 0, 10)?.rows, before);
+        assert!(store.add_playlist(id, &[2, 3, 3])?);
+        assert!(store.add_playlist_sources(id, &[], &[3, 4])?);
+        assert_eq!(store.playlist_track_ids(id, 10)?, [1, 2, 3, 4]);
+        Ok(())
+    }
+
+    #[test]
+    fn deep_pages_preserve_entry_identity_missing_tracks_and_exact_totals() -> Result<()> {
+        let store = store()?;
+        let total = crate::model::MAX_QUERY_ROWS + 17;
+        store.conn.execute(
+            "WITH RECURSIVE ids(id) AS (SELECT 5 UNION ALL SELECT id+1 FROM ids WHERE id<?1) INSERT INTO tracks(id,path) SELECT id,'track-'||id FROM ids",
+            [total as i64],
+        )?;
+        let tracks = (1..=total as i64).collect::<Vec<_>>();
+        let id = store.create_playlist_with_tracks("deep", &tracks)?;
+        let tail = store.playlist_entries_page(id, total - 3, usize::MAX)?;
+        assert_eq!(tail.total, total);
+        assert_eq!(
+            tail.rows.iter().map(|row| row.track_id).collect::<Vec<_>>(),
+            tracks[total - 3..]
+        );
+        store.conn.execute(
+            "UPDATE tracks SET missing=1 WHERE id=?1",
+            [total as i64 - 1],
+        )?;
+        let page = store.playlist_entries_page(id, total - 3, 2)?;
+        assert_eq!(page.total, total);
+        assert_eq!(page.rows[0], tail.rows[0]);
+        assert_eq!(page.rows[1].id, tail.rows[1].id);
+        assert_eq!(page.rows[1].track_id, tail.rows[1].track_id);
+        assert!(page.rows[1].missing);
+        assert_eq!(page.rows[1].title, tail.rows[1].title);
+        for offset in [total, total + 1, usize::MAX] {
+            let page = store.playlist_entries_page(id, offset, 3)?;
+            assert_eq!(page.total, total);
+            assert!(page.rows.is_empty());
+        }
+        assert_eq!(store.playlist_entries_page(id, usize::MAX, 0)?.total, total);
+        assert_eq!(
+            store.playlist_entries_page(id, 0, usize::MAX)?.rows.len(),
+            crate::model::MAX_QUERY_ROWS
+        );
+        assert_eq!(
+            store.playlist_summary_page(0, 10)?.rows[0].entry_count,
+            total
+        );
+        assert_eq!(
+            store.playlist_summary_batch(None, 10)?.rows[0].entry_count,
+            total
+        );
+        Ok(())
+    }
+
+    #[test]
     fn append_keeps_first_occurrence_order_and_invalid_ids_roll_back() -> Result<()> {
         let store = store()?;
         assert!(
@@ -490,7 +623,7 @@ mod request_tests {
         let other = store.create_playlist_with_tracks("other", &[4, 3])?;
         let other_before = positioned_entries(&store, other)?;
         let initial = positioned_entries(&store, id)?;
-        store.move_playlist_entry(initial[1].0, 3)?;
+        assert!(store.move_playlist_entry(initial[1].0, 3)?);
         assert_eq!(
             positioned_entries(&store, id)?,
             vec![
@@ -500,7 +633,7 @@ mod request_tests {
                 (initial[1].0, 2, 3)
             ]
         );
-        store.move_playlist_entry(initial[1].0, 0)?;
+        assert!(store.move_playlist_entry(initial[1].0, 0)?);
         let moved = positioned_entries(&store, id)?;
         assert_eq!(
             moved,
@@ -511,8 +644,9 @@ mod request_tests {
                 (initial[3].0, 4, 3)
             ]
         );
-        store.move_playlist_entry(initial[1].0, 0)?;
+        assert!(!store.move_playlist_entry(initial[1].0, 0)?);
         assert!(store.move_playlist_entry(initial[1].0, 4).is_err());
+        assert!(store.move_playlist_entry(initial[1].0, usize::MAX).is_err());
         assert!(store.move_playlist_entry(i64::MAX, 0).is_err());
         assert_eq!(positioned_entries(&store, id)?, moved);
         assert_eq!(positioned_entries(&store, other)?, other_before);

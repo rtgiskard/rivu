@@ -23,6 +23,10 @@ Single-entry moves update only the positions between the old and new locations.
 Bulk queue moves rewrite the affected interval rather than the full queue;
 reorders skip rows whose position is already correct. Entry identities and the
 current occurrence remain stable, and no-op moves leave queue content valid.
+Structural queue mutations advance the content revision once inside their changing
+Store transaction, including reference deletion and gap compaction. Metadata
+invalidation remains field-sensitive; failures roll back structural revision and
+content together. Already-unique deduplication leaves content and projections valid.
 
 Scan-backed metadata and user overrides skip writes when their stored values are
 unchanged. Setting an override equal to its raw value still records that editing
@@ -30,14 +34,26 @@ intent; an omitted field continues to follow rescanned metadata. No-op edits
 succeed for existing tracks and still reject unknown IDs. Queue-content validity
 is described in <<_revisions_and_watching,Revisions and watching>>.
 
+Scan merging checks each eligible old CUE sheet's absence once per merge and
+indexes relocation candidates by fingerprint, segment number and frame bounds.
+Multiple compatible old identities remain ambiguous; exact identities still take
+precedence. These indexes are merge-local, not persistent source-probe caches;
+only `NotFound` permits relocation, and scan uncertainty protection is unchanged.
+
 Track-ID mutations serialize each input list once. Library deletion validates
 before playback-side effects, then consumes the prepared input in the same
 serialized core dispatch. Stopping playback can update statistics, not catalog
 identities; reference deletion and gap compaction remain transactional.
+The audio stop acknowledgement supplies its final position and confirmed heard
+time independently of lifecycle-event delivery. Event-channel backpressure does
+not delay that snapshot, and later events cannot account for the same heard time twice.
 Count-only pages omit row projection; queue and playlist totals do not join
 track metadata. Equivalent normalized root prefixes are counted once per request,
 then expanded to the original paths and order. Root aggregation state is
 request-local and bounded by the 256-root query limit.
+Queue and playlist entry pages seek by their contiguous position rather than
+skipping an OFFSET prefix. Playlist entry totals use the indexed maximum position;
+this relies on the same Store-owned contiguous-order invariant.
 
 Directory and root queries use BINARY path ranges: a normalized nonempty prefix
 ends in `/`, and replacing that delimiter with `0` gives its exclusive upper
@@ -60,6 +76,14 @@ socket; its dispatcher separates application requests from core commands and
 queries while preserving the wire format. Shared analysis and waveform data
 are in-process resources, not IPC state sections.
 
+Ordinary-file relocation uses a Core-owned single-flight verification worker.
+Acceptance carries `Ack.relocation_id`; final completion or failure is reported
+by `RelocationTask` and system task status. Core retains 32 results and joins the
+worker on shutdown. A verified open descriptor survives to the commit boundary;
+file identity, source absence and affected playback are checked again before
+Store atomically revalidates identities and destination conflicts. UI request
+epochs discard results belonging to closed or superseded reviews.
+
 The graphical host has three lifetime boundaries within one process:
 
 * `App` in `app.rs` owns the core runtime, IPC server and socket acquisition,
@@ -68,6 +92,8 @@ The graphical host has three lifetime boundaries within one process:
   window exists.
 * The core owns accepted business operations and authoritative state. Closing a
   window does not cancel playback, scans, saves, or other accepted commands.
+  Explicit relocation review is an exception: dismissing its dialog requests
+  cancellation of that dialog's verification task, without undoing a commit.
 * `UiSession` owns window creation, focus, reload, and close. `GuiApp` owns the
   window's view state, subscriptions, and render resources. Reopening creates a
   new view from current core state; repeated open requests focus the existing
@@ -134,7 +160,7 @@ The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
 Bodies use Postcard serialization without COBS framing. The current protocol
-version is `12`; clients and servers must use matching wire schemas. The four-byte
+version is `14`; clients and servers must use matching wire schemas. The four-byte
 frame length remains little-endian; body integers follow Postcard's encoding.
 
 Request frame content is limited to 4 MiB
@@ -206,9 +232,14 @@ result but drains the active exchange before sending only the latest pending
 query. Exiting the TUI closes an in-flight socket wait, including command and
 handshake waits, without waiting for a response.
 The Watch worker's first Hello requests all state sections and supplies the
-initial TUI snapshot. Until it arrives, the screen stays in a loading state
-that accepts `q`; no separate foreground state request is made. Initial
-connection or handshake errors restore the terminal before returning the error.
+initial TUI snapshot and instance identity. Command and query sessions must bind
+to that same Hello instance before issuing requests. Until the snapshot arrives,
+the screen stays in a loading state that accepts `q`; no separate foreground
+state request is made. Command and query sessions can reconnect only to the
+same pinned instance; the Watch worker does not automatically reconnect. A
+changed instance is fatal, without replaying queued commands against a
+replacement server. Fatal connection, handshake, and instance-identity failures
+restore the terminal before returning the error.
 
 == Message types
 
@@ -256,6 +287,15 @@ Reapplying identical metadata or favorites, including a forced scan that keeps
 the same displayed values, does not advance the queue content revision.
 Raw title, artist, or album changes hidden by overrides also leave queue content
 valid when their effective display values are unchanged.
+Unchanged scans preserve library, structure and playlist query revisions, while
+scan status and requested playlist imports still complete. Empty or existing-only
+playlist additions and same-position moves preserve playlist query validity;
+missing identities still fail validation.
+
+Playback-statistics writes return count and activity time directly to the Core.
+The bounded track cache and current/recent snapshots receive these scalar changes
+without reloading complete metadata. Count threshold and activity timing remain
+independent.
 
 Watch has no fixed expiry. A complete new request on that connection supersedes
 a pending Watch without a Watch response. The preserved input then becomes the

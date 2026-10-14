@@ -289,7 +289,7 @@ async fn serve_connection(
                     state: wire_state(handle.state(sections)),
                 });
                 write_frame_buffered(&mut stream, &response, &mut write_buffer).await?;
-                session = SessionState::Bound;
+                session = SessionState::Bound(instance_id);
             }
             WireRequest::State(sections) => {
                 let response = WireResponse::State(wire_state(handle.state(sections)));

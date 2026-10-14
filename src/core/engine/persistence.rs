@@ -111,17 +111,26 @@ impl Core {
         Ok(())
     }
 
-    pub(in crate::core) fn update_track_stats(&mut self, track_id: i64) -> Result<()> {
-        let track = self.store.track(track_id)?.context("Track not found")?;
-        self.refresh_history_track(&track);
-        self.state.queue = self.store.queue_projection(self.queue_ids.len())?;
-        if self
-            .state
-            .current_track
-            .as_ref()
-            .is_some_and(|current| current.id == track_id && current.as_ref() != &track)
+    pub(in crate::core) fn update_track_stats(
+        &mut self,
+        track_id: i64,
+        stats: crate::store::TrackStats,
+    ) -> Result<()> {
+        if let Some(index) =
+            self.state.library.history.iter().position(|entry| {
+                entry.track_id == track_id && entry.play_count != stats.play_count
+            })
         {
-            self.state.current_track = Some(Arc::new(track));
+            Arc::make_mut(&mut self.state.library.history)[index].play_count = stats.play_count;
+        }
+        self.state.queue = self.store.queue_projection(self.queue_ids.len())?;
+        if let Some(current) = self.state.current_track.as_mut()
+            && current.id == track_id
+            && (current.play_count != stats.play_count || current.last_played != stats.last_played)
+        {
+            let current = Arc::make_mut(current);
+            current.play_count = stats.play_count;
+            current.last_played = stats.last_played;
         }
         self.state.library.revision = self.state.library.revision.wrapping_add(1);
         Ok(())

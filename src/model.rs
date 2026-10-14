@@ -163,6 +163,16 @@ pub struct PlaylistEntryRow {
     pub missing: bool,
 }
 
+/// Stable entry identity and current absolute position, without metadata or page residency.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaylistEntryLocation {
+    pub id: i64,
+    pub playlist_id: i64,
+    pub track_id: i64,
+    pub position: usize,
+    pub total: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LibraryStats {
     pub total: usize,
@@ -306,6 +316,25 @@ pub struct ScanTaskStatus {
     pub error: Option<String>,
 }
 
+/// A manually confirmed ordinary-file identity relocation, owned by Core.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelocationPhase {
+    Verifying,
+    Completed,
+    Cancelled,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelocationTaskStatus {
+    pub id: u64,
+    pub source_id: i64,
+    pub target_id: i64,
+    pub phase: RelocationPhase,
+    pub error: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SystemState {
     pub scanning: bool,
@@ -322,6 +351,8 @@ pub struct SystemState {
     pub ffmpeg_status: String,
     pub database_optimization: Option<DatabaseOptimization>,
     pub shutting_down: bool,
+    #[serde(default)]
+    pub relocation_task: Option<RelocationTaskStatus>,
 }
 impl Default for SystemState {
     fn default() -> Self {
@@ -339,6 +370,7 @@ impl Default for SystemState {
             ffmpeg_status: "disabled".into(),
             database_optimization: None,
             shutting_down: false,
+            relocation_task: None,
         }
     }
 }
@@ -493,6 +525,21 @@ pub enum Query {
     QueueEntries {
         queue_ids: Vec<u64>,
     },
+    PlaylistEntry {
+        entry_id: i64,
+    },
+    DuplicateGroups {
+        offset: usize,
+        limit: usize,
+    },
+    DuplicateMembers {
+        fingerprint: String,
+        offset: usize,
+        limit: usize,
+    },
+    RelocationTask {
+        id: u64,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -632,6 +679,17 @@ pub enum Command {
     DismissScanResult,
     CancelScan {
         id: u64,
+    },
+    /// Explicitly retain source identity/state at a freshly verified target path.
+    RelocateTrack {
+        source_id: i64,
+        target_id: i64,
+    },
+    CancelRelocation {
+        id: u64,
+    },
+    KeepTrackIndependent {
+        track_id: i64,
     },
 }
 

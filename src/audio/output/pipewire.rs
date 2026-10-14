@@ -463,7 +463,7 @@ fn run(
             // All sample, mapping, analysis and clock storage was preallocated.
             if processing.get() {
                 unsafe {
-                    process(stream, callback, auto_mix || routed.get());
+                    process(stream, callback, routed.get());
                 }
             }
         })
@@ -508,10 +508,14 @@ fn run(
         }
         {
             let graph = connection.inventory.borrow();
-            if auto_mix {
-                route_ok.set(true);
-            } else if observed_revision != Some(graph.revision) {
-                route_ok.set(route_matches(&graph, stream.node_id(), target.id, &names));
+            if observed_revision != Some(graph.revision) {
+                route_ok.set(route_matches(
+                    &graph,
+                    stream.node_id(),
+                    target.id,
+                    &names,
+                    auto_mix,
+                ));
                 observed_revision = Some(graph.revision);
             }
         }
@@ -527,10 +531,8 @@ fn run(
                 target.name
             );
         }
-        if !auto_mix && started && !route_ok.get() {
-            bail!(
-                "PipeWire speaker links changed or disappeared; refusing a partial/remixed route"
-            );
+        if started && !route_ok.get() {
+            bail!("PipeWire output links changed or disappeared; refusing an invalid route");
         }
         match stream.state() {
             pw::stream::StreamState::Error(error) => bail!("PipeWire output: {error}"),
@@ -550,6 +552,7 @@ fn run(
             _ => {}
         }
     }
+    route_ok.set(false);
     stream.disconnect()?;
     Ok(())
 }
@@ -658,16 +661,30 @@ fn output_timestamp(time: &pw::sys::pw_time, rate: u32, now: u64) -> Option<Outp
     })
 }
 
-// An accepted format alone is insufficient: session policy could leave LFE or
-// RC unlinked, or connect a stream to a different sink. Require one direct link
-// per speaker with equal labels on both ends, and no extra outgoing links.
-fn route_matches(graph: &Inventory, source: u32, target: u32, speakers: &[&str]) -> bool {
+// An accepted format alone is insufficient: all outgoing links must reach the
+// selected sink, and at least one must exist. Remixing may change the exposed
+// speaker labels and port count; strict mode additionally requires one direct
+// link per speaker with equal labels on both ends and no extra outgoing links.
+fn route_matches(
+    graph: &Inventory,
+    source: u32,
+    target: u32,
+    speakers: &[&str],
+    auto_mix: bool,
+) -> bool {
     let routes = || {
         graph
             .links
             .values()
             .filter(|route| route.output_node == source)
     };
+    if auto_mix {
+        let mut routes = routes();
+        return routes
+            .next()
+            .is_some_and(|route| route.input_node == target)
+            && routes.all(|route| route.input_node == target);
+    }
     if routes().count() != speakers.len() {
         return false;
     }
@@ -901,18 +918,91 @@ mod tests {
                 },
             );
         }
-        assert!(route_matches(&graph, 1, 2, &speakers));
+        assert!(route_matches(&graph, 1, 2, &speakers, false));
         graph.route_confirmed.set(true);
         graph.ports.insert(203, "FL".into());
         graph.changed();
         assert!(!graph.route_confirmed.get());
-        assert!(!route_matches(&graph, 1, 2, &speakers));
+        assert!(!route_matches(&graph, 1, 2, &speakers, false));
         graph.ports.insert(203, "LFE".into());
         graph.links.get_mut(&4).unwrap().input_node = 3;
-        assert!(!route_matches(&graph, 1, 2, &speakers));
+        assert!(!route_matches(&graph, 1, 2, &speakers, false));
         graph.links.get_mut(&4).unwrap().input_node = 2;
         graph.links.remove(&4);
-        assert!(!route_matches(&graph, 1, 2, &speakers));
+        assert!(!route_matches(&graph, 1, 2, &speakers, false));
+    }
+
+    #[test]
+    fn auto_mix_accepts_remixed_speaker_labels_and_port_counts_only_for_selected_sink() {
+        let mut graph = Inventory::default();
+        // A mono stream may expose stereo ports after PipeWire remixing.
+        for (index, speaker) in ["FL", "FR"].iter().enumerate() {
+            let index = index as u32;
+            graph.ports.insert(100 + index, (*speaker).to_owned());
+            graph.ports.insert(200 + index, (*speaker).to_owned());
+            graph.links.insert(
+                index,
+                Route {
+                    output_node: 1,
+                    output_port: 100 + index,
+                    input_node: 2,
+                    input_port: 200 + index,
+                },
+            );
+        }
+        assert!(route_matches(&graph, 1, 2, &["FC"], true));
+        assert!(!route_matches(&graph, 1, 2, &["FC"], false));
+        assert!(route_matches(&graph, 1, 2, &["FL", "FR"], false));
+
+        // Remixing can also connect different speaker labels without changing
+        // the target identity. Strict routing must still reject that graph.
+        graph.ports.insert(200, "MONO".into());
+        assert!(route_matches(&graph, 1, 2, &["FL", "FR"], true));
+        assert!(!route_matches(&graph, 1, 2, &["FL", "FR"], false));
+    }
+
+    #[test]
+    fn auto_mix_rejects_wrong_multiple_and_lost_targets() {
+        let mut graph = Inventory::default();
+        graph.links.insert(
+            0,
+            Route {
+                output_node: 1,
+                output_port: 100,
+                input_node: 3,
+                input_port: 200,
+            },
+        );
+        assert!(!route_matches(&graph, 1, 2, &["FC"], true));
+        graph.links.get_mut(&0).unwrap().input_node = 2;
+        assert!(route_matches(&graph, 1, 2, &["FC"], true));
+        graph.route_confirmed.set(true);
+
+        // An unrelated stream may use a different sink; our stream may not
+        // gain even one additional outgoing link to that sink.
+        graph.links.insert(
+            1,
+            Route {
+                output_node: 4,
+                output_port: 101,
+                input_node: 3,
+                input_port: 201,
+            },
+        );
+        graph.changed();
+        assert!(!graph.route_confirmed.get());
+        assert!(route_matches(&graph, 1, 2, &["FC"], true));
+        graph.links.get_mut(&1).unwrap().output_node = 1;
+        assert!(!route_matches(&graph, 1, 2, &["FC"], true));
+
+        graph.links.get_mut(&1).unwrap().output_node = 4;
+        graph.route_confirmed.set(true);
+        graph.links.remove(&0);
+        graph.changed();
+        assert!(!graph.route_confirmed.get());
+        assert!(!route_matches(&graph, 1, 2, &["FC"], true));
+        graph.links.clear();
+        assert!(!route_matches(&graph, 1, 2, &["FC"], true));
     }
 
     #[test]
