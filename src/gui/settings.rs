@@ -1938,7 +1938,7 @@ impl Settings {
                         .id("settings-analysis-help")
                         .tooltip(settings_tooltip("Applies to Spectrum, Spectrogram, and Audio Visualizer. Changing FFT size or window clears visualization history."))))
                     .child(settings_group("Rendering", row().gap_2()
-                        .child(visual_switch("settings-still-mode", "", "Still mode", draft.still_mode, cx, |draft| draft.still_mode = !draft.still_mode))
+                        .child(visual_switch("settings-still-mode", "", "Still mode", draft.still_mode, cx, |draft| draft.still_mode = !draft.still_mode))
                         .id("settings-rendering-help")
                         .tooltip(settings_tooltip("Still mode stops visualization processing and discards results; playback and interface effects are unchanged. Rendering cache reduces CPU use at the cost of memory in Spectrum, Spectrogram, and Waveform."))
                         .child(visual_switch("visual-cache", "", "Rendering cache", draft.visualization_cache, cx, |draft| draft.visualization_cache = !draft.visualization_cache))
