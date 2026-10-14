@@ -56,6 +56,7 @@ pub struct Input {
     content: SharedString,
     placeholder: SharedString,
     trailing_space: Pixels,
+    scroll_offset: Pixels,
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
@@ -80,6 +81,7 @@ impl Input {
             content,
             placeholder: placeholder.into(),
             trailing_space: px(7.),
+            scroll_offset: px(0.),
             selected_range: end..end,
             selection_reversed: false,
             marked_range: None,
@@ -139,6 +141,7 @@ impl Input {
         self.selected_range = end..end;
         self.selection_reversed = false;
         self.marked_range = None;
+        self.scroll_offset = px(0.);
         self.last_layout = None;
         self.last_bounds = None;
         cx.emit(InputEvent::Changed { user: false });
@@ -287,7 +290,7 @@ impl Input {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
-        line.closest_index_for_x(position.x - bounds.left())
+        line.closest_index_for_x(position.x - bounds.left() + self.scroll_offset)
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -354,6 +357,17 @@ impl Input {
         cx.emit(InputEvent::Changed { user: true });
         cx.notify();
     }
+}
+
+const CARET_WIDTH: f32 = 1.5;
+
+fn scroll_to_caret(previous: Pixels, caret: Pixels, width: Pixels, line_width: Pixels) -> Pixels {
+    let visible_width = (width - px(CARET_WIDTH)).max(px(0.));
+    let max_scroll = (line_width - visible_width).max(px(0.));
+    previous
+        .max(caret - visible_width)
+        .min(caret)
+        .clamp(px(0.), max_scroll)
 }
 
 fn utf8_offset_from_utf16(text: &str, offset: usize) -> usize {
@@ -481,15 +495,17 @@ impl EntityInputHandler for Input {
     fn bounds_for_range(
         &mut self,
         range_utf16: Range<usize>,
-        bounds: gpui::Bounds<Pixels>,
+        _: gpui::Bounds<Pixels>,
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<gpui::Bounds<Pixels>> {
         let line = self.last_layout.as_ref()?;
+        let bounds = self.last_bounds?;
+        let origin = bounds.left() - self.scroll_offset;
         let range = self.range_from_utf16(&range_utf16);
         Some(gpui::Bounds::from_corners(
-            point(bounds.left() + line.x_for_index(range.start), bounds.top()),
-            point(bounds.left() + line.x_for_index(range.end), bounds.bottom()),
+            point(origin + line.x_for_index(range.start), bounds.top()),
+            point(origin + line.x_for_index(range.end), bounds.bottom()),
         ))
     }
 
@@ -501,7 +517,7 @@ impl EntityInputHandler for Input {
     ) -> Option<usize> {
         let line_point = self.last_bounds?.localize(&point)?;
         let line = self.last_layout.as_ref()?;
-        let utf8_index = line.index_for_x(point.x - line_point.x)?;
+        let utf8_index = line.index_for_x(line_point.x + self.scroll_offset)?;
         Some(self.offset_to_utf16(utf8_index))
     }
 }
@@ -512,6 +528,7 @@ struct InputElement {
 
 struct PrepaintState {
     line: Option<ShapedLine>,
+    scroll_offset: Pixels,
     cursor: Option<PaintQuad>,
     selection: Option<PaintQuad>,
 }
@@ -607,13 +624,24 @@ impl Element for InputElement {
             .text_system()
             .shape_line(display_text, font_size, &runs, None);
         let cursor_pos = line.x_for_index(cursor_offset);
+        let scroll_offset = scroll_to_caret(
+            input.scroll_offset,
+            cursor_pos,
+            bounds.size.width,
+            if input.content.is_empty() {
+                px(0.)
+            } else {
+                line.width()
+            },
+        );
+        let origin = bounds.left() - scroll_offset;
         let (selection, cursor) = if selected_range.is_empty() {
             (
                 None,
                 Some(fill(
                     gpui::Bounds::new(
-                        point(bounds.left() + cursor_pos, bounds.top()),
-                        size(px(1.5), bounds.bottom() - bounds.top()),
+                        point(origin + cursor_pos, bounds.top()),
+                        size(px(CARET_WIDTH), bounds.bottom() - bounds.top()),
                     ),
                     rgb(ACCENT),
                 )),
@@ -623,11 +651,11 @@ impl Element for InputElement {
                 Some(fill(
                     gpui::Bounds::from_corners(
                         point(
-                            bounds.left() + line.x_for_index(selected_range.start),
+                            origin + line.x_for_index(selected_range.start),
                             bounds.top(),
                         ),
                         point(
-                            bounds.left() + line.x_for_index(selected_range.end),
+                            origin + line.x_for_index(selected_range.end),
                             bounds.bottom(),
                         ),
                     ),
@@ -638,6 +666,7 @@ impl Element for InputElement {
         };
         PrepaintState {
             line: Some(line),
+            scroll_offset,
             cursor,
             selection,
         }
@@ -659,27 +688,31 @@ impl Element for InputElement {
             ElementInputHandler::new(bounds, self.input.clone()),
             cx,
         );
-        if let Some(selection) = prepaint.selection.take() {
-            window.paint_quad(selection);
-        }
         let line = prepaint.line.take().expect("input text line is prepared");
-        line.paint(
-            bounds.origin,
-            window.line_height(),
-            gpui::TextAlign::Left,
-            None,
-            window,
-            cx,
-        )
-        .ok();
-        if focus_handle.is_focused(window)
-            && let Some(cursor) = prepaint.cursor.take()
-        {
-            window.paint_quad(cursor);
-        }
+        let origin = point(bounds.left() - prepaint.scroll_offset, bounds.top());
+        window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+            if let Some(selection) = prepaint.selection.take() {
+                window.paint_quad(selection);
+            }
+            line.paint(
+                origin,
+                window.line_height(),
+                gpui::TextAlign::Left,
+                None,
+                window,
+                cx,
+            )
+            .ok();
+            if focus_handle.is_focused(window)
+                && let Some(cursor) = prepaint.cursor.take()
+            {
+                window.paint_quad(cursor);
+            }
+        });
         self.input.update(cx, |input, _| {
             input.last_layout = Some(line);
             input.last_bounds = Some(bounds);
+            input.scroll_offset = prepaint.scroll_offset;
         });
     }
 }
@@ -736,6 +769,31 @@ impl Focusable for Input {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn caret_scrolls_to_both_edges_without_moving_a_visible_caret() {
+        let width = px(101.5);
+        let line = px(300.);
+        assert_eq!(scroll_to_caret(px(0.), px(300.), width, line), px(200.));
+        assert_eq!(scroll_to_caret(px(200.), px(0.), width, line), px(0.));
+        assert_eq!(scroll_to_caret(px(100.), px(150.), width, line), px(100.));
+        assert_eq!(scroll_to_caret(px(100.), px(90.), width, line), px(90.));
+        assert_eq!(scroll_to_caret(px(0.), px(101.), width, line), px(1.));
+    }
+
+    #[test]
+    fn caret_scroll_clamps_after_resize_or_text_shrink() {
+        assert_eq!(
+            scroll_to_caret(px(200.), px(300.), px(401.5), px(300.)),
+            px(0.)
+        );
+        assert_eq!(
+            scroll_to_caret(px(200.), px(20.), px(101.5), px(20.)),
+            px(0.)
+        );
+        assert_eq!(scroll_to_caret(px(200.), px(0.), px(101.5), px(0.)), px(0.));
+        assert_eq!(scroll_to_caret(px(0.), px(20.), px(0.), px(20.)), px(20.));
+    }
 
     #[test]
     fn ime_ranges_convert_at_unicode_boundaries() {

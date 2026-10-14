@@ -149,6 +149,9 @@ General → Interface includes Layout snapping and Layout grid spacing. These sa
 integer `1`–`64` logical pixels before interface scaling) in `config.toml`.
 
 Hover settings fields for accepted ranges and input syntax.
+Single-line desktop text fields scroll horizontally to keep the caret visible.
+Use Left/Right to navigate long values, Home/End to reach either end, or
+Shift+Left/Right to extend a selection beyond the visible text.
 
 Common visualization settings apply as follows:
 
