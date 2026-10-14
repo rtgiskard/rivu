@@ -91,6 +91,13 @@ impl Render for GuiApp {
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = event.keystroke.key.as_str();
+                if this.playlist_action.is_some() {
+                    if key == "escape" {
+                        this.dismiss_playlist_action(window, cx);
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
                 if this.playlist_editor.is_some() {
                     if key == "escape" {
                         this.cancel_playlist_name(window, cx);
@@ -216,6 +223,7 @@ impl Render for GuiApp {
                     || this.about_open
                     || this.duplicate_review.open
                     || this.playlist_editor.is_some()
+                    || this.playlist_action.is_some()
                     || this.app_menu_open
                     || this.panel_menu.is_some()
                     || this.catalog_open;
@@ -767,6 +775,67 @@ impl Render for GuiApp {
                     }
                     if is_queue {
                         menu = menu
+                            .child(
+                                menu_item(
+                                    "queue-add-playlist",
+                                    "Add to playlist  ›",
+                                    cx,
+                                    move |this, _, cx| {
+                                        this.refresh(cx);
+                                        if !this.browser.queue.ready()
+                                            || this.browser.queue.len() == 0
+                                        {
+                                            return;
+                                        }
+                                        this.panel_menu = Some(PanelMenu {
+                                            page: PanelMenuPage::Playlists,
+                                            ..state
+                                        });
+                                        cx.notify();
+                                    },
+                                )
+                                .opacity(if has_selected_queue {
+                                    1.
+                                } else {
+                                    0.4
+                                }),
+                            )
+                            .child(
+                                menu_item(
+                                    "queue-mark-favorite",
+                                    "Mark favorite",
+                                    cx,
+                                    |this, _, cx| {
+                                        this.refresh(cx);
+                                        let mut track_ids: Vec<_> = this
+                                            .browser
+                                            .queue
+                                            .ordered()
+                                            .into_iter()
+                                            .map(|row| row.track_id)
+                                            .collect();
+                                        track_ids.sort_unstable();
+                                        track_ids.dedup();
+                                        if track_ids.is_empty() {
+                                            return;
+                                        }
+                                        this.panel_menu = None;
+                                        this.send(
+                                            Command::SetFavorite {
+                                                track_ids,
+                                                favorite: true,
+                                            },
+                                            cx,
+                                        );
+                                        cx.notify();
+                                    },
+                                )
+                                .opacity(if has_selected_queue {
+                                    1.
+                                } else {
+                                    0.4
+                                }),
+                            )
                             .child(menu_item(
                                 "randomize-queue",
                                 "Randomize queue",
@@ -786,33 +855,19 @@ impl Render for GuiApp {
                                     this.send(Command::DeduplicateQueue, cx);
                                     cx.notify();
                                 },
-                            ));
-                        if has_selected_queue {
-                            menu = menu.child(menu_item(
-                                "queue-add-playlist",
-                                "Add to playlist  ›",
+                            ))
+                            .child(menu_item(
+                                "clear-queue",
+                                "Clear queue",
                                 cx,
                                 move |this, _, cx| {
                                     this.panel_menu = Some(PanelMenu {
-                                        page: PanelMenuPage::Playlists,
+                                        page: PanelMenuPage::ConfirmClearQueue,
                                         ..state
                                     });
                                     cx.notify();
                                 },
                             ));
-                        }
-                        menu = menu.child(menu_item(
-                            "clear-queue",
-                            "Clear queue",
-                            cx,
-                            move |this, _, cx| {
-                                this.panel_menu = Some(PanelMenu {
-                                    page: PanelMenuPage::ConfirmClearQueue,
-                                    ..state
-                                });
-                                cx.notify();
-                            },
-                        ));
                     }
                     menu = menu
                         .when(
@@ -1116,6 +1171,9 @@ impl Render for GuiApp {
             );
         }
 
+        if self.playlist_action.is_some() {
+            app = app.child(self.playlist_action_overlay(cx));
+        }
         if self.playlist_editor.is_some() {
             app = app.child(self.playlist_name_dialog(cx));
         }

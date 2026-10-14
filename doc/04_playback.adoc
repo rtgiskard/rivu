@@ -123,8 +123,14 @@ Dragging library tracks or directories onto Queue appends the resolved tracks.
 Removing the current occurrence stops playback; removing other occurrences does
 not. Queue controls remain available while the layout is locked.
 
-The Queue panel menu provides Randomize queue and Remove duplicates. Randomizing
-changes queue order without changing the current playback or shuffle setting.
+The Queue panel menu groups Add to playlist, Mark favorite, Randomize queue,
+Remove duplicates, and Clear queue in that order. Add to playlist and Mark
+favorite act on selected occurrences and are unavailable without a ready
+selection. Mark favorite sets their tracks as favorites; tracks already marked
+stay marked, and selecting repeated occurrences does not toggle the favorite off.
+Randomize, Remove duplicates, and Clear act on the entire queue. Clear requires
+confirmation. Randomizing changes queue order without changing the current
+playback or shuffle setting.
 Removing duplicates keeps each track at its first position; if a later duplicate
 is playing, playback continues as that track's retained occurrence.
 

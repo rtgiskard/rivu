@@ -17,8 +17,8 @@ use super::{
     queries::ViewRequests,
 };
 use crate::model::{
-    Command, DirectoryRow, HistoryEntry, LibrarySort, Page, PlaylistEntryLocation,
-    PlaylistEntryRow, PlaylistSummary, Query,
+    DirectoryRow, HistoryEntry, LibrarySort, Page, PlaylistEntryLocation, PlaylistEntryRow,
+    PlaylistSummary, Query,
 };
 use gpui::ScrollStrategy;
 use selection::LibrarySelection;
@@ -504,12 +504,6 @@ pub(super) struct PlaylistEntriesBuffer {
     pub(super) scroll: gpui::UniformListScrollHandle,
 }
 
-#[derive(Clone, Copy)]
-pub(super) enum PlaylistEntryAction {
-    Play,
-    Move(bool),
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct PlaylistRefresh {
     pub(super) summaries: bool,
@@ -524,6 +518,7 @@ pub(super) struct PlaylistBrowser {
     selected_entry: Option<i64>,
     entry_details: Option<PlaylistEntryLocation>,
     selected_name: String,
+    selection_generation: u64,
 }
 
 impl PlaylistBrowser {
@@ -613,16 +608,17 @@ impl PlaylistBrowser {
     pub(super) fn selected(&self) -> Option<i64> {
         self.selected
     }
+    pub(super) fn selection_generation(&self) -> u64 {
+        self.selection_generation
+    }
     pub(super) fn selected_entry(&self) -> Option<i64> {
         self.selected_entry
-    }
-    pub(super) fn selected_name(&self) -> &str {
-        &self.selected_name
     }
 
     pub(super) fn select(&mut self, id: i64, name: String, index: usize) -> bool {
         let changed = self.selected != Some(id);
         if changed {
+            self.selection_generation = self.selection_generation.wrapping_add(1);
             self.selected_entry = None;
             self.entry_details = None;
         }
@@ -633,6 +629,7 @@ impl PlaylistBrowser {
     }
 
     pub(super) fn clear_selection(&mut self) {
+        self.selection_generation = self.selection_generation.wrapping_add(1);
         self.selected = None;
         self.selected_entry = None;
         self.entry_details = None;
@@ -742,29 +739,6 @@ impl PlaylistBrowser {
             self.take_entry();
         }
         self.entry_details = details;
-    }
-
-    pub(super) fn entry_action(&self, action: PlaylistEntryAction) -> Option<Command> {
-        let entry_id = self.selected_entry?;
-        let details = self.entry_details.as_ref()?;
-        match action {
-            PlaylistEntryAction::Play => Some(Command::Play {
-                track_id: details.track_id,
-            }),
-            PlaylistEntryAction::Move(down) => {
-                let target = if down {
-                    details.position.saturating_add(1)
-                } else {
-                    details.position.saturating_sub(1)
-                };
-                (target != details.position && target < details.total).then_some(
-                    Command::MovePlaylistEntry {
-                        entry_id,
-                        index: target,
-                    },
-                )
-            }
-        }
     }
 
     pub(super) fn entry_ready(&self) -> bool {
@@ -1235,7 +1209,7 @@ mod tests {
         assert_eq!(browser.playlists.selected(), None);
         assert_eq!(browser.playlists.selected_entry(), None);
         assert_eq!(browser.playlists.entries().playlist_id, None);
-        assert!(browser.playlists.selected_name().is_empty());
+        assert!(browser.playlists.selected_name.is_empty());
     }
 
     #[test]
@@ -1340,7 +1314,23 @@ mod tests {
     }
 
     #[test]
-    fn refreshed_offviewport_entry_plays_and_moves_by_identity_without_cached_pages() {
+    fn playlist_switch_generation_rejects_drag_after_switching_back() {
+        let mut playlists = PlaylistBrowser::default();
+        playlists.select(1, "one".into(), 0);
+        let original = playlists.selection_generation();
+        playlists.select(1, "renamed".into(), 0);
+        assert_eq!(playlists.selection_generation(), original);
+        playlists.select(2, "two".into(), 1);
+        playlists.select(1, "one".into(), 0);
+        assert_ne!(playlists.selection_generation(), original);
+        let returned = playlists.selection_generation();
+        playlists.clear_selection();
+        playlists.select(1, "one".into(), 0);
+        assert_ne!(playlists.selection_generation(), returned);
+    }
+
+    #[test]
+    fn refreshed_offviewport_entry_resolves_identity_without_cached_pages() {
         let mut playlists = PlaylistBrowser::default();
         playlists.select(1, "one".into(), 0);
         playlists.prepare_entries(1);
@@ -1363,7 +1353,6 @@ mod tests {
         playlists.prepare_entries(1);
         assert_eq!(playlists.selected_entry(), Some(41));
         assert!(!playlists.entry_ready());
-        assert!(playlists.entry_action(PlaylistEntryAction::Play).is_none());
         // The one identity result restores actions without restoring offscreen payload.
         playlists.accept_entry_lookup(
             41,
@@ -1376,25 +1365,18 @@ mod tests {
             }),
         );
         assert!(playlists.entry_ready());
-        assert!(matches!(
-            playlists.entry_action(PlaylistEntryAction::Play),
-            Some(Command::Play { track_id: 99 })
-        ));
+        assert_eq!(
+            playlists.entry_details.as_ref().map(|entry| entry.track_id),
+            Some(99)
+        );
         assert_eq!(playlists.entries.rows.visible().start, 8_000);
         assert!(playlists.entries.rows.iter().next().is_none());
-        assert!(matches!(
-            playlists.entry_action(PlaylistEntryAction::Move(true)),
-            Some(Command::MovePlaylistEntry {
-                entry_id: 41,
-                index: 7_001
-            })
-        ));
-        playlists.prepare_entries(1);
-        assert!(
-            playlists
-                .entry_action(PlaylistEntryAction::Move(false))
-                .is_none()
+        assert_eq!(
+            playlists.entry_details.as_ref().map(|entry| entry.position),
+            Some(7_000)
         );
+        playlists.prepare_entries(1);
+        assert!(!playlists.entry_ready());
         playlists.accept_entry_lookup(
             41,
             Some(PlaylistEntryLocation {
@@ -1405,13 +1387,10 @@ mod tests {
                 total: 10_000,
             }),
         );
-        assert!(matches!(
-            playlists.entry_action(PlaylistEntryAction::Move(false)),
-            Some(Command::MovePlaylistEntry {
-                entry_id: 41,
-                index: 5_999
-            })
-        ));
+        assert_eq!(
+            playlists.entry_details.as_ref().map(|entry| entry.position),
+            Some(6_000)
+        );
         assert_eq!(playlists.take_entry(), Some(41));
         assert!(!playlists.entry_ready());
     }
@@ -1422,7 +1401,7 @@ mod tests {
         playlists.select(1, "one".into(), 0);
         playlists.prepare_entries(1);
         playlists.select_entry(41, 3);
-        assert!(playlists.entry_action(PlaylistEntryAction::Play).is_none());
+        assert!(!playlists.entry_ready());
         playlists.accept_entry_lookup(40, None);
         assert_eq!(playlists.selected_entry(), Some(41));
         playlists.accept_entry_lookup(41, None);
@@ -1433,7 +1412,7 @@ mod tests {
     }
 
     #[test]
-    fn entry_move_boundaries_and_changed_membership_reject_stale_actions() {
+    fn changed_membership_rejects_stale_entry_identity() {
         let mut playlists = PlaylistBrowser::default();
         playlists.select(1, "one".into(), 0);
         playlists.prepare_entries(1);
@@ -1448,19 +1427,9 @@ mod tests {
                 total: 1,
             }),
         );
-        assert!(
-            playlists
-                .entry_action(PlaylistEntryAction::Move(false))
-                .is_none()
-        );
-        assert!(
-            playlists
-                .entry_action(PlaylistEntryAction::Move(true))
-                .is_none()
-        );
+        assert!(playlists.entry_ready());
         playlists.prepare_entries(1);
         assert!(!playlists.entry_ready());
-        assert!(playlists.entry_action(PlaylistEntryAction::Play).is_none());
         playlists.accept_entry_lookup(
             41,
             Some(PlaylistEntryLocation {
@@ -1472,7 +1441,6 @@ mod tests {
             }),
         );
         assert_eq!(playlists.selected_entry(), None);
-        assert!(playlists.entry_action(PlaylistEntryAction::Play).is_none());
     }
 
     #[test]

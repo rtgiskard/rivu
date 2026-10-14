@@ -32,11 +32,31 @@ See link:04_playback.adoc#_queue[Playback queue].
 
 == Desktop UI
 
-In the Playlists panel, New playlist opens a blank name dialog. Select a playlist
-and use Rename to edit its current name. Enter submits; Cancel or Esc discards the
-draft. Empty names are rejected. Saving runs in the background and prevents
-repeat submissions; failures keep the dialog and draft available for correction.
-A submitted save cannot be cancelled, including by closing the window.
+The Playlists panel keeps New playlist, Import, and Export together at the top.
+Export stays in place and is unavailable until a playlist is selected. New playlist
+opens a blank name dialog. Hover a catalog row to reveal its Play and actions
+buttons; these target that row without changing the selected playlist. The actions
+menu offers Add selected tracks (unavailable without a completed Library selection),
+Rename, and Delete. Rename opens the current name; Enter submits, and Cancel or
+Esc discards the draft. Empty names are rejected. Saving runs in the background
+and prevents repeat submissions; failures keep the dialog and draft available
+for correction. A submitted save cannot be cancelled, including by closing the window.
+
+Playing a non-empty playlist starts immediately when the queue is empty. Otherwise
+a confirmation names the playlist and offers Cancel or Replace and play. Cancel
+or Esc leaves the queue and playback untouched. An empty playlist cannot replace
+the queue. Deletion also requires confirmation naming the target playlist; it
+removes only the playlist, never music files.
+
+Selecting a playlist shows its tracks below the catalog. The catalog fits its
+content up to about one third of the available list area, leaving the remainder
+for tracks; a short track list can also shrink. With no selection, the catalog
+uses the remaining panel space. Track rows use the Queue's numbering and text
+layout. Double-click a track to play it individually. Hover a track to reveal
+Remove from playlist. Drag one track onto another to move that entry to the
+target position; this saves playlist order without changing the queue. Drags
+carry entry identity and playlist revisions, and are rejected after the playlist
+changes or the selection switches, including switching away and back.
 
 To save selected queue tracks under a chosen name, use the Queue panel menu's
 Add to playlist → Save selected queue as new playlist action. It opens its own
@@ -50,16 +70,17 @@ Saving runs in the background; the control stays unavailable until its result
 arrives. Closing the window does not cancel a save already submitted to the core.
 
 Playlist catalogs, entries, and the Queue panel's playlist-destination menu
-load rows automatically while scrolling. Entry numbering and move actions use
+load rows automatically while scrolling. Entry numbering and drag reordering use
 absolute playlist positions. Scrolling away from the selected playlist preserves
 its name and selected entry. See link:02_library.adoc#_paged_views[Library] for
 scrolling and query failure behavior.
 Deleting the selected playlist from another client clears its playlist and entry
 selection on refresh. Empty playlists and unloaded pages do not imply deletion.
 When refreshed pages invalidate a selected entry's position, the GUI resolves
-its current location by entry ID rather than reusing the old row index. Entry
-mutations remain unavailable while that lookup is pending or failed; a failed
-lookup requires explicit Retry. Confirmed entry removal clears its selection.
+its current location by entry ID rather than reusing the old row index. A pending
+or failed lookup is shown inline; a failed lookup offers Retry. Loaded track rows
+remain directly actionable by entry ID with revision checks for removal and
+reordering. Confirmed entry removal clears its selection when selected.
 Moving an entry refreshes only that playlist's entries and selected entry location;
 the unchanged playlist catalog and library views stay loaded. This also applies
 to moves submitted by another client. Renaming, creating, deleting, or changing
