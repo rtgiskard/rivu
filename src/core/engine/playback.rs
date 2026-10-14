@@ -67,8 +67,8 @@ impl Core {
         }) else {
             return Ok(());
         };
-        self.store.increment_play_count(track_id)?;
-        self.update_track_stats(track_id)?;
+        let stats = self.store.increment_play_count(track_id)?;
+        self.update_track_stats(track_id, stats)?;
         if let Some(playback) = self.playback.as_mut() {
             playback.counted = true;
         }
@@ -92,13 +92,16 @@ impl Core {
             .as_ref()
             .and_then(|playback| playback.paused_at)
             .map_or(played_at, |paused_at| played_at.min(paused_at));
-        if let Err(error) = self.store.mark_played(track_id, played_at) {
-            // Rejected bookkeeping must not be revived by another queued start
-            // or counted from the successful audio output's final snapshot.
-            self.playback = None;
-            return Err(error);
-        }
-        self.update_track_stats(track_id)?;
+        let stats = match self.store.mark_played(track_id, played_at) {
+            Ok(stats) => stats,
+            Err(error) => {
+                // Rejected bookkeeping cannot be revived by another queued start
+                // or counted from the output's final snapshot.
+                self.playback = None;
+                return Err(error);
+            }
+        };
+        self.update_track_stats(track_id, stats)?;
         let playback = self.playback.as_mut().expect("playback was checked above");
         playback.started = true;
         playback.last_heard_at = Some(played_at);
@@ -219,8 +222,8 @@ impl Core {
         let result = (|| -> Result<()> {
             bookkeeping?;
             if let Some((track_id, played_at)) = final_activity {
-                self.store.mark_played(track_id, played_at)?;
-                self.update_track_stats(track_id)?;
+                let stats = self.store.mark_played(track_id, played_at)?;
+                self.update_track_stats(track_id, stats)?;
                 self.state.library.history = Arc::new(self.store.history(MAX_QUERY_ROWS)?);
             }
             self.count_play()

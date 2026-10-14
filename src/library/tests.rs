@@ -37,6 +37,60 @@ fn scan_paths(paths: &[PathBuf], known: &[KnownFile], ffmpeg_enabled: bool) -> R
     )
 }
 
+#[test]
+fn new_and_retargeted_cue_sheets_reuse_known_sources_outside_request_scope() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let sources = directory.path().join("sources");
+    let sheets = directory.path().join("sheets");
+    fs::create_dir_all(&sources)?;
+    fs::create_dir_all(&sheets)?;
+    let first = sources.join("first.wav");
+    let second = sources.join("second.wav");
+    wav(&first, 150)?;
+    wav(&second, 150)?;
+    let mut baseline = scan_paths(&[first, second], &[], false)?;
+    assert!(baseline.errors.is_empty(), "{:?}", baseline.errors);
+    for record in &mut baseline.records {
+        record.media.artist = format!(
+            "Cached {}",
+            record.path.file_stem().unwrap().to_str().unwrap()
+        );
+    }
+    let store = crate::store::Store::open(Path::new(":memory:"))?;
+    store.apply_scan(&baseline)?;
+    let sheet = sheets.join("album.cue");
+    for (index, name) in ["first", "second"].into_iter().enumerate() {
+        fs::write(
+            &sheet,
+            format!(
+                "FILE \"../sources/{name}.wav\" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n"
+            ),
+        )?;
+        // Exercise both explicit sheet and tiny directory requests. Neither
+        // may discard reusable whole-source metadata beyond the request root.
+        let requested = if index == 0 {
+            sheet.clone()
+        } else {
+            sheets.clone()
+        };
+        let known = store.known_files(std::slice::from_ref(&requested))?;
+        let scan = super::scan_paths(
+            &[requested],
+            &known,
+            false,
+            &[directory.path().to_path_buf()],
+            crate::config::Config::default().scan_max_depth,
+            &ScanCancellation::default(),
+            |_, _, _, _, _| {},
+        )?;
+        assert!(scan.errors.is_empty(), "{:?}", scan.errors);
+        assert_eq!(scan.records.len(), 1);
+        assert_eq!(scan.records[0].media.artist, format!("Cached {name}"));
+        store.apply_scan(&scan)?;
+    }
+    Ok(())
+}
+
 fn scan_paths_at_depth(
     paths: &[PathBuf],
     known: &[KnownFile],
@@ -972,7 +1026,7 @@ fn ordinary_scan_rehashes_same_size_wav_after_pre_epoch_mtime_change() -> Result
     let store = crate::store::Store::open(Path::new(":memory:"))?;
     store.apply_scan(&original)?;
     let id = store.track_id_for_source(&audio, None)?.unwrap();
-    let known = store.known_files()?;
+    let known = store.known_files(std::slice::from_ref(&audio))?;
     assert_eq!(known[0].modified_ns, -2_000_000_000);
 
     let mut contents = fs::read(&audio)?;

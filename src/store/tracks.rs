@@ -81,6 +81,12 @@ impl Store {
             .filter(|query| !query.is_empty())
             .map(str::to_lowercase);
         let total = self.filtered_track_count(query.as_deref(), favorite, missing)?;
+        if limit == 0 {
+            return Ok(Page {
+                total,
+                rows: Vec::new(),
+            });
+        }
         let order = library_order(sort);
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {LIBRARY_ROW_COLUMNS} FROM tracks {TRACK_SEARCH_FILTER} ORDER BY {order} LIMIT ?4 OFFSET ?5"
@@ -127,6 +133,12 @@ impl Store {
             params![query, favorite, missing, prefix],
             |row| row.get::<_, i64>(0),
         )? as usize;
+        if limit == 0 {
+            return Ok(Page {
+                total,
+                rows: Vec::new(),
+            });
+        }
         let order = library_order(sort);
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {LIBRARY_ROW_COLUMNS} FROM tracks {TRACK_SEARCH_FILTER}{scope} ORDER BY {order} LIMIT ?5 OFFSET ?6"
@@ -275,6 +287,12 @@ impl Store {
             params![query, favorite, None::<bool>, prefix],
             |row| row.get::<_, i64>(0),
         )? as usize;
+        if limit == 0 {
+            return Ok(Page {
+                total,
+                rows: Vec::new(),
+            });
+        }
         sql.truncate(children_end);
         sql.push_str(page_columns);
         sql.push_str(LIBRARY_ROW_COLUMNS_QUALIFIED);
@@ -521,6 +539,7 @@ impl Store {
         for (playlist_id, positions) in playlist_positions {
             close_gaps(tx, &positions, PositionScope::Playlist(playlist_id))?;
         }
+        super::queue::invalidate_structure(tx, !queue_positions.is_empty())?;
         Ok(())
     }
 
@@ -544,30 +563,37 @@ impl Store {
         for (playlist_id, positions) in playlist_positions {
             close_gaps(&tx, &positions, PositionScope::Playlist(playlist_id))?;
         }
+        super::queue::invalidate_structure(&tx, !queue_positions.is_empty())?;
         tx.commit()?;
         Ok(())
     }
-    pub fn mark_played(&self, track: i64, at: i64) -> Result<()> {
-        self.track_cache.borrow_mut().entries.remove(&track);
-        changed(
-            self.conn.execute(
-                "UPDATE tracks SET last_played=? WHERE id=?",
+    pub fn mark_played(&self, track: i64, at: i64) -> Result<super::TrackStats> {
+        let stats = self
+            .conn
+            .query_row(
+                "UPDATE tracks SET last_played=?1 WHERE id=?2 RETURNING play_count,last_played",
                 params![at, track],
-            )?,
-            "track",
-            track,
-        )
+                super::TrackStats::from_row,
+            )
+            .optional()?
+            .with_context(|| format!("track {track} does not exist"))?;
+        self.cache_track_stats(track, stats);
+        Ok(stats)
     }
-    pub fn increment_play_count(&self, track: i64) -> Result<()> {
-        self.track_cache.borrow_mut().entries.remove(&track);
-        changed(
-            self.conn.execute(
-                "UPDATE tracks SET play_count=play_count+1 WHERE id=?",
-                [track],
-            )?,
-            "track",
-            track,
-        )
+    pub fn increment_play_count(&self, track: i64) -> Result<super::TrackStats> {
+        let stats = self.conn.query_row(
+            "UPDATE tracks SET play_count=play_count+1 WHERE id=?1 RETURNING play_count,last_played",
+            [track], super::TrackStats::from_row,
+        ).optional()?.with_context(|| format!("track {track} does not exist"))?;
+        self.cache_track_stats(track, stats);
+        Ok(stats)
+    }
+
+    fn cache_track_stats(&self, id: i64, stats: super::TrackStats) {
+        if let Some((track, _)) = self.track_cache.borrow_mut().entries.get_mut(&id) {
+            track.play_count = stats.play_count;
+            track.last_played = stats.last_played;
+        }
     }
 }
 

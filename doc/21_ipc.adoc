@@ -23,6 +23,10 @@ Single-entry moves update only the positions between the old and new locations.
 Bulk queue moves rewrite the affected interval rather than the full queue;
 reorders skip rows whose position is already correct. Entry identities and the
 current occurrence remain stable, and no-op moves leave queue content valid.
+Structural queue mutations advance the content revision once inside their changing
+Store transaction, including reference deletion and gap compaction. Metadata
+invalidation remains field-sensitive; failures roll back structural revision and
+content together. Already-unique deduplication leaves content and projections valid.
 
 Scan-backed metadata and user overrides skip writes when their stored values are
 unchanged. Setting an override equal to its raw value still records that editing
@@ -41,6 +45,9 @@ Count-only pages omit row projection; queue and playlist totals do not join
 track metadata. Equivalent normalized root prefixes are counted once per request,
 then expanded to the original paths and order. Root aggregation state is
 request-local and bounded by the 256-root query limit.
+Queue and playlist entry pages seek by their contiguous position rather than
+skipping an OFFSET prefix. Playlist entry totals use the indexed maximum position;
+this relies on the same Store-owned contiguous-order invariant.
 
 Directory and root queries use BINARY path ranges: a normalized nonempty prefix
 ends in `/`, and replacing that delimiter with `0` gives its exclusive upper
@@ -255,6 +262,15 @@ Reapplying identical metadata or favorites, including a forced scan that keeps
 the same displayed values, does not advance the queue content revision.
 Raw title, artist, or album changes hidden by overrides also leave queue content
 valid when their effective display values are unchanged.
+Unchanged scans preserve library, structure and playlist query revisions, while
+scan status and requested playlist imports still complete. Empty or existing-only
+playlist additions and same-position moves preserve playlist query validity;
+missing identities still fail validation.
+
+Playback-statistics writes return count and activity time directly to the Core.
+The bounded track cache and current/recent snapshots receive these scalar changes
+without reloading complete metadata. Count threshold and activity timing remain
+independent.
 
 Watch has no fixed expiry. A complete new request on that connection supersedes
 a pending Watch without a Watch response. The preserved input then becomes the

@@ -75,24 +75,20 @@ fn create_schema(conn: &Connection) -> Result<()> {
             revision INTEGER NOT NULL DEFAULT 0
         );
         INSERT INTO queue_meta(singleton) VALUES(1);
-        CREATE TRIGGER queue_insert AFTER INSERT ON queue_entries BEGIN
-            UPDATE queue_meta SET revision=revision+1;
-        END;
-        CREATE TRIGGER queue_delete AFTER DELETE ON queue_entries BEGIN
-            UPDATE queue_meta SET revision=revision+1;
-        END;
-        CREATE TRIGGER queue_move AFTER UPDATE OF position ON queue_entries
-        WHEN old.position<>new.position BEGIN
-            UPDATE queue_meta SET revision=revision+1;
-        END;
-        INSERT INTO schema_meta(key,value) VALUES('version',9);",
+        INSERT INTO schema_meta(key,value) VALUES('version',10);",
     )?;
     tx.execute_batch(TRACK_INDEXES_AND_TRIGGER)?;
     tx.commit()?;
     Ok(())
 }
 
-fn migrate_to_v9(conn: &Connection, version: i64) -> Result<()> {
+const MIGRATE_QUEUE_TO_V10: &str = "DROP TRIGGER IF EXISTS queue_insert;
+    DROP TRIGGER IF EXISTS queue_delete;
+    DROP TRIGGER IF EXISTS queue_move;
+    DELETE FROM schema_meta WHERE key='compact_pending';
+    UPDATE schema_meta SET value=10 WHERE key='version';";
+
+fn migrate_legacy_to_v10(conn: &Connection, version: i64) -> Result<()> {
     conn.create_scalar_function(
         "fingerprint_blob",
         1,
@@ -155,15 +151,24 @@ fn migrate_to_v9(conn: &Connection, version: i64) -> Result<()> {
              CREATE INDEX queue_order ON queue_entries(position);
              DROP INDEX playlist_order;
              CREATE INDEX playlist_order ON playlist_entries(playlist_id,position);
-             CREATE INDEX IF NOT EXISTS playlist_track_lookup ON playlist_entries(track_id,playlist_id);
-             UPDATE schema_meta SET value=9 WHERE key='version';"
+             CREATE INDEX IF NOT EXISTS playlist_track_lookup ON playlist_entries(track_id,playlist_id);"
         )?;
+        tx.execute_batch(MIGRATE_QUEUE_TO_V10)?;
         tx.commit()?;
         Ok(())
     })();
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.remove_function("fingerprint_blob", 1)?;
     result
+}
+
+fn migrate_to_v10(conn: &Connection) -> Result<()> {
+    // Keep all occurrence IDs, current selection and revision. A version boundary
+    // prevents older Store implementations from accepting a trigger-free schema.
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(MIGRATE_QUEUE_TO_V10)?;
+    tx.commit()?;
+    Ok(())
 }
 
 impl Store {
@@ -195,10 +200,11 @@ impl Store {
                 )
                 .context("Unsupported library database; remove the old database and rescan")?;
             match version {
-                7 | 8 => migrate_to_v9(&c, version).with_context(|| {
-                    format!("Migrate library database from version {version} to 9")
+                7 | 8 => migrate_legacy_to_v10(&c, version).with_context(|| {
+                    format!("Migrate library database from version {version} to 10")
                 })?,
-                9 => {}
+                9 => migrate_to_v10(&c).context("Migrate library database from version 9 to 10")?,
+                10 => {}
                 _ => bail!(
                     "Unsupported database version {version}; remove the old database and rescan"
                 ),
@@ -249,10 +255,6 @@ impl Store {
             Ok((database_size, wal_size))
         };
         let (database_bytes_before, wal_bytes_before) = sizes()?;
-        self.conn.execute(
-            "INSERT OR REPLACE INTO schema_meta(key,value) VALUES('compact_pending',1)",
-            [],
-        )?;
         self.conn.execute_batch("VACUUM; PRAGMA optimize;")?;
         let busy: i64 = self
             .conn
@@ -262,18 +264,6 @@ impl Store {
                 "Database checkpoint blocked by another reader; retry optimization after closing it"
             );
         }
-        self.conn
-            .execute("DELETE FROM schema_meta WHERE key='compact_pending'", [])?;
-        let busy: i64 = self
-            .conn
-            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
-        if busy != 0 {
-            self.conn.execute(
-                "INSERT OR REPLACE INTO schema_meta(key,value) VALUES('compact_pending',1)",
-                [],
-            )?;
-            bail!("Database checkpoint blocked after maintenance; retry optimization");
-        }
         let (database_bytes_after, wal_bytes_after) = sizes()?;
         Ok(DatabaseOptimization {
             database_bytes_before,
@@ -281,5 +271,94 @@ impl Store {
             wal_bytes_before,
             wal_bytes_after,
         })
+    }
+}
+
+#[cfg(test)]
+pub(super) const LEGACY_QUEUE_TRIGGERS: &str = "
+    CREATE TRIGGER queue_insert AFTER INSERT ON queue_entries BEGIN
+        UPDATE queue_meta SET revision=revision+1;
+    END;
+    CREATE TRIGGER queue_delete AFTER DELETE ON queue_entries BEGIN
+        UPDATE queue_meta SET revision=revision+1;
+    END;
+    CREATE TRIGGER queue_move AFTER UPDATE OF position ON queue_entries
+    WHEN old.position<>new.position BEGIN
+        UPDATE queue_meta SET revision=revision+1;
+    END;";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v9_migration_preserves_occurrences_current_and_revision() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("queue.db");
+        let store = Store::open(&path)?;
+        store
+            .conn
+            .execute_batch("INSERT INTO tracks(path) VALUES('/a'),('/b');")?;
+        store.enqueue_tracks(&[1, 2, 1])?;
+        let ids = store.queue_ids()?;
+        store.set_queue_current(Some(ids[2]))?;
+        store.conn.execute_batch(LEGACY_QUEUE_TRIGGERS)?;
+        store
+            .conn
+            .execute("UPDATE schema_meta SET value=9 WHERE key='version'", [])?;
+        let state = store.queue_state()?;
+        let page = store.queue_page(0, 10)?;
+        drop(store);
+
+        let store = Store::open(&path)?;
+        assert_eq!(store.queue_state()?, state);
+        assert_eq!(store.queue_page(0, 10)?, page);
+        store.reorder_queue(&ids)?;
+        store.move_queue_entry(ids[0], 0)?;
+        assert_eq!(store.queue_state()?, state);
+        store.move_queue_entry(ids[0], 2)?;
+        let changed = store.queue_state()?;
+        assert!(changed.revision > state.revision);
+        assert_eq!(changed.current_id, state.current_id);
+        store.set_favorite(&[1], true)?;
+        assert!(store.queue_state()?.revision > changed.revision);
+        let state = store.queue_state()?;
+        let page = store.queue_page(0, 10)?;
+        drop(store);
+        let reopened = Store::open(&path)?;
+        assert_eq!(reopened.queue_state()?, state);
+        assert_eq!(reopened.queue_page(0, 10)?, page);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_v10_migration_rolls_back_trigger_removal_and_version() -> Result<()> {
+        let store = Store::open(Path::new(":memory:"))?;
+        store.conn.execute_batch(LEGACY_QUEUE_TRIGGERS)?;
+        store.conn.execute_batch(
+            "UPDATE schema_meta SET value=9 WHERE key='version';
+             CREATE TEMP TRIGGER reject_schema_version AFTER UPDATE ON schema_meta
+             BEGIN SELECT RAISE(ABORT,'injected migration failure'); END;",
+        )?;
+        assert!(migrate_to_v10(&store.conn).is_err());
+        store
+            .conn
+            .execute_batch("DROP TRIGGER reject_schema_version;")?;
+        store
+            .conn
+            .execute("INSERT INTO tracks(path) VALUES('/a')", [])?;
+        let before = store.queue_state()?;
+        store.conn.execute(
+            "INSERT INTO queue_entries(track_id,position) VALUES(1,0)",
+            [],
+        )?;
+        assert!(store.queue_state()?.revision > before.revision);
+        let version: i64 = store.conn.query_row(
+            "SELECT value FROM schema_meta WHERE key='version'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(version, 9);
+        Ok(())
     }
 }

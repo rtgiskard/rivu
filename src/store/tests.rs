@@ -297,6 +297,8 @@ fn legacy_schema(store: &Store, version: i64, patched_indexes: bool) {
         tx.execute_batch("DROP INDEX tracks_directory; DROP INDEX playlist_track_lookup;")
             .unwrap();
     }
+    tx.execute_batch(super::schema::LEGACY_QUEUE_TRIGGERS)
+        .unwrap();
     tx.commit().unwrap();
     store
         .conn
@@ -345,7 +347,7 @@ fn supported_migrations_preserve_library_playlist_queue_and_current_identity() {
             .unwrap();
         store.remove_tracks(&[100]).unwrap();
         let expected_tracks = all_tracks(&store);
-        let expected_known = store.known_files().unwrap();
+        let expected_known = store.known_files(&[PathBuf::from("/")]).unwrap();
         let expected_playlist = playlist_entries(&store, playlist);
         let expected_queue = store.queue_state().unwrap();
         let expected_page = store.queue_page(0, 10).unwrap();
@@ -362,12 +364,12 @@ fn supported_migrations_preserve_library_playlist_queue_and_current_identity() {
                     |row| row.get::<_, i64>(0)
                 )
                 .unwrap(),
-            9
+            10
         );
         assert_eq!(all_tracks(&migrated), expected_tracks);
         assert_eq!(
             migrated
-                .known_files()
+                .known_files(&[PathBuf::from("/")])
                 .unwrap()
                 .iter()
                 .map(|file| &file.fingerprint)
@@ -738,7 +740,7 @@ fn metadata_refresh_preserves_favorites_and_unknown_values() {
     assert!(store.set_favorite(&[id, 999], false).is_err());
     assert!(all_tracks(&store)[0].favorite);
     assert_eq!(
-        store.known_files().unwrap()[0]
+        store.known_files(&[PathBuf::from("/")]).unwrap()[0]
             .media
             .as_ref()
             .unwrap()
@@ -763,45 +765,13 @@ fn maintenance_retries_after_reader_releases_and_keeps_records() {
     store.mark_played(id, 42).unwrap();
     store.conn.busy_timeout(std::time::Duration::ZERO).unwrap();
     assert!(store.optimize().is_err());
-    assert_eq!(
-        store
-            .conn
-            .query_row(
-                "SELECT value FROM schema_meta WHERE key='compact_pending'",
-                [],
-                |r| r.get::<_, i64>(0)
-            )
-            .unwrap(),
-        1
-    );
     reader.execute_batch("ROLLBACK").unwrap();
     drop(reader);
     drop(store);
     let reopened = Store::open(&path).unwrap();
     assert_eq!(all_tracks(&reopened)[0].last_played, Some(42));
-    assert_eq!(
-        reopened
-            .conn
-            .query_row(
-                "SELECT value FROM schema_meta WHERE key='compact_pending'",
-                [],
-                |row| row.get::<_, i64>(0)
-            )
-            .unwrap(),
-        1
-    );
     reopened.optimize().unwrap();
-    assert_eq!(
-        reopened
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM schema_meta WHERE key='compact_pending'",
-                [],
-                |r| r.get::<_, i64>(0)
-            )
-            .unwrap(),
-        0
-    );
+    assert_eq!(all_tracks(&reopened)[0].last_played, Some(42));
 }
 
 #[test]
@@ -901,7 +871,7 @@ fn shared_source_segments_keep_independent_ids_overrides_stats_and_missing_state
         );
         assert!(!after[index].missing);
     }
-    let known = store.known_files().unwrap();
+    let known = store.known_files(&[PathBuf::from("/")]).unwrap();
     let known = known.iter().find(|r| r.track_id == ids[1]).unwrap();
     assert_eq!(known.cue, changed.cue);
     assert_eq!(known.media.as_ref().unwrap().title, "New raw title");
@@ -2667,7 +2637,7 @@ fn queue_dedup_uses_first_position_not_allocation_order_and_track_deletes_remove
 fn unsupported_database_versions_are_rejected_without_migration() {
     fs::create_dir_all(".cache").unwrap();
     let directory = tempfile::tempdir_in(".cache").unwrap();
-    for version in [6, 10] {
+    for version in [6, 11] {
         let path = directory.path().join(format!("version-{version}.db"));
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection

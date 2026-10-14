@@ -57,7 +57,7 @@ impl Core {
         let known = if force {
             Vec::new()
         } else {
-            self.store.known_files()?
+            self.store.known_files(&paths)?
         };
         let ffmpeg_enabled = config.ffmpeg_enabled;
         tracing::info!(
@@ -290,8 +290,9 @@ impl Core {
     pub(in crate::core) fn finish_scan(&mut self, scan: ScanFinished) -> Result<bool> {
         let result = scan.result?;
         let successful = result.errors().is_empty();
-        self.store.apply_scan(&result)?;
-        self.reload(true)?;
+        if self.store.apply_scan(&result)? {
+            self.reload(true)?;
+        }
         if let Some((name, items)) = scan.import {
             let accessible: HashSet<_> = result
                 .records

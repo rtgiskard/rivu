@@ -47,6 +47,14 @@ Ordinary scans reuse valid metadata and fingerprints when file size and modifica
 time match; force scans reprobe and reread source content. Neither resets user edits.
 Representable pre-epoch modification times remain valid cache keys; unavailable or
 out-of-range times always bypass cache reuse.
+An unchanged result still completes its scan status and reports errors, but does
+not invalidate library, structure, playlist, or queue-content views. Playlist
+imports still create the requested playlist when the scanned tracks are unchanged.
+Exact ordinary-file requests read only that source's cached metadata. Directory
+and CUE requests retain the existing metadata snapshot so new or retargeted sheets
+can reuse sources outside the requested scope. Merging reads scoped identities
+and missing candidates, plus indexed fingerprint-compatible relocation candidates
+from anywhere in the library; relocation eligibility and ambiguity are unchanged.
 
 Cancellation is cooperative: discovery, files, CUE boundaries, and hash-read chunks
 check the scan owner's shared cancellation token. A blocking audio probe is checked
@@ -182,9 +190,10 @@ including ranges that cross groups or unloaded pages. Selected root headers
 support directory rescanning and dragging with the same recursive semantics
 as tree directories; actions deduplicate overlapping track identities.
 
-After a scan saves its results, both views and root counts refresh automatically,
-including previously empty expanded folders, even if some files failed to import.
-Collapsed folders load updated contents when reopened.
+After a scan changes stored library data, both views and root counts refresh
+automatically, including previously empty expanded folders, even if some files
+failed to import. Unchanged scans preserve existing view revisions. Collapsed
+folders load updated contents when reopened.
 The scan status row offers a close button after completion or failure. Closing
 it hides the result and progress bar without changing imported tracks or the
 separate error message. A new scan shows progress again.
@@ -272,19 +281,23 @@ Recent entries reflect edited titles and current play counts without reopening
 the view. Crossing the counting threshold refreshes the recent entry while
 playback continues; editing its title does not change its activity timestamp or
 recency order.
+The retained snapshot contains up to 256 recent tracks both after startup and
+after subsequent activity or catalog refreshes.
 
 `rivu library history --limit N` prints up to N retained rows in human mode.
 For the JSON history shape and `--limit` behavior, see <<_cli_output,CLI output>>.
 
 == SQLite maintenance
 
-Rivu uses version 9 library databases and automatically upgrades versions 7 and 8
-in one transaction, preserving library records, overrides, favorites, statistics,
-decoder hints, playlists, saved queue occurrences and current selection. Version-7
-tracks receive the Auto decoder hint. Other schemas are not upgraded automatically.
+Rivu uses version 10 library databases and automatically upgrades versions 7, 8
+and 9 in one transaction, preserving library records, overrides, favorites,
+statistics, decoder hints, playlists, saved queue occurrences and current
+selection. Version-7 tracks receive the Auto decoder hint. Other schemas are
+not upgraded automatically.
 Stop the core and back up the database before switching database-schema versions;
-older builds cannot open the upgraded database. Migration requires temporary disk
-space to rebuild track storage; use optimization afterward to reclaim free pages.
+older builds cannot open the upgraded database. Versions 7 and 8 require temporary
+disk space to rebuild track storage; use optimization afterward to reclaim free
+pages. Version 9 upgrades without rebuilding track storage.
 
 Stop the core before removing `library.db` and its `-wal`/`-shm` sidecars, then scan
 the music files again. This resets playlists, saved queue, favorites, metadata

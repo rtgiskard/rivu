@@ -635,7 +635,7 @@ impl Core {
     fn load_initial_state(&mut self) -> Result<()> {
         self.state.library.track_total = self.store.track_count()?;
         self.state.library.playlist_total = self.store.playlist_summary_page(0, 0)?.total;
-        self.state.library.history = Arc::new(self.store.history(200.min(MAX_QUERY_ROWS))?);
+        self.state.library.history = Arc::new(self.store.history(MAX_QUERY_ROWS)?);
         self.state.system.devices = Arc::new(audio::devices().unwrap_or_default());
         self.state.system.ffmpeg_status = if self.state.system.config.ffmpeg_enabled {
             audio::ffmpeg_status().unwrap_or_else(|error| format!("unavailable: {error:#}"))
@@ -1564,12 +1564,12 @@ mod tests {
         core.store.set_queue_current(Some(1)).unwrap();
         core.refresh_queue_tracks().unwrap();
         let revision = core.state.queue.revision;
-        core.store.mark_played(1, 7).unwrap();
-        core.update_track_stats(1).unwrap();
+        let stats = core.store.mark_played(1, 7).unwrap();
+        core.update_track_stats(1, stats).unwrap();
         assert_eq!(core.state.current_track().unwrap().last_played, Some(7));
         assert_eq!(core.state.queue.revision, revision);
-        core.store.increment_play_count(1).unwrap();
-        core.update_track_stats(1).unwrap();
+        let stats = core.store.increment_play_count(1).unwrap();
+        core.update_track_stats(1, stats).unwrap();
         assert_ne!(core.state.queue.revision, revision);
         assert_eq!(
             core.store.queue_page(0, 1).unwrap().rows[0]
@@ -1577,6 +1577,70 @@ mod tests {
                 .play_count,
             1
         );
+    }
+
+    #[test]
+    fn startup_and_catalog_refresh_retain_the_same_recent_history() {
+        let (directory, mut core) = fixture();
+        let media = core
+            .store
+            .known_files(&[directory.path().to_path_buf()])
+            .unwrap()[0]
+            .media
+            .clone()
+            .unwrap();
+        let result = ScanResult {
+            roots: vec![directory.path().to_path_buf()],
+            records: (1..=MAX_QUERY_ROWS + 1)
+                .map(|id| ScanRecord {
+                    path: directory.path().join(format!("history-{id}.wav")),
+                    cue: None,
+                    size: 1,
+                    modified_ns: 1,
+                    fingerprint: None,
+                    media: media.clone(),
+                })
+                .collect(),
+            ..ScanResult::default()
+        };
+        core.store.apply_scan(&result).unwrap();
+        let ids: Vec<_> = core
+            .store
+            .known_files(&[directory.path().to_path_buf()])
+            .unwrap()
+            .into_iter()
+            .filter(|known| {
+                known
+                    .path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("history-")
+            })
+            .map(|known| known.track_id)
+            .collect();
+        for (index, &id) in ids.iter().enumerate() {
+            core.store.mark_played(id, index as i64 + 1).unwrap();
+        }
+        let expected: Vec<_> = ids.iter().rev().take(MAX_QUERY_ROWS).copied().collect();
+        core.load_initial_state().unwrap();
+        let initial: Vec<_> = core
+            .state
+            .library
+            .history
+            .iter()
+            .map(|entry| entry.track_id)
+            .collect();
+        assert_eq!(initial, expected);
+        core.reload_catalog(false).unwrap();
+        let refreshed: Vec<_> = core
+            .state
+            .library
+            .history
+            .iter()
+            .map(|entry| entry.track_id)
+            .collect();
+        assert_eq!(refreshed, expected);
     }
 
     #[test]
@@ -1695,12 +1759,86 @@ mod tests {
     }
 
     #[test]
+    fn unchanged_scans_keep_query_results_valid_and_still_import_playlists() {
+        let (directory, mut core) = fixture();
+        core.store.set_queue_current(Some(1)).unwrap();
+        core.refresh_queue_tracks().unwrap();
+        let result = ScanResult {
+            roots: vec![directory.path().to_path_buf()],
+            records: core
+                .store
+                .known_files(&[directory.path().to_path_buf()])
+                .unwrap()
+                .into_iter()
+                .map(|known| ScanRecord {
+                    path: known.path,
+                    cue: known.cue,
+                    size: known.size,
+                    modified_ns: known.modified_ns,
+                    fingerprint: known.fingerprint,
+                    media: known.media.unwrap(),
+                })
+                .collect(),
+            ..ScanResult::default()
+        };
+        let before = core.state.query_revisions();
+        let current = core.state.current_track.clone().unwrap();
+        for import in [false, true] {
+            let scan = ScanFinished {
+                id: 0,
+                result: Ok(result.clone()),
+                import: import.then(|| {
+                    (
+                        "unchanged import".into(),
+                        vec![M3uItem {
+                            path: directory.path().join("1.wav"),
+                            name: None,
+                            cue_track: None,
+                        }],
+                    )
+                }),
+                progress: ScanProgress {
+                    phase: ScanPhase::Completed,
+                    processed: 4,
+                    total: Some(4),
+                    errors: 0,
+                    path: None,
+                },
+            };
+            assert!(core.finish_scan(scan).unwrap());
+            let after = core.state.query_revisions();
+            assert_eq!(after.library, before.library);
+            assert_eq!(after.structure, before.structure);
+            assert_eq!(after.queue, before.queue);
+            if import {
+                assert_ne!(after.playlist, before.playlist);
+                let playlist = core.store.playlist_summary_page(0, 1).unwrap().rows[0].id;
+                assert_eq!(core.store.playlist_track_ids(playlist, 10).unwrap(), [1]);
+            } else {
+                assert_eq!(after, before);
+            }
+            assert_eq!(core.state.current_track.as_deref(), Some(current.as_ref()));
+            assert!(
+                core.view(&Query::TrackBatch {
+                    query: None,
+                    favorite: None,
+                    missing: None,
+                    after: None,
+                    limit: 2,
+                    expected: Some(before),
+                })
+                .is_ok()
+            );
+        }
+    }
+
+    #[test]
     fn failed_playlist_import_keeps_committed_scan_visible() {
         let (directory, mut core) = fixture();
         let before = core.state.query_revisions();
         let mut media = core
             .store
-            .known_files()
+            .known_files(&[directory.path().to_path_buf()])
             .unwrap()
             .into_iter()
             .find(|known| known.track_id == 1)
@@ -1757,7 +1895,7 @@ mod tests {
             let sheet = directory.path().join("album.cue");
             let media = core
                 .store
-                .known_files()
+                .known_files(&[directory.path().to_path_buf()])
                 .unwrap()
                 .into_iter()
                 .find(|file| file.track_id == 1)
@@ -2066,6 +2204,108 @@ mod tests {
                 Some("Unreadable source")
             );
         }
+    }
+
+    #[test]
+    fn playlist_append_and_move_only_invalidate_changed_pages() {
+        let (_directory, mut core) = fixture();
+        core.command(Command::CreatePlaylistWithTracks {
+            name: "mix".into(),
+            track_ids: vec![1, 2],
+        })
+        .unwrap();
+        let entry_id = core.store.playlist_entries_page(1, 0, 1).unwrap().rows[0].id;
+        let expected = core.state.query_revisions();
+        let query = Query::PlaylistEntryBatch {
+            playlist_id: 1,
+            after: None,
+            limit: 1,
+            expected: Some(expected),
+        };
+        for command in [
+            Command::AddPlaylist {
+                playlist_id: 1,
+                track_ids: vec![],
+            },
+            Command::AddPlaylist {
+                playlist_id: 1,
+                track_ids: vec![2, 1, 2],
+            },
+            Command::AddPlaylistSources {
+                playlist_id: 1,
+                directories: vec![],
+                track_ids: vec![],
+            },
+            Command::AddPlaylistSources {
+                playlist_id: 1,
+                directories: vec![],
+                track_ids: vec![1, 2],
+            },
+            Command::MovePlaylistEntry { entry_id, index: 0 },
+        ] {
+            core.command(command).unwrap();
+            assert_eq!(core.state.query_revisions(), expected);
+            assert!(core.view(&query).is_ok());
+        }
+        for command in [
+            Command::AddPlaylist {
+                playlist_id: 999,
+                track_ids: vec![],
+            },
+            Command::AddPlaylist {
+                playlist_id: 1,
+                track_ids: vec![3, 999],
+            },
+            Command::AddPlaylistSources {
+                playlist_id: 999,
+                directories: vec![],
+                track_ids: vec![],
+            },
+            Command::AddPlaylistSources {
+                playlist_id: 1,
+                directories: vec![],
+                track_ids: vec![3, 999],
+            },
+            Command::MovePlaylistEntry {
+                entry_id,
+                index: usize::MAX,
+            },
+            Command::MovePlaylistEntry {
+                entry_id: i64::MAX,
+                index: 0,
+            },
+        ] {
+            assert!(core.command(command).is_err());
+            assert_eq!(core.state.query_revisions(), expected);
+            assert_eq!(core.store.playlist_track_ids(1, 10).unwrap(), [1, 2]);
+        }
+        for command in [
+            Command::AddPlaylist {
+                playlist_id: 1,
+                track_ids: vec![3],
+            },
+            Command::AddPlaylistSources {
+                playlist_id: 1,
+                directories: vec![],
+                track_ids: vec![4],
+            },
+            Command::MovePlaylistEntry { entry_id, index: 3 },
+        ] {
+            let before = core.state.query_revisions();
+            let query = Query::PlaylistEntryBatch {
+                playlist_id: 1,
+                after: None,
+                limit: 1,
+                expected: Some(before),
+            };
+            core.command(command).unwrap();
+            let after = core.state.query_revisions();
+            assert_ne!(after.playlist, before.playlist);
+            assert_eq!(after.library, before.library);
+            assert_eq!(after.queue, before.queue);
+            assert_eq!(core.view(&query).unwrap_err(), QueryError::RevisionChanged);
+        }
+        assert_eq!(core.store.playlist_track_ids(1, 10).unwrap(), [2, 3, 4, 1]);
     }
 
     #[test]
@@ -2812,7 +3052,7 @@ mod tests {
 
         let known = core
             .store
-            .known_files()
+            .known_files(&[directory.path().to_path_buf()])
             .unwrap()
             .into_iter()
             .find(|file| file.track_id == 1)
