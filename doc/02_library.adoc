@@ -346,15 +346,9 @@ For the JSON history shape and `--limit` behavior, see <<_cli_output,CLI output>
 
 == SQLite maintenance
 
-Rivu uses version 10 library databases and automatically upgrades versions 7, 8
-and 9 in one transaction, preserving library records, overrides, favorites,
-statistics, decoder hints, playlists, saved queue occurrences and current
-selection. Version-7 tracks receive the Auto decoder hint. Other schemas are
-not upgraded automatically.
-Stop the core and back up the database before switching database-schema versions;
-older builds cannot open the upgraded database. Versions 7 and 8 require temporary
-disk space to rebuild track storage; use optimization afterward to reclaim free
-pages. Version 9 upgrades without rebuilding track storage.
+Rivu accepts only version 11 library databases. Older, newer, and unversioned
+databases are rejected; there is no compatibility, migration, or automatic reset.
+Back up an incompatible database before replacing it.
 
 Stop the core before removing `library.db` and its `-wal`/`-shm` sidecars, then scan
 the music files again. This resets playlists, saved queue, favorites, metadata

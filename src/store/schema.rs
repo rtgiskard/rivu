@@ -2,13 +2,13 @@ use super::Store;
 use super::cache::TrackCache;
 use crate::model::DatabaseOptimization;
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::Connection;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-pub(super) const TRACK_TABLE: &str = "CREATE TABLE tracks(
+const TRACK_TABLE: &str = "CREATE TABLE tracks(
     id INTEGER PRIMARY KEY AUTOINCREMENT,path TEXT NOT NULL,
     fingerprint BLOB CHECK(fingerprint IS NULL OR (typeof(fingerprint)='blob' AND length(fingerprint)=32)),
     file_size INTEGER NOT NULL DEFAULT 0,modified_ns INTEGER NOT NULL DEFAULT 0,
@@ -27,7 +27,7 @@ pub(super) const TRACK_TABLE: &str = "CREATE TABLE tracks(
     decoder_hint INTEGER NOT NULL DEFAULT 0 CHECK(decoder_hint IN (0,1,2))
 );";
 
-pub(super) const TRACK_INDEXES_AND_TRIGGER: &str = "
+const TRACK_INDEXES_AND_TRIGGER: &str = "
     CREATE INDEX tracks_fingerprint ON tracks(fingerprint);
     CREATE UNIQUE INDEX tracks_path ON tracks(path) WHERE cue_sheet IS NULL;
     CREATE INDEX tracks_directory ON tracks(path);
@@ -83,103 +83,6 @@ fn create_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-const MIGRATE_QUEUE_TO_V10: &str = "DROP TRIGGER IF EXISTS queue_insert;
-    DROP TRIGGER IF EXISTS queue_delete;
-    DROP TRIGGER IF EXISTS queue_move;
-    DELETE FROM schema_meta WHERE key='compact_pending';
-    UPDATE schema_meta SET value=10 WHERE key='version';";
-
-fn migrate_legacy_to_v11(conn: &Connection, version: i64) -> Result<()> {
-    conn.create_scalar_function(
-        "fingerprint_blob",
-        1,
-        rusqlite::functions::FunctionFlags::SQLITE_UTF8
-            | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
-        |ctx| {
-            let value = ctx.get_raw(0);
-            if value == rusqlite::types::ValueRef::Null {
-                return Ok(None);
-            }
-            blake3::Hash::from_hex(value.as_str()?)
-                .map(|hash| Some(*hash.as_bytes()))
-                .map_err(|error| {
-                    rusqlite::Error::UserFunctionError(
-                        std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
-                            .into(),
-                    )
-                })
-        },
-    )?;
-    // Rebuild only tracks, with FK actions disabled outside the atomic transaction.
-    // Queue entries/current selection and every other table retain their identities.
-    conn.pragma_update(None, "foreign_keys", "OFF")?;
-    let result = (|| -> Result<()> {
-        let tx = conn.unchecked_transaction()?;
-        let sequence: Option<i64> = tx
-            .query_row(
-                "SELECT seq FROM sqlite_sequence WHERE name='tracks'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()?;
-        tx.execute_batch(&TRACK_TABLE.replacen(
-            "CREATE TABLE tracks(",
-            "CREATE TABLE tracks_v9(",
-            1,
-        ))?;
-        let columns = "id,path,fingerprint,file_size,modified_ns,raw_title,raw_artist,raw_album,title_override,artist_override,album_override,duration,codec,channels,sample_rate,missing,play_count,last_played,cue_sheet,cue_number,cue_start_frame,cue_end_frame,probe_version,bitrate_bps,track_number,disc_number,bits_per_sample,release_date,favorite";
-        let select = columns.replace("fingerprint", "fingerprint_blob(fingerprint)");
-        let hint = if version == 7 {
-            "0"
-        } else {
-            "CASE decoder_hint WHEN 'auto' THEN 0 WHEN 'native' THEN 1 WHEN 'ffmpeg' THEN 2 END"
-        };
-        tx.execute_batch(&format!(
-            "INSERT INTO tracks_v9({columns},decoder_hint) SELECT {select},{hint} FROM tracks;
-             DROP TRIGGER queue_metadata;
-             DROP TABLE tracks;
-             ALTER TABLE tracks_v9 RENAME TO tracks;"
-        ))?;
-        if let Some(sequence) = sequence {
-            tx.execute(
-                "UPDATE sqlite_sequence SET seq=?1 WHERE name='tracks'",
-                [sequence],
-            )?;
-        }
-        tx.execute_batch(TRACK_INDEXES_AND_TRIGGER)?;
-        tx.execute_batch(
-            "DROP INDEX queue_order;
-             CREATE INDEX queue_order ON queue_entries(position);
-             DROP INDEX playlist_order;
-             CREATE INDEX playlist_order ON playlist_entries(playlist_id,position);
-             CREATE INDEX IF NOT EXISTS playlist_track_lookup ON playlist_entries(track_id,playlist_id);"
-        )?;
-        tx.execute_batch(MIGRATE_QUEUE_TO_V10)?;
-        tx.execute("UPDATE schema_meta SET value=11 WHERE key='version'", [])?;
-        tx.commit()?;
-        Ok(())
-    })();
-    conn.pragma_update(None, "foreign_keys", "ON")?;
-    conn.remove_function("fingerprint_blob", 1)?;
-    result
-}
-
-fn migrate_to_v11(conn: &Connection, version: i64) -> Result<()> {
-    // Preserve queue occurrence/current identities and all track state. The new
-    // row choice records independence, not a stale list of relocation candidates.
-    let tx = conn.unchecked_transaction()?;
-    if version == 9 {
-        tx.execute_batch(MIGRATE_QUEUE_TO_V10)?;
-    }
-    tx.execute_batch(
-        "ALTER TABLE tracks ADD COLUMN relocation_independent INTEGER NOT NULL DEFAULT 0
-         CHECK(relocation_independent IN (0,1));
-         UPDATE schema_meta SET value=11 WHERE key='version';",
-    )?;
-    tx.commit()?;
-    Ok(())
-}
-
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(p) = path.parent()
@@ -208,17 +111,8 @@ impl Store {
                     |row| row.get(0),
                 )
                 .context("Unsupported library database; remove the old database and rescan")?;
-            match version {
-                7 | 8 => migrate_legacy_to_v11(&c, version).with_context(|| {
-                    format!("Migrate library database from version {version} to 11")
-                })?,
-                9 | 10 => migrate_to_v11(&c, version).with_context(|| {
-                    format!("Migrate library database from version {version} to 11")
-                })?,
-                11 => {}
-                _ => bail!(
-                    "Unsupported database version {version}; remove the old database and rescan"
-                ),
+            if version != 11 {
+                bail!("Unsupported database version {version}; remove the old database and rescan");
             }
         }
         // SQLite's built-in lower() is ASCII-only; preserve frontend Unicode search.
@@ -286,157 +180,56 @@ impl Store {
 }
 
 #[cfg(test)]
-pub(super) const LEGACY_QUEUE_TRIGGERS: &str = "
-    CREATE TRIGGER queue_insert AFTER INSERT ON queue_entries BEGIN
-        UPDATE queue_meta SET revision=revision+1;
-    END;
-    CREATE TRIGGER queue_delete AFTER DELETE ON queue_entries BEGIN
-        UPDATE queue_meta SET revision=revision+1;
-    END;
-    CREATE TRIGGER queue_move AFTER UPDATE OF position ON queue_entries
-    WHEN old.position<>new.position BEGIN
-        UPDATE queue_meta SET revision=revision+1;
-    END;";
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn v9_migration_preserves_occurrences_current_and_revision() -> Result<()> {
-        let directory = tempfile::tempdir()?;
-        let path = directory.path().join("queue.db");
-        let store = Store::open(&path)?;
-        store
-            .conn
-            .execute_batch("INSERT INTO tracks(path) VALUES('/a'),('/b');")?;
-        store.enqueue_tracks(&[1, 2, 1])?;
-        let ids = store.queue_ids()?;
-        store.set_queue_current(Some(ids[2]))?;
-        store.conn.execute_batch(LEGACY_QUEUE_TRIGGERS)?;
-        store
-            .conn
-            .execute_batch("ALTER TABLE tracks DROP COLUMN relocation_independent;")?;
-        store
-            .conn
-            .execute("UPDATE schema_meta SET value=9 WHERE key='version'", [])?;
-        let state = store.queue_state()?;
-        let page = store.queue_page(0, 10)?;
-        drop(store);
+    fn incompatible_databases_are_rejected_without_changing_schema_or_data() -> Result<()> {
+        for version in [None, Some(0), Some(7), Some(8), Some(9), Some(10), Some(12)] {
+            let directory = tempfile::tempdir()?;
+            let path = directory.path().join("library.db");
+            let connection = Store::open(&path)?.conn;
+            connection.execute_batch(
+                "ALTER TABLE tracks DROP COLUMN relocation_independent;
+                 CREATE TABLE preserved_data(value BLOB NOT NULL);
+                 INSERT INTO preserved_data VALUES(X'0001FEFF');",
+            )?;
+            if let Some(version) = version {
+                connection.execute(
+                    "UPDATE schema_meta SET value=?1 WHERE key='version'",
+                    [version],
+                )?;
+            } else {
+                connection.execute_batch("DROP TABLE schema_meta;")?;
+            }
+            let schema_version: i64 =
+                connection.query_row("PRAGMA schema_version", [], |row| row.get(0))?;
+            drop(connection);
 
-        let store = Store::open(&path)?;
-        assert_eq!(store.queue_state()?, state);
-        assert_eq!(store.queue_page(0, 10)?, page);
-        store.reorder_queue(&ids)?;
-        store.move_queue_entry(ids[0], 0)?;
-        assert_eq!(store.queue_state()?, state);
-        store.move_queue_entry(ids[0], 2)?;
-        let changed = store.queue_state()?;
-        assert!(changed.revision > state.revision);
-        assert_eq!(changed.current_id, state.current_id);
-        store.set_favorite(&[1], true)?;
-        assert!(store.queue_state()?.revision > changed.revision);
-        let state = store.queue_state()?;
-        let page = store.queue_page(0, 10)?;
-        drop(store);
-        let reopened = Store::open(&path)?;
-        assert_eq!(reopened.queue_state()?, state);
-        assert_eq!(reopened.queue_page(0, 10)?, page);
-        Ok(())
-    }
+            assert!(Store::open(&path).is_err());
 
-    #[test]
-    fn v10_migration_preserves_state_and_defaults_old_rows_to_relocation_eligible() -> Result<()> {
-        let directory = tempfile::tempdir()?;
-        let path = directory.path().join("library.db");
-        let store = Store::open(&path)?;
-        let hash = blake3::hash(b"same audio");
-        store.conn.execute(
-            "INSERT INTO tracks(path,fingerprint,missing,title_override,favorite,play_count,last_played)
-             VALUES('/old',?1,1,'Owned',1,7,123),('/target',?1,0,NULL,0,0,NULL)",
-            [hash.as_bytes().as_slice()],
-        )?;
-        store.enqueue_tracks(&[1, 2, 1])?;
-        let ids = store.queue_ids()?;
-        store.set_queue_current(Some(ids[2]))?;
-        let state = store.queue_state()?;
-        let page = store.queue_page(0, 10)?;
-        let source = store.track(1)?.unwrap();
-        store.conn.execute_batch(
-            "ALTER TABLE tracks DROP COLUMN relocation_independent;
-             UPDATE schema_meta SET value=10 WHERE key='version';",
-        )?;
-        drop(store);
-        let store = Store::open(&path)?;
-        assert_eq!(store.track(1)?.unwrap(), source);
-        assert_eq!(store.queue_state()?, state);
-        assert_eq!(store.queue_page(0, 10)?, page);
-        let members = store.duplicate_members_page(hash.to_hex().as_ref(), 0, 10)?;
-        assert!(members.rows.iter().all(|member| !member.independent));
-        assert_eq!(
-            store.conn.query_row(
-                "SELECT value FROM schema_meta WHERE key='version'",
-                [],
-                |row| row.get::<_, i64>(0)
-            )?,
-            11
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn failed_v10_to_v11_migration_rolls_back_new_column_and_version() -> Result<()> {
-        let store = Store::open(Path::new(":memory:"))?;
-        store.conn.execute_batch(
-            "ALTER TABLE tracks DROP COLUMN relocation_independent;
-             UPDATE schema_meta SET value=10 WHERE key='version';
-             CREATE TEMP TRIGGER reject_schema_version AFTER UPDATE ON schema_meta
-             BEGIN SELECT RAISE(ABORT,'injected migration failure'); END;",
-        )?;
-        assert!(migrate_to_v11(&store.conn, 10).is_err());
-        assert_eq!(
-            store.conn.query_row(
-                "SELECT value FROM schema_meta WHERE key='version'",
-                [],
-                |row| row.get::<_, i64>(0)
-            )?,
-            10
-        );
-        assert_eq!(store.conn.query_row("SELECT COUNT(*) FROM pragma_table_info('tracks') WHERE name='relocation_independent'", [], |row| row.get::<_, i64>(0))?, 0);
-        Ok(())
-    }
-
-    #[test]
-    fn failed_v11_migration_rolls_back_trigger_removal_and_version() -> Result<()> {
-        let store = Store::open(Path::new(":memory:"))?;
-        store.conn.execute_batch(LEGACY_QUEUE_TRIGGERS)?;
-        store
-            .conn
-            .execute_batch("ALTER TABLE tracks DROP COLUMN relocation_independent;")?;
-        store.conn.execute_batch(
-            "UPDATE schema_meta SET value=9 WHERE key='version';
-             CREATE TEMP TRIGGER reject_schema_version AFTER UPDATE ON schema_meta
-             BEGIN SELECT RAISE(ABORT,'injected migration failure'); END;",
-        )?;
-        assert!(migrate_to_v11(&store.conn, 9).is_err());
-        store
-            .conn
-            .execute_batch("DROP TRIGGER reject_schema_version;")?;
-        store
-            .conn
-            .execute("INSERT INTO tracks(path) VALUES('/a')", [])?;
-        let before = store.queue_state()?;
-        store.conn.execute(
-            "INSERT INTO queue_entries(track_id,position) VALUES(1,0)",
-            [],
-        )?;
-        assert!(store.queue_state()?.revision > before.revision);
-        let version: i64 = store.conn.query_row(
-            "SELECT value FROM schema_meta WHERE key='version'",
-            [],
-            |row| row.get(0),
-        )?;
-        assert_eq!(version, 9);
+            let connection = Connection::open(&path)?;
+            assert_eq!(
+                connection.query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))?,
+                schema_version
+            );
+            assert_eq!(
+                connection.query_row("SELECT value FROM preserved_data", [], |row| {
+                    row.get::<_, Vec<u8>>(0)
+                })?,
+                [0, 1, 254, 255]
+            );
+            if let Some(version) = version {
+                assert_eq!(
+                    connection.query_row(
+                        "SELECT value FROM schema_meta WHERE key='version'",
+                        [],
+                        |row| row.get::<_, i64>(0)
+                    )?,
+                    version
+                );
+            }
+        }
         Ok(())
     }
 }
