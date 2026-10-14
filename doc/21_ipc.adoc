@@ -70,6 +70,14 @@ socket; its dispatcher separates application requests from core commands and
 queries while preserving the wire format. Shared analysis and waveform data
 are in-process resources, not IPC state sections.
 
+Ordinary-file relocation uses a Core-owned single-flight verification worker.
+Acceptance carries `Ack.relocation_id`; final completion or failure is reported
+by `RelocationTask` and system task status. Core retains 32 results and joins the
+worker on shutdown. A verified open descriptor survives to the commit boundary;
+file identity, source absence and affected playback are checked again before
+Store atomically revalidates identities and destination conflicts. UI request
+epochs discard results belonging to closed or superseded reviews.
+
 The graphical host has three lifetime boundaries within one process:
 
 * `App` in `app.rs` owns the core runtime, IPC server and socket acquisition,
@@ -78,6 +86,8 @@ The graphical host has three lifetime boundaries within one process:
   window exists.
 * The core owns accepted business operations and authoritative state. Closing a
   window does not cancel playback, scans, saves, or other accepted commands.
+  Explicit relocation review is an exception: dismissing its dialog requests
+  cancellation of that dialog's verification task, without undoing a commit.
 * `UiSession` owns window creation, focus, reload, and close. `GuiApp` owns the
   window's view state, subscriptions, and render resources. Reopening creates a
   new view from current core state; repeated open requests focus the existing

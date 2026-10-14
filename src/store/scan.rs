@@ -53,6 +53,7 @@ struct Existing {
     path: PathBuf,
     hash: Option<String>,
     cue: Option<CueSegment>,
+    independent: bool,
 }
 
 #[derive(Hash, PartialEq, Eq)]
@@ -168,10 +169,11 @@ impl Store {
                 path: PathBuf::from(r.get::<_, String>(1)?),
                 hash: fingerprint_from_row(r, 2)?,
                 cue: cue_from_row(r, 3)?,
+                independent: r.get(7)?,
             })
         };
         let mut q = tx.prepare(&format!(
-            "SELECT id,path,fingerprint,cue_sheet,cue_number,cue_start_frame,cue_end_frame
+            "SELECT id,path,fingerprint,cue_sheet,cue_number,cue_start_frame,cue_end_frame,relocation_independent
              FROM tracks WHERE id IN ({SCAN_SCOPE_IDS})"
         ))?;
         for row in q.query_map(
@@ -190,8 +192,14 @@ impl Store {
             .iter()
             .filter_map(|record| record.fingerprint.as_deref())
             .collect();
+        let ordinary_candidate_hashes: HashSet<&str> = result
+            .records
+            .iter()
+            .filter(|record| record.cue.is_none())
+            .filter_map(|record| record.fingerprint.as_deref())
+            .collect();
         let mut q = tx.prepare(
-            "SELECT id,path,fingerprint,cue_sheet,cue_number,cue_start_frame,cue_end_frame
+            "SELECT id,path,fingerprint,cue_sheet,cue_number,cue_start_frame,cue_end_frame,relocation_independent
              FROM tracks INDEXED BY tracks_fingerprint WHERE fingerprint=?1",
         )?;
         for hash in &candidate_hashes {
@@ -290,6 +298,7 @@ impl Store {
         };
         let mut byidentity = HashMap::new();
         let mut byhash: HashMap<&str, Vec<&Existing>> = HashMap::new();
+        let mut absent_ordinary = HashSet::new();
         for record in &old {
             let key = identity(&record.path, record.cue.as_ref());
             let owner = record
@@ -303,9 +312,32 @@ impl Store {
                 && fs::symlink_metadata(owner)
                     .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
             {
-                byhash.entry(hash).or_default().push(record);
+                if record.cue.is_none() && ordinary_candidate_hashes.contains(hash) {
+                    absent_ordinary.insert(record.id);
+                }
+                if record.cue.is_some() || !record.independent {
+                    byhash.entry(hash).or_default().push(record);
+                }
             }
             byidentity.insert(key, record.id);
+        }
+        // Ordinary moves require uniqueness on both sides. Resolve exact paths
+        // first; never let scan order choose one of several newly found copies.
+        let mut new_ordinary: HashMap<&str, Option<&Path>> = HashMap::new();
+        for record in &result.records {
+            if record.cue.is_none()
+                && !byidentity.contains_key(&identity(&record.path, None))
+                && let Some(hash) = record.fingerprint.as_deref()
+            {
+                new_ordinary
+                    .entry(hash)
+                    .and_modify(|path| {
+                        if *path != Some(record.path.as_path()) {
+                            *path = None;
+                        }
+                    })
+                    .or_insert(Some(record.path.as_path()));
+            }
         }
         let mut seen = HashSet::new();
         tx.execute_batch(
@@ -346,6 +378,9 @@ impl Store {
             let key = identity(&r.path, r.cue.as_ref());
             let id = byidentity.get(&key).copied().or_else(|| {
                 r.fingerprint.as_deref().and_then(|hash| {
+                    if r.cue.is_none() && !new_ordinary.get(hash).is_some_and(Option::is_some) {
+                        return None;
+                    }
                     let mut candidates =
                         byhash
                             .get(hash)?
@@ -463,10 +498,11 @@ impl Store {
                 .map_or(o.path.as_path(), |cue| cue.sheet.as_path());
             if !seen.contains(&o.id)
                 && !(o.cue.is_none() && suppressed.contains(o.path.as_path()))
-                && result
+                && (result
                     .roots
                     .iter()
                     .any(|root| owner == root || owner.starts_with(root))
+                    || absent_ordinary.contains(&o.id))
                 && !unconfirmed(o)
             {
                 changed_tracks += mark_missing.execute([o.id])?;
@@ -953,5 +989,212 @@ mod tests {
         );
         assert_eq!(store.track(id).unwrap().unwrap(), before);
         assert_eq!(store.queue_state().unwrap(), queue);
+    }
+
+    #[test]
+    fn one_missing_ordinary_source_and_two_new_copies_preserve_old_id_in_either_scan_order() {
+        for reverse in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let store = Store::open(Path::new(":memory:")).unwrap();
+            let mut original = record();
+            original.path = directory.path().join("old/source.wav");
+            store
+                .apply_scan(&ScanResult {
+                    records: vec![original.clone()],
+                    ..ScanResult::default()
+                })
+                .unwrap();
+            let id = store
+                .track_id_for_source(&original.path, None)
+                .unwrap()
+                .unwrap();
+            store.set_favorite(&[id], true).unwrap();
+            store.enqueue_tracks(&[id]).unwrap();
+            let queue_id = store.queue_ids().unwrap()[0];
+            let mut first = original.clone();
+            first.path = directory.path().join("new/first.wav");
+            let mut second = original.clone();
+            second.path = directory.path().join("new/second.wav");
+            let mut records = vec![first.clone(), second.clone()];
+            if reverse {
+                records.reverse();
+            }
+            let scan = ScanResult {
+                roots: vec![directory.path().join("new")],
+                records,
+                ..ScanResult::default()
+            };
+            store.apply_scan(&scan).unwrap();
+            let retained = store.track(id).unwrap().unwrap();
+            assert_eq!(retained.path, original.path);
+            assert!(retained.favorite);
+            assert!(retained.missing);
+            let first_id = store
+                .track_id_for_source(&first.path, None)
+                .unwrap()
+                .unwrap();
+            let second_id = store
+                .track_id_for_source(&second.path, None)
+                .unwrap()
+                .unwrap();
+            assert_ne!(first_id, id);
+            assert_ne!(second_id, id);
+            assert_ne!(first_id, second_id);
+            assert_eq!(store.queue_ids().unwrap(), [queue_id]);
+            let groups = store.duplicate_groups_page(0, 10).unwrap();
+            assert_eq!(groups.rows[0].missing_members, 1);
+            assert_eq!(groups.rows[0].present_members, 2);
+            assert!(!store.apply_scan(&scan).unwrap());
+            assert_eq!(store.track(id).unwrap().unwrap(), retained);
+        }
+    }
+
+    #[test]
+    fn two_missing_ordinary_sources_and_one_new_target_preserve_both_source_states() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let mut first = record();
+        first.path = directory.path().join("old/first.wav");
+        let mut second = first.clone();
+        second.path = directory.path().join("old/second.wav");
+        store
+            .apply_scan(&ScanResult {
+                records: vec![first.clone(), second.clone()],
+                ..ScanResult::default()
+            })
+            .unwrap();
+        let first_id = store
+            .track_id_for_source(&first.path, None)
+            .unwrap()
+            .unwrap();
+        let second_id = store
+            .track_id_for_source(&second.path, None)
+            .unwrap()
+            .unwrap();
+        store
+            .edit_track(first_id, Some("Owned title"), None, None, None)
+            .unwrap();
+        store.increment_play_count(second_id).unwrap();
+        let mut target = first.clone();
+        target.path = directory.path().join("new/target.wav");
+        store
+            .apply_scan(&ScanResult {
+                roots: vec![directory.path().join("new")],
+                records: vec![target.clone()],
+                ..ScanResult::default()
+            })
+            .unwrap();
+        let target_id = store
+            .track_id_for_source(&target.path, None)
+            .unwrap()
+            .unwrap();
+        assert_ne!(target_id, first_id);
+        assert_ne!(target_id, second_id);
+        assert_eq!(store.track(first_id).unwrap().unwrap().title, "Owned title");
+        assert_eq!(store.track(second_id).unwrap().unwrap().play_count, 1);
+        assert!(store.track(first_id).unwrap().unwrap().missing);
+        assert!(store.track(second_id).unwrap().unwrap().missing);
+        let prepared = store.prepare_relocation(first_id, target_id).unwrap();
+        store.commit_relocation(&prepared).unwrap();
+        assert_eq!(store.track(first_id).unwrap().unwrap().path, target.path);
+        assert_eq!(store.track(first_id).unwrap().unwrap().title, "Owned title");
+        assert_eq!(store.track(second_id).unwrap().unwrap().path, second.path);
+        assert_eq!(store.track(second_id).unwrap().unwrap().play_count, 1);
+    }
+
+    #[test]
+    fn exact_ordinary_identities_do_not_count_as_new_relocation_targets() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let mut original = record();
+        original.path = directory.path().join("old/source.wav");
+        let mut existing = original.clone();
+        existing.path = directory.path().join("new/existing.wav");
+        store
+            .apply_scan(&ScanResult {
+                records: vec![original.clone(), existing.clone()],
+                ..ScanResult::default()
+            })
+            .unwrap();
+        let source_id = store
+            .track_id_for_source(&original.path, None)
+            .unwrap()
+            .unwrap();
+        let existing_id = store
+            .track_id_for_source(&existing.path, None)
+            .unwrap()
+            .unwrap();
+        original.path = directory.path().join("new/moved.wav");
+        store
+            .apply_scan(&ScanResult {
+                roots: vec![directory.path().join("new")],
+                records: vec![existing.clone(), original.clone()],
+                ..ScanResult::default()
+            })
+            .unwrap();
+        assert_eq!(
+            store.track_id_for_source(&original.path, None).unwrap(),
+            Some(source_id)
+        );
+        assert_eq!(
+            store.track_id_for_source(&existing.path, None).unwrap(),
+            Some(existing_id)
+        );
+        assert_eq!(store.track_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn independent_ordinary_identity_is_never_automatically_reassigned_by_later_scan() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let mut original = record();
+        original.path = directory.path().join("old/source.wav");
+        store
+            .apply_scan(&ScanResult {
+                records: vec![original.clone()],
+                ..ScanResult::default()
+            })
+            .unwrap();
+        let id = store
+            .track_id_for_source(&original.path, None)
+            .unwrap()
+            .unwrap();
+        store.keep_independent(id).unwrap();
+        let mut copy = original.clone();
+        copy.path = directory.path().join("new/copy.wav");
+        store
+            .apply_scan(&ScanResult {
+                roots: vec![directory.path().join("new")],
+                records: vec![copy.clone()],
+                ..ScanResult::default()
+            })
+            .unwrap();
+        assert_ne!(
+            store.track_id_for_source(&copy.path, None).unwrap(),
+            Some(id)
+        );
+        assert_eq!(store.track(id).unwrap().unwrap().path, original.path);
+        assert!(store.track(id).unwrap().unwrap().missing);
+        store
+            .apply_scan(&ScanResult {
+                records: vec![original.clone(), copy],
+                ..ScanResult::default()
+            })
+            .unwrap();
+        assert_eq!(
+            store.track_id_for_source(&original.path, None).unwrap(),
+            Some(id)
+        );
+        let members = store
+            .duplicate_members_page(original.fingerprint.as_deref().unwrap(), 0, 10)
+            .unwrap();
+        assert!(
+            members
+                .rows
+                .iter()
+                .find(|member| member.track.id == id)
+                .unwrap()
+                .independent
+        );
     }
 }

@@ -2,6 +2,7 @@
 //! Operation modules share this owner; transaction boundaries stay within operations.
 
 mod cache;
+mod duplicates;
 mod playlists;
 mod positions;
 mod queue;
@@ -13,6 +14,8 @@ mod tracks;
 use anyhow::{Result, bail};
 use rusqlite::Connection;
 use std::cell::RefCell;
+
+pub use duplicates::{DuplicateGroup, DuplicateMember, PreparedRelocation, RelocationIdentity};
 
 pub struct Store {
     conn: Connection,

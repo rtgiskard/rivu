@@ -397,6 +397,7 @@ fn ack_wire_round_trip_has_explicit_response_type() {
         error: Some("failed".into()),
         revision: 42,
         scan_id: Some(u64::MAX),
+        relocation_id: Some(42),
     };
     let mut encoded = Vec::new();
     encode_response_frame_into(&WireResponse::Ack(ack.clone()), &mut encoded).unwrap();
@@ -1050,6 +1051,7 @@ fn client_session_reuses_connection_after_command_and_request_rejections() {
                 error: Some("rejected".into()),
                 revision: 3,
                 scan_id: None,
+                relocation_id: None,
             },
         );
         assert!(matches!(
@@ -1113,6 +1115,7 @@ fn client_session_discards_partial_failed_response_before_next_explicit_request(
                 error: None,
                 revision: 1,
                 scan_id: None,
+                relocation_id: None,
             }),
             &mut frame,
         )
@@ -1133,6 +1136,7 @@ fn client_session_discards_partial_failed_response_before_next_explicit_request(
                 error: None,
                 revision: 2,
                 scan_id: None,
+                relocation_id: None,
             },
         );
     });
@@ -1331,6 +1335,7 @@ fn independent_cli_session_can_explicitly_reconnect_to_a_new_instance() {
                 error: None,
                 revision: 2,
                 scan_id: None,
+                relocation_id: None,
             },
         );
     });

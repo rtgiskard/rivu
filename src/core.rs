@@ -106,6 +106,7 @@ impl CoreState {
             system: system.scanning != old.scanning
                 || system.scan_message != old.scan_message
                 || system.scan_progress != old.scan_progress
+                || system.relocation_task != old.relocation_task
                 || system.last_error != old.last_error
                 || !Arc::ptr_eq(&system.devices, &old.devices)
                 || system.selected_device != old.selected_device
@@ -301,6 +302,7 @@ impl CoreHandle {
                 error: Some(error),
                 revision: self.revision(),
                 scan_id: None,
+                relocation_id: None,
             },
         }
     }
@@ -370,6 +372,7 @@ impl RuntimeControl {
             ),
             revision: revision(),
             scan_id: None,
+            relocation_id: None,
         })
     }
 
@@ -482,6 +485,7 @@ impl Runtime {
             .spawn(move || {
                 let _completion = CompletionGuard(worker_control.clone());
                 let (scan_tx, scan_rx) = bounded(1);
+                let (relocation_tx, relocation_rx) = bounded(1);
                 let mut core = Core {
                     store,
                     engine,
@@ -498,6 +502,11 @@ impl Runtime {
                     active_scan: None,
                     scan_results: VecDeque::new(),
                     next_scan_id: 1,
+                    relocation_tx,
+                    relocation_rx,
+                    active_relocation: None,
+                    relocation_results: VecDeque::new(),
+                    next_relocation_id: 1,
                     played: Vec::new(),
                     played_cursor: 0,
                     config_last_attempt: Instant::now(),
@@ -608,6 +617,24 @@ struct ScanTask {
     cancellation: library::ScanCancellation,
     worker: JoinHandle<()>,
 }
+struct RelocationTask {
+    status: RelocationTaskStatus,
+    prepared: crate::store::PreparedRelocation,
+    cancellation: library::ScanCancellation,
+    worker: Option<JoinHandle<()>>,
+}
+impl Drop for RelocationTask {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+struct RelocationFinished {
+    id: u64,
+    result: Result<engine::relocation::VerifiedTarget>,
+}
 struct Core {
     store: Store,
     engine: AudioEngine,
@@ -625,6 +652,11 @@ struct Core {
     active_scan: Option<ScanTask>,
     scan_results: VecDeque<ScanTaskStatus>,
     next_scan_id: u64,
+    relocation_tx: Sender<RelocationFinished>,
+    relocation_rx: Receiver<RelocationFinished>,
+    active_relocation: Option<RelocationTask>,
+    relocation_results: VecDeque<RelocationTaskStatus>,
+    next_relocation_id: u64,
     played: Vec<u64>,
     // Number of history entries through the current (or just removed) entry.
     played_cursor: usize,
@@ -762,6 +794,7 @@ mod tests {
             .library_roots
             .push(directory.path().to_path_buf());
         let (scan_tx, scan_rx) = bounded(1);
+        let (relocation_tx, relocation_rx) = bounded(1);
         let mut core = Core {
             store,
             engine: AudioEngine::new(1).unwrap(),
@@ -778,6 +811,11 @@ mod tests {
             active_scan: None,
             scan_results: VecDeque::new(),
             next_scan_id: 1,
+            relocation_tx,
+            relocation_rx,
+            active_relocation: None,
+            relocation_results: VecDeque::new(),
+            next_relocation_id: 1,
             played: Vec::new(),
             played_cursor: 0,
             config_last_attempt: Instant::now(),
@@ -785,6 +823,303 @@ mod tests {
         };
         core.enqueue(&[1, 2, 2, 3, 4]).unwrap();
         (directory, core)
+    }
+
+    fn relocation_fixture() -> (tempfile::TempDir, Core, i64, i64) {
+        let (directory, mut core) = fixture();
+        let paths =
+            ["old.wav", "target.wav", "other-copy.wav"].map(|name| directory.path().join(name));
+        let media = core
+            .store
+            .known_files(&[directory.path().to_path_buf()])
+            .unwrap()[0]
+            .media
+            .clone()
+            .unwrap();
+        let records = paths
+            .iter()
+            .map(|path| {
+                std::fs::write(path, b"same complete content").unwrap();
+                let metadata = std::fs::metadata(path).unwrap();
+                ScanRecord {
+                    path: path.clone(),
+                    cue: None,
+                    size: metadata.len(),
+                    modified_ns: i64::try_from(
+                        metadata
+                            .modified()
+                            .unwrap()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap()
+                            .as_nanos(),
+                    )
+                    .unwrap(),
+                    fingerprint: Some(blake3::hash(b"same complete content").to_hex().to_string()),
+                    media: media.clone(),
+                }
+            })
+            .collect();
+        core.store
+            .apply_scan(&ScanResult {
+                records,
+                ..ScanResult::default()
+            })
+            .unwrap();
+        let known = core
+            .store
+            .known_files(&[directory.path().to_path_buf()])
+            .unwrap();
+        let source = known
+            .iter()
+            .find(|file| file.path == paths[0])
+            .unwrap()
+            .track_id;
+        let target = known
+            .iter()
+            .find(|file| file.path == paths[1])
+            .unwrap()
+            .track_id;
+        std::fs::remove_file(&paths[0]).unwrap();
+        core.store
+            .apply_scan(&ScanResult {
+                roots: vec![paths[0].clone()],
+                ..ScanResult::default()
+            })
+            .unwrap();
+        core.reload(true).unwrap();
+        assert!(core.track(source).unwrap().missing);
+        (directory, core, source, target)
+    }
+
+    fn settle_relocation(core: &mut Core) -> RelocationTaskStatus {
+        let event = core
+            .relocation_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        core.relocation_event(event);
+        assert!(core.active_relocation.is_none());
+        core.state.system.relocation_task.clone().unwrap()
+    }
+
+    #[test]
+    fn manual_relocation_preserves_source_identity_state_and_references() {
+        let (_directory, mut core, source, target) = relocation_fixture();
+        let target_path = core.track(target).unwrap().path;
+        core.command(Command::SetFavorite {
+            track_ids: vec![source],
+            favorite: true,
+        })
+        .unwrap();
+        core.command(Command::EditTrack {
+            track_id: source,
+            title: Some("User title".into()),
+            artist: None,
+            album: None,
+            decoder_hint: Some(DecoderHint::Native),
+        })
+        .unwrap();
+        core.store.mark_played(source, 123).unwrap();
+        core.store.increment_play_count(source).unwrap();
+        core.enqueue(&[source]).unwrap();
+        core.command(Command::CreatePlaylistWithTracks {
+            name: "Preserved".into(),
+            track_ids: vec![source],
+        })
+        .unwrap();
+        let queue_before = core.queue_ids.clone();
+        let revisions = core.state.query_revisions();
+        core.command(Command::RelocateTrack {
+            source_id: source,
+            target_id: target,
+        })
+        .unwrap();
+        let id = core.active_relocation.as_ref().unwrap().status.id;
+        assert_ne!(core.track(source).unwrap().path, target_path);
+        let status = settle_relocation(&mut core);
+        assert_eq!(status.phase, RelocationPhase::Completed);
+        let retained = core.track(source).unwrap();
+        assert_eq!(retained.path, target_path);
+        assert_eq!(retained.title, "User title");
+        assert_eq!(retained.decoder_hint, DecoderHint::Native);
+        assert!(retained.favorite && !retained.missing);
+        assert_eq!(retained.play_count, 1);
+        assert_eq!(retained.last_played, Some(123));
+        assert!(core.store.track(target).unwrap().is_none());
+        assert_eq!(core.queue_ids, queue_before);
+        assert!(core.store.queued_track(source).unwrap().is_some());
+        assert!(core.state.query_revisions().library > revisions.library);
+        assert!(core.state.query_revisions().structure > revisions.structure);
+        assert!(
+            matches!(core.view(&Query::RelocationTask { id }), Ok(ViewResponse::RelocationTask(task)) if task == status)
+        );
+    }
+
+    #[test]
+    fn relocation_cancel_and_shutdown_never_commit_completed_worker_output() {
+        for shutdown in [false, true] {
+            let (_directory, mut core, source, target) = relocation_fixture();
+            core.relocate_track(source, target).unwrap();
+            let id = core.active_relocation.as_ref().unwrap().status.id;
+            if shutdown {
+                core.shutdown_relocation();
+            } else {
+                core.cancel_relocation(id).unwrap();
+                settle_relocation(&mut core);
+            }
+            assert_eq!(
+                core.state.system.relocation_task.as_ref().unwrap().phase,
+                RelocationPhase::Cancelled
+            );
+            assert!(core.track(source).unwrap().missing);
+            assert!(core.store.track(target).unwrap().is_some());
+            // A retained completed cancellation is harmless and never retries.
+            core.cancel_relocation(id).unwrap();
+            if let Ok(event) = core.relocation_rx.try_recv() {
+                core.relocation_event(event);
+            }
+            assert!(core.track(source).unwrap().missing);
+        }
+    }
+
+    #[test]
+    fn relocation_rechecks_target_conflicts_and_source_presence_at_commit() {
+        for source_returns in [false, true] {
+            let (_directory, mut core, source, target) = relocation_fixture();
+            core.relocate_track(source, target).unwrap();
+            // Fence hashing completion without allowing Core's commit dispatch.
+            let event = core
+                .relocation_rx
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+            if source_returns {
+                std::fs::write(core.track(source).unwrap().path, b"returned").unwrap();
+            } else {
+                core.command(Command::SetFavorite {
+                    track_ids: vec![target],
+                    favorite: true,
+                })
+                .unwrap();
+            }
+            core.relocation_event(event);
+            let status = core.state.system.relocation_task.as_ref().unwrap();
+            assert_eq!(status.phase, RelocationPhase::Failed);
+            assert!(status.error.is_some());
+            assert!(core.track(source).unwrap().missing);
+            assert!(core.store.track(target).unwrap().is_some());
+        }
+    }
+
+    #[test]
+    fn relocation_rejects_target_file_drift_after_background_hash() {
+        let (_directory, mut core, source, target) = relocation_fixture();
+        core.relocate_track(source, target).unwrap();
+        let event = core
+            .relocation_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        std::fs::write(core.track(target).unwrap().path, b"new bytes").unwrap();
+        core.relocation_event(event);
+        assert_eq!(
+            core.state.system.relocation_task.as_ref().unwrap().phase,
+            RelocationPhase::Failed
+        );
+        assert!(core.track(source).unwrap().missing);
+    }
+
+    #[test]
+    fn relocation_rejects_active_affected_rows_at_start_and_during_hash() {
+        for during_hash in [false, true] {
+            for playing_target in [false, true] {
+                let (_directory, mut core, source, target) = relocation_fixture();
+                if during_hash {
+                    core.relocate_track(source, target).unwrap();
+                }
+                core.enqueue(&[if playing_target { target } else { source }])
+                    .unwrap();
+                let queue_id = *core.queue_ids.last().unwrap();
+                pending(&mut core, queue_id);
+                if during_hash {
+                    assert_eq!(settle_relocation(&mut core).phase, RelocationPhase::Failed);
+                } else {
+                    assert!(core.relocate_track(source, target).is_err());
+                    assert!(core.active_relocation.is_none());
+                }
+                assert!(core.track(source).unwrap().missing);
+                assert!(core.store.track(target).unwrap().is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn relocation_rejects_source_marked_independent_during_hash() {
+        let (_directory, mut core, source, target) = relocation_fixture();
+        core.relocate_track(source, target).unwrap();
+        let event = core
+            .relocation_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        core.command(Command::KeepTrackIndependent { track_id: source })
+            .unwrap();
+        core.relocation_event(event);
+        assert_eq!(
+            core.state.system.relocation_task.as_ref().unwrap().phase,
+            RelocationPhase::Failed
+        );
+        assert!(core.track(source).unwrap().missing);
+        assert!(core.store.track(target).unwrap().is_some());
+    }
+
+    #[test]
+    fn relocation_rejects_database_identity_drift_after_fresh_verification() {
+        for change_source in [false, true] {
+            let (directory, mut core, source, target) = relocation_fixture();
+            core.relocate_track(source, target).unwrap();
+            let event = core
+                .relocation_rx
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+            let changed_id = if change_source { source } else { target };
+            let known = core
+                .store
+                .known_files(&[directory.path().to_path_buf()])
+                .unwrap()
+                .into_iter()
+                .find(|file| file.track_id == changed_id)
+                .unwrap();
+            let changed_path = known.path.clone();
+            core.store
+                .apply_scan(&ScanResult {
+                    records: vec![ScanRecord {
+                        path: known.path,
+                        cue: None,
+                        size: known.size,
+                        modified_ns: known.modified_ns,
+                        fingerprint: Some(
+                            blake3::hash(b"different historical identity")
+                                .to_hex()
+                                .to_string(),
+                        ),
+                        media: known.media.unwrap(),
+                    }],
+                    ..ScanResult::default()
+                })
+                .unwrap();
+            if change_source {
+                core.store
+                    .apply_scan(&ScanResult {
+                        roots: vec![changed_path],
+                        ..ScanResult::default()
+                    })
+                    .unwrap();
+            }
+            core.relocation_event(event);
+            assert_eq!(
+                core.state.system.relocation_task.as_ref().unwrap().phase,
+                RelocationPhase::Failed
+            );
+            assert!(core.track(source).unwrap().missing);
+            assert!(core.store.track(target).unwrap().is_some());
+        }
     }
 
     // Capture the commands Core really sends without opening a platform device.
@@ -949,6 +1284,14 @@ mod tests {
             core.audio_event(AudioEvent::Ended { generation }).unwrap();
             assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
             assert_eq!(core.state.queue.current_id, Some(expected));
+            // Core sends Load synchronously, but the recorder forwards it on
+            // another thread. Its snapshot reply follows recording every earlier
+            // FIFO command, so draining cannot race the final paused Load.
+            let (snapshot, recorded_through_snapshot) = bounded(1);
+            core.audio(AudioCommand::StopAndSnapshot(snapshot)).unwrap();
+            recorded_through_snapshot
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
             let loads: Vec<_> = commands
                 .try_iter()
                 .filter_map(|command| match command {

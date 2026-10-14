@@ -7,7 +7,7 @@ impl Core {
         // pending state before spawning; never turn acceptance into an error later.
         if matches!(
             &command,
-            Command::Scan { .. } | Command::ImportPlaylist { .. }
+            Command::Scan { .. } | Command::ImportPlaylist { .. } | Command::RelocateTrack { .. }
         ) {
             return self.apply_command(command);
         }
@@ -22,6 +22,16 @@ impl Core {
         match command {
             Command::Scan { paths, force } => return self.scan(paths, None, force),
             Command::CancelScan { id } => self.cancel_scan(id)?,
+            Command::RelocateTrack {
+                source_id,
+                target_id,
+            } => return self.relocate_track(source_id, target_id),
+            Command::CancelRelocation { id } => self.cancel_relocation(id)?,
+            Command::KeepTrackIndependent { track_id } => {
+                if self.store.keep_independent(track_id)? {
+                    self.state.library.revision = self.state.library.revision.wrapping_add(1);
+                }
+            }
             Command::Play { track_id } => {
                 self.track(track_id)?;
                 let existing = self.store.queued_track(track_id)?;

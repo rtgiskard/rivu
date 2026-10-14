@@ -93,6 +93,9 @@ pub enum ViewResponse {
     QueueBatch(Batch<QueueRow, QueueCursor>),
     QueueEntries(Vec<QueueRow>),
     PlaylistEntry(Option<PlaylistEntryLocation>),
+    DuplicateGroups(Page<crate::store::DuplicateGroup>),
+    DuplicateMembers(Page<crate::store::DuplicateMember>),
+    RelocationTask(crate::model::RelocationTaskStatus),
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QueryError {
@@ -175,6 +178,8 @@ pub struct Ack {
     pub revision: u64,
     /// Present only when this command accepted a new scan/import task.
     pub scan_id: Option<u64>,
+    /// Present only when this command accepted a manual relocation task.
+    pub relocation_id: Option<u64>,
 }
 
 #[cfg(test)]

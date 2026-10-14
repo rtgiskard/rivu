@@ -22,6 +22,7 @@ impl Core {
                         error: result.err().map(|error| format!("{error:#}")),
                         revision: self.state.system.revision,
                         scan_id: None,
+                        relocation_id: None,
                     });
                     break;
                 }
@@ -39,18 +40,21 @@ impl Core {
                         }
                         Operation::Command(command) => {
                             let starts_scan = matches!(&command, Command::Scan { .. } | Command::ImportPlaylist { .. });
+                            let starts_relocation = matches!(&command, Command::RelocateTrack { .. });
                             let result = self.command(command);
                             if let Err(error) = &result {
                                 self.state.system.last_error = Some(format!("{error:#}"));
                             }
                             self.publish();
                             let scan_id = if result.is_ok() && starts_scan { self.active_scan.as_ref().map(|task| task.status.id) } else { None };
+                            let relocation_id = if result.is_ok() && starts_relocation { self.active_relocation.as_ref().map(|task| task.status.id) } else { None };
                             if let Some(reply) = request.reply {
                                 let _ = reply.send(CoreResponse::Ack(Ack {
                                     ok: result.is_ok(),
                                     error: result.err().map(|error| format!("{error:#}")),
                                     revision: self.state.system.revision,
                                     scan_id,
+                                    relocation_id,
                                 }));
                             }
                         }
@@ -70,6 +74,7 @@ impl Core {
                                     error: result.err().map(|error| format!("{error:#}")),
                                     revision: self.state.system.revision,
                                     scan_id: None,
+                                    relocation_id: None,
                                 }));
                             }
                         }
@@ -83,6 +88,11 @@ impl Core {
                 recv(self.scan_rx) -> scan => {
                     if let Ok(scan) = scan {
                         self.scan_event(scan);
+                    }
+                }
+                recv(self.relocation_rx) -> event => {
+                    if let Ok(event) = event {
+                        self.relocation_event(event);
                     }
                 }
                 recv(config_ticks) -> _ => {
@@ -116,6 +126,7 @@ impl Core {
         }
         let _ = self.engine.send(AudioCommand::Shutdown);
         self.shutdown_scan();
+        self.shutdown_relocation();
         self.state.playback.status = PlaybackStatus::Stopped;
         self.state.system.shutting_down = true;
         self.publish();
@@ -229,6 +240,32 @@ impl Core {
             return Err(QueryError::RevisionChanged);
         }
         Ok(match query {
+            Query::DuplicateGroups { offset, limit } => ViewResponse::DuplicateGroups(
+                self.store
+                    .duplicate_groups_page(*offset, (*limit).min(MAX_QUERY_ROWS))?,
+            ),
+            Query::DuplicateMembers {
+                fingerprint,
+                offset,
+                limit,
+            } => ViewResponse::DuplicateMembers(self.store.duplicate_members_page(
+                fingerprint,
+                *offset,
+                (*limit).min(MAX_QUERY_ROWS),
+            )?),
+            Query::RelocationTask { id } => ViewResponse::RelocationTask(
+                self.active_relocation
+                    .as_ref()
+                    .map(|task| &task.status)
+                    .filter(|status| status.id == *id)
+                    .or_else(|| {
+                        self.relocation_results
+                            .iter()
+                            .find(|status| status.id == *id)
+                    })
+                    .cloned()
+                    .context("Unknown or expired relocation task")?,
+            ),
             Query::QueuePage { offset, limit } => ViewResponse::QueuePage(
                 self.store
                     .queue_page_with_total(*offset, *limit, self.queue_ids.len())?,

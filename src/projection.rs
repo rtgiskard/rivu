@@ -41,6 +41,7 @@ pub struct GuiSystemSnapshot {
     pub ffmpeg_status: String,
     pub database_optimization: Option<DatabaseOptimization>,
     pub shutting_down: bool,
+    pub relocation_task: Option<crate::model::RelocationTaskStatus>,
 }
 
 impl GuiSnapshot {
@@ -70,6 +71,7 @@ impl GuiSnapshot {
                 ffmpeg_status: state.system.ffmpeg_status.clone(),
                 database_optimization: state.system.database_optimization.clone(),
                 shutting_down: state.system.shutting_down,
+                relocation_task: state.system.relocation_task.clone(),
             },
         }
     }

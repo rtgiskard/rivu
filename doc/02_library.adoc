@@ -67,6 +67,46 @@ rivu library scan ~/Music --wait
 rivu library scan ~/Music --force --wait
 ----
 
+== Same files and relocation
+
+Ordinary-file automatic relocation requires a unique missing old identity and a
+unique new destination with matching content. Exact paths take precedence.
+Ambiguous copies retain separate IDs and the missing identity's user state;
+scan order never chooses a destination. CUE matching is unchanged.
+
+Use the Library panel menu's `Same files / Relocation candidates` action to
+inspect paged ordinary-file groups. Historical cached BLAKE3 hashes identify
+candidates, not fresh proof. Rows show paths, current existence, scan state,
+metadata, favorites, overrides, history and playlist/queue reference counts.
+Choose a missing old identity and a present destination, then review and confirm.
+`Close / defer` leaves undecided pairs unchanged. `Keep destination independent`
+persists a decision that excludes that row from automatic and manual relocation,
+including after rescanning. No audio files are deleted.
+
+Confirmation starts one background full-file verification at a time. Rivu checks
+the destination's fresh hash and stable file identity, then revalidates database
+identities and source absence before committing atomically. The old ID, overrides,
+favorite, history and references survive at the destination; its redundant row
+is removed. Destinations with user state or references, active source/destination
+playback, changed files or database identities, and a reappearing source are
+rejected rather than merged. Correct the reported conflict before retrying.
+
+Closing the review requests cancellation of its ongoing verification. Cancellation
+before commit leaves identities unchanged; it cannot undo a completed commit.
+CLI acceptance supplies a task ID, not proof of success. `--wait` reports the
+final outcome; otherwise query status or cancel using that ID. The running core
+retains the latest 32 task results, not persistent task history.
+
+[source,sh]
+----
+rivu library duplicates
+rivu library duplicates --fingerprint FULL_BLAKE3 --offset 0 --limit 100
+rivu library relocate OLD_ID DESTINATION_ID --wait
+rivu library relocation-status TASK_ID
+rivu library cancel-relocation TASK_ID
+rivu library keep-independent DESTINATION_ID
+----
+
 == CUE library tracks
 
 `rivu library scan album.cue --wait` creates one library track per audio entry,

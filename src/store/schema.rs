@@ -23,6 +23,7 @@ pub(super) const TRACK_TABLE: &str = "CREATE TABLE tracks(
     bitrate_bps INTEGER,track_number INTEGER,disc_number INTEGER,
     bits_per_sample INTEGER,release_date TEXT,
     favorite INTEGER NOT NULL DEFAULT 0 CHECK(favorite IN (0,1)),
+    relocation_independent INTEGER NOT NULL DEFAULT 0 CHECK(relocation_independent IN (0,1)),
     decoder_hint INTEGER NOT NULL DEFAULT 0 CHECK(decoder_hint IN (0,1,2))
 );";
 
@@ -75,7 +76,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
             revision INTEGER NOT NULL DEFAULT 0
         );
         INSERT INTO queue_meta(singleton) VALUES(1);
-        INSERT INTO schema_meta(key,value) VALUES('version',10);",
+        INSERT INTO schema_meta(key,value) VALUES('version',11);",
     )?;
     tx.execute_batch(TRACK_INDEXES_AND_TRIGGER)?;
     tx.commit()?;
@@ -88,7 +89,7 @@ const MIGRATE_QUEUE_TO_V10: &str = "DROP TRIGGER IF EXISTS queue_insert;
     DELETE FROM schema_meta WHERE key='compact_pending';
     UPDATE schema_meta SET value=10 WHERE key='version';";
 
-fn migrate_legacy_to_v10(conn: &Connection, version: i64) -> Result<()> {
+fn migrate_legacy_to_v11(conn: &Connection, version: i64) -> Result<()> {
     conn.create_scalar_function(
         "fingerprint_blob",
         1,
@@ -154,6 +155,7 @@ fn migrate_legacy_to_v10(conn: &Connection, version: i64) -> Result<()> {
              CREATE INDEX IF NOT EXISTS playlist_track_lookup ON playlist_entries(track_id,playlist_id);"
         )?;
         tx.execute_batch(MIGRATE_QUEUE_TO_V10)?;
+        tx.execute("UPDATE schema_meta SET value=11 WHERE key='version'", [])?;
         tx.commit()?;
         Ok(())
     })();
@@ -162,11 +164,18 @@ fn migrate_legacy_to_v10(conn: &Connection, version: i64) -> Result<()> {
     result
 }
 
-fn migrate_to_v10(conn: &Connection) -> Result<()> {
-    // Keep all occurrence IDs, current selection and revision. A version boundary
-    // prevents older Store implementations from accepting a trigger-free schema.
+fn migrate_to_v11(conn: &Connection, version: i64) -> Result<()> {
+    // Preserve queue occurrence/current identities and all track state. The new
+    // row choice records independence, not a stale list of relocation candidates.
     let tx = conn.unchecked_transaction()?;
-    tx.execute_batch(MIGRATE_QUEUE_TO_V10)?;
+    if version == 9 {
+        tx.execute_batch(MIGRATE_QUEUE_TO_V10)?;
+    }
+    tx.execute_batch(
+        "ALTER TABLE tracks ADD COLUMN relocation_independent INTEGER NOT NULL DEFAULT 0
+         CHECK(relocation_independent IN (0,1));
+         UPDATE schema_meta SET value=11 WHERE key='version';",
+    )?;
     tx.commit()?;
     Ok(())
 }
@@ -200,11 +209,13 @@ impl Store {
                 )
                 .context("Unsupported library database; remove the old database and rescan")?;
             match version {
-                7 | 8 => migrate_legacy_to_v10(&c, version).with_context(|| {
-                    format!("Migrate library database from version {version} to 10")
+                7 | 8 => migrate_legacy_to_v11(&c, version).with_context(|| {
+                    format!("Migrate library database from version {version} to 11")
                 })?,
-                9 => migrate_to_v10(&c).context("Migrate library database from version 9 to 10")?,
-                10 => {}
+                9 | 10 => migrate_to_v11(&c, version).with_context(|| {
+                    format!("Migrate library database from version {version} to 11")
+                })?,
+                11 => {}
                 _ => bail!(
                     "Unsupported database version {version}; remove the old database and rescan"
                 ),
@@ -305,6 +316,9 @@ mod tests {
         store.conn.execute_batch(LEGACY_QUEUE_TRIGGERS)?;
         store
             .conn
+            .execute_batch("ALTER TABLE tracks DROP COLUMN relocation_independent;")?;
+        store
+            .conn
             .execute("UPDATE schema_meta SET value=9 WHERE key='version'", [])?;
         let state = store.queue_state()?;
         let page = store.queue_page(0, 10)?;
@@ -332,15 +346,79 @@ mod tests {
     }
 
     #[test]
-    fn failed_v10_migration_rolls_back_trigger_removal_and_version() -> Result<()> {
+    fn v10_migration_preserves_state_and_defaults_old_rows_to_relocation_eligible() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("library.db");
+        let store = Store::open(&path)?;
+        let hash = blake3::hash(b"same audio");
+        store.conn.execute(
+            "INSERT INTO tracks(path,fingerprint,missing,title_override,favorite,play_count,last_played)
+             VALUES('/old',?1,1,'Owned',1,7,123),('/target',?1,0,NULL,0,0,NULL)",
+            [hash.as_bytes().as_slice()],
+        )?;
+        store.enqueue_tracks(&[1, 2, 1])?;
+        let ids = store.queue_ids()?;
+        store.set_queue_current(Some(ids[2]))?;
+        let state = store.queue_state()?;
+        let page = store.queue_page(0, 10)?;
+        let source = store.track(1)?.unwrap();
+        store.conn.execute_batch(
+            "ALTER TABLE tracks DROP COLUMN relocation_independent;
+             UPDATE schema_meta SET value=10 WHERE key='version';",
+        )?;
+        drop(store);
+        let store = Store::open(&path)?;
+        assert_eq!(store.track(1)?.unwrap(), source);
+        assert_eq!(store.queue_state()?, state);
+        assert_eq!(store.queue_page(0, 10)?, page);
+        let members = store.duplicate_members_page(hash.to_hex().as_ref(), 0, 10)?;
+        assert!(members.rows.iter().all(|member| !member.independent));
+        assert_eq!(
+            store.conn.query_row(
+                "SELECT value FROM schema_meta WHERE key='version'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )?,
+            11
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn failed_v10_to_v11_migration_rolls_back_new_column_and_version() -> Result<()> {
+        let store = Store::open(Path::new(":memory:"))?;
+        store.conn.execute_batch(
+            "ALTER TABLE tracks DROP COLUMN relocation_independent;
+             UPDATE schema_meta SET value=10 WHERE key='version';
+             CREATE TEMP TRIGGER reject_schema_version AFTER UPDATE ON schema_meta
+             BEGIN SELECT RAISE(ABORT,'injected migration failure'); END;",
+        )?;
+        assert!(migrate_to_v11(&store.conn, 10).is_err());
+        assert_eq!(
+            store.conn.query_row(
+                "SELECT value FROM schema_meta WHERE key='version'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )?,
+            10
+        );
+        assert_eq!(store.conn.query_row("SELECT COUNT(*) FROM pragma_table_info('tracks') WHERE name='relocation_independent'", [], |row| row.get::<_, i64>(0))?, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_v11_migration_rolls_back_trigger_removal_and_version() -> Result<()> {
         let store = Store::open(Path::new(":memory:"))?;
         store.conn.execute_batch(LEGACY_QUEUE_TRIGGERS)?;
+        store
+            .conn
+            .execute_batch("ALTER TABLE tracks DROP COLUMN relocation_independent;")?;
         store.conn.execute_batch(
             "UPDATE schema_meta SET value=9 WHERE key='version';
              CREATE TEMP TRIGGER reject_schema_version AFTER UPDATE ON schema_meta
              BEGIN SELECT RAISE(ABORT,'injected migration failure'); END;",
         )?;
-        assert!(migrate_to_v10(&store.conn).is_err());
+        assert!(migrate_to_v11(&store.conn, 9).is_err());
         store
             .conn
             .execute_batch("DROP TRIGGER reject_schema_version;")?;

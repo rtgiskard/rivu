@@ -14,4 +14,5 @@ mod persistence;
 mod playback;
 mod playlists;
 mod queue;
+pub(super) mod relocation;
 mod runtime;

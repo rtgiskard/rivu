@@ -248,6 +248,7 @@ fn legacy_schema(store: &Store, version: i64, patched_indexes: bool) {
     let table = super::schema::TRACK_TABLE
         .replacen("CREATE TABLE tracks(", "CREATE TABLE tracks_legacy(", 1)
         .replace("fingerprint BLOB CHECK(fingerprint IS NULL OR (typeof(fingerprint)='blob' AND length(fingerprint)=32))", "fingerprint TEXT")
+        .replace("    relocation_independent INTEGER NOT NULL DEFAULT 0 CHECK(relocation_independent IN (0,1)),\n", "")
         .replace(",\n    decoder_hint INTEGER NOT NULL DEFAULT 0 CHECK(decoder_hint IN (0,1,2))", hint);
     let columns = "id,path,fingerprint,file_size,modified_ns,raw_title,raw_artist,raw_album,title_override,artist_override,album_override,duration,codec,channels,sample_rate,missing,play_count,last_played,cue_sheet,cue_number,cue_start_frame,cue_end_frame,probe_version,bitrate_bps,track_number,disc_number,bits_per_sample,release_date,favorite";
     let select = columns.replace(
@@ -364,7 +365,7 @@ fn supported_migrations_preserve_library_playlist_queue_and_current_identity() {
                     |row| row.get::<_, i64>(0)
                 )
                 .unwrap(),
-            10
+            11
         );
         assert_eq!(all_tracks(&migrated), expected_tracks);
         assert_eq!(
@@ -2637,7 +2638,7 @@ fn queue_dedup_uses_first_position_not_allocation_order_and_track_deletes_remove
 fn unsupported_database_versions_are_rejected_without_migration() {
     fs::create_dir_all(".cache").unwrap();
     let directory = tempfile::tempdir_in(".cache").unwrap();
-    for version in [6, 11] {
+    for version in [6, 12] {
         let path = directory.path().join(format!("version-{version}.db"));
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection

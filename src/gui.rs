@@ -1,6 +1,7 @@
 mod artwork;
 mod browser;
 mod components;
+mod duplicates;
 mod fonts;
 mod input;
 mod layout;
@@ -375,6 +376,8 @@ pub(super) struct GuiApp {
     inputs: HashMap<Field, Entity<Input>>,
     browser: BrowserState,
     metadata: MetadataSession,
+    duplicate_review: duplicates::DuplicateReview,
+    duplicate_focus: FocusHandle,
     metadata_decoder_hint: crate::model::DecoderHint,
     layout_focus: FocusHandle,
     scroll_views: scrolling::ScrollViews,
@@ -755,6 +758,8 @@ impl GuiApp {
             inputs,
             browser: BrowserState::default(),
             metadata: MetadataSession::default(),
+            duplicate_review: duplicates::DuplicateReview::default(),
+            duplicate_focus: cx.focus_handle(),
             metadata_decoder_hint: Default::default(),
             layout_focus: cx.focus_handle(),
             scroll_views: scrolling::ScrollViews::default(),
@@ -1084,6 +1089,10 @@ impl GuiApp {
                 self.ui_font = fonts::resolve(&state.system.config.ui_font, cx);
             }
             self.state = state;
+            self.sync_duplicate_review(
+                library_changed || library_structure_changed || playlist_changed || queue_changed,
+                cx,
+            );
             self.browser.history.sync(&self.state.library.history);
             self.sync_metadata_default(cx);
             self.sync_full_waveform_request();

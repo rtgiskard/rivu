@@ -2487,6 +2487,7 @@ mod tests {
                     error: None,
                     revision: 2,
                     scan_id: None,
+                    relocation_id: None,
                 },
             );
         });
