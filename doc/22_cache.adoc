@@ -151,6 +151,11 @@ publishing MPRIS metadata; a late result can warm the cache, never replace a
 newer identity. MPRIS signals metadata after artwork becomes available, including
 an initial cold load without another playback update.
 
+The Album artwork panel initiates acquisition only while visible. Hiding it
+clears queued demand without cancelling a submitted shared load; completion may
+warm the cache but cannot start another hidden lookup. Revealing it acquires the
+latest track. Other consumers, including MPRIS, retain their own acquisition demand.
+
 The lookup key is track ID plus source fingerprint. Resident requests for the
 same identity share one probe outside the lookup lock. Consumers hold the lookup
 result itself, so loading, GUI, and MPRIS references keep that version resident.

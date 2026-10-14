@@ -208,6 +208,11 @@ impl AlbumArtwork {
     }
 
     fn prepare_artwork(&mut self, cx: &mut Context<Self>) {
+        if !self.visible {
+            // Forget queued demand, but let the shared in-flight load finish.
+            let _ = self.loader.prepare(None);
+            return;
+        }
         let artwork = self
             .track
             .as_ref()
@@ -241,7 +246,7 @@ impl AlbumArtwork {
                 let current = this
                     .track
                     .as_ref()
-                    .filter(|track| !this.manager.is_loaded(track));
+                    .filter(|track| this.visible && !this.manager.is_loaded(track));
                 if let Some(next) = this.loader.finish(&identity, current) {
                     this.start_artwork(next, cx);
                 } else {
