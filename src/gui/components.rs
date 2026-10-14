@@ -84,23 +84,32 @@ pub(crate) fn list_viewport(child: impl IntoElement) -> Div {
         .child(child)
 }
 
+/// Compact floating surface shared by action and row tooltips.
+fn tooltip_surface(window: &Window, max_width_rems: f32) -> Div {
+    let available = (window.viewport_size().width - px(UI_INSET * 2.)).max(px(0.));
+    div()
+        .min_w_0()
+        .max_w((window.rem_size() * max_width_rems).min(available))
+        .px(px(UI_INSET))
+        .py_1()
+        .rounded_md()
+        .bg(rgb(PANEL))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .shadow_sm()
+        .text_sm()
+        .text_color(rgb(TEXT))
+        .whitespace_normal()
+}
+
 /// Shared tooltip used by icon buttons.
 pub(crate) struct ButtonTooltip {
     pub(super) text: SharedString,
 }
 
 impl Render for ButtonTooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .max_w(gpui::px(360.))
-            .px(gpui::px(UI_INSET))
-            .py_2()
-            .bg(rgb(PANEL))
-            .border_1()
-            .border_color(rgb(BORDER))
-            .text_sm()
-            .text_color(rgb(TEXT))
-            .child(self.text.clone())
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        tooltip_surface(window, 22.5).child(self.text.clone())
     }
 }
 
@@ -502,19 +511,10 @@ struct TrackTooltip {
 
 impl Render for TrackTooltip {
     fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let width = (window.viewport_size().width - px(UI_INSET * 2.)).max(px(0.));
-        super::column()
-            .w(px(560.).min(width))
-            .px(gpui::px(UI_INSET))
-            .py_2()
-            .bg(rgb(PANEL))
-            .border_1()
-            .border_color(rgb(BORDER))
-            .text_color(rgb(TEXT))
-            .whitespace_normal()
+        tooltip_surface(window, 35.)
             .child(
                 div()
-                    .w_full()
+                    .min_w_0()
                     .flex_shrink_0()
                     .whitespace_normal()
                     .child(self.title.clone()),
@@ -522,7 +522,7 @@ impl Render for TrackTooltip {
             .when(!self.detail.is_empty(), |view| {
                 view.child(
                     caption(self.detail.clone())
-                        .w_full()
+                        .min_w_0()
                         .flex_shrink_0()
                         .whitespace_normal(),
                 )
