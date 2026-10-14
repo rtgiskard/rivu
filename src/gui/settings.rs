@@ -1,7 +1,7 @@
 use super::{
     BORDER, ButtonTooltip, DropdownItem, DropdownState, ERROR, POPOVER_MAX_HEIGHT, StatusKind,
     UI_INSET, active_control, button, caption, column,
-    components::DROPDOWN_ROW_REMS,
+    components::{DROPDOWN_ROW_REMS, disabled_control},
     copyable_message, dropdown_container, dropdown_row, dropdown_trigger, form_field, icon_button,
     input::{Input, InputEvent},
     row, section_group, status_message, toggle_button, two_column,
@@ -1430,24 +1430,22 @@ impl Settings {
                         .flex_1(),
                     )
                     .child(
-                        icon_button(
+                        disabled_control(icon_button(
                             "settings-artwork-cache-calculate",
                             "󰃬",
                             "Calculate usage",
                             cx,
                             |this, _, cx| this.maintain_artwork_cache(false, cx),
-                        )
-                        .when(busy, |control| control.opacity(0.4).cursor_default()),
+                        ), busy),
                     )
                     .child(
-                        icon_button(
+                        disabled_control(icon_button(
                             "settings-artwork-cache-clean",
                             "󰆴",
                             "Clean expired",
                             cx,
                             |this, _, cx| this.maintain_artwork_cache(true, cx),
-                        )
-                        .when(busy, |control| control.opacity(0.4).cursor_default()),
+                        ), busy),
                     ),
             )
             .child(caption(
@@ -1720,8 +1718,7 @@ impl Settings {
                                     this.draft.ffmpeg_enabled = !this.draft.ffmpeg_enabled;
                                     cx.notify();
                                 },
-                            )
-                            .text_size(rems(1.)),
+                            ),
                             ffmpeg,
                         ))
                         .child(visual_switch(
@@ -1752,17 +1749,14 @@ impl Settings {
                                     .min_w_0()
                                     .child(self.inputs[&Field::LayoutSnapGrid].clone()),
                             )
-                            .child(
-                                visual_switch(
-                                    "settings-layout-snapping",
-                                    "󰐃",
-                                    "Layout snapping",
-                                    self.draft.layout_snap_enabled,
-                                    cx,
-                                    |draft| draft.layout_snap_enabled = !draft.layout_snap_enabled,
-                                )
-                                .size(px(36.)),
-                            ),
+                            .child(visual_switch(
+                                "settings-layout-snapping",
+                                "󰐃",
+                                "Layout snapping",
+                                self.draft.layout_snap_enabled,
+                                cx,
+                                |draft| draft.layout_snap_enabled = !draft.layout_snap_enabled,
+                            )),
                     ),
                 )
                 .child(
@@ -1783,8 +1777,7 @@ impl Settings {
                                     this.draft.mpris_enabled = !this.draft.mpris_enabled;
                                     cx.notify();
                                 },
-                            )
-                            .text_size(rems(1.)),
+                            ),
                             mpris,
                         ))
                         .child(visual_switch(
@@ -2301,27 +2294,30 @@ impl Settings {
                         .text_sm()
                         .child(feedback),
                 )
-                .child(
+                .child(disabled_control(
                     icon_button(
                         "settings-apply",
                         "",
                         "Apply settings",
                         cx,
                         |this, _, cx| this.apply_settings(cx),
-                    )
-                    .opacity(if self.applying { 0.4 } else { 1.0 }),
-                )
-                .child(icon_button(
-                    "settings-discard",
-                    "",
-                    "Discard changes and close",
-                    cx,
-                    |this, _, cx| {
-                        if this.applying {
-                            return;
-                        }
-                        this.cancel(cx);
-                    },
+                    ),
+                    self.applying,
+                ))
+                .child(disabled_control(
+                    icon_button(
+                        "settings-discard",
+                        "",
+                        "Discard changes and close",
+                        cx,
+                        |this, _, cx| {
+                            if this.applying {
+                                return;
+                            }
+                            this.cancel(cx);
+                        },
+                    ),
+                    self.applying,
                 )),
         );
         if self.dropdown.is_open() {

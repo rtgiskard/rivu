@@ -137,14 +137,14 @@ impl GuiApp {
                     .child(icon_button(
                         "playlist-name-cancel",
                         "",
-                        "Cancel",
+                        "Cancel playlist name editing",
                         cx,
                         |this, window, cx| this.cancel_playlist_name(window, cx),
                     ))
                     .child(icon_button(
                         "playlist-name-submit",
                         "",
-                        submit,
+                        format!("{submit} playlist"),
                         cx,
                         |this, window, cx| this.submit_playlist_name(window, cx),
                     )),

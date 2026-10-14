@@ -344,23 +344,16 @@ impl Render for GuiApp {
                     .bg(rgb(ERROR_BG))
                     .text_color(rgb(TEXT))
                     .child(copyable_message("copy-error", error, cx).flex_initial())
-                    .child(
-                        icon_button(
-                            "dismiss-error",
-                            "",
-                            "Dismiss message",
-                            cx,
-                            |this, _, cx| {
-                                this.error = None;
-                                this.send(Command::DismissError, cx);
-                            },
-                        )
-                        .size(rems(1.5))
-                        .min_h_0()
-                        .border_0()
-                        .bg(rgb(ERROR_BG))
-                        .text_color(rgb(MUTED)),
-                    ),
+                    .child(components::quiet_icon_button(icon_button(
+                        "dismiss-error",
+                        "",
+                        "Dismiss message",
+                        cx,
+                        |this, _, cx| {
+                            this.error = None;
+                            this.send(Command::DismissError, cx);
+                        },
+                    ))),
             );
         } else if self.state.system.scanning {
             footer = footer.child(
@@ -775,7 +768,7 @@ impl Render for GuiApp {
                     }
                     if is_queue {
                         menu = menu
-                            .child(
+                            .child(components::disabled_control(
                                 menu_item(
                                     "queue-add-playlist",
                                     "Add to playlist  ›",
@@ -793,14 +786,10 @@ impl Render for GuiApp {
                                         });
                                         cx.notify();
                                     },
-                                )
-                                .opacity(if has_selected_queue {
-                                    1.
-                                } else {
-                                    0.4
-                                }),
-                            )
-                            .child(
+                                ),
+                                !has_selected_queue,
+                            ))
+                            .child(components::disabled_control(
                                 menu_item(
                                     "queue-mark-favorite",
                                     "Mark favorite",
@@ -829,13 +818,9 @@ impl Render for GuiApp {
                                         );
                                         cx.notify();
                                     },
-                                )
-                                .opacity(if has_selected_queue {
-                                    1.
-                                } else {
-                                    0.4
-                                }),
-                            )
+                                ),
+                                !has_selected_queue,
+                            ))
                             .child(menu_item(
                                 "randomize-queue",
                                 "Randomize queue",
@@ -1017,30 +1002,28 @@ impl Render for GuiApp {
                                 .pb_2(),
                         )
                         .child(
-                            row()
-                                .child(
-                                    menu_item("cancel-clear-queue", "Cancel", cx, |this, _, cx| {
+                            column()
+                                .child(menu_item(
+                                    "cancel-clear-queue",
+                                    "Cancel",
+                                    cx,
+                                    |this, _, cx| {
                                         this.panel_menu = None;
                                         cx.notify();
-                                    })
-                                    .flex_1(),
-                                )
-                                .child(
-                                    menu_item(
-                                        "confirm-clear-queue",
-                                        "Clear queue",
-                                        cx,
-                                        |this, _, cx| {
-                                            this.panel_menu = None;
-                                            this.browser.queue.clear();
+                                    },
+                                ))
+                                .child(components::danger_control(menu_item(
+                                    "confirm-clear-queue",
+                                    "Clear queue",
+                                    cx,
+                                    |this, _, cx| {
+                                        this.panel_menu = None;
+                                        this.browser.queue.clear();
 
-                                            this.send(Command::ClearQueue, cx);
-                                            cx.notify();
-                                        },
-                                    )
-                                    .flex_1()
-                                    .text_color(rgb(ERROR)),
-                                ),
+                                        this.send(Command::ClearQueue, cx);
+                                        cx.notify();
+                                    },
+                                ))),
                         );
                 }
                 PanelMenuPage::Playlists => {
@@ -1301,17 +1284,17 @@ impl Render for GuiApp {
                                     ),
                             )
                             .child(
-                                icon_button(
+                                components::quiet_icon_button(icon_button(
                                     "about-close",
                                     "",
-                                    "Close",
+                                    "Close About",
                                     cx,
                                     |this, window, cx| {
                                         this.about_open = false;
                                         this.focus_layout(window, cx);
                                         cx.notify();
                                     },
-                                )
+                                ))
                                 .absolute()
                                 .top(px(8.))
                                 .right(px(8.)),
