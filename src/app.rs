@@ -23,10 +23,6 @@ use signal_hook::{
 use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc, thread};
 
 /// Application requests are never business commands or core view state.
-#[expect(
-    clippy::large_enum_variant,
-    reason = "Inline business commands avoid an extra allocation during application request conversion"
-)]
 #[derive(Clone, Debug)]
 pub enum AppCommand {
     Core(Command),

@@ -12,7 +12,7 @@ The policy covers Waveform display columns and static images, Spectrum body
 geometry, and Spectrogram history images. Audio Visualizer styles are independent:
 radial styles do not retain reusable graphics, stereo analysis styles retain
 their own result images, and generative styles retain simulation state. The
-setting does not control those resources or font caches.
+setting does not control those resources, album artwork, or font caches.
 
 Disabling the cache bypasses reusable graphics, not the underlying audio data
 or Spectrogram history. Peak hold, smoothing, and display calculations retain
@@ -46,6 +46,8 @@ display mapping still invalidate reuse. Hold timing and Peak markers advance
 independently of the cached body; Peak markers are drawn separately. Restoring a
 hidden panel waits for a valid audio frame to initialize its envelopes before
 drawing. The benefit depends on the workload, not on a fixed expected hit rate.
+The shared palette ramp is independent of geometry caching; its bounded ownership
+and retirement are described in link:23_visuals.adoc#_spectrum[Spectrum rendering].
 
 === Spectrogram
 

@@ -120,6 +120,12 @@ file_group!(Waveform, WaveformView {
     peak_gamma => waveform_peak_gamma: f32,
 });
 
+file_group!(AlbumArtwork, AlbumArtworkView {
+    mode => album_artwork_mode: AlbumArtworkMode,
+    period_seconds => album_artwork_period_seconds: f32,
+    direction => album_artwork_direction: AlbumArtworkDirection,
+});
+
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Visualizations {
@@ -135,6 +141,7 @@ struct Visualizations {
     spectrogram: Spectrogram,
     audio_visualizer: AudioVisualizer,
     waveform: Waveform,
+    album_artwork: AlbumArtwork,
 }
 
 #[derive(Serialize)]
@@ -151,6 +158,7 @@ struct VisualizationsView<'a> {
     spectrogram: SpectrogramView<'a>,
     audio_visualizer: AudioVisualizerView<'a>,
     waveform: WaveformView<'a>,
+    album_artwork: AlbumArtworkView<'a>,
 }
 
 #[derive(Default, Deserialize)]
@@ -198,6 +206,7 @@ impl FileConfig {
         self.visualizations.spectrogram.apply(&mut config);
         self.visualizations.audio_visualizer.apply(&mut config);
         self.visualizations.waveform.apply(&mut config);
+        self.visualizations.album_artwork.apply(&mut config);
         config
     }
 }
@@ -231,6 +240,7 @@ impl<'a> From<&'a Config> for FileConfigView<'a> {
                 spectrogram: config.into(),
                 audio_visualizer: config.into(),
                 waveform: config.into(),
+                album_artwork: config.into(),
             },
         }
     }

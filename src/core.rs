@@ -3326,7 +3326,10 @@ mod tests {
         write_pcm(&hidden);
         let mut config = core.state.system.config.as_ref().clone();
         config.scan_max_depth = 2;
-        core.command(Command::Configure { config }).unwrap();
+        core.command(Command::Configure {
+            config: std::sync::Arc::new(config),
+        })
+        .unwrap();
         core.command(Command::Scan {
             paths: vec![directory.path().to_path_buf()],
             force: false,
@@ -3351,7 +3354,10 @@ mod tests {
         std::fs::remove_file(&hidden).unwrap();
         let mut config = core.state.system.config.as_ref().clone();
         config.scan_max_depth = 1;
-        core.command(Command::Configure { config }).unwrap();
+        core.command(Command::Configure {
+            config: std::sync::Arc::new(config),
+        })
+        .unwrap();
         core.command(Command::Scan {
             paths: vec![directory.path().to_path_buf()],
             force: false,
@@ -3378,7 +3384,10 @@ mod tests {
         assert!(!core.track(visible_id).unwrap().missing);
         let mut config = core.state.system.config.as_ref().clone();
         config.scan_max_depth = 2;
-        core.command(Command::Configure { config }).unwrap();
+        core.command(Command::Configure {
+            config: std::sync::Arc::new(config),
+        })
+        .unwrap();
         core.command(Command::Scan {
             paths: vec![directory.path().to_path_buf()],
             force: false,
@@ -3488,7 +3497,10 @@ mod tests {
         }
         let mut config = core.state.system.config.as_ref().clone();
         config.library_roots = vec![first.join("."), second.join("unused/..")];
-        core.command(Command::Configure { config }).unwrap();
+        core.command(Command::Configure {
+            config: std::sync::Arc::new(config),
+        })
+        .unwrap();
         core.command(Command::Scan {
             paths: vec![first.join("unused/.."), second.join(".")],
             force: false,
@@ -3622,7 +3634,10 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), &alias).unwrap();
         let mut config = core.state.system.config.as_ref().clone();
         config.library_roots = vec![alias.join("unused/.."), outside.path().to_path_buf()];
-        core.command(Command::Configure { config }).unwrap();
+        core.command(Command::Configure {
+            config: std::sync::Arc::new(config),
+        })
+        .unwrap();
         assert_eq!(
             core.state.system.config.library_roots,
             [alias.clone(), outside.path().to_path_buf()]
@@ -5109,7 +5124,10 @@ mod tests {
         let device = core.state.system.selected_device.clone();
         let ffmpeg_status = core.state.system.ffmpeg_status.clone();
 
-        core.command(Command::Configure { config }).unwrap_err();
+        core.command(Command::Configure {
+            config: std::sync::Arc::new(config),
+        })
+        .unwrap_err();
 
         assert_eq!(*core.state.system.config, *previous);
         assert_eq!(core.state.playback.volume, playback.volume);
@@ -5136,7 +5154,10 @@ mod tests {
         config.still_mode = true;
         config.page_size = 0;
 
-        core.command(Command::Configure { config }).unwrap_err();
+        core.command(Command::Configure {
+            config: std::sync::Arc::new(config),
+        })
+        .unwrap_err();
 
         assert_eq!(*core.state.system.config, *previous);
         assert_eq!(core.state.playback.volume, previous.volume);
@@ -5169,7 +5190,10 @@ mod tests {
         core.played_cursor = 2;
         let expected = config.clone();
 
-        core.command(Command::Configure { config }).unwrap_err();
+        core.command(Command::Configure {
+            config: std::sync::Arc::new(config),
+        })
+        .unwrap_err();
 
         assert_eq!(*core.state.system.config, expected);
         assert_eq!(core.state.playback.volume, expected.volume);

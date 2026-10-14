@@ -1,7 +1,7 @@
 //! User-editable TOML settings, separate from the library database and GUI layout.
 //!
 //! The file has library, playback, interface, logging, and visualizations tables;
-//! the latter contains spectrum, spectrogram, audio_visualizer, and waveform.
+//! the latter contains spectrum, spectrogram, audio_visualizer, waveform, and album_artwork.
 //! Missing fields use [`Config::default`]; unknown or misplaced fields and invalid
 //! values are errors. `playback.repeat` accepts "off", "all", or "one". Omit
 //! `playback.output_device` to use the system default. Paths are literal filesystem
@@ -17,6 +17,20 @@ use std::{
 };
 
 mod file;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AlbumArtworkMode {
+    Static,
+    Rotating,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AlbumArtworkDirection {
+    Clockwise,
+    Counterclockwise,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VisualizationPalette {
@@ -297,6 +311,10 @@ pub struct Config {
     pub waveform_rms_gain: f32,
     pub waveform_peak_gain: f32,
     pub waveform_peak_gamma: f32,
+    pub album_artwork_mode: AlbumArtworkMode,
+    /// Positive finite seconds per full rotation, shared by all artwork panels.
+    pub album_artwork_period_seconds: f32,
+    pub album_artwork_direction: AlbumArtworkDirection,
     /// Enable reusable caches owned by visualization controls.
     pub visualization_cache: bool,
     pub media_read_buffer_mb: u32,
@@ -374,6 +392,9 @@ impl Default for Config {
             waveform_rms_gain: 1.6,
             waveform_peak_gain: 0.75,
             waveform_peak_gamma: 1.1,
+            album_artwork_mode: AlbumArtworkMode::Static,
+            album_artwork_period_seconds: 20.0,
+            album_artwork_direction: AlbumArtworkDirection::Clockwise,
             visualization_cache: true,
             media_read_buffer_mb: 2,
             ffmpeg_enabled: false,
@@ -621,6 +642,11 @@ impl Config {
                 "{name} is outside its supported range; got {value}"
             );
         }
+        ensure!(
+            self.album_artwork_period_seconds.is_finite()
+                && self.album_artwork_period_seconds > 0.0,
+            "visualizations.album_artwork.period_seconds must be finite and greater than zero"
+        );
         Ok(())
     }
 
@@ -746,6 +772,66 @@ mod tests {
     }
 
     #[test]
+    fn album_artwork_settings_round_trip_and_reject_invalid_periods() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        for mode in [AlbumArtworkMode::Static, AlbumArtworkMode::Rotating] {
+            for direction in [
+                AlbumArtworkDirection::Clockwise,
+                AlbumArtworkDirection::Counterclockwise,
+            ] {
+                for period in [f32::MIN_POSITIVE, 0.125, 20.0, f32::MAX] {
+                    let config = Config {
+                        album_artwork_mode: mode,
+                        album_artwork_period_seconds: period,
+                        album_artwork_direction: direction,
+                        ..Config::default()
+                    };
+                    config.save(&path).unwrap();
+                    assert_eq!(Config::load(&path).unwrap(), config);
+                }
+            }
+        }
+        for period in ["0", "-1", "nan", "inf", "-inf"] {
+            fs::write(
+                &path,
+                format!("visualizations.album_artwork.period_seconds = {period}\n"),
+            )
+            .unwrap();
+            assert!(Config::load(&path).is_err());
+        }
+        Config::default().save(&path).unwrap();
+        let original = fs::read(&path).unwrap();
+        for period in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let config = Config {
+                album_artwork_period_seconds: period,
+                ..Config::default()
+            };
+            assert!(config.save(&path).is_err());
+            assert_eq!(fs::read(&path).unwrap(), original);
+        }
+        for invalid in ["mode = 'spinning'", "direction = 'left'", "unknown = true"] {
+            fs::write(
+                &path,
+                format!("[visualizations.album_artwork]\n{invalid}\n"),
+            )
+            .unwrap();
+            assert!(Config::load(&path).is_err());
+        }
+        fs::write(&path, "visualizations.album_artwork.mode = 'rotating'\n").unwrap();
+        let partial = Config::load(&path).unwrap();
+        assert_eq!(partial.album_artwork_mode, AlbumArtworkMode::Rotating);
+        assert_eq!(
+            partial.album_artwork_period_seconds,
+            Config::default().album_artwork_period_seconds
+        );
+        assert_eq!(
+            partial.album_artwork_direction,
+            Config::default().album_artwork_direction
+        );
+    }
+
+    #[test]
     fn grouped_file_defaults_partial_tables_and_font_normalization() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
@@ -832,7 +918,13 @@ mod tests {
             .collect();
         assert_eq!(
             nested,
-            ["audio_visualizer", "spectrogram", "spectrum", "waveform"]
+            [
+                "album_artwork",
+                "audio_visualizer",
+                "spectrogram",
+                "spectrum",
+                "waveform"
+            ]
         );
     }
 
@@ -939,6 +1031,9 @@ mod tests {
             waveform_rms_gain: 2.0,
             waveform_peak_gain: 0.5,
             waveform_peak_gamma: 1.25,
+            album_artwork_mode: AlbumArtworkMode::Rotating,
+            album_artwork_period_seconds: 12.5,
+            album_artwork_direction: AlbumArtworkDirection::Counterclockwise,
             visualization_cache: false,
             page_size: 32,
         };

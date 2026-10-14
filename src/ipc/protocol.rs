@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub(super) const PROTOCOL_VERSION: u8 = 15;
+pub(super) const PROTOCOL_VERSION: u8 = 16;
 pub(super) const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub(super) const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub(super) const MAX_CLIENTS: usize = 16;
@@ -310,7 +310,7 @@ pub(super) enum WireCommand {
     },
     DismissError,
     Configure {
-        config: WireConfig,
+        config: Box<WireConfig>,
     },
     MprisStatus {
         status: String,
@@ -755,7 +755,7 @@ impl From<Command> for WireCommand {
             Command::DismissScanResult => Self::DismissScanResult,
             Command::CancelScan { id } => Self::CancelScan { id },
             Command::Configure { config } => Self::Configure {
-                config: WireConfig::from(&config),
+                config: Box::new(WireConfig::from(config.as_ref())),
             },
             Command::MprisStatus { status } => Self::MprisStatus { status },
             Command::CreatePlaylistFromQueue { name } => Self::CreatePlaylistFromQueue { name },
@@ -876,7 +876,7 @@ impl TryFrom<WireCommand> for Command {
             WireCommand::DismissScanResult => Self::DismissScanResult,
             WireCommand::CancelScan { id } => Self::CancelScan { id },
             WireCommand::Configure { config } => Self::Configure {
-                config: config.into(),
+                config: Arc::new((*config).into()),
             },
             WireCommand::MprisStatus { status } => Self::MprisStatus { status },
             WireCommand::Shutdown => bail!("Shutdown is an application request"),
@@ -977,6 +977,9 @@ pub(super) struct WireConfig {
     audio_visualizer_fade_when_idle: bool,
     audio_visualizer_primary_color: crate::config::RgbColor,
     audio_visualizer_secondary_color: crate::config::RgbColor,
+    album_artwork_mode: crate::config::AlbumArtworkMode,
+    album_artwork_period_seconds: f32,
+    album_artwork_direction: crate::config::AlbumArtworkDirection,
     spectrogram_labels: bool,
     spectrogram_interpolate: bool,
     spectrogram_sampling_points_scale: f32,
@@ -1058,6 +1061,9 @@ impl From<&crate::config::Config> for WireConfig {
             audio_visualizer_fade_when_idle: value.audio_visualizer_fade_when_idle,
             audio_visualizer_primary_color: value.audio_visualizer_primary_color,
             audio_visualizer_secondary_color: value.audio_visualizer_secondary_color,
+            album_artwork_mode: value.album_artwork_mode,
+            album_artwork_period_seconds: value.album_artwork_period_seconds,
+            album_artwork_direction: value.album_artwork_direction,
             spectrogram_labels: value.spectrogram_labels,
             spectrogram_interpolate: value.spectrogram_interpolate,
             spectrogram_sampling_points_scale: value.spectrogram_sampling_points_scale,
@@ -1141,6 +1147,9 @@ impl From<WireConfig> for crate::config::Config {
             audio_visualizer_fade_when_idle: value.audio_visualizer_fade_when_idle,
             audio_visualizer_primary_color: value.audio_visualizer_primary_color,
             audio_visualizer_secondary_color: value.audio_visualizer_secondary_color,
+            album_artwork_mode: value.album_artwork_mode,
+            album_artwork_period_seconds: value.album_artwork_period_seconds,
+            album_artwork_direction: value.album_artwork_direction,
             spectrogram_labels: value.spectrogram_labels,
             spectrogram_interpolate: value.spectrogram_interpolate,
             spectrogram_sampling_points_scale: value.spectrogram_sampling_points_scale,

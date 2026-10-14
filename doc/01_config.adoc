@@ -9,7 +9,8 @@ Paths are literal: `~` and environment variables are not expanded.
 The file has five stable top-level domains: `[library]`, `[playback]`,
 `[interface]`, `[logging]`, and `[visualizations]`. Visualization view settings
 live in `[visualizations.spectrum]`, `[visualizations.spectrogram]`,
-`[visualizations.audio_visualizer]`, and `[visualizations.waveform]`.
+`[visualizations.audio_visualizer]`, `[visualizations.waveform]`, and
+`[visualizations.album_artwork]`.
 Desktop integration belongs to Interface; output and decoding belong to Playback;
 shared analysis belongs to Visualizations. Dotted names below identify file paths.
 A minimal example (all omitted settings retain their defaults):
@@ -180,6 +181,11 @@ Audio Visualizer style, reference lines, and labels are defaults for new
 instances, while effect parameters are shared by all instances. See
 <<_audio_visualizer,Audio Visualizer>> for instance settings and style-specific
 effects. Inactive Spectrum style-dependent settings retain their values.
+
+Visualizations → Album artwork edits mode, seconds per circle, and direction
+for every Album artwork panel. These are shared application settings, not
+per-layout instance options; Apply and Discard follow the same draft rules
+as the other global settings.
 
 Font: type to search installed families, or use the arrow to browse them and
 `serif`, `sans-serif`, and `monospace`. Enter or a click selects a choice; Space
@@ -427,6 +433,30 @@ link:../src/config.rs[`Config`] for the full setting ranges and defaults.
 results but rebuilds derived graphics on repaint. It does not affect Radial
 Spectrum. See link:22_cache.adoc[Visualization Cache] for scope and trade-offs,
 and link:23_visuals.adoc[Visualization Rendering Design] for rendering choices.
+
+=== Album artwork
+
+The optional `Album artwork` panel (`album_artwork` in layout files) follows
+the current playback track independently of Metadata. Its configuration is:
+
+[source,toml]
+----
+[visualizations.album_artwork]
+mode = "static"
+period_seconds = 20.0
+direction = "clockwise"
+----
+
+`mode` accepts `static` (default) or `rotating`. `period_seconds` is the time
+for one full circle and must be finite and greater than zero; there is no
+additional upper limit. `direction` accepts `clockwise` (default) or
+`counterclockwise`. All Album artwork panels share these settings.
+Rotation follows playback rather than audio energy. Pausing, hiding the panel,
+and Still Mode preserve its angle; resuming does not catch up on suspended time.
+Stopping, changing the current track, or selecting static mode resets the cover
+upright. A track without artwork uses Playback's generated default cover, kept stationary.
+The circular panel crops the cover's corners; Metadata's full preview is unchanged.
+
 
 === Still Mode
 
