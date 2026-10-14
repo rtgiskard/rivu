@@ -241,6 +241,7 @@ impl GuiApp {
                     )
                     .child(
                         column()
+                            .gap_0()
                             .flex_1()
                             .child(
                                 row()
@@ -458,11 +459,18 @@ impl GuiApp {
                 tools.child(div().text_sm().text_color(rgb(TEXT)).child("Library"))
             })
             .child(
-                caption(selection_label)
+                caption(selection_label.clone())
+                    .id(("library-selection-count", panel_id))
                     .w(gpui::rems(6.))
                     .flex_1()
                     .min_w_0()
-                    .truncate(),
+                    .truncate()
+                    .tooltip(move |_, cx| {
+                        cx.new(|_| super::ButtonTooltip {
+                            text: selection_label.clone().into(),
+                        })
+                        .into()
+                    }),
             )
             .child(icon_button(
                 ("library-view", panel_id),
@@ -688,6 +696,7 @@ impl GuiApp {
             selected_id.and_then(|id| self.browser.queue.identity(id).map(|row| row.position));
         let selection_count = self.browser.queue.len();
         let header = row()
+            .flex_wrap()
             .flex_shrink_0()
             .when(!tab_bar_visible, |header| {
                 header.child(div().text_sm().text_color(rgb(TEXT)).child("Queue"))
@@ -806,8 +815,7 @@ impl GuiApp {
                 this.resolve_library_drag(drag.nodes(), super::DragDestination::Queue, cx);
             }))
             .drag_over::<LibraryDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
-            .child(header)
-            .when(self.state.queue.total > 0, |panel| panel.child(tools))
+            .child(header.when(self.state.queue.total > 0, |header| header.child(tools)))
             .child(list_viewport(
                 uniform_list(
                     ("queue-rows", panel_id),
