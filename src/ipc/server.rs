@@ -9,8 +9,8 @@ use crate::{
     model::{Command, Query},
     response::{Ack, QueryResponse, StateRevisions},
 };
-use anyhow::{Context, Error, Result};
-use bytes::BytesMut;
+use anyhow::{Context, Error, Result, bail};
+use bytes::{BufMut, Bytes, BytesMut};
 use rand::RngExt;
 use std::{
     fs,
@@ -19,10 +19,11 @@ use std::{
     time::Duration,
 };
 use tokio::{
+    io::{AsyncRead, AsyncReadExt},
     net::{UnixListener, UnixStream},
     runtime::Builder,
     sync::watch,
-    time::timeout,
+    time::{Instant, timeout, timeout_at},
 };
 /// Holds the abstract listener before any database or audio startup side effects.
 /// The kernel releases the address after the last listening descriptor closes.
@@ -172,39 +173,59 @@ async fn run_query(handle: &CoreHandle, query: Query) -> Result<QueryResponse> {
     .map_err(|error| anyhow::anyhow!("Core query task failed: {error}"))
 }
 
+const FRAME_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Default)]
+struct RequestReader {
+    pending: BytesMut,
+    deadline: Option<Instant>,
+}
+
+impl RequestReader {
+    async fn read(&mut self, stream: &mut (impl AsyncRead + Unpin)) -> Result<Bytes> {
+        // Idle sessions have no expiry. Start one absolute deadline at the first
+        // byte, retaining it when Watch updates cancel and resume this future.
+        if self.pending.is_empty() {
+            let read = stream
+                .read_buf(&mut (&mut self.pending).limit(4))
+                .await
+                .context("Reading IPC frame")?;
+            if read == 0 {
+                bail!("IPC connection closed while reading frame");
+            }
+            self.deadline = Some(Instant::now() + FRAME_TIMEOUT);
+        }
+        let deadline = self.deadline.expect("Started request frame has a deadline");
+        let frame = timeout_at(deadline, read_frame(stream, MAX_REQUEST, &mut self.pending))
+            .await
+            .context("IPC request frame completion timed out")??;
+        self.deadline = None;
+        Ok(frame)
+    }
+}
+
+enum WatchResult {
+    Revisions(StateRevisions),
+    Request(Bytes),
+}
+
 async fn wait_for_revisions(
     stream: &mut UnixStream,
-    pending: &mut BytesMut,
+    reader: &mut RequestReader,
     handle: &CoreHandle,
     expected: StateRevisions,
     updates: &mut watch::Receiver<StateRevisions>,
     shutdown: &mut watch::Receiver<bool>,
-) -> Option<Option<StateRevisions>> {
-    let mut scratch = [0u8; 8192];
+) -> Result<Option<WatchResult>> {
     loop {
         let current = handle.state_revisions();
         if current != expected {
-            return Some(Some(current));
+            return Ok(Some(WatchResult::Revisions(current)));
         }
         tokio::select! {
-            changed = updates.changed() => { if changed.is_err() { return None; } }
-            changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() { return None; } }
-            ready = stream.readable() => {
-                if ready.is_err() { return None; }
-                match stream.try_read(&mut scratch) {
-                    Ok(0) => return None,
-                    Ok(read) => {
-                        pending.extend_from_slice(&scratch[..read]);
-                        if pending.len() >= 4 {
-                            let length = u32::from_le_bytes(pending[..4].try_into().unwrap()) as usize;
-                            if length > MAX_REQUEST { return None; }
-                            if pending.len() >= 4 + length { return Some(None); }
-                        }
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-                    Err(_) => return None,
-                }
-            }
+            changed = updates.changed() => { if changed.is_err() { return Ok(None); } }
+            changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() { return Ok(None); } }
+            frame = reader.read(stream) => return Ok(Some(WatchResult::Request(frame?))),
         }
     }
 }
@@ -217,16 +238,19 @@ async fn serve_connection(
     mut updates: watch::Receiver<StateRevisions>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
-    let mut pending = BytesMut::new();
+    let mut reader = RequestReader::default();
+    let mut pending_request = None;
     let mut write_buffer = Vec::new();
     let mut session = SessionState::Unbound;
     loop {
         if *shutdown.borrow() {
             return Ok(());
         }
-        let bytes = if session.is_bound() {
+        let bytes = if let Some(frame) = pending_request.take() {
+            frame
+        } else if session.is_bound() {
             tokio::select! {
-                frame = read_frame(&mut stream, MAX_REQUEST, &mut pending) => frame?,
+                frame = reader.read(&mut stream) => frame?,
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() { return Ok(()); }
                     continue;
@@ -234,7 +258,7 @@ async fn serve_connection(
             }
         } else {
             tokio::select! {
-                frame = timeout(HELLO_TIMEOUT, read_frame(&mut stream, MAX_REQUEST, &mut pending)) => {
+                frame = timeout(HELLO_TIMEOUT, reader.read(&mut stream)) => {
                     match frame {
                         Ok(frame) => frame?,
                         Err(_) => {
@@ -356,18 +380,22 @@ async fn serve_connection(
             WireRequest::Watch(expected) => {
                 let Some(result) = wait_for_revisions(
                     &mut stream,
-                    &mut pending,
+                    &mut reader,
                     &handle,
                     expected,
                     &mut updates,
                     &mut shutdown,
                 )
-                .await
+                .await?
                 else {
                     return Ok(());
                 };
-                let Some(revisions) = result else {
-                    continue;
+                let revisions = match result {
+                    WatchResult::Request(frame) => {
+                        pending_request = Some(frame);
+                        continue;
+                    }
+                    WatchResult::Revisions(revisions) => revisions,
                 };
                 let response = WireResponse::Watch(revisions);
                 write_frame_buffered(&mut stream, &response, &mut write_buffer).await?;
@@ -447,4 +475,63 @@ pub fn is_no_instance(error: &Error) -> bool {
             )
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        future::Future,
+        task::{Context as TaskContext, Waker},
+    };
+    use tokio::io::AsyncWriteExt;
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_request_wait_accepts_a_frame_after_the_completion_interval() {
+        let (mut writer, mut stream) = tokio::io::duplex(32);
+        let reading = tokio::spawn(async move { RequestReader::default().read(&mut stream).await });
+        tokio::task::yield_now().await;
+        tokio::time::advance(FRAME_TIMEOUT * 2).await;
+        writer.write_all(&[2, 0, 0, 0, 14, 1]).await.unwrap();
+        assert_eq!(reading.await.unwrap().unwrap().as_ref(), &[14, 1]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn partial_request_deadline_survives_cancel_and_additional_bytes() {
+        let (mut writer, mut stream) = tokio::io::duplex(32);
+        let mut reader = RequestReader::default();
+        writer.write_all(&[2]).await.unwrap();
+        {
+            let mut reading = std::pin::pin!(reader.read(&mut stream));
+            let mut context = TaskContext::from_waker(Waker::noop());
+            assert!(reading.as_mut().poll(&mut context).is_pending());
+        }
+        tokio::time::advance(FRAME_TIMEOUT - Duration::from_secs(1)).await;
+        writer.write_all(&[0, 0, 0, 14]).await.unwrap();
+        {
+            let mut reading = std::pin::pin!(reader.read(&mut stream));
+            let mut context = TaskContext::from_waker(Waker::noop());
+            assert!(reading.as_mut().poll(&mut context).is_pending());
+        }
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert!(
+            reader
+                .read(&mut stream)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("completion timed out")
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn completed_request_resets_the_deadline_for_the_next_frame() {
+        let (mut writer, mut stream) = tokio::io::duplex(32);
+        let mut reader = RequestReader::default();
+        writer.write_all(&[2, 0, 0, 0, 14, 1]).await.unwrap();
+        assert_eq!(reader.read(&mut stream).await.unwrap().as_ref(), &[14, 1]);
+        tokio::time::advance(FRAME_TIMEOUT * 2).await;
+        writer.write_all(&[2, 0, 0, 0, 14, 2]).await.unwrap();
+        assert_eq!(reader.read(&mut stream).await.unwrap().as_ref(), &[14, 2]);
+    }
 }

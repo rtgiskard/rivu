@@ -52,6 +52,9 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 pipewire = { version = "0.10.1", features = ["v1_2_0"] }
 fontconfig-sys = { package = "yeslogic-fontconfig-sys", version = "6" }
 
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+
 [build-dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Share libspa-sys's generator version instead of compiling two bindgen families.

@@ -167,7 +167,11 @@ Request frame content is limited to 4 MiB
 and response frame content to 16 MiB, including the version and message type but
 excluding the length prefix. The server accepts at most 16 concurrent clients;
 additional connections receive `IPC server is busy` and close. An unbound client
-has one second to complete each incoming frame while waiting for Hello.
+has one second to complete each incoming frame while waiting for Hello. After
+binding, each request frame must complete within five seconds of its first byte;
+additional bytes and revision updates do not restart that deadline. Incomplete
+frames close the connection and release its session slot. Normal idle sessions
+and Watch waits have no inactivity expiry.
 
 Frame limits bound encoded bytes, not decoded heap usage. Decoding must reject
 malicious lengths without disproportionate allocation or work; changes to the
