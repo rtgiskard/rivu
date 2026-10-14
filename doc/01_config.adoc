@@ -193,6 +193,7 @@ rendering. If the requested primary family cannot be resolved or is unavailable
 to the GUI, Rivu logs a warning and uses `sans-serif`.
 
 `interface.scale` accepts `0.75`–`2.0`.
+The application menu stays within the window; scroll it when not all actions fit.
 GUI icons use the system-installed Symbols Nerd Font Mono independently of
 `interface.font`. The optional `embed-nerd-font` Cargo feature embeds a build-host font;
 see link:../readme.adoc[build instructions] for requirements and licensing.

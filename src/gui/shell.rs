@@ -329,7 +329,8 @@ impl Render for GuiApp {
                                 this.send(Command::DismissError, cx);
                             },
                         )
-                        .size(px(24.0))
+                        .size(rems(1.5))
+                        .min_h_0()
                         .border_0()
                         .bg(rgb(ERROR_BG))
                         .text_color(rgb(MUTED)),
@@ -407,7 +408,13 @@ impl Render for GuiApp {
                     .absolute()
                     .bottom(rems(3.0))
                     .right(gpui::px(UI_INSET))
-                    .w(px(220.))
+                    .w(rems(220. / 16.))
+                    .max_w((window.viewport_size().width - px(UI_INSET * 2.)).max(px(0.)))
+                    .max_h(
+                        (window.viewport_size().height - window.rem_size() * 3. - px(UI_INSET))
+                            .max(px(0.)),
+                    )
+                    .overflow_y_scroll()
                     .p_1()
                     .gap_1()
                     .bg(rgb(PANEL))
