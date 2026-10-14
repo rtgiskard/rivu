@@ -12,6 +12,28 @@ defaults, and display behavior are documented in
 link:01_config.adoc[Configuration and layout]. Cache ownership, invalidation,
 and resource lifetime are covered by link:22_cache.adoc[Visualization Cache].
 
+== Pinned GPU extensions
+
+`vendor/gpui` and `vendor/gpui_wgpu` derive from Zed revision
+`df48a139ce9c292738b523252c12f044697e673f` under the upstream Apache-2.0 license.
+Their standalone manifests resolve upstream workspace dependencies at that same
+revision; this is not a framework upgrade. The local extensions add centered
+image transforms and a caller-owned image texture as a path fill on Rivu's
+Linux/WGPU rendering path. Existing untransformed images and ordinary path
+backgrounds retain their existing behavior.
+
+Run `cargo test --manifest-path vendor/gpui_wgpu/Cargo.toml --lib` to exercise
+the patched shader and headless GPU regressions in their isolated test workspace.
+Upstream test-only font and image fixtures retain their original licenses.
+
+Album artwork reuses its decoded image and atlas texture while the GPU transforms
+the already-cropped sprite. Rounded clipping follows image-local coordinates;
+the surrounding content mask remains in screen coordinates. No rotated pixel
+buffers or angle-indexed image cache are created. Texture-filled paths map the
+caller's image to path bounds, preserve path coverage and opacity, and leave
+image retirement to the caller's existing window owner. Spectrum's use and
+bounded ramp ownership are described in <<_spectrum,Spectrum>>.
+
 == Analysis boundary
 
 Visualization analysis is separate from audio output and observes samples
@@ -157,16 +179,19 @@ for less repeated rendering of an otherwise unchanged waveform.
 
 == Spectrum
 
-Spectrum uses batched body geometry with a shared spatial gradient. This suits
-continuous curves and filled areas as well as styles composed of many bars,
-outlines, or LED segments. In dense styles, separate submissions for every
-primitive would add overhead without improving the intended color mapping.
+Spectrum uses batched body geometry with a shared spatial gradient texture.
+Continuous curves and filled areas, as well as bars, outlines, and LED segments,
+each submit their body as one path. GPUI fills that actual path from a custom
+one-column image, normalized to the common plot bounds with the strongest color
+at the top and the visible minimum at the bottom. Linear sampling is clamped to
+the image's texel centers. The texture contains the full authored cubic palette
+mapping, not a two-color approximation or duplicated, masked palette intervals.
 
 Waveform and Spectrum exclude DeaDBeeF's initial black-to-deep-blue interval:
 normalized color levels map to `0.06 + 0.94 * level` in the original palette.
-Spectrum's remaining stops are rescaled to fill the plot height; body and Peak
-colors use the same visible domain. Waveform uses that domain for its centerline,
-RMS endpoints, and Peak colors, retaining the color compression described above.
+Spectrum samples the remaining visible domain across the full plot height; body
+and Peak colors use that same domain. Waveform uses it for its centerline, RMS
+endpoints, and Peak colors, retaining the color compression described above.
 Tokyo Night is unchanged. Spectrogram continues to use the complete palette,
 including DeaDBeeF's black floor. These color mappings do not alter signal levels
 or amplitude geometry.
@@ -176,10 +201,21 @@ body. They are not connected into a curve, and the body cache does not own their
 geometry. This preserves their transient-marker meaning while keeping body
 reuse separate from Peak rendering.
 
+The shared `PaletteLut` owns a bounded 1 by 1024 BGRA ramp, constructed once when
+the active palette changes and reused across Spectrum panels and repaints,
+including when geometry caching is disabled. Range, dimensions, and style
+changes alter geometry or the plot mapping, not the ramp. Palette replacement
+queues the old image through the visualization owner's existing frame-boundary
+retirement mechanism; closing the window explicitly drops the current ramp and
+all retired images from its atlas. The active LUT retains the CPU ramp for reuse.
+Upload or paint failures follow the existing visualization error reporting path,
+without substituting a different fill.
+
 Batching does not make dense styles free: more bars or LED segments still
-increase geometry work, and the shared gradient requires renderer submissions
-for its palette intervals. The choice favors batching where the visual model
-allows it, rather than forcing Waveform and Spectrum through one strategy.
+increase geometry work. The common gradient now needs only one body submission
+per plot, without copying its geometry for each palette interval. The choice
+favors batching where the visual model allows it, rather than forcing Waveform
+and Spectrum through one strategy.
 
 == Audio Visualizer ownership
 
