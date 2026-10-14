@@ -346,7 +346,7 @@ pub(crate) fn dropdown_trigger(
 pub(crate) fn context_menu_container(id: impl Into<ElementId>) -> Stateful<Div> {
     div()
         .id(id)
-        .w(gpui::px(MENU_WIDTH))
+        .w(gpui::rems(MENU_WIDTH / 16.))
         .occlude()
         .p_1()
         .gap_0()
@@ -368,6 +368,7 @@ pub(crate) fn menu_item_style(
         .px(gpui::px(UI_INSET))
         .py_0()
         .flex()
+        .gap_2()
         .items_center()
         .text_sm()
         .cursor_pointer()
@@ -375,7 +376,13 @@ pub(crate) fn menu_item_style(
         .bg(rgb(PANEL).alpha(0.0))
         .rounded_sm()
         .hover(|style| style.bg(rgb(HIGHLIGHT)))
-        .child(label.into())
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .whitespace_normal()
+                .child(label.into()),
+        )
 }
 
 /// Shared shell for anchored dropdowns.
