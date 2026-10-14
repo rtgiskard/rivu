@@ -155,9 +155,12 @@ impl Core {
                 directories,
                 track_ids,
             } => {
-                self.store
-                    .add_playlist_sources(playlist_id, &directories, &track_ids)?;
-                self.reload_playlists()?;
+                if self
+                    .store
+                    .add_playlist_sources(playlist_id, &directories, &track_ids)?
+                {
+                    self.reload_playlists()?;
+                }
             }
             Command::RemovePlaylistEntry { entry_id } => self.remove_playlist_entry(entry_id)?,
             Command::MovePlaylistEntry { entry_id, index } => {
