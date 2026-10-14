@@ -158,7 +158,7 @@ impl Store {
                         COALESCE(t.title_override,t.raw_title),
                         COALESCE(t.artist_override,t.raw_artist),
                         COALESCE(t.album_override,t.raw_album),
-                        COALESCE(t.missing,1)
+                        COALESCE(t.missing,1),t.favorite
                  FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id
                  WHERE e.playlist_id=?1 AND (e.position,e.id)>(?2,?3)
                  ORDER BY e.position,e.id LIMIT ?4",
@@ -169,7 +169,7 @@ impl Store {
                         COALESCE(t.title_override,t.raw_title),
                         COALESCE(t.artist_override,t.raw_artist),
                         COALESCE(t.album_override,t.raw_album),
-                        COALESCE(t.missing,1)
+                        COALESCE(t.missing,1),t.favorite
                  FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id
                  WHERE e.playlist_id=?1
                  ORDER BY e.position,e.id LIMIT ?2",
@@ -199,6 +199,7 @@ impl Store {
                 artist: row.get(4)?,
                 album: row.get(5)?,
                 missing: row.get::<_, i64>(6)? != 0,
+                favorite: row.get(7)?,
             });
             last_cursor = Some(cursor);
         }
@@ -275,7 +276,7 @@ impl Store {
                 rows: Vec::new(),
             });
         }
-        let mut stmt = self.conn.prepare("SELECT e.id,e.track_id,COALESCE(t.title_override,t.raw_title),COALESCE(t.artist_override,t.raw_artist),COALESCE(t.album_override,t.raw_album),COALESCE(t.missing,1) FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id WHERE e.playlist_id=?1 AND e.position>=?3 ORDER BY e.position,e.id LIMIT ?2")?;
+        let mut stmt = self.conn.prepare("SELECT e.id,e.track_id,COALESCE(t.title_override,t.raw_title),COALESCE(t.artist_override,t.raw_artist),COALESCE(t.album_override,t.raw_album),COALESCE(t.missing,1),t.favorite FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id WHERE e.playlist_id=?1 AND e.position>=?3 ORDER BY e.position,e.id LIMIT ?2")?;
         let limit = limit.min(crate::model::MAX_QUERY_ROWS) as i64;
         let offset = offset.min(i64::MAX as usize) as i64;
         let rows = stmt
@@ -287,6 +288,7 @@ impl Store {
                     artist: r.get(3)?,
                     album: r.get(4)?,
                     missing: r.get::<_, i64>(5)? != 0,
+                    favorite: r.get(6)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;

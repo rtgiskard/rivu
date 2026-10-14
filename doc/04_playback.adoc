@@ -117,8 +117,12 @@ selected row preserves the selection; otherwise it selects that row. Up/Down
 navigate the focused queue, Enter plays the selected occurrence, and Delete
 removes selected occurrences.
 
-The queue toolbar plays, removes, and moves a single selected row. Dragging a
-row onto another row moves it; a multi-selection can be dragged as a group.
+Hover a queue row to reveal its favorite, play, remove, move-up and move-down
+controls. Each action targets that occurrence without changing the selection;
+the favorite toggle updates its library track, including other occurrences.
+Move-up is unavailable on the first row and move-down on the last. The toolbar
+offers removal for a multi-selection and saving the entire queue as a playlist.
+Dragging a row onto another row moves it; a multi-selection can be dragged as a group.
 Dragging library tracks or directories onto Queue appends the resolved tracks.
 Removing the current occurrence stops playback; removing other occurrences does
 not. Queue controls remain available while the layout is locked.

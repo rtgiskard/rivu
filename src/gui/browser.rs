@@ -1367,6 +1367,7 @@ mod tests {
                     artist: String::new(),
                     album: String::new(),
                     missing: false,
+                    favorite: false,
                 })
                 .collect(),
         });

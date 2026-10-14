@@ -359,6 +359,10 @@ entry lookup also requires its captured target and revision baseline to remain
 current. Command acknowledgements contain success or an error and the core's
 publication revision, not replacement state.
 
+Playlist entry page and batch rows include `favorite`, the current library
+track's boolean favorite state. Favorite changes invalidate library-content
+revisions, not playlist entry order; consumers reload the affected projections.
+
 Interactive pages return an exact filtered total and at most 256 rows; larger
 limits are clamped, and `limit = 0` returns the count without rows. Offset pages
 do not reserve a snapshot across requests. Cursor batches avoid the total-count

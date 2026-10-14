@@ -432,7 +432,7 @@ impl GuiApp {
                                                     )
                                                     .when(failed, |view| {
                                                         view.child(
-                                                            icon_button(
+                                                            super::components::quiet_icon_button(icon_button(
                                                                 gpui::ElementId::named_usize("library-retry", index),
                                                                 "󰑐",
                                                                 "Retry loading folder",
@@ -441,7 +441,7 @@ impl GuiApp {
                                                                     this.browser.library.retry_directory(&branch);
                                                                     this.request_directory_page(branch.clone(), offset, cx);
                                                                 },
-                                                            )
+                                                            ))
                                                             .min_h_0()
                                                             .size(px(24.0 * ui_scale.max(0.5))),
                                                         )
@@ -567,13 +567,13 @@ impl GuiApp {
                                     )
                                     .when(this.browser.library.root_counts_failed(), |view| {
                                         view.child(
-                                            icon_button(
+                                            super::components::quiet_icon_button(icon_button(
                                                 gpui::ElementId::named_usize("library-count-retry", index),
                                                 "󰑐",
                                                 "Retry scanned track counts",
                                                 cx,
                                                 |this, _, cx| this.request_root_counts(cx),
-                                            )
+                                            ))
                                             .min_h_0()
                                             .size(px(24.0 * ui_scale.max(0.5))),
                                         )
@@ -616,8 +616,9 @@ impl GuiApp {
                                     },
                                     |view, (track_id, favorite)| {
                                         view.child(
-                                            this.library_favorite_toggle(
+                                            this.track_favorite_toggle(
                                                 gpui::ElementId::named_usize("library-tree-favorite", index),
+                                                "library-track-row",
                                                 track_id,
                                                 favorite,
                                                 cx,

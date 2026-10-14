@@ -2185,6 +2185,7 @@ mod tests {
                         title: format!("row-{index}"),
                         artist: "artist".into(),
                         album: "album".into(),
+                        favorite: false,
                         missing: false,
                     })
                     .collect(),

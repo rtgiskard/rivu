@@ -160,6 +160,7 @@ pub struct PlaylistEntryRow {
     pub title: String,
     pub artist: String,
     pub album: String,
+    pub favorite: bool,
     pub missing: bool,
 }
 

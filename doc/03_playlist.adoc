@@ -53,11 +53,13 @@ content up to about one third of the available list area, leaving the remainder
 for tracks; a short track list can also shrink. With no selection, the catalog
 uses the remaining panel space. Track rows use the Queue's numbering and text
 layout. Double-click a track to play it individually. Hover a track to reveal
-Remove from playlist. Drag one track onto another to move that entry to the
+the library favorite toggle and Remove from playlist. Favorite changes are
+shared with Library and Queue; they do not change playlist order or playback.
+Once loading completes, an empty playlist shows its empty state. Drag one track
+onto another to move that entry to the
 target position; this saves playlist order without changing the queue. Drags
 carry entry identity and playlist revisions, and are rejected after the playlist
 changes or the selection switches, including switching away and back.
-Once loading completes, an empty playlist shows its empty state.
 
 To save selected queue tracks under a chosen name, use the Queue panel menu's
 Add to playlist → Save selected queue as new playlist action. It opens its own

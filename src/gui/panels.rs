@@ -1,7 +1,9 @@
 use super::{
     ACCENT, BORDER, Dragging, Field, GuiApp, HIGHLIGHT, HistorySort, ListFocus, MUTED, Measured,
     StatusKind, TEXT, UI_INSET, ViewRequestKind, active_control, artwork_preview, button, column,
-    components::quiet_icon_button, form_field, format_time, icon_button, library::LibraryDrag,
+    components::{danger_control, disabled_control, quiet_icon_button},
+    form_field, format_time, icon_button,
+    library::LibraryDrag,
     list_viewport, metadata_item, paged, panel_header, panel_surface, panel_toolbar, row, row_text,
     section_group, sortable_header, status_message,
 };
@@ -507,9 +509,10 @@ impl GuiApp {
             )
     }
 
-    pub(super) fn library_favorite_toggle(
+    pub(super) fn track_favorite_toggle(
         &self,
         id: impl Into<gpui::ElementId>,
+        group: &'static str,
         track_id: i64,
         favorite: bool,
         cx: &mut Context<Self>,
@@ -535,7 +538,7 @@ impl GuiApp {
         ))
         .text_color(rgb(if favorite { ACCENT } else { MUTED }))
         .opacity(0.)
-        .group_hover("library-track-row", |style| style.opacity(1.))
+        .group_hover(group, |style| style.opacity(1.))
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
             cx.stop_propagation();
         })
@@ -656,7 +659,7 @@ impl GuiApp {
                 self.browser.library.force_scan(),
             ));
         tools = tools
-            .child(
+            .child(disabled_control(
                 icon_button(
                     ("library-enqueue", panel_id),
                     "󰐕",
@@ -675,11 +678,11 @@ impl GuiApp {
                             cx,
                         )
                     },
-                )
-                .opacity(if can_edit_tracks { 1.0 } else { 0.4 }),
-            )
-            .child(
-                icon_button(
+                ),
+                !can_edit_tracks,
+            ))
+            .child(disabled_control(
+                danger_control(icon_button(
                     ("library-remove", panel_id),
                     "󰆴",
                     "Remove selected tracks from library",
@@ -697,9 +700,9 @@ impl GuiApp {
                             cx,
                         )
                     },
-                )
-                .opacity(if can_edit_tracks { 1.0 } else { 0.4 }),
-            );
+                )),
+                !can_edit_tracks,
+            ));
         let mut panel = panel_surface(("library-panel", panel_id))
             .child(tools)
             .child(
@@ -719,38 +722,15 @@ impl GuiApp {
             .child(self.library_directory_list(panel_id, cx))
             .into_any_element()
     }
+    fn send_queue_row_action(&mut self, revision: u64, command: Command, cx: &mut Context<Self>) {
+        self.refresh(cx);
+        if self.state.queue.revision == revision {
+            self.send(command, cx);
+        }
+    }
 
     pub(super) fn selected_queue_ids_in_order(&self) -> Vec<u64> {
         self.browser.queue.ordered_ids()
-    }
-
-    fn selected_queue_single(&self) -> Option<u64> {
-        (self.browser.queue.len() == 1)
-            .then(|| self.browser.queue.active().map(|row| row.id))
-            .flatten()
-    }
-
-    fn move_selected_queue(&mut self, down: bool, cx: &mut Context<Self>) {
-        let Some(queue_id) = self.selected_queue_single() else {
-            return;
-        };
-        let Some(row) = self.browser.queue.identity(queue_id) else {
-            return;
-        };
-        let target = if down {
-            row.position.saturating_add(1)
-        } else {
-            row.position.saturating_sub(1)
-        };
-        if target != row.position && target < self.state.queue.total {
-            self.send(
-                Command::MoveQueue {
-                    queue_id,
-                    index: target,
-                },
-                cx,
-            );
-        }
     }
 
     fn move_queue_entry(&mut self, drag: &QueueDrag, target_id: u64, cx: &mut Context<Self>) {
@@ -810,9 +790,6 @@ impl GuiApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let selected_id = self.selected_queue_single();
-        let selected_index =
-            selected_id.and_then(|id| self.browser.queue.identity(id).map(|row| row.position));
         let selection_count = self.browser.queue.len();
         let header = row()
             .flex_wrap()
@@ -836,7 +813,7 @@ impl GuiApp {
             );
         let mut tools = panel_toolbar().min_h(px(32.));
         if self.state.queue.total > 0 {
-            tools = tools.child(
+            tools = tools.child(disabled_control(
                 icon_button(
                     ("queue-save-playlist", panel_id),
                     "\u{f0193}",
@@ -847,67 +824,26 @@ impl GuiApp {
                     },
                     cx,
                     |this, _, cx| this.save_queue_as_playlist(cx),
-                )
-                .opacity(if self.queue_save_pending { 0.4 } else { 1.0 }),
-            );
+                ),
+                self.queue_save_pending,
+            ));
         }
-        if selection_count > 0 {
-            tools = tools
-                .child(icon_button(
-                    ("queue-play", panel_id),
-                    "󰐊",
-                    "Play selected queue entry",
-                    cx,
-                    |this, _, cx| {
-                        let queue_id = this.browser.queue.active().map(|row| row.id);
-                        if let Some(queue_id) = queue_id {
-                            this.send(Command::PlayQueue { queue_id }, cx);
-                        }
-                    },
-                ))
-                .child(icon_button(
-                    ("queue-remove", panel_id),
-                    "",
-                    "Remove selected queue entries",
-                    cx,
-                    |this, _, cx| {
-                        let queue_ids = this.selected_queue_ids_in_order();
-                        if !queue_ids.is_empty() {
-                            this.browser.queue.clear();
+        if selection_count > 1 {
+            tools = tools.child(icon_button(
+                ("queue-remove", panel_id),
+                "",
+                "Remove selected queue entries",
+                cx,
+                |this, _, cx| {
+                    let queue_ids = this.selected_queue_ids_in_order();
+                    if queue_ids.len() > 1 {
+                        this.browser.queue.clear();
 
-                            this.send(Command::RemoveQueueEntries { queue_ids }, cx);
-                            cx.notify();
-                        }
-                    },
-                ));
-            if selection_count == 1 {
-                // Identity refresh may temporarily hide actions, not their toolbar cells.
-                tools = tools
-                    .child(div().size(gpui::rems(2.)).flex_shrink_0().when(
-                        selected_index.is_some_and(|index| index > 0),
-                        |slot| {
-                            slot.child(icon_button(
-                                ("queue-up", panel_id),
-                                "",
-                                "Move selected entry up",
-                                cx,
-                                |this, _, cx| this.move_selected_queue(false, cx),
-                            ))
-                        },
-                    ))
-                    .child(div().size(gpui::rems(2.)).flex_shrink_0().when(
-                        selected_index.is_some_and(|index| index + 1 < self.state.queue.total),
-                        |slot| {
-                            slot.child(icon_button(
-                                ("queue-down", panel_id),
-                                "",
-                                "Move selected entry down",
-                                cx,
-                                |this, _, cx| this.move_selected_queue(true, cx),
-                            ))
-                        },
-                    ));
-            }
+                        this.send(Command::RemoveQueueEntries { queue_ids }, cx);
+                        cx.notify();
+                    }
+                },
+            ));
         }
         let (save_message, save_kind): (SharedString, _) = if self.queue_save_pending {
             ("Saving…".into(), StatusKind::Info)
@@ -959,22 +895,18 @@ impl GuiApp {
             .child(div().w(gpui::rems(8.)).h_full().flex_shrink_0().when(
                 self.browser.queue.selection_error.is_some(),
                 |slot| {
-                    slot.child(
-                        button(
-                            ("queue-selection-retry", panel_id),
-                            "Retry selection",
-                            cx,
-                            |this, _, cx| {
-                                if this.browser.queue.selection_error.is_some() {
-                                    this.refresh_queue(cx);
-                                    cx.notify();
-                                }
-                            },
-                        )
-                        .w_full()
-                        .h_full()
-                        .truncate(),
-                    )
+                    slot.child(icon_button(
+                        ("queue-selection-retry", panel_id),
+                        "󰑐",
+                        "Retry selection",
+                        cx,
+                        |this, _, cx| {
+                            if this.browser.queue.selection_error.is_some() {
+                                this.refresh_queue(cx);
+                                cx.notify();
+                            }
+                        },
+                    ))
                 },
             ));
         let scroll = self.scroll_views.list(("queue", panel_id));
@@ -999,6 +931,10 @@ impl GuiApp {
                                         .h(px(TRACK_HEIGHT));
                                 };
                                 let id = entry.id;
+                                let track_id = entry.track_id;
+                                let favorite = entry.track.favorite;
+                                let can_move_down = index + 1 < this.state.queue.total;
+                                let revision = this.state.queue.revision;
                                 let (title, detail) = Self::panel_track_text(&entry.track);
                                 let playing = this.state.queue.current_id == Some(id);
                                 let drag = QueueDrag {
@@ -1014,6 +950,93 @@ impl GuiApp {
                                     index,
                                     playing,
                                     this.browser.queue.contains(&id),
+                                )
+                                .group("queue-track-row")
+                                .child(
+                                    row()
+                                        .gap_0()
+                                        .opacity(0.)
+                                        .group_hover("queue-track-row", |style| style.opacity(1.))
+                                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation();
+                                        })
+                                        .child(this.track_favorite_toggle(
+                                            ("queue-entry-favorite", id),
+                                            "queue-track-row",
+                                            track_id,
+                                            favorite,
+                                            cx,
+                                        ))
+                                        .child(quiet_icon_button(icon_button(
+                                            ("queue-entry-play", id),
+                                            "󰐊",
+                                            "Play this queue entry",
+                                            cx,
+                                            move |this, _, cx| {
+                                                this.send_queue_row_action(
+                                                    revision,
+                                                    Command::PlayQueue { queue_id: id },
+                                                    cx,
+                                                )
+                                            },
+                                        )))
+                                        .child(quiet_icon_button(icon_button(
+                                            ("queue-entry-remove", id),
+                                            "",
+                                            "Remove from queue",
+                                            cx,
+                                            move |this, _, cx| {
+                                                this.send_queue_row_action(
+                                                    revision,
+                                                    Command::RemoveQueueEntries {
+                                                        queue_ids: vec![id],
+                                                    },
+                                                    cx,
+                                                )
+                                            },
+                                        )))
+                                        .child(disabled_control(
+                                            quiet_icon_button(icon_button(
+                                                ("queue-entry-up", id),
+                                                "",
+                                                "Move this entry up",
+                                                cx,
+                                                move |this, _, cx| {
+                                                    if index > 0 {
+                                                        this.send_queue_row_action(
+                                                            revision,
+                                                            Command::MoveQueue {
+                                                                queue_id: id,
+                                                                index: index - 1,
+                                                            },
+                                                            cx,
+                                                        );
+                                                    }
+                                                },
+                                            )),
+                                            index == 0,
+                                        ))
+                                        .child(disabled_control(
+                                            quiet_icon_button(icon_button(
+                                                ("queue-entry-down", id),
+                                                "",
+                                                "Move this entry down",
+                                                cx,
+                                                move |this, _, cx| {
+                                                    if can_move_down {
+                                                        this.send_queue_row_action(
+                                                            revision,
+                                                            Command::MoveQueue {
+                                                                queue_id: id,
+                                                                index: index + 1,
+                                                            },
+                                                            cx,
+                                                        );
+                                                    }
+                                                },
+                                            )),
+                                            !can_move_down,
+                                        )),
                                 )
                                 .on_mouse_down(
                                     gpui::MouseButton::Right,
@@ -1234,13 +1257,14 @@ impl GuiApp {
                     .child(
                         row()
                             .justify_end()
-                            .child(button(
+                            .child(icon_button(
                                 "playlist-action-cancel",
+                                "",
                                 "Cancel",
                                 cx,
                                 |this, window, cx| this.dismiss_playlist_action(window, cx),
                             ))
-                            .child(button(
+                            .child(danger_control(button(
                                 "playlist-action-confirm",
                                 if deleting {
                                     "Delete"
@@ -1269,7 +1293,7 @@ impl GuiApp {
                                         );
                                     }
                                 },
-                            )),
+                            ))),
                     ),
             )
             .into_any_element()
@@ -1332,7 +1356,7 @@ impl GuiApp {
                 }),
             )
             .when(rows_error.is_some() && !pending, |view| {
-                view.child(button(
+                view.child(icon_button(
                     (
                         if kind == ViewRequestKind::Entries {
                             "playlist-entries-empty-retry"
@@ -1341,6 +1365,7 @@ impl GuiApp {
                         },
                         panel_id,
                     ),
+                    "󰑐",
                     "Retry",
                     cx,
                     move |this, _, cx| {
@@ -1405,30 +1430,26 @@ impl GuiApp {
             .child(div().w(gpui::rems(4.)).h_full().flex_shrink_0().when(
                 selection_unavailable && !selection_pending,
                 |slot| {
-                    slot.child(
-                        button(
-                            ("retry-playlist-entry", panel_id),
-                            "Retry",
-                            cx,
-                            move |this, _, cx| {
-                                this.refresh(cx);
-                                if this.browser.playlists.selected() == playlist_id
-                                    && this.browser.playlists.selected_entry() == selection_entry
-                                    && !this.browser.playlists.entry_ready()
-                                    && !this
-                                        .browser
-                                        .requests
-                                        .pending(ViewRequestKind::EntrySelection)
-                                {
-                                    this.request_entry_selection(cx);
-                                    cx.notify();
-                                }
-                            },
-                        )
-                        .w_full()
-                        .h_full()
-                        .truncate(),
-                    )
+                    slot.child(icon_button(
+                        ("retry-playlist-entry", panel_id),
+                        "󰑐",
+                        "Retry",
+                        cx,
+                        move |this, _, cx| {
+                            this.refresh(cx);
+                            if this.browser.playlists.selected() == playlist_id
+                                && this.browser.playlists.selected_entry() == selection_entry
+                                && !this.browser.playlists.entry_ready()
+                                && !this
+                                    .browser
+                                    .requests
+                                    .pending(ViewRequestKind::EntrySelection)
+                            {
+                                this.request_entry_selection(cx);
+                                cx.notify();
+                            }
+                        },
+                    ))
                 },
             ));
         let catalog_len = self.browser.playlists.summaries().rows.len();
@@ -1603,6 +1624,13 @@ impl GuiApp {
                                 this.browser.playlists.selected_entry() == Some(id),
                             )
                             .group("playlist-track-row")
+                            .child(this.track_favorite_toggle(
+                                ("playlist-entry-favorite", id as u64),
+                                "playlist-track-row",
+                                track_id,
+                                e.favorite,
+                                cx,
+                            ))
                             .child(
                                 quiet_icon_button(icon_button(
                                     ("playlist-entry-remove", id as u64),
@@ -1723,7 +1751,7 @@ impl GuiApp {
                         cx,
                         |this, _, cx| this.choose_playlist_import(cx),
                     ))
-                    .child(
+                    .child(disabled_control(
                         icon_button(
                             ("playlist-export", panel_id),
                             "",
@@ -1734,10 +1762,9 @@ impl GuiApp {
                                     this.choose_playlist_export(id, cx);
                                 }
                             },
-                        )
-                        .opacity(if playlist_id.is_some() { 1. } else { 0.4 })
-                        .when(playlist_id.is_none(), |view| view.cursor_default()),
-                    )
+                        ),
+                        playlist_id.is_none(),
+                    ))
                     .child(selection_status),
             )
             .child(lists)
@@ -1988,7 +2015,7 @@ impl GuiApp {
                                     .child(
                                         row().gap_2()
                                             .child(
-                                                icon_button(
+                                                disabled_control(icon_button(
                                                     ("metadata-favorite", panel_id),
                                                     if favorite { "󰓎" } else { "󰓐" },
                                                     if favorite { "Remove from favorites" } else { "Add to favorites" },
@@ -2003,10 +2030,10 @@ impl GuiApp {
                                                             track_ids: vec![track_id], favorite: !favorite,
                                                         }, cx);
                                                     },
-                                                ).when(!ready, |view| view.opacity(0.4).cursor_default()),
+                                                ).text_color(rgb(if favorite { ACCENT } else { TEXT })), !ready),
                                             )
                                             .child(
-                                                icon_button(
+                                                disabled_control(icon_button(
                                                     ("metadata-save", panel_id), "󰆓",
                                                     "Save metadata. Media files are never modified.", cx,
                                                     move |this, _, cx| {
@@ -2014,10 +2041,10 @@ impl GuiApp {
                                                             this.save_metadata(cx);
                                                         }
                                                     },
-                                                ).when(!metadata_dirty, |view| view.opacity(0.4).cursor_default()),
+                                                ), !metadata_dirty),
                                             )
                                             .child(
-                                                button(("metadata-retry", panel_id), "Retry", cx, move |this, _, cx| {
+                                                disabled_control(icon_button(("metadata-retry", panel_id), "󰑐", "Retry loading track details", cx, move |this, _, cx| {
                                                     if this.metadata.selected() == selected
                                                         && matches!(this.metadata.load_state(), super::metadata::MetadataLoadState::Failed(_))
                                                         && let Some(id) = selected
@@ -2025,7 +2052,7 @@ impl GuiApp {
                                                         this.request_track(id, cx);
                                                         cx.notify();
                                                     }
-                                                }).when(!can_retry, |view| view.opacity(0.4).cursor_default()),
+                                                }), !can_retry),
                                             ),
                                     ),
                             )
@@ -2049,7 +2076,7 @@ impl GuiApp {
                                     ("metadata-decoder-native", "Native", DecoderHint::Native),
                                     ("metadata-decoder-ffmpeg", "FFmpeg", DecoderHint::Ffmpeg),
                                 ].into_iter().map(|(key, label, decoder_hint)| {
-                                    active_control(
+                                    disabled_control(active_control(
                                         button((key, panel_id), label, cx, move |this, _, cx| {
                                             if this.metadata.track().is_some_and(|track| Some(track.id) == id) {
                                                 this.metadata_decoder_hint = decoder_hint;
@@ -2057,7 +2084,7 @@ impl GuiApp {
                                             }
                                         }),
                                         ready && self.metadata_decoder_hint == decoder_hint,
-                                    ).when(!ready, |view| view.opacity(0.4).cursor_default())
+                                    ), !ready)
                                 }),
                             ))
                             .child(caption(

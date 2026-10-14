@@ -209,6 +209,7 @@ pub(crate) fn icon_button<T: 'static>(
     let hint = hint.into();
     button(id, icon, cx, action)
         .font_family(super::fonts::SYMBOLS_FAMILY)
+        .text_size(gpui::rems(1.))
         .size(gpui::rems(2.))
         .p_0()
         .flex()
@@ -224,6 +225,18 @@ pub(crate) fn quiet_icon_button(control: Stateful<Div>) -> Stateful<Div> {
         .border_0()
         .bg(rgb(PANEL).alpha(0.0))
         .text_color(rgb(super::MUTED))
+}
+
+/// Shared unavailable-action appearance; the action owner retains its guard.
+pub(crate) fn disabled_control(control: Stateful<Div>, disabled: bool) -> Stateful<Div> {
+    control.when(disabled, |view| view.opacity(0.4).cursor_default())
+}
+
+/// Destructive text remains visible on hover; keep the shared focus treatment.
+pub(crate) fn danger_control(control: Stateful<Div>) -> Stateful<Div> {
+    control
+        .text_color(rgb(super::ERROR))
+        .border_color(rgb(super::ERROR))
 }
 
 /// Compact toggle button used by visual and system settings.
@@ -246,8 +259,7 @@ pub(crate) fn toggle_button<T: 'static>(
                 action(this, cx);
                 cx.notify();
             },
-        )
-        .text_size(gpui::rems(1.)),
+        ),
         enabled,
     )
 }
