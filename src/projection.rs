@@ -90,12 +90,9 @@ pub struct TuiSnapshot {
 
 #[derive(Clone, Debug, Default)]
 pub struct TuiLibrarySnapshot {
-    pub track_total: usize,
-    pub playlist_total: usize,
     pub revision: u64,
     pub structure_revision: u64,
     pub playlist_revision: u64,
-    pub history: Arc<Vec<HistoryEntry>>,
 }
 
 #[derive(Clone, Debug)]
@@ -125,12 +122,9 @@ impl TuiSnapshot {
     pub(crate) fn from_client(state: &ClientSnapshot, previous: Option<&Self>) -> Self {
         Self {
             library: TuiLibrarySnapshot {
-                track_total: state.library.track_total,
-                playlist_total: state.library.playlist_total,
                 revision: state.library.revision,
                 structure_revision: state.library.structure_revision,
                 playlist_revision: state.library.playlist_revision,
-                history: Arc::clone(&state.library.history),
             },
             queue: state.queue.clone(),
             current_track: state.current_track.clone(),
