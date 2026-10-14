@@ -80,6 +80,14 @@ impl ViewRequests {
         self.generations.get(&kind) == Some(&generation)
     }
 
+    fn finish(&mut self, kind: ViewRequestKind, generation: u64) -> bool {
+        if !self.is_current(kind, generation) {
+            return false;
+        }
+        self.cancel(kind);
+        true
+    }
+
     pub(super) fn pending(&self, kind: ViewRequestKind) -> bool {
         self.generations.contains_key(&kind)
     }
@@ -177,7 +185,7 @@ impl GuiApp {
             let result = response.result;
             let _ = this.update(cx, |this, cx| {
                 this.refresh(cx);
-                if !this.browser.requests.is_current(kind, generation) {
+                if !this.browser.requests.finish(kind, generation) {
                     return;
                 }
                 let result = match result {
@@ -227,7 +235,7 @@ impl GuiApp {
                 }
                 match result {
                     ViewResponse::PlaylistSummaries(page) if kind == ViewRequestKind::Summaries => {
-                        this.browser.playlists.accept_summaries(page);
+                        this.browser.accept_playlist_summaries(page);
                     }
                     ViewResponse::PlaylistEntries(page) if kind == ViewRequestKind::Entries => {
                         this.browser.playlists.accept_entries(page);
@@ -683,5 +691,143 @@ mod tests {
         assert!(!requests.is_current(ViewRequestKind::EntrySelection, 1));
         assert!(requests.is_current(ViewRequestKind::Entries, 2));
         assert!(requests.is_current(ViewRequestKind::EntrySelection, 3));
+    }
+
+    #[test]
+    fn empty_playlist_completion_ends_loading_and_failed_refresh_stays_retryable() {
+        let mut browser = super::BrowserState::default();
+        let kind = ViewRequestKind::Entries;
+        browser.playlists.select(41, "empty".into(), 0);
+        browser.playlists.prepare_entries(41);
+        browser.playlists.prepare_page(true, 0, 20);
+        browser.requests.begin(kind, 1);
+        assert_eq!(browser.playlists.entries().rows.len(), 1);
+        assert!(browser.requests.pending(kind));
+
+        assert!(browser.requests.finish(kind, 1));
+        browser.playlists.accept_entries(crate::model::Page {
+            total: 0,
+            rows: Vec::new(),
+        });
+        assert_eq!(browser.playlists.selected(), Some(41));
+        assert!(browser.playlists.entries().rows.is_empty());
+        assert!(!browser.requests.pending(kind));
+        assert_eq!(browser.playlists.demand_page(true, 0..1, 20), None);
+
+        browser.playlists.prepare_entries(41);
+        browser.playlists.prepare_page(true, 0, 20);
+        browser.requests.begin(kind, 2);
+        assert!(browser.requests.pending(kind));
+        assert!(browser.requests.finish(kind, 2));
+        browser.playlists.fail_page(true, "unavailable".into());
+        assert!(browser.playlists.entries().rows.is_empty());
+        assert!(!browser.requests.pending(kind));
+        assert_eq!(
+            browser.playlists.entries().rows.error(0),
+            Some("unavailable")
+        );
+
+        browser.playlists.prepare_entries(41);
+        browser.playlists.prepare_page(true, 0, 20);
+        browser.requests.begin(kind, 3);
+        assert!(browser.requests.pending(kind));
+        assert_eq!(browser.playlists.entries().rows.error(0), None);
+        assert!(browser.requests.finish(kind, 3));
+        browser.playlists.accept_entries(crate::model::Page {
+            total: 0,
+            rows: Vec::new(),
+        });
+        assert!(browser.playlists.entries().rows.is_empty());
+        assert!(!browser.requests.pending(kind));
+    }
+
+    #[test]
+    fn finishing_a_superseded_page_cannot_end_its_replacement() {
+        let mut requests = ViewRequests::default();
+        requests.begin(ViewRequestKind::Entries, 1);
+        requests.begin(ViewRequestKind::Entries, 2);
+        assert!(!requests.finish(ViewRequestKind::Entries, 1));
+        assert!(requests.pending(ViewRequestKind::Entries));
+        assert!(requests.is_current(ViewRequestKind::Entries, 2));
+        assert!(requests.finish(ViewRequestKind::Entries, 2));
+        assert!(!requests.pending(ViewRequestKind::Entries));
+        assert!(!requests.finish(ViewRequestKind::Entries, 2));
+    }
+
+    #[test]
+    fn empty_catalog_releases_selected_playlist_and_pending_entry_requests() {
+        let mut browser = super::BrowserState::default();
+        assert!(browser.playlists.entries().rows.is_empty());
+        browser.playlists.select(41, "deleted".into(), 0);
+        browser.playlists.prepare_entries(41);
+        browser.playlists.prepare_page(true, 0, 20);
+        browser.playlists.prepare_page(false, 0, 20);
+        for kind in [
+            ViewRequestKind::Summaries,
+            ViewRequestKind::Selection,
+            ViewRequestKind::Entries,
+            ViewRequestKind::EntrySelection,
+        ] {
+            browser.requests.begin(kind, 1);
+        }
+
+        assert!(browser.requests.finish(ViewRequestKind::Summaries, 1));
+        browser.playlists.fail_page(false, "unavailable".into());
+        assert!(!browser.requests.pending(ViewRequestKind::Summaries));
+        assert_eq!(
+            browser.playlists.summaries().rows.error(0),
+            Some("unavailable")
+        );
+        assert_eq!(browser.playlists.selected(), Some(41));
+        assert_eq!(browser.playlists.retry_page(false, 20), Some(0));
+        browser.playlists.prepare_page(false, 0, 20);
+        browser.requests.begin(ViewRequestKind::Summaries, 2);
+        assert!(browser.requests.finish(ViewRequestKind::Summaries, 2));
+        browser.accept_playlist_summaries(crate::model::Page {
+            total: 0,
+            rows: Vec::new(),
+        });
+        assert_eq!(browser.playlists.selected(), None);
+        assert_eq!(browser.playlists.entries().playlist_id, None);
+        assert!(browser.playlists.entries().rows.is_empty());
+        assert!(browser.playlists.summaries().rows.is_empty());
+        for kind in [
+            ViewRequestKind::Summaries,
+            ViewRequestKind::Selection,
+            ViewRequestKind::Entries,
+            ViewRequestKind::EntrySelection,
+        ] {
+            assert!(!browser.requests.pending(kind));
+            assert!(!browser.requests.finish(kind, 1));
+        }
+        assert_eq!(browser.playlists.demand_page(true, 0..1, 20), None);
+    }
+
+    #[test]
+    fn clearing_selection_releases_entry_owner_and_outstanding_requests() {
+        let mut browser = super::BrowserState::default();
+        browser.playlists.select(41, "selected".into(), 0);
+        browser.playlists.prepare_entries(41);
+        browser.playlists.prepare_page(true, 0, 20);
+        for kind in [
+            ViewRequestKind::Selection,
+            ViewRequestKind::Entries,
+            ViewRequestKind::EntrySelection,
+        ] {
+            browser.requests.begin(kind, 1);
+        }
+
+        browser.clear_selection();
+        assert_eq!(browser.playlists.selected(), None);
+        assert_eq!(browser.playlists.entries().playlist_id, None);
+        assert!(browser.playlists.entries().rows.is_empty());
+        for kind in [
+            ViewRequestKind::Selection,
+            ViewRequestKind::Entries,
+            ViewRequestKind::EntrySelection,
+        ] {
+            assert!(!browser.requests.pending(kind));
+            assert!(!browser.requests.finish(kind, 1));
+        }
     }
 }

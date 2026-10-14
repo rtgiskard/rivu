@@ -57,6 +57,7 @@ Remove from playlist. Drag one track onto another to move that entry to the
 target position; this saves playlist order without changing the queue. Drags
 carry entry identity and playlist revisions, and are rejected after the playlist
 changes or the selection switches, including switching away and back.
+Once loading completes, an empty playlist shows its empty state.
 
 To save selected queue tracks under a chosen name, use the Queue panel menu's
 Add to playlist → Save selected queue as new playlist action. It opens its own

@@ -70,10 +70,19 @@ impl BrowserState {
 
     pub(super) fn remove_playlist_selection(&mut self) {
         self.requests
+            .cancel(super::queries::ViewRequestKind::Selection);
+        self.requests
             .cancel(super::queries::ViewRequestKind::Entries);
         self.requests
             .cancel(super::queries::ViewRequestKind::EntrySelection);
-        self.playlists.remove_selected();
+        self.playlists.clear_selection();
+    }
+
+    pub(super) fn accept_playlist_summaries(&mut self, page: Page<PlaylistSummary>) {
+        if page.total == 0 {
+            self.remove_playlist_selection();
+        }
+        self.playlists.accept_summaries(page);
     }
 
     /// The first row after `id - 1` proves existence without scanning other pages.
@@ -91,7 +100,7 @@ impl BrowserState {
     pub(super) fn clear_selection(&mut self) {
         self.library.clear_selection();
         self.queue.clear();
-        self.playlists.clear_selection();
+        self.remove_playlist_selection();
     }
 }
 
@@ -495,13 +504,27 @@ pub(super) struct PlaylistSummaryBuffer {
     pub(super) scroll: gpui::UniformListScrollHandle,
 }
 
-#[derive(Default)]
 pub(super) struct PlaylistEntriesBuffer {
     pub(super) playlist_id: Option<i64>,
     pub(super) offset: usize,
     pub(super) total: usize,
     pub(super) rows: PagedRows<PlaylistEntryRow>,
     pub(super) scroll: gpui::UniformListScrollHandle,
+}
+
+impl Default for PlaylistEntriesBuffer {
+    fn default() -> Self {
+        // Without a selected playlist there is no unknown page to load.
+        let mut rows = PagedRows::default();
+        rows.set_total(0);
+        Self {
+            playlist_id: None,
+            offset: 0,
+            total: 0,
+            rows,
+            scroll: Default::default(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -635,10 +658,6 @@ impl PlaylistBrowser {
         self.entry_details = None;
         self.selected_name.clear();
         self.summaries.rows.pin(None);
-    }
-
-    pub(super) fn remove_selected(&mut self) {
-        self.clear_selection();
         self.entries = PlaylistEntriesBuffer::default();
     }
 
@@ -1209,6 +1228,7 @@ mod tests {
         assert_eq!(browser.playlists.selected(), None);
         assert_eq!(browser.playlists.selected_entry(), None);
         assert_eq!(browser.playlists.entries().playlist_id, None);
+        assert!(browser.playlists.entries().rows.is_empty());
         assert!(browser.playlists.selected_name.is_empty());
     }
 
@@ -1238,10 +1258,11 @@ mod tests {
         assert_eq!(playlists.selected_entry(), None);
         playlists.prepare_entries(2);
         playlists.select_entry(20, 0);
-        playlists.remove_selected();
+        playlists.clear_selection();
         assert_eq!(playlists.selected(), None);
         assert_eq!(playlists.selected_entry(), None);
         assert_eq!(playlists.entries().playlist_id, None);
+        assert!(playlists.entries().rows.is_empty());
     }
     #[test]
     fn playlist_reorder_refresh_is_scoped_and_preserves_catalog_payload() {
