@@ -409,59 +409,102 @@ impl GuiApp {
 
     fn library_scan_status(&self, panel_id: u64, cx: &mut Context<Self>) -> Div {
         use crate::model::ScanPhase;
-        let Some(progress) = self.state.system.scan_progress.as_ref() else {
-            return column().child(caption(self.state.system.scan_message.clone()));
-        };
-        let phase = match progress.phase {
-            ScanPhase::Discovering => "Discovering files",
-            ScanPhase::ReadingMetadata => "Reading metadata",
-            ScanPhase::Saving => "Saving library",
-            ScanPhase::Completed => "Scan completed",
-            ScanPhase::Failed => "Scan failed",
-            ScanPhase::Cancelled => "Scan cancelled",
-        };
-        let count = match progress.total {
-            Some(total) => format!("{} / {total} files", progress.processed),
-            None => format!("{} files found", progress.processed),
-        };
-        let mut header = row()
-            .items_center()
-            .gap_2()
-            .child(caption(format!("{phase} · {count} · {} errors", progress.errors)).flex_1());
-        if !self.state.system.scanning
-            && matches!(
-                progress.phase,
-                ScanPhase::Completed | ScanPhase::Failed | ScanPhase::Cancelled
-            )
+        let progress = self.state.system.scan_progress.as_ref();
+        let header_text = progress.map_or_else(
+            || "Scanning library…".to_owned(),
+            |progress| {
+                let phase = match progress.phase {
+                    ScanPhase::Discovering => "Discovering files",
+                    ScanPhase::ReadingMetadata => "Reading metadata",
+                    ScanPhase::Saving => "Saving library",
+                    ScanPhase::Completed => "Scan completed",
+                    ScanPhase::Failed => "Scan failed",
+                    ScanPhase::Cancelled => "Scan cancelled",
+                };
+                let count = match progress.total {
+                    Some(total) => format!("{} / {total} files", progress.processed),
+                    None => format!("{} files found", progress.processed),
+                };
+                format!("{phase} · {count} · {} errors", progress.errors)
+            },
+        );
+        let dismissible = !self.state.system.scanning
+            && progress.is_some_and(|progress| {
+                matches!(
+                    progress.phase,
+                    ScanPhase::Completed | ScanPhase::Failed | ScanPhase::Cancelled
+                )
+            });
+        let dismiss = div()
+            .size(gpui::rems(2.))
+            .flex_shrink_0()
+            .when(dismissible, |slot| {
+                slot.child(quiet_icon_button(icon_button(
+                    ("dismiss-scan-result", panel_id),
+                    "",
+                    "Dismiss scan result",
+                    cx,
+                    |this, _, cx| this.send(Command::DismissScanResult, cx),
+                )))
+            });
+        let mut bar = div().w_full().h(px(3.)).flex_shrink_0().bg(rgb(BORDER));
+        if let Some(progress) = progress
+            && let Some(total) = progress.total.filter(|total| *total > 0)
         {
-            header = header.child(super::components::quiet_icon_button(icon_button(
-                ("dismiss-scan-result", panel_id),
-                "",
-                "Dismiss scan result",
-                cx,
-                |this, _, cx| this.send(Command::DismissScanResult, cx),
+            let fraction = (progress.processed as f32 / total as f32).clamp(0., 1.);
+            bar = bar.child(div().h_full().w(gpui::relative(fraction)).bg(rgb(
+                if progress.phase == ScanPhase::Failed {
+                    super::ERROR
+                } else {
+                    ACCENT
+                },
             )));
         }
-        let mut status = column().gap_1().flex_shrink_0().child(header);
-        if let Some(total) = progress.total.filter(|total| *total > 0) {
-            let fraction = (progress.processed as f32 / total as f32).clamp(0., 1.);
-            status = status.child(div().w_full().h(px(3.)).bg(rgb(BORDER)).child(
-                div().h_full().w(gpui::relative(fraction)).bg(rgb(
-                    if progress.phase == ScanPhase::Failed {
-                        super::ERROR
-                    } else {
-                        ACCENT
-                    },
-                )),
-            ));
-        }
-        if let Some(path) = progress.path.as_ref() {
-            status = status.child(caption(path.to_string_lossy().into_owned()).truncate());
-        }
-        if progress.phase == ScanPhase::Completed {
-            status = status.child(caption(self.state.system.scan_message.clone()).truncate());
-        }
-        status
+        let path: SharedString = progress
+            .and_then(|progress| progress.path.as_ref())
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default()
+            .into();
+        let message: SharedString = self.state.system.scan_message.clone().into();
+        // Keep every scan phase in the same cells; only dismissal removes the surface.
+        column()
+            .gap_1()
+            .min_w_0()
+            .flex_shrink_0()
+            .child(
+                row()
+                    .h(gpui::rems(2.))
+                    .flex_shrink_0()
+                    .child(caption(header_text).flex_1().min_w_0().truncate())
+                    .child(dismiss),
+            )
+            .child(bar)
+            .child(
+                caption(path.clone())
+                    .id(("scan-path", panel_id))
+                    .h(gpui::rems(1.25))
+                    .flex_shrink_0()
+                    .min_w_0()
+                    .truncate()
+                    .tooltip(move |_, cx| {
+                        cx.new(|_| super::ButtonTooltip { text: path.clone() })
+                            .into()
+                    }),
+            )
+            .child(
+                caption(message.clone())
+                    .id(("scan-message", panel_id))
+                    .h(gpui::rems(1.25))
+                    .flex_shrink_0()
+                    .min_w_0()
+                    .truncate()
+                    .tooltip(move |_, cx| {
+                        cx.new(|_| super::ButtonTooltip {
+                            text: message.clone(),
+                        })
+                        .into()
+                    }),
+            )
     }
 
     pub(super) fn library_favorite_toggle(
@@ -807,32 +850,6 @@ impl GuiApp {
                 )
                 .opacity(if self.queue_save_pending { 0.4 } else { 1.0 }),
             );
-            if self.queue_save_pending {
-                tools = tools.child(status_message("Saving…", StatusKind::Info));
-            } else if let Some(feedback) = &self.queue_save_feedback {
-                let kind = if feedback.is_ok() {
-                    StatusKind::Success
-                } else {
-                    StatusKind::Error
-                };
-                tools = tools.child(status_message(
-                    match feedback {
-                        Ok(message) | Err(message) => message.clone(),
-                    },
-                    kind,
-                ));
-            }
-        }
-        if self.browser.queue.busy {
-            tools = tools.child(status_message("Loading selection…", StatusKind::Info));
-        }
-        if self.browser.queue.selection_error.is_some() {
-            tools = tools.child(button(
-                ("queue-selection-retry", panel_id),
-                "Retry selection",
-                cx,
-                |this, _, cx| this.refresh_queue(cx),
-            ));
         }
         if selection_count > 0 {
             tools = tools
@@ -863,27 +880,103 @@ impl GuiApp {
                         }
                     },
                 ));
-            if let Some(index) = selected_index {
-                if index > 0 {
-                    tools = tools.child(icon_button(
-                        ("queue-up", panel_id),
-                        "",
-                        "Move selected entry up",
-                        cx,
-                        |this, _, cx| this.move_selected_queue(false, cx),
+            if selection_count == 1 {
+                // Identity refresh may temporarily hide actions, not their toolbar cells.
+                tools = tools
+                    .child(div().size(gpui::rems(2.)).flex_shrink_0().when(
+                        selected_index.is_some_and(|index| index > 0),
+                        |slot| {
+                            slot.child(icon_button(
+                                ("queue-up", panel_id),
+                                "",
+                                "Move selected entry up",
+                                cx,
+                                |this, _, cx| this.move_selected_queue(false, cx),
+                            ))
+                        },
+                    ))
+                    .child(div().size(gpui::rems(2.)).flex_shrink_0().when(
+                        selected_index.is_some_and(|index| index + 1 < self.state.queue.total),
+                        |slot| {
+                            slot.child(icon_button(
+                                ("queue-down", panel_id),
+                                "",
+                                "Move selected entry down",
+                                cx,
+                                |this, _, cx| this.move_selected_queue(true, cx),
+                            ))
+                        },
                     ));
-                }
-                if index + 1 < self.state.queue.total {
-                    tools = tools.child(icon_button(
-                        ("queue-down", panel_id),
-                        "",
-                        "Move selected entry down",
-                        cx,
-                        |this, _, cx| this.move_selected_queue(true, cx),
-                    ));
-                }
             }
         }
+        let (save_message, save_kind): (SharedString, _) = if self.queue_save_pending {
+            ("Saving…".into(), StatusKind::Info)
+        } else {
+            match &self.queue_save_feedback {
+                Some(Ok(message)) => (message.clone().into(), StatusKind::Success),
+                Some(Err(message)) => (message.clone().into(), StatusKind::Error),
+                None => ("".into(), StatusKind::Info),
+            }
+        };
+        let (selection_message, selection_kind): (SharedString, _) =
+            if let Some(error) = &self.browser.queue.selection_error {
+                (error.clone().into(), StatusKind::Error)
+            } else if self.browser.queue.busy {
+                ("Loading selection…".into(), StatusKind::Info)
+            } else {
+                ("".into(), StatusKind::Info)
+            };
+        let status = row()
+            .h(gpui::rems(2.))
+            .flex_shrink_0()
+            .overflow_hidden()
+            .child(
+                status_message(save_message.clone(), save_kind)
+                    .id(("queue-save-status", panel_id))
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .tooltip(move |_, cx| {
+                        cx.new(|_| super::ButtonTooltip {
+                            text: save_message.clone(),
+                        })
+                        .into()
+                    }),
+            )
+            .child(
+                status_message(selection_message.clone(), selection_kind)
+                    .id(("queue-selection-status", panel_id))
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .tooltip(move |_, cx| {
+                        cx.new(|_| super::ButtonTooltip {
+                            text: selection_message.clone(),
+                        })
+                        .into()
+                    }),
+            )
+            .child(div().w(gpui::rems(8.)).h_full().flex_shrink_0().when(
+                self.browser.queue.selection_error.is_some(),
+                |slot| {
+                    slot.child(
+                        button(
+                            ("queue-selection-retry", panel_id),
+                            "Retry selection",
+                            cx,
+                            |this, _, cx| {
+                                if this.browser.queue.selection_error.is_some() {
+                                    this.refresh_queue(cx);
+                                    cx.notify();
+                                }
+                            },
+                        )
+                        .w_full()
+                        .h_full()
+                        .truncate(),
+                    )
+                },
+            ));
         let scroll = self.scroll_views.list(("queue", panel_id));
         panel_surface(("queue-panel", panel_id))
             .on_drop(cx.listener(|this, drag: &LibraryDrag, window, cx| {
@@ -892,6 +985,7 @@ impl GuiApp {
             }))
             .drag_over::<LibraryDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
             .child(header.when(self.state.queue.total > 0, |header| header.child(tools)))
+            .child(status)
             .child(list_viewport(
                 uniform_list(
                     ("queue-rows", panel_id),
@@ -1193,6 +1287,7 @@ impl GuiApp {
             self.browser.playlists.summaries().rows.error(0)
         };
         let pending = self.browser.requests.pending(kind);
+        let playlist_id = self.browser.playlists.selected();
         let message = if pending {
             "Loading…"
         } else if let Some(error) = rows_error {
@@ -1202,17 +1297,40 @@ impl GuiApp {
         } else {
             "No playlists yet"
         };
+        let message: SharedString = message.to_owned().into();
         row()
             .p_2()
+            .h(px(TRACK_HEIGHT))
+            .w_full()
+            .overflow_hidden()
             .min_h_0()
-            .child(status_message(
-                message.to_owned(),
-                if rows_error.is_some() {
-                    StatusKind::Error
-                } else {
-                    StatusKind::Info
-                },
-            ))
+            .child(
+                status_message(
+                    message.clone(),
+                    if rows_error.is_some() && !pending {
+                        StatusKind::Error
+                    } else {
+                        StatusKind::Info
+                    },
+                )
+                .id((
+                    if kind == ViewRequestKind::Entries {
+                        "playlist-entries-empty-status"
+                    } else {
+                        "playlist-catalog-empty-status"
+                    },
+                    panel_id,
+                ))
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .tooltip(move |_, cx| {
+                    cx.new(|_| super::ButtonTooltip {
+                        text: message.clone(),
+                    })
+                    .into()
+                }),
+            )
             .when(rows_error.is_some() && !pending, |view| {
                 view.child(button(
                     (
@@ -1226,11 +1344,17 @@ impl GuiApp {
                     "Retry",
                     cx,
                     move |this, _, cx| {
+                        if this.browser.requests.pending(kind) {
+                            return;
+                        }
                         if kind == ViewRequestKind::Entries {
-                            if let Some(id) = this.browser.playlists.selected() {
+                            if this.browser.playlists.selected() == playlist_id
+                                && this.browser.playlists.entries().rows.error(0).is_some()
+                                && let Some(id) = playlist_id
+                            {
                                 this.request_playlist_entries(id, 0, cx);
                             }
-                        } else {
+                        } else if this.browser.playlists.summaries().rows.error(0).is_some() {
                             this.request_playlist_summaries(0, cx);
                         }
                     },
@@ -1245,6 +1369,68 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let playlist_id = self.browser.playlists.selected();
+        let selection_entry = self.browser.playlists.selected_entry();
+        let selection_unavailable = playlist_id.is_some()
+            && selection_entry.is_some()
+            && !self.browser.playlists.entry_ready();
+        let selection_pending = self
+            .browser
+            .requests
+            .pending(ViewRequestKind::EntrySelection);
+        let selection_message = if !selection_unavailable {
+            ""
+        } else if selection_pending {
+            "Refreshing selection…"
+        } else {
+            "Selection unavailable"
+        };
+        let selection_status = row()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .overflow_hidden()
+            .child(
+                status_message(selection_message, StatusKind::Info)
+                    .id(("playlist-selection-status", panel_id))
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .tooltip(move |_, cx| {
+                        cx.new(|_| super::ButtonTooltip {
+                            text: selection_message.into(),
+                        })
+                        .into()
+                    }),
+            )
+            .child(div().w(gpui::rems(4.)).h_full().flex_shrink_0().when(
+                selection_unavailable && !selection_pending,
+                |slot| {
+                    slot.child(
+                        button(
+                            ("retry-playlist-entry", panel_id),
+                            "Retry",
+                            cx,
+                            move |this, _, cx| {
+                                this.refresh(cx);
+                                if this.browser.playlists.selected() == playlist_id
+                                    && this.browser.playlists.selected_entry() == selection_entry
+                                    && !this.browser.playlists.entry_ready()
+                                    && !this
+                                        .browser
+                                        .requests
+                                        .pending(ViewRequestKind::EntrySelection)
+                                {
+                                    this.request_entry_selection(cx);
+                                    cx.notify();
+                                }
+                            },
+                        )
+                        .w_full()
+                        .h_full()
+                        .truncate(),
+                    )
+                },
+            ));
         let catalog_len = self.browser.playlists.summaries().rows.len();
         self.scroll_views.register_list(
             ("playlist-catalog", panel_id),
@@ -1369,44 +1555,6 @@ impl GuiApp {
                 ("playlist-entries", panel_id),
                 &self.browser.playlists.entries().scroll,
             );
-            if self.browser.playlists.selected_entry().is_some()
-                && !self.browser.playlists.entry_ready()
-            {
-                let pending = self
-                    .browser
-                    .requests
-                    .pending(ViewRequestKind::EntrySelection);
-                lists = lists.child(
-                    row()
-                        .flex_shrink_0()
-                        .child(status_message(
-                            if pending {
-                                "Refreshing selection…"
-                            } else {
-                                "Selection unavailable"
-                            },
-                            StatusKind::Info,
-                        ))
-                        .when(!pending, |view| {
-                            view.child(button(
-                                ("retry-playlist-entry", panel_id),
-                                "Retry",
-                                cx,
-                                |this, _, cx| {
-                                    this.refresh(cx);
-                                    if !this
-                                        .browser
-                                        .requests
-                                        .pending(ViewRequestKind::EntrySelection)
-                                    {
-                                        this.request_entry_selection(cx);
-                                    }
-                                    cx.notify();
-                                },
-                            ))
-                        }),
-                );
-            }
             let entries_len = self.browser.playlists.entries().rows.len();
             let entries = uniform_list(
                 ("playlist-entries", panel_id),
@@ -1550,6 +1698,7 @@ impl GuiApp {
             ))
             .child(
                 row()
+                    .h(gpui::rems(2.))
                     .flex_shrink_0()
                     .child(icon_button(
                         ("playlist-create", panel_id),
@@ -1588,7 +1737,8 @@ impl GuiApp {
                         )
                         .opacity(if playlist_id.is_some() { 1. } else { 0.4 })
                         .when(playlist_id.is_none(), |view| view.cursor_default()),
-                    ),
+                    )
+                    .child(selection_status),
             )
             .child(lists)
             .into_any_element()

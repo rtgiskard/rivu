@@ -68,6 +68,8 @@ The playlist name is generated from the current date and time; duplicate queue
 occurrences become one playlist entry.
 Saving runs in the background; the control stays unavailable until its result
 arrives. Closing the window does not cancel a save already submitted to the core.
+Saving feedback and queue selection errors use a persistent status area; Retry
+is available for a failed selection load without moving the queue controls.
 
 Playlist catalogs, entries, and the Queue panel's playlist-destination menu
 load rows automatically while scrolling. Entry numbering and drag reordering use
@@ -78,7 +80,8 @@ Deleting the selected playlist from another client clears its playlist and entry
 selection on refresh. Empty playlists and unloaded pages do not imply deletion.
 When refreshed pages invalidate a selected entry's position, the GUI resolves
 its current location by entry ID rather than reusing the old row index. A pending
-or failed lookup is shown inline; a failed lookup offers Retry. Loaded track rows
+or failed lookup is shown in the track toolbar without moving the list; a failed
+lookup offers Retry. Loaded track rows
 remain directly actionable by entry ID with revision checks for removal and
 reordering. Confirmed entry removal clears its selection when selected.
 Moving an entry refreshes only that playlist's entries and selected entry location;
