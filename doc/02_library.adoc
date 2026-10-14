@@ -286,6 +286,10 @@ Pending keyboard navigation is cancelled when library data, filters, or batch
 size change; an old row index is never applied to the refreshed collection.
 GUI row-navigation and selection keys target only a visible Library or Queue
 list; switching tabs does not let those keys act on the hidden list.
+Clicking a playlist catalog, playlist track, or Recent row suspends Library and
+Queue row shortcuts, including queue deletion, until one of those lists is
+selected again or the clicked panel is hidden. Playlist and Recent row clicks
+do not forward these shortcuts to another panel.
 
 The TUI Library tree starts at the configured library roots only, including empty
 roots. With no configured roots it is empty; it does not add a filesystem-root

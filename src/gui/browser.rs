@@ -11,7 +11,7 @@ mod selection;
 
 use super::queue::QueueSelection;
 use super::{
-    HistorySort, ListFocus,
+    BrowserFocus, HistorySort, ListFocus,
     library::{DirectoryTree, LibraryNode, TreeBranch},
     paged::PagedRows,
     queries::ViewRequests,
@@ -52,16 +52,24 @@ pub(super) struct BrowserState {
     pub(super) queue: QueueSelection,
     pub(super) history: HistoryBrowser,
     pub(super) requests: ViewRequests,
-    focus: Option<ListFocus>,
+    focus: Option<BrowserFocus>,
 }
 
 impl BrowserState {
-    pub(super) fn focus(&self) -> Option<ListFocus> {
+    pub(super) fn focus(&self) -> Option<BrowserFocus> {
         self.focus
     }
 
     pub(super) fn focus_list(&mut self, focus: ListFocus) {
-        self.focus = Some(focus);
+        self.focus = Some(BrowserFocus::List(focus));
+    }
+
+    pub(super) fn focus_playlists(&mut self) {
+        self.focus = Some(BrowserFocus::Playlists);
+    }
+
+    pub(super) fn focus_history(&mut self) {
+        self.focus = Some(BrowserFocus::History);
     }
 
     pub(super) fn clear_focus(&mut self) {

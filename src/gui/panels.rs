@@ -1538,7 +1538,9 @@ impl GuiApp {
                                 cx.stop_propagation()
                             }),
                         )
-                        .on_click(cx.listener(move |this, _, _, cx| {
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.focus_layout(window, cx);
+                            this.browser.focus_playlists();
                             if this.browser.playlists.select(id, name.clone(), index) {
                                 this.request_playlist_entries(id, 0, cx);
                             }
@@ -1664,6 +1666,7 @@ impl GuiApp {
                             .on_click(cx.listener(
                                 move |this, event: &gpui::ClickEvent, window, cx| {
                                     this.focus_layout(window, cx);
+                                    this.browser.focus_playlists();
                                     this.browser
                                         .requests
                                         .cancel(ViewRequestKind::EntrySelection);
@@ -2225,19 +2228,16 @@ impl GuiApp {
                                                 .flex_shrink_0()
                                                 .truncate(),
                                         )
-                                        .on_click(
-                                            cx.listener(
-                                                move |this, event: &gpui::ClickEvent, _, cx| {
-                                                    this.select_track(id, false, cx);
-                                                    if event.click_count() == 2 {
-                                                        this.send(
-                                                            Command::Play { track_id: id },
-                                                            cx,
-                                                        );
-                                                    }
-                                                },
-                                            ),
-                                        ),
+                                        .on_click(cx.listener(
+                                            move |this, event: &gpui::ClickEvent, window, cx| {
+                                                this.focus_layout(window, cx);
+                                                this.browser.focus_history();
+                                                this.select_track(id, false, cx);
+                                                if event.click_count() == 2 {
+                                                    this.send(Command::Play { track_id: id }, cx);
+                                                }
+                                            },
+                                        )),
                                     )
                                 })
                                 .collect::<Vec<_>>()

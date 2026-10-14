@@ -277,15 +277,29 @@ enum ListFocus {
     Queue,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BrowserFocus {
+    List(ListFocus),
+    Playlists,
+    History,
+}
+
 fn visible_list_focus(
-    preferred: Option<ListFocus>,
-    visible: impl Iterator<Item = ListFocus>,
+    preferred: Option<BrowserFocus>,
+    visible: impl Iterator<Item = BrowserFocus>,
 ) -> Option<ListFocus> {
     let mut first = None;
     for focus in visible {
-        first.get_or_insert(focus);
+        let list = match focus {
+            BrowserFocus::List(list) => Some(list),
+            BrowserFocus::Playlists | BrowserFocus::History => None,
+        };
         if Some(focus) == preferred {
-            return Some(focus);
+            // A visible unsupported list owns the keys; never target another panel.
+            return list;
+        }
+        if first.is_none() {
+            first = list;
         }
     }
     first
@@ -485,8 +499,10 @@ impl GuiApp {
                 .active_panels()
                 .into_iter()
                 .filter_map(|panel| match panel.kind.as_str() {
-                    "library" => Some(ListFocus::Library),
-                    "queue" => Some(ListFocus::Queue),
+                    "library" => Some(BrowserFocus::List(ListFocus::Library)),
+                    "queue" => Some(BrowserFocus::List(ListFocus::Queue)),
+                    "playlists" => Some(BrowserFocus::Playlists),
+                    "history" => Some(BrowserFocus::History),
                     _ => None,
                 }),
         )
@@ -2026,23 +2042,52 @@ impl GuiApp {
 
 #[cfg(test)]
 mod state_tests {
-    use super::{ListFocus, visible_list_focus};
+    use super::{BrowserFocus, ListFocus, visible_list_focus};
 
     #[test]
     fn keyboard_focus_uses_only_visible_lists_after_tab_switch() {
         assert!(
-            visible_list_focus(Some(ListFocus::Queue), [ListFocus::Library].into_iter())
-                == Some(ListFocus::Library)
+            visible_list_focus(
+                Some(BrowserFocus::List(ListFocus::Queue)),
+                [BrowserFocus::List(ListFocus::Library)].into_iter(),
+            ) == Some(ListFocus::Library)
         );
-        assert!(visible_list_focus(Some(ListFocus::Queue), [].into_iter()).is_none());
+        assert!(
+            visible_list_focus(Some(BrowserFocus::List(ListFocus::Queue)), [].into_iter())
+                .is_none()
+        );
         assert!(
             visible_list_focus(
-                Some(ListFocus::Queue),
-                [ListFocus::Library, ListFocus::Queue].into_iter()
+                Some(BrowserFocus::List(ListFocus::Queue)),
+                [
+                    BrowserFocus::List(ListFocus::Library),
+                    BrowserFocus::List(ListFocus::Queue),
+                ]
+                .into_iter()
             ) == Some(ListFocus::Queue)
         );
         assert!(
-            visible_list_focus(None, [ListFocus::Library].into_iter()) == Some(ListFocus::Library)
+            visible_list_focus(None, [BrowserFocus::List(ListFocus::Library)].into_iter())
+                == Some(ListFocus::Library)
         );
+    }
+
+    #[test]
+    fn unsupported_visible_list_suppresses_other_panel_shortcuts() {
+        for target in [BrowserFocus::Playlists, BrowserFocus::History] {
+            assert!(
+                visible_list_focus(
+                    Some(target),
+                    [BrowserFocus::List(ListFocus::Queue), target].into_iter(),
+                )
+                .is_none()
+            );
+            assert!(
+                visible_list_focus(
+                    Some(target),
+                    [BrowserFocus::List(ListFocus::Queue)].into_iter(),
+                ) == Some(ListFocus::Queue)
+            );
+        }
     }
 }
