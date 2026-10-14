@@ -68,6 +68,14 @@ bound. These ranges preserve literal characters, case, Unicode, and component
 boundaries. A full path index includes ordinary files and CUE segments alongside
 the separate identity constraints. It avoids full table scans per distinct root,
 at the cost of index storage and maintenance during library writes.
+Directory pages derive narrow child identities once within a single SQL statement,
+materializing them for both the exact total and ordered page selection. Full track
+payload is joined only for selected track children, not directory representatives
+or rows preceding the page. This trades a request-local temporary child relation
+for avoiding repeated source derivation; its size follows the matching children,
+not the requested page limit. Count-only requests instead use a direct count
+without materializing children or building the page. Empty and out-of-range pages
+still return the exact total.
 
 Playlist deletion-reference lookup has an additional index on
 `(track_id,playlist_id)`. It avoids scanning unrelated playlist entries for sparse

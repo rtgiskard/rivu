@@ -259,67 +259,79 @@ impl Store {
         } else {
             DIRECTORY_SCOPE
         };
-        // SQLite derives immediate children; Rust retains only the requested page.
+        // Materialize narrow children once for both the exact total and the page.
         // Group directories but preserve distinct CUE tracks sharing a source path.
         let sources =
             "WITH sources AS (SELECT id,path,substr(path,length(?4)+1) AS rest FROM tracks ";
-        let children = "), children AS (SELECT 0 AS kind,CASE WHEN ?4='' AND instr(rest,'/')=1 THEN '/' ELSE ?4||substr(rest,1,instr(rest,'/')-1) END AS child,MIN(id) AS track_id FROM sources WHERE instr(rest,'/')>0 GROUP BY child UNION ALL SELECT 1,path,id FROM sources WHERE instr(rest,'/')=0)";
-        let page_columns = " SELECT c.kind,c.child,";
-        let page_tail = " FROM children c JOIN tracks t ON t.id=c.track_id ORDER BY c.kind,c.child,t.id LIMIT ?5 OFFSET ?6";
-        // Reuse the library search predicate and one SQL buffer for count and payload.
+        let children_prefix = "), children AS ";
+        let children = "(SELECT 0 AS kind,CASE WHEN ?4='' AND instr(rest,'/')=1 THEN '/' ELSE ?4||substr(rest,1,instr(rest,'/')-1) END AS child,MIN(id) AS track_id FROM sources WHERE instr(rest,'/')>0 GROUP BY child UNION ALL SELECT 1,path,id FROM sources WHERE instr(rest,'/')=0)";
+        let page_columns = ", page AS MATERIALIZED (SELECT kind,child,track_id FROM children ORDER BY kind,child,track_id LIMIT ?5 OFFSET ?6) SELECT total.total,p.kind,p.child,";
+        // Join payload only after pagination; empty pages retain the total row.
+        let page_tail = " FROM (SELECT COUNT(*) AS total FROM children) total LEFT JOIN page p ON 1 LEFT JOIN tracks t ON p.kind=1 AND t.id=p.track_id ORDER BY p.kind,p.child,p.track_id";
+        let count_tail = " SELECT COUNT(*) FROM children";
+        let materialized = if limit == 0 { "" } else { "MATERIALIZED " };
         let mut sql = String::with_capacity(
             sources.len()
                 + TRACK_SEARCH_FILTER.len()
                 + scope.len()
+                + children_prefix.len()
+                + materialized.len()
                 + children.len()
-                + page_columns.len()
-                + LIBRARY_ROW_COLUMNS_QUALIFIED.len()
-                + page_tail.len(),
+                + if limit == 0 {
+                    count_tail.len()
+                } else {
+                    page_columns.len() + LIBRARY_ROW_COLUMNS_QUALIFIED.len() + page_tail.len()
+                },
         );
         sql.push_str(sources);
         sql.push_str(TRACK_SEARCH_FILTER);
         sql.push_str(scope);
+        sql.push_str(children_prefix);
+        sql.push_str(materialized);
         sql.push_str(children);
-        let children_end = sql.len();
-        sql.push_str(" SELECT COUNT(*) FROM children");
-        let total = self.conn.query_row(
-            &sql,
-            params![query, favorite, None::<bool>, prefix],
-            |row| row.get::<_, i64>(0),
-        )? as usize;
         if limit == 0 {
+            // A single consumer needs no materialized children or page machinery.
+            sql.push_str(count_tail);
+            let total = self.conn.query_row(
+                &sql,
+                params![query, favorite, None::<bool>, prefix],
+                |row| row.get::<_, i64>(0),
+            )? as usize;
             return Ok(Page {
                 total,
                 rows: Vec::new(),
             });
         }
-        sql.truncate(children_end);
         sql.push_str(page_columns);
         sql.push_str(LIBRARY_ROW_COLUMNS_QUALIFIED);
         sql.push_str(page_tail);
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt
-            .query_map(
-                params![
-                    query,
-                    favorite,
-                    None::<bool>,
-                    prefix,
-                    limit.min(crate::model::MAX_QUERY_ROWS) as i64,
-                    offset.min(i64::MAX as usize) as i64
-                ],
-                |row| {
-                    if row.get::<_, i64>(0)? == 0 {
-                        Ok(DirectoryRow::Directory {
-                            path: PathBuf::from(row.get::<_, String>(1)?),
-                        })
-                    } else {
-                        Ok(DirectoryRow::Track(library_row_at(row, 2)?))
-                    }
-                },
-            )?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(Page { total, rows })
+        let mut result = stmt.query(params![
+            query,
+            favorite,
+            None::<bool>,
+            prefix,
+            limit.min(crate::model::MAX_QUERY_ROWS) as i64,
+            offset.min(i64::MAX as usize) as i64
+        ])?;
+        let mut page = Page {
+            total: 0,
+            rows: Vec::new(),
+        };
+        while let Some(row) = result.next()? {
+            page.total = row.get::<_, i64>(0)? as usize;
+            let Some(kind) = row.get::<_, Option<i64>>(1)? else {
+                continue;
+            };
+            page.rows.push(if kind == 0 {
+                DirectoryRow::Directory {
+                    path: PathBuf::from(row.get::<_, String>(2)?),
+                }
+            } else {
+                DirectoryRow::Track(library_row_at(row, 3)?)
+            });
+        }
+        Ok(page)
     }
 
     pub(super) fn source_parameters(
@@ -830,6 +842,52 @@ mod request_tests {
         assert!(!store.set_favorite(&[2, 1, 2], true)?);
         assert!(!store.set_favorite(&[], false)?);
         assert_eq!(store.library_stats()?.total, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn directory_pages_distinguish_filesystem_root_from_empty_prefix() -> Result<()> {
+        use crate::model::DirectoryRow;
+        let store = Store::open(Path::new(":memory:"))?;
+        let empty = store.directory_page(Path::new(""), None, None, 0, 10)?;
+        assert_eq!(empty.total, 0);
+        assert!(empty.rows.is_empty());
+        store.conn.execute_batch(
+            "INSERT INTO tracks(id,path) VALUES
+             (1,'/music/one.wav'),(2,'/z.wav'),(3,'relative/one.wav'),
+             (4,'standalone.wav'),(5,'relative0/outside.wav');",
+        )?;
+        let all = store.directory_page(Path::new(""), None, None, 0, 10)?;
+        assert_eq!(all.total, 4);
+        assert_eq!(
+            &all.rows[..3],
+            &[
+                DirectoryRow::Directory { path: "/".into() },
+                DirectoryRow::Directory {
+                    path: "relative".into(),
+                },
+                DirectoryRow::Directory {
+                    path: "relative0".into(),
+                },
+            ]
+        );
+        assert!(matches!(&all.rows[3], DirectoryRow::Track(row) if row.id == 4));
+        let root = store.directory_page(Path::new("/"), None, None, 0, 10)?;
+        assert_eq!(root.total, 2);
+        assert_eq!(
+            root.rows[0],
+            DirectoryRow::Directory {
+                path: "/music".into(),
+            }
+        );
+        assert!(matches!(&root.rows[1], DirectoryRow::Track(row) if row.id == 2));
+        for (path, total) in [("", 4), ("/", 2)] {
+            for (offset, limit) in [(0, 0), (total, 10)] {
+                let page = store.directory_page(Path::new(path), None, None, offset, limit)?;
+                assert_eq!(page.total, total);
+                assert!(page.rows.is_empty());
+            }
+        }
         Ok(())
     }
 
