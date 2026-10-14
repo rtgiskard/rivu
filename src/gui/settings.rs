@@ -9,8 +9,8 @@ use super::{
 use crate::{
     artwork::{ArtworkCacheReport, ArtworkManager},
     config::{
-        AnalysisWindow, AudioVisualizerOptions, AudioVisualizerStyle, Config, LogLevel, RgbColor,
-        SpectrumStyle, VisualizationPalette,
+        AlbumArtworkDirection, AlbumArtworkMode, AnalysisWindow, AudioVisualizerOptions,
+        AudioVisualizerStyle, Config, LogLevel, RgbColor, SpectrumStyle, VisualizationPalette,
     },
     core::CoreHandle,
 };
@@ -32,12 +32,20 @@ enum SettingChoice {
     Palette(VisualizationPalette),
     LogLevel(LogLevel),
     Window(AnalysisWindow),
+    AlbumArtworkMode(AlbumArtworkMode),
+    AlbumArtworkDirection(AlbumArtworkDirection),
 }
 
 impl SettingChoice {
     fn label(self) -> String {
         match self {
             Self::Device(_) | Self::Font(_) | Self::CustomFont => String::new(),
+            Self::AlbumArtworkMode(AlbumArtworkMode::Static) => "Static".to_owned(),
+            Self::AlbumArtworkMode(AlbumArtworkMode::Rotating) => "Rotating".to_owned(),
+            Self::AlbumArtworkDirection(AlbumArtworkDirection::Clockwise) => "Clockwise".to_owned(),
+            Self::AlbumArtworkDirection(AlbumArtworkDirection::Counterclockwise) => {
+                "Counterclockwise".to_owned()
+            }
             Self::SpectrumStyle(value) => spectrum_style_label(value).to_owned(),
             Self::AudioVisualizerStyle(value) => audio_visualizer_style_label(value).to_owned(),
             Self::Palette(value) => visualization_palette_label(value).to_owned(),
@@ -97,6 +105,7 @@ enum Field {
     WaveformRmsGain,
     WaveformPeakGain,
     WaveformPeakGamma,
+    AlbumArtworkPeriod,
 }
 impl Field {
     fn label(self) -> &'static str {
@@ -140,12 +149,14 @@ impl Field {
             Self::WaveformRmsGain => "RMS gain",
             Self::WaveformPeakGain => "Peak gain",
             Self::WaveformPeakGamma => "Peak gamma",
+            Self::AlbumArtworkPeriod => "Seconds per circle",
         }
     }
 
     fn hint(self) -> &'static str {
         match self {
             Self::Roots => "Separate paths with semicolons.",
+            Self::AlbumArtworkPeriod => "Finite and greater than zero; default 20 seconds.",
             Self::ScanMaxDepth => "Minimum 1; starting folder = depth 0.",
             Self::Volume => "0–100.",
             Self::PlayCountThreshold => "0 ≤ value < 100; based on time heard.",
@@ -333,6 +344,7 @@ enum VisualPage {
     Spectrogram,
     AudioVisualizer,
     Waveform,
+    AlbumArtwork,
 }
 
 struct FontOption {
@@ -355,6 +367,8 @@ enum Measured {
     SettingsFft,
     SettingsLogLevel,
     SettingsWindow,
+    AlbumArtworkMode,
+    AlbumArtworkDirection,
 }
 
 pub(super) enum SettingsEvent {
@@ -579,6 +593,7 @@ impl Settings {
             Field::WaveformRmsGain,
             Field::WaveformPeakGain,
             Field::WaveformPeakGamma,
+            Field::AlbumArtworkPeriod,
         ]
         .into_iter()
         .map(|field| {
@@ -945,6 +960,11 @@ impl Settings {
             self.draft.waveform_peak_gamma.to_string(),
             cx,
         );
+        self.set_value(
+            Field::AlbumArtworkPeriod,
+            self.draft.album_artwork_period_seconds.to_string(),
+            cx,
+        );
     }
 
     fn parse(&self, cx: &App) -> Result<Config> {
@@ -1021,6 +1041,7 @@ impl Settings {
         config.waveform_rms_gain = self.number(Field::WaveformRmsGain, cx)?;
         config.waveform_peak_gain = self.number(Field::WaveformPeakGain, cx)?;
         config.waveform_peak_gamma = self.number(Field::WaveformPeakGamma, cx)?;
+        config.album_artwork_period_seconds = self.number(Field::AlbumArtworkPeriod, cx)?;
         config.validate()?;
         Ok(config)
     }
@@ -1292,6 +1313,10 @@ impl Settings {
             SettingChoice::Fft(value) => self.draft.analysis_fft_size = value,
             SettingChoice::LogLevel(value) => self.draft.log_level = value,
             SettingChoice::Window(value) => self.draft.analysis_window = value,
+            SettingChoice::AlbumArtworkMode(value) => self.draft.album_artwork_mode = value,
+            SettingChoice::AlbumArtworkDirection(value) => {
+                self.draft.album_artwork_direction = value
+            }
         }
         self.dropdown.select_index(index);
         self.dropdown.close();
@@ -1309,6 +1334,8 @@ impl Settings {
                 SettingChoice::AudioVisualizerStyle(_) => Measured::SettingsStyle,
                 SettingChoice::Palette(_) => Measured::SettingsStyle,
                 SettingChoice::Device(_) => Measured::Device,
+                SettingChoice::AlbumArtworkMode(_) => Measured::AlbumArtworkMode,
+                SettingChoice::AlbumArtworkDirection(_) => Measured::AlbumArtworkDirection,
             };
         }
         self.dropdown.open(items);
@@ -1858,12 +1885,80 @@ impl Settings {
                 cx,
                 |settings| settings.visual_page = VisualPage::AudioVisualizer,
             ))
+            .child(self.tab_button(
+                "visual-album-artwork",
+                "Album artwork",
+                selected == VisualPage::AlbumArtwork,
+                cx,
+                |settings| settings.visual_page = VisualPage::AlbumArtwork,
+            ))
     }
 
     fn visual_settings(&mut self, cx: &mut Context<Settings>) -> Div {
         let settings = &*self;
         let draft = &settings.draft;
         match settings.visual_page {
+            VisualPage::AlbumArtwork => {
+                let mode = dropdown_button(
+                    "album-artwork-mode",
+                    SettingChoice::AlbumArtworkMode(draft.album_artwork_mode).label(),
+                    cx,
+                    |this, _, _| {
+                        let values = [AlbumArtworkMode::Static, AlbumArtworkMode::Rotating];
+                        let selected = values
+                            .iter()
+                            .position(|value| *value == this.draft.album_artwork_mode)
+                            .unwrap_or(0);
+                        this.open_setting_dropdown(
+                            values
+                                .into_iter()
+                                .map(|value| {
+                                    let choice = SettingChoice::AlbumArtworkMode(value);
+                                    DropdownItem::new(choice, choice.label())
+                                })
+                                .collect(),
+                            selected,
+                        );
+                    },
+                )
+                .relative()
+                .child(self.measurement(Measured::AlbumArtworkMode));
+                let direction = dropdown_button(
+                    "album-artwork-direction",
+                    SettingChoice::AlbumArtworkDirection(draft.album_artwork_direction).label(),
+                    cx,
+                    |this, _, _| {
+                        let values = [
+                            AlbumArtworkDirection::Clockwise,
+                            AlbumArtworkDirection::Counterclockwise,
+                        ];
+                        let selected = values
+                            .iter()
+                            .position(|value| *value == this.draft.album_artwork_direction)
+                            .unwrap_or(0);
+                        this.open_setting_dropdown(
+                            values
+                                .into_iter()
+                                .map(|value| {
+                                    let choice = SettingChoice::AlbumArtworkDirection(value);
+                                    DropdownItem::new(choice, choice.label())
+                                })
+                                .collect(),
+                            selected,
+                        );
+                    },
+                )
+                .relative()
+                .child(self.measurement(Measured::AlbumArtworkDirection));
+                column().child(settings_group(
+                    "Playback motion",
+                    column().gap_2()
+                        .child(two_column(form_field("Mode", mode).min_w(px(180.)), form_field("Direction", direction).min_w(px(180.))))
+                        .child(settings.single(Field::AlbumArtworkPeriod))
+                        .id("settings-album-artwork-help")
+                        .tooltip(settings_tooltip("Shared by all Album artwork panels. Rotation follows playback, not audio energy. Still mode freezes rotation without removing the cover.")),
+                ))
+            }
             VisualPage::Common => {
                 let palette = dropdown_button(
                     "visual-palette",
@@ -2251,6 +2346,7 @@ impl Settings {
             (_, VisualPage::Spectrogram) => "settings-spectrogram-scroll",
             (_, VisualPage::Waveform) => "settings-waveform-scroll",
             (_, VisualPage::AudioVisualizer) => "settings-audio-visualizer-scroll",
+            (_, VisualPage::AlbumArtwork) => "settings-album-artwork-scroll",
         };
         let content = match self.page {
             SettingsPage::General => self.general_settings(cx),

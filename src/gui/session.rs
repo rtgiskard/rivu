@@ -45,6 +45,10 @@ impl UiSession {
         }
     }
 
+    pub(crate) fn has_window(&self) -> bool {
+        self.window.is_some()
+    }
+
     pub(crate) fn show_window(&mut self, cx: &mut App) -> Result<()> {
         cx.activate(true);
         if let Some(window) = self.window {

@@ -8,7 +8,9 @@ impl Core {
             config.shuffle = self.state.playback.shuffle;
             config.repeat = self.state.playback.repeat;
             config.library_columns = self.state.system.config.library_columns;
-            return self.command(Command::Configure { config });
+            return self.command(Command::Configure {
+                config: std::sync::Arc::new(config),
+            });
         }
         let mut config = self.state.system.config.as_ref().clone();
         let still_mode = matches!(change, GuiConfigChange::ToggleStillMode);

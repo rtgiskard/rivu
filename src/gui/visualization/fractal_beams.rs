@@ -65,7 +65,7 @@ impl Scene {
         for (root, length) in ROOT_LENGTHS.iter().copied().enumerate() {
             scene.grow(NO_PARENT, root, 0, length, 0.0, 0.0);
         }
-        scene.rebuild();
+        scene.rebuild_segments();
         scene
     }
 
@@ -77,7 +77,7 @@ impl Scene {
         self.next_pulse = 0;
         self.previous_onset = 0.0;
         self.pulse_cooldown = 0.0;
-        self.rebuild();
+        self.rebuild_segments();
     }
 
     pub(super) fn advance(&mut self, dt: f32, drive: Drive) {
@@ -125,7 +125,6 @@ impl Scene {
             self.pulse_cooldown = 0.12;
         }
         self.previous_onset = drive.onset;
-        self.rebuild();
     }
 
     pub(super) fn segments(&self) -> &[LightSegment] {
@@ -178,7 +177,7 @@ impl Scene {
         }
     }
 
-    fn rebuild(&mut self) {
+    pub(super) fn rebuild_segments(&mut self) {
         self.segments.clear();
         let low = self.bands[0];
         let mid = self.bands[1];
@@ -306,6 +305,7 @@ mod tests {
         for _ in 0..45 {
             scene.advance(DT, sounding());
         }
+        scene.rebuild_segments();
         let segments = scene.segments().to_vec();
         let phases = scene.phases;
         let pulse_age = scene.pulses[0].age;
@@ -347,6 +347,8 @@ mod tests {
             };
             scene.advance(DT, drive);
             fresh.advance(DT, drive);
+            scene.rebuild_segments();
+            fresh.rebuild_segments();
             same_segments(scene.segments(), fresh.segments());
         }
     }
@@ -368,6 +370,7 @@ mod tests {
                 onset: if step % 19 == 0 { 1.0 } else { 0.0 },
             };
             scene.advance(0.1, drive);
+            scene.rebuild_segments();
             assert_eq!(scene.branches.len(), BRANCH_COUNT);
             assert_eq!(scene.segments().len(), SEGMENT_COUNT);
             assert_eq!(scene.branches.capacity(), branch_capacity);
@@ -439,6 +442,10 @@ mod tests {
                 },
             );
         }
+        quiet_high.rebuild_segments();
+        bright_high.rebuild_segments();
+        wide.rebuild_segments();
+        extended.rebuild_segments();
         assert!(light(&bright_high, Some(2)) > light(&quiet_high, Some(2)) * 5.0);
         // The first child follows the root's four pieces; mids widen its fork.
         assert_ne!(
@@ -473,6 +480,7 @@ mod tests {
                 bands: [0.0; 3],
             },
         );
+        scene.rebuild_segments();
         let root_light = light(&scene, Some(0));
         let fine_light = light(&scene, Some(2));
         // Keeping one onset high must not retrigger each substep.
@@ -486,6 +494,7 @@ mod tests {
                 },
             );
         }
+        scene.rebuild_segments();
         assert_eq!(scene.next_pulse, 1);
         assert!(light(&scene, Some(0)) < root_light);
         assert!(light(&scene, Some(2)) > fine_light);
@@ -500,6 +509,7 @@ mod tests {
                 },
             );
         }
+        scene.rebuild_segments();
         assert_eq!(scene.next_pulse, 1);
         assert!(scene.pulses.iter().all(|pulse| !pulse.active));
         assert!(light(&scene, None) < sounding_light * 0.0001);

@@ -547,6 +547,22 @@ pub(crate) fn row_tooltip(
     })
 }
 
+/// Build row detail only when the tooltip opens.
+pub(crate) fn lazy_row_tooltip(
+    view: Stateful<Div>,
+    title: impl Into<SharedString>,
+    detail: impl Fn() -> SharedString + 'static,
+) -> Stateful<Div> {
+    let title = title.into();
+    view.tooltip(move |_, cx| {
+        cx.new(|_| TrackTooltip {
+            title: title.clone(),
+            detail: detail(),
+        })
+        .into()
+    })
+}
+
 /// Standard two-line row text with an overflow tooltip.
 pub(crate) fn row_text(
     id: impl Into<ElementId>,

@@ -391,6 +391,10 @@ impl AudioVisualizer {
                             }
                             alpha
                         };
+                        if fade_alpha == 0.0 {
+                            paint_guides(bounds, options, data.background, window, cx);
+                            return;
+                        }
                         match options.style {
                             AudioVisualizerStyle::Bars => paint_bars(bounds, &data, window),
                             AudioVisualizerStyle::Rings => paint_rings(bounds, &data, window),

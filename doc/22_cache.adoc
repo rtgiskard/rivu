@@ -12,7 +12,7 @@ The policy covers Waveform display columns and static images, Spectrum body
 geometry, and Spectrogram history images. Audio Visualizer styles are independent:
 radial styles do not retain reusable graphics, stereo analysis styles retain
 their own result images, and generative styles retain simulation state. The
-setting does not control those resources or font caches.
+setting does not control those resources, album artwork, or font caches.
 
 Disabling the cache bypasses reusable graphics, not the underlying audio data
 or Spectrogram history. Peak hold, smoothing, and display calculations retain
@@ -46,6 +46,8 @@ display mapping still invalidate reuse. Hold timing and Peak markers advance
 independently of the cached body; Peak markers are drawn separately. Restoring a
 hidden panel waits for a valid audio frame to initialize its envelopes before
 drawing. The benefit depends on the workload, not on a fixed expected hit rate.
+The shared palette ramp is independent of geometry caching; its bounded ownership
+and retirement are described in link:23_visuals.adoc#_spectrum[Spectrum rendering].
 
 === Spectrogram
 
@@ -84,6 +86,17 @@ total process or GPU memory. Removed panel entries are pruned. Replaced images
 and images from hidden or removed panels are retired through the window
 lifecycle, without requiring those panels to paint again. Window closure
 releases the remaining retained images.
+
+After the window is destroyed, the application switches the graphical platform
+to headless mode, releasing the display connection and its shared GPU context.
+Reopening reconnects to the original display before creating a new window;
+requests arriving during a connection switch are coalesced. A failed reconnect
+leaves the application running so another open request can retry.
+
+Playback, IPC, tray, MPRIS, and accepted business operations remain independent
+of this transition. The GPUI event loop, executors, font system, and application
+caches remain available; this is not full framework teardown. No allocator trim
+is performed, and closing the window does not promise serve-level process memory.
 
 An image cannot be dropped merely because the application has stopped reusing
 it: a submitted scene can still reference it. Replaced cached waveform and
@@ -137,6 +150,11 @@ are matched by track ID and fingerprint before updating the selected preview or
 publishing MPRIS metadata; a late result can warm the cache, never replace a
 newer identity. MPRIS signals metadata after artwork becomes available, including
 an initial cold load without another playback update.
+
+The Album artwork panel initiates acquisition only while visible. Hiding it
+clears queued demand without cancelling a submitted shared load; completion may
+warm the cache but cannot start another hidden lookup. Revealing it acquires the
+latest track. Other consumers, including MPRIS, retain their own acquisition demand.
 
 The lookup key is track ID plus source fingerprint. Resident requests for the
 same identity share one probe outside the lookup lock. Consumers hold the lookup

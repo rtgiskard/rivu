@@ -194,6 +194,23 @@ playback remain usable. Its menu offers Play/Pause, Previous, Next,
 Shuffle, Repeat, and Quit. Repeat follows the cycle described under
 <<_transport_and_timing,Transport and timing>>.
 
+== Album artwork panel
+
+Add *Album artwork* from the panel catalog for a circular preview of the current
+playback track. It is optional and is not added to the default layout. Unlike
+Track details, browsing or selecting a different library track does not change it.
+
+Choose Static or Rotating in link:01_config.adoc#_album_artwork[Settings artwork
+controls]. Rotation runs only during playback with a decoded cover. Pause retains
+the angle, and resume continues; stopping or changing tracks resets it. Static
+mode immediately returns the cover upright. Changing the period or direction
+preserves the current angle. Missing artwork uses a static placeholder.
+
+Hiding the panel or window suspends animation without advancing hidden time.
+Still Mode also freezes rotation but retains the cover. Multiple panels share
+the same cover and rotation state. The full, static Track details preview is
+unchanged.
+
 == MPRIS and artwork
 
 `interface.mpris_enabled` enables desktop media controls for graphical and headless cores

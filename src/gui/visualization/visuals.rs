@@ -16,8 +16,7 @@
 use super::super::{ERROR, ERROR_BG};
 use gpui::{
     AnyElement, App, Bounds, Path, PathBuilder, Pixels, Point, RenderImage, SharedString,
-    TextAlign, Window, canvas, div, fill, linear_color_stop, linear_gradient, point, prelude::*,
-    px, rgb, size,
+    TextAlign, Window, canvas, div, fill, point, prelude::*, px, rgb, size,
 };
 use std::{cell::RefCell, collections::HashMap, ops::Range, rc::Rc, sync::Arc, time::Duration};
 
@@ -54,21 +53,39 @@ fn palette_stops(palette: VisualizationPalette) -> &'static [(f32, [u8; 3])] {
     }
 }
 
+fn visible_palette_fraction(palette: VisualizationPalette, fraction: f32) -> f32 {
+    let fraction = fraction.clamp(0.0, 1.0);
+    match palette {
+        VisualizationPalette::Deadbeef => 0.06 + fraction * 0.94,
+        VisualizationPalette::TokyoNight => fraction,
+    }
+}
+
 const PALETTE_LUT_SIZE: usize = 1024;
 
 pub(super) struct PaletteLut {
     palette: VisualizationPalette,
     colors: [[u8; 3]; PALETTE_LUT_SIZE],
+    spectrum_ramp: Arc<RenderImage>,
 }
 
 impl PaletteLut {
     fn new(palette: VisualizationPalette) -> Self {
+        let pixels = image::RgbaImage::from_fn(1, PALETTE_LUT_SIZE as u32, |_, row| {
+            let fraction = 1.0 - row as f32 / (PALETTE_LUT_SIZE - 1) as f32;
+            let [red, green, blue] = gradient(
+                visible_palette_fraction(palette, fraction),
+                palette_stops(palette),
+            );
+            image::Rgba([blue, green, red, 255])
+        });
         Self {
             palette,
             colors: std::array::from_fn(|index| {
                 let fraction = index as f32 / (PALETTE_LUT_SIZE - 1) as f32;
                 gradient(fraction, palette_stops(palette))
             }),
+            spectrum_ramp: Arc::new(RenderImage::new([image::Frame::new(pixels)])),
         }
     }
 
@@ -79,26 +96,7 @@ impl PaletteLut {
 
     // Waveform and Spectrum exclude DeaDBeeF's black floor; Spectrogram does not.
     pub(super) fn lookup_mapped_rgb(&self, fraction: f32) -> [u8; 3] {
-        let fraction = fraction.clamp(0.0, 1.0);
-        let mapped = match self.palette {
-            VisualizationPalette::Deadbeef => 0.06 + fraction * 0.94,
-            VisualizationPalette::TokyoNight => fraction,
-        };
-        self.lookup_rgb(mapped)
-    }
-
-    fn visible_stops(&self) -> &'static [(f32, [u8; 3])] {
-        match self.palette {
-            VisualizationPalette::Deadbeef => &DEADBEEF_STOPS[1..],
-            VisualizationPalette::TokyoNight => TOKYO_NIGHT_STOPS,
-        }
-    }
-
-    fn stop_position(&self, raw: f32) -> f32 {
-        match self.palette {
-            VisualizationPalette::Deadbeef => ((raw - 0.06) / 0.94).clamp(0.0, 1.0),
-            VisualizationPalette::TokyoNight => raw,
-        }
+        self.lookup_rgb(visible_palette_fraction(self.palette, fraction))
     }
 }
 
@@ -437,11 +435,11 @@ impl Visuals {
             || data.spectrogram_interpolate != config.spectrogram_interpolate
             || data.spectrogram_interpolation_points != config.spectrogram_interpolation_points
             || data.spectrogram_sampling_points_scale != config.spectrogram_sampling_points_scale;
-        data.palette_lut = if palette_changed {
-            active_palette_lut(config.visual_palette)
-        } else {
-            Rc::clone(&data.palette_lut)
-        };
+        if palette_changed {
+            let old_ramp = Arc::clone(&data.palette_lut.spectrum_ramp);
+            data.retired.push(old_ramp);
+            data.palette_lut = active_palette_lut(config.visual_palette);
+        }
         data.visual_background = config.visual_background.rgb();
         data.spectrum_db_range = spectrum_db_range;
         data.spectrum_bars = config.spectrum_bars;
@@ -652,7 +650,7 @@ impl Visuals {
         data.release_images(|image| {
             window
                 .drop_image(image)
-                .map_err(|error| format!("Cannot release spectrogram image: {error}"))
+                .map_err(|error| format!("Cannot release visualization image: {error}"))
         });
         if !data.retired.is_empty() {
             let visuals = self.clone();
@@ -661,7 +659,7 @@ impl Visuals {
                 visuals.data.borrow_mut().release_images(|image| {
                     window
                         .drop_image(image)
-                        .map_err(|error| format!("Cannot release spectrogram image: {error}"))
+                        .map_err(|error| format!("Cannot release visualization image: {error}"))
                 });
             });
         }
@@ -670,6 +668,7 @@ impl Visuals {
     pub(in crate::gui) fn release_all_images(&self, window: &mut Window) {
         let mut data = self.data.borrow_mut();
         let mut failure = None;
+        let spectrum_ramp = Arc::clone(&data.palette_lut.spectrum_ramp);
         let VisualData {
             columns,
             retired,
@@ -681,9 +680,10 @@ impl Visuals {
             .filter_map(|column| column.image.take())
             .chain(retired.drain(..))
             .chain(pending_images.drain(..))
+            .chain(std::iter::once(spectrum_ramp))
         {
             if let Err(error) = window.drop_image(image) {
-                failure = Some(format!("Cannot release spectrogram image: {error}"));
+                failure = Some(format!("Cannot release visualization image: {error}"));
             }
         }
         if let Some(error) = failure {
@@ -1187,7 +1187,7 @@ impl VisualData {
                     && geometry.key.as_ref() == Some(&geometry_key)
                 {
                     if let Some(path) = geometry.body.clone() {
-                        paint_spectrum_path(path, plot, window, self.palette_lut.as_ref());
+                        paint_spectrum_path(path, plot, window, self.palette_lut.as_ref())?;
                     }
                     return Ok(());
                 }
@@ -1333,7 +1333,7 @@ impl VisualData {
                     self.spectrum_geometry.remove(&panel_id);
                 }
                 if let Some(path) = body {
-                    paint_spectrum_path(path, plot, window, self.palette_lut.as_ref());
+                    paint_spectrum_path(path, plot, window, self.palette_lut.as_ref())?;
                 }
                 Ok(())
             },
@@ -1693,37 +1693,11 @@ fn paint_spectrum_path(
     plot: Bounds<Pixels>,
     window: &mut Window,
     palette: &PaletteLut,
-) {
+) -> Result<(), String> {
     path.bounds = plot;
-    let stops = palette.visible_stops();
-    let mut visible = Some(path);
-    for (index, pair) in stops.windows(2).enumerate() {
-        let start = palette.stop_position(pair[0].0);
-        let end = palette.stop_position(pair[1].0);
-        let mask = Bounds::new(
-            point(plot.left(), plot.bottom() - plot.size.height * end),
-            size(plot.size.width, plot.size.height * (end - start)),
-        );
-        let background = linear_gradient(
-            0.0,
-            linear_color_stop(rgb(stop_color(pair[0].1)), 0.0),
-            linear_color_stop(rgb(stop_color(pair[1].1)), 1.0),
-        );
-        let mut segment_path = if index + 2 == stops.len() {
-            visible
-                .take()
-                .expect("last spectrum gradient owns the path")
-        } else {
-            visible
-                .as_ref()
-                .expect("spectrum gradient path is retained")
-                .clone()
-        };
-        segment_path.bounds = mask;
-        window.with_content_mask(Some(gpui::ContentMask { bounds: mask }), |window| {
-            window.paint_path(segment_path, background);
-        });
-    }
+    window
+        .paint_path_with_texture(path, Arc::clone(&palette.spectrum_ramp))
+        .map_err(|error| format!("Cannot upload/paint spectrum gradient: {error}"))
 }
 
 fn stop_color([red, green, blue]: [u8; 3]) -> u32 {
@@ -1890,8 +1864,8 @@ fn frequency_label(frequency: f32) -> SharedString {
 }
 
 /// Cubic Hermite interpolation preserves the palette position and tangent
-/// continuously inside each authored color-stop interval. The renderers use
-/// these same intervals to assemble the full gradient with masked spans.
+/// continuously inside each authored color-stop interval. The lookup table and
+/// Spectrum's shared gradient texture sample this same authored mapping.
 fn gradient(value: f32, stops: &[(f32, [u8; 3])]) -> [u8; 3] {
     debug_assert!(stops.len() >= 2);
     let value = value.clamp(0.0, 1.0);
@@ -1989,6 +1963,79 @@ mod tests {
                 assert_eq!(gradient(position, stops), color);
             }
         }
+        // The interior retains the authored cubic tangent, not a linear stop blend.
+        assert_eq!(gradient(0.1, TOKYO_NIGHT_STOPS), [138, 115, 187]);
+    }
+
+    #[test]
+    fn spectrum_ramp_samples_cubic_visible_domain_top_to_bottom_in_bgra() {
+        for palette in [
+            VisualizationPalette::Deadbeef,
+            VisualizationPalette::TokyoNight,
+        ] {
+            let lut = PaletteLut::new(palette);
+            let bytes = lut.spectrum_ramp.as_bytes(0).unwrap();
+            assert_eq!(bytes.len(), PALETTE_LUT_SIZE * 4);
+            for (row, pixel) in bytes.as_chunks::<4>().0.iter().enumerate() {
+                let fraction = 1.0 - row as f32 / (PALETTE_LUT_SIZE - 1) as f32;
+                let mapped = match palette {
+                    VisualizationPalette::Deadbeef => 0.06 + 0.94 * fraction,
+                    VisualizationPalette::TokyoNight => fraction,
+                };
+                let [red, green, blue] = gradient(mapped, palette_stops(palette));
+                assert_eq!(pixel, &[blue, green, red, 255]);
+            }
+            let stops = palette_stops(palette);
+            let [red, green, blue] = stops.last().unwrap().1;
+            assert_eq!(&bytes[..4], &[blue, green, red, 255]);
+            let [red, green, blue] = match palette {
+                VisualizationPalette::Deadbeef => DEADBEEF_STOPS[1].1,
+                VisualizationPalette::TokyoNight => TOKYO_NIGHT_STOPS[0].1,
+            };
+            assert_eq!(&bytes[bytes.len() - 4..], &[blue, green, red, 255]);
+            assert_ne!([red, green, blue], [0, 0, 0]);
+        }
+    }
+
+    #[test]
+    fn spectrum_ramp_is_reused_until_palette_replacement_and_retired_at_frame_boundary() {
+        let mut visuals = configured_visuals();
+        let old_ramp = Arc::downgrade(&visuals.data.borrow().palette_lut.spectrum_ramp);
+        let mut config = Config {
+            spectrum_db_range: Some(40.0),
+            visualization_cache: false,
+            ..Config::default()
+        };
+        visuals.configure(&config);
+        {
+            let data = visuals.data.borrow();
+            assert!(Arc::ptr_eq(
+                &old_ramp.upgrade().unwrap(),
+                &data.palette_lut.spectrum_ramp,
+            ));
+            assert!(data.retired.is_empty());
+        }
+        config.visual_palette = match config.visual_palette {
+            VisualizationPalette::Deadbeef => VisualizationPalette::TokyoNight,
+            VisualizationPalette::TokyoNight => VisualizationPalette::Deadbeef,
+        };
+        visuals.configure(&config);
+        {
+            let data = visuals.data.borrow();
+            assert!(Arc::ptr_eq(&old_ramp.upgrade().unwrap(), &data.retired[0]));
+            assert!(!Arc::ptr_eq(
+                &data.retired[0],
+                &data.palette_lut.spectrum_ramp
+            ));
+        }
+        let mut released = 0;
+        visuals.data.borrow_mut().release_images(|image| {
+            assert!(Arc::ptr_eq(&old_ramp.upgrade().unwrap(), &image));
+            released += 1;
+            Ok(())
+        });
+        assert_eq!(released, 1);
+        assert!(old_ramp.upgrade().is_none());
     }
 
     fn frame(time: f64, level: f32) -> AnalysisFrame {

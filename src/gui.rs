@@ -1,3 +1,4 @@
+mod album_artwork;
 mod artwork;
 mod browser;
 mod components;
@@ -116,14 +117,14 @@ const PANELS: &[PanelSpec] = &[
         render: |app, panel, window, cx| app.playlists_panel(panel.id, window, cx),
     },
     PanelSpec {
-        kind: "metadata",
-        title: "Track details",
-        render: |app, panel, window, cx| app.metadata_panel(panel.id, window, cx),
-    },
-    PanelSpec {
         kind: "history",
         title: "Recent tracks",
         render: |app, panel, window, cx| app.history_panel(panel.id, window, cx),
+    },
+    PanelSpec {
+        kind: "metadata",
+        title: "Track details",
+        render: |app, panel, window, cx| app.metadata_panel(panel.id, window, cx),
     },
     PanelSpec {
         kind: "spectrum",
@@ -144,6 +145,11 @@ const PANELS: &[PanelSpec] = &[
         kind: "audio_visualizer",
         title: "Audio Visualizer",
         render: GuiApp::audio_visualizer_panel,
+    },
+    PanelSpec {
+        kind: "album_artwork",
+        title: "Album artwork",
+        render: |app, _, _, _| app.album_artwork.clone().into_any_element(),
     },
 ];
 fn panel_spec(kind: &str) -> Option<&'static PanelSpec> {
@@ -406,6 +412,7 @@ pub(super) struct GuiApp {
     artwork_manager: Arc<crate::artwork::ArtworkManager>,
     artwork_loader: artwork::ArtworkLoader,
     artwork_view: artwork::ArtworkView,
+    album_artwork: Entity<album_artwork::AlbumArtwork>,
     queue_save_pending: bool,
     queue_save_feedback: Option<Result<String, String>>,
     playlist_editor: Option<playlist_editor::PlaylistEditor>,
@@ -809,6 +816,8 @@ impl GuiApp {
             }
         })
         .detach();
+        let default_album = cx.new(|_| artwork::Artwork::new());
+        let album_default = default_album.read(cx).circular();
         let mut app = Self {
             settings,
             handle,
@@ -830,12 +839,16 @@ impl GuiApp {
             queue_save_feedback: None,
             playlist_editor: None,
             playlist_action: None,
+            album_artwork: cx.new(|cx| {
+                let default_album = cx.new(|_| album_default);
+                album_artwork::AlbumArtwork::new(Arc::clone(&artwork_manager), default_album)
+            }),
             artwork_manager,
             artwork_loader: artwork::ArtworkLoader::default(),
             artwork_view: artwork::ArtworkView::default(),
             visuals: visualization::Visuals::new(),
             audio_visualizer: visualization::AudioVisualizer::new(),
-            default_album: cx.new(|_| artwork::Artwork::new()),
+            default_album,
             catalog_open: false,
             settings_open: false,
             about_open: false,
@@ -885,6 +898,9 @@ impl GuiApp {
             .image_releaser()
             .release_all_images(window);
         self.artwork_view.release_all_images(window, cx);
+        self.album_artwork.update(cx, |artwork, cx| {
+            artwork.release_all_images(window, cx);
+        });
     }
     fn send(&mut self, command: Command, cx: &mut Context<Self>) {
         if let Err(error) = self.handle.send(command) {
@@ -1222,6 +1238,7 @@ impl GuiApp {
                 }
             }
         }
+        self.sync_album_artwork(cx);
         if self.state.system.shutting_down {
             return;
         }
@@ -1325,7 +1342,36 @@ impl GuiApp {
         self.audio_visualizer.update(&self.analysis_staging);
         cx.notify();
     }
+    fn sync_album_artwork(&mut self, cx: &mut Context<Self>) {
+        fn active_artwork(node: &Node) -> bool {
+            match node {
+                Node::Tabs { panels, active, .. } => panels
+                    .iter()
+                    .any(|panel| panel.id == *active && panel.kind == "album_artwork"),
+                Node::Split { children, .. } => children.iter().any(active_artwork),
+            }
+        }
+        let visible = self.window_visible
+            && !self.state.system.shutting_down
+            && self
+                .layouts
+                .current()
+                .root
+                .as_ref()
+                .is_some_and(active_artwork);
+        self.album_artwork.update(cx, |artwork, cx| {
+            artwork.sync(
+                self.state.current_track(),
+                self.state.playback.status,
+                &self.state.system.config,
+                visible,
+                cx,
+            );
+        });
+    }
+
     fn sync_analysis(&mut self, cx: &mut Context<Self>) {
+        self.sync_album_artwork(cx);
         let enabled = !self.state.system.config.still_mode;
         self.visuals.set_enabled(enabled);
         let active_panels = if enabled {

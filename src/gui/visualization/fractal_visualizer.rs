@@ -255,8 +255,10 @@ impl Data {
                 scene.advance(dt, self.drive);
             }
         }
-        if let Some(Scene::Flow(scene)) = &mut self.scene {
-            scene.rebuild_segments();
+        match &mut self.scene {
+            Some(Scene::Beams(scene)) => scene.rebuild_segments(),
+            Some(Scene::Flow(scene)) => scene.rebuild_segments(),
+            None => {}
         }
         self.last_time = Some(frame.sample_time);
     }

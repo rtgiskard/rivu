@@ -16,6 +16,7 @@ terminal, and headless modes that share one playback instance.
   and configurable appearance
 * Waveform, Spectrum, Spectrogram, and Audio Visualizer with radial, stereo-density,
   spatial-spectrum, fractal-beam, and fractal-flow styles
+* Optional Album artwork panel with static or configurable rotating covers
 * Generated desktop artwork and embedded-cover support for MPRIS; no network
   media or cover fetching
 
@@ -83,6 +84,11 @@ versions listed above. Cross-compiling is not currently a supported build path.
 Compilation makes the extension available; `playback.ffmpeg_enabled = true` enables it
 at runtime. See link:doc/04_playback.adoc[Playback] for runtime dependencies and
 decoding behavior.
+
+The pinned GPUI and WGPU renderer are included under `vendor/` for GPU image
+transforms and custom path-gradient textures; the remaining Zed dependencies
+stay at the same pinned revision. See
+link:doc/23_visuals.adoc#_pinned_gpu_extensions[GPU extension boundaries].
 
 === Build information
 

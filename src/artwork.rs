@@ -44,6 +44,13 @@ impl Artwork {
         Arc::clone(&self.file().path)
     }
 
+    pub(crate) fn is_placeholder(&self) -> bool {
+        self.file()
+            .path
+            .file_name()
+            .is_some_and(|name| name == "default.png")
+    }
+
     fn file(&self) -> &ArtworkFile {
         self.0
             .image

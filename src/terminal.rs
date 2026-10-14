@@ -1486,10 +1486,6 @@ fn move_selection_page(
     }
 }
 
-#[expect(
-    clippy::large_enum_variant,
-    reason = "Key actions are consumed immediately; boxing commands would allocate per command key"
-)]
 enum KeyAction {
     Quit,
     Search,

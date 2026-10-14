@@ -23,10 +23,10 @@ struct ArtworkViewState {
 }
 
 impl ArtworkView {
-    fn replace(&self, next: Option<LoadedArtwork>, cx: &mut App) {
+    pub(super) fn replace(&self, next: Option<LoadedArtwork>, cx: &mut App) -> bool {
         let mut state = self.0.borrow_mut();
         if state.current.as_ref().map(|image| &image.read(cx).artwork) == next.as_ref() {
-            return;
+            return false;
         }
         let next = next.map(|artwork| ArtworkImage::new(artwork, cx));
         if let Some(old) = std::mem::replace(&mut state.current, next) {
@@ -35,6 +35,7 @@ impl ArtworkView {
                 state.retired.push(old);
             }
         }
+        true
     }
 
     pub(super) fn image(&self, cx: &App) -> Option<Img> {
@@ -126,7 +127,7 @@ pub(super) struct ArtworkLoader {
 }
 
 impl ArtworkLoader {
-    fn prepare(&mut self, track: Option<&Track>) -> Option<Track> {
+    pub(super) fn prepare(&mut self, track: Option<&Track>) -> Option<Track> {
         let Some(track) = track else {
             self.pending = None;
             return None;
@@ -145,7 +146,11 @@ impl ArtworkLoader {
         Some(track.clone())
     }
 
-    fn finish(&mut self, identity: &ArtworkIdentity, current: Option<&Track>) -> Option<Track> {
+    pub(super) fn finish(
+        &mut self,
+        identity: &ArtworkIdentity,
+        current: Option<&Track>,
+    ) -> Option<Track> {
         debug_assert_eq!(self.active.as_ref(), Some(identity));
         self.active = None;
         let pending = self.pending.take()?;
@@ -212,6 +217,7 @@ impl GuiApp {
 
 pub(super) struct Artwork {
     layers: Rc<Vec<(Path<Pixels>, Background)>>,
+    circular: bool,
 }
 
 impl Artwork {
@@ -237,6 +243,14 @@ impl Artwork {
         ];
         Self {
             layers: Rc::new(layers),
+            circular: false,
+        }
+    }
+
+    pub(super) fn circular(&self) -> Self {
+        Self {
+            layers: Rc::clone(&self.layers),
+            circular: true,
         }
     }
 }
@@ -247,6 +261,7 @@ impl Render for Artwork {
         div()
             .size_full()
             .rounded_md()
+            .when(self.circular, |view| view.rounded_full())
             .overflow_hidden()
             .bg(rgb(BG))
             .child(

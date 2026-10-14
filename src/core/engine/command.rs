@@ -314,11 +314,12 @@ impl Core {
             }
             Command::Configure { mut config } => {
                 config.validate()?;
-                config.library_roots = config
+                let roots = config
                     .library_roots
                     .iter()
                     .map(|root| library::logical_path(root))
                     .collect::<Result<_>>()?;
+                Arc::make_mut(&mut config).library_roots = roots;
                 if let Some(device) = &config.output_device
                     && !self.state.system.devices.contains(device)
                 {
@@ -346,7 +347,7 @@ impl Core {
                 self.state.playback.shuffle = config.shuffle;
                 self.state.playback.repeat = config.repeat;
                 self.state.system.ffmpeg_status = ffmpeg_status;
-                self.state.system.config = Arc::new(config);
+                self.state.system.config = config;
                 tracing::info!("configuration_updated");
                 let config = &self.state.system.config;
                 (|| -> Result<()> {

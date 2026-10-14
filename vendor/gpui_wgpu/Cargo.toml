@@ -1,0 +1,154 @@
+# Pinned Zed df48a139ce9c292738b523252c12f044697e673f; workspace dependencies resolved without upgrades.
+
+["package"]
+"name" = "gpui_wgpu"
+"version" = "0.1.0"
+"edition" = "2024"
+"publish" = false
+"license" = "Apache-2.0"
+"autoexamples" = false
+"autobenches" = false
+"autotests" = false
+
+["lib"]
+"path" = "src/gpui_wgpu.rs"
+"doctest" = false
+
+["features"]
+"default" = []
+"bench-support" = ["gpui/bench-support", "dep:image"]
+"font-kit" = ["dep:font-kit"]
+"test-support" = ["gpui/test-support", "dep:image"]
+
+["dependencies"]
+"cosmic-text" = "0.19.0"
+
+["dependencies"."gpui"]
+"default-features" = false
+"git" = "https://github.com/zed-industries/zed"
+"rev" = "df48a139ce9c292738b523252c12f044697e673f"
+
+["dependencies"."anyhow"]
+"version" = "1.0.86"
+
+["dependencies"."bytemuck"]
+"version" = "1"
+
+["dependencies"."collections"]
+"version" = "0.1.0"
+"git" = "https://github.com/zed-industries/zed"
+"rev" = "df48a139ce9c292738b523252c12f044697e673f"
+
+["dependencies"."etagere"]
+"version" = "0.2"
+
+["dependencies"."itertools"]
+"version" = "0.14.0"
+
+["dependencies"."image"]
+"version" = "0.25.1"
+"default-features" = false
+"features" = ["bmp", "dds", "exr", "ff", "gif", "hdr", "ico", "jpeg", "png", "pnm", "qoi", "rayon", "tga", "tiff", "webp"]
+"optional" = true
+
+["dependencies"."log"]
+"version" = "0.4"
+"default-features" = false
+"features" = ["std"]
+
+["dependencies"."parking_lot"]
+"version" = "0.12.1"
+
+["dependencies"."profiling"]
+"version" = "1"
+
+["dependencies"."raw-window-handle"]
+"version" = "0.6"
+
+["dependencies"."smallvec"]
+"version" = "1.6"
+"features" = ["union", "const_new"]
+
+["dependencies"."swash"]
+"version" = "0.2.6"
+
+["dependencies"."unicode-bidi"]
+"version" = "0.3.18"
+"default-features" = false
+"features" = ["hardcoded-data"]
+
+["dependencies"."unicode-segmentation"]
+"version" = "1.10"
+
+["dependencies"."gpui_util"]
+"git" = "https://github.com/zed-industries/zed"
+"rev" = "df48a139ce9c292738b523252c12f044697e673f"
+
+["dependencies"."font-kit"]
+"git" = "https://github.com/zed-industries/font-kit"
+"rev" = "94b0f28166665e8fd2f53ff6d268a14955c82269"
+"package" = "zed-font-kit"
+"version" = "0.14.1-zed"
+"default-features" = false
+"optional" = true
+
+["target"]
+
+["target"."cfg(any(target_os = \"linux\", target_os = \"freebsd\"))"]
+
+["target"."cfg(any(target_os = \"linux\", target_os = \"freebsd\"))"."dependencies"]
+
+["target"."cfg(any(target_os = \"linux\", target_os = \"freebsd\"))"."dependencies"."wgpu"]
+"version" = "29.0"
+"default-features" = false
+"features" = ["std", "parking_lot", "metal", "gles", "vulkan", "wgsl", "webgpu"]
+
+["target"."cfg(not(any(target_os = \"linux\", target_os = \"freebsd\")))"]
+
+["target"."cfg(not(any(target_os = \"linux\", target_os = \"freebsd\")))"."dependencies"]
+
+["target"."cfg(not(any(target_os = \"linux\", target_os = \"freebsd\")))"."dependencies"."wgpu"]
+"version" = "29.0"
+"default-features" = true
+
+["target"."cfg(target_family = \"wasm\")"]
+
+["target"."cfg(target_family = \"wasm\")"."dependencies"]
+
+["target"."cfg(target_family = \"wasm\")"."dependencies"."web-sys"]
+"version" = "0.3"
+"features" = ["HtmlCanvasElement"]
+
+["target"."cfg(target_family = \"wasm\")"."dependencies"."wgpu"]
+"version" = "29.0"
+"default-features" = false
+"features" = ["webgl"]
+
+["dev-dependencies"]
+
+["dev-dependencies"."criterion"]
+"version" = "0.8.2"
+"features" = ["html_reports"]
+
+["dev-dependencies"."gpui"]
+"default-features" = false
+"features" = ["bench-support"]
+"git" = "https://github.com/zed-industries/zed"
+"rev" = "df48a139ce9c292738b523252c12f044697e673f"
+
+["dev-dependencies"."image"]
+"version" = "0.25.1"
+"default-features" = false
+"features" = ["bmp", "dds", "exr", "ff", "gif", "hdr", "ico", "jpeg", "png", "pnm", "qoi", "rayon", "tga", "tiff", "webp"]
+
+["dev-dependencies"."naga"]
+"version" = "29.0.4"
+"features" = ["wgsl-in"]
+
+# Standalone regression-test root; the application supplies its own patches.
+[workspace]
+resolver = "3"
+
+[patch."https://github.com/zed-industries/zed"]
+gpui = { path = "../gpui" }
+gpui_wgpu = { path = "." }

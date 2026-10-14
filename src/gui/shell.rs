@@ -42,6 +42,7 @@ impl Render for GuiApp {
         let paint_visualizer = self.audio_visualizer.clone();
         let paint_waveform = self.waveform.read(cx).image_releaser();
         let paint_artwork = self.artwork_view.clone();
+        let paint_album_artwork = self.album_artwork.read(cx).image_releaser();
         let root = self.layouts.current_mut().root.take();
         let layout_view = root
             .as_ref()
@@ -324,6 +325,7 @@ impl Render for GuiApp {
                         paint_waveform.release_retired(window);
                         paint_visualizer.release_retired_images(window);
                         paint_artwork.release_retired(window);
+                        paint_album_artwork.release_retired(window);
                         paint_visuals.finish_prepaint();
                     },
                 )
@@ -565,7 +567,7 @@ impl Render for GuiApp {
                 });
                 if matches!(
                     kind,
-                    "spectrum" | "waveform" | "spectrogram" | "audio_visualizer"
+                    "spectrum" | "waveform" | "spectrogram" | "audio_visualizer" | "album_artwork"
                 ) {
                     visualizations = visualizations.child(choice);
                 } else {

@@ -700,7 +700,7 @@ pub enum Command {
     },
     DismissError,
     Configure {
-        config: crate::config::Config,
+        config: Arc<crate::config::Config>,
     },
     MprisStatus {
         status: String,
