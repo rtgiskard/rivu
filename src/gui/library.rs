@@ -480,7 +480,7 @@ impl GuiApp {
                                 DirectoryRow::Track(track) => (
                                     LibraryNode::Track(track.id),
                                     track.title.clone(),
-                                    track_detail(track),
+                                    String::new(),
                                     None,
                                 ),
                             };
@@ -591,7 +591,7 @@ impl GuiApp {
                                 .overflow_hidden()
                                 .child(tree_guides(this.browser.library.tree(), index))
                                 .child(name_content);
-                            let row_view = super::components::row_tooltip(
+                            let row_view = super::components::lazy_row_tooltip(
                                 super::tree_row(
                                     gpui::ElementId::named_usize("library-node", index),
                                     0,
@@ -630,7 +630,13 @@ impl GuiApp {
                                     },
                                 ),
                                 tooltip_title,
-                                detail,
+                                {
+                                    let entry = visible.row;
+                                    move || match &entry {
+                                        DirectoryRow::Track(track) => track_detail(track).into(),
+                                        DirectoryRow::Directory { .. } => detail.clone().into(),
+                                    }
+                                },
                             )
                             .when(!this.library_range_pending(), |view| {
                                 let app = cx.entity();
