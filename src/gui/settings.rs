@@ -1430,8 +1430,9 @@ impl Settings {
                         .flex_1(),
                     )
                     .child(
-                        button(
+                        icon_button(
                             "settings-artwork-cache-calculate",
+                            "󰃬",
                             "Calculate usage",
                             cx,
                             |this, _, cx| this.maintain_artwork_cache(false, cx),
@@ -1439,8 +1440,9 @@ impl Settings {
                         .when(busy, |control| control.opacity(0.4).cursor_default()),
                     )
                     .child(
-                        button(
+                        icon_button(
                             "settings-artwork-cache-clean",
+                            "󰆴",
                             "Clean expired",
                             cx,
                             |this, _, cx| this.maintain_artwork_cache(true, cx),
@@ -1630,31 +1632,35 @@ impl Settings {
         .child(self.measurement(Measured::SettingsLogLevel));
         let logging = settings_group(
             "Logging",
-            row()
-                .items_center()
-                .flex_wrap()
-                .gap_3()
+            column()
+                .gap_2()
                 .child(
-                    column()
-                        .flex_1()
-                        .min_w(px(180.))
-                        .gap_1()
-                        .child(caption("Log level"))
-                        .child(log_level_dropdown),
+                    row()
+                        .items_start()
+                        .flex_wrap()
+                        .gap_3()
+                        .child(
+                            column()
+                                .flex_1()
+                                .min_w(px(180.))
+                                .gap_1()
+                                .child(caption("Log level"))
+                                .child(log_level_dropdown),
+                        )
+                        .child(
+                            self.field(Field::LogRetentionWeeks)
+                                .flex_1()
+                                .min_w(px(180.)),
+                        ),
                 )
-                .child(
-                    self.field(Field::LogRetentionWeeks)
-                        .flex_1()
-                        .min_w(px(180.)),
-                )
-                .child(visual_switch(
+                .child(row().child(visual_switch(
                     "settings-log-file",
                     "",
                     "Write logs to disk",
                     draft.log_to_file,
                     cx,
                     |draft| draft.log_to_file = !draft.log_to_file,
-                )),
+                ))),
         );
         let library = settings_group(
             "Library",
@@ -1736,17 +1742,29 @@ impl Settings {
                     self.font_control(cx).min_w(px(180.)),
                     self.field(Field::Scale).min_w(px(180.)),
                 ))
-                .child(two_column(
-                    row().child(visual_switch(
-                        "settings-layout-snapping",
-                        "󰐃",
-                        "Layout snapping",
-                        self.draft.layout_snap_enabled,
-                        cx,
-                        |draft| draft.layout_snap_enabled = !draft.layout_snap_enabled,
-                    )),
-                    self.field(Field::LayoutSnapGrid).min_w(px(180.)),
-                ))
+                .child(
+                    Field::LayoutSnapGrid.form(
+                        row()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(self.inputs[&Field::LayoutSnapGrid].clone()),
+                            )
+                            .child(
+                                visual_switch(
+                                    "settings-layout-snapping",
+                                    "󰐃",
+                                    "Layout snapping",
+                                    self.draft.layout_snap_enabled,
+                                    cx,
+                                    |draft| draft.layout_snap_enabled = !draft.layout_snap_enabled,
+                                )
+                                .size(px(36.)),
+                            ),
+                    ),
+                )
                 .child(
                     row()
                         .flex_wrap()
@@ -2118,16 +2136,13 @@ impl Settings {
                 }
                 let content = column().gap_3()
                     .child(display)
-                    .child(settings_group("Response & glow", column().gap_2()
+                    .child(settings_group("Response & motion", column().gap_2()
                         .child(settings.single(Field::AudioVisualizerDb))
                         .child(settings.pair(Field::AudioVisualizerSensitivity, Field::AudioVisualizerBloomIntensity))
-                        .id("settings-visualizer-response-help")
-                        .tooltip(settings_tooltip("Effect parameters are shared by all instances, regardless of the default style. Fractal styles: silence fades the light; pause freezes it. Pulses follow energy rises, not detected beats."))))
-                    .child(settings_group("Shape & motion", column().gap_2()
                         .child(settings.pair(Field::AudioVisualizerInnerDiameter, Field::AudioVisualizerRotationSpeed))
                         .child(row().child(visual_switch("audio-visualizer-fade-idle", "", "Fade when idle", draft.audio_visualizer_fade_when_idle, cx, |draft| draft.audio_visualizer_fade_when_idle = !draft.audio_visualizer_fade_when_idle)))
-                        .id("settings-visualizer-motion-help")
-                        .tooltip(settings_tooltip("Effect parameters are shared by all instances. Controls the Bars, Rings and Bars + Rings styles."))))
+                        .id("settings-visualizer-response-motion-help")
+                        .tooltip(settings_tooltip("Effect parameters are shared by all instances, regardless of the default style. Inner diameter, rotation and Fade when idle control the Bars, Rings and Bars + Rings styles. Fractal styles: silence fades the light; pause freezes it. Pulses follow energy rises, not detected beats."))))
                     .child(settings_group("Bars & rings", column().gap_2()
                         .child(settings.pair(Field::AudioVisualizerBarWidth, Field::AudioVisualizerBarGlowLayers))
                         .child(settings.single(Field::AudioVisualizerRingOpacity))
@@ -2166,7 +2181,7 @@ impl Settings {
                                 ))
                                 .child(visual_switch(
                                     "waveform-seek",
-                                    "󱀞",
+                                    "",
                                     "Click and drag to seek",
                                     draft.waveform_seek_enabled,
                                     cx,
