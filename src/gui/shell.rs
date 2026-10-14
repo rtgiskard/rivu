@@ -91,6 +91,15 @@ impl Render for GuiApp {
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = event.keystroke.key.as_str();
+                if this.playlist_editor.is_some() {
+                    if key == "escape" {
+                        this.cancel_playlist_name(window, cx);
+                        cx.stop_propagation();
+                    } else if !this.input_focused(window, cx) {
+                        cx.stop_propagation();
+                    }
+                    return;
+                }
                 if this.duplicate_review.open {
                     if key == "escape" {
                         this.close_duplicate_review(window, cx);
@@ -206,6 +215,7 @@ impl Render for GuiApp {
                 let modal = this.settings_open
                     || this.about_open
                     || this.duplicate_review.open
+                    || this.playlist_editor.is_some()
                     || this.app_menu_open
                     || this.panel_menu.is_some()
                     || this.catalog_open;
@@ -984,15 +994,7 @@ impl Render for GuiApp {
                             "queue-create-playlist",
                             "Save selected queue as new playlist",
                             cx,
-                            |this, _, cx| {
-                                let name = this.value(Field::PlaylistName, cx).trim().to_owned();
-                                if name.is_empty() {
-                                    this.panel_error(
-                                        "Enter a playlist name in Playlists first.",
-                                        cx,
-                                    );
-                                    return;
-                                }
+                            |this, window, cx| {
                                 let mut seen = HashSet::new();
                                 let track_ids: Vec<_> = this
                                     .browser
@@ -1005,9 +1007,12 @@ impl Render for GuiApp {
                                 if track_ids.is_empty() {
                                     return;
                                 }
-                                this.panel_menu = None;
-                                this.send(
-                                    Command::CreatePlaylistWithTracks { name, track_ids },
+                                this.begin_playlist_name(
+                                    super::playlist_editor::PlaylistNameAction::Create {
+                                        track_ids,
+                                    },
+                                    String::new(),
+                                    window,
                                     cx,
                                 );
                             },
@@ -1111,6 +1116,9 @@ impl Render for GuiApp {
             );
         }
 
+        if self.playlist_editor.is_some() {
+            app = app.child(self.playlist_name_dialog(cx));
+        }
         if self.layouts_open {
             app = app.child(self.layouts_panel(window, cx));
         }

@@ -983,35 +983,92 @@ impl GuiApp {
                 ),
             ))
             .child(
-                row()
-                    .items_end()
-                    .gap_2()
-                    .child(
-                        self.panel_field(Field::PlaylistName, "Playlist name")
-                            .flex_1(),
-                    )
+                panel_toolbar()
                     .child(icon_button(
                         ("playlist-create", panel_id),
                         "",
-                        "Create playlist",
+                        "New playlist…",
                         cx,
-                        |this, _, cx| {
-                            let name = this.value(Field::PlaylistName, cx).trim().to_owned();
-                            if name.is_empty() {
-                                this.panel_error("Enter a playlist name first.", cx);
-                            } else {
-                                this.send(Command::CreatePlaylist { name }, cx);
-                            }
+                        |this, window, cx| {
+                            this.begin_playlist_name(
+                                super::playlist_editor::PlaylistNameAction::Create {
+                                    track_ids: Vec::new(),
+                                },
+                                String::new(),
+                                window,
+                                cx,
+                            );
                         },
-                    )),
+                    ))
+                    .child(icon_button(
+                        ("playlist-import", panel_id),
+                        "",
+                        "Import M3U",
+                        cx,
+                        |this, _, cx| this.choose_playlist_import(cx),
+                    ))
+                    .when(playlist_id.is_some(), |bar| {
+                        let id = playlist_id.expect("selected playlist");
+                        let selected_name = selected_name.clone();
+                        bar.child(icon_button(
+                            ("playlist-add", panel_id),
+                            "",
+                            "Add selected tracks",
+                            cx,
+                            move |this, _, cx| {
+                                this.send(
+                                    Command::AddPlaylist {
+                                        playlist_id: id,
+                                        track_ids: this.panel_selected_tracks(),
+                                    },
+                                    cx,
+                                )
+                            },
+                        ))
+                        .child(icon_button(
+                            ("playlist-play", panel_id),
+                            "󰐊",
+                            "Play playlist",
+                            cx,
+                            move |this, _, cx| {
+                                this.send(Command::PlayPlaylist { playlist_id: id }, cx)
+                            },
+                        ))
+                        .child(icon_button(
+                            ("playlist-export", panel_id),
+                            "",
+                            "Export playlist",
+                            cx,
+                            move |this, _, cx| this.choose_playlist_export(id, cx),
+                        ))
+                        .child(icon_button(
+                            ("playlist-rename", panel_id),
+                            "",
+                            "Rename playlist",
+                            cx,
+                            move |this, window, cx| {
+                                this.begin_playlist_name(
+                                    super::playlist_editor::PlaylistNameAction::Rename {
+                                        playlist_id: id,
+                                    },
+                                    selected_name.clone(),
+                                    window,
+                                    cx,
+                                );
+                            },
+                        ))
+                        .child(icon_button(
+                            ("playlist-delete", panel_id),
+                            "",
+                            "Delete playlist",
+                            cx,
+                            move |this, _, cx| {
+                                this.browser.remove_playlist_selection();
+                                this.send(Command::DeletePlaylist { playlist_id: id }, cx);
+                            },
+                        ))
+                    }),
             )
-            .child(panel_toolbar().child(icon_button(
-                ("playlist-import", panel_id),
-                "",
-                "Import M3U",
-                cx,
-                |this, _, cx| this.choose_playlist_import(cx),
-            )))
             .child(list_viewport(
                 uniform_list(
                     ("playlist-catalog", panel_id),
@@ -1058,7 +1115,7 @@ impl GuiApp {
                 .w_full()
                 .track_scroll(&self.browser.playlists.summaries().scroll),
             ));
-        if let Some(id) = playlist_id {
+        if playlist_id.is_some() {
             self.scroll_views.register_list(
                 ("playlist-entries", panel_id),
                 &self.browser.playlists.entries().scroll,
@@ -1067,69 +1124,7 @@ impl GuiApp {
                 .child(caption(format!("{} · {entry_count} tracks", selected_name)).truncate())
                 .child(
                     panel_toolbar()
-                        .child(icon_button(
-                            ("playlist-add", panel_id),
-                            "",
-                            "Add selected tracks",
-                            cx,
-                            move |this, _, cx| {
-                                this.send(
-                                    Command::AddPlaylist {
-                                        playlist_id: id,
-                                        track_ids: this.panel_selected_tracks(),
-                                    },
-                                    cx,
-                                )
-                            },
-                        ))
-                        .child(icon_button(
-                            ("playlist-play", panel_id),
-                            "󰐊",
-                            "Play playlist",
-                            cx,
-                            move |this, _, cx| {
-                                this.send(Command::PlayPlaylist { playlist_id: id }, cx)
-                            },
-                        ))
-                        .child(icon_button(
-                            ("playlist-export", panel_id),
-                            "",
-                            "Export playlist",
-                            cx,
-                            move |this, _, cx| this.choose_playlist_export(id, cx),
-                        ))
-                        .child(icon_button(
-                            ("playlist-rename", panel_id),
-                            "",
-                            "Rename playlist",
-                            cx,
-                            move |this, _, cx| {
-                                let name = this.value(Field::PlaylistName, cx).trim().to_owned();
-                                if name.is_empty() {
-                                    this.panel_error("Enter a playlist name first.", cx);
-                                } else {
-                                    this.send(
-                                        Command::RenamePlaylist {
-                                            playlist_id: id,
-                                            name,
-                                        },
-                                        cx,
-                                    );
-                                }
-                            },
-                        ))
-                        .child(icon_button(
-                            ("playlist-delete", panel_id),
-                            "",
-                            "Delete playlist",
-                            cx,
-                            move |this, _, cx| {
-                                this.browser.remove_playlist_selection();
-                                this.send(Command::DeletePlaylist { playlist_id: id }, cx);
-                            },
-                        ))
-                        .child(caption("Playlist").text_xs().text_color(rgb(MUTED)))
-                        .child(div().w(px(1.)).h(px(20.)).bg(rgb(BORDER)))
+                        .child(caption("Track").text_xs().text_color(rgb(MUTED)))
                         .when(
                             self.browser.playlists.selected_entry().is_some()
                                 && !self.browser.playlists.entry_ready(),

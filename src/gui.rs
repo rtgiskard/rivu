@@ -9,6 +9,7 @@ mod library;
 mod metadata;
 mod paged;
 mod panels;
+mod playlist_editor;
 mod queries;
 mod queue;
 mod scrolling;
@@ -391,6 +392,7 @@ pub(super) struct GuiApp {
     artwork_view: artwork::ArtworkView,
     queue_save_pending: bool,
     queue_save_feedback: Option<Result<String, String>>,
+    playlist_editor: Option<playlist_editor::PlaylistEditor>,
     settings: Entity<settings::Settings>,
     visuals: visualization::Visuals,
     audio_visualizer: visualization::AudioVisualizer,
@@ -706,6 +708,19 @@ impl GuiApp {
                 }
             },
         ));
+        subscriptions.push(cx.subscribe_in(
+            &inputs[&Field::PlaylistName],
+            window,
+            |this, _, event, window, cx| match event {
+                InputEvent::Submit => this.submit_playlist_name(window, cx),
+                InputEvent::Changed { .. } => {
+                    if let Some(editor) = this.playlist_editor.as_mut() {
+                        editor.error = None;
+                    }
+                    cx.notify();
+                }
+            },
+        ));
         for field in [Field::Title, Field::Artist, Field::Album] {
             subscriptions.push(cx.subscribe(&inputs[&field], move |this, _, event, cx| {
                 if let InputEvent::Changed { user } = event {
@@ -772,6 +787,7 @@ impl GuiApp {
             error,
             queue_save_pending: false,
             queue_save_feedback: None,
+            playlist_editor: None,
             artwork_manager,
             artwork_loader: artwork::ArtworkLoader::default(),
             artwork_view: artwork::ArtworkView::default(),
