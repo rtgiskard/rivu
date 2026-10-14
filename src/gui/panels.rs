@@ -428,11 +428,41 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let total = self.browser.library.tree().root_total();
-        let tools = panel_toolbar()
+        let range_pending = self.library_range_pending();
+        let selected_directories = self
+            .browser
+            .library
+            .selected_nodes()
+            .iter()
+            .filter(|node| matches!(node, super::library::LibraryNode::Directory(_)))
+            .count();
+        let selection_label = if range_pending {
+            "Selecting…".to_owned()
+        } else if selected_directories > 0 && self.browser.library.selected().is_empty() {
+            format!("{selected_directories} folders selected")
+        } else if selected_directories > 0 {
+            format!(
+                "{} tracks · {selected_directories} folders selected",
+                self.browser.library.selected().len()
+            )
+        } else if !self.browser.library.selected().is_empty() {
+            format!("{} tracks selected", self.browser.library.selected().len())
+        } else {
+            format!("{total} entries")
+        };
+        let can_edit_tracks = !range_pending && !self.browser.library.selected().is_empty();
+        let mut tools = panel_toolbar();
+        tools = tools
             .when(!tab_bar_visible, |tools| {
                 tools.child(div().text_sm().text_color(rgb(TEXT)).child("Library"))
             })
-            .child(caption(format!("{total} entries")).flex_shrink_0())
+            .child(
+                caption(selection_label)
+                    .w(gpui::rems(6.))
+                    .flex_1()
+                    .min_w_0()
+                    .truncate(),
+            )
             .child(icon_button(
                 ("library-view", panel_id),
                 if self.browser.library.tree_active() {
@@ -497,42 +527,17 @@ impl GuiApp {
                 ),
                 self.browser.library.force_scan(),
             ));
-        let range_pending = self.library_range_pending();
-        let selected_directories = self
-            .browser
-            .library
-            .selected_nodes()
-            .iter()
-            .filter(|node| matches!(node, super::library::LibraryNode::Directory(_)))
-            .count();
-        let selection_label = if range_pending {
-            "Selecting…".to_owned()
-        } else if selected_directories > 0 && self.browser.library.selected().is_empty() {
-            format!("{selected_directories} folders selected")
-        } else if selected_directories > 0 {
-            format!(
-                "{} tracks · {selected_directories} folders selected",
-                self.browser.library.selected().len()
-            )
-        } else if !self.browser.library.selected().is_empty() {
-            format!("{} tracks selected", self.browser.library.selected().len())
-        } else {
-            String::new()
-        };
-        let has_selection = !selection_label.is_empty();
-        let mut selection_tools = panel_toolbar()
-            .h(gpui::rems(2.))
-            .min_h(gpui::rems(2.))
-            .child(caption(selection_label).flex_1().min_w_0().truncate());
-        if !range_pending && !self.browser.library.selected().is_empty() {
-            selection_tools = selection_tools
-                .child(icon_button(
+        tools = tools
+            .child(
+                icon_button(
                     ("library-enqueue", panel_id),
                     "󰐕",
                     "Append selected tracks to queue",
                     cx,
                     |this, _, cx| {
-                        if this.library_range_pending() {
+                        if this.library_range_pending()
+                            || this.browser.library.selected().is_empty()
+                        {
                             return;
                         }
                         this.send(
@@ -542,14 +547,19 @@ impl GuiApp {
                             cx,
                         )
                     },
-                ))
-                .child(icon_button(
+                )
+                .opacity(if can_edit_tracks { 1.0 } else { 0.4 }),
+            )
+            .child(
+                icon_button(
                     ("library-remove", panel_id),
                     "󰆴",
                     "Remove selected tracks from library",
                     cx,
                     |this, _, cx| {
-                        if this.library_range_pending() {
+                        if this.library_range_pending()
+                            || this.browser.library.selected().is_empty()
+                        {
                             return;
                         }
                         this.send(
@@ -559,8 +569,9 @@ impl GuiApp {
                             cx,
                         )
                     },
-                ));
-        }
+                )
+                .opacity(if can_edit_tracks { 1.0 } else { 0.4 }),
+            );
         let mut panel = panel_surface(("library-panel", panel_id))
             .child(tools)
             .child(
@@ -568,8 +579,7 @@ impl GuiApp {
                     .w_full()
                     .flex_shrink_0()
                     .child(self.input(Field::Search)),
-            )
-            .when(has_selection, |panel| panel.child(selection_tools));
+            );
         if self.state.system.scan_progress.is_some() || self.state.system.scanning {
             panel = panel.child(self.library_scan_status(panel_id, cx));
         }
