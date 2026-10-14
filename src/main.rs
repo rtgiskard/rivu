@@ -579,10 +579,7 @@ fn run() -> Result<()> {
         }
         Action::Quit => {
             let ack = ipc::request_ack(&data_dir, &rivu::app::AppCommand::Shutdown)?;
-            if !ack.ok {
-                bail!("{}", ack.error.as_deref().unwrap_or("Command failed"));
-            }
-            Ok(())
+            show_ack(&ack, args.json)
         }
         action => {
             let (command, wait_scan) = translate(action)?;
