@@ -84,6 +84,14 @@ The close icon leaves undecided pairs unchanged. `Keep destination independent`
 persists a decision that excludes that row from automatic and manual relocation,
 including after rescanning. No audio files are deleted.
 
+Eligible rows offer `Use as old record` or `Use as destination`. A destination
+with user state or references shows a rejection warning; old records and
+ineligible rows retain that information as metadata. Group and file paging are
+independent, and paging files preserves the selected old identity and destination.
+During confirmation, group selection, role selection and both pagers are locked.
+Use Back to selection to revise the pair, Refresh to reset, or Close to leave
+undecided files unchanged.
+
 Confirmation starts one background full-file verification at a time. Rivu checks
 the destination's fresh hash and stable file identity, then revalidates database
 identities and source absence before committing atomically. The old ID, overrides,

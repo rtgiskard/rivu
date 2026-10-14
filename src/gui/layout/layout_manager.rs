@@ -141,7 +141,7 @@ impl GuiApp {
         let mut content = column().gap_2().child(
             row()
                 .child(div().flex_1().text_lg().child("Layouts"))
-                .child(icon_button(
+                .child(components::quiet_icon_button(icon_button(
                     "layouts-close",
                     "",
                     "Close layouts",
@@ -152,7 +152,7 @@ impl GuiApp {
                         this.focus_layout(window, cx);
                         cx.notify();
                     },
-                )),
+                ))),
         );
         if let Some(action) = self.layout_action.clone() {
             let (title, submit) = match &action {
@@ -184,9 +184,12 @@ impl GuiApp {
                         },
                     ))
                     .child(if matches!(action, Action::Delete(_)) {
-                        button("layout-action-submit", submit, cx, |this, window, cx| {
-                            this.finish_layout_action(window, cx)
-                        })
+                        components::danger_control(button(
+                            "layout-action-submit",
+                            submit,
+                            cx,
+                            |this, window, cx| this.finish_layout_action(window, cx),
+                        ))
                     } else {
                         icon_button(
                             "layout-action-submit",
@@ -202,7 +205,7 @@ impl GuiApp {
             for (index, name) in self.layouts.names().enumerate() {
                 let current = name == self.layouts.active_name();
                 let target = name.to_owned();
-                let mut choice = row().child(
+                let mut choice = row().group("layout-choice-row").child(
                     menu_item(
                         ("layout-select", index),
                         if current {
@@ -217,15 +220,25 @@ impl GuiApp {
                 );
                 if !current {
                     let name = name.to_owned();
-                    choice = choice.child(icon_button(
-                        ("layout-delete", index),
-                        "󰆴",
-                        format!("Delete layout “{name}”…"),
-                        cx,
-                        move |this, window, cx| {
-                            this.begin_layout_action(Action::Delete(name.clone()), window, cx)
-                        },
-                    ));
+                    choice = choice.child(
+                        components::quiet_icon_button(icon_button(
+                            ("layout-delete", index),
+                            "󰆴",
+                            format!("Delete layout “{name}”…"),
+                            cx,
+                            move |this, window, cx| {
+                                this.begin_layout_action(Action::Delete(name.clone()), window, cx)
+                            },
+                        ))
+                        .opacity(0.)
+                        .group_hover("layout-choice-row", |style| style.opacity(1.))
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            |_, _, cx| {
+                                cx.stop_propagation();
+                            },
+                        ),
+                    );
                 }
                 choices = choices.child(choice);
             }
