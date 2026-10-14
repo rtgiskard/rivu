@@ -198,7 +198,7 @@ impl GuiApp {
                 self.state.playback.repeat != RepeatMode::Off,
             ));
         let volume_control = row()
-            .w(px(172.))
+            .w(gpui::rems(10.75))
             .max_w(gpui::relative(1.))
             .flex_shrink_0()
             .child(
@@ -219,7 +219,8 @@ impl GuiApp {
             .child(div().flex_1().min_w_0().child(volume))
             .child(
                 caption(format!("{:.0}%", self.state.playback.volume * 100.))
-                    .w(px(34.))
+                    .w(gpui::rems(2.5))
+                    .whitespace_nowrap()
                     .flex_shrink_0(),
             );
         let scroll = self.scroll_views.content(("transport", panel_id));
