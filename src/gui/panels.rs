@@ -1600,256 +1600,337 @@ impl GuiApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.sync_metadata_inputs(cx);
         self.prepare_artwork(cx);
-        let mut panel = panel_surface(("metadata-panel", panel_id));
-        if let Some(track) = self.metadata.track() {
-            let id = track.id;
-            let favorite = track.favorite;
-            let metadata_dirty = self.metadata_dirty(cx) && !self.metadata.saving();
-            let file_path = if track.missing {
-                "Missing".to_owned()
-            } else {
-                track.path.to_string_lossy().into_owned()
-            };
-            let last_played = self.last_played_text(id, track.last_played);
-            let last_played = last_played
-                .strip_prefix("Last played · ")
-                .unwrap_or(&last_played)
-                .to_owned();
-            let file: [[(&'static str, SharedString); 2]; 1] = [[
-                ("File path", file_path.into()),
-                (
-                    "Availability",
-                    if track.missing {
-                        "Missing"
-                    } else {
-                        "Available"
-                    }
-                    .into(),
-                ),
-            ]];
-            let metadata: [[(&'static str, SharedString); 2]; 3] = [
-                [
-                    (
-                        "Codec",
-                        if track.codec.is_empty() {
-                            "—".into()
-                        } else {
-                            track.codec.clone().into()
-                        },
-                    ),
-                    (
-                        "Sample rate",
-                        if track.sample_rate == 0 {
-                            "—".into()
-                        } else {
-                            format!("{} Hz", track.sample_rate).into()
-                        },
-                    ),
-                ],
-                [
-                    (
-                        "Channels",
-                        if track.channels == 0 {
-                            "—".into()
-                        } else {
-                            track.channels.to_string().into()
-                        },
-                    ),
-                    (
-                        "Duration",
-                        track
-                            .duration
-                            .map_or("—".into(), |value| format_time(value).into()),
-                    ),
-                ],
-                [
-                    (
-                        "Bitrate",
-                        track.bitrate_bps.map_or("—".into(), |value| {
-                            format!("{:.1} kbps", value as f64 / 1000.0).into()
-                        }),
-                    ),
-                    (
-                        "Bits/sample",
-                        track
-                            .bits_per_sample
-                            .map_or("—".into(), |value| value.to_string().into()),
-                    ),
-                ],
-            ];
-            let disc: (&'static str, SharedString) = (
-                "Disc",
-                track
-                    .disc_number
-                    .map_or("—".into(), |value| value.to_string().into()),
+        let track = self.metadata.track();
+        let id = track.map(|track| track.id);
+        let favorite = track.is_some_and(|track| track.favorite);
+        let ready = self.metadata.ready();
+        let metadata_dirty = ready && self.metadata_dirty(cx) && !self.metadata.saving();
+        let selected = self.metadata.selected();
+        let can_retry = selected.is_some()
+            && matches!(
+                self.metadata.load_state(),
+                super::metadata::MetadataLoadState::Failed(_)
             );
-            let tags: [[(&'static str, SharedString); 2]; 2] = [
-                [
-                    (
-                        "Track",
-                        track
-                            .track_number
-                            .map_or("—".into(), |value| value.to_string().into()),
+        let placeholder: SharedString = "Not loaded".into();
+        let status: SharedString = match self.metadata.load_state() {
+            super::metadata::MetadataLoadState::Empty => "No track selected".into(),
+            super::metadata::MetadataLoadState::Loading => "Loading track details…".into(),
+            super::metadata::MetadataLoadState::Ready => "Ready".into(),
+            super::metadata::MetadataLoadState::Unavailable => "Track unavailable".into(),
+            super::metadata::MetadataLoadState::Failed(error) => {
+                format!("Could not load track details: {error}").into()
+            }
+        };
+        let heading = self
+            .metadata
+            .selected()
+            .or(id)
+            .map_or_else(|| "Track details".to_owned(), |id| format!("Track #{id}"));
+        let file: [[(&'static str, SharedString); 2]; 1] = [[
+            (
+                "File path",
+                track.map_or_else(
+                    || placeholder.clone(),
+                    |track| {
+                        if track.missing {
+                            "Missing".into()
+                        } else {
+                            track.path.to_string_lossy().into_owned().into()
+                        }
+                    },
+                ),
+            ),
+            (
+                "Availability",
+                track.map_or_else(
+                    || placeholder.clone(),
+                    |track| {
+                        if track.missing {
+                            "Missing".into()
+                        } else {
+                            "Available".into()
+                        }
+                    },
+                ),
+            ),
+        ]];
+        let metadata: [[(&'static str, SharedString); 2]; 3] = [
+            [
+                (
+                    "Codec",
+                    track.map_or_else(
+                        || placeholder.clone(),
+                        |track| {
+                            if track.codec.is_empty() {
+                                "—".into()
+                            } else {
+                                track.codec.clone().into()
+                            }
+                        },
                     ),
-                    (
-                        "Release",
-                        track.release_date.as_deref().unwrap_or("—").into(),
+                ),
+                (
+                    "Sample rate",
+                    track.map_or_else(
+                        || placeholder.clone(),
+                        |track| {
+                            if track.sample_rate == 0 {
+                                "—".into()
+                            } else {
+                                format!("{} Hz", track.sample_rate).into()
+                            }
+                        },
                     ),
-                ],
-                [
-                    ("Play count", track.play_count.to_string().into()),
-                    ("Last played", last_played.into()),
-                ],
-            ];
-            // Measure the actual labels once per render using the same font and
-            // text-xs size as captions; GPUI caches the shaped lines. Every card
-            // shares these two widths, so values and column boundaries stay aligned.
-            let label_widths = std::array::from_fn(|index| {
-                file.iter()
-                    .chain(&metadata)
-                    .chain(&tags)
-                    .map(|fields| fields[index].0)
-                    .chain((index == 1).then_some(disc.0))
-                    .map(|label| {
-                        let run = gpui::TextRun {
-                            len: label.len(),
-                            font: self.ui_font.clone(),
-                            color: rgb(MUTED).into(),
-                            background_color: None,
-                            underline: None,
-                            strikethrough: None,
-                        };
-                        let line = window.text_system().shape_line(
-                            label.into(),
-                            window.rem_size() * 0.75,
-                            &[run],
-                            None,
-                        );
-                        line.width().ceil()
-                    })
-                    .fold(px(0.), gpui::Pixels::max)
-            });
-            let scroll = self.scroll_views.content(("metadata", panel_id));
-            let details = div()
-                .id(("metadata-details", panel_id))
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .track_scroll(&scroll)
-                .child(
-                    column()
-                        .flex_shrink_0()
-                        .p(px(UI_INSET))
-                        .gap_3()
-                        .child(
-                            row()
-                                .justify_between()
-                                .items_center()
-                                .child(
-                                    caption(format!("Track #{id}"))
-                                        .text_lg()
-                                        .text_color(rgb(TEXT)),
-                                )
-                                .child(
-                                    row()
-                                        .gap_2()
-                                        .child(icon_button(
-                                            ("metadata-favorite", panel_id),
-                                            if favorite { "󰓎" } else { "󰓐" },
-                                            if favorite {
-                                                "Remove from favorites"
-                                            } else {
-                                                "Add to favorites"
-                                            },
-                                            cx,
-                                            move |this, _, cx| {
-                                                this.send(
-                                                    Command::SetFavorite {
-                                                        track_ids: vec![id],
-                                                        favorite: !favorite,
-                                                    },
-                                                    cx,
-                                                );
-                                            },
-                                        ))
-                                        .child(
-                                            icon_button(
-                                                ("metadata-save", panel_id),
-                                                "󰆓",
-                                                "Save metadata. Media files are never modified.",
-                                                cx,
-                                                |this, _, cx| this.save_metadata(cx),
-                                            )
-                                            .when(!metadata_dirty, |view| {
-                                                view.opacity(0.4).cursor_default()
-                                            }),
-                                        ),
-                                ),
-                        )
-                        .child(metadata_group("File", metadata_rows(file, label_widths)))
-                        .child(metadata_group("Metadata", metadata_rows(metadata, label_widths)))
-                        .child(metadata_group(
-                            "Decoder hint",
-                            column()
-                                .gap_2()
-                                .child(
-                                    row().flex_wrap().children(
-                                        [
-                                            ("metadata-decoder-auto", "Auto", DecoderHint::Auto),
-                                            ("metadata-decoder-native", "Native", DecoderHint::Native),
-                                            ("metadata-decoder-ffmpeg", "FFmpeg", DecoderHint::Ffmpeg),
-                                        ]
-                                        .into_iter()
-                                        .map(|(key, label, decoder_hint)| {
-                                            active_control(
-                                                button(
-                                                    (key, panel_id),
-                                                    label,
+                ),
+            ],
+            [
+                (
+                    "Channels",
+                    track.map_or_else(
+                        || placeholder.clone(),
+                        |track| {
+                            if track.channels == 0 {
+                                "—".into()
+                            } else {
+                                track.channels.to_string().into()
+                            }
+                        },
+                    ),
+                ),
+                (
+                    "Duration",
+                    track.map_or_else(
+                        || placeholder.clone(),
+                        |track| {
+                            track
+                                .duration
+                                .map_or("—".into(), |value| format_time(value).into())
+                        },
+                    ),
+                ),
+            ],
+            [
+                (
+                    "Bitrate",
+                    track.map_or_else(
+                        || placeholder.clone(),
+                        |track| {
+                            track.bitrate_bps.map_or("—".into(), |value| {
+                                format!("{:.1} kbps", value as f64 / 1000.0).into()
+                            })
+                        },
+                    ),
+                ),
+                (
+                    "Bits/sample",
+                    track.map_or_else(
+                        || placeholder.clone(),
+                        |track| {
+                            track
+                                .bits_per_sample
+                                .map_or("—".into(), |value| value.to_string().into())
+                        },
+                    ),
+                ),
+            ],
+        ];
+        let disc: (&'static str, SharedString) = (
+            "Disc",
+            track.map_or_else(
+                || placeholder.clone(),
+                |track| {
+                    track
+                        .disc_number
+                        .map_or("—".into(), |value| value.to_string().into())
+                },
+            ),
+        );
+        let tags: [[(&'static str, SharedString); 2]; 2] = [
+            [
+                (
+                    "Track",
+                    track.map_or_else(
+                        || placeholder.clone(),
+                        |track| {
+                            track
+                                .track_number
+                                .map_or("—".into(), |value| value.to_string().into())
+                        },
+                    ),
+                ),
+                (
+                    "Release",
+                    track.map_or_else(
+                        || placeholder.clone(),
+                        |track| {
+                            track
+                                .release_date
+                                .as_deref()
+                                .unwrap_or("—")
+                                .to_owned()
+                                .into()
+                        },
+                    ),
+                ),
+            ],
+            [
+                (
+                    "Play count",
+                    track.map_or_else(
+                        || placeholder.clone(),
+                        |track| track.play_count.to_string().into(),
+                    ),
+                ),
+                (
+                    "Last played",
+                    track.map_or_else(
+                        || placeholder.clone(),
+                        |track| {
+                            let text = self.last_played_text(track.id, track.last_played);
+                            text.strip_prefix("Last played · ")
+                                .unwrap_or(&text)
+                                .to_owned()
+                                .into()
+                        },
+                    ),
+                ),
+            ],
+        ];
+        // Static labels are measured even before values load, using the caption font.
+        // Every card shares the same two column widths.
+        let label_widths = std::array::from_fn(|index| {
+            file.iter()
+                .chain(&metadata)
+                .chain(&tags)
+                .map(|fields| fields[index].0)
+                .chain((index == 1).then_some(disc.0))
+                .map(|label| {
+                    let run = gpui::TextRun {
+                        len: label.len(),
+                        font: self.ui_font.clone(),
+                        color: rgb(MUTED).into(),
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    };
+                    window
+                        .text_system()
+                        .shape_line(label.into(), window.rem_size() * 0.75, &[run], None)
+                        .width()
+                        .ceil()
+                })
+                .fold(px(0.), gpui::Pixels::max)
+        });
+        let scroll = self.scroll_views.content(("metadata", panel_id));
+        let details = div()
+            .id(("metadata-details", panel_id))
+            .flex().flex_col().flex_1().min_h_0()
+            .overflow_y_scroll().track_scroll(&scroll)
+            .child(
+                column().flex_shrink_0().p(px(UI_INSET)).gap_3()
+                    .child(
+                        column().gap_1()
+                            .child(
+                                row().justify_between().items_center()
+                                    .child(caption(heading).text_lg().text_color(rgb(TEXT)))
+                                    .child(
+                                        row().gap_2()
+                                            .child(
+                                                icon_button(
+                                                    ("metadata-favorite", panel_id),
+                                                    if favorite { "󰓎" } else { "󰓐" },
+                                                    if favorite { "Remove from favorites" } else { "Add to favorites" },
                                                     cx,
                                                     move |this, _, cx| {
-                                                        this.metadata_decoder_hint = decoder_hint;
-                                                        cx.notify();
+                                                        let Some((track_id, favorite)) = this.metadata.track()
+                                                            .filter(|track| Some(track.id) == id)
+                                                            .map(|track| (track.id, track.favorite)) else {
+                                                            return;
+                                                        };
+                                                        this.send(Command::SetFavorite {
+                                                            track_ids: vec![track_id], favorite: !favorite,
+                                                        }, cx);
                                                     },
-                                                ),
-                                                self.metadata_decoder_hint == decoder_hint,
+                                                ).when(!ready, |view| view.opacity(0.4).cursor_default()),
                                             )
-                                        }),
+                                            .child(
+                                                icon_button(
+                                                    ("metadata-save", panel_id), "󰆓",
+                                                    "Save metadata. Media files are never modified.", cx,
+                                                    move |this, _, cx| {
+                                                        if this.metadata.track().is_some_and(|track| Some(track.id) == id) {
+                                                            this.save_metadata(cx);
+                                                        }
+                                                    },
+                                                ).when(!metadata_dirty, |view| view.opacity(0.4).cursor_default()),
+                                            )
+                                            .child(
+                                                button(("metadata-retry", panel_id), "Retry", cx, move |this, _, cx| {
+                                                    if this.metadata.selected() == selected
+                                                        && matches!(this.metadata.load_state(), super::metadata::MetadataLoadState::Failed(_))
+                                                        && let Some(id) = selected
+                                                    {
+                                                        this.request_track(id, cx);
+                                                        cx.notify();
+                                                    }
+                                                }).when(!can_retry, |view| view.opacity(0.4).cursor_default()),
+                                            ),
                                     ),
-                                )
-                                .child(caption(
-                                    "Use Save to apply metadata and decoder hint changes together. The saved hint applies on the next track open or full waveform request.",
-                                ).text_xs().text_color(rgb(MUTED)))
-                                .child(caption(
-                                    "FFmpeg requires the extension to be enabled. Native may play DTS-WAV as noise.",
-                                ).text_xs().text_color(rgb(MUTED))),
-                        ))
-                        .child(metadata_group(
-                            "Tags",
-                            column()
-                                .gap_2()
-                                .child(metadata_row(
-                                    self.panel_field(Field::Title, "Title"),
-                                    self.panel_field(Field::Artist, "Artist"),
-                                ))
-                                .child(metadata_row(
-                                    self.panel_field(Field::Album, "Album"),
-                                    metadata_item(disc.0, disc.1, label_widths[1]),
-                                ))
-                                .child(metadata_rows(tags, label_widths).gap_2())
-                                .when_some(self.artwork_view.image(cx), |tags, image| {
-                                    tags.child(artwork_preview(
-                                        image,
-                                        self.artwork_view.aspect_ratio(cx),
-                                    ))
+                            )
+                            .child(
+                                div().id(("metadata-status", panel_id)).min_w_0()
+                                    .h(gpui::rems(1.25))
+                                    .child(caption(status.clone()).text_xs().text_color(rgb(MUTED)).truncate())
+                                    .tooltip(move |_, cx| {
+                                        cx.new(|_| super::ButtonTooltip { text: status.clone() }).into()
+                                    }),
+                            ),
+                    )
+                    .child(metadata_group("File", metadata_rows(file, label_widths)))
+                    .child(metadata_group("Metadata", metadata_rows(metadata, label_widths)))
+                    .child(metadata_group(
+                        "Decoder hint",
+                        column().gap_2()
+                            .child(row().flex_wrap().children(
+                                [
+                                    ("metadata-decoder-auto", "Auto", DecoderHint::Auto),
+                                    ("metadata-decoder-native", "Native", DecoderHint::Native),
+                                    ("metadata-decoder-ffmpeg", "FFmpeg", DecoderHint::Ffmpeg),
+                                ].into_iter().map(|(key, label, decoder_hint)| {
+                                    active_control(
+                                        button((key, panel_id), label, cx, move |this, _, cx| {
+                                            if this.metadata.track().is_some_and(|track| Some(track.id) == id) {
+                                                this.metadata_decoder_hint = decoder_hint;
+                                                cx.notify();
+                                            }
+                                        }),
+                                        ready && self.metadata_decoder_hint == decoder_hint,
+                                    ).when(!ready, |view| view.opacity(0.4).cursor_default())
                                 }),
-                        )),
-                );
-            panel = panel.child(details);
-        }
-        panel.into_any_element()
+                            ))
+                            .child(caption(
+                                "Use Save to apply metadata and decoder hint changes together. The saved hint applies on the next track open or full waveform request.",
+                            ).text_xs().text_color(rgb(MUTED)))
+                            .child(caption(
+                                "FFmpeg requires the extension to be enabled. Native may play DTS-WAV as noise.",
+                            ).text_xs().text_color(rgb(MUTED))),
+                    ))
+                    .child(metadata_group(
+                        "Tags",
+                        column().gap_2()
+                            .child(metadata_row(self.panel_field(Field::Title, "Title"), self.panel_field(Field::Artist, "Artist")))
+                            .child(metadata_row(self.panel_field(Field::Album, "Album"), metadata_item(disc.0, disc.1, label_widths[1])))
+                            .child(metadata_rows(tags, label_widths).gap_2())
+                            .when_some(self.artwork_view.image(cx), |tags, image| {
+                                tags.child(artwork_preview(image, self.artwork_view.aspect_ratio(cx)))
+                            }),
+                    )),
+            );
+        panel_surface(("metadata-panel", panel_id))
+            .child(details)
+            .into_any_element()
     }
 
     fn history_sort_button(

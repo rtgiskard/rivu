@@ -59,13 +59,24 @@ pub(super) struct SaveToken {
     pub(super) track_id: i64,
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) enum MetadataLoadState {
+    #[default]
+    Empty,
+    Loading,
+    Ready,
+    Unavailable,
+    Failed(String),
+}
+
 #[derive(Default)]
 pub(super) struct MetadataSession {
     selected: Option<i64>,
     identity: Option<i64>,
     track: Option<Track>,
     baseline: Option<MetadataValues>,
-    pending_edits: u8,
+    load_state: MetadataLoadState,
+    loading: Option<LoadToken>,
     epoch: u64,
     request: u64,
     saving: Option<SaveToken>,
@@ -78,6 +89,15 @@ impl MetadataSession {
     pub(super) fn track(&self) -> Option<&Track> {
         self.track.as_ref()
     }
+    pub(super) fn load_state(&self) -> &MetadataLoadState {
+        &self.load_state
+    }
+    pub(super) fn ready(&self) -> bool {
+        self.track
+            .as_ref()
+            .is_some_and(|track| self.identity == Some(track.id))
+    }
+
     pub(super) fn saving(&self) -> bool {
         self.saving.is_some()
     }
@@ -91,17 +111,6 @@ impl MetadataSession {
         })
     }
 
-    pub(super) fn edited_before_load(&mut self, field: Field) {
-        if self.baseline.is_none() && self.identity.is_some() {
-            self.pending_edits |= match field {
-                Field::Title => 1,
-                Field::Artist => 2,
-                Field::Album => 4,
-                _ => return,
-            };
-        }
-    }
-
     fn change_identity(&mut self, id: Option<i64>) {
         self.identity = id;
         self.epoch = self.epoch.wrapping_add(1);
@@ -109,7 +118,8 @@ impl MetadataSession {
         self.track = None;
         self.baseline = None;
         self.saving = None;
-        self.pending_edits = 0;
+        self.loading = None;
+        self.load_state = MetadataLoadState::Empty;
     }
 
     /// Returns whether inputs must be cleared before this selection loads.
@@ -130,17 +140,30 @@ impl MetadataSession {
     pub(super) fn begin_load(&mut self, id: i64) -> LoadToken {
         debug_assert_eq!(self.identity, Some(id));
         self.request = self.request.wrapping_add(1);
-        LoadToken {
+        let token = LoadToken {
             epoch: self.epoch,
             request: self.request,
             track_id: id,
-        }
+        };
+        self.loading = Some(token);
+        self.load_state = MetadataLoadState::Loading;
+        token
     }
 
     pub(super) fn accepts_load(&self, token: LoadToken) -> bool {
-        self.epoch == token.epoch
+        self.loading == Some(token)
+            && self.epoch == token.epoch
             && self.request == token.request
             && self.identity == Some(token.track_id)
+    }
+
+    pub(super) fn fail_load(&mut self, token: LoadToken, error: String) -> bool {
+        if !self.accepts_load(token) {
+            return false;
+        }
+        self.loading = None;
+        self.load_state = MetadataLoadState::Failed(error);
+        true
     }
 
     /// `Some(values)` replaces widget text. Dirty drafts keep their old baseline.
@@ -157,8 +180,10 @@ impl MetadataSession {
             .as_ref()
             .is_some_and(|track| track.id != token.track_id)
         {
+            self.fail_load(token, "Received details for a different track".into());
             return None;
         }
+        self.loading = None;
         self.accept_track(track, draft)
     }
 
@@ -168,31 +193,20 @@ impl MetadataSession {
         draft: MetadataDraft<'_>,
     ) -> Option<MetadataValues> {
         let Some(track) = track else {
-            self.change_identity(None);
+            self.track = None;
+            self.baseline = None;
+            self.saving = None;
+            self.load_state = MetadataLoadState::Unavailable;
             return Some(MetadataValues::default());
         };
         let first_load = self.baseline.is_none();
         let replace = first_load || (!self.dirty(draft) && !self.saving());
-        let mut values = replace.then(|| MetadataValues::from_track(&track));
+        let values = replace.then(|| MetadataValues::from_track(&track));
         if let Some(values) = values.as_ref() {
             self.baseline = Some(values.clone());
         }
-        // A formerly focused widget can receive input while the new query loads.
-        // Preserve every user-touched field, including explicitly cleared text.
-        if first_load {
-            let values = values.as_mut().expect("first load supplies a baseline");
-            if self.pending_edits & 1 != 0 {
-                values.title = draft.title.to_owned();
-            }
-            if self.pending_edits & 2 != 0 {
-                values.artist = draft.artist.to_owned();
-            }
-            if self.pending_edits & 4 != 0 {
-                values.album = draft.album.to_owned();
-            }
-            self.pending_edits = 0;
-        }
         self.track = Some(track);
+        self.load_state = MetadataLoadState::Ready;
         values
     }
 
@@ -275,6 +289,8 @@ impl MetadataSession {
         self.saving = None;
         if ok {
             self.request = self.request.wrapping_add(1);
+            self.loading = None;
+            self.load_state = MetadataLoadState::Ready;
             if let (Some(track), Some(baseline)) = (self.track.as_mut(), self.baseline.as_ref()) {
                 // Refreshes may have updated other fields while this save was in flight.
                 // Only the submitted changes are acknowledged; untouched draft fields
@@ -315,11 +331,19 @@ impl GuiApp {
         })
     }
 
+    pub(super) fn sync_metadata_inputs(&mut self, cx: &mut Context<Self>) {
+        let enabled = self.metadata.ready();
+        for field in [Field::Title, Field::Artist, Field::Album] {
+            self.inputs[&field].update(cx, |input, cx| input.set_enabled(enabled, cx));
+        }
+    }
+
     fn set_metadata_values(&mut self, values: MetadataValues, cx: &mut Context<Self>) {
         self.set_value(Field::Title, values.title, cx);
         self.set_value(Field::Artist, values.artist, cx);
         self.set_value(Field::Album, values.album, cx);
         self.metadata_decoder_hint = values.decoder_hint;
+        self.sync_metadata_inputs(cx);
     }
 
     pub(super) fn request_track(&mut self, id: i64, cx: &mut Context<Self>) {
@@ -328,6 +352,7 @@ impl GuiApp {
         }
         self.sync_full_waveform_request();
         let token = self.metadata.begin_load(id);
+        self.sync_metadata_inputs(cx);
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
             // Retain the existing quiet interval without querying superseded selections.
@@ -352,7 +377,8 @@ impl GuiApp {
                 let result = match response.result {
                     Ok(result) => result,
                     Err(error) => {
-                        this.error = Some(error.to_string());
+                        this.metadata.fail_load(token, error.to_string());
+                        this.sync_metadata_inputs(cx);
                         cx.notify();
                         return;
                     }
@@ -372,8 +398,12 @@ impl GuiApp {
                         this.set_metadata_values(values, cx);
                     }
                     this.sync_waveform(cx);
-                    cx.notify();
+                    this.sync_metadata_inputs(cx);
+                } else {
+                    this.metadata
+                        .fail_load(token, "Could not load track details".into());
                 }
+                cx.notify();
             });
         })
         .detach();
@@ -399,6 +429,7 @@ impl GuiApp {
         {
             self.set_metadata_values(values, cx);
         }
+        self.sync_metadata_inputs(cx);
     }
 
     pub(super) fn save_metadata(&mut self, cx: &mut Context<Self>) {
@@ -861,46 +892,105 @@ mod tests {
     }
 
     #[test]
-    fn selection_of_playback_identity_keeps_draft_and_pending_load_preserves_typed_fields() {
+    fn selection_of_playback_identity_keeps_draft() {
         let mut session = MetadataSession::default();
         session.sync_playback(Some(&track(1, "playing")), values("").as_draft());
         assert!(!session.select(1));
         assert!(session.dirty(values("draft").as_draft()));
-        session.select(2);
-        let token = session.begin_load(2);
-        session.edited_before_load(Field::Title);
-        let mut remote = track(2, "loaded");
-        remote.artist = "remote artist".into();
-        let loaded = session
-            .accept_load(
-                token,
-                Some(remote),
-                values("typed while loading").as_draft(),
-            )
-            .unwrap();
-        assert_eq!(loaded.title, "typed while loading");
-        assert_eq!(loaded.artist, "remote artist");
-        assert!(session.dirty(loaded.as_draft()));
     }
 
     #[test]
-    fn pending_user_clear_survives_load_but_switching_track_discards_pending_edits() {
+    fn selection_loading_failure_unavailable_and_retry_are_identity_owned() {
+        let mut session = MetadataSession::default();
+        assert_eq!(session.load_state(), &MetadataLoadState::Empty);
+        assert!(!session.ready());
+        load(&mut session, 1, "one");
+        let old = session.begin_load(1);
+        assert!(session.select(2));
+        let pending = session.begin_load(2);
+        assert_eq!(session.load_state(), &MetadataLoadState::Loading);
+        assert!(session.track().is_none());
+        assert!(!session.ready());
+        assert!(session.begin_save(values("old draft").as_draft()).is_none());
+        assert!(!session.fail_load(old, "late failure".into()));
+        assert!(
+            session
+                .accept_load(old, Some(track(1, "late one")), values("").as_draft())
+                .is_none()
+        );
+        assert_eq!(session.load_state(), &MetadataLoadState::Loading);
+        assert!(session.fail_load(pending, "query failed".into()));
+        assert_eq!(
+            session.load_state(),
+            &MetadataLoadState::Failed("query failed".into())
+        );
+        assert!(!session.accepts_load(pending));
+        assert!(!session.fail_load(pending, "duplicate failure".into()));
+        assert!(!session.ready());
+        assert!(session.begin_save(values("old draft").as_draft()).is_none());
+
+        let retry = session.begin_load(2);
+        session.accept_load(retry, None, values("").as_draft());
+        assert_eq!(session.selected(), Some(2));
+        assert_eq!(session.load_state(), &MetadataLoadState::Unavailable);
+        assert!(!session.ready());
+        assert!(!session.accepts_load(retry));
+        let retry = session.begin_load(2);
+        let loaded = session
+            .accept_load(retry, Some(track(2, "two")), values("").as_draft())
+            .unwrap();
+        assert_eq!(loaded.title, "two");
+        assert!(session.ready());
+        assert_eq!(session.load_state(), &MetadataLoadState::Ready);
+        assert!(!session.accepts_load(retry));
+        session.clear_selection();
+        assert!(!session.fail_load(retry, "after cancellation".into()));
+        assert_eq!(session.load_state(), &MetadataLoadState::Empty);
+        assert!(session.track().is_none());
+    }
+
+    #[test]
+    fn same_track_refresh_keeps_ready_data_and_dirty_draft_through_failure() {
+        let mut session = MetadataSession::default();
+        load(&mut session, 1, "one");
+        let draft = values("draft");
+        assert!(!session.select(1));
+        let token = session.begin_load(1);
+        assert!(session.ready());
+        assert_eq!(session.track().unwrap().title, "one");
+        assert!(session.fail_load(token, "refresh failed".into()));
+        assert!(session.ready());
+        assert!(session.dirty(draft.as_draft()));
+        assert_eq!(session.track().unwrap().title, "one");
+        let retry = session.begin_load(1);
+        assert!(
+            session
+                .accept_load(retry, Some(track(1, "remote")), draft.as_draft())
+                .is_none()
+        );
+        assert_eq!(session.load_state(), &MetadataLoadState::Ready);
+        assert_eq!(session.track().unwrap().title, "remote");
+        assert!(session.dirty(draft.as_draft()));
+        let (_, command) = session.begin_save(draft.as_draft()).unwrap();
+        assert!(
+            matches!(command, Command::EditTrack { title: Some(title), .. } if title == "draft")
+        );
+    }
+
+    #[test]
+    fn mismatched_track_response_completes_as_failure_without_ready_data() {
         let mut session = MetadataSession::default();
         session.select(1);
-        session.edited_before_load(Field::Title);
         let token = session.begin_load(1);
-        let loaded = session
-            .accept_load(token, Some(track(1, "remote")), values("").as_draft())
-            .unwrap();
-        assert_eq!(loaded.title, "");
-        assert!(session.dirty(loaded.as_draft()));
-        session.select(2);
-        let token = session.begin_load(2);
-        let loaded = session
-            .accept_load(token, Some(track(2, "next")), values("").as_draft())
-            .unwrap();
-        assert_eq!(loaded.title, "next");
-        assert!(!session.dirty(loaded.as_draft()));
+        assert!(
+            session
+                .accept_load(token, Some(track(2, "wrong")), values("").as_draft())
+                .is_none()
+        );
+        assert!(matches!(session.load_state(), MetadataLoadState::Failed(_)));
+        assert!(!session.accepts_load(token));
+        assert!(session.track().is_none());
+        assert!(!session.ready());
     }
     #[test]
     fn snapshot_reload_supersedes_old_metadata_and_completes_without_a_frame() {

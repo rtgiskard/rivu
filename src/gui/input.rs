@@ -53,6 +53,7 @@ pub enum InputEvent {
 /// editing and grapheme navigation remain safe for all Unicode text.
 pub struct Input {
     focus_handle: FocusHandle,
+    enabled: bool,
     content: SharedString,
     placeholder: SharedString,
     trailing_space: Pixels,
@@ -78,6 +79,7 @@ impl Input {
         let end = content.len();
         Self {
             focus_handle: cx.focus_handle(),
+            enabled: true,
             content,
             placeholder: placeholder.into(),
             trailing_space: px(7.),
@@ -118,6 +120,17 @@ impl Input {
             KeyBinding::new("cmd-x", Cut, Some("Input")),
             KeyBinding::new("ctrl-x", Cut, Some("Input")),
         ]);
+    }
+
+    /// Disabled inputs retain their entity and value but reject user editing.
+    pub(super) fn set_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.enabled == enabled {
+            return;
+        }
+        self.enabled = enabled;
+        self.is_selecting = false;
+        self.marked_range = None;
+        cx.notify();
     }
 
     /// Returns whether this input currently owns window focus.
@@ -186,6 +199,9 @@ impl Input {
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.enabled {
+            return;
+        }
         if self.selected_range.is_empty() {
             let previous = self.previous_boundary(self.cursor_offset());
             if previous == self.cursor_offset() {
@@ -198,6 +214,9 @@ impl Input {
     }
 
     fn delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.enabled {
+            return;
+        }
         if self.selected_range.is_empty() {
             let next = self.next_boundary(self.cursor_offset());
             if next == self.cursor_offset() {
@@ -210,7 +229,9 @@ impl Input {
     }
 
     fn submit(&mut self, _: &SubmitInput, _: &mut Window, cx: &mut Context<Self>) {
-        cx.emit(InputEvent::Submit);
+        if self.enabled {
+            cx.emit(InputEvent::Submit);
+        }
     }
 
     fn on_mouse_down(
@@ -219,6 +240,9 @@ impl Input {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.enabled {
+            return;
+        }
         self.focus_handle.focus(window, cx);
         self.is_selecting = true;
         let offset = self.index_for_mouse_position(event.position);
@@ -240,12 +264,18 @@ impl Input {
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.enabled {
+            return;
+        }
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             self.replace_selection(None, &text.replace('\n', " "), window, cx);
         }
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.enabled {
+            return;
+        }
         if !self.selected_range.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_string(),
@@ -254,6 +284,9 @@ impl Input {
     }
 
     fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.enabled {
+            return;
+        }
         if !self.selected_range.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_string(),
@@ -263,6 +296,9 @@ impl Input {
     }
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        if !self.enabled {
+            return;
+        }
         self.selected_range = offset..offset;
         self.selection_reversed = false;
         cx.notify();
@@ -294,6 +330,9 @@ impl Input {
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        if !self.enabled {
+            return;
+        }
         if self.selection_reversed {
             self.selected_range.start = offset;
         } else {
@@ -344,6 +383,9 @@ impl Input {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.enabled {
+            return;
+        }
         let range = range_utf16
             .as_ref()
             .map(|range| self.replace_range_from_utf16(range))
@@ -473,6 +515,9 @@ impl EntityInputHandler for Input {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.enabled {
+            return;
+        }
         let range = range_utf16
             .as_ref()
             .map(|range| self.range_from_utf16(range))
@@ -683,15 +728,18 @@ impl Element for InputElement {
         cx: &mut App,
     ) {
         let focus_handle = self.input.read(cx).focus_handle.clone();
-        window.handle_input(
-            &focus_handle,
-            ElementInputHandler::new(bounds, self.input.clone()),
-            cx,
-        );
+        let enabled = self.input.read(cx).enabled;
+        if enabled {
+            window.handle_input(
+                &focus_handle,
+                ElementInputHandler::new(bounds, self.input.clone()),
+                cx,
+            );
+        }
         let line = prepaint.line.take().expect("input text line is prepared");
         let origin = point(bounds.left() - prepaint.scroll_offset, bounds.top());
         window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
-            if let Some(selection) = prepaint.selection.take() {
+            if enabled && let Some(selection) = prepaint.selection.take() {
                 window.paint_quad(selection);
             }
             line.paint(
@@ -703,7 +751,8 @@ impl Element for InputElement {
                 cx,
             )
             .ok();
-            if focus_handle.is_focused(window)
+            if enabled
+                && focus_handle.is_focused(window)
                 && let Some(cursor) = prepaint.cursor.take()
             {
                 window.paint_quad(cursor);
@@ -719,12 +768,16 @@ impl Element for InputElement {
 
 impl Render for Input {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let focused = self.focus_handle.is_focused(window);
+        let focused = self.enabled && self.focus_handle.is_focused(window);
         div()
             .flex()
             .key_context("Input")
             .track_focus(&self.focus_handle(cx))
-            .cursor(CursorStyle::IBeam)
+            .cursor(if self.enabled {
+                CursorStyle::IBeam
+            } else {
+                CursorStyle::Arrow
+            })
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::left))
@@ -744,6 +797,7 @@ impl Render for Input {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .bg(rgb(PANEL))
             .text_color(rgb(TEXT))
+            .when(!self.enabled, |view| view.opacity(0.4))
             .border_1()
             .border_color(if focused { rgb(ACCENT) } else { rgb(BORDER) })
             .rounded(px(5.))

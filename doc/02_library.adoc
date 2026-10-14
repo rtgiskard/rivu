@@ -166,6 +166,18 @@ playlist, or removing one of its entries, does not discard a track's draft.
 Escape first leaves a focused input; Escape from the layout clears selection
 and restores details for the playing track.
 
+Track details keeps its header, groups, fields, and actions visible with no track
+selected or while another selection loads. Unloaded details show `Not loaded`;
+the reserved status line distinguishes no selection, loading, query failure,
+and an unavailable library record from unknown metadata on a loaded track (`—`).
+Fields, Save, favorite, and decoder-hint actions are disabled until the current
+track is ready. Switching tracks clears the old values and artwork immediately;
+late responses from the previous selection cannot replace the current details.
+A same-track refresh retains ready details and drafts, including after a query
+failure. Retry reloads the selected track after a query failure without changing
+selection or discarding its draft. A record confirmed unavailable clears the
+details and disables editing.
+
 Decoder hints use the same Save and draft-discard workflow as tags. Routing and
 DTS-WAV safety: link:04_playback.adoc#_optional_ffmpeg_decoder[Playback].
 

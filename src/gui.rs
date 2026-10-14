@@ -723,11 +723,8 @@ impl GuiApp {
             },
         ));
         for field in [Field::Title, Field::Artist, Field::Album] {
-            subscriptions.push(cx.subscribe(&inputs[&field], move |this, _, event, cx| {
-                if let InputEvent::Changed { user } = event {
-                    if *user {
-                        this.metadata.edited_before_load(field);
-                    }
+            subscriptions.push(cx.subscribe(&inputs[&field], move |_, _, event, cx| {
+                if matches!(event, InputEvent::Changed { .. }) {
                     cx.notify();
                 }
             }));
@@ -786,10 +783,10 @@ impl GuiApp {
             scroll_views: scrolling::ScrollViews::default(),
             interaction: LayoutInteraction::default(),
             error,
-            playlist_action: None,
             queue_save_pending: false,
             queue_save_feedback: None,
             playlist_editor: None,
+            playlist_action: None,
             artwork_manager,
             artwork_loader: artwork::ArtworkLoader::default(),
             artwork_view: artwork::ArtworkView::default(),
