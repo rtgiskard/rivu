@@ -1325,6 +1325,81 @@ fn ambiguous_cue_relocation_does_not_steal_an_existing_id() {
 }
 
 #[test]
+fn cue_relocation_keeps_unique_segments_when_another_segment_is_ambiguous() {
+    let directory = tempfile::tempdir().unwrap();
+    let old_sheet = directory.path().join("old.cue");
+    let duplicate_sheet = directory.path().join("duplicate.cue");
+    let new_sheet = directory.path().join("new.cue");
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    let make = |sheet: &Path, number| {
+        segment(
+            sheet.to_str().unwrap(),
+            number,
+            u64::from(number - 1) * 4500,
+            (number < 3).then_some(u64::from(number) * 4500),
+        )
+    };
+    let mut original = scan((1..=3).map(|number| make(&old_sheet, number)).collect());
+    original.roots = vec![directory.path().to_path_buf()];
+    original.records.push(make(&duplicate_sheet, 2));
+    store.apply_scan(&original).unwrap();
+    let ids: Vec<_> = (1..=3)
+        .map(|number| {
+            all_tracks(&store)
+                .iter()
+                .find(|track| {
+                    track
+                        .cue
+                        .as_ref()
+                        .is_some_and(|cue| cue.sheet == old_sheet && cue.number == number)
+                })
+                .unwrap()
+                .id
+        })
+        .collect();
+    store.set_favorite(&ids, true).unwrap();
+    let playlist = store.create_playlist("Saved segments").unwrap();
+    store.add_playlist(playlist, &ids).unwrap();
+    let mut moved = scan(
+        (1..=3)
+            .rev()
+            .map(|number| make(&new_sheet, number))
+            .collect(),
+    );
+    moved.roots = original.roots;
+    store.apply_scan(&moved).unwrap();
+    let tracks = all_tracks(&store);
+    for number in 1..=3 {
+        let track = tracks
+            .iter()
+            .find(|track| {
+                track
+                    .cue
+                    .as_ref()
+                    .is_some_and(|cue| cue.sheet == new_sheet && cue.number == number)
+            })
+            .unwrap();
+        let old_id = ids[(number - 1) as usize];
+        if number == 2 {
+            assert_ne!(track.id, old_id);
+            assert!(!track.favorite);
+            let old = store.track(old_id).unwrap().unwrap();
+            assert!(old.missing && old.favorite);
+        } else {
+            assert_eq!(track.id, old_id);
+            assert!(track.favorite && !track.missing);
+        }
+    }
+    assert_eq!(
+        playlist_entries(&store, playlist)
+            .iter()
+            .map(|entry| entry.track_id)
+            .collect::<Vec<_>>(),
+        ids
+    );
+}
+
+#[test]
 fn invalid_cue_database_range_leaves_entire_scan_unchanged() {
     let store = Store::open(Path::new(":memory:")).unwrap();
     store

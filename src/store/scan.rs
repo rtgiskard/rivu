@@ -69,6 +69,19 @@ fn identity<'a>(path: &'a Path, cue: Option<&'a CueSegment>) -> TrackIdentity<'a
     }
 }
 
+#[derive(Hash, PartialEq, Eq)]
+enum RelocationKey<'a> {
+    File(&'a str),
+    Cue(&'a str, u32, u64, Option<u64>),
+}
+
+fn relocation_key<'a>(hash: &'a str, cue: Option<&CueSegment>) -> RelocationKey<'a> {
+    match cue {
+        Some(cue) => RelocationKey::Cue(hash, cue.number, cue.start_frame, cue.end_frame),
+        None => RelocationKey::File(hash),
+    }
+}
+
 impl Store {
     /// Validate logical request scopes. Ordinary exact files use indexed reads;
     /// directories and sheets keep the snapshot needed for arbitrary CUE sources.
@@ -297,7 +310,9 @@ impl Store {
                 .any(|ancestor| excluded_directories.contains(&(root, ancestor)))
         };
         let mut byidentity = HashMap::new();
-        let mut byhash: HashMap<&str, Vec<&Existing>> = HashMap::new();
+        // None records ambiguity without allocating a candidate vector per segment.
+        let mut candidates_by_key: HashMap<RelocationKey<'_>, Option<&Existing>> = HashMap::new();
+        let mut absent_sheets = HashMap::new();
         let mut absent_ordinary = HashSet::new();
         for record in &old {
             let key = identity(&record.path, record.cue.as_ref());
@@ -309,14 +324,23 @@ impl Store {
                 && let Some(hash) = record.hash.as_deref()
                 && candidate_hashes.contains(hash)
                 && !unconfirmed(record)
-                && fs::symlink_metadata(owner)
-                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+                && match &record.cue {
+                    Some(cue) => *absent_sheets.entry(cue.sheet.as_path()).or_insert_with(|| {
+                        fs::symlink_metadata(owner)
+                            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+                    }),
+                    None => fs::symlink_metadata(owner)
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+                }
             {
                 if record.cue.is_none() && ordinary_candidate_hashes.contains(hash) {
                     absent_ordinary.insert(record.id);
                 }
                 if record.cue.is_some() || !record.independent {
-                    byhash.entry(hash).or_default().push(record);
+                    candidates_by_key
+                        .entry(relocation_key(hash, record.cue.as_ref()))
+                        .and_modify(|candidate| *candidate = None)
+                        .or_insert(Some(record));
                 }
             }
             byidentity.insert(key, record.id);
@@ -381,22 +405,11 @@ impl Store {
                     if r.cue.is_none() && !new_ordinary.get(hash).is_some_and(Option::is_some) {
                         return None;
                     }
-                    let mut candidates =
-                        byhash
-                            .get(hash)?
-                            .iter()
-                            .filter(|old| match (&old.cue, &r.cue) {
-                                (None, None) => true,
-                                (Some(a), Some(b)) => {
-                                    a.number == b.number
-                                        && a.start_frame == b.start_frame
-                                        && a.end_frame == b.end_frame
-                                }
-                                _ => false,
-                            });
-                    let candidate = candidates.next()?;
-                    (candidates.next().is_none() && !seen.contains(&candidate.id))
-                        .then_some(candidate.id)
+                    let candidate = candidates_by_key
+                        .get(&relocation_key(hash, r.cue.as_ref()))
+                        .copied()
+                        .flatten()?;
+                    (!seen.contains(&candidate.id)).then_some(candidate.id)
                 })
             });
             let m = &r.media;

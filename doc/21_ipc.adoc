@@ -34,6 +34,12 @@ intent; an omitted field continues to follow rescanned metadata. No-op edits
 succeed for existing tracks and still reject unknown IDs. Queue-content validity
 is described in <<_revisions_and_watching,Revisions and watching>>.
 
+Scan merging checks each eligible old CUE sheet's absence once per merge and
+indexes relocation candidates by fingerprint, segment number and frame bounds.
+Multiple compatible old identities remain ambiguous; exact identities still take
+precedence. These indexes are merge-local, not persistent source-probe caches;
+only `NotFound` permits relocation, and scan uncertainty protection is unchanged.
+
 Track-ID mutations serialize each input list once. Library deletion validates
 before playback-side effects, then consumes the prepared input in the same
 serialized core dispatch. Stopping playback can update statistics, not catalog
