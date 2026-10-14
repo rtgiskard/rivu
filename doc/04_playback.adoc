@@ -24,6 +24,26 @@ synthesize silence absent from the source.
 Ordinary audio plays to actual decoder EOF; an estimated metadata duration is
 not a playback cutoff. An explicit CUE subtrack end remains a hard playback bound.
 
+Successful playback fills or improves bitrate information in the library without
+rewriting media files. Reliable fixed-encoding opening metadata can upgrade an estimate.
+Otherwise, complete playback from the beginning to actual source EOF measures
+the selected encoded audio stream during normal decoding; there is no additional
+full-file analysis pass. Seeking, restricted CUE playback, early stop, and decode
+errors cannot produce a complete-playback measured average. Missing packet durations,
+known incomplete streams, or unsupported statistics leave the value estimated or
+unknown. Native MPEG playback checks available authoritative frame counts at completion;
+estimated metadata durations are not completeness evidence. Without reliable
+counts, measurement does not certify file integrity. Late results and
+source replacements cannot update another track or a changed file.
+Native VBRI MP3 can remain estimated because the demuxer consumes its first audio
+frame as metadata while the declared frame count still includes it.
+Pausing alone does not invalidate complete-stream measurement. Confirmed
+values are not replaced by estimates. CUE records use whole-source opening
+metadata, never source byte counts divided by a subtrack's duration.
+Bitrate measurement does not load FFmpeg or change decoder selection. It only
+reuses the decoder selected by the existing enable setting, Decoder hint, and
+Auto fallback rules.
+
 Seek targets must be finite and non-negative. Ordinary file seeks are not clamped
 by estimated metadata duration; completion requires actual decoder EOF. Only an
 explicit CUE end bounds the seek target. Seeking while paused keeps playback

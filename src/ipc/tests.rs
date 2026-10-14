@@ -333,6 +333,7 @@ fn library_root_responses_wire_round_trip_preserves_projection_and_revisions() {
                 duration: Some(12.0),
                 codec: "pcm".into(),
                 bitrate_bps: Some(1536000),
+                bitrate_exact: true,
                 favorite: true,
                 missing: true,
                 play_count: 7,

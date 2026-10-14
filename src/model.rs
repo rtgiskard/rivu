@@ -29,8 +29,11 @@ pub struct MediaInfo {
     pub artist: String,
     pub album: String,
     pub duration: Option<f64>,
-    /// Encoded audio bitrate in bits/s, when stream metadata supplies it.
+    /// Encoded audio bitrate in bits/s; a scan estimate unless `bitrate_exact` is true.
     pub bitrate_bps: Option<u64>,
+    /// Reliable fixed-encoding calculation or complete-playback measured average;
+    /// decoder overlap/delay/padding handling can introduce small backend differences.
+    pub bitrate_exact: bool,
     pub track_number: Option<u32>,
     pub disc_number: Option<u32>,
     /// Source PCM/lossless precision, never the decoder's output sample width.
@@ -86,6 +89,8 @@ pub struct Track {
     pub channels: u16,
     pub sample_rate: u32,
     pub bitrate_bps: Option<u64>,
+    #[serde(default)]
+    pub bitrate_exact: bool,
     pub track_number: Option<u32>,
     pub disc_number: Option<u32>,
     pub bits_per_sample: Option<u32>,
@@ -106,6 +111,8 @@ pub struct LibraryRow {
     pub duration: Option<f64>,
     pub codec: String,
     pub bitrate_bps: Option<u64>,
+    #[serde(default)]
+    pub bitrate_exact: bool,
     pub favorite: bool,
     pub missing: bool,
     pub play_count: u64,

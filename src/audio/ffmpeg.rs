@@ -5,6 +5,7 @@
 
 use super::{
     Channel, MediaInfo,
+    bitrate::PacketStats,
     source::{DECODE_WORK_BUDGET, DecodeStep, check_cancelled},
 };
 use anyhow::{Context, Result, bail};
@@ -39,6 +40,53 @@ use abi::*;
 const NOPTS: i64 = i64::MIN;
 const ERR_EAGAIN: c_int = -11;
 const ERR_EOF: c_int = -541_478_725;
+
+const MAX_PACKET_SIDE_DATA: i32 = 64;
+
+// FFmpeg's default decoder applies AV_PKT_DATA_SKIP_SAMPLES. Restore these
+// samples to the encoded-duration denominator, never to the audible PCM.
+fn packet_trim_samples(packet: &AVPacket) -> Option<u64> {
+    if !(0..=MAX_PACKET_SIDE_DATA).contains(&packet.side_data_elems)
+        || (packet.side_data_elems > 0 && packet.side_data.is_null())
+    {
+        return None;
+    }
+    let mut trim = None;
+    for index in 0..packet.side_data_elems as usize {
+        let side = unsafe { &*packet.side_data.add(index) };
+        if side.type_ != AVPacketSideDataType_AV_PKT_DATA_SKIP_SAMPLES {
+            continue;
+        }
+        if trim.is_some() || side.size < 10 || side.data.is_null() {
+            return None;
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(side.data, 10) };
+        let start = u32::from_le_bytes(bytes[..4].try_into().ok()?);
+        let end = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
+        trim = Some(u64::from(start) + u64::from(end));
+    }
+    Some(trim.unwrap_or(0))
+}
+
+fn automatic_frame_trim(frame: &AVFrame) -> bool {
+    if !(0..=MAX_PACKET_SIDE_DATA).contains(&frame.nb_side_data)
+        || (frame.nb_side_data > 0 && frame.side_data.is_null())
+    {
+        return false;
+    }
+    for index in 0..frame.nb_side_data as usize {
+        let side = unsafe { *frame.side_data.add(index) };
+        if side.is_null() {
+            return false;
+        }
+        // Manual skip mode exports this side data instead of applying it. Do
+        // not double-count: that mode cannot publish our automatic-trim stats.
+        if unsafe { (*side).type_ } == AVFrameSideDataType_AV_FRAME_DATA_SKIP_SAMPLES {
+            return false;
+        }
+    }
+    true
+}
 
 // Function pointers are copied out of Symbols while the owning Library stays in Runtime.
 type FOpenInput = unsafe extern "C" fn(
@@ -503,6 +551,8 @@ pub(super) struct Decoder {
     primed: Option<(Vec<f32>, f64)>,
     layout: Vec<Channel>,
     info: MediaInfo,
+    packet_stats: PacketStats,
+    expected_samples: Option<u64>,
 }
 unsafe impl Send for Decoder {}
 impl Decoder {
@@ -624,14 +674,27 @@ impl Decoder {
         } else {
             None
         };
+        let pcm_bitrate = if pcm {
+            u64::try_from(p.bits_per_coded_sample)
+                .ok()
+                .and_then(|bits| bits.checked_mul(u64::try_from(p.sample_rate).ok()?))
+                .and_then(|bits| bits.checked_mul(u64::try_from(p.ch_layout.nb_channels).ok()?))
+                .filter(|bits| *bits > 0)
+        } else {
+            None
+        };
         let info = MediaInfo {
             title,
             artist,
             album,
             duration,
-            bitrate_bps: u64::try_from(p.bit_rate)
-                .ok()
-                .filter(|bitrate| *bitrate > 0),
+            bitrate_bps: pcm_bitrate.or_else(|| {
+                u64::try_from(p.bit_rate)
+                    .ok()
+                    .filter(|bitrate| *bitrate > 0)
+            }),
+            // Only encoded PCM width × channels × sample rate is reliable here.
+            bitrate_exact: pcm_bitrate.is_some(),
             track_number,
             disc_number,
             bits_per_sample,
@@ -655,6 +718,27 @@ impl Decoder {
             layout: Vec::new(),
             info,
             primed: None,
+            packet_stats: PacketStats::new(),
+            expected_samples: if pcm {
+                u64::try_from(stream_ref.duration).ok().and_then(|ticks| {
+                    let rate = u128::try_from(p.sample_rate).ok()?;
+                    let num = u128::try_from(stream_ref.time_base.num).ok()?;
+                    let den = u128::try_from(stream_ref.time_base.den)
+                        .ok()
+                        .filter(|den| *den > 0)?;
+                    let samples = u128::from(ticks).checked_mul(num)?.checked_mul(rate)?;
+                    (samples % den == 0)
+                        .then(|| u64::try_from(samples / den).ok())
+                        .flatten()
+                })
+            } else if codec_name == "flac" && p.extradata_size == 34 && !p.extradata.is_null() {
+                let info = unsafe { std::slice::from_raw_parts(p.extradata, 34) };
+                let samples =
+                    u64::from_be_bytes(info[10..18].try_into().unwrap()) & ((1_u64 << 36) - 1);
+                (samples > 0).then_some(samples)
+            } else {
+                None
+            },
         };
         input.format = ptr::null_mut();
         let mut frames = Vec::new();
@@ -675,6 +759,9 @@ impl Decoder {
     pub(super) fn layout(&self) -> &[Channel] {
         &self.layout
     }
+    pub(super) fn completed_bitrate(&self) -> Option<u64> {
+        self.packet_stats.bitrate(1, self.info.sample_rate)
+    }
     /// Replaces caller-owned PCM only on `Frames`; `Yield` is not EOF.
     pub(super) fn next_frames(
         &mut self,
@@ -683,9 +770,14 @@ impl Decoder {
         budget: &mut usize,
     ) -> Result<DecodeStep<f64>> {
         let read = self.rt.f.read_frame;
-        self.next_frames_with_reader(frames, cancelled, budget, |format, packet| unsafe {
-            read(format, packet)
-        })
+        let result =
+            self.next_frames_with_reader(frames, cancelled, budget, |format, packet| unsafe {
+                read(format, packet)
+            });
+        if result.is_err() {
+            self.packet_stats.invalidate();
+        }
+        result
     }
 
     fn next_frames_with_reader(
@@ -716,6 +808,13 @@ impl Decoder {
             check_cancelled(cancelled)?;
             if ret >= 0 {
                 let frame = unsafe { &*self.frame };
+                // AV_FRAME_FLAG_CORRUPT (1); the runtime ABI is generated without constants.
+                if frame.decode_error_flags != 0
+                    || frame.flags & 1 != 0
+                    || !automatic_frame_trim(frame)
+                {
+                    self.packet_stats.invalidate();
+                }
                 let rate = frame.sample_rate;
                 let channels = frame.ch_layout.nb_channels;
                 if rate <= 0 || channels <= 0 || frame.nb_samples <= 0 {
@@ -766,10 +865,14 @@ impl Decoder {
                     .saturating_add(frame.nb_samples as i64);
                 frames.resize(frame.nb_samples as usize * channels as usize, 0.0);
                 copy_frame(frame, frames)?;
+                self.packet_stats.add_duration(frame.nb_samples as u64);
                 return Ok(DecodeStep::Frames(timestamp.max(0.0)));
             }
             if ret != ERR_EAGAIN {
                 if ret == ERR_EOF {
+                    if self.draining {
+                        self.packet_stats.finish(self.expected_samples);
+                    }
                     return Ok(DecodeStep::Eof);
                 }
                 bail!("{}", error_text(self.rt, ret, "receive audio frame"));
@@ -796,6 +899,19 @@ impl Decoder {
                     unsafe { (self.rt.f.packet_unref)(self.packet) };
                     continue;
                 }
+                // AV_PKT_FLAG_CORRUPT (2).
+                if packet.flags & 2 != 0 {
+                    self.packet_stats.invalidate();
+                }
+                match u64::try_from(packet.size)
+                    .ok()
+                    .zip(packet_trim_samples(packet))
+                {
+                    Some((bytes, trim)) if packet.duration > 0 => {
+                        self.packet_stats.add(bytes, trim)
+                    }
+                    _ => self.packet_stats.invalidate(),
+                }
                 let sent = unsafe { (self.rt.f.send_packet)(self.codec, self.packet) };
                 if sent == ERR_EAGAIN {
                     bail!("FFmpeg decoder backpressure while sending audio packet");
@@ -808,6 +924,7 @@ impl Decoder {
         }
     }
     pub(super) fn seek(&mut self, seconds: f64, cancelled: Option<&AtomicBool>) -> Result<()> {
+        self.packet_stats.invalidate();
         check_cancelled(cancelled)?;
         if !seconds.is_finite() || seconds < 0.0 {
             bail!("Invalid FFmpeg seek position");
@@ -941,6 +1058,40 @@ unsafe fn copy_samples<T: Copy>(
 mod tests {
     use super::*;
 
+    #[test]
+    fn encoded_duration_restores_skip_discard_and_rejects_manual_or_malformed_trim() {
+        let mut bytes = [0_u8; 10];
+        bytes[..4].copy_from_slice(&312_u32.to_le_bytes());
+        bytes[4..8].copy_from_slice(&648_u32.to_le_bytes());
+        let mut side: AVPacketSideData = unsafe { std::mem::zeroed() };
+        side.type_ = AVPacketSideDataType_AV_PKT_DATA_SKIP_SAMPLES;
+        side.data = bytes.as_mut_ptr();
+        side.size = bytes.len();
+        let mut packet: AVPacket = unsafe { std::mem::zeroed() };
+        packet.side_data = &mut side;
+        packet.side_data_elems = 1;
+        assert_eq!(packet_trim_samples(&packet), Some(960));
+        let mut stats = PacketStats::new();
+        stats.add(1000, packet_trim_samples(&packet).unwrap());
+        stats.add_duration(8640);
+        stats.finish(Some(9600));
+        assert_eq!(stats.bitrate(1, 48_000), Some(40_000));
+        side.size = 7;
+        packet.side_data = &mut side;
+        assert_eq!(packet_trim_samples(&packet), None);
+        packet.side_data_elems = MAX_PACKET_SIDE_DATA + 1;
+        assert_eq!(packet_trim_samples(&packet), None);
+
+        let mut frame: AVFrame = unsafe { std::mem::zeroed() };
+        assert!(automatic_frame_trim(&frame));
+        let mut manual: AVFrameSideData = unsafe { std::mem::zeroed() };
+        manual.type_ = AVFrameSideDataType_AV_FRAME_DATA_SKIP_SAMPLES;
+        let mut manual_ptr = &mut manual as *mut AVFrameSideData;
+        frame.side_data = &mut manual_ptr;
+        frame.nb_side_data = 1;
+        assert!(!automatic_frame_trim(&frame));
+    }
+
     fn pcm_file() -> tempfile::NamedTempFile {
         use std::io::Write;
 
@@ -956,6 +1107,85 @@ mod tests {
         file.write_all(&bytes.to_le_bytes()).unwrap();
         file.write_all(&vec![0; bytes as usize]).unwrap();
         file
+    }
+
+    #[test]
+    fn complete_ffmpeg_decode_counts_primed_selected_packets_not_pcm_or_other_streams() {
+        let file = pcm_file();
+        let mut decoder = Decoder::open(file.path(), None).unwrap();
+        assert_eq!(decoder.completed_bitrate(), None);
+        let mut frames = Vec::new();
+        let mut injected = false;
+        let mut samples = 0;
+        let read = decoder.rt.f.read_frame;
+        loop {
+            let step = decoder
+                .next_frames_with_reader(&mut frames, None, &mut 64, |format, packet| {
+                    if !injected {
+                        injected = true;
+                        unsafe {
+                            (*packet).stream_index = -1;
+                            (*packet).size = 1_000_000;
+                            (*packet).duration = 1;
+                        }
+                        return 0;
+                    }
+                    unsafe { read(format, packet) }
+                })
+                .unwrap();
+            match step {
+                DecodeStep::Frames(_) => samples += frames.len(),
+                DecodeStep::Yield => (),
+                DecodeStep::Eof => break,
+            }
+        }
+        assert_eq!(samples, 16_000);
+        assert_eq!(decoder.completed_bitrate(), Some(128_000));
+        decoder.seek(0.0, None).unwrap();
+        loop {
+            if matches!(
+                decoder.next_frames(&mut frames, None, &mut 64).unwrap(),
+                DecodeStep::Eof
+            ) {
+                break;
+            }
+        }
+        assert_eq!(
+            decoder.completed_bitrate(),
+            None,
+            "a seek permanently excludes complete statistics"
+        );
+    }
+
+    #[test]
+    fn ffmpeg_missing_packet_duration_and_corrupt_packet_never_become_exact() {
+        let file = pcm_file();
+        for corrupt in [false, true] {
+            let mut decoder = Decoder::open(file.path(), None).unwrap();
+            let read = decoder.rt.f.read_frame;
+            let mut frames = Vec::new();
+            loop {
+                let step = decoder
+                    .next_frames_with_reader(&mut frames, None, &mut 64, |format, packet| {
+                        let status = unsafe { read(format, packet) };
+                        if status >= 0 {
+                            unsafe {
+                                if corrupt {
+                                    (*packet).flags |= 2;
+                                } else {
+                                    (*packet).duration = 0;
+                                }
+                            }
+                        }
+                        status
+                    })
+                    .unwrap();
+                if matches!(step, DecodeStep::Eof) {
+                    break;
+                }
+            }
+            assert_eq!(decoder.completed_bitrate(), None);
+        }
     }
 
     #[test]

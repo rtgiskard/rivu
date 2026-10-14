@@ -1,6 +1,9 @@
 //! Container probing, decoding, seeking, and packet-accurate native-channel samples.
 
-use super::{BYTES_PER_MEBIBYTE, Channel, MediaInfo};
+use super::{
+    BYTES_PER_MEBIBYTE, Channel, MediaInfo,
+    bitrate::{self, PacketStats},
+};
 use crate::model::DecoderHint;
 use anyhow::{Context, Result, anyhow, bail};
 use std::{
@@ -151,6 +154,15 @@ fn trim_samples(
         .context("Packet trim out of range")?;
     Ok((seconds(time) * rate as f64).round().max(0.0) as usize)
 }
+fn trim_sample_count(base: TimeBase, ticks: u64, rate: u32) -> Option<u64> {
+    let scaled = u128::from(ticks) * u128::from(base.numer.get()) * u128::from(rate);
+    let denominator = u128::from(base.denom.get());
+    if scaled % denominator != 0 {
+        return None;
+    }
+    u64::try_from(scaled / denominator).ok()
+}
+
 fn duration(track: &Track, rate: u32) -> Option<f64> {
     if let (Some(duration), Some(base)) = (track.duration, track.time_base) {
         return base.calc_duration(duration).map(seconds);
@@ -306,6 +318,10 @@ pub(super) struct Source {
     seek_target: Option<f64>,
     ready: bool,
     exhausted: bool,
+    packet_stats: PacketStats,
+    complete_stream: bool,
+    expected_samples: Option<u64>,
+    mpeg_packets: bool,
 }
 impl Source {
     pub(super) fn open(
@@ -404,6 +420,10 @@ impl Source {
             seek_target: None,
             ready: false,
             exhausted: false,
+            packet_stats: PacketStats::new(),
+            complete_stream: true,
+            expected_samples: None,
+            mpeg_packets: false,
         };
         if !source.prime(cancelled)? {
             bail!("FFmpeg audio stream contains no samples");
@@ -422,9 +442,12 @@ impl Source {
         if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
             hint.with_extension(extension);
         }
+        let mut stream =
+            MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions { buffer_len });
+        let compressed_summary = bitrate::probe(&mut stream, cancelled)?;
         let mut format = match get_probe().probe(
             &hint,
-            MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions { buffer_len }),
+            stream,
             FormatOptions::default(),
             MetadataOptions::default(),
         ) {
@@ -508,6 +531,32 @@ impl Source {
             media_duration =
                 media_duration.map(|value| (value - opus.initial_skip as f64 / 48_000.0).max(0.0));
         }
+        let compressed_summary = compressed_summary.filter(|summary| summary.codec == params.codec);
+        let mpeg_packets = params.codec == symphonia::core::codecs::audio::well_known::CODEC_ID_MP3;
+        // Only exact codec/container sample counts, never estimated durations.
+        let expected_samples = if pcm_bitrate(&params).is_some()
+            || params.codec == symphonia::core::codecs::audio::well_known::CODEC_ID_FLAC
+        {
+            format
+                .tracks()
+                .iter()
+                .find(|candidate| candidate.id == track)
+                .and_then(|track| track.num_frames)
+                .filter(|samples| *samples > 0)
+        } else if mpeg_packets {
+            compressed_summary
+                .as_ref()
+                .and_then(|summary| summary.expected_samples)
+        } else {
+            None
+        };
+        let mut packet_stats = PacketStats::new();
+        if compressed_summary
+            .as_ref()
+            .is_some_and(|summary| !summary.completion_valid)
+        {
+            packet_stats.invalidate();
+        }
         let mut info = MediaInfo {
             title: path
                 .file_stem()
@@ -517,7 +566,18 @@ impl Source {
             artist: String::new(),
             album: String::new(),
             duration: media_duration,
-            bitrate_bps: pcm_bitrate(&params),
+            bitrate_bps: pcm_bitrate(&params).or_else(|| {
+                if params.codec == symphonia::core::codecs::audio::well_known::CODEC_ID_VORBIS {
+                    return params
+                        .extra_data
+                        .as_deref()
+                        .and_then(bitrate::vorbis_nominal);
+                }
+                compressed_summary
+                    .as_ref()
+                    .and_then(|summary| summary.bitrate)
+            }),
+            bitrate_exact: pcm_bitrate(&params).is_some(),
             track_number: None,
             disc_number: None,
             bits_per_sample: source_bits_per_sample(&params),
@@ -544,6 +604,10 @@ impl Source {
             seek_target: None,
             ready: false,
             exhausted: false,
+            packet_stats,
+            complete_stream: true,
+            expected_samples,
+            mpeg_packets,
         };
         if !source.prime(cancelled)? {
             bail!("Audio track contains no decodable samples");
@@ -561,6 +625,8 @@ impl Source {
         cancelled: Option<&AtomicBool>,
     ) -> Result<()> {
         check_cancelled(cancelled)?;
+        self.complete_stream = false;
+        self.packet_stats.invalidate();
         if !range.start_seconds.is_finite()
             || range.start_seconds < 0.0
             || range
@@ -583,6 +649,8 @@ impl Source {
 
     fn seek_with_cancel(&mut self, target: f64, cancelled: Option<&AtomicBool>) -> Result<()> {
         check_cancelled(cancelled)?;
+        self.complete_stream = false;
+        self.packet_stats.invalidate();
         let target = target.max(0.0);
         if self
             .range_end
@@ -640,6 +708,17 @@ impl Source {
     }
     pub(super) fn info(&self) -> &MediaInfo {
         &self.info
+    }
+
+    /// Available only after actual demux/decoder EOF, never segment exhaustion.
+    pub(super) fn completed_bitrate(&self) -> Option<u64> {
+        if !self.complete_stream {
+            return None;
+        }
+        match &self.decode {
+            Decode::Ffmpeg(decoder) => decoder.completed_bitrate(),
+            _ => self.packet_stats.bitrate(1, self.info.sample_rate),
+        }
     }
 
     pub(super) fn layout(&self) -> &[Channel] {
@@ -832,6 +911,23 @@ impl Source {
         &mut self,
         cancelled: Option<&AtomicBool>,
         budget: &mut usize,
+        read: impl FnMut(
+            &mut dyn FormatReader,
+        )
+            -> symphonia::core::errors::Result<Option<symphonia::core::packet::Packet>>,
+    ) -> Result<DecodeStep<()>> {
+        let result = self.read_next_inner(cancelled, budget, read);
+        if result.is_err() {
+            self.complete_stream = false;
+            self.packet_stats.invalidate();
+        }
+        result
+    }
+
+    fn read_next_inner(
+        &mut self,
+        cancelled: Option<&AtomicBool>,
+        budget: &mut usize,
         mut read: impl FnMut(
             &mut dyn FormatReader,
         )
@@ -861,6 +957,7 @@ impl Source {
             check_cancelled(cancelled)?;
             let Some(packet) = packet? else {
                 self.exhausted = true;
+                self.packet_stats.finish(self.expected_samples);
                 return Ok(DecodeStep::Eof);
             };
             if packet.track_id != self.track {
@@ -871,7 +968,7 @@ impl Source {
                     .calc_time(packet.pts)
                     .context("Packet timestamp out of range")?,
             );
-            match &mut self.decode {
+            let encoded_samples = match &mut self.decode {
                 Decode::Native(decoder) => {
                     let audio = decoder.decode(&packet).map_err(native_error)?;
                     if audio.spec().rate() != self.info.sample_rate {
@@ -879,12 +976,30 @@ impl Source {
                     }
                     update_layout(audio.spec().channels(), &mut self.layout)?;
                     self.info.channels = self.layout.len() as u16;
+                    let represented = if self.mpeg_packets {
+                        bitrate::mpeg_packet_samples(&packet.data, self.info.sample_rate)
+                    } else {
+                        trim_sample_count(
+                            self.time_base,
+                            packet.trim_start.get(),
+                            self.info.sample_rate,
+                        )
+                        .and_then(|trim| (audio.frames() as u64).checked_add(trim))
+                        .and_then(|samples| {
+                            samples.checked_add(trim_sample_count(
+                                self.time_base,
+                                packet.trim_end.get(),
+                                self.info.sample_rate,
+                            )?)
+                        })
+                    };
                     interleave_audio(audio, &mut self.frames);
                     packet_start += self
                         .time_base
                         .calc_duration(packet.trim_start)
                         .context("Packet trim out of range")?
                         .as_secs_f64();
+                    represented
                 }
                 Decode::Opus(opus) => {
                     let count =
@@ -910,8 +1025,13 @@ impl Source {
                     self.info.channels = opus.channels as u16;
                     packet_start =
                         (packet_start - opus.timestamp_delay + leading as f64 / 48_000.0).max(0.0);
+                    Some(count as u64)
                 }
                 Decode::Ffmpeg(_) => unreachable!(),
+            };
+            match encoded_samples {
+                Some(samples) => self.packet_stats.add(packet.data.len() as u64, samples),
+                None => self.packet_stats.invalidate(),
             }
             if let Some(end) = self.range_end {
                 let remaining =
@@ -1093,6 +1213,248 @@ mod tests {
             );
         }
         file
+    }
+
+    #[test]
+    fn native_complete_stream_upgrades_estimate_from_only_encoded_audio_payload() {
+        let file = opus_file();
+        // Independently inspect this deterministic fixture's one-packet pages:
+        // exclude OpusHead/OpusTags and all Ogg framing bytes.
+        let bytes = std::fs::read(file.path()).unwrap();
+        let mut offset = 0;
+        let mut audio_bytes = 0_u64;
+        let mut audio_packets = 0_u64;
+        while offset < bytes.len() {
+            assert_eq!(&bytes[offset..offset + 4], b"OggS");
+            let segments = bytes[offset + 26] as usize;
+            let payload = bytes[offset + 27..offset + 27 + segments]
+                .iter()
+                .map(|size| usize::from(*size))
+                .sum::<usize>();
+            let sequence = u32::from_le_bytes(bytes[offset + 18..offset + 22].try_into().unwrap());
+            if sequence >= 2 {
+                audio_bytes += payload as u64;
+                audio_packets += 1;
+            }
+            offset += 27 + segments + payload;
+        }
+        let expected = (audio_bytes * 8 * 48_000 + audio_packets * 960 / 2) / (audio_packets * 960);
+        let mut source =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
+        source.info.bitrate_bps = Some(128_000); // A legacy scan estimate.
+        source.info.bitrate_exact = false;
+        assert_eq!(
+            source.completed_bitrate(),
+            None,
+            "primed prefix is not complete"
+        );
+        assert_eq!(decode_remaining(&mut source).len(), 96_000);
+        assert_eq!(source.completed_bitrate(), Some(expected));
+        assert_ne!(expected, 128_000);
+        assert!(
+            !source.info.bitrate_exact,
+            "only the completion consumer upgrades metadata"
+        );
+    }
+
+    fn silent_mpeg_frame(index: u8) -> Vec<u8> {
+        let kbps = [
+            0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320,
+        ][index as usize];
+        let mut frame = vec![0; 144 * kbps * 1000 / 44_100];
+        frame[..4].copy_from_slice(&[0xff, 0xfb, index << 4, 0]);
+        // Zero side information/main data describes valid silent granules.
+        frame
+    }
+
+    fn native_mpeg_file(bytes: &[u8]) -> tempfile::NamedTempFile {
+        let mut file = tempfile::Builder::new().suffix(".mp3").tempfile().unwrap();
+        file.write_all(bytes).unwrap();
+        file
+    }
+
+    #[test]
+    fn native_unmarked_vbr_counts_frames_despite_excessive_demux_trim() {
+        let mut bytes = Vec::new();
+        for index in std::iter::repeat_n(14, 20).chain(std::iter::repeat_n(1, 80)) {
+            bytes.extend_from_slice(&silent_mpeg_frame(index));
+        }
+        let file = native_mpeg_file(&bytes);
+        // Exercise the actual demuxer's bad estimate, not a fabricated trim:
+        // its high-rate prefix causes trim requests larger than whole frames.
+        let stream = MediaSourceStream::new(
+            Box::new(File::open(file.path()).unwrap()),
+            MediaSourceStreamOptions::default(),
+        );
+        let mut format = get_probe()
+            .probe(
+                &Hint::new(),
+                stream,
+                FormatOptions::default(),
+                MetadataOptions::default(),
+            )
+            .unwrap();
+        let mut excessive_trim = false;
+        while let Some(packet) = format.next_packet().unwrap() {
+            excessive_trim |= packet.trim_end.get() > 1152;
+        }
+        assert!(
+            excessive_trim,
+            "fixture must exercise uncapped estimated trim"
+        );
+        let mut source =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
+        assert_eq!(source.info.bitrate_bps, Some(320_000));
+        assert_eq!(
+            source.expected_samples, None,
+            "estimated MPEG counts are not authority"
+        );
+        decode_remaining(&mut source);
+        let samples = 100 * 1152;
+        let expected = (bytes.len() as u64 * 8 * 44_100 + samples / 2) / samples;
+        assert_eq!(source.completed_bitrate(), Some(expected));
+        assert_ne!(expected, 320_000);
+    }
+
+    #[test]
+    fn native_mpeg_summary_authority_survives_truncated_scan_estimate() {
+        for id in [b"Xing", b"Info"] {
+            let mut tag = silent_mpeg_frame(11);
+            let audio = silent_mpeg_frame(11).repeat(8);
+            tag[36..40].copy_from_slice(id);
+            tag[40..44].copy_from_slice(&3_u32.to_be_bytes());
+            tag[44..48].copy_from_slice(&8_u32.to_be_bytes());
+            let size = (tag.len() + audio.len()) as u32;
+            tag[48..52].copy_from_slice(&size.to_be_bytes());
+            tag.extend_from_slice(&audio);
+            for (truncate, declared_bytes, extra_byte) in [
+                (false, true, false),
+                (true, true, false),
+                (true, false, false),
+                (false, true, true),
+            ] {
+                let mut bytes = tag.clone();
+                if !declared_bytes {
+                    bytes[40..44].copy_from_slice(&1_u32.to_be_bytes());
+                }
+                if truncate {
+                    bytes.truncate(bytes.len() - 200);
+                }
+                if extra_byte {
+                    bytes.push(0);
+                }
+                let file = native_mpeg_file(&bytes);
+                let mut source =
+                    Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false)
+                        .unwrap();
+                assert_eq!(source.expected_samples, Some(8 * 1152));
+                if (truncate || extra_byte) && declared_bytes {
+                    assert_eq!(source.info.bitrate_bps, None);
+                }
+                decode_remaining(&mut source);
+                let expected = if truncate || extra_byte {
+                    None
+                } else {
+                    let samples = 8 * 1152;
+                    Some((audio.len() as u64 * 8 * 44_100 + samples / 2) / samples)
+                };
+                assert_eq!(
+                    source.completed_bitrate(),
+                    expected,
+                    "{id:?}, truncated={truncate}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_vbri_skipped_audio_frame_is_not_complete_measurement() {
+        let mut bytes = silent_mpeg_frame(9).repeat(3);
+        let size = bytes.len() as u32;
+        bytes[36..40].copy_from_slice(b"VBRI");
+        bytes[40..42].copy_from_slice(&1_u16.to_be_bytes());
+        bytes[46..50].copy_from_slice(&size.to_be_bytes());
+        bytes[50..54].copy_from_slice(&3_u32.to_be_bytes());
+        bytes[54..56].copy_from_slice(&1_u16.to_be_bytes());
+        bytes[56..58].copy_from_slice(&1_u16.to_be_bytes());
+        bytes[58..60].copy_from_slice(&4_u16.to_be_bytes());
+        bytes[60..62].copy_from_slice(&3_u16.to_be_bytes());
+        bytes[62..66].copy_from_slice(&size.to_be_bytes());
+        let file = native_mpeg_file(&bytes);
+        let mut source =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
+        assert_eq!(source.expected_samples, Some(3 * 1152));
+        // Symphonia currently consumes the VBRI-bearing first audio frame as a
+        // tag. Do not pretend its bytes/samples were successfully decoded.
+        assert_eq!(decode_remaining(&mut source).len(), 2 * 1152 * 2);
+        assert_eq!(source.completed_bitrate(), None);
+    }
+
+    #[test]
+    fn seeking_ranges_and_failed_decode_never_publish_complete_statistics() {
+        let file = opus_file();
+        for seek in [0.0, 0.5] {
+            let mut source =
+                Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
+            source.seek(seek).unwrap();
+            decode_remaining(&mut source);
+            assert_eq!(source.completed_bitrate(), None);
+        }
+        for end in [None, Some(0.5)] {
+            let mut source =
+                Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
+            source
+                .restrict(super::super::PlaybackRange {
+                    start_seconds: 0.0,
+                    end_seconds: end,
+                })
+                .unwrap();
+            decode_remaining(&mut source);
+            assert_eq!(source.completed_bitrate(), None);
+        }
+        let mut source =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
+        let mut budget = 64;
+        assert!(
+            source
+                .read_next_with_reader(None, &mut budget, |format| {
+                    let mut packet = format.next_packet()?.unwrap();
+                    packet.data = Box::from([0xff]); // Opus code 3 without its frame-count byte.
+                    Ok(Some(packet))
+                })
+                .is_err()
+        );
+        decode_remaining(&mut source);
+        assert_eq!(source.completed_bitrate(), None);
+    }
+
+    #[test]
+    fn native_other_stream_packets_do_not_change_selected_audio_average() {
+        let file = pcm_file();
+        let mut source =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
+        let mut injected = false;
+        loop {
+            let mut budget = 64;
+            let step = source
+                .read_next_with_reader(None, &mut budget, |format| {
+                    if !injected {
+                        injected = true;
+                        return Ok(Some(symphonia::core::packet::Packet::new(
+                            u32::MAX,
+                            symphonia::core::units::Timestamp::ZERO,
+                            symphonia::core::units::Duration::new(1),
+                            vec![0; 100_000],
+                        )));
+                    }
+                    format.next_packet()
+                })
+                .unwrap();
+            if step == DecodeStep::Eof {
+                break;
+            }
+        }
+        assert_eq!(source.completed_bitrate(), Some(705_600));
     }
 
     fn decode_remaining(source: &mut Source) -> Vec<f32> {

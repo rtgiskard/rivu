@@ -190,12 +190,12 @@ impl Store {
                 |row| {
                     Ok(DuplicateMember {
                         track: track_from_row(row)?,
-                        file_size: row.get::<_, i64>(24)? as u64,
-                        modified_ns: row.get(25)?,
-                        has_overrides: row.get(26)?,
-                        playlist_references: row.get::<_, i64>(27)? as usize,
-                        queue_references: row.get::<_, i64>(28)? as usize,
-                        independent: row.get(29)?,
+                        file_size: row.get::<_, i64>(25)? as u64,
+                        modified_ns: row.get(26)?,
+                        has_overrides: row.get(27)?,
+                        playlist_references: row.get::<_, i64>(28)? as usize,
+                        queue_references: row.get::<_, i64>(29)? as usize,
+                        independent: row.get(30)?,
                     })
                 },
             )?
@@ -243,7 +243,7 @@ impl Store {
         tx.execute(
             "CREATE TEMP TABLE relocation_target AS
              SELECT path,fingerprint,file_size,modified_ns,raw_title,raw_artist,raw_album,
-                    duration,codec,channels,sample_rate,probe_version,bitrate_bps,
+                    duration,codec,channels,sample_rate,probe_version,bitrate_bps,bitrate_exact,
                     track_number,disc_number,bits_per_sample,release_date
              FROM tracks WHERE id=?1",
             [target.identity.id],
@@ -254,7 +254,7 @@ impl Store {
                 file_size=t.file_size,modified_ns=t.modified_ns,
                 raw_title=t.raw_title,raw_artist=t.raw_artist,raw_album=t.raw_album,
                 duration=t.duration,codec=t.codec,channels=t.channels,sample_rate=t.sample_rate,
-                probe_version=t.probe_version,bitrate_bps=t.bitrate_bps,
+                probe_version=t.probe_version,bitrate_bps=t.bitrate_bps,bitrate_exact=t.bitrate_exact,
                 track_number=t.track_number,disc_number=t.disc_number,
                 bits_per_sample=t.bits_per_sample,release_date=t.release_date,missing=0
              FROM temp.relocation_target AS t WHERE tracks.id=?1",
@@ -282,11 +282,11 @@ mod tests {
         store.conn.execute(
             "INSERT INTO tracks(id,path,fingerprint,file_size,modified_ns,missing,
                 raw_title,raw_artist,raw_album,duration,codec,channels,sample_rate,
-                bitrate_bps,track_number,disc_number,bits_per_sample,release_date,probe_version)
+                bitrate_bps,bitrate_exact,track_number,disc_number,bits_per_sample,release_date,probe_version)
              VALUES(1,'/old/source.wav',?1,10,20,1,'Old','Artist','Album',1,'pcm',2,48000,
-                    1536000,1,1,16,'2024',3),
+                    1536000,0,1,1,16,'2024',3),
                    (2,'/new/target.wav',?1,10,30,0,'Target','New artist','New album',2,'flac',2,96000,
-                    300000,2,2,24,'2025',3)",
+                    300000,1,2,2,24,'2025',3)",
             [hash.as_bytes().as_slice()],
         )?;
         Ok(store)
@@ -416,6 +416,8 @@ mod tests {
         assert!(!retained.missing);
         assert_eq!(retained.duration, target.duration);
         assert_eq!(retained.codec, target.codec);
+        assert_eq!(retained.bitrate_bps, target.bitrate_bps);
+        assert!(retained.bitrate_exact);
         assert_eq!(retained.sample_rate, target.sample_rate);
         assert_eq!(retained.bits_per_sample, target.bits_per_sample);
         assert_eq!(retained.release_date, target.release_date);

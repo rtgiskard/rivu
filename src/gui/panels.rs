@@ -2004,7 +2004,12 @@ impl GuiApp {
                         || placeholder.clone(),
                         |track| {
                             track.bitrate_bps.map_or("—".into(), |value| {
-                                format!("{:.1} kbps", value as f64 / 1000.0).into()
+                                format!(
+                                    "{}{:.1} kbps",
+                                    if track.bitrate_exact { "" } else { "≈" },
+                                    value as f64 / 1000.0
+                                )
+                                .into()
                             })
                         },
                     ),

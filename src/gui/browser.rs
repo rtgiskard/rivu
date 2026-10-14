@@ -906,6 +906,7 @@ mod tests {
                     duration: None,
                     codec: String::new(),
                     bitrate_bps: None,
+                    bitrate_exact: false,
                     favorite: false,
                     missing: false,
                     play_count: 0,

@@ -600,6 +600,7 @@ impl Drop for Runtime {
 
 struct PlaybackStats {
     track_id: i64,
+    source: Option<(crate::store::PlaybackSource, std::fs::Metadata)>,
     heard: f64,
     position: Option<f64>,
     started: bool,
@@ -806,6 +807,7 @@ mod tests {
                             channels: 2,
                             sample_rate: 48000,
                             bitrate_bps: None,
+                            bitrate_exact: false,
                             track_number: None,
                             disc_number: None,
                             bits_per_sample: None,
@@ -1310,7 +1312,11 @@ mod tests {
             let generation = core.generation;
             let commands = recording_audio(&mut core);
             core.command(Command::Pause).unwrap();
-            core.audio_event(AudioEvent::Ended { generation }).unwrap();
+            core.audio_event(AudioEvent::Ended {
+                generation,
+                bitrate_bps: None,
+            })
+            .unwrap();
             assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
             assert_eq!(core.state.queue.current_id, Some(expected));
             // Core sends Load synchronously, but the recorder forwards it on
@@ -1329,7 +1335,11 @@ mod tests {
                 })
                 .collect();
             assert_eq!(loads, [true]);
-            core.audio_event(AudioEvent::Ended { generation }).unwrap();
+            core.audio_event(AudioEvent::Ended {
+                generation,
+                bitrate_bps: None,
+            })
+            .unwrap();
             assert_eq!(core.state.queue.current_id, Some(expected));
             assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
         }
@@ -3994,6 +4004,9 @@ mod tests {
         core.state.playback.duration = duration;
         core.playback = Some(PlaybackStats {
             track_id,
+            source: core
+                .playback_source(core.state.current_track().unwrap())
+                .unwrap(),
             heard: 0.0,
             position: None,
             started: false,
@@ -4017,6 +4030,7 @@ mod tests {
                 channels: track.channels,
                 sample_rate: track.sample_rate,
                 bitrate_bps: None,
+                bitrate_exact: false,
                 track_number: None,
                 disc_number: None,
                 bits_per_sample: None,
@@ -4051,6 +4065,231 @@ mod tests {
         let path = core.track(track_id).unwrap().path.clone();
         let error = core.command(command).unwrap_err();
         assert!(format!("{error:#}").contains(&path.display().to_string()));
+    }
+
+    fn precision_pending(core: &mut Core) {
+        let track = core.store.track(1).unwrap().unwrap();
+        std::fs::write(&track.path, b"encoded source").unwrap();
+        let metadata = std::fs::metadata(&track.path).unwrap();
+        let mut media = core
+            .store
+            .known_source(&track.path)
+            .unwrap()
+            .unwrap()
+            .media
+            .unwrap();
+        media.bitrate_bps = Some(128_000);
+        media.bitrate_exact = false;
+        core.store
+            .apply_scan(&ScanResult {
+                records: vec![ScanRecord {
+                    path: track.path,
+                    cue: None,
+                    size: metadata.len(),
+                    modified_ns: metadata
+                        .modified()
+                        .unwrap()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos() as i64,
+                    fingerprint: None,
+                    media,
+                }],
+                ..ScanResult::default()
+            })
+            .unwrap();
+        core.store.clear_queue().unwrap();
+        core.reload_queue().unwrap();
+        core.enqueue(&[1]).unwrap();
+        let queue_id = core.queue_ids[0];
+        pending(core, queue_id);
+        assert!(core.playback.as_ref().unwrap().source.is_some());
+    }
+
+    #[test]
+    fn playback_started_upgrades_estimate_and_duplicate_cannot_downgrade() {
+        let (_directory, mut core) = fixture();
+        precision_pending(&mut core);
+        let mut event = started_event(&core, Some(10.0));
+        if let AudioEvent::Started { info, .. } = &mut event {
+            info.bitrate_bps = Some(128_000);
+            info.bitrate_exact = true;
+        }
+        let before = core.state.library.revision;
+        core.audio_event(event).unwrap();
+        assert!(core.store.track(1).unwrap().unwrap().bitrate_exact);
+        assert!(core.state.current_track().unwrap().bitrate_exact);
+        assert!(
+            core.store.queue_page(0, 10).unwrap().rows[0]
+                .track
+                .bitrate_exact
+        );
+        // The precision update shares Started's existing content revision.
+        assert_eq!(core.state.library.revision, before.wrapping_add(1));
+        let revision = core.state.library.revision;
+        let mut duplicate = started_event(&core, Some(10.0));
+        if let AudioEvent::Started { info, .. } = &mut duplicate {
+            info.bitrate_bps = Some(64_000);
+        }
+        core.audio_event(duplicate).unwrap();
+        assert_eq!(core.state.library.revision, revision);
+        assert_eq!(
+            core.store.track(1).unwrap().unwrap().bitrate_bps,
+            Some(128_000)
+        );
+    }
+
+    #[test]
+    fn stale_playback_start_cannot_upgrade_precision() {
+        let (_directory, mut core) = fixture();
+        precision_pending(&mut core);
+        let revision = core.state.library.revision;
+        let mut event = started_event(&core, Some(10.0));
+        if let AudioEvent::Started { generation, info } = &mut event {
+            *generation = generation.wrapping_sub(1);
+            info.bitrate_bps = Some(192_000);
+            info.bitrate_exact = true;
+        }
+        core.audio_event(event).unwrap();
+        assert_eq!(core.state.library.revision, revision);
+        assert!(!core.playback.as_ref().unwrap().started);
+        assert!(!core.store.track(1).unwrap().unwrap().bitrate_exact);
+        assert_eq!(
+            core.store.track(1).unwrap().unwrap().bitrate_bps,
+            Some(128_000)
+        );
+    }
+
+    #[test]
+    fn full_eof_upgrades_estimate_but_stale_and_stopped_events_do_not() {
+        for drain in [false, true] {
+            let (_directory, mut core) = fixture();
+            precision_pending(&mut core);
+            started(&mut core, Some(10.0)).unwrap();
+            let generation = core.generation;
+            core.audio_event(AudioEvent::Ended {
+                generation: generation.wrapping_sub(1),
+                bitrate_bps: Some(192_000),
+            })
+            .unwrap();
+            assert!(!core.store.track(1).unwrap().unwrap().bitrate_exact);
+            if drain {
+                let (send, receive) = bounded(1);
+                core.engine.events = receive;
+                send.send(AudioEvent::Ended {
+                    generation,
+                    bitrate_bps: Some(192_000),
+                })
+                .unwrap();
+                core.finish_playback(Ok(None), false, Ok(())).unwrap();
+            } else {
+                core.audio_event(AudioEvent::Ended {
+                    generation,
+                    bitrate_bps: Some(192_000),
+                })
+                .unwrap();
+            }
+            let exact = core.store.track(1).unwrap().unwrap();
+            assert_eq!(exact.bitrate_bps, Some(192_000));
+            assert!(exact.bitrate_exact);
+            let revision = core.state.library.revision;
+            core.audio_event(AudioEvent::Ended {
+                generation,
+                bitrate_bps: Some(256_000),
+            })
+            .unwrap();
+            assert_eq!(core.state.library.revision, revision);
+            assert_eq!(core.store.track(1).unwrap().unwrap(), exact);
+        }
+        let (_directory, mut core) = fixture();
+        precision_pending(&mut core);
+        started(&mut core, Some(10.0)).unwrap();
+        let generation = core.generation;
+        core.finish_playback(Ok(None), false, Ok(())).unwrap();
+        core.audio_event(AudioEvent::Ended {
+            generation,
+            bitrate_bps: Some(192_000),
+        })
+        .unwrap();
+        assert!(!core.store.track(1).unwrap().unwrap().bitrate_exact);
+    }
+
+    #[test]
+    fn same_track_restart_retains_queued_started_and_eof_bitrate_upgrades() {
+        for eof in [false, true] {
+            let (_directory, mut core) = fixture();
+            precision_pending(&mut core);
+            let queue_id = core.queue_ids[0];
+            let generation = core.generation;
+            let event = if eof {
+                started(&mut core, Some(10.0)).unwrap();
+                AudioEvent::Ended {
+                    generation,
+                    bitrate_bps: Some(192_000),
+                }
+            } else {
+                let mut event = started_event(&core, Some(10.0));
+                if let AudioEvent::Started { info, .. } = &mut event {
+                    info.bitrate_bps = Some(192_000);
+                    info.bitrate_exact = true;
+                }
+                event
+            };
+            let _commands = recording_audio(&mut core);
+            let (sender, events) = bounded(1);
+            core.engine.events = events;
+            sender.send(event).unwrap();
+
+            core.start(queue_id, false).unwrap();
+            assert_eq!(core.generation, generation.wrapping_add(1));
+            assert!(!core.playback.as_ref().unwrap().started);
+            assert!(core.playback.as_ref().unwrap().source.is_none());
+
+            // A new decoder estimate must not replace the retiring worker's upgrade.
+            let mut event = started_event(&core, Some(10.0));
+            if let AudioEvent::Started { info, .. } = &mut event {
+                info.bitrate_bps = Some(64_000);
+            }
+            for event in [None, Some(event)] {
+                if let Some(event) = event {
+                    core.audio_event(event).unwrap();
+                }
+                core.publish();
+                let stored = core.store.track(1).unwrap().unwrap();
+                assert_eq!(stored.bitrate_bps, Some(192_000));
+                assert!(stored.bitrate_exact);
+                let state = core.shared.read();
+                assert_eq!(state.playback.status, PlaybackStatus::Playing);
+                assert_eq!(state.queue.current_id, Some(queue_id));
+                assert_eq!(state.current_track().unwrap(), &stored);
+                let page = core.store.queue_page(0, 1).unwrap();
+                assert_eq!(page.rows[0].track.bitrate_bps, stored.bitrate_bps);
+                assert_eq!(page.rows[0].track.bitrate_exact, stored.bitrate_exact);
+            }
+        }
+    }
+
+    #[test]
+    fn playback_bitrate_runtime_replacement_and_optional_failure_do_not_interrupt_start() {
+        for replace in [false, true] {
+            let (_directory, mut core) = fixture();
+            precision_pending(&mut core);
+            if replace {
+                let path = core.state.current_track().unwrap().path.clone();
+                std::fs::write(path, b"different encoded source with different size").unwrap();
+            }
+            let mut event = started_event(&core, Some(10.0));
+            if let AudioEvent::Started { info, .. } = &mut event {
+                info.bitrate_bps = Some(if replace { 192_000 } else { u64::MAX });
+                info.bitrate_exact = true;
+            }
+            core.audio_event(event).unwrap();
+            assert!(core.playback.as_ref().unwrap().started);
+            assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
+            let track = core.store.track(1).unwrap().unwrap();
+            assert_eq!(track.bitrate_bps, Some(128_000));
+            assert!(!track.bitrate_exact);
+        }
     }
 
     #[test]
@@ -4220,6 +4459,7 @@ mod tests {
                 channels: track.channels,
                 sample_rate: track.sample_rate,
                 bitrate_bps: None,
+                bitrate_exact: false,
                 track_number: None,
                 disc_number: None,
                 bits_per_sample: None,
@@ -4298,7 +4538,12 @@ mod tests {
                     listened_seconds: 10.0,
                 })
                 .unwrap();
-            sender.send(AudioEvent::Ended { generation }).unwrap();
+            sender
+                .send(AudioEvent::Ended {
+                    generation,
+                    bitrate_bps: None,
+                })
+                .unwrap();
             sender
                 .send(AudioEvent::Failed {
                     generation,
@@ -4337,7 +4582,12 @@ mod tests {
                 listened_seconds: 10.0,
             })
             .unwrap();
-        sender.send(AudioEvent::Ended { generation }).unwrap();
+        sender
+            .send(AudioEvent::Ended {
+                generation,
+                bitrate_bps: None,
+            })
+            .unwrap();
         core.store.remove_tracks(&[1]).unwrap();
         assert!(
             core.finish_playback(Ok(Some((generation, 10.0))), false, Ok(()))
@@ -4494,7 +4744,11 @@ mod tests {
             listened_seconds: 10.0,
         })
         .unwrap();
-        core.audio_event(AudioEvent::Ended { generation }).unwrap();
+        core.audio_event(AudioEvent::Ended {
+            generation,
+            bitrate_bps: None,
+        })
+        .unwrap();
         core.audio_event(AudioEvent::Failed {
             generation,
             message: "Old failure".into(),
@@ -4554,7 +4808,13 @@ mod tests {
             progress(&mut core, 10.0, heard);
             assert_eq!(play_count(&core, 1), 0);
             let generation = core.generation;
-            assert!(core.audio_event(AudioEvent::Ended { generation }).is_err());
+            assert!(
+                core.audio_event(AudioEvent::Ended {
+                    generation,
+                    bitrate_bps: None
+                })
+                .is_err()
+            );
             assert_eq!(play_count(&core, 1), expected);
             assert_eq!(core.state.playback.duration, Some(10.0));
             assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
@@ -4569,7 +4829,13 @@ mod tests {
         core.command(Command::Seek { seconds: 10.0 }).unwrap();
         progress(&mut core, f64::NAN, 8.0);
         let generation = core.generation;
-        assert!(core.audio_event(AudioEvent::Ended { generation }).is_err());
+        assert!(
+            core.audio_event(AudioEvent::Ended {
+                generation,
+                bitrate_bps: None
+            })
+            .is_err()
+        );
         assert_eq!(play_count(&core, 1), 0);
         assert_eq!(core.state.playback.duration, None);
 
@@ -4669,6 +4935,7 @@ mod tests {
                     channels: 2,
                     sample_rate: 48_000,
                     bitrate_bps: None,
+                    bitrate_exact: false,
                     track_number: None,
                     disc_number: None,
                     bits_per_sample: None,
@@ -4724,7 +4991,10 @@ mod tests {
         core.state.playback.position = 10.0;
         let generation = core.generation;
         let error = core
-            .audio_event(AudioEvent::Ended { generation })
+            .audio_event(AudioEvent::Ended {
+                generation,
+                bitrate_bps: None,
+            })
             .unwrap_err();
         assert!(error.to_string().contains("2.wav"));
         assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
@@ -4929,7 +5199,11 @@ mod tests {
                 assert_eq!(core.store.playlist_track_ids(playlist, 10).unwrap(), [1, 2]);
                 assert_queue_saved(&core);
                 core.audio_event(late_started).unwrap();
-                core.audio_event(AudioEvent::Ended { generation }).unwrap();
+                core.audio_event(AudioEvent::Ended {
+                    generation,
+                    bitrate_bps: None,
+                })
+                .unwrap();
                 assert_eq!(core.state.queue.current_id, Some(3));
                 assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
                 core.load_initial_state().unwrap();
@@ -5218,7 +5492,10 @@ mod tests {
         missing(&mut core, Command::Next, 2);
         let generation = core.generation;
         let error = core
-            .audio_event(AudioEvent::Ended { generation })
+            .audio_event(AudioEvent::Ended {
+                generation,
+                bitrate_bps: None,
+            })
             .unwrap_err();
         assert!(error.to_string().contains("1.wav"));
         assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);

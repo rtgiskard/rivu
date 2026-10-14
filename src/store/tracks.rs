@@ -44,7 +44,105 @@ pub(crate) struct PreparedTrackRemoval<'a> {
     encoded: String,
 }
 
+/// Captured before loading audio; bitrate persistence must still match this source.
+pub(crate) struct PlaybackSource {
+    pub(crate) id: i64,
+    pub(crate) path: PathBuf,
+    pub(crate) file_size: u64,
+    pub(crate) modified_ns: i64,
+    cue: Option<crate::model::CueSegment>,
+    fingerprint: Option<blake3::Hash>,
+}
+
 impl Store {
+    pub(crate) fn playback_source(&self, track: &Track) -> Result<Option<PlaybackSource>> {
+        if track.bitrate_bps.is_some() && track.bitrate_exact {
+            return Ok(None);
+        }
+        let fingerprint = track
+            .fingerprint
+            .as_deref()
+            .map(blake3::Hash::from_hex)
+            .transpose()
+            .context("Invalid playback BLAKE3 fingerprint")?;
+        let cue = track.cue.as_ref();
+        let metadata = self
+            .conn
+            .query_row(
+                "SELECT file_size,modified_ns FROM tracks WHERE id=?1 AND path=?2
+                 AND fingerprint IS ?3 AND cue_sheet IS ?4 AND cue_number IS ?5
+                 AND cue_start_frame IS ?6 AND cue_end_frame IS ?7
+                 AND missing=0 AND (bitrate_bps IS NULL OR bitrate_exact=0)",
+                params![
+                    track.id,
+                    track
+                        .path
+                        .to_str()
+                        .context("Playback source path is not UTF-8")?,
+                    fingerprint.as_ref().map(|hash| hash.as_bytes().as_slice()),
+                    cue.and_then(|cue| cue.sheet.to_str()),
+                    cue.map(|cue| cue.number),
+                    cue.map(|cue| cue.start_frame as i64),
+                    cue.and_then(|cue| cue.end_frame).map(|frame| frame as i64),
+                ],
+                |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)?)),
+            )
+            .optional()?;
+        Ok(metadata.map(|(file_size, modified_ns)| PlaybackSource {
+            id: track.id,
+            path: track.path.clone(),
+            file_size,
+            modified_ns,
+            cue: track.cue.clone(),
+            fingerprint,
+        }))
+    }
+
+    /// Source-conditional enrichment: exact replaces estimates; estimates only fill gaps.
+    pub(crate) fn upgrade_bitrate(
+        &self,
+        source: &PlaybackSource,
+        bitrate_bps: u64,
+        bitrate_exact: bool,
+    ) -> Result<bool> {
+        if bitrate_bps == 0 {
+            return Ok(false);
+        }
+        let bitrate = i64::try_from(bitrate_bps).context("Audio bitrate exceeds database range")?;
+        let cue = source.cue.as_ref();
+        let updated = self.conn.execute(
+            "UPDATE tracks SET bitrate_bps=?1,bitrate_exact=?11 WHERE id=?2
+             AND (bitrate_bps IS NULL OR (bitrate_exact=0 AND ?11=1))
+             AND (bitrate_bps IS NOT ?1 OR bitrate_exact IS NOT ?11)
+             AND missing=0 AND path=?3 AND file_size=?4 AND modified_ns=?5
+             AND fingerprint IS ?6 AND cue_sheet IS ?7 AND cue_number IS ?8
+             AND cue_start_frame IS ?9 AND cue_end_frame IS ?10",
+            params![
+                bitrate,
+                source.id,
+                source
+                    .path
+                    .to_str()
+                    .context("Playback source path is not UTF-8")?,
+                source.file_size as i64,
+                source.modified_ns,
+                source
+                    .fingerprint
+                    .as_ref()
+                    .map(|hash| hash.as_bytes().as_slice()),
+                cue.and_then(|cue| cue.sheet.to_str()),
+                cue.map(|cue| cue.number),
+                cue.map(|cue| cue.start_frame as i64),
+                cue.and_then(|cue| cue.end_frame).map(|frame| frame as i64),
+                bitrate_exact,
+            ],
+        )?;
+        if updated != 0 {
+            self.track_cache.borrow_mut().entries.remove(&source.id);
+        }
+        Ok(updated != 0)
+    }
+
     pub fn set_favorite(&self, ids: &[i64], favorite: bool) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
         let encoded_ids = self.validated_track_ids(ids)?;

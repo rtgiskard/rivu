@@ -374,7 +374,11 @@ impl Core {
             } if generation == self.generation => {
                 self.playback_progress(position_seconds, listened_seconds)?;
             }
-            AudioEvent::Ended { generation } if generation == self.generation => {
+            AudioEvent::Ended {
+                generation,
+                bitrate_bps,
+            } if generation == self.generation => {
+                self.playback_ended_bitrate(bitrate_bps)?;
                 let status = self.state.playback.status;
                 self.stop_playback(true)?;
                 self.advance_with_status(true, status)?;

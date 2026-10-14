@@ -158,6 +158,12 @@ impl Playback {
         self.source.info()
     }
 
+    pub(super) fn completed_bitrate(&self) -> Option<u64> {
+        self.finished()
+            .then(|| self.source.completed_bitrate())
+            .flatten()
+    }
+
     pub(super) fn uses_ffmpeg(&self) -> bool {
         self.source.uses_ffmpeg()
     }
@@ -637,6 +643,47 @@ mod tests {
             playback.waveform.read().rms_counts.iter().sum::<u64>(),
             96_000
         );
+    }
+
+    #[test]
+    fn complete_bitrate_waits_for_output_drain_and_cue_end_never_upgrades() {
+        let file = pcm_samples(320);
+        for restricted in [false, true] {
+            let (mut playback, mut render) = test_playback(
+                file.path(),
+                PlaybackRange {
+                    start_seconds: 0.0,
+                    end_seconds: Some(0.04),
+                },
+            );
+            if !restricted {
+                playback.source =
+                    Source::open(file.path(), 64 * 1024, DecoderHint::Native, false).unwrap();
+            }
+            assert_eq!(playback.completed_bitrate(), None);
+            playback.fill().unwrap();
+            assert!(playback.eof);
+            assert_eq!(
+                playback.completed_bitrate(),
+                None,
+                "decoded EOF is not audible EOF"
+            );
+            let mut data = [0.0; 160];
+            render(&mut data, 0);
+            render(&mut data, 20);
+            render(&mut data, 40);
+            assert_eq!(
+                playback.completed_bitrate(),
+                None,
+                "queued device tail has not elapsed"
+            );
+            render(&mut data, 60);
+            assert!(playback.finished());
+            assert_eq!(
+                playback.completed_bitrate(),
+                (!restricted).then_some(128_000)
+            );
+        }
     }
 
     #[test]

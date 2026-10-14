@@ -87,7 +87,7 @@ const KNOWN_COLUMNS: &str =
     "id,path,file_size,modified_ns,fingerprint,raw_title,raw_artist,raw_album,
     duration,codec,channels,sample_rate,cue_sheet,cue_number,cue_start_frame,
     cue_end_frame,probe_version,bitrate_bps,track_number,disc_number,
-    bits_per_sample,release_date";
+    bits_per_sample,release_date,bitrate_exact";
 
 fn known_file_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<KnownFile> {
     Ok(KnownFile {
@@ -107,6 +107,7 @@ fn known_file_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<KnownFile> {
                 channels: r.get::<_, i64>(10)? as u16,
                 sample_rate: r.get::<_, i64>(11)? as u32,
                 bitrate_bps: r.get::<_, Option<i64>>(17)?.map(|value| value as u64),
+                bitrate_exact: r.get(22)?,
                 track_number: r.get(18)?,
                 disc_number: r.get(19)?,
                 bits_per_sample: r.get(20)?,
@@ -127,7 +128,7 @@ impl Store {
             "SELECT id,path,file_size,modified_ns,fingerprint,raw_title,raw_artist,raw_album,
                     duration,codec,channels,sample_rate,cue_sheet,cue_number,cue_start_frame,
                     cue_end_frame,probe_version,bitrate_bps,track_number,disc_number,
-                    bits_per_sample,release_date
+                    bits_per_sample,release_date,bitrate_exact
              FROM tracks WHERE id=COALESCE(
                 (SELECT id FROM tracks INDEXED BY tracks_directory
                  WHERE path=?1 AND cue_sheet IS NULL ORDER BY id LIMIT 1),
@@ -388,6 +389,7 @@ impl Store {
                 cue_end_frame INTEGER,
                 probe_version INTEGER NOT NULL,
                 bitrate_bps INTEGER,
+                bitrate_exact INTEGER NOT NULL,
                 track_number INTEGER,
                 disc_number INTEGER,
                 bits_per_sample INTEGER,
@@ -398,9 +400,9 @@ impl Store {
             "INSERT INTO temp.scan_stage(
                 resolved_id,path,fingerprint,file_size,modified_ns,raw_title,raw_artist,raw_album,
                 duration,codec,channels,sample_rate,cue_sheet,cue_number,cue_start_frame,
-                cue_end_frame,probe_version,bitrate_bps,track_number,disc_number,bits_per_sample,
+                cue_end_frame,probe_version,bitrate_bps,bitrate_exact,track_number,disc_number,bits_per_sample,
                 release_date
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         )?;
         for r in &result.records {
             let key = identity(&r.path, r.cue.as_ref());
@@ -455,6 +457,7 @@ impl Store {
                 end,
                 PROBE_VERSION,
                 bitrate,
+                m.bitrate_exact && bitrate.is_some(),
                 m.track_number,
                 m.disc_number,
                 m.bits_per_sample,
@@ -467,13 +470,30 @@ impl Store {
             }
         }
         drop(stage);
+        // A queued scan may predate playback enrichment. Preserve precision only
+        // for unchanged encoded content and the same CUE source restriction.
+        tx.execute(
+            "UPDATE temp.scan_stage AS s SET bitrate_bps=t.bitrate_bps,bitrate_exact=t.bitrate_exact
+             FROM tracks AS t WHERE t.id=s.resolved_id AND s.bitrate_exact=0
+             AND (s.bitrate_bps IS NULL OR t.bitrate_exact=1)
+             AND t.bitrate_bps IS NOT NULL
+             AND t.cue_sheet IS s.cue_sheet AND t.cue_number IS s.cue_number
+             AND t.cue_start_frame IS s.cue_start_frame AND t.cue_end_frame IS s.cue_end_frame
+             AND (
+                (s.fingerprint IS NOT NULL AND t.fingerprint=s.fingerprint)
+                OR (t.path=s.path AND t.file_size=s.file_size
+                    AND t.modified_ns=s.modified_ns AND s.modified_ns<>?1
+                    AND t.fingerprint IS s.fingerprint)
+             )",
+            [i64::MIN],
+        )?;
         let mut changed_tracks = tx.execute(
             "UPDATE tracks SET
                 path=s.path,fingerprint=s.fingerprint,file_size=s.file_size,modified_ns=s.modified_ns,
                 raw_title=s.raw_title,raw_artist=s.raw_artist,raw_album=s.raw_album,duration=s.duration,
                 codec=s.codec,channels=s.channels,sample_rate=s.sample_rate,cue_sheet=s.cue_sheet,
                 cue_number=s.cue_number,cue_start_frame=s.cue_start_frame,cue_end_frame=s.cue_end_frame,
-                missing=0,probe_version=s.probe_version,bitrate_bps=s.bitrate_bps,
+                missing=0,probe_version=s.probe_version,bitrate_bps=s.bitrate_bps,bitrate_exact=s.bitrate_exact,
                 track_number=s.track_number,disc_number=s.disc_number,bits_per_sample=s.bits_per_sample,
                 release_date=s.release_date
              FROM temp.scan_stage AS s WHERE tracks.id=s.resolved_id AND (
@@ -488,6 +508,7 @@ impl Store {
                 OR tracks.cue_end_frame IS NOT s.cue_end_frame OR tracks.missing IS NOT 0
                 OR tracks.probe_version IS NOT s.probe_version
                 OR tracks.bitrate_bps IS NOT s.bitrate_bps
+                OR tracks.bitrate_exact IS NOT s.bitrate_exact
                 OR tracks.track_number IS NOT s.track_number OR tracks.disc_number IS NOT s.disc_number
                 OR tracks.bits_per_sample IS NOT s.bits_per_sample
                 OR tracks.release_date IS NOT s.release_date
@@ -498,10 +519,10 @@ impl Store {
             "INSERT INTO tracks(
                 path,fingerprint,file_size,modified_ns,raw_title,raw_artist,raw_album,duration,codec,
                 channels,sample_rate,cue_sheet,cue_number,cue_start_frame,cue_end_frame,probe_version,
-                bitrate_bps,track_number,disc_number,bits_per_sample,release_date
+                bitrate_bps,bitrate_exact,track_number,disc_number,bits_per_sample,release_date
              ) SELECT path,fingerprint,file_size,modified_ns,raw_title,raw_artist,raw_album,duration,codec,
                 channels,sample_rate,cue_sheet,cue_number,cue_start_frame,cue_end_frame,probe_version,
-                bitrate_bps,track_number,disc_number,bits_per_sample,release_date
+                bitrate_bps,bitrate_exact,track_number,disc_number,bits_per_sample,release_date
              FROM temp.scan_stage WHERE resolved_id IS NULL",
             [],
         )?;
@@ -557,6 +578,7 @@ mod tests {
                 channels: 2,
                 sample_rate: 48000,
                 bitrate_bps: Some(1_536_000),
+                bitrate_exact: true,
                 track_number: Some(1),
                 disc_number: Some(1),
                 bits_per_sample: Some(16),

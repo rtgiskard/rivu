@@ -36,7 +36,12 @@ pub(super) fn track_detail(track: &crate::model::LibraryRow) -> String {
     match track.bitrate_bps {
         Some(value) => {
             use std::fmt::Write;
-            let _ = write!(detail, "{:.1} kbps", value as f64 / 1000.0);
+            let _ = write!(
+                detail,
+                "{}{:.1} kbps",
+                if track.bitrate_exact { "" } else { "≈" },
+                value as f64 / 1000.0
+            );
         }
         None => detail.push('-'),
     }
@@ -89,7 +94,14 @@ fn track_columns(track: &LibraryRow, columns: LibraryColumns) -> Option<gpui::Di
             }
             LibraryColumn::Bitrate => track.bitrate_bps.map_or_else(
                 || "-".into(),
-                |value| format!("{:.1} kbps", value as f64 / 1000.0).into(),
+                |value| {
+                    format!(
+                        "{}{:.1} kbps",
+                        if track.bitrate_exact { "" } else { "≈" },
+                        value as f64 / 1000.0
+                    )
+                    .into()
+                },
             ),
         };
         let cell = super::caption(value).truncate();

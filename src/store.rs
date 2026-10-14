@@ -16,6 +16,7 @@ use rusqlite::Connection;
 use std::cell::RefCell;
 
 pub use duplicates::{DuplicateGroup, DuplicateMember, PreparedRelocation, RelocationIdentity};
+pub(crate) use tracks::PlaybackSource;
 
 pub struct Store {
     conn: Connection,

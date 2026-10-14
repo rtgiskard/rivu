@@ -1,6 +1,104 @@
 use super::*;
 
+fn modified_ns(metadata: &std::fs::Metadata) -> Option<i64> {
+    let modified = metadata.modified().ok()?;
+    let ns = match modified.duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_nanos() as i128,
+        Err(error) => -(error.duration().as_nanos() as i128),
+    };
+    i64::try_from(ns).ok().filter(|ns| *ns != i64::MIN)
+}
+
+fn same_source_file(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {
+    if !after.is_file()
+        || before.len() != after.len()
+        || before.modified().ok() != after.modified().ok()
+    {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        before.dev() == after.dev()
+            && before.ino() == after.ino()
+            && before.ctime() == after.ctime()
+            && before.ctime_nsec() == after.ctime_nsec()
+    }
+    #[cfg(not(unix))]
+    {
+        before.created().ok() == after.created().ok()
+    }
+}
+
 impl Core {
+    pub(in crate::core) fn playback_source(
+        &self,
+        track: &Track,
+    ) -> Result<Option<(crate::store::PlaybackSource, std::fs::Metadata)>> {
+        if track.bitrate_bps.is_some() && track.bitrate_exact {
+            return Ok(None);
+        }
+        let Some(source) = self.store.playback_source(track)? else {
+            return Ok(None);
+        };
+        let Ok(metadata) = std::fs::metadata(&source.path) else {
+            return Ok(None);
+        };
+        Ok((metadata.is_file()
+            && source.file_size == metadata.len()
+            && Some(source.modified_ns) == modified_ns(&metadata))
+        .then_some((source, metadata)))
+    }
+
+    fn persist_playback_bitrate(&mut self, bitrate: u64, exact: bool) -> bool {
+        let Some(playback) = self.playback.as_ref() else {
+            return false;
+        };
+        let track_id = playback.track_id;
+        let Some((source, before)) = playback.source.as_ref() else {
+            return false;
+        };
+        if !std::fs::metadata(&source.path).is_ok_and(|after| same_source_file(before, &after))
+            || !self
+                .store
+                .upgrade_bitrate(source, bitrate, exact)
+                .unwrap_or_else(|error| {
+                    tracing::warn!(error = ?error, "playback_bitrate_not_saved");
+                    false
+                })
+        {
+            return false;
+        }
+        if let Some(current) = self.state.current_track.as_mut()
+            && current.id == track_id
+        {
+            let current = Arc::make_mut(current);
+            current.bitrate_bps = Some(bitrate);
+            current.bitrate_exact = exact;
+        }
+        true
+    }
+
+    pub(in crate::core) fn playback_ended_bitrate(&mut self, bitrate: Option<u64>) -> Result<()> {
+        // Only the worker's actual full-source EOF can supply this value.
+        if self
+            .playback
+            .as_ref()
+            .is_some_and(|playback| playback.started)
+            && self
+                .state
+                .current_track
+                .as_ref()
+                .is_some_and(|track| track.cue.is_none())
+            && let Some(bitrate) = bitrate.filter(|bitrate| *bitrate > 0)
+            && self.persist_playback_bitrate(bitrate, true)
+        {
+            self.state.queue = self.store.queue_projection(self.queue_ids.len())?;
+            self.state.library.revision = self.state.library.revision.wrapping_add(1);
+        }
+        Ok(())
+    }
+
     pub(in crate::core) fn start(&mut self, queue_id: u64, record_history: bool) -> Result<()> {
         self.start_with_status(queue_id, record_history, PlaybackStatus::Playing)
     }
@@ -15,7 +113,14 @@ impl Core {
             bail!("Missing audio file: {}", track.path.display());
         }
         self.stop()?;
+        // Retiring Started/Ended bookkeeping can enrich this same track in the store.
+        // Keep the missing-file preflight above, but load the authoritative snapshot now.
+        let track = self.track(track.id)?;
         if status != PlaybackStatus::Stopped {
+            let source = self.playback_source(&track).unwrap_or_else(|error| {
+                tracing::warn!(error = ?error, "playback_bitrate_identity_unavailable");
+                None
+            });
             self.audio(AudioCommand::Load {
                 path: track.path.clone(),
                 decoder_hint: track.decoder_hint,
@@ -29,6 +134,7 @@ impl Core {
             })?;
             self.playback = Some(PlaybackStats {
                 track_id: track.id,
+                source,
                 heard: 0.0,
                 position: None,
                 started: false,
@@ -101,6 +207,11 @@ impl Core {
                 return Err(error);
             }
         };
+        // Coalesce this content change with the existing start bookkeeping's
+        // queue projection and library revision; unknown/no-op results add none.
+        if let Some(bitrate) = info.bitrate_bps.filter(|bitrate| *bitrate > 0) {
+            self.persist_playback_bitrate(bitrate, info.bitrate_exact);
+        }
         self.update_track_stats(track_id, stats)?;
         let playback = self.playback.as_mut().expect("playback was checked above");
         playback.started = true;
@@ -150,6 +261,10 @@ impl Core {
             } if event_generation == generation => {
                 self.playback_progress(position_seconds, listened_seconds)?;
             }
+            AudioEvent::Ended {
+                generation: event_generation,
+                bitrate_bps,
+            } if event_generation == generation => self.playback_ended_bitrate(bitrate_bps)?,
             // Retiring terminal events cannot advance, recursively stop, or revive playback.
             _ => {}
         }

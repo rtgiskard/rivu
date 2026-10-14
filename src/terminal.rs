@@ -2139,6 +2139,7 @@ mod tests {
             duration: None,
             codec: "flac".into(),
             bitrate_bps: None,
+            bitrate_exact: false,
             favorite: false,
             missing: false,
             play_count: 0,

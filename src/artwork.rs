@@ -496,6 +496,7 @@ mod tests {
             channels: 1,
             sample_rate: 8_000,
             bitrate_bps: None,
+            bitrate_exact: false,
             track_number: None,
             disc_number: None,
             bits_per_sample: Some(16),

@@ -76,6 +76,10 @@ mod ffmpeg {
             unreachable!("FFmpeg decoder cannot be opened without the ffmpeg feature")
         }
 
+        pub(super) fn completed_bitrate(&self) -> Option<u64> {
+            None
+        }
+
         pub(super) fn next_frames(
             &mut self,
             _: &mut Vec<f32>,
@@ -90,6 +94,7 @@ mod ffmpeg {
         }
     }
 }
+mod bitrate;
 mod format;
 mod output;
 mod playback;
@@ -190,6 +195,8 @@ pub enum AudioEvent {
     },
     Ended {
         generation: u64,
+        /// Precise selected-stream average, only after complete playback drains.
+        bitrate_bps: Option<u64>,
     },
     DecoderStopped {
         generation: u64,

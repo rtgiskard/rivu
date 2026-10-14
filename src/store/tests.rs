@@ -52,6 +52,7 @@ fn rec(path: &str, hash: &str, title: &str, dur: f64) -> ScanRecord {
             channels: 2,
             sample_rate: 48000,
             bitrate_bps: None,
+            bitrate_exact: false,
             track_number: None,
             disc_number: None,
             bits_per_sample: None,
@@ -75,6 +76,111 @@ fn db(name: &str) -> (PathBuf, Store) {
     let p = std::env::temp_dir().join(format!("rivu-{name}-{}.db", std::process::id()));
     let _ = fs::remove_file(&p);
     (p.clone(), Store::open(&p).unwrap())
+}
+
+#[test]
+fn playback_precision_upgrade_is_source_conditional_and_idempotent() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("precision.db");
+    let store = Store::open(&database).unwrap();
+    let mut record = rec("/music/source.flac", "source", "Source", 10.0);
+    record.media.bitrate_bps = Some(128_000);
+    store.apply_scan(&scan(vec![record.clone()])).unwrap();
+    let track = all_tracks(&store).remove(0);
+    store.enqueue_tracks(&[track.id]).unwrap();
+    let source = store.playback_source(&track).unwrap().unwrap();
+    assert!(!store.upgrade_bitrate(&source, 192_000, false).unwrap());
+    assert!(!store.upgrade_bitrate(&source, 0, true).unwrap());
+    let before = store.queue_state().unwrap();
+    // Precision itself is content, even when the numerical value is unchanged.
+    assert!(store.upgrade_bitrate(&source, 128_000, true).unwrap());
+    let exact = store.track(track.id).unwrap().unwrap();
+    assert!(exact.bitrate_exact);
+    assert!(store.queue_page(0, 10).unwrap().rows[0].track.bitrate_exact);
+    assert!(
+        store
+            .library_view_page(None, None, None, crate::model::LibrarySort::Id, 0, 10)
+            .unwrap()
+            .rows[0]
+            .bitrate_exact
+    );
+    assert!(
+        store
+            .known_source(&record.path)
+            .unwrap()
+            .unwrap()
+            .media
+            .unwrap()
+            .bitrate_exact
+    );
+    let revision = store.queue_state().unwrap();
+    assert!(revision.revision > before.revision);
+    assert!(!store.upgrade_bitrate(&source, 256_000, true).unwrap());
+    assert!(!store.upgrade_bitrate(&source, 256_000, false).unwrap());
+    assert_eq!(store.queue_state().unwrap(), revision);
+    assert!(store.playback_source(&exact).unwrap().is_none());
+
+    // Ordinary and forced probes can both arrive after the playback result.
+    for bitrate in [Some(96_000), None] {
+        record.media.bitrate_bps = bitrate;
+        assert!(!store.apply_scan(&scan(vec![record.clone()])).unwrap());
+        assert_eq!(store.track(track.id).unwrap().unwrap(), exact);
+        assert_eq!(store.queue_state().unwrap(), revision);
+    }
+    drop(store);
+    let store = Store::open(&database).unwrap();
+    assert!(store.track(track.id).unwrap().unwrap().bitrate_exact);
+    record.fingerprint = Some(blake3::hash(b"replacement").to_hex().to_string());
+    record.modified_ns += 1;
+    record.media.bitrate_bps = Some(64_000);
+    assert!(store.apply_scan(&scan(vec![record.clone()])).unwrap());
+    let replacement = store.track(track.id).unwrap().unwrap();
+    assert_eq!(replacement.bitrate_bps, Some(64_000));
+    assert!(!replacement.bitrate_exact);
+    assert!(!store.upgrade_bitrate(&source, 128_000, true).unwrap());
+    record.media.bitrate_exact = true;
+    assert!(store.apply_scan(&scan(vec![record])).unwrap());
+    assert!(store.track(track.id).unwrap().unwrap().bitrate_exact);
+}
+
+#[test]
+fn playback_precision_fill_and_cue_guard_preserve_source_identity() {
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    let mut record = rec("/music/source.flac", "source", "Source", 10.0);
+    record.fingerprint = None;
+    store.apply_scan(&scan(vec![record.clone()])).unwrap();
+    let track = all_tracks(&store).remove(0);
+    let source = store.playback_source(&track).unwrap().unwrap();
+    assert!(store.upgrade_bitrate(&source, 128_000, false).unwrap());
+    assert!(!store.upgrade_bitrate(&source, 192_000, false).unwrap());
+    assert!(store.upgrade_bitrate(&source, 192_000, true).unwrap());
+    assert!(!store.apply_scan(&scan(vec![record.clone()])).unwrap());
+    record.modified_ns += 1;
+    store.apply_scan(&scan(vec![record])).unwrap();
+    assert_eq!(store.track(track.id).unwrap().unwrap().bitrate_bps, None);
+    assert!(!store.upgrade_bitrate(&source, 192_000, true).unwrap());
+
+    let mut cue = rec("/music/cue.flac", "cue", "Cue", 10.0);
+    cue.cue = Some(CueSegment {
+        sheet: "/music/album.cue".into(),
+        number: 1,
+        start_frame: 0,
+        end_frame: Some(750),
+    });
+    store.apply_scan(&scan(vec![cue.clone()])).unwrap();
+    let id = store
+        .track_id_for_source(Path::new("/music/album.cue"), Some(1))
+        .unwrap()
+        .unwrap();
+    let source = store
+        .playback_source(&store.track(id).unwrap().unwrap())
+        .unwrap()
+        .unwrap();
+    assert!(store.upgrade_bitrate(&source, 128_000, true).unwrap());
+    cue.cue.as_mut().unwrap().end_frame = Some(700);
+    store.apply_scan(&scan(vec![cue])).unwrap();
+    assert!(!store.track(id).unwrap().unwrap().bitrate_exact);
+    assert!(!store.upgrade_bitrate(&source, 192_000, true).unwrap());
 }
 
 #[test]
@@ -558,6 +664,7 @@ fn metadata_refresh_preserves_favorites_and_unknown_values() {
     store.increment_play_count(id).unwrap();
     record.media.track_number = Some(3);
     record.media.bitrate_bps = None;
+    record.fingerprint = Some(blake3::hash(b"replacement").to_hex().to_string());
     store.apply_scan(&scan(vec![record])).unwrap();
     let track = all_tracks(&store).remove(0);
     assert!(track.favorite);
@@ -2594,7 +2701,7 @@ fn queue_dedup_uses_first_position_not_allocation_order_and_track_deletes_remove
 fn unsupported_database_versions_are_rejected_without_migration() {
     fs::create_dir_all(".cache").unwrap();
     let directory = tempfile::tempdir_in(".cache").unwrap();
-    for version in [6, 12] {
+    for version in [6, 13] {
         let path = directory.path().join(format!("version-{version}.db"));
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection

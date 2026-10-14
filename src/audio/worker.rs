@@ -337,13 +337,17 @@ impl Worker {
                 let playback = self.playback.as_ref().unwrap();
                 let generation = playback.generation();
                 let position = playback.position();
+                let bitrate_bps = playback.completed_bitrate();
                 let (_, heard) = self.stop();
                 self.event(AudioEvent::Progress {
                     generation,
                     position_seconds: position,
                     listened_seconds: heard,
                 });
-                self.event(AudioEvent::Ended { generation });
+                self.event(AudioEvent::Ended {
+                    generation,
+                    bitrate_bps,
+                });
                 continue;
             }
             // Neither a command-budget yield nor a partial refill needs a timer.
@@ -415,7 +419,12 @@ mod tests {
         let (commands, receive) = bounded(1);
         commands.send(AudioCommand::Volume(0.4)).unwrap();
         let (events, event_receive) = bounded(1);
-        events.send(AudioEvent::Ended { generation: 1 }).unwrap();
+        events
+            .send(AudioEvent::Ended {
+                generation: 1,
+                bitrate_bps: None,
+            })
+            .unwrap();
         let (shutdown, cancelled) = bounded(0);
         let analyzer = AnalysisWorker::new(Arc::new(RwLock::new(
             crate::analysis::AnalysisFrame::default(),
@@ -430,12 +439,15 @@ mod tests {
             1024,
         );
         let worker = std::thread::spawn(move || {
-            worker.event(AudioEvent::Ended { generation: 2 });
+            worker.event(AudioEvent::Ended {
+                generation: 2,
+                bitrate_bps: None,
+            });
             worker.run();
         });
         let mut retired = Vec::new();
         let snapshot = crate::audio::stop_and_snapshot(&commands, &event_receive, |event| {
-            if let AudioEvent::Ended { generation } = event {
+            if let AudioEvent::Ended { generation, .. } = event {
                 retired.push(generation);
             }
         });
@@ -688,7 +700,12 @@ mod tests {
             let (commands, receive) = bounded(1);
             commands.send(AudioCommand::Pause(true)).unwrap();
             let (events, event_receive) = bounded(1);
-            events.send(AudioEvent::Ended { generation: 1 }).unwrap();
+            events
+                .send(AudioEvent::Ended {
+                    generation: 1,
+                    bitrate_bps: None,
+                })
+                .unwrap();
             let held_events = event_receive.clone();
             let (shutdown, cancelled) = bounded(0);
             let analysis = Arc::new(RwLock::new(AnalysisFrame::default()));
@@ -697,7 +714,10 @@ mod tests {
             let analysis_control = Arc::clone(&analyzer.control);
             let worker = Worker::new(receive, events, cancelled, analyzer, waveform.clone(), 1024);
             let worker = std::thread::spawn(move || {
-                worker.event(AudioEvent::Ended { generation: 2 });
+                worker.event(AudioEvent::Ended {
+                    generation: 2,
+                    bitrate_bps: None,
+                });
                 worker.run();
             });
             let engine = AudioEngine {
@@ -721,7 +741,7 @@ mod tests {
             closer.join().unwrap();
             assert!(matches!(
                 held_events.try_recv(),
-                Ok(AudioEvent::Ended { generation: 1 })
+                Ok(AudioEvent::Ended { generation: 1, .. })
             ));
         }
     }
@@ -730,7 +750,12 @@ mod tests {
     fn full_event_queue_drops_progress_but_retains_lifecycle_events() {
         let (events, receive) = bounded(1);
         let (_stop, shutdown) = bounded(0);
-        events.send(AudioEvent::Ended { generation: 1 }).unwrap();
+        events
+            .send(AudioEvent::Ended {
+                generation: 1,
+                bitrate_bps: None,
+            })
+            .unwrap();
         send_event(
             &events,
             &shutdown,
@@ -757,7 +782,7 @@ mod tests {
         });
         assert!(matches!(
             receive.recv().unwrap(),
-            AudioEvent::Ended { generation: 1 }
+            AudioEvent::Ended { generation: 1, .. }
         ));
         assert!(matches!(
             receive.recv().unwrap(),
@@ -774,9 +799,21 @@ mod tests {
     fn shutdown_cancels_a_full_event_queue() {
         let (events, _receive) = bounded(1);
         let (stop, shutdown) = bounded::<()>(0);
-        events.send(AudioEvent::Ended { generation: 1 }).unwrap();
+        events
+            .send(AudioEvent::Ended {
+                generation: 1,
+                bitrate_bps: None,
+            })
+            .unwrap();
         let sender = std::thread::spawn(move || {
-            send_event(&events, &shutdown, AudioEvent::Ended { generation: 2 });
+            send_event(
+                &events,
+                &shutdown,
+                AudioEvent::Ended {
+                    generation: 2,
+                    bitrate_bps: None,
+                },
+            );
         });
         drop(stop);
         sender.join().unwrap();

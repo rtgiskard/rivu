@@ -147,6 +147,22 @@ GUI/TUI lists show compact display metadata. Track details and
 and statistics. Unknown values appear as `—` in human output or `null` for
 nullable JSON fields.
 
+`bitrate_bps` describes the encoded audio stream, not decoded PCM or the entire
+container file. `bitrate_exact` marks a reliable fixed-encoding calculation or a
+complete-playback measured average, rather than a scan estimate. Human output
+prefixes scan estimates with `≈`. Existing stored values are estimates until
+confirmed. Scans use low-cost probe information and bounded headers, including
+MP3 summaries and Vorbis nominal targets; they do not traverse a whole stream
+solely to measure its bitrate. Unknown values remain unknown.
+PCM bitrate uses the actual encoded sample width. Measured compressed averages
+use selected audio packet bytes and represented sample duration, excluding
+container overhead, tags, artwork, and other streams. Decoder handling of overlap,
+delay, and padding can cause small differences between measured averages; the
+precision flag does not promise bit-for-bit agreement between decoder backends.
+An unchanged-source scan cannot downgrade a confirmed value; a changed source
+invalidates its previous precision. Playback upgrades are described in
+link:04_playback.adoc#_transport_and_timing[Playback].
+
 [source,sh]
 ----
 rivu library probe album.wav --enhanced

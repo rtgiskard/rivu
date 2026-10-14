@@ -307,6 +307,7 @@ fn run() -> Result<()> {
                         "codec": info.codec, "channels": info.channels, "sample_rate": info.sample_rate,
                         "duration": info.duration, "ffmpeg_enabled": ffmpeg_enabled,
                         "bitrate_bps": info.bitrate_bps, "bits_per_sample": info.bits_per_sample,
+                        "bitrate_exact": info.bitrate_exact,
                         "track_number": info.track_number, "disc_number": info.disc_number,
                         "release_date": info.release_date,
                         "ffmpeg_status": decoder_status,
@@ -328,7 +329,8 @@ fn run() -> Result<()> {
                 info.duration
                     .map_or("unknown".into(), |value| format!("{value:.3} s")),
                 info.bitrate_bps.map_or("—".into(), |value| format!(
-                    "{:.1} kbps",
+                    "{}{:.1} kbps",
+                    if info.bitrate_exact { "" } else { "≈" },
                     value as f64 / 1000.0
                 )),
                 info.bits_per_sample
@@ -746,7 +748,12 @@ fn list_library(
                     if track.favorite { " [favorite]" } else { "" }
                 )?;
                 match track.bitrate_bps {
-                    Some(value) => writeln!(output, "{:.1} kbps", value as f64 / 1000.0)?,
+                    Some(value) => writeln!(
+                        output,
+                        "{}{:.1} kbps",
+                        if track.bitrate_exact { "" } else { "≈" },
+                        value as f64 / 1000.0
+                    )?,
                     None => writeln!(output, "—")?,
                 }
             }

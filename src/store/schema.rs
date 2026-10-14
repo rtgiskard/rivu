@@ -21,30 +21,33 @@ const TRACK_TABLE: &str = "CREATE TABLE tracks(
     cue_start_frame INTEGER,cue_end_frame INTEGER,
     probe_version INTEGER NOT NULL DEFAULT 0,
     bitrate_bps INTEGER,track_number INTEGER,disc_number INTEGER,
+    bitrate_exact INTEGER NOT NULL DEFAULT 0 CHECK(bitrate_exact IN (0,1)),
     bits_per_sample INTEGER,release_date TEXT,
     favorite INTEGER NOT NULL DEFAULT 0 CHECK(favorite IN (0,1)),
     relocation_independent INTEGER NOT NULL DEFAULT 0 CHECK(relocation_independent IN (0,1)),
     decoder_hint INTEGER NOT NULL DEFAULT 0 CHECK(decoder_hint IN (0,1,2))
 );";
 
-const TRACK_INDEXES_AND_TRIGGER: &str = "
+const TRACK_INDEXES: &str = "
     CREATE INDEX tracks_fingerprint ON tracks(fingerprint);
     CREATE UNIQUE INDEX tracks_path ON tracks(path) WHERE cue_sheet IS NULL;
     CREATE INDEX tracks_directory ON tracks(path);
     CREATE UNIQUE INDEX tracks_cue ON tracks(cue_sheet,cue_number) WHERE cue_sheet IS NOT NULL;
     CREATE INDEX tracks_recent ON tracks(last_played DESC,id DESC) WHERE last_played IS NOT NULL;
     CREATE INDEX tracks_album ON tracks(COALESCE(album_override,raw_album), CASE WHEN COALESCE(album_override,raw_album)<>'' THEN COALESCE(disc_number,4294967295) END, CASE WHEN COALESCE(album_override,raw_album)<>'' THEN COALESCE(track_number,4294967295) END, COALESCE(title_override,raw_title));
-    CREATE INDEX tracks_most_played ON tracks(play_count DESC);
+    CREATE INDEX tracks_most_played ON tracks(play_count DESC);";
+
+const QUEUE_METADATA_TRIGGER: &str = "
     CREATE TRIGGER queue_metadata AFTER UPDATE OF raw_title,raw_artist,raw_album,
         title_override,artist_override,album_override,duration,favorite,missing,
-        play_count,codec,bitrate_bps ON tracks
+        play_count,codec,bitrate_bps,bitrate_exact ON tracks
     WHEN (COALESCE(old.title_override,old.raw_title) IS NOT COALESCE(new.title_override,new.raw_title)
         OR COALESCE(old.artist_override,old.raw_artist) IS NOT COALESCE(new.artist_override,new.raw_artist)
         OR COALESCE(old.album_override,old.raw_album) IS NOT COALESCE(new.album_override,new.raw_album)
         OR old.duration IS NOT new.duration
         OR old.favorite IS NOT new.favorite OR old.missing IS NOT new.missing
         OR old.play_count IS NOT new.play_count OR old.codec IS NOT new.codec
-        OR old.bitrate_bps IS NOT new.bitrate_bps)
+        OR old.bitrate_bps IS NOT new.bitrate_bps OR old.bitrate_exact IS NOT new.bitrate_exact)
         AND EXISTS(SELECT 1 FROM queue_entries WHERE track_id=new.id) BEGIN
         UPDATE queue_meta SET revision=revision+1;
     END;";
@@ -76,9 +79,10 @@ fn create_schema(conn: &Connection) -> Result<()> {
             revision INTEGER NOT NULL DEFAULT 0
         );
         INSERT INTO queue_meta(singleton) VALUES(1);
-        INSERT INTO schema_meta(key,value) VALUES('version',11);",
+        INSERT INTO schema_meta(key,value) VALUES('version',12);",
     )?;
-    tx.execute_batch(TRACK_INDEXES_AND_TRIGGER)?;
+    tx.execute_batch(TRACK_INDEXES)?;
+    tx.execute_batch(QUEUE_METADATA_TRIGGER)?;
     tx.commit()?;
     Ok(())
 }
@@ -111,7 +115,17 @@ impl Store {
                     |row| row.get(0),
                 )
                 .context("Unsupported library database; remove the old database and rescan")?;
-            if version != 11 {
+            if version == 11 {
+                let tx = c.unchecked_transaction()?;
+                tx.execute_batch(
+                    "ALTER TABLE tracks ADD COLUMN bitrate_exact INTEGER NOT NULL DEFAULT 0
+                        CHECK(bitrate_exact IN (0,1));
+                     DROP TRIGGER queue_metadata;",
+                )?;
+                tx.execute_batch(QUEUE_METADATA_TRIGGER)?;
+                tx.execute("UPDATE schema_meta SET value=12 WHERE key='version'", [])?;
+                tx.commit()?;
+            } else if version != 12 {
                 bail!("Unsupported database version {version}; remove the old database and rescan");
             }
         }
@@ -184,8 +198,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn version_eleven_bitrates_migrate_as_estimates_and_precision_survives_restart() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("library.db");
+        let store = Store::open(&path)?;
+        store.conn.execute_batch(
+            "INSERT INTO tracks(path,bitrate_bps) VALUES('/music/legacy.flac',128000);
+             DROP TRIGGER queue_metadata;
+             ALTER TABLE tracks DROP COLUMN bitrate_exact;
+             CREATE TRIGGER queue_metadata AFTER UPDATE OF bitrate_bps ON tracks BEGIN
+                UPDATE queue_meta SET revision=revision+1;
+             END;
+             UPDATE schema_meta SET value=11 WHERE key='version';",
+        )?;
+        drop(store);
+        let store = Store::open(&path)?;
+        let track = store.track(1)?.unwrap();
+        assert_eq!(track.bitrate_bps, Some(128_000));
+        assert!(!track.bitrate_exact);
+        assert!(
+            store
+                .conn
+                .execute("UPDATE tracks SET bitrate_exact=2", [])
+                .is_err()
+        );
+        store.enqueue_tracks(&[1])?;
+        let revision = store.queue_state()?.revision;
+        store
+            .conn
+            .execute("UPDATE tracks SET bitrate_exact=1 WHERE id=1", [])?;
+        assert!(store.queue_state()?.revision > revision);
+        drop(store);
+        let store = Store::open(&path)?;
+        assert!(store.track(1)?.unwrap().bitrate_exact);
+        assert_eq!(
+            store.conn.query_row(
+                "SELECT value FROM schema_meta WHERE key='version'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?,
+            12
+        );
+        Ok(())
+    }
+
+    #[test]
     fn incompatible_databases_are_rejected_without_changing_schema_or_data() -> Result<()> {
-        for version in [None, Some(0), Some(7), Some(8), Some(9), Some(10), Some(12)] {
+        for version in [None, Some(0), Some(7), Some(8), Some(9), Some(10), Some(13)] {
             let directory = tempfile::tempdir()?;
             let path = directory.path().join("library.db");
             let connection = Store::open(&path)?.conn;
