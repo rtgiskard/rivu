@@ -14,6 +14,15 @@ old wakeup and visualization demand and releases retained render images. The
 new root installs its own subscriptions and reconciles demand with its active
 panels. Renaming and deleting an inactive layout do not rebuild the root.
 
+New default layouts allocate 42% of the vertical content to Playback and 58%
+to the lower panes. The lower panes divide their width equally between Library
+and the right-hand stack; that stack assigns 66% of its vertical content to
+Queue and 17% each to Spectrum and Spectrogram. These proportions exclude
+separator gutters and balance visible playback controls with usable list space
+at larger interface scales.
+They apply only when creating a default layout: loading a saved tree retains
+its boundaries, including omitted or empty arrays that mean equal division.
+
 == Normalized trees and resource boundaries
 
 Leaves are nonempty tab groups with a valid active panel. Splits have two or more

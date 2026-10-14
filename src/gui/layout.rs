@@ -796,7 +796,7 @@ impl Default for Layout {
             root: Some(Node::Split {
                 id: 1,
                 axis: Axis::Vertical,
-                boundaries: Vec::new(),
+                boundaries: vec![0.42],
                 children: vec![
                     tabs(2, 3, "transport"),
                     Node::Split {
@@ -808,7 +808,7 @@ impl Default for Layout {
                             Node::Split {
                                 id: 7,
                                 axis: Axis::Vertical,
-                                boundaries: Vec::new(),
+                                boundaries: vec![0.66, 0.83],
                                 children: vec![
                                     tabs(8, 9, "queue"),
                                     tabs(10, 11, "spectrum"),
