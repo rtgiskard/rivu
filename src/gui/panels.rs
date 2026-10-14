@@ -1463,20 +1463,16 @@ impl GuiApp {
             cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                 range
                     .map(|index| {
-                        let Some(p) = this.browser.playlists.summaries().rows.get(index).cloned()
-                        else {
+                        let Some(p) = this.browser.playlists.summaries().rows.get(index) else {
                             return this
                                 .paged_loading_row(ViewRequestKind::Summaries, index, cx)
                                 .h(px(TRACK_HEIGHT))
                                 .into_any_element();
                         };
                         let id = p.id;
-                        let name = p.name.clone();
-                        let play_target = PlaylistTarget {
-                            id,
-                            name: p.name.clone(),
-                        };
-                        let menu_target = play_target.clone();
+                        let name = gpui::SharedString::from(p.name.clone());
+                        let play_name = name.clone();
+                        let menu_name = name.clone();
                         let playable = p.entry_count > 0;
                         list_row(
                             ("playlist", id as u64),
@@ -1485,7 +1481,7 @@ impl GuiApp {
                         .group("playlist-catalog-row")
                         .child(row_text(
                             ("playlist-text", id as u64),
-                            p.name,
+                            name.clone(),
                             format!("{} tracks", p.entry_count),
                         ))
                         .child(
@@ -1504,7 +1500,10 @@ impl GuiApp {
                                     } else {
                                         this.focus_layout(window, cx);
                                         this.playlist_action =
-                                            Some(PlaylistAction::Play(play_target.clone()));
+                                            Some(PlaylistAction::Play(PlaylistTarget {
+                                                id,
+                                                name: play_name.to_string(),
+                                            }));
                                         cx.notify();
                                     }
                                 },
@@ -1526,7 +1525,10 @@ impl GuiApp {
                                 move |this, window, cx| {
                                     this.focus_layout(window, cx);
                                     this.playlist_action = Some(PlaylistAction::Menu(
-                                        menu_target.clone(),
+                                        PlaylistTarget {
+                                            id,
+                                            name: menu_name.to_string(),
+                                        },
                                         window.mouse_position(),
                                     ));
                                     cx.notify();
@@ -1539,7 +1541,7 @@ impl GuiApp {
                             }),
                         )
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            if this.browser.playlists.select(id, name.clone(), index) {
+                            if this.browser.playlists.select(id, name.to_string(), index) {
                                 this.request_playlist_entries(id, 0, cx);
                             }
                             cx.notify();
@@ -1583,8 +1585,7 @@ impl GuiApp {
                 cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                     range
                         .map(|index| {
-                            let Some(e) = this.browser.playlists.entries().rows.get(index).cloned()
-                            else {
+                            let Some(e) = this.browser.playlists.entries().rows.get(index) else {
                                 return this
                                     .paged_loading_row(ViewRequestKind::Entries, index, cx)
                                     .h(px(TRACK_HEIGHT))
@@ -1592,6 +1593,8 @@ impl GuiApp {
                             };
                             let id = e.id;
                             let track_id = e.track_id;
+                            let title = e.title.clone();
+                            let favorite = e.favorite;
                             let revision = this.playlist_revision(playlist_id);
                             let catalog_revision = this.state.library.playlist_revision;
                             let selection_generation =
@@ -1617,7 +1620,7 @@ impl GuiApp {
                             track_list_row(
                                 ("playlist-entry", id as u64),
                                 ("playlist-entry-text", id as u64),
-                                e.title,
+                                title,
                                 detail,
                                 index,
                                 false,
@@ -1628,7 +1631,7 @@ impl GuiApp {
                                 ("playlist-entry-favorite", id as u64),
                                 "playlist-track-row",
                                 track_id,
-                                e.favorite,
+                                favorite,
                                 cx,
                             ))
                             .child(
