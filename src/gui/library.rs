@@ -451,6 +451,7 @@ impl GuiApp {
                                                                     this.request_directory_page(branch.clone(), offset, cx);
                                                                 },
                                                             )
+                                                            .min_h_0()
                                                             .size(px(24.0 * ui_scale.max(0.5))),
                                                         )
                                                     }),
@@ -582,12 +583,13 @@ impl GuiApp {
                                                 cx,
                                                 |this, _, cx| this.request_root_counts(cx),
                                             )
+                                            .min_h_0()
                                             .size(px(24.0 * ui_scale.max(0.5))),
                                         )
                                     })
                                 })
                                 .when_some(scan, |view, scan| {
-                                    view.child(scan.size(px(24.0 * ui_scale.max(0.5))))
+                                    view.child(scan.min_h_0().size(px(24.0 * ui_scale.max(0.5))))
                                 })
                                 .when_some(
                                     match entry {
@@ -602,6 +604,7 @@ impl GuiApp {
                                                 favorite,
                                                 cx,
                                             )
+                                            .min_h_0()
                                             .size(px(24.0 * ui_scale.max(0.5))),
                                         )
                                     },
