@@ -1,8 +1,6 @@
 use super::super::*;
 use super::{docking, layout_geometry};
 
-const DOCK_COLORS: [u32; 4] = [0x7aa2f7, 0x9ece6a, 0xbb9af7, 0xe0af68];
-
 fn panel_group(node: &Node, panel: u64) -> Option<(u64, usize)> {
     match node {
         Node::Tabs { id, panels, .. } => panels
@@ -68,8 +66,7 @@ impl GuiApp {
         };
         let geometry = DockGeometry::current(window, self.state.system.config.ui_scale);
         if session.geometry != geometry || self.interaction.measured_geometry() != Some(geometry) {
-            let had_preview = session.guide.is_some() || session.hover.is_some();
-            session.guide = None;
+            let had_preview = session.hover.is_some();
             session.hover = None;
             if had_preview {
                 cx.notify();
@@ -81,50 +78,19 @@ impl GuiApp {
             return;
         }
         session.geometry = geometry;
-        let previous_guide = session.guide.map(|guide| (guide.leaf, guide.edge));
-        let request = self.docking_request(&mut session, pointer);
+        let request = self.docking_request(pointer);
         if session.hover.as_ref().map(|hover| hover.request) != request {
             session.hover =
                 request.and_then(|request| self.prepare_docking(session.source, request));
             cx.notify();
         }
-        if previous_guide != session.guide.map(|guide| (guide.leaf, guide.edge)) {
-            cx.notify();
-        }
         self.interaction.restore_docking(session);
     }
 
-    fn docking_request(
-        &self,
-        session: &mut PanelDocking,
-        pointer: Point<Pixels>,
-    ) -> Option<DockRequest> {
+    fn docking_request(&self, pointer: Point<Pixels>) -> Option<DockRequest> {
         let root = self.layouts.current().root.as_ref()?;
         let measured = self.interaction.measurements();
         let bounds = |id| measured.get(&Measured::Node(id)).copied();
-        let outer = bounds(layout_geometry::node_id(root))?;
-        if !outer.contains(&pointer) {
-            session.guide = None;
-            return None;
-        }
-        if !session
-            .guide
-            .as_ref()
-            .is_some_and(|guide| guide.contains(pointer, session.geometry.ui_scale))
-        {
-            session.guide =
-                docking::Guide::build(root, pointer, session.geometry.ui_scale, &bounds);
-        }
-        if let Some(target) = session
-            .guide
-            .as_ref()
-            .and_then(|guide| guide.target(pointer))
-        {
-            return Some(DockRequest {
-                target,
-                index: None,
-            });
-        }
         fn leaf<'a>(
             node: &'a Node,
             pointer: Point<Pixels>,
@@ -144,13 +110,14 @@ impl GuiApp {
         let Node::Tabs { id, .. } = node else {
             return None;
         };
-        let index = docking::tab_index(node, pointer, &|id| {
+        let panel_bounds = bounds(*id)?;
+        let index = docking::tab_index(node, pointer, panel_bounds, &|id| {
             measured.get(&Measured::Tab(id)).copied()
         });
         let edge = if index.is_some() {
             Edge::Center
         } else {
-            dock_edge(pointer, bounds(*id)?)?
+            dock_edge(pointer, panel_bounds)?
         };
         Some(DockRequest {
             target: docking::Target { node: *id, edge },
@@ -270,18 +237,7 @@ impl GuiApp {
         {
             let owner = hover.owner;
             let preview = hover.preview;
-            let selected_bar = session.guide.as_ref().and_then(|guide| {
-                guide
-                    .bars
-                    .iter()
-                    .flatten()
-                    .find(|bar| bar.target == hover.request.target)
-            });
-            let color = if preview.is_some() {
-                selected_bar.map_or(ACCENT, |bar| DOCK_COLORS[bar.depth % DOCK_COLORS.len()])
-            } else {
-                0xf7768e
-            };
+            let color = if preview.is_some() { ACCENT } else { 0xf7768e };
             overlay = overlay.child(
                 div()
                     .absolute()
@@ -304,24 +260,6 @@ impl GuiApp {
                 .absolute()
                 .size_full(),
             );
-            let root = self.layouts.current().root.as_ref().unwrap();
-            let label = if layout_geometry::node_id(root) == hover.request.target.node {
-                "Layout"
-            } else {
-                layout_geometry::find(root, hover.request.target.node)
-                    .map(|node| match node {
-                        Node::Split {
-                            axis: Axis::Horizontal,
-                            ..
-                        } => "Row",
-                        Node::Split {
-                            axis: Axis::Vertical,
-                            ..
-                        } => "Column",
-                        Node::Tabs { .. } => "Panel",
-                    })
-                    .unwrap_or("Region")
-            };
             let direction = match hover.request.target.edge {
                 Edge::Left => "left",
                 Edge::Right => "right",
@@ -331,10 +269,8 @@ impl GuiApp {
             };
             let text = if preview.is_none() {
                 "Cannot dock here".to_owned()
-            } else if let Some(bar) = selected_bar {
-                format!("{label} · level {} · {direction}", bar.depth + 1)
             } else {
-                format!("{label} · {direction}")
+                format!("Panel · {direction}")
             };
             overlay = overlay.child(
                 div()
@@ -350,33 +286,6 @@ impl GuiApp {
                     .text_xs()
                     .child(text),
             );
-        }
-        if let Some(guide) = &session.guide {
-            for bar in guide.bars.iter().flatten() {
-                let selected = session
-                    .hover
-                    .as_ref()
-                    .is_some_and(|hover| hover.request.target == bar.target);
-                let color = DOCK_COLORS[bar.depth % DOCK_COLORS.len()];
-                overlay = overlay.child(
-                    div()
-                        .absolute()
-                        .left(bar.bounds.origin.x)
-                        .top(bar.bounds.origin.y)
-                        .w(bar.bounds.size.width)
-                        .h(bar.bounds.size.height)
-                        .rounded_sm()
-                        .border_1()
-                        .border_color(rgb(color))
-                        .bg(rgb(color).alpha(if selected { 0.7 } else { 0.35 }))
-                        .text_color(rgb(TEXT))
-                        .text_xs()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(["1", "2", "3", "4"][bar.depth]),
-                );
-            }
         }
         overlay.into_any_element()
     }

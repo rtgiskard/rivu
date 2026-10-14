@@ -42,10 +42,10 @@ fixed sibling-count budget. Depth bounds recursive model and rendering work and
 keeps accepted layouts within the JSON reader's nesting allowance.
 
 Structural edits retain original containers until their normalized shape has
-passed depth and boundary preflight. This keeps ancestor destinations reachable
-and lets a rejected move restore panel order, active tabs, instance preferences,
-and the allocator without cloning the tree. Only successful edits consume the
-temporary structure through normalization. A mathematically nonempty interval
+passed depth and boundary preflight. This lets a rejected move restore panel
+order, active tabs, instance preferences, and the allocator without cloning
+the tree. Only successful edits consume the temporary structure through
+normalization. A mathematically nonempty interval
 can be too narrow to hold another distinct floating-point boundary; edits that
 would violate strict boundary ordering must be rejected, not silently rounded
 into duplicate boundaries.
@@ -95,25 +95,16 @@ available content length. Stored fractions preserve proportions after a window
 resize; they do not promise immutable pixel coordinates across different window
 sizes.
 
-== Container docking targets
+== Panel docking targets
 
 Panel dragging resolves one target from measured layout-tree rectangles, never
-from overlay hitboxes. Only ancestors of the hovered leaf that share its chosen
-edge are candidates. A separator gutter is neutral; two nearby edges at a
-corner do not receive an arbitrary direction priority. Strips are overlaid
-inside their owners without changing layout or participating in candidate
-discovery. Their root-to-leaf order, depth colors, and geometry remain stable
-while traversing the strip stack. Painted ancestor strips remain reachable
-outside the original leaf's span. Exit hysteresis retains the display, not an
-already-selected drop target.
-
-Guide construction uses a fixed four-entry stack, including the leaf. Paths
-longer than four nodes, missing or ambiguous measurements, short strips, and
-stacks occupying more than half the hovered leaf's perpendicular span disable
-the complete guide. Ordinary panel docking remains available; this fallback
-does not change the model's 32-split limit. Entry distance is 24 logical pixels,
-corner trim 24, minimum strip length 120, and exit margin 12; all scale with the
-interface. Strips use thicknesses 22, 20, 18, and 16 with 4-pixel insets and gaps.
+from overlay hitboxes. Only the hovered tab group can be a destination: its
+left, right, top, or bottom edge splits that panel region, and its center merges
+tabs. Enclosing rows, columns, and the layout are not separate targets. Outside
+the visible tab bar, each edge zone occupies the outer 22 percent of the panel
+on its axis; the remaining center merges tabs. Corners with two competing edges
+and separator gutters are neutral. The outline and direction label identify
+the destination panel; shading previews the moved panel's final rectangle.
 
 A target transition prepares one owned candidate layout using the model's
 actual move and measured-size reconciliation. Projecting that result supplies
@@ -128,8 +119,11 @@ rectangles when prepainting the new geometry; input cannot interleave with that
 prepaint. Until fresh measurements exist, docking resolves no target and release
 leaves the layout unchanged, rather than using the previous frame's bounds.
 
-Tab-index targeting checks the active panel's tab-bar visibility. Hidden tab
-bars have no tab targets; persisting visibility changes removes their old tab
+Tab-index targeting checks the active panel's tab-bar visibility and takes
+priority over edge zones. The entire visible tab row, including gaps and its
+unused tail, reorders or transfers tabs without splitting the panel. Insertion
+uses tab midpoints, with the tail inserting after the last tab. Hidden tab bars
+have no tab targets; persisting visibility changes removes their old tab
 measurements. Ordinary edge and central docking remain available.
 
 The docking session owns only panel drags. Escape, window exit or deactivation,

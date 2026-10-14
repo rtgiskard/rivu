@@ -38,7 +38,7 @@ use gpui::{prelude::*, *};
 use input::{Input, InputEvent};
 use layout::interaction::{
     Cancellation, DockGeometry, DockHover, DockRequest, DragCommit, Dragging, LayoutInteraction,
-    Measured, PanelDocking,
+    Measured,
 };
 use layout::{Axis, Edge, LayoutSet, Node};
 use library::LibraryNode;

@@ -53,7 +53,6 @@ impl DockGeometry {
 
 pub(in crate::gui) struct PanelDocking {
     pub(in crate::gui) source: u64,
-    pub(in crate::gui) guide: Option<docking::Guide>,
     pub(in crate::gui) hover: Option<DockHover>,
     pub(in crate::gui) geometry: DockGeometry,
 }
@@ -195,7 +194,6 @@ impl LayoutInteraction {
 
     pub(in crate::gui) fn clear_docking_preview(&mut self) {
         if let Some(session) = &mut self.docking {
-            session.guide = None;
             session.hover = None;
         }
     }
@@ -212,7 +210,6 @@ impl LayoutInteraction {
         let cancellation = self.cancel();
         self.docking = Some(PanelDocking {
             source,
-            guide: None,
             hover: None,
             geometry,
         });
