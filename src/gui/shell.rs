@@ -1210,34 +1210,36 @@ impl Render for GuiApp {
                                     .items_start()
                                     .gap_3()
                                     .child(div().text_2xl().child("Rivu"))
-                                    .child(caption("A local-first music player"))
-                                    .children(
-                                        [
-                                            (
-                                                "Version",
-                                                format!(
-                                                    "{} (features: {})",
-                                                    env!("RIVU_GIT_VERSION"),
-                                                    env!("RIVU_BUILD_FEATURES"),
-                                                ),
+                                    .child(
+                                        column()
+                                            .gap(rems(1.))
+                                            .child(caption("A local-first music player"))
+                                            .children(
+                                                [
+                                                    (
+                                                        "Version",
+                                                        format!(
+                                                            "{} (features: {})",
+                                                            env!("RIVU_GIT_VERSION"),
+                                                            env!("RIVU_BUILD_FEATURES"),
+                                                        ),
+                                                    ),
+                                                    ("Built", built),
+                                                    ("License", "GPL-3.0-or-later".to_owned()),
+                                                ]
+                                                .into_iter()
+                                                .map(|(label, value)| {
+                                                    row()
+                                                        .gap_3()
+                                                        .child(
+                                                            div()
+                                                                .w(rems(4.))
+                                                                .flex_shrink_0()
+                                                                .child(caption(label)),
+                                                        )
+                                                        .child(caption(value))
+                                                }),
                                             ),
-                                            ("Built", built),
-                                            ("License", "GPL-3.0-or-later".to_owned()),
-                                        ]
-                                        .into_iter()
-                                        .map(
-                                            |(label, value)| {
-                                                row()
-                                                    .gap_3()
-                                                    .child(
-                                                        div()
-                                                            .w(rems(4.))
-                                                            .flex_shrink_0()
-                                                            .child(caption(label)),
-                                                    )
-                                                    .child(caption(value))
-                                            },
-                                        ),
                                     ),
                             )
                             .child(
