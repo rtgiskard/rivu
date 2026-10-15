@@ -1138,7 +1138,11 @@ impl GuiApp {
         cx.notify();
     }
 
-    pub(super) fn playlist_action_overlay(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn playlist_action_overlay(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(action) = self.playlist_action.clone() else {
             return div().into_any_element();
         };
@@ -1148,15 +1152,10 @@ impl GuiApp {
                 !self.library_range_pending() && !self.browser.library.selected().is_empty();
             let rename = target.clone();
             let delete = target.clone();
-            let menu = column()
-                .id("playlist-row-menu")
-                .occlude()
-                .w(px(260.))
-                .p_1()
-                .bg(rgb(super::PANEL))
-                .border_1()
-                .border_color(rgb(BORDER))
-                .rounded_md()
+            let menu = super::context_menu_container("playlist-row-menu")
+                .max_w((window.viewport_size().width - px(UI_INSET * 2.)).max(px(0.)))
+                .max_h((window.viewport_size().height - px(UI_INSET * 2.)).max(px(0.)))
+                .overflow_y_scroll()
                 .on_mouse_down_out(cx.listener(|this, _, window, cx| {
                     this.dismiss_playlist_action(window, cx);
                     cx.stop_propagation();
@@ -1248,16 +1247,20 @@ impl GuiApp {
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .child(
                 column()
-                    .w(px(420.))
+                    .id("playlist-action-card")
+                    .w(gpui::rems(26.25))
                     .max_w(gpui::relative(0.9))
+                    .max_h(window.viewport_size().height * 0.9)
+                    .overflow_y_scroll()
                     .p(px(UI_INSET))
                     .bg(rgb(super::PANEL))
                     .border_1()
                     .border_color(rgb(BORDER))
                     .rounded_md()
-                    .child(panel_header(title, detail))
+                    .child(panel_header(title, detail).flex_shrink_0())
                     .child(
                         row()
+                            .flex_shrink_0()
                             .justify_end()
                             .child(icon_button(
                                 "playlist-action-cancel",

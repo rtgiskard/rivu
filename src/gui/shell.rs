@@ -1175,10 +1175,10 @@ impl Render for GuiApp {
         }
 
         if self.playlist_action.is_some() {
-            app = app.child(self.playlist_action_overlay(cx));
+            app = app.child(self.playlist_action_overlay(window, cx));
         }
         if self.playlist_editor.is_some() {
-            app = app.child(self.playlist_name_dialog(cx));
+            app = app.child(self.playlist_name_dialog(window, cx));
         }
         if self.layouts_open {
             app = app.child(self.layouts_panel(window, cx));
@@ -1191,7 +1191,7 @@ impl Render for GuiApp {
             );
         }
         if self.duplicate_review.open {
-            app = app.child(self.duplicate_review_dialog(cx));
+            app = app.child(self.duplicate_review_dialog(window, cx));
         }
         if self.about_open {
             static LOGO: std::sync::LazyLock<Arc<Image>> = std::sync::LazyLock::new(|| {

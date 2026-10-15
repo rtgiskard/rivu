@@ -110,7 +110,11 @@ impl GuiApp {
         cx.notify();
     }
 
-    pub(super) fn playlist_name_dialog(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn playlist_name_dialog(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let editor = self.playlist_editor.as_ref().expect("playlist editor open");
         let (title, submit) = match editor.action {
             PlaylistNameAction::Create { .. } => ("New playlist", "Create"),
@@ -173,14 +177,18 @@ impl GuiApp {
             )
             .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.stop_propagation()))
             .child(
-                content
-                    .w(px(420.))
+                column()
+                    .id("playlist-name-card")
+                    .w(rems(26.25))
                     .max_w(relative(0.9))
+                    .max_h(window.viewport_size().height * 0.9)
+                    .overflow_y_scroll()
                     .p(px(UI_INSET))
                     .bg(rgb(PANEL))
                     .border_1()
                     .border_color(rgb(BORDER))
-                    .rounded_md(),
+                    .rounded_md()
+                    .child(content.flex_shrink_0()),
             )
             .into_any_element()
     }

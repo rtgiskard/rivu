@@ -448,7 +448,11 @@ impl GuiApp {
         cx.notify();
     }
 
-    pub(super) fn duplicate_review_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn duplicate_review_dialog(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let review = &self.duplicate_review;
         let busy = review.busy.is_some();
         let mut groups = column().gap_2();
@@ -697,12 +701,7 @@ impl GuiApp {
             }
             members = members.child(card);
         }
-        let mut decisions = column()
-            .id("review-decisions")
-            .flex_shrink_0()
-            .max_h(rems(14.))
-            .overflow_y_scroll()
-            .gap_2();
+        let mut decisions = column().gap_2();
         if let Some(source) = &review.source {
             decisions = decisions.child(caption(format!(
                 "Old identity #{}: {}",
@@ -780,7 +779,7 @@ impl GuiApp {
             .on_mouse_down(MouseButton::Middle, cx.listener(|_, _, _, cx| cx.stop_propagation()))
             .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.stop_propagation()))
             .child(column().id("duplicate-review-card").w(relative(0.94)).h(relative(0.92)).min_w_0().min_h_0()
-                .p_3().gap_2().overflow_hidden().bg(rgb(PANEL)).border_1().border_color(rgb(BORDER)).rounded_md()
+                .p_3().gap_2().overflow_y_scroll().bg(rgb(PANEL)).border_1().border_color(rgb(BORDER)).rounded_md()
                 .child(row().flex_shrink_0()
                     .child(div().flex_1().min_w_0().child(panel_header("Same files / Relocation candidates", "Review ordinary files with matching cached content. No audio files are deleted.")))
                     .child(components::disabled_control(components::quiet_icon_button(icon_button("review-refresh", "󰑐", "Refresh same-file groups", cx, |this, _, cx| {
@@ -809,7 +808,9 @@ impl GuiApp {
                             busy || review.members_loading || review.confirming,
                             cx,
                         )))))
-                .child(decisions)
+                .child(column().id("review-decisions").flex_shrink_0()
+                    .max_h((window.rem_size() * 14.).min(window.viewport_size().height * 0.35))
+                    .overflow_y_scroll().child(decisions.flex_shrink_0()))
                 .child(caption("Cached hashes identify candidates, not proof. Keep independent saves a decision; it does not merge records.").flex_shrink_0()))
     }
 
