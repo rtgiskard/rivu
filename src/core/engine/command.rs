@@ -20,7 +20,7 @@ impl Core {
 
     fn apply_command(&mut self, command: Command) -> Result<()> {
         match command {
-            Command::Scan { paths, force } => return self.scan(paths, None, force),
+            Command::Scan { paths, force } => return self.scan(paths, force),
             Command::CancelScan { id } => self.cancel_scan(id)?,
             Command::RelocateTrack {
                 source_id,
@@ -207,12 +207,7 @@ impl Core {
                         .into_owned()
                 });
                 Store::validate_playlist_name(&name)?;
-                let items = library::import_playlist(&path)?;
-                let paths = items
-                    .iter()
-                    .map(|item| item.path.clone())
-                    .collect::<Vec<_>>();
-                return self.scan(paths, Some((name, items)), false);
+                return self.import_playlist(path, name);
             }
             Command::ExportPlaylist { playlist_id, path } => {
                 self.export_playlist(playlist_id, &path)?;

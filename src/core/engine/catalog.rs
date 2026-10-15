@@ -44,18 +44,24 @@ fn lookup_scan_source(
     result
 }
 
+#[derive(Debug)]
+enum ScanInput {
+    Paths { paths: Vec<PathBuf>, force: bool },
+    Import { path: PathBuf, name: String },
+}
+
 impl Core {
-    pub(in crate::core) fn scan(
-        &mut self,
-        paths: Vec<PathBuf>,
-        import: Option<(String, Vec<M3uItem>)>,
-        force: bool,
-    ) -> Result<()> {
+    pub(in crate::core) fn scan(&mut self, paths: Vec<PathBuf>, force: bool) -> Result<()> {
+        self.start_scan(ScanInput::Paths { paths, force })
+    }
+
+    pub(in crate::core) fn import_playlist(&mut self, path: PathBuf, name: String) -> Result<()> {
+        self.start_scan(ScanInput::Import { path, name })
+    }
+
+    fn start_scan(&mut self, mut input: ScanInput) -> Result<()> {
         if self.active_scan.is_some() {
             bail!("A library scan is already running");
-        }
-        if paths.is_empty() {
-            bail!("No files or directories supplied");
         }
         let config = Arc::clone(&self.state.system.config);
         if config.library_roots.is_empty() {
@@ -63,26 +69,25 @@ impl Core {
                 "No library roots are configured; add a library root in the configuration before scanning"
             );
         }
-        let paths = paths
-            .into_iter()
-            .map(|path| library::logical_path(&path))
-            .collect::<Result<Vec<_>>>()?;
-        for requested in &paths {
-            ensure!(
-                config
-                    .library_roots
-                    .iter()
-                    .any(|root| requested.starts_with(root)),
-                "Scan path is outside configured library roots: {}",
-                requested.display()
-            );
+        if let ScanInput::Paths { paths, .. } = &mut input {
+            ensure!(!paths.is_empty(), "No files or directories supplied");
+            for requested in paths {
+                *requested = library::logical_path(requested)?;
+                ensure!(
+                    config
+                        .library_roots
+                        .iter()
+                        .any(|root| requested.starts_with(root)),
+                    "Scan path is outside configured library roots: {}",
+                    requested.display()
+                );
+            }
         }
         // Flush before accepting a task, never fail its acknowledgement afterward.
         self.save(false)?;
         let ffmpeg_enabled = config.ffmpeg_enabled;
         tracing::info!(
-            paths = ?paths,
-            force,
+            input = ?input,
             max_depth = config.scan_max_depth,
             "library_scan_started"
         );
@@ -128,21 +133,45 @@ impl Core {
                         }
                     }
                 };
-                let result = library::scan_paths(
-                    &paths,
-                    |path| {
-                        if force {
-                            Ok(None)
-                        } else {
-                            lookup_scan_source(&sender, id, path, &worker_cancellation)
+                let mut import = None;
+                let result = (|| {
+                    let (paths, sheets, force) = match input {
+                        ScanInput::Import { path, name } => {
+                            import = Some((name, Vec::new()));
+                            let prepared = library::prepare_playlist_import(
+                                &path,
+                                &worker_cancellation,
+                                Some(&config.library_roots),
+                            )
+                            .context(
+                                "Preparing playlist import; scan not saved, playlist not created",
+                            )?;
+                            let paths = prepared
+                                .items
+                                .iter()
+                                .map(|item| item.path.clone())
+                                .collect::<Vec<_>>();
+                            import.as_mut().unwrap().1 = prepared.items;
+                            (paths, Some(prepared.sheets), false)
                         }
-                    },
-                    ffmpeg_enabled,
-                    &config.library_roots,
-                    config.scan_max_depth,
-                    &worker_cancellation,
-                    &mut progress,
-                );
+                        ScanInput::Paths { paths, force } => (paths, None, force),
+                    };
+                    library::scan_paths_with_cues(
+                        &paths,
+                        |path| {
+                            if force {
+                                Ok(None)
+                            } else {
+                                lookup_scan_source(&sender, id, path, &worker_cancellation)
+                            }
+                        },
+                        ffmpeg_enabled,
+                        &config.library_roots,
+                        config.scan_max_depth,
+                        (&worker_cancellation, sheets),
+                        &mut progress,
+                    )
+                })();
                 match &result {
                     Ok(result) => tracing::info!(
                         records = result.records.len(),

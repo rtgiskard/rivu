@@ -41,6 +41,23 @@ pub fn read(path: &Path) -> Result<CueSheet> {
         .with_context(|| format!("Parsing CUE {}", path.display()))
 }
 
+/// Parse an already bounded import input without reopening its sheet.
+pub(crate) fn parse_import(
+    bytes: &[u8],
+    path: &Path,
+    cancellation: &crate::library::ScanCancellation,
+) -> Result<CueSheet> {
+    cancellation.check()?;
+    let text = decode(bytes).with_context(|| format!("Decoding CUE {}", path.display()))?;
+    cancellation.check()?;
+    parse_checked(
+        &text,
+        path.parent().unwrap_or_else(|| Path::new(".")),
+        || cancellation.check(),
+    )
+    .with_context(|| format!("Parsing CUE {}", path.display()))
+}
+
 fn decode(bytes: &[u8]) -> Result<Cow<'_, str>> {
     let (little_endian, data) = if let Some(data) = bytes.strip_prefix(&[0xff, 0xfe]) {
         (true, data)
@@ -124,6 +141,14 @@ fn timestamp(value: &str) -> Result<u64> {
 }
 
 fn parse(text: &str, parent: &Path) -> Result<CueSheet> {
+    parse_checked(text, parent, || Ok(()))
+}
+
+fn parse_checked(
+    text: &str,
+    parent: &Path,
+    mut check: impl FnMut() -> Result<()>,
+) -> Result<CueSheet> {
     let mut sheet = CueSheet {
         title: None,
         performer: None,
@@ -133,6 +158,7 @@ fn parse(text: &str, parent: &Path) -> Result<CueSheet> {
     let mut file = None;
     let mut file_group = 0;
     for (line_number, raw) in text.lines().enumerate() {
+        check()?;
         let line = raw.trim();
         if line.is_empty() {
             continue;
@@ -250,6 +276,7 @@ fn parse(text: &str, parent: &Path) -> Result<CueSheet> {
     }
     let mut pending = pending.into_iter().peekable();
     while let Some(track) = pending.next() {
+        check()?;
         let start = track
             .start
             .with_context(|| format!("TRACK {:02} has no INDEX 01", track.number))?;
@@ -349,5 +376,23 @@ FILE "disc two.wav" WAVE
         }
         assert!(decode(&[0xff, 0xfe, 1]).is_err());
         assert!(decode(&[0xff, 0xfe, 0x00, 0xd8]).is_err());
+    }
+    #[test]
+    fn parsing_stops_when_import_is_cancelled() {
+        let cancellation = crate::library::ScanCancellation::default();
+        let mut checks = 0;
+        let result = parse_checked(
+            "FILE album.wav WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n",
+            Path::new("."),
+            || {
+                checks += 1;
+                if checks == 2 {
+                    cancellation.cancel();
+                }
+                cancellation.check()
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(checks, 2);
     }
 }

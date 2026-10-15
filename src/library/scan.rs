@@ -220,11 +220,34 @@ impl ScanResult {
 /// probes and lookups, but an in-flight probe itself is not interruptible.
 pub fn scan_paths(
     paths: &[PathBuf],
-    mut known_source: impl FnMut(&Path) -> Result<Option<KnownFile>>,
+    known_source: impl FnMut(&Path) -> Result<Option<KnownFile>>,
     ffmpeg_enabled: bool,
     library_roots: &[PathBuf],
     max_depth: u32,
     cancellation: &ScanCancellation,
+    progress: impl FnMut(ScanPhase, usize, Option<usize>, usize, Option<&Path>),
+) -> Result<ScanResult> {
+    scan_paths_with_cues(
+        paths,
+        known_source,
+        ffmpeg_enabled,
+        library_roots,
+        max_depth,
+        (cancellation, None),
+        progress,
+    )
+}
+
+pub(crate) fn scan_paths_with_cues(
+    paths: &[PathBuf],
+    mut known_source: impl FnMut(&Path) -> Result<Option<KnownFile>>,
+    ffmpeg_enabled: bool,
+    library_roots: &[PathBuf],
+    max_depth: u32,
+    (cancellation, mut sheets): (
+        &ScanCancellation,
+        Option<HashMap<PathBuf, crate::cue::CueSheet>>,
+    ),
     mut progress: impl FnMut(ScanPhase, usize, Option<usize>, usize, Option<&Path>),
 ) -> Result<ScanResult> {
     cancellation.check()?;
@@ -417,6 +440,7 @@ pub fn scan_paths(
             ffmpeg_enabled,
             library_roots,
             cancellation,
+            sheets.as_mut(),
         ) {
             Ok(records) => {
                 suppressed.extend(records.iter().map(|record| record.path.clone()));
@@ -530,9 +554,15 @@ fn scan_cue(
     ffmpeg_enabled: bool,
     library_roots: &[PathBuf],
     cancellation: &ScanCancellation,
+    sheets: Option<&mut HashMap<PathBuf, crate::cue::CueSheet>>,
 ) -> Result<Vec<ScanRecord>> {
     cancellation.check()?;
-    let sheet = crate::cue::read(path);
+    let sheet = match sheets {
+        Some(sheets) => sheets
+            .remove(path)
+            .context("Import CUE sheet was not prepared"),
+        None => crate::cue::read(path),
+    };
     cancellation.check()?;
     let sheet = sheet?;
     let mut records = Vec::with_capacity(sheet.tracks.len());

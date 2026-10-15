@@ -124,6 +124,27 @@ name comes from the imported file's name without its extension. Both explicit
 and default names are validated before a scan starts or any scan data is saved.
 Another import or scan cannot start while scanning is active.
 
+After early name/root configuration validation and pending-state saving, import
+accepts a scan task. Playlist reads, decoding, CUE expansion, and metadata scanning
+run in that task's existing filesystem worker, not on the database owner. Input
+failures are terminal task errors (`--wait` observes them), not a failed
+acknowledgement after acceptance. Other commands remain available during import.
+Scan cancellation and shutdown also cancel input processing; a cancelled import
+does not save scan results or create a playlist.
+
+Import inputs must be ordinary files, including CUE sheets referenced by M3U;
+directories, devices, and FIFOs are rejected without waiting for a writer. M3U
+input is limited to 16 MiB, each CUE sheet to 1 MiB, and aggregate input to 64 MiB
+(each distinct CUE sheet is read once). Expansion is limited to 100,000 entries,
+before first-occurrence deduplication. Expanded entry data and retained parsed CUE
+data each have a 64 MiB accounting limit, including paths, names, and record
+storage. These limits allow large collections while bounding repeated-sheet
+expansion and long-metadata costs; they are import limits, not playlist-size
+limits for other operations. Input errors identify preparation/read/decode/parse
+stages and occur before any scan or playlist commit. Parsed import CUE sheets are
+reused by metadata scanning, preserving the sheet version and track order read
+during preparation. Ordinary library directory scanning is unchanged.
+
 Scan saving, playlist creation, and playlist refresh are separate stages. A
 failure to save the scan does not create a playlist. Once the scan has been
 saved, a later library refresh or playlist creation failure does not roll back

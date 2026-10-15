@@ -3901,14 +3901,14 @@ mod tests {
         let (directory, mut core) = fixture();
         let path = directory.path().join("1.wav");
         write_pcm(&path);
-        core.scan(vec![path.clone()], None, false).unwrap();
+        core.scan(vec![path.clone()], false).unwrap();
         let id = core.active_scan.as_ref().unwrap().status.id;
         assert!(settle_scan(&mut core));
         let ViewResponse::ScanTask(before) = core.view(&Query::ScanTask { id }).unwrap() else {
             panic!("Expected task");
         };
         core.state.system.last_error = Some("Unrelated audio failure".into());
-        core.scan(vec![path], None, false).unwrap();
+        core.scan(vec![path], false).unwrap();
         let ViewResponse::ScanTask(after) = core.view(&Query::ScanTask { id }).unwrap() else {
             panic!("Expected task");
         };
@@ -3924,7 +3924,7 @@ mod tests {
             let path = directory.path().join("new.wav");
             write_pcm(&path);
             let total = core.state.library.track_total;
-            core.scan(vec![path], None, false).unwrap();
+            core.scan(vec![path], false).unwrap();
             let id = core.active_scan.as_ref().unwrap().status.id;
             let lookup = loop {
                 let event = core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -3957,7 +3957,7 @@ mod tests {
         let path = directory.path().join("new.wav");
         write_pcm(&path);
         let total = core.state.library.track_total;
-        core.scan(vec![path], None, false).unwrap();
+        core.scan(vec![path], false).unwrap();
         let id = core.active_scan.as_ref().unwrap().status.id;
         let finished = loop {
             match core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
@@ -3980,7 +3980,7 @@ mod tests {
         let (directory, mut core) = fixture();
         let path = directory.path().join("1.wav");
         write_pcm(&path);
-        core.scan(vec![path], None, false).unwrap();
+        core.scan(vec![path], false).unwrap();
         let before = core.active_scan.as_ref().unwrap().status.clone();
         let progress = ScanProgress {
             phase: ScanPhase::Failed,
@@ -4017,7 +4017,7 @@ mod tests {
         let path = directory.path().join("1.wav");
         write_pcm(&path);
         for _ in 0..MAX_RETAINED_SCAN_RESULTS + 1 {
-            core.scan(vec![path.clone()], None, false).unwrap();
+            core.scan(vec![path.clone()], false).unwrap();
             assert!(settle_scan(&mut core));
         }
         assert_eq!(core.scan_results.len(), MAX_RETAINED_SCAN_RESULTS);
@@ -6336,5 +6336,94 @@ mod tests {
         assert_eq!(published[0].played_at, before[0].played_at);
         assert_eq!(before[0].play_count, 0);
         assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
+    }
+    #[test]
+    fn import_input_failures_are_terminal_tasks_without_database_changes() {
+        for kind in [
+            "missing",
+            "fifo",
+            "nested_fifo",
+            "oversized",
+            "expansion",
+            "invalid_utf8",
+        ] {
+            let (directory, mut core) = fixture();
+            let path = directory.path().join("bounded.m3u");
+            match kind {
+                "missing" => {}
+                "fifo" | "nested_fifo" => {
+                    let fifo = if kind == "fifo" {
+                        path.clone()
+                    } else {
+                        directory.path().join("nested.cue")
+                    };
+                    let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+                    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+                    if kind == "nested_fifo" {
+                        std::fs::write(&path, "nested.cue\n").unwrap();
+                    }
+                }
+                "oversized" => {
+                    std::fs::File::create(&path)
+                        .unwrap()
+                        .set_len(32 * 1024 * 1024)
+                        .unwrap();
+                }
+                "expansion" => {
+                    std::fs::write(directory.path().join("album.cue"),
+                        "FILE album.wav WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nINDEX 01 00:01:00\n").unwrap();
+                    std::fs::write(&path, "album.cue\n".repeat(50_001)).unwrap();
+                }
+                "invalid_utf8" => std::fs::write(&path, [0xff]).unwrap(),
+                _ => unreachable!(),
+            }
+            let before = core.state.query_revisions();
+            core.command(Command::ImportPlaylist {
+                path,
+                name: Some("Bounded".into()),
+            })
+            .unwrap();
+            assert!(core.active_scan.is_some());
+            assert!(!settle_scan(&mut core));
+            let status = core.scan_results.back().unwrap();
+            assert_eq!(status.progress.phase, ScanPhase::Failed);
+            assert!(status.error.is_some());
+            assert_eq!(core.state.query_revisions(), before);
+            assert_eq!(core.store.track_count().unwrap(), 4);
+            assert_eq!(core.store.playlist_summary_page(0, 0).unwrap().total, 0);
+        }
+    }
+
+    #[test]
+    fn accepted_import_allows_dispatch_and_cancellation_before_commit() {
+        let (directory, mut core) = fixture();
+        write_pcm(&directory.path().join("new.wav"));
+        let path = directory.path().join("mix.m3u");
+        std::fs::write(&path, "new.wav\n").unwrap();
+        core.command(Command::ImportPlaylist { path, name: None })
+            .unwrap();
+        let id = core.active_scan.as_ref().unwrap().status.id;
+        // Hold the worker at its existing owner lookup, without timing assumptions.
+        let lookup = loop {
+            let event = core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            if matches!(&event, ScanEvent::KnownSource { .. }) {
+                break event;
+            }
+            core.scan_event(event);
+        };
+        core.command(Command::SetFavorite {
+            track_ids: vec![1],
+            favorite: true,
+        })
+        .unwrap();
+        core.cancel_scan(id).unwrap();
+        core.scan_event(lookup);
+        assert!(!settle_scan(&mut core));
+        assert_eq!(
+            core.scan_results.back().unwrap().progress.phase,
+            ScanPhase::Cancelled
+        );
+        assert_eq!(core.store.track_count().unwrap(), 4);
+        assert_eq!(core.store.playlist_summary_page(0, 0).unwrap().total, 0);
     }
 }
