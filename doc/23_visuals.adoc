@@ -50,6 +50,10 @@ fixed blue/purple edge glow behind the circular cover, without color extraction
 or an audio dependency. Real and generated default covers share animation,
 interaction, and lifecycle rules. Changing style or frame pacing does not reset
 the rotation angle.
+Right-click an Album artwork panel and open `Style` to select a style; the current
+style is marked. Changes take effect immediately and are saved to the shared
+configuration used by Settings and all Album artwork panels. Motion mode,
+direction, period, and frame rate are unchanged.
 
 `visualizations.album_artwork.fps` accepts integers from 0 through 240, default 0.
 Zero follows display callbacks without a timer throttle; positive values cap

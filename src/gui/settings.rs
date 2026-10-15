@@ -42,13 +42,7 @@ impl SettingChoice {
     fn label(self) -> String {
         match self {
             Self::Device(_) | Self::Font(_) | Self::CustomFont => String::new(),
-            Self::AlbumArtworkStyle(AlbumArtworkStyle::Plain) => "Plain".to_owned(),
-            Self::AlbumArtworkStyle(AlbumArtworkStyle::Vinyl) => "Vinyl".to_owned(),
-            Self::AlbumArtworkStyle(AlbumArtworkStyle::Glass) => "Glass".to_owned(),
-            Self::AlbumArtworkStyle(AlbumArtworkStyle::Halo) => "Halo".to_owned(),
-            Self::AlbumArtworkStyle(AlbumArtworkStyle::Metal) => "Metal".to_owned(),
-            Self::AlbumArtworkStyle(AlbumArtworkStyle::Card) => "Card".to_owned(),
-            Self::AlbumArtworkStyle(AlbumArtworkStyle::Duotone) => "Duotone".to_owned(),
+            Self::AlbumArtworkStyle(value) => album_artwork_style_label(value).to_owned(),
             Self::AlbumArtworkMode(AlbumArtworkMode::Static) => "Static".to_owned(),
             Self::AlbumArtworkMode(AlbumArtworkMode::Rotating) => "Rotating".to_owned(),
             Self::AlbumArtworkDirection(AlbumArtworkDirection::Clockwise) => "Clockwise".to_owned(),
@@ -304,6 +298,28 @@ fn spectrum_style_label(style: SpectrumStyle) -> &'static str {
         SpectrumStyle::Solid => "Solid",
     }
 }
+pub(super) const ALBUM_ARTWORK_STYLES: [AlbumArtworkStyle; 7] = [
+    AlbumArtworkStyle::Plain,
+    AlbumArtworkStyle::Vinyl,
+    AlbumArtworkStyle::Glass,
+    AlbumArtworkStyle::Halo,
+    AlbumArtworkStyle::Metal,
+    AlbumArtworkStyle::Card,
+    AlbumArtworkStyle::Duotone,
+];
+
+pub(super) fn album_artwork_style_label(style: AlbumArtworkStyle) -> &'static str {
+    match style {
+        AlbumArtworkStyle::Plain => "Plain",
+        AlbumArtworkStyle::Vinyl => "Vinyl",
+        AlbumArtworkStyle::Glass => "Glass",
+        AlbumArtworkStyle::Halo => "Halo",
+        AlbumArtworkStyle::Metal => "Metal",
+        AlbumArtworkStyle::Card => "Card",
+        AlbumArtworkStyle::Duotone => "Duotone",
+    }
+}
+
 pub(super) fn audio_visualizer_style_label(style: AudioVisualizerStyle) -> &'static str {
     match style {
         AudioVisualizerStyle::Bars => "Bars",
@@ -1971,15 +1987,7 @@ impl Settings {
                     SettingChoice::AlbumArtworkStyle(draft.album_artwork_style).label(),
                     cx,
                     |this, _, _| {
-                        let values = [
-                            AlbumArtworkStyle::Plain,
-                            AlbumArtworkStyle::Vinyl,
-                            AlbumArtworkStyle::Glass,
-                            AlbumArtworkStyle::Halo,
-                            AlbumArtworkStyle::Metal,
-                            AlbumArtworkStyle::Card,
-                            AlbumArtworkStyle::Duotone,
-                        ];
+                        let values = ALBUM_ARTWORK_STYLES;
                         let selected = values
                             .iter()
                             .position(|value| *value == this.draft.album_artwork_style)

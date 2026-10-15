@@ -7,6 +7,7 @@ use crate::{config::AudioVisualizerStyle, model::playback_key_command};
 pub(super) enum PanelMenuPage {
     Main,
     AudioVisualizerStyle,
+    AlbumArtworkStyle,
     ConfirmClearQueue,
     Playlists,
     LibraryColumns,
@@ -631,6 +632,7 @@ impl Render for GuiApp {
             let is_library = panel_kind == Some("library");
             let is_waveform = panel_kind == Some("waveform");
             let is_audio_visualizer = panel_kind == Some("audio_visualizer");
+            let is_album_artwork = panel_kind == Some("album_artwork");
             let has_selected_queue = self.browser.queue.ready() && self.browser.queue.len() > 0;
             let mut menu = context_menu_container("panel-context-menu")
                 .max_w((window.viewport_size().width - px(UI_INSET * 2.)).max(px(0.)))
@@ -686,6 +688,27 @@ impl Render for GuiApp {
                                 cx.notify();
                             },
                         ));
+                    }
+                    if is_album_artwork {
+                        menu = menu
+                            .child(menu_item(
+                                "album-artwork-style-menu",
+                                format!(
+                                    "Style: {}  ›",
+                                    settings::album_artwork_style_label(
+                                        self.state.system.config.album_artwork_style
+                                    )
+                                ),
+                                cx,
+                                move |this, _, cx| {
+                                    this.panel_menu = Some(PanelMenu {
+                                        page: PanelMenuPage::AlbumArtworkStyle,
+                                        ..state
+                                    });
+                                    cx.notify();
+                                },
+                            ))
+                            .child(components::menu_separator());
                     }
                     if is_audio_visualizer
                         && let Some(options) = self
@@ -958,6 +981,46 @@ impl Render for GuiApp {
                         .child(components::menu_separator())
                         .child(components::menu_back(
                             "library-columns-back",
+                            cx,
+                            move |this, _, cx| {
+                                this.panel_menu = Some(PanelMenu {
+                                    page: PanelMenuPage::Main,
+                                    ..state
+                                });
+                                cx.notify();
+                            },
+                        ));
+                }
+                PanelMenuPage::AlbumArtworkStyle => {
+                    menu = menu
+                        .child(components::menu_title("Artwork style"))
+                        .child(components::menu_separator());
+                    for style in settings::ALBUM_ARTWORK_STYLES {
+                        let selected = self.state.system.config.album_artwork_style == style;
+                        let label = settings::album_artwork_style_label(style);
+                        menu = menu.child(
+                            menu_item(label, label, cx, move |this, _, cx| {
+                                this.panel_menu = None;
+                                if let Err(error) = this.handle.update_gui_config(
+                                    crate::core::GuiConfigChange::AlbumArtworkStyle(style),
+                                ) {
+                                    this.error = Some(format!("{error:#}"));
+                                }
+                                this.refresh(cx);
+                                cx.notify();
+                            })
+                            .child(
+                                div()
+                                    .ml_auto()
+                                    .text_color(rgb(if selected { ACCENT } else { MUTED }))
+                                    .child(if selected { "●" } else { "○" }),
+                            ),
+                        );
+                    }
+                    menu = menu
+                        .child(components::menu_separator())
+                        .child(components::menu_back(
+                            "album-artwork-style-back",
                             cx,
                             move |this, _, cx| {
                                 this.panel_menu = Some(PanelMenu {

@@ -20,6 +20,7 @@ impl Core {
                 config.waveform_seek_enabled = !config.waveform_seek_enabled
             }
             GuiConfigChange::ToggleLibraryColumn(column) => config.library_columns.toggle(column),
+            GuiConfigChange::AlbumArtworkStyle(style) => config.album_artwork_style = style,
             GuiConfigChange::AddLibraryRoot(path) => {
                 let path = library::logical_path(&path)?;
                 if config.library_roots.contains(&path) {

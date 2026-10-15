@@ -54,6 +54,7 @@ pub(crate) enum GuiConfigChange {
     ToggleStillMode,
     ToggleWaveformSeek,
     ToggleLibraryColumn(LibraryColumn),
+    AlbumArtworkStyle(crate::config::AlbumArtworkStyle),
     AddLibraryRoot(std::path::PathBuf),
     RemoveLibraryRoot(std::path::PathBuf),
     Settings(Config),
