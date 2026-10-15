@@ -13,7 +13,7 @@ use crate::{
 };
 
 use super::{
-    BORDER, TEXT,
+    BORDER, HIGHLIGHT, TEXT,
     artwork::{Artwork, ArtworkLoader, ArtworkView},
     caption, column,
     components::{LIST_ROW_REMS, quiet_icon_button, track_list_row},
@@ -466,8 +466,50 @@ impl AlbumBrowser {
         let image = self.covers.get(&index).and_then(|cover| cover.image(cx));
         let directory = key.directory.to_string_lossy().into_owned();
         let title = album_title(&key);
+        let actions = panel_toolbar()
+            .id(("album-actions", index))
+            .absolute()
+            .right_0()
+            .bottom_0()
+            .gap_1()
+            .p_1()
+            .rounded_md()
+            .bg(rgb(HIGHLIGHT))
+            .invisible()
+            .group_hover("album-card", |style| style.visible())
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .child(icon_button(
+                ("play-album", index),
+                "",
+                "Play album",
+                cx,
+                move |this, _, cx| {
+                    this.send(
+                        Command::PlayAlbum {
+                            key: play_key.clone(),
+                        },
+                        cx,
+                    )
+                },
+            ))
+            .child(icon_button(
+                ("enqueue-album", index),
+                "󰐕",
+                "Add album to queue",
+                cx,
+                move |this, _, cx| {
+                    this.send(
+                        Command::EnqueueAlbum {
+                            key: enqueue_key.clone(),
+                        },
+                        cx,
+                    )
+                },
+            ));
         column()
             .id(("album-card", index))
+            .group("album-card")
             .flex_1()
             .min_w_0()
             .h_full()
@@ -494,7 +536,8 @@ impl AlbumBrowser {
                             view.child(image.absolute().size_full().object_fit(ObjectFit::Contain))
                         }
                         None => view.child(self.default_album.clone()),
-                    }),
+                    })
+                    .child(actions),
             )
             .child(
                 div()
@@ -504,6 +547,7 @@ impl AlbumBrowser {
                     .flex_shrink_0()
                     .text_sm()
                     .text_color(rgb(TEXT))
+                    .text_center()
                     .truncate()
                     .child(title.clone())
                     .tooltip(move |_, cx| {
@@ -515,48 +559,18 @@ impl AlbumBrowser {
             )
             .child(
                 caption(album.artist.clone())
+                    .w_full()
+                    .text_center()
                     .truncate()
                     .h(rems(1.25))
                     .flex_shrink_0(),
             )
             .child(
                 caption(format!("{} tracks", album.track_count))
+                    .w_full()
+                    .text_center()
                     .h(rems(1.25))
                     .flex_shrink_0(),
-            )
-            .child(
-                panel_toolbar()
-                    .id(("album-actions", index))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(|_, _, cx| cx.stop_propagation())
-                    .child(icon_button(
-                        ("play-album", index),
-                        "",
-                        "Play album",
-                        cx,
-                        move |this, _, cx| {
-                            this.send(
-                                Command::PlayAlbum {
-                                    key: play_key.clone(),
-                                },
-                                cx,
-                            )
-                        },
-                    ))
-                    .child(icon_button(
-                        ("enqueue-album", index),
-                        "󰐕",
-                        "Add album to queue",
-                        cx,
-                        move |this, _, cx| {
-                            this.send(
-                                Command::EnqueueAlbum {
-                                    key: enqueue_key.clone(),
-                                },
-                                cx,
-                            )
-                        },
-                    )),
             )
             .into_any_element()
     }
@@ -814,7 +828,7 @@ impl Render for AlbumBrowser {
                                         .grid_cols(columns as u16)
                                         .gap_2()
                                         .w_full()
-                                        .h(rems(17.))
+                                        .h(rems(14.))
                                         .pb_2();
                                     for index in start..end {
                                         cards = cards.child(this.card(index, cx));
