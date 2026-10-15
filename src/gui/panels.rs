@@ -1117,18 +1117,18 @@ impl GuiApp {
                 .child(
                     super::menu_item(
                         "playlist-row-add",
-                        "Add selected Library tracks",
+                        "Add current track",
                         cx,
                         move |this, window, cx| {
-                            let track_ids = this.panel_selected_tracks();
-                            if track_ids.is_empty() {
+                            let Some(track_id) = this.state.current_track().map(|track| track.id)
+                            else {
                                 return;
-                            }
+                            };
                             this.dismiss_playlist_action(window, cx);
                             this.send(
                                 Command::AddPlaylist {
                                     playlist_id: id,
-                                    track_ids,
+                                    track_ids: vec![track_id],
                                 },
                                 cx,
                             );

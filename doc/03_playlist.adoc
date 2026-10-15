@@ -40,8 +40,9 @@ The Playlists panel keeps New playlist, Import, and Export together at the top.
 Export stays in place and is unavailable until a playlist is selected. New playlist
 opens a blank name dialog. Hover a catalog row to reveal its Play and actions
 buttons; these target that row without changing the selected playlist. The actions
-menu offers Add selected tracks (unavailable without a completed Library selection),
-Rename, and Delete. Rename opens the current name; Enter submits, and Cancel or
+menu offers Add current track (unavailable without a current playback track),
+Rename, and Delete. Add current track uses the playback track, not any Library
+selection. Rename opens the current name; Enter submits, and Cancel or
 Esc discards the draft. Empty names are rejected. Saving runs in the background
 and prevents repeat submissions; failures keep the dialog and draft available
 for correction. A submitted save cannot be cancelled, including by closing the window.
