@@ -1808,7 +1808,7 @@ impl Settings {
                     self.font_control(cx).min_w(rems(180. / 16.)),
                     self.field(Field::Scale).min_w(rems(180. / 16.)),
                 ))
-                .child(
+                .child(two_column(
                     Field::LayoutSnapGrid.form(
                         row()
                             .gap_2()
@@ -1827,7 +1827,8 @@ impl Settings {
                                 |draft| draft.layout_snap_enabled = !draft.layout_snap_enabled,
                             )),
                     ),
-                )
+                    div(),
+                ))
                 .child(
                     row()
                         .flex_wrap()
