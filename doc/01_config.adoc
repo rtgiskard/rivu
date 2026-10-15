@@ -87,6 +87,7 @@ retained until restart. Disabling stops a track currently decoded through FFmpeg
 native-decoded playback is unaffected.
 
 `playback.volume` accepts finite values from `0` to `1` and defaults to `0.7`.
+Settings → General → Playback displays Volume as a percentage with three decimal places.
 `playback.shuffle` defaults to `false`; `playback.repeat` accepts `off`, `all`, or `one` and defaults
 to `off`. `playback.play_count_threshold_percent` defaults to `20` and must be finite and
 in `[0, 100)`; zero still requires some confirmed heard time. Edit the threshold
@@ -245,7 +246,7 @@ See link:../readme.adoc[README] for application lifecycle and host behavior.
 
 === Artwork cache maintenance
 
-Settings → General → Artwork cache provides manual maintenance of embedded
+Settings → General → Library → Artwork cache provides manual maintenance of embedded
 cover files. Enter a positive whole number in `Expire files older than (days)`
 (initially 30), then choose `Calculate usage` or `Clean expired`. Neither opening
 Settings nor starting Rivu scans this directory. These actions run immediately

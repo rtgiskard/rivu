@@ -815,7 +815,11 @@ impl Settings {
             self.draft.scan_max_depth.to_string(),
             cx,
         );
-        self.set_value(Field::Volume, (self.draft.volume * 100.).to_string(), cx);
+        self.set_value(
+            Field::Volume,
+            format!("{:.3}", self.draft.volume * 100.),
+            cx,
+        );
         self.set_value(
             Field::PlayCountThreshold,
             self.draft.play_count_threshold_percent.to_string(),
@@ -1481,8 +1485,9 @@ impl Settings {
         let busy = self.artwork_cache_busy.is_some();
         let mut content = column()
             .gap_2()
+            .child(caption("Artwork cache"))
             .child(caption(
-                "Manual maintenance only. Changes take effect immediately; Apply is not required."
+                "Cleaning takes effect immediately; no Apply needed.",
             ))
             .child(
                 row()
@@ -1499,28 +1504,27 @@ impl Settings {
                         .min_w(rems(180. / 16.))
                         .flex_1(),
                     )
-                    .child(
-                        disabled_control(icon_button(
+                    .child(disabled_control(
+                        icon_button(
                             "settings-artwork-cache-calculate",
                             "󰃬",
                             "Calculate usage",
                             cx,
                             |this, _, cx| this.maintain_artwork_cache(false, cx),
-                        ), busy),
-                    )
-                    .child(
-                        disabled_control(icon_button(
+                        ),
+                        busy,
+                    ))
+                    .child(disabled_control(
+                        icon_button(
                             "settings-artwork-cache-clean",
                             "󰆴",
                             "Clean expired",
                             cx,
                             |this, _, cx| this.maintain_artwork_cache(true, cx),
-                        ), busy),
-                    ),
-            )
-            .child(caption(
-                "Uses file modification age. Artwork still held in memory is protected; missing artwork is regenerated when needed."
-            ));
+                        ),
+                        busy,
+                    )),
+            );
         if let Some((days, clean)) = self.artwork_cache_busy {
             content = content.child(status_message(
                 format!(
@@ -1594,7 +1598,7 @@ impl Settings {
                     .text_color(rgb(ERROR)),
             );
         }
-        settings_group("Artwork cache", content)
+        content
     }
 
     fn general_settings(&mut self, cx: &mut Context<Self>) -> Div {
@@ -1754,7 +1758,8 @@ impl Settings {
                         this.dropdown.close();
                         cx.emit(SettingsEvent::ReviewDuplicates);
                     },
-                ))),
+                )))
+                .child(self.artwork_cache_settings(cx)),
         );
         let playback = settings_group(
             "Playback",
@@ -1881,7 +1886,6 @@ impl Settings {
             .child(audio)
             .child(interface)
             .child(logging)
-            .child(self.artwork_cache_settings(cx))
     }
 
     fn visual_settings_tabs(&self, cx: &mut Context<Self>) -> Div {
@@ -2024,7 +2028,7 @@ impl Settings {
                 column().child(settings_group(
                     "Playback motion",
                     column().gap_2()
-                        .child(form_field("Style", style))
+                        .child(two_column(form_field("Style", style).min_w(rems(180. / 16.)), div()))
                         .child(two_column(form_field("Mode", mode).min_w(rems(180. / 16.)), form_field("Direction", direction).min_w(rems(180. / 16.))))
                         .child(settings.single(Field::AlbumArtworkPeriod))
                         .id("settings-album-artwork-help")
