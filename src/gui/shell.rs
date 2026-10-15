@@ -58,6 +58,11 @@ impl Render for GuiApp {
                     .into_any_element()
             });
         self.layouts.current_mut().root = root;
+        let paint_album_browsers = self
+            .album_browsers
+            .values()
+            .map(Entity::downgrade)
+            .collect::<Vec<_>>();
         let mut app = column()
             .id("rivu")
             .relative()
@@ -313,7 +318,7 @@ impl Render for GuiApp {
             .child(
                 canvas(
                     |_, _, _| (),
-                    move |_, _, window, _cx| {
+                    move |_, _, window, cx| {
                         let entity = docking_view.clone();
                         window.on_mouse_event::<MouseExitEvent>(move |_, phase, window, cx| {
                             if phase == DispatchPhase::Capture {
@@ -326,6 +331,9 @@ impl Render for GuiApp {
                         paint_visualizer.release_retired_images(window);
                         paint_artwork.release_retired(window);
                         paint_album_artwork.release_retired(window);
+                        for albums in &paint_album_browsers {
+                            let _ = albums.update(cx, |albums, _| albums.retire_images(window));
+                        }
                         paint_visuals.finish_prepaint();
                     },
                 )

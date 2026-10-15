@@ -309,6 +309,37 @@ The scan status row offers a close button after completion or failure. Closing
 it hides the result and progress bar without changing imported tracks or the
 separate error message. A new scan shows progress again.
 
+== Albums
+
+Add the dockable `Albums` panel to browse a paged cover grid. Open an album to
+browse its paged tracks; use Back to return to the grid. `Play album` replaces
+the queue with the complete album and starts its first track. `Add to queue`
+appends the complete album without changing current playback. Track rows also
+offer individual playback and queue actions. Album actions include tracks beyond
+the currently loaded page.
+
+Search matches effective album titles or any member artist across the library,
+not just the current page. Matching an artist keeps the complete album visible,
+including compilation tracks by other artists. `Sort: Title` / `Sort: Artist`
+switches ordering; searches and sort changes return to the first page.
+Each Albums panel keeps its own search, sort, detail view, and scrolling position;
+resizing or navigating one panel does not change another panel.
+
+Back preserves the grid page and visible album; changing grid width preserves
+that album as the scroll anchor. Hiding and reopening the panel retains its
+browsing position. Changing pages starts at the top of the new page. Track rows
+show duration, missing-file status, and the current track's playback state.
+The current-track marker identifies the library track, not a particular queue
+occurrence when the same track appears more than once.
+
+Albums use the exact effective album title and immediate parent directory.
+Same-name albums in different directories remain separate; different artists
+within one directory form a compilation. Disc subdirectories are not inferred
+to be one album. Missing titles display as `Unknown album`; empty artist
+metadata displays as `Unknown artist`, and multiple nonempty artists display
+as `Various artists`. Members are ordered by disc number, track number (unknown
+numbers last), title, then library ID. Metadata overrides affect grouping.
+
 == Paged views
 
 GUI/TUI library and playlist views load results automatically while scrolling;

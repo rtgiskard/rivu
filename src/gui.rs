@@ -1,4 +1,5 @@
 mod album_artwork;
+mod album_browser;
 mod artwork;
 mod browser;
 mod components;
@@ -105,6 +106,11 @@ const PANELS: &[PanelSpec] = &[
         render: |app, panel, window, cx| {
             app.library_panel(panel.id, panel.show_tab_bar, window, cx)
         },
+    },
+    PanelSpec {
+        kind: "albums",
+        title: "Albums",
+        render: |app, panel, window, cx| app.album_browser_panel(panel.id, window, cx),
     },
     PanelSpec {
         kind: "queue",
@@ -412,7 +418,9 @@ pub(super) struct GuiApp {
     artwork_manager: Arc<crate::artwork::ArtworkManager>,
     artwork_loader: artwork::ArtworkLoader,
     artwork_view: artwork::ArtworkView,
+    default_album: Entity<artwork::Artwork>,
     album_artwork: Entity<album_artwork::AlbumArtwork>,
+    album_browsers: HashMap<u64, Entity<album_browser::AlbumBrowser>>,
     queue_save_pending: bool,
     queue_save_feedback: Option<Result<String, String>>,
     playlist_editor: Option<playlist_editor::PlaylistEditor>,
@@ -420,7 +428,6 @@ pub(super) struct GuiApp {
     settings: Entity<settings::Settings>,
     visuals: visualization::Visuals,
     audio_visualizer: visualization::AudioVisualizer,
-    default_album: Entity<artwork::Artwork>,
     catalog_open: bool,
     settings_open: bool,
     about_open: bool,
@@ -447,6 +454,10 @@ impl GuiApp {
         self.inputs
             .values()
             .any(|input| input.read(cx).is_focused(window))
+            || self
+                .album_browsers
+                .values()
+                .any(|albums| albums.read(cx).input_focused(window, cx))
     }
 
     fn focus_layout(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -788,6 +799,11 @@ impl GuiApp {
                 }
                 this.refresh(cx);
                 this.sync_analysis(cx);
+                if !this.window_visible {
+                    for albums in this.album_browsers.values() {
+                        albums.update(cx, |albums, cx| albums.release_all_images(window, cx));
+                    }
+                }
                 this.request_frame(window, cx);
                 cx.notify();
             }),
@@ -843,12 +859,13 @@ impl GuiApp {
                 let default_album = cx.new(|_| album_default);
                 album_artwork::AlbumArtwork::new(Arc::clone(&artwork_manager), default_album)
             }),
+            default_album,
+            album_browsers: HashMap::new(),
             artwork_manager,
             artwork_loader: artwork::ArtworkLoader::default(),
             artwork_view: artwork::ArtworkView::default(),
             visuals: visualization::Visuals::new(),
             audio_visualizer: visualization::AudioVisualizer::new(),
-            default_album,
             catalog_open: false,
             settings_open: false,
             about_open: false,
@@ -901,6 +918,9 @@ impl GuiApp {
         self.album_artwork.update(cx, |artwork, cx| {
             artwork.release_all_images(window, cx);
         });
+        for albums in self.album_browsers.values() {
+            albums.update(cx, |albums, cx| albums.release_all_images(window, cx));
+        }
     }
     fn send(&mut self, command: Command, cx: &mut Context<Self>) {
         if let Err(error) = self.handle.send(command) {
@@ -1342,7 +1362,72 @@ impl GuiApp {
         self.audio_visualizer.update(&self.analysis_staging);
         cx.notify();
     }
+    fn album_browser_panel(
+        &mut self,
+        id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let page_size = self.view_page_size();
+        let albums = self.album_browsers.entry(id).or_insert_with(|| {
+            let albums = cx.new(|cx| {
+                album_browser::AlbumBrowser::new(
+                    self.handle.clone(),
+                    Arc::clone(&self.artwork_manager),
+                    self.default_album.clone(),
+                    cx,
+                )
+            });
+            window
+                .observe_release(&albums, cx, |albums, window, cx| {
+                    albums.release_all_images(window, cx);
+                })
+                .detach();
+            albums
+        });
+        let visible = self.window_visible && !self.state.system.shutting_down;
+        albums.update(cx, |albums, cx| {
+            albums.sync(
+                visible,
+                self.state.library.revision,
+                page_size,
+                self.state.current_track().map(|track| track.id),
+                self.state.playback.status,
+                cx,
+            );
+        });
+        albums.clone().into_any_element()
+    }
+
+    fn sync_album_browser(&mut self, cx: &mut Context<Self>) {
+        let panels = self.layouts.current().panels();
+        let active = self.layouts.current().active_panels();
+        let visible = self.window_visible && !self.state.system.shutting_down;
+        let revision = self.state.library.revision;
+        let page_size = self.view_page_size();
+        let current_track = self.state.current_track().map(|track| track.id);
+        let playback_status = self.state.playback.status;
+        self.album_browsers.retain(|id, albums| {
+            let exists = panels
+                .iter()
+                .any(|panel| panel.id == *id && panel.kind == "albums");
+            let shown = visible && active.iter().any(|panel| panel.id == *id);
+            albums.update(cx, |albums, cx| {
+                albums.sync(
+                    shown,
+                    revision,
+                    page_size,
+                    current_track,
+                    playback_status,
+                    cx,
+                );
+            });
+            exists
+        });
+    }
+
     fn sync_album_artwork(&mut self, cx: &mut Context<Self>) {
+        self.sync_album_browser(cx);
         fn active_artwork(node: &Node) -> bool {
             match node {
                 Node::Tabs { panels, active, .. } => panels
