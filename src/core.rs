@@ -2208,6 +2208,133 @@ mod tests {
     }
 
     #[test]
+    fn invalid_import_names_are_rejected_before_scan_acceptance() {
+        let (directory, mut core) = fixture();
+        let source = directory.path().join("new.wav");
+        write_pcm(&source);
+        let before = core.state.query_revisions();
+        let next_scan = core.next_scan_id;
+        for name in [
+            "",
+            " ",
+            "\u{2003}",
+            "\tMix",
+            "Mix\n",
+            "Mix\u{7f}",
+            "Mix\u{85}",
+        ] {
+            let path = directory.path().join("valid.m3u8");
+            std::fs::write(&path, "new.wav\n").unwrap();
+            let error = core
+                .command(Command::ImportPlaylist {
+                    path,
+                    name: Some(name.into()),
+                })
+                .unwrap_err();
+            assert!(error.to_string().contains("name"));
+        }
+        for filename in [" .m3u8", "\u{2003}.m3u8", "bad\nname.m3u8"] {
+            let path = directory.path().join(filename);
+            std::fs::write(&path, "new.wav\n").unwrap();
+            let error = core
+                .command(Command::ImportPlaylist { path, name: None })
+                .unwrap_err();
+            assert!(error.to_string().contains("name"));
+        }
+        let error = core
+            .command(Command::ImportPlaylist {
+                path: PathBuf::new(),
+                name: None,
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("name"));
+        assert!(core.active_scan.is_none());
+        assert!(core.scan_results.is_empty());
+        assert_eq!(core.next_scan_id, next_scan);
+        assert_eq!(core.state.query_revisions(), before);
+        assert_eq!(core.store.track_count().unwrap(), 4);
+        assert!(
+            core.store
+                .track_id_for_source(&source, None)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(core.store.playlist_summary_page(0, 0).unwrap().total, 0);
+    }
+
+    #[test]
+    fn imports_preserve_valid_explicit_and_default_name_whitespace() {
+        for explicit in [false, true] {
+            let (directory, mut core) = fixture();
+            write_pcm(&directory.path().join("new.wav"));
+            let name = "  Mix \u{2003} ";
+            let path = directory.path().join(format!("{name}.m3u8"));
+            std::fs::write(&path, "new.wav\n").unwrap();
+            core.command(Command::ImportPlaylist {
+                path,
+                name: explicit.then(|| name.into()),
+            })
+            .unwrap();
+            assert!(settle_scan(&mut core));
+            let playlists = core.store.playlist_summary_page(0, 10).unwrap();
+            assert_eq!(playlists.total, 1);
+            assert_eq!(playlists.rows[0].name, name);
+            assert_eq!(playlists.rows[0].entry_count, 1);
+        }
+    }
+
+    #[test]
+    fn import_task_errors_distinguish_scan_save_from_playlist_creation_failure() {
+        for scan_saved in [false, true] {
+            let (directory, mut core) = fixture_with_database(Some(10.0), true);
+            let source = directory.path().join("new.wav");
+            write_pcm(&source);
+            let path = directory.path().join("mix.m3u8");
+            std::fs::write(&path, "new.wav\n").unwrap();
+            let connection =
+                rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+            connection
+                .execute_batch(if scan_saved {
+                    "CREATE TRIGGER reject_import BEFORE INSERT ON playlists
+                     BEGIN SELECT RAISE(ABORT, 'playlist write refused'); END;"
+                } else {
+                    "CREATE TRIGGER reject_import BEFORE INSERT ON tracks
+                     BEGIN SELECT RAISE(ABORT, 'scan write refused'); END;"
+                })
+                .unwrap();
+            core.command(Command::ImportPlaylist { path, name: None })
+                .unwrap();
+            let id = core.active_scan.as_ref().unwrap().status.id;
+            assert!(!settle_scan(&mut core));
+            let ViewResponse::ScanTask(task) = core.view(&Query::ScanTask { id }).unwrap() else {
+                panic!("Expected task");
+            };
+            let error = task.error.as_deref().unwrap();
+            if scan_saved {
+                assert!(task.message.contains("Scan saved"));
+                assert!(task.message.contains("playlist creation"));
+                assert!(error.contains("playlist write refused"));
+            } else {
+                assert!(task.message.contains("save scan"));
+                assert!(task.message.contains("playlist not created"));
+                assert!(error.contains("scan write refused"));
+            }
+            assert_eq!(
+                core.store
+                    .track_id_for_source(&source, None)
+                    .unwrap()
+                    .is_some(),
+                scan_saved
+            );
+            assert_eq!(
+                core.state.library.track_total,
+                if scan_saved { 5 } else { 4 }
+            );
+            assert_eq!(core.store.playlist_summary_page(0, 0).unwrap().total, 0);
+        }
+    }
+
+    #[test]
     fn failed_playlist_import_keeps_committed_scan_visible() {
         let (directory, mut core) = fixture();
         let before = core.state.query_revisions();
@@ -2243,7 +2370,9 @@ mod tests {
                 path: None,
             },
         };
-        assert!(core.finish_scan(scan).is_err());
+        let error = core.finish_scan(scan).unwrap_err();
+        assert!(error.to_string().contains("Scan saved"));
+        assert!(error.to_string().contains("playlist creation"));
         assert_eq!(
             core.store.queue_page(0, 1).unwrap().rows[0].track.title,
             "Updated by scan"

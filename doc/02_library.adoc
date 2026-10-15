@@ -389,9 +389,12 @@ For the JSON history shape and `--limit` behavior, see <<_cli_output,CLI output>
 
 == SQLite maintenance
 
-Rivu accepts only version 11 library databases. Older, newer, and unversioned
-databases are rejected; there is no compatibility, migration, or automatic reset.
-Back up an incompatible database before replacing it.
+Rivu creates version 12 library databases and automatically upgrades version 11
+databases to version 12 on open. The upgrade preserves library identities and user
+state; previously stored bitrates remain estimates until an exact value is obtained.
+Other versions and unversioned databases are rejected without an automatic reset.
+Back up the database and any WAL before upgrading or replacing it. Version 12
+databases cannot be opened by versions of Rivu that only support version 11.
 
 Stop the core before removing `library.db` and its `-wal`/`-shm` sidecars, then scan
 the music files again. This resets playlists, saved queue, favorites, metadata
@@ -403,6 +406,13 @@ connection. SQLite normally checkpoints and removes the WAL/SHM sidecars when
 the last connection closes; external connections can defer that cleanup.
 After an abrupt exit such as `SIGKILL`, keep any remaining WAL with the database
 so SQLite can recover committed transactions on the next open.
+
+Rivu uses SQLite WAL mode with `synchronous=NORMAL`. Committed transactions survive
+an application crash, but a power failure or operating-system crash can roll back
+recent commits. This trades power-loss durability for fewer commit-time disk
+syncs; it does not make playlists, favorites, overrides, or playback statistics
+reconstructible by scanning. Keep backups of user state. See
+https://sqlite.org/pragma.html#pragma_synchronous[SQLite synchronous modes].
 
 To reclaim database/WAL space and refresh SQLite query statistics, ensure
 playback is stopped and no scan is active, then run:
