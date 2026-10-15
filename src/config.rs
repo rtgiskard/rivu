@@ -25,6 +25,9 @@ pub enum AlbumArtworkStyle {
     Vinyl,
     Glass,
     Halo,
+    Metal,
+    Card,
+    Duotone,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -325,6 +328,8 @@ pub struct Config {
     /// Positive finite seconds per full rotation, shared by all artwork panels.
     pub album_artwork_period_seconds: f32,
     pub album_artwork_direction: AlbumArtworkDirection,
+    /// Animation request cap (0 follows display callbacks), at most 240 FPS.
+    pub album_artwork_fps: u16,
     /// Enable reusable caches owned by visualization controls.
     pub visualization_cache: bool,
     pub media_read_buffer_mb: u32,
@@ -406,6 +411,7 @@ impl Default for Config {
             album_artwork_mode: AlbumArtworkMode::Static,
             album_artwork_period_seconds: 20.0,
             album_artwork_direction: AlbumArtworkDirection::Clockwise,
+            album_artwork_fps: 0,
             visualization_cache: true,
             media_read_buffer_mb: 2,
             ffmpeg_enabled: false,
@@ -658,6 +664,10 @@ impl Config {
                 && self.album_artwork_period_seconds > 0.0,
             "visualizations.album_artwork.period_seconds must be finite and greater than zero"
         );
+        ensure!(
+            self.album_artwork_fps <= 240,
+            "visualizations.album_artwork.fps must be between 0 and 240"
+        );
         Ok(())
     }
 
@@ -783,7 +793,7 @@ mod tests {
     }
 
     #[test]
-    fn album_artwork_settings_round_trip_and_reject_invalid_periods() {
+    fn album_artwork_settings_round_trip_and_reject_invalid_motion_values() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
         for (name, style) in [
@@ -791,6 +801,9 @@ mod tests {
             ("vinyl", AlbumArtworkStyle::Vinyl),
             ("glass", AlbumArtworkStyle::Glass),
             ("halo", AlbumArtworkStyle::Halo),
+            ("metal", AlbumArtworkStyle::Metal),
+            ("card", AlbumArtworkStyle::Card),
+            ("duotone", AlbumArtworkStyle::Duotone),
         ] {
             fs::write(
                 &path,
@@ -843,11 +856,34 @@ mod tests {
             assert!(config.save(&path).is_err());
             assert_eq!(fs::read(&path).unwrap(), original);
         }
+        for fps in [0, 1, 60, 240] {
+            fs::write(&path, format!("visualizations.album_artwork.fps = {fps}\n")).unwrap();
+            let config = Config::load(&path).unwrap();
+            assert_eq!(config.album_artwork_fps, fps);
+            config.save(&path).unwrap();
+            assert_eq!(Config::load(&path).unwrap(), config);
+        }
+        Config::default().save(&path).unwrap();
+        let original = fs::read(&path).unwrap();
+        for fps in [241, u16::MAX] {
+            let config = Config {
+                album_artwork_fps: fps,
+                ..Config::default()
+            };
+            assert!(config.validate().is_err());
+            assert!(config.save(&path).is_err());
+            assert_eq!(fs::read(&path).unwrap(), original);
+        }
         for invalid in [
             "style = 'unknown'",
             "mode = 'spinning'",
             "direction = 'left'",
             "unknown = true",
+            "fps = -1",
+            "fps = 241",
+            "fps = 65536",
+            "fps = 1.5",
+            "fps = '60'",
         ] {
             fs::write(
                 &path,
@@ -860,6 +896,7 @@ mod tests {
         let partial = Config::load(&path).unwrap();
         assert_eq!(partial.album_artwork_mode, AlbumArtworkMode::Rotating);
         assert_eq!(partial.album_artwork_style, AlbumArtworkStyle::Plain);
+        assert_eq!(partial.album_artwork_fps, 0);
         assert_eq!(
             partial.album_artwork_period_seconds,
             Config::default().album_artwork_period_seconds
@@ -1073,6 +1110,7 @@ mod tests {
             album_artwork_mode: AlbumArtworkMode::Rotating,
             album_artwork_period_seconds: 12.5,
             album_artwork_direction: AlbumArtworkDirection::Counterclockwise,
+            album_artwork_fps: 120,
             visualization_cache: false,
             page_size: 32,
         };

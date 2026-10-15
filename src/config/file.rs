@@ -125,6 +125,7 @@ file_group!(AlbumArtwork, AlbumArtworkView {
     mode => album_artwork_mode: AlbumArtworkMode,
     period_seconds => album_artwork_period_seconds: f32,
     direction => album_artwork_direction: AlbumArtworkDirection,
+    fps => album_artwork_fps: u16,
 });
 
 #[derive(Default, Deserialize)]

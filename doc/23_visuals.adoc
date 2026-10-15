@@ -34,12 +34,25 @@ caller's image to path bounds, preserve path coverage and opacity, and leave
 image retirement to the caller's existing window owner. Spectrum's use and
 bounded ramp ownership are described in <<_spectrum,Spectrum>>.
 
-Album artwork offers `plain` (default), `vinyl`, `glass`, and `halo` styles,
-independently of static or rotating motion. Real and generated default covers
-share animation, interaction, and lifecycle rules. Changing style does not reset
-the rotation angle. The existing approximately 16.7 ms animation timer throttle
-is retained; styles introduce neither per-frame CPU geometry rotation nor a new
-application cache system.
+Album artwork offers `plain` (default), `vinyl`, `glass`, `halo`, `metal`, `card`,
+and `duotone` styles, independently of static or rotating motion. Metal places a
+fixed brushed radial sheen over the rotating circular cover. Card rotates the
+full square image, rounded frame, and shadow together, reserving enough margin
+for its diagonal; it does not crop away the original composition. Duotone uses a
+fixed blue/purple edge glow behind the circular cover, without color extraction
+or an audio dependency. Real and generated default covers share animation,
+interaction, and lifecycle rules. Changing style or frame pacing does not reset
+the rotation angle.
+
+`visualizations.album_artwork.fps` accepts integers from 0 through 240, default 0.
+Zero follows display callbacks without a timer throttle; positive values cap
+animation requests per second independently of the analysis rate. A lower cap
+reduces rendering work and resource use at the expense of motion smoothness;
+display-following mode can do more work on high-refresh displays. Each owner has
+at most one pending frame or timer; pausing, hiding, static mode, and Still Mode
+cancel pending work, and resuming does not replay missed frames. Styles introduce
+neither per-frame CPU geometry rotation nor a new application cache system.
+
 
 == Analysis boundary
 

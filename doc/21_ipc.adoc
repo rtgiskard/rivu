@@ -215,8 +215,12 @@ The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
 Bodies use Postcard serialization without COBS framing. The current protocol
-version is `20`; clients and servers must use matching wire schemas. The four-byte
+version is `21`; clients and servers must use matching wire schemas. The four-byte
 frame length remains little-endian; body integers follow Postcard's encoding.
+Version 21 adds the Album artwork animation cap (`album_artwork_fps`, an integer
+from 0 through 240, with 0 following display callbacks) to configuration state
+and Configure commands, and supports the `metal`, `card`, and `duotone` artwork
+styles. The Configuration chapter describes their rendering behavior.
 
 Request frame content is limited to 4 MiB
 and response frame content to 16 MiB, including the version and message type but

@@ -456,23 +456,34 @@ style = "plain"
 mode = "static"
 period_seconds = 20.0
 direction = "clockwise"
+fps = 0
 ----
 
-`style` accepts `plain` (default), `vinyl`, `glass`, or `halo`. Style and motion
-are independent: all four styles support static and rotating modes. Changing
-style preserves the current rotation angle.
+`style` accepts `plain` (default), `vinyl`, `glass`, `halo`, `metal`, `card`, or
+`duotone`. Style and motion are independent: all seven styles support static and
+rotating modes. Changing style preserves the current rotation angle. Metal adds
+a fixed brushed radial sheen over a circular cover. Card preserves the full
+square image inside a rounded frame and shadow that rotate together, with room
+for the corners at every angle. Duotone adds a fixed blue/purple edge glow behind
+a circular cover, without extracted colors or audio-driven effects.
 `mode` accepts `static` (default) or `rotating`. `period_seconds` is the time
 for one full circle and must be finite and greater than zero; there is no
 additional upper limit. `direction` accepts `clockwise` (default) or
-`counterclockwise`. All Album artwork panels share these settings.
+`counterclockwise`. `fps` is an integer from 0 through 240 (default 0): zero
+follows display callbacks without timer throttling; a positive value caps
+animation requests per second. Lower caps reduce rendering work and resource
+use at the cost of less smooth motion; zero can render more frequently on
+high-refresh displays. Changing the cap preserves the angle. All Album artwork
+panels share these settings; the analysis rate is independent.
 Rotation follows playback rather than audio energy. Pausing, hiding the panel,
 and Still Mode preserve its angle; resuming does not catch up on suspended time.
 Stopping, changing the current track, or selecting static mode resets the cover
 upright. A track without artwork uses Playback's generated default cover with
-the same animation, interaction, and lifecycle rules as a real cover. Rendering
-uses GPU transforms and retains the existing approximately 16.7 ms animation
-timer throttle; it does not rotate geometry on the CPU every frame or introduce
-an application image cache. Metadata's full preview is unchanged.
+the same animation, interaction, and lifecycle rules as a real cover. Pending
+animation work is cancelled while paused, hidden, static, or in Still Mode, and
+resuming never produces a catch-up burst. Rendering uses GPU transforms, without
+rotating geometry on the CPU every frame or introducing an application image
+cache. Metadata's full preview is unchanged.
 
 
 === Still Mode

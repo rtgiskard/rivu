@@ -46,6 +46,9 @@ impl SettingChoice {
             Self::AlbumArtworkStyle(AlbumArtworkStyle::Vinyl) => "Vinyl".to_owned(),
             Self::AlbumArtworkStyle(AlbumArtworkStyle::Glass) => "Glass".to_owned(),
             Self::AlbumArtworkStyle(AlbumArtworkStyle::Halo) => "Halo".to_owned(),
+            Self::AlbumArtworkStyle(AlbumArtworkStyle::Metal) => "Metal".to_owned(),
+            Self::AlbumArtworkStyle(AlbumArtworkStyle::Card) => "Card".to_owned(),
+            Self::AlbumArtworkStyle(AlbumArtworkStyle::Duotone) => "Duotone".to_owned(),
             Self::AlbumArtworkMode(AlbumArtworkMode::Static) => "Static".to_owned(),
             Self::AlbumArtworkMode(AlbumArtworkMode::Rotating) => "Rotating".to_owned(),
             Self::AlbumArtworkDirection(AlbumArtworkDirection::Clockwise) => "Clockwise".to_owned(),
@@ -112,6 +115,7 @@ enum Field {
     WaveformPeakGain,
     WaveformPeakGamma,
     AlbumArtworkPeriod,
+    AlbumArtworkFps,
 }
 impl Field {
     fn label(self) -> &'static str {
@@ -156,6 +160,7 @@ impl Field {
             Self::WaveformPeakGain => "Peak gain",
             Self::WaveformPeakGamma => "Peak gamma",
             Self::AlbumArtworkPeriod => "Seconds per circle",
+            Self::AlbumArtworkFps => "Animation rate (FPS)",
         }
     }
 
@@ -163,6 +168,9 @@ impl Field {
         match self {
             Self::Roots => "Separate paths with semicolons.",
             Self::AlbumArtworkPeriod => "Finite and greater than zero; default 20 seconds.",
+            Self::AlbumArtworkFps => {
+                "0–240. 0 follows the display; a positive cap reduces rendering work."
+            }
             Self::ScanMaxDepth => "Minimum 1; starting folder = depth 0.",
             Self::Volume => "0–100.",
             Self::PlayCountThreshold => "0 ≤ value < 100; based on time heard.",
@@ -615,6 +623,7 @@ impl Settings {
             Field::WaveformPeakGain,
             Field::WaveformPeakGamma,
             Field::AlbumArtworkPeriod,
+            Field::AlbumArtworkFps,
         ]
         .into_iter()
         .map(|field| {
@@ -1000,6 +1009,11 @@ impl Settings {
             self.draft.album_artwork_period_seconds.to_string(),
             cx,
         );
+        self.set_value(
+            Field::AlbumArtworkFps,
+            self.draft.album_artwork_fps.to_string(),
+            cx,
+        );
     }
 
     fn parse(&self, cx: &App) -> Result<Config> {
@@ -1077,6 +1091,7 @@ impl Settings {
         config.waveform_peak_gain = self.number(Field::WaveformPeakGain, cx)?;
         config.waveform_peak_gamma = self.number(Field::WaveformPeakGamma, cx)?;
         config.album_artwork_period_seconds = self.number(Field::AlbumArtworkPeriod, cx)?;
+        config.album_artwork_fps = self.number(Field::AlbumArtworkFps, cx)?;
         config.validate()?;
         Ok(config)
     }
@@ -1955,6 +1970,9 @@ impl Settings {
                             AlbumArtworkStyle::Vinyl,
                             AlbumArtworkStyle::Glass,
                             AlbumArtworkStyle::Halo,
+                            AlbumArtworkStyle::Metal,
+                            AlbumArtworkStyle::Card,
+                            AlbumArtworkStyle::Duotone,
                         ];
                         let selected = values
                             .iter()
@@ -2031,6 +2049,7 @@ impl Settings {
                         .child(two_column(form_field("Style", style).min_w(rems(180. / 16.)), div()))
                         .child(two_column(form_field("Mode", mode).min_w(rems(180. / 16.)), form_field("Direction", direction).min_w(rems(180. / 16.))))
                         .child(settings.single(Field::AlbumArtworkPeriod))
+                        .child(settings.single(Field::AlbumArtworkFps))
                         .id("settings-album-artwork-help")
                         .tooltip(settings_tooltip("Shared by all Album artwork panels. Rotation follows playback, not audio energy. Still mode freezes rotation without removing the cover.")),
                 ))

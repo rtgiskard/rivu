@@ -16,7 +16,54 @@ use crate::{
 
 use super::artwork::{Artwork, ArtworkLoader, ArtworkView};
 
-const FRAME_INTERVAL: Duration = Duration::from_nanos(16_666_667);
+/// Pacing is measured between native frame requests, not after frame delivery.
+/// A late wake schedules only one frame and establishes a fresh deadline.
+struct FramePacing {
+    fps: u16,
+    interval: Duration,
+    last_request: Option<Instant>,
+}
+
+impl FramePacing {
+    fn new() -> Self {
+        Self {
+            fps: 0,
+            interval: Duration::ZERO,
+            last_request: None,
+        }
+    }
+
+    fn set_fps(&mut self, fps: u16) -> bool {
+        if self.fps == fps {
+            return false;
+        }
+        self.fps = fps;
+        self.interval = if fps == 0 {
+            Duration::ZERO
+        } else {
+            Duration::from_nanos(1_000_000_000_u64.div_ceil(u64::from(fps)))
+        };
+        true
+    }
+
+    fn delay(&self, now: Instant) -> Duration {
+        if self.interval.is_zero() {
+            return Duration::ZERO;
+        }
+        self.last_request.map_or(Duration::ZERO, |last| {
+            self.interval
+                .saturating_sub(now.saturating_duration_since(last))
+        })
+    }
+
+    fn requested(&mut self, now: Instant) {
+        self.last_request = Some(now);
+    }
+
+    fn reset(&mut self) {
+        self.last_request = None;
+    }
+}
 
 #[derive(Clone, Copy, PartialEq)]
 struct RotationSettings {
@@ -81,9 +128,11 @@ impl Rotation {
         eligible: bool,
         reset: bool,
     ) -> bool {
-        self.advance(now);
         let running = eligible && settings.mode == AlbumArtworkMode::Rotating;
         let changed = reset || self.settings != settings || self.running != running;
+        if changed {
+            self.advance(now);
+        }
         if reset || settings.mode == AlbumArtworkMode::Static {
             self.angle = 0.;
         }
@@ -108,8 +157,9 @@ pub(super) struct AlbumArtwork {
     visible: bool,
     still: bool,
     style: AlbumArtworkStyle,
-    decorations: [Arc<Image>; 3],
+    decorations: [Arc<Image>; 6],
     rotation: Rotation,
+    pacing: FramePacing,
     frame_pending: bool,
     frame_generation: u64,
     frame_timer: Option<Task<()>>,
@@ -131,9 +181,13 @@ impl AlbumArtwork {
                 include_bytes!("../../assets/album_vinyl.svg").as_slice(),
                 include_bytes!("../../assets/album_glass.svg").as_slice(),
                 include_bytes!("../../assets/album_halo.svg").as_slice(),
+                include_bytes!("../../assets/album_metal.svg").as_slice(),
+                include_bytes!("../../assets/album_card.svg").as_slice(),
+                include_bytes!("../../assets/album_duotone.svg").as_slice(),
             ]
             .map(|bytes| Arc::new(Image::from_bytes(ImageFormat::Svg, bytes.to_vec()))),
             rotation: Rotation::new(),
+            pacing: FramePacing::new(),
             frame_pending: false,
             frame_generation: 0,
             frame_timer: None,
@@ -162,6 +216,7 @@ impl AlbumArtwork {
             || self.visible != visible
             || self.still != config.still_mode
             || self.style != config.album_artwork_style
+            || self.pacing.fps != config.album_artwork_fps
             || self.rotation.settings != settings;
         if switched {
             self.track = track.cloned();
@@ -172,6 +227,9 @@ impl AlbumArtwork {
         self.visible = visible;
         self.still = config.still_mode;
         self.style = config.album_artwork_style;
+        if self.pacing.set_fps(config.album_artwork_fps) {
+            self.cancel_frame();
+        }
         self.sync_rotation(settings, switched || stopped);
         self.prepare_artwork(cx);
         if changed {
@@ -191,6 +249,7 @@ impl AlbumArtwork {
 
     fn cancel_frame(&mut self) {
         self.frame_timer = None;
+        self.pacing.reset();
         self.frame_pending = false;
         // Native next-frame callbacks cannot be removed, so obsolete callbacks
         // are inert even if hiding and reopening happen before they are drained.
@@ -260,27 +319,35 @@ impl AlbumArtwork {
         if !self.rotation.running || self.frame_pending || self.frame_timer.is_some() {
             return;
         }
-        self.frame_pending = true;
+        let now = Instant::now();
         let generation = self.frame_generation;
+        let delay = self.pacing.delay(now);
+        if !delay.is_zero() {
+            let timer = cx.background_executor().timer(delay);
+            self.frame_timer = Some(cx.spawn_in(window, async move |this, cx| {
+                timer.await;
+                let _ = this.update_in(cx, |this, window, cx| {
+                    if generation == this.frame_generation && this.rotation.running {
+                        this.frame_timer = None;
+                        this.request_frame(window, cx);
+                    }
+                });
+            }));
+            return;
+        }
+        self.pacing.requested(now);
+        self.frame_pending = true;
         let view = cx.weak_entity();
-        window.on_next_frame(move |window, cx| {
+        window.on_next_frame(move |_, cx| {
             let _ = view.update(cx, |this, cx| {
                 if generation != this.frame_generation || !this.rotation.running {
                     return;
                 }
                 this.frame_pending = false;
                 this.rotation.advance(Instant::now());
+                // Rendering requests the next callback (or one capped timer).
+                // fps=0 therefore follows display callbacks without a timer.
                 cx.notify();
-                let timer = cx.background_executor().timer(FRAME_INTERVAL);
-                this.frame_timer = Some(cx.spawn_in(window, async move |this, cx| {
-                    timer.await;
-                    let _ = this.update_in(cx, |this, window, cx| {
-                        if generation == this.frame_generation {
-                            this.frame_timer = None;
-                            this.request_frame(window, cx);
-                        }
-                    });
-                }));
             });
         });
         cx.notify();
@@ -316,8 +383,10 @@ fn circle_bounds(bounds: Bounds<Pixels>) -> Bounds<Pixels> {
 fn artwork_bounds(bounds: Bounds<Pixels>, style: AlbumArtworkStyle, scale: f32) -> Bounds<Pixels> {
     let circle = circle_bounds(bounds);
     let reserve = match style {
-        AlbumArtworkStyle::Vinyl | AlbumArtworkStyle::Glass => 0.94,
-        AlbumArtworkStyle::Plain | AlbumArtworkStyle::Halo => 1.0,
+        AlbumArtworkStyle::Vinyl | AlbumArtworkStyle::Glass | AlbumArtworkStyle::Metal => 0.94,
+        // Reserve the entire rotating square's diagonal, including SVG shadow.
+        AlbumArtworkStyle::Card => 0.94 * std::f32::consts::FRAC_1_SQRT_2,
+        AlbumArtworkStyle::Plain | AlbumArtworkStyle::Halo | AlbumArtworkStyle::Duotone => 1.0,
     };
     let side = (f32::from(circle.size.width) * scale * reserve / 2.0).floor() * 2.0;
     let center = circle
@@ -326,6 +395,16 @@ fn artwork_bounds(bounds: Bounds<Pixels>, style: AlbumArtworkStyle, scale: f32) 
     Bounds {
         origin: center.map(|coordinate| px((coordinate - side / 2.0) / scale)),
         size: size(px(side / scale), px(side / scale)),
+    }
+}
+
+fn artwork_image_ratio(style: AlbumArtworkStyle) -> f32 {
+    match style {
+        AlbumArtworkStyle::Plain => 1.0,
+        AlbumArtworkStyle::Vinyl | AlbumArtworkStyle::Card => 0.875,
+        AlbumArtworkStyle::Glass => 0.96875,
+        AlbumArtworkStyle::Halo | AlbumArtworkStyle::Duotone => 0.75,
+        AlbumArtworkStyle::Metal => 0.90625,
     }
 }
 
@@ -343,6 +422,9 @@ impl Render for AlbumArtwork {
             AlbumArtworkStyle::Vinyl => Some(self.decorations[0].clone()),
             AlbumArtworkStyle::Glass => Some(self.decorations[1].clone()),
             AlbumArtworkStyle::Halo => Some(self.decorations[2].clone()),
+            AlbumArtworkStyle::Metal => Some(self.decorations[3].clone()),
+            AlbumArtworkStyle::Card => Some(self.decorations[4].clone()),
+            AlbumArtworkStyle::Duotone => Some(self.decorations[5].clone()),
         };
         let angle = self.rotation.angle as f32;
         canvas(
@@ -350,58 +432,76 @@ impl Render for AlbumArtwork {
                 let scale = window.scale_factor();
                 let circle = artwork_bounds(bounds, style, scale);
                 let side = circle.size.width;
-                let ratio = match style {
-                    AlbumArtworkStyle::Plain => 1.0,
-                    AlbumArtworkStyle::Vinyl => 0.875,
-                    AlbumArtworkStyle::Glass => 0.96875,
-                    AlbumArtworkStyle::Halo => 0.75,
-                };
+                let ratio = artwork_image_ratio(style);
                 // Even device-pixel diameters keep all concentric layers on the
                 // same center after pixel snapping, including fractional scale.
                 let image_side = px((f32::from(side) * scale * ratio / 2.0).floor() * 2.0 / scale);
                 let inset = (side - image_side) / 2.0;
-                let surface = div()
-                    .absolute()
-                    .left(inset)
-                    .top(inset)
-                    .size(image_side)
-                    .rounded_full()
-                    .bg(rgb(super::BG))
-                    .when(
-                        matches!(style, AlbumArtworkStyle::Vinyl | AlbumArtworkStyle::Glass),
-                        |surface| {
-                            surface.shadow(vec![BoxShadow {
-                                color: rgb(0x000000).alpha(0.28).into(),
-                                offset: point(px(0.0), side * 0.008),
-                                blur_radius: side * 0.025,
-                                spread_radius: px(0.0),
-                                inset: false,
-                            }])
-                        },
-                    )
-                    .child(
-                        image
-                            .size_full()
-                            .object_fit(ObjectFit::Cover)
-                            .rounded_full()
-                            .with_transformation(Transformation::rotate(radians(angle))),
-                    );
+                let surface = if style == AlbumArtworkStyle::Card {
+                    // The complete source fits inside the SVG's 32..480 inner
+                    // square. Source and frame rotate about the same center;
+                    // the square's reserved diagonal keeps every corner inside.
+                    div()
+                        .absolute()
+                        .left(inset)
+                        .top(inset)
+                        .size(image_side)
+                        .child(
+                            image
+                                .size_full()
+                                .object_fit(ObjectFit::Contain)
+                                .rounded(side * 0.035)
+                                .with_transformation(Transformation::rotate(radians(angle))),
+                        )
+                } else {
+                    div()
+                        .absolute()
+                        .left(inset)
+                        .top(inset)
+                        .size(image_side)
+                        .rounded_full()
+                        .bg(rgb(super::BG))
+                        .when(
+                            matches!(style, AlbumArtworkStyle::Vinyl | AlbumArtworkStyle::Glass),
+                            |surface| {
+                                surface.shadow(vec![BoxShadow {
+                                    color: rgb(0x000000).alpha(0.28).into(),
+                                    offset: point(px(0.0), side * 0.008),
+                                    blur_radius: side * 0.025,
+                                    spread_radius: px(0.0),
+                                    inset: false,
+                                }])
+                            },
+                        )
+                        .child(
+                            image
+                                .size_full()
+                                .object_fit(ObjectFit::Cover)
+                                .rounded_full()
+                                .with_transformation(Transformation::rotate(radians(angle))),
+                        )
+                };
                 let mut element = div().relative().size(side);
-                if style == AlbumArtworkStyle::Halo {
+                let behind = matches!(style, AlbumArtworkStyle::Halo | AlbumArtworkStyle::Duotone);
+                if behind {
                     element =
                         element.child(img(decoration.clone().unwrap()).absolute().size_full());
                 }
                 element = element.child(surface);
-                if let Some(decoration) = decoration.filter(|_| style != AlbumArtworkStyle::Halo) {
+                if let Some(decoration) = decoration.filter(|_| !behind) {
                     element = element.child(
                         img(decoration)
                             .absolute()
                             .top_0()
                             .left_0()
                             .size_full()
-                            .when(style == AlbumArtworkStyle::Vinyl, |image| {
-                                image.with_transformation(Transformation::rotate(radians(angle)))
-                            }),
+                            .when(
+                                matches!(style, AlbumArtworkStyle::Vinyl | AlbumArtworkStyle::Card),
+                                |image| {
+                                    image
+                                        .with_transformation(Transformation::rotate(radians(angle)))
+                                },
+                            ),
                     );
                 }
                 let mut element = element.into_any_element();
@@ -433,6 +533,87 @@ mod tests {
 
     fn assert_angle(rotation: &Rotation, expected: f64) {
         assert!((rotation.angle - expected).abs() < 1e-10);
+    }
+
+    #[test]
+    fn uncapped_pacing_never_adds_a_timer_delay() {
+        let start = Instant::now();
+        let mut pacing = FramePacing::new();
+        assert_eq!(pacing.delay(start), Duration::ZERO);
+        pacing.requested(start);
+        for elapsed in [
+            Duration::ZERO,
+            Duration::from_nanos(1),
+            Duration::from_secs(10),
+        ] {
+            assert_eq!(pacing.delay(start + elapsed), Duration::ZERO);
+        }
+    }
+
+    #[test]
+    fn capped_pacing_counts_from_request_without_additive_frame_latency() {
+        let start = Instant::now();
+        for fps in [1, 30, 60, 144, 240] {
+            let interval = Duration::from_nanos(1_000_000_000_u64.div_ceil(u64::from(fps)));
+            let mut pacing = FramePacing::new();
+            assert!(pacing.set_fps(fps));
+            assert_eq!(pacing.delay(start), Duration::ZERO);
+            pacing.requested(start);
+            assert_eq!(pacing.delay(start), interval);
+            let elapsed = interval / 2;
+            assert_eq!(pacing.delay(start + elapsed), interval - elapsed);
+            assert_eq!(pacing.delay(start + interval), Duration::ZERO);
+        }
+    }
+
+    #[test]
+    fn late_frames_do_not_accumulate_catchup_requests() {
+        let start = Instant::now();
+        let mut pacing = FramePacing::new();
+        pacing.set_fps(60);
+        pacing.requested(start);
+        let late = start + Duration::from_secs(10);
+        assert_eq!(pacing.delay(late), Duration::ZERO);
+        pacing.requested(late);
+        assert_eq!(pacing.delay(late), Duration::from_nanos(16_666_667));
+    }
+
+    #[test]
+    fn cancellation_and_fps_changes_restart_only_pacing_not_rotation() {
+        let start = Instant::now();
+        let mut pacing = FramePacing::new();
+        let mut rotation = Rotation::new();
+        rotation.sync(start, rotating(), true, true);
+        rotation.advance(start);
+        let now = start + Duration::from_secs(5);
+        rotation.advance(now);
+        for fps in [1, 240, 0, 60] {
+            assert!(pacing.set_fps(fps));
+            pacing.requested(now);
+            pacing.reset();
+            assert_eq!(pacing.delay(now), Duration::ZERO);
+            assert!(!rotation.sync(now, rotating(), true, false));
+            assert_angle(&rotation, std::f64::consts::FRAC_PI_2);
+        }
+    }
+
+    #[test]
+    fn unchanged_sync_does_not_advance_between_animation_frames() {
+        let start = Instant::now();
+        let mut rotation = Rotation::new();
+        rotation.sync(start, rotating(), true, true);
+        rotation.advance(start);
+        for millis in [50, 100, 200, 500, 999] {
+            assert!(!rotation.sync(
+                start + Duration::from_millis(millis),
+                rotating(),
+                true,
+                false,
+            ));
+            assert_angle(&rotation, 0.);
+        }
+        rotation.advance(start + Duration::from_secs(1));
+        assert_angle(&rotation, std::f64::consts::TAU / 20.);
     }
 
     #[test]
@@ -537,6 +718,9 @@ mod tests {
                 AlbumArtworkStyle::Vinyl,
                 AlbumArtworkStyle::Glass,
                 AlbumArtworkStyle::Halo,
+                AlbumArtworkStyle::Metal,
+                AlbumArtworkStyle::Card,
+                AlbumArtworkStyle::Duotone,
             ] {
                 let circle = artwork_bounds(bounds, style, scale);
                 assert!(circle.size.width >= px(0.0));
@@ -547,6 +731,29 @@ mod tests {
                     .map(|coordinate| f32::from(coordinate) * scale);
                 assert!((actual.x - center.x).abs() < 0.001);
                 assert!((actual.y - center.y).abs() < 0.001);
+            }
+        }
+    }
+
+    #[test]
+    fn card_preserves_inner_square_and_bounds_every_rotated_corner() {
+        assert_eq!(artwork_image_ratio(AlbumArtworkStyle::Card), 448. / 512.);
+        for (width, height) in [(32., 96.), (400., 200.), (200., 400.), (997.5, 601.25)] {
+            let bounds = Bounds {
+                origin: point(px(10.25), px(20.25)),
+                size: size(px(width), px(height)),
+            };
+            for scale in [1.0, 1.25, 1.5, 2.0] {
+                let card = artwork_bounds(bounds, AlbumArtworkStyle::Card, scale);
+                for step in 0..32 {
+                    let angle = step as f32 * std::f32::consts::TAU / 32.;
+                    let extent = card.size.width * (angle.cos().abs() + angle.sin().abs()) / 2.;
+                    let center = card.center();
+                    assert!(center.x - extent >= bounds.origin.x);
+                    assert!(center.y - extent >= bounds.origin.y);
+                    assert!(center.x + extent <= bounds.origin.x + bounds.size.width);
+                    assert!(center.y + extent <= bounds.origin.y + bounds.size.height);
+                }
             }
         }
     }

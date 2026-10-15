@@ -747,10 +747,11 @@ fn system_config_wire_adapter_preserves_optional_fields_and_library_columns() {
         let config = Arc::new(crate::config::Config {
             output_device,
             library_columns,
-            album_artwork_style: crate::config::AlbumArtworkStyle::Vinyl,
+            album_artwork_style: crate::config::AlbumArtworkStyle::Metal,
             album_artwork_mode: crate::config::AlbumArtworkMode::Rotating,
             album_artwork_period_seconds: 12.5,
             album_artwork_direction: crate::config::AlbumArtworkDirection::Counterclockwise,
+            album_artwork_fps: 240,
             ..Default::default()
         });
         let system = crate::model::SystemState {
@@ -862,10 +863,11 @@ fn configure_request_round_trip_preserves_optional_config_field_and_library_colu
             audio_visualizer_labels: output_device.is_none(),
             output_device,
             library_columns,
-            album_artwork_style: crate::config::AlbumArtworkStyle::Halo,
+            album_artwork_style: crate::config::AlbumArtworkStyle::Duotone,
             album_artwork_mode: crate::config::AlbumArtworkMode::Rotating,
             album_artwork_period_seconds: 12.5,
             album_artwork_direction: crate::config::AlbumArtworkDirection::Counterclockwise,
+            album_artwork_fps: 30,
             ..Default::default()
         };
         let request = WireRequest::Command(WireCommand::from(Command::Configure {

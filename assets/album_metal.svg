@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="metal" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#f4f8ff"/><stop offset=".2" stop-color="#536071"/><stop offset=".38" stop-color="#dce6f4"/><stop offset=".5" stop-color="#fff"/><stop offset=".58" stop-color="#596474"/><stop offset=".8" stop-color="#b7c6d8"/><stop offset="1" stop-color="#3c4656"/></linearGradient>
+    <linearGradient id="sheen" x1="0" y1="1" x2="1" y2="0"><stop stop-color="#fff" stop-opacity="0"/><stop offset=".38" stop-color="#fff" stop-opacity=".02"/><stop offset=".49" stop-color="#eff6ff" stop-opacity=".23"/><stop offset=".58" stop-color="#fff" stop-opacity=".03"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>
+  </defs>
+  <circle cx="256" cy="256" r="242" fill="none" stroke="url(#metal)" stroke-width="16"/>
+  <g fill="none" stroke="#d7e4f7" stroke-opacity=".24" stroke-width="1"><circle cx="256" cy="256" r="237"/><circle cx="256" cy="256" r="241"/><circle cx="256" cy="256" r="245"/></g>
+  <circle cx="256" cy="256" r="233" fill="url(#sheen)"/>
+  <circle cx="256" cy="256" r="232" fill="none" stroke="#060c15" stroke-opacity=".65" stroke-width="2"/>
+</svg>
