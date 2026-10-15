@@ -240,11 +240,14 @@ and an unavailable library record from unknown metadata on a loaded track (`—`
 Fields, Save, favorite, and decoder-hint actions are disabled until the current
 track is ready. Switching tracks clears the old values and artwork immediately;
 late responses from the previous selection cannot replace the current details.
-A same-track refresh retains ready details and drafts, including after a query
-failure. Retry reloads the selected track after a query failure without changing
-selection or discarding its draft. A record confirmed unavailable disables saving;
-an existing draft remains available to inspect, retry, or discard. Starting or
-failing a retry does not restore saving. An earlier save acknowledgement confirms
+A same-track background refresh retains ready details and drafts, including after
+a query failure. The Track details reload action exits manual track selection and
+reloads the current Playback track without changing list selections. Unsaved or
+saving drafts require Discard or Cancel first; after confirmation the action uses
+the then-current Playback track. Without a current track, details are cleared.
+A record confirmed unavailable disables saving; an existing draft remains available
+to inspect or discard. Starting or failing a reload does not restore saving.
+An earlier save acknowledgement confirms
 its submitted changes without changing that unavailable state or cancelling a
 newer query. Cached playback details cannot restore saving either; only a reload
 that finds the record enables it again. Without a draft, unavailable details are

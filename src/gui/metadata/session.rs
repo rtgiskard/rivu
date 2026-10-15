@@ -129,13 +129,6 @@ impl MetadataSession {
         self.track().is_some()
     }
 
-    pub(in crate::gui) fn can_retry(&self) -> bool {
-        self.identity.is_some()
-            && !matches!(self.read_state, MetadataReadState::Pending(_))
-            && (matches!(self.read_state, MetadataReadState::Failed(_))
-                || matches!(self.availability, MetadataAvailability::Unavailable(_)))
-    }
-
     pub(in crate::gui) fn saving(&self) -> bool {
         self.saving.is_some()
     }
@@ -1158,7 +1151,6 @@ mod tests {
                 .is_none()
         );
         assert!(session.editable());
-        assert!(session.can_retry());
         assert!(!session.can_save(draft.as_draft()));
 
         let retry = session.begin_load(1);
@@ -1166,7 +1158,6 @@ mod tests {
             session.availability(),
             MetadataAvailability::Unavailable(_)
         ));
-        assert!(!session.can_retry());
         assert!(!session.can_save(draft.as_draft()));
         assert!(session.begin_save(draft.as_draft()).is_none());
         assert!(session.fail_load(retry, "retry failed".into()));
@@ -1176,7 +1167,6 @@ mod tests {
         ));
         assert_eq!(session.track().unwrap().title, "original");
         assert!(session.dirty(draft.as_draft()));
-        assert!(session.can_retry());
         assert!(!session.can_save(draft.as_draft()));
         assert!(session.begin_save(draft.as_draft()).is_none());
 

@@ -81,6 +81,7 @@ pub(in crate::gui) enum ManualAction {
         structure_revision: u64,
     },
     Clear,
+    ReloadPlayback,
     Discard {
         editor: Option<session::EditorIdentity>,
         selected: Option<i64>,
@@ -226,6 +227,11 @@ impl GuiApp {
                 self.browser.clear_selection();
                 self.clear_metadata_selection(cx);
             }
+            ManualAction::ReloadPlayback => {
+                self.metadata.discard_draft();
+                self.clear_metadata_selection(cx);
+                self.retry_metadata(cx);
+            }
             ManualAction::Discard { selected, .. } => {
                 self.metadata.discard_draft();
                 self.set_metadata_values(MetadataValues::default(), cx);
@@ -354,6 +360,11 @@ impl GuiApp {
         if let Some(id) = self.metadata.identity() {
             self.load_metadata_track(id, cx);
         }
+    }
+
+    pub(super) fn reload_playback_metadata(&mut self, cx: &mut Context<Self>) {
+        let id = self.begin_manual_intent();
+        self.ready_manual_action(id, ManualAction::ReloadPlayback, cx);
     }
 
     fn load_metadata_track(&mut self, id: i64, cx: &mut Context<Self>) {

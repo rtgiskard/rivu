@@ -1892,7 +1892,6 @@ impl GuiApp {
         let follow_paused = self.metadata.selected().is_none()
             && protected
             && identity != self.state.current_track().map(|track| track.id);
-        let can_retry = self.metadata.can_retry();
         let placeholder: SharedString = "Not loaded".into();
         let presence_status = match self.metadata.availability() {
             MetadataAvailability::Unknown if identity.is_none() => "No track selected",
@@ -2190,14 +2189,11 @@ impl GuiApp {
                                                 },
                                             )), !protected))
                                             .child(
-                                                disabled_control(icon_button(("metadata-retry", panel_id), "󰑐", "Retry loading track details", cx, move |this, _, cx| {
-                                                    if this.metadata.editor_identity() == editor_identity
-                                                        && this.metadata.can_retry()
-                                                    {
-                                                        this.retry_metadata(cx);
-                                                        cx.notify();
+                                                icon_button(("metadata-retry", panel_id), "󰑐", "Reload current playback track", cx, move |this, _, cx| {
+                                                    if this.metadata.editor_identity() == editor_identity {
+                                                        this.reload_playback_metadata(cx);
                                                     }
-                                                }), !can_retry),
+                                                }),
                                             ),
                                     ),
                             )
