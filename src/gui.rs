@@ -888,7 +888,9 @@ impl GuiApp {
         app.request_root_counts(cx);
         app.request_directory_page(library::TreeBranch::default(), 0, cx);
         app.request_playlist_summaries(0, cx);
-        app.browser.history.sync(&app.state.library.history);
+        app.browser
+            .history
+            .sync(&app.state.library.history, app.history_playback());
         app.sync_analysis(cx);
         // Initialization may have completed before the wakeup callback was
         // installed. Reconcile once so the first frame never keeps the empty snapshot.
@@ -1136,6 +1138,16 @@ impl GuiApp {
         self.browser.clear_focus();
     }
 
+    fn history_playback(&self) -> Option<(i64, i64)> {
+        if self.state.playback.status == PlaybackStatus::Stopped {
+            return None;
+        }
+        Some((
+            self.state.current_track()?.id,
+            self.state.playback.last_heard_at?,
+        ))
+    }
+
     fn refresh(&mut self, cx: &mut Context<Self>) {
         let state = (self.handle.revision() != self.state.system.revision)
             .then(|| self.handle.gui_snapshot());
@@ -1187,7 +1199,9 @@ impl GuiApp {
                 library_changed || library_structure_changed || playlist_changed || queue_changed,
                 cx,
             );
-            self.browser.history.sync(&self.state.library.history);
+            self.browser
+                .history
+                .sync(&self.state.library.history, self.history_playback());
             self.sync_metadata_default(cx);
             self.sync_full_waveform_request();
             self.browser.playlists.reconcile_selection();

@@ -463,6 +463,9 @@ Recent entries reflect edited titles and current play counts without reopening
 the view. Crossing the counting threshold refreshes the recent entry while
 playback continues; editing its title does not change its activity timestamp or
 recency order.
+In the GUI, Last played sorting uses the same live playback timestamp shown for
+the current playing or paused track. Equal-second timestamps place the current
+track first when sorting newest first; title and play-count sorting are unaffected.
 The retained snapshot contains up to 256 recent tracks both after startup and
 after subsequent activity or catalog refreshes.
 

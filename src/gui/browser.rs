@@ -773,6 +773,7 @@ pub(super) struct HistoryBrowser {
     source: Arc<Vec<HistoryEntry>>,
     indices: Vec<usize>,
     title_keys: Vec<String>,
+    playback: Option<(i64, i64)>,
     sort: HistorySort,
     descending: bool,
 }
@@ -783,6 +784,7 @@ impl Default for HistoryBrowser {
             source: Arc::default(),
             indices: Vec::new(),
             title_keys: Vec::new(),
+            playback: None,
             sort: HistorySort::Recent,
             descending: true,
         }
@@ -790,8 +792,14 @@ impl Default for HistoryBrowser {
 }
 
 impl HistoryBrowser {
-    pub(super) fn sync(&mut self, source: &Arc<Vec<HistoryEntry>>) {
-        if Arc::ptr_eq(&self.source, source) {
+    pub(super) fn sync(&mut self, source: &Arc<Vec<HistoryEntry>>, playback: Option<(i64, i64)>) {
+        let source_changed = !Arc::ptr_eq(&self.source, source);
+        let playback_changed = self.playback != playback;
+        self.playback = playback;
+        if !source_changed {
+            if playback_changed && self.sort == HistorySort::Recent {
+                self.rebuild();
+            }
             return;
         }
         self.source = Arc::clone(source);
@@ -807,7 +815,16 @@ impl HistoryBrowser {
         self.indices.extend(0..self.source.len());
         self.indices.sort_by(|&a, &b| {
             let ordering = match self.sort {
-                HistorySort::Recent => self.source[a].played_at.cmp(&self.source[b].played_at),
+                HistorySort::Recent => {
+                    let key = |entry: &HistoryEntry| {
+                        let current = self.playback.filter(|&(id, _)| id == entry.track_id);
+                        (
+                            current.map_or(entry.played_at, |(_, time)| time),
+                            current.is_some(),
+                        )
+                    };
+                    key(&self.source[a]).cmp(&key(&self.source[b]))
+                }
                 HistorySort::Title => self.title_keys[a].cmp(&self.title_keys[b]),
                 HistorySort::Plays => self.source[a].play_count.cmp(&self.source[b].play_count),
             };
@@ -874,7 +891,7 @@ mod tests {
             },
         ]);
         let mut history = HistoryBrowser::default();
-        history.sync(&source);
+        history.sync(&source, None);
         let ids = |history: &HistoryBrowser| {
             (0..history.len())
                 .map(|index| history.get(index).unwrap().track_id)
@@ -883,17 +900,63 @@ mod tests {
         assert_eq!(ids(&history), [1, 3, 2]);
         history.set_sort(HistorySort::Title);
         assert_eq!(ids(&history), [2, 3, 1]);
-        history.sync(&source);
+        history.sync(&source, None);
         assert_eq!(ids(&history), [2, 3, 1]);
         history.set_sort(HistorySort::Title);
         assert_eq!(ids(&history), [1, 2, 3]);
         history.set_sort(HistorySort::Plays);
         assert_eq!(ids(&history), [2, 1, 3]);
         let replacement = Arc::new(vec![source[2].clone(), source[0].clone()]);
-        history.sync(&replacement);
+        history.sync(&replacement, None);
         assert_eq!(ids(&history), [1, 3]);
-        history.sync(&Arc::default());
+        history.sync(&Arc::default(), None);
         assert_eq!(history.len(), 0);
+    }
+
+    #[test]
+    fn history_recency_uses_live_playback_time_without_replacing_history() {
+        let source = Arc::new(vec![
+            HistoryEntry {
+                track_id: 1,
+                title: "alpha".into(),
+                play_count: 2,
+                played_at: 30,
+                favorite: false,
+            },
+            HistoryEntry {
+                track_id: 2,
+                title: "beta".into(),
+                play_count: 1,
+                played_at: 10,
+                favorite: false,
+            },
+        ]);
+        let mut history = HistoryBrowser::default();
+        let ids = |history: &HistoryBrowser| {
+            (0..history.len())
+                .map(|index| history.get(index).unwrap().track_id)
+                .collect::<Vec<_>>()
+        };
+        history.sync(&source, Some((2, 40)));
+        assert_eq!(ids(&history), [2, 1]);
+        // Equal-second timestamps still put the current track first in descending order.
+        history.sync(&source, Some((2, 30)));
+        assert_eq!(ids(&history), [2, 1]);
+        history.set_sort(HistorySort::Recent);
+        assert_eq!(ids(&history), [1, 2]);
+        history.sync(&source, Some((2, 20)));
+        assert_eq!(ids(&history), [2, 1]);
+        history.set_sort(HistorySort::Recent);
+        assert_eq!(ids(&history), [1, 2]);
+        history.sync(&source, Some((1, 5)));
+        assert_eq!(ids(&history), [2, 1]);
+        history.sync(&source, None);
+        assert_eq!(ids(&history), [1, 2]);
+        history.set_sort(HistorySort::Title);
+        history.sync(&source, Some((2, 40)));
+        assert_eq!(ids(&history), [1, 2]);
+        history.set_sort(HistorySort::Plays);
+        assert_eq!(ids(&history), [1, 2]);
     }
 
     #[test]
