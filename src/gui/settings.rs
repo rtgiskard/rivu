@@ -1500,14 +1500,12 @@ impl Settings {
         let busy = self.artwork_cache_busy.is_some();
         let mut content = column()
             .gap_2()
-            .child(caption("Artwork cache"))
             .child(caption(
                 "Cleaning takes effect immediately; no Apply needed.",
             ))
             .child(
                 row()
                     .items_end()
-                    .flex_wrap()
                     .gap_2()
                     .child(
                         form_field(
@@ -1516,7 +1514,7 @@ impl Settings {
                                 .id("settings-artwork-cache-age")
                                 .child(self.artwork_cache_age.clone()),
                         )
-                        .min_w(rems(180. / 16.))
+                        .min_w_0()
                         .flex_1(),
                     )
                     .child(disabled_control(
@@ -1613,7 +1611,7 @@ impl Settings {
                     .text_color(rgb(ERROR)),
             );
         }
-        content
+        settings_group("Artwork cache", content)
     }
 
     fn general_settings(&mut self, cx: &mut Context<Self>) -> Div {
@@ -1765,16 +1763,24 @@ impl Settings {
                                 .min_w(rems(220. / 16.)),
                         ),
                 )
-                .child(row().child(button(
-                    "settings-same-files",
-                    "Same files / Relocation candidates…",
-                    cx,
-                    |this, _, cx| {
-                        this.dropdown.close();
-                        cx.emit(SettingsEvent::ReviewDuplicates);
-                    },
-                )))
-                .child(self.artwork_cache_settings(cx)),
+                .child(two_column(
+                    settings_group(
+                        "Same files / Relocation",
+                        column()
+                            .gap_2()
+                            .child(caption("Review matching files and relocation candidates. Audio files are never deleted."))
+                            .child(button(
+                                "settings-same-files",
+                                "Review candidates…",
+                                cx,
+                                |this, _, cx| {
+                                    this.dropdown.close();
+                                    cx.emit(SettingsEvent::ReviewDuplicates);
+                                },
+                            )),
+                    ),
+                    self.artwork_cache_settings(cx),
+                )),
         );
         let playback = settings_group(
             "Playback",
@@ -1919,6 +1925,13 @@ impl Settings {
                 |settings| settings.visual_page = VisualPage::Common,
             ))
             .child(self.tab_button(
+                "visual-album-artwork",
+                "Album artwork",
+                selected == VisualPage::AlbumArtwork,
+                cx,
+                |settings| settings.visual_page = VisualPage::AlbumArtwork,
+            ))
+            .child(self.tab_button(
                 "visual-spectrogram",
                 "Spectrogram",
                 selected == VisualPage::Spectrogram,
@@ -1945,13 +1958,6 @@ impl Settings {
                 selected == VisualPage::AudioVisualizer,
                 cx,
                 |settings| settings.visual_page = VisualPage::AudioVisualizer,
-            ))
-            .child(self.tab_button(
-                "visual-album-artwork",
-                "Album artwork",
-                selected == VisualPage::AlbumArtwork,
-                cx,
-                |settings| settings.visual_page = VisualPage::AlbumArtwork,
             ))
     }
 
@@ -2046,9 +2052,8 @@ impl Settings {
                 column().child(settings_group(
                     "Playback motion",
                     column().gap_2()
-                        .child(two_column(form_field("Style", style).min_w(rems(180. / 16.)), div()))
-                        .child(two_column(form_field("Mode", mode).min_w(rems(180. / 16.)), form_field("Direction", direction).min_w(rems(180. / 16.))))
-                        .child(settings.single(Field::AlbumArtworkPeriod))
+                        .child(two_column(form_field("Style", style).min_w(rems(180. / 16.)), form_field("Mode", mode).min_w(rems(180. / 16.))))
+                        .child(two_column(form_field("Direction", direction).min_w(rems(180. / 16.)), settings.field(Field::AlbumArtworkPeriod)))
                         .child(settings.single(Field::AlbumArtworkFps))
                         .id("settings-album-artwork-help")
                         .tooltip(settings_tooltip("Shared by all Album artwork panels. Rotation follows playback, not audio energy. Still mode freezes rotation without removing the cover.")),
