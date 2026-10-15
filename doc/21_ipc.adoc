@@ -490,6 +490,11 @@ directory; artist order uses summary artist, title, then directory (binary order
 rows use the identical album-level filter. Browsing filters never restrict
 whole-album playback or queue command membership.
 
+Representative-track lookups, member pages, and whole-album queue operations use
+the existing path index to restrict directory ranges, then check the exact parent
+directory and effective title. This avoids scanning same-title albums outside the
+path range; exact totals and page rows still use separate grouping queries.
+
 Members and the representative track use disc number, track number (each null
 last), effective title, then track ID. Summary artist is the sole nonempty
 effective artist, `Various artists` for multiple, or `Unknown artist` for none.

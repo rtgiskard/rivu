@@ -320,6 +320,72 @@ fn album_search_matches_effective_metadata_without_filtering_members() {
 }
 
 #[test]
+fn album_consumers_preserve_root_unicode_and_direct_parent_boundaries() {
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    let records = [
+        ("/root.flac", "Root", 0),
+        ("/音樂%_/雪.flac", "Second", 2),
+        ("/音樂%_/é.flac", "First", 1),
+        ("/音樂%_/disc/child.flac", "Child", 0),
+        ("/音樂%_extra/other.flac", "Sibling", 0),
+        ("/音樂%_0/other.flac", "Upper", 0),
+    ]
+    .into_iter()
+    .map(|(path, title, number)| {
+        let mut record = rec(path, path, title, 10.0);
+        record.media.album = "共享·曲集".into();
+        record.media.track_number = Some(number);
+        record
+    })
+    .collect();
+    let mut scanned = scan(records);
+    scanned.roots = vec!["/".into()];
+    store.apply_scan(&scanned).unwrap();
+    let albums = store.albums_page(None, AlbumSort::Title, 0, 24).unwrap();
+    assert_eq!(albums.total, 5);
+    assert_eq!(albums.rows.len(), 5);
+    for (directory, expected) in [
+        ("/", &["Root"][..]),
+        ("/音樂%_", &["First", "Second"][..]),
+        ("/音樂%_/disc", &["Child"][..]),
+        ("/音樂%_extra", &["Sibling"][..]),
+        ("/音樂%_0", &["Upper"][..]),
+    ] {
+        let album = albums
+            .rows
+            .iter()
+            .find(|album| album.key.directory == Path::new(directory))
+            .unwrap();
+        assert_eq!(album.key.title, "共享·曲集");
+        assert_eq!(album.track_count, expected.len());
+        assert_eq!(album.representative.title, expected[0]);
+        let page = store.album_tracks_page(&album.key, 0, 24).unwrap();
+        assert_eq!(page.total, expected.len());
+        assert_eq!(
+            page.rows
+                .iter()
+                .map(|row| row.title.as_str())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        let empty = store.album_tracks_page(&album.key, 0, 0).unwrap();
+        assert_eq!(empty.total, expected.len());
+        assert!(empty.rows.is_empty());
+        store.queue_album(&album.key, true).unwrap();
+        let queued = store.queue_page(0, 24).unwrap();
+        assert_eq!(queued.total, expected.len());
+        assert_eq!(
+            queued
+                .rows
+                .iter()
+                .map(|row| row.track.title.as_str())
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+}
+
+#[test]
 fn playback_precision_upgrade_is_source_conditional_and_idempotent() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("precision.db");

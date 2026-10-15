@@ -10,6 +10,16 @@ const DIRECTORY: &str = "CASE WHEN rtrim(path,replace(path,'/',''))='/' THEN '/'
 const TITLE: &str = "COALESCE(album_override,raw_album)";
 const ORDER: &str = "disc_number IS NULL,disc_number,track_number IS NULL,track_number,COALESCE(title_override,raw_title),id";
 
+// A slash-terminated prefix has the exclusive BINARY upper bound ending in '0',
+// including Unicode suffixes. Keep the parent check so child directories do not
+// join the album. Callers force tracks_directory: title equality otherwise makes
+// SQLite prefer tracks_album and scan every same-titled album.
+fn album_filter() -> String {
+    format!(
+        "path>=(CASE WHEN ?1='/' THEN '/' ELSE ?1||'/' END) AND path<(CASE WHEN ?1='/' THEN '0' ELSE ?1||'0' END) AND {DIRECTORY}=?1 AND {TITLE}=?2"
+    )
+}
+
 impl Store {
     pub fn albums_page(
         &self,
@@ -31,6 +41,10 @@ impl Store {
             AlbumSort::Artist => "artist,title,directory",
         };
         let mut statement = self.conn.prepare(&format!("SELECT directory,title,track_count,artist FROM ({groups}) ORDER BY {order} LIMIT ?2 OFFSET ?3"))?;
+        let mut representative = self.conn.prepare(&format!(
+            "SELECT id FROM tracks INDEXED BY tracks_directory WHERE {} ORDER BY {ORDER} LIMIT 1",
+            album_filter()
+        ))?;
         let mut rows = statement.query(params![
             query,
             limit.min(MAX_QUERY_ROWS) as i64,
@@ -46,7 +60,7 @@ impl Store {
                 .directory
                 .to_str()
                 .context("Album directory is not UTF-8")?;
-            let id = self.conn.query_row(&format!("SELECT id FROM tracks WHERE {DIRECTORY}=?1 AND {TITLE}=?2 ORDER BY {ORDER} LIMIT 1"), params![directory, key.title], |row| row.get(0))?;
+            let id = representative.query_row(params![directory, key.title], |row| row.get(0))?;
             summaries.push(AlbumSummary {
                 representative: self
                     .track(id)?
@@ -72,13 +86,13 @@ impl Store {
             .directory
             .to_str()
             .context("Album directory is not UTF-8")?;
-        let filter = format!("{DIRECTORY}=?1 AND {TITLE}=?2");
+        let filter = album_filter();
         let total = self.conn.query_row(
-            &format!("SELECT COUNT(*) FROM tracks WHERE {filter}"),
+            &format!("SELECT COUNT(*) FROM tracks INDEXED BY tracks_directory WHERE {filter}"),
             params![directory, key.title],
             |row| row.get::<_, i64>(0),
         )? as usize;
-        let mut statement = self.conn.prepare(&format!("SELECT {LIBRARY_ROW_COLUMNS} FROM tracks WHERE {filter} ORDER BY {ORDER} LIMIT ?3 OFFSET ?4"))?;
+        let mut statement = self.conn.prepare(&format!("SELECT {LIBRARY_ROW_COLUMNS} FROM tracks INDEXED BY tracks_directory WHERE {filter} ORDER BY {ORDER} LIMIT ?3 OFFSET ?4"))?;
         let rows = statement
             .query_map(
                 params![
@@ -99,9 +113,9 @@ impl Store {
             .to_str()
             .context("Album directory is not UTF-8")?;
         let tx = self.conn.unchecked_transaction()?;
-        let filter = format!("{DIRECTORY}=?1 AND {TITLE}=?2");
+        let filter = album_filter();
         let count: i64 = tx.query_row(
-            &format!("SELECT COUNT(*) FROM tracks WHERE {filter}"),
+            &format!("SELECT COUNT(*) FROM tracks INDEXED BY tracks_directory WHERE {filter}"),
             params![directory, key.title],
             |row| row.get(0),
         )?;
@@ -113,7 +127,7 @@ impl Store {
             )?;
             tx.execute("DELETE FROM queue_entries", [])?;
         }
-        tx.execute(&format!("INSERT INTO queue_entries(track_id,position) SELECT id,(SELECT COALESCE(MAX(position)+1,0) FROM queue_entries)+row_number() OVER (ORDER BY {ORDER})-1 FROM tracks WHERE {filter} ORDER BY {ORDER}"), params![directory, key.title])?;
+        tx.execute(&format!("INSERT INTO queue_entries(track_id,position) SELECT id,(SELECT COALESCE(MAX(position)+1,0) FROM queue_entries)+row_number() OVER (ORDER BY {ORDER})-1 FROM tracks INDEXED BY tracks_directory WHERE {filter} ORDER BY {ORDER}"), params![directory, key.title])?;
         invalidate_structure(&tx, true)?;
         tx.commit()?;
         Ok(())
