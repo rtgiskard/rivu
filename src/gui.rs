@@ -447,6 +447,7 @@ pub(super) struct GuiApp {
     frame_timer: Option<Task<()>>,
     last_analysis_request: Option<Instant>,
     ui_font: Font,
+    history_column_widths: Option<panels::HistoryColumnWidths>,
     _subscriptions: Vec<Subscription>,
 }
 impl GuiApp {
@@ -883,6 +884,7 @@ impl GuiApp {
             last_analysis_request: None,
             _subscriptions: subscriptions,
             ui_font,
+            history_column_widths: None,
         };
         app.interaction
             .retain_layout(app.layouts.current().root.as_ref());

@@ -22,6 +22,16 @@ use gpui::{
     AnyElement, Context, Div, SharedString, Window, div, prelude::*, px, rgb, uniform_list,
 };
 
+// Re-measure only when content, playback labels, font, or UI scale changes.
+// Layout growth belongs exclusively to Track, not these three content columns.
+pub(super) struct HistoryColumnWidths {
+    source: std::sync::Arc<Vec<crate::model::HistoryEntry>>,
+    font: gpui::Font,
+    rem_size: gpui::Pixels,
+    playback: (Option<i64>, PlaybackStatus, Option<i64>),
+    widths: [gpui::Pixels; 3],
+}
+
 fn compact_icon_button(control: gpui::Stateful<Div>) -> gpui::Stateful<Div> {
     quiet_icon_button(control).w(gpui::rems(1.4))
 }
@@ -2239,6 +2249,7 @@ impl GuiApp {
         panel_id: u64,
         label: &'static str,
         sort: HistorySort,
+        width: Option<gpui::Pixels>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let active = self.browser.history.sort() == sort;
@@ -2252,7 +2263,7 @@ impl GuiApp {
             label,
             active,
             self.browser.history.descending(),
-            None,
+            width,
             cx,
             move |this, _, cx| {
                 this.browser.history.set_sort(sort);
@@ -2267,10 +2278,80 @@ impl GuiApp {
     pub(super) fn history_panel(
         &mut self,
         panel_id: u64,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let history_len = self.browser.history.len();
+        let playback = (
+            self.state.current_track().map(|track| track.id),
+            self.state.playback.status,
+            self.state.playback.last_heard_at.map(|time| {
+                if self.state.playback.status == PlaybackStatus::Paused {
+                    time
+                } else {
+                    0
+                }
+            }),
+        );
+        let source = &self.state.library.history;
+        let rem_size = window.rem_size();
+        let widths = if let Some(cache) = &self.history_column_widths
+            && std::sync::Arc::ptr_eq(&cache.source, source)
+            && cache.font == self.ui_font
+            && cache.rem_size == rem_size
+            && cache.playback == playback
+        {
+            cache.widths
+        } else {
+            let measure = |text: SharedString, font: gpui::Font| {
+                let run = gpui::TextRun {
+                    len: text.len(),
+                    font,
+                    color: rgb(MUTED).into(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                window
+                    .text_system()
+                    .shape_line(text, rem_size * 0.75, &[run], None)
+                    .width()
+                    .ceil()
+            };
+            let text_width = |text: SharedString| measure(text, self.ui_font.clone());
+            // Keep space for either sort direction so sorting does not move columns.
+            let arrow = measure("󰁅".into(), gpui::font(super::fonts::SYMBOLS_FAMILY)).max(measure(
+                "󰁝".into(),
+                gpui::font(super::fonts::SYMBOLS_FAMILY),
+            )) + rem_size * 0.25;
+            let mut widths = [
+                text_width("#".into()),
+                text_width("Play count".into()) + arrow,
+                text_width("Last played".into()) + arrow,
+            ];
+            for (index, item) in source.iter().enumerate() {
+                widths[0] = widths[0].max(text_width((index + 1).to_string().into()));
+                widths[1] = widths[1].max(text_width(item.play_count.to_string().into()));
+                let last_played = self.last_played_text(item.track_id, Some(item.played_at));
+                widths[2] = widths[2].max(text_width(
+                    last_played
+                        .strip_prefix("Last played · ")
+                        .unwrap_or(&last_played)
+                        .to_owned()
+                        .into(),
+                ));
+            }
+            // Match px_2 on both header controls and data cells.
+            let widths = widths.map(|width| width + rem_size);
+            self.history_column_widths = Some(HistoryColumnWidths {
+                source: std::sync::Arc::clone(source),
+                font: self.ui_font.clone(),
+                rem_size,
+                playback,
+                widths,
+            });
+            widths
+        };
         let header = row()
             .items_center()
             .gap_0()
@@ -2284,38 +2365,27 @@ impl GuiApp {
             .border_color(rgb(BORDER))
             .child(
                 caption("#")
-                    .w(gpui::relative(0.08))
-                    .pr_2()
+                    .w(widths[0])
+                    .flex_shrink_0()
+                    .px_2()
                     .min_w_0()
                     .truncate(),
             )
-            .child(self.history_sort_button(panel_id, "Track", HistorySort::Title, cx))
-            .child(
-                div()
-                    .flex()
-                    .w(gpui::relative(0.2))
-                    .h_full()
-                    .min_w_0()
-                    .child(self.history_sort_button(
-                        panel_id,
-                        "Play count",
-                        HistorySort::Plays,
-                        cx,
-                    )),
-            )
-            .child(
-                div()
-                    .flex()
-                    .w(gpui::relative(0.3))
-                    .h_full()
-                    .min_w_0()
-                    .child(self.history_sort_button(
-                        panel_id,
-                        "Last played",
-                        HistorySort::Recent,
-                        cx,
-                    )),
-            );
+            .child(self.history_sort_button(panel_id, "Track", HistorySort::Title, None, cx))
+            .child(self.history_sort_button(
+                panel_id,
+                "Play count",
+                HistorySort::Plays,
+                Some(widths[1]),
+                cx,
+            ))
+            .child(self.history_sort_button(
+                panel_id,
+                "Last played",
+                HistorySort::Recent,
+                Some(widths[2]),
+                cx,
+            ));
         let scroll = self.scroll_views.list(("history", panel_id));
         panel_surface(("history-panel", panel_id))
             .child(panel_header(
@@ -2353,8 +2423,9 @@ impl GuiApp {
                                         .relative()
                                         .child(
                                             caption((index + 1).to_string())
-                                                .w(gpui::relative(0.08))
-                                                .pr_2()
+                                                .w(widths[0])
+                                                .flex_shrink_0()
+                                                .px_2()
                                                 .min_w_0()
                                                 .truncate(),
                                         )
@@ -2362,22 +2433,24 @@ impl GuiApp {
                                             div()
                                                 .flex_1()
                                                 .min_w_0()
-                                                .pr_2()
+                                                .px_2()
                                                 .text_sm()
                                                 .truncate()
                                                 .child(title),
                                         )
                                         .child(
                                             caption(item.play_count.to_string())
-                                                .w(gpui::relative(0.2))
-                                                .pr_2()
+                                                .w(widths[1])
+                                                .flex_shrink_0()
+                                                .px_2()
                                                 .min_w_0()
                                                 .truncate(),
                                         )
                                         .child(
                                             caption(last_played.to_owned())
-                                                .w(gpui::relative(0.3))
-                                                .pr_2()
+                                                .w(widths[2])
+                                                .flex_shrink_0()
+                                                .px_2()
                                                 .min_w_0()
                                                 .truncate(),
                                         )
