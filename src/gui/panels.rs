@@ -323,72 +323,60 @@ impl GuiApp {
                     .flex_shrink_0(),
             );
         let scroll = self.scroll_views.content(("transport", panel_id));
-        div()
+        column()
             .id(("transport-panel", panel_id))
             .size_full()
+            .min_w_0()
+            .min_h_0()
+            .p_2()
+            .gap_1()
             .overflow_y_scroll()
             .track_scroll(&scroll)
             .child(
                 row()
-                    .items_center()
-                    .child(
-                        div().size(px(128.)).flex_shrink_0().child(
-                            self.default_album
-                                .clone()
-                                .cached(gpui::StyleRefinement::default().size_full()),
-                        ),
-                    )
-                    .child(
-                        column()
-                            .gap_0()
-                            .flex_1()
-                            .child(
-                                row()
-                                    .flex_shrink_0()
-                                    .flex_wrap()
-                                    .child(
-                                        div().flex_1().min_w_0().text_xl().truncate().child(title),
-                                    )
-                                    .child(caption(artist).truncate())
-                                    .child(caption(status)),
-                            )
-                            .child(
-                                row()
-                                    .flex_shrink_0()
-                                    .child(
-                                        div()
-                                            .id(("progress-label", panel_id))
-                                            .flex_shrink_0()
-                                            .text_lg()
-                                            .text_color(rgb(MUTED))
-                                            .font_family(super::fonts::SYMBOLS_FAMILY)
-                                            .child("󰅐")
-                                            .tooltip(|_, cx| {
-                                                cx.new(|_| super::ButtonTooltip {
-                                                    text: "Playback progress".into(),
-                                                })
-                                                .into()
-                                            }),
-                                    )
-                                    .child(div().flex_1().min_w_0().child(seek))
-                                    .child(
-                                        caption(format!(
-                                            "{} / {}",
-                                            format_time(preview_position),
-                                            duration.map_or("—".into(), format_time)
-                                        ))
-                                        .flex_shrink_0(),
-                                    ),
-                            )
-                            .child(
-                                row()
-                                    .flex_shrink_0()
-                                    .flex_wrap()
-                                    .justify_between()
-                                    .child(controls)
-                                    .child(volume_control),
-                            ),
+                    .w_full()
+                    .min_w_0()
+                    .flex_shrink_0()
+                    .child(div().flex_1().min_w_0().text_lg().truncate().child(title))
+                    .child(caption(status).flex_shrink_0()),
+            )
+            .child(
+                row()
+                    .w_full()
+                    .min_w_0()
+                    .flex_shrink_0()
+                    .child(caption(artist).min_w_0().truncate())
+                    .when_some(
+                        track.filter(|track| !track.album.is_empty()),
+                        |view, track| view.child(caption(track.album.clone()).min_w_0().truncate()),
                     ),
+            )
+            .child(
+                row()
+                    .w_full()
+                    .min_w_0()
+                    .flex_shrink_0()
+                    .flex_wrap()
+                    .child(div().flex_1().min_w(gpui::rems(4.)).child(seek))
+                    .child(
+                        caption(format!(
+                            "{} / {}",
+                            format_time(preview_position),
+                            duration.map_or("—".into(), format_time)
+                        ))
+                        .whitespace_nowrap()
+                        .flex_shrink_0(),
+                    ),
+            )
+            .child(
+                row()
+                    .w_full()
+                    .min_w_0()
+                    .flex_shrink_0()
+                    .flex_wrap()
+                    .justify_between()
+                    .child(controls)
+                    .child(volume_control),
             )
             .into_any_element()
     }

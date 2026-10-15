@@ -9,6 +9,10 @@ Use `rivu playback` for play, pause, resume (`play` without a track ID), stop,
 next, previous, seek, volume, shuffle, and repeat controls. Seek positions are
 seconds; CLI volume is a percentage from 0 to 100.
 
+The desktop Playback panel shows the current title, artist and album, playback
+progress, transport controls, and volume. Controls wrap in narrow panels;
+overflow remains scrollable. Use the separate Album artwork panel for covers.
+
 Repeat cycles Off, All, and One. Previous restarts the current entry when its
 position exceeds three seconds; at or before three seconds it navigates back,
 using playback history when shuffling.
