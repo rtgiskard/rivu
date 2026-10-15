@@ -5114,6 +5114,57 @@ mod tests {
     }
 
     #[test]
+    fn favorite_toggle_inverts_mixed_tracks_once_and_rejects_invalid_groups() {
+        let (_directory, mut core) = fixture();
+        playing(&mut core, 1);
+        progress(&mut core, 3.0, 3.0);
+        core.command(Command::SetFavorite {
+            track_ids: vec![2],
+            favorite: true,
+        })
+        .unwrap();
+        let playback = core.state.playback.clone();
+        let played_at = core.store.history(200).unwrap()[0].played_at;
+        let revisions = core.state.query_revisions();
+        for track_ids in [vec![], vec![1, 999]] {
+            let empty = track_ids.is_empty();
+            assert_eq!(
+                core.command(Command::ToggleFavorite { track_ids }).is_ok(),
+                empty
+            );
+            assert_eq!(core.state.query_revisions(), revisions);
+            assert!(!core.track(1).unwrap().favorite);
+            assert!(core.track(2).unwrap().favorite);
+        }
+        for (first, second) in [(true, false), (false, true)] {
+            core.command(Command::ToggleFavorite {
+                track_ids: vec![1, 2, 1],
+            })
+            .unwrap();
+            assert_eq!(core.track(1).unwrap().favorite, first);
+            assert_eq!(core.track(2).unwrap().favorite, second);
+            assert!(!core.track(3).unwrap().favorite);
+            assert_eq!(core.state.current_track().unwrap().favorite, first);
+            assert_eq!(core.state.library.history[0].favorite, first);
+            let history = core.store.history(200).unwrap();
+            assert_eq!(history[0].favorite, first);
+            assert_eq!(history[0].played_at, played_at);
+            for row in core.store.queue_page(0, MAX_QUERY_ROWS).unwrap().rows {
+                let expected = match row.track_id {
+                    1 => first,
+                    2 => second,
+                    _ => false,
+                };
+                assert_eq!(row.track.favorite, expected);
+            }
+            assert_ne!(core.state.query_revisions().library, revisions.library);
+            assert_ne!(core.state.query_revisions().queue, revisions.queue);
+            assert_eq!(core.state.playback, playback);
+            assert_eq!(play_count(&core, 1), 1);
+        }
+    }
+
+    #[test]
     fn removing_missing_tracks_reuses_queue_playlist_and_recent_cleanup_without_disk_deletes() {
         let (_directory, mut core) = fixture();
         let kept_path = core.track(1).unwrap().path.clone();

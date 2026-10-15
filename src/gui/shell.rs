@@ -800,12 +800,6 @@ impl Render for GuiApp {
                             ));
                     }
                     if is_queue {
-                        menu = menu.child(menu_item(
-                            "queue-save-playlist",
-                            "Save queue as playlist…",
-                            cx,
-                            |this, window, cx| this.save_queue_as_playlist(window, cx),
-                        ));
                         menu = menu
                             .child(components::disabled_control(
                                 menu_item(
@@ -830,8 +824,8 @@ impl Render for GuiApp {
                             ))
                             .child(components::disabled_control(
                                 menu_item(
-                                    "queue-mark-favorite",
-                                    "Mark favorite",
+                                    "queue-toggle-favorite",
+                                    "Toggle favorite",
                                     cx,
                                     |this, _, cx| {
                                         this.refresh(cx);
@@ -848,13 +842,7 @@ impl Render for GuiApp {
                                             return;
                                         }
                                         this.panel_menu = None;
-                                        this.send(
-                                            Command::SetFavorite {
-                                                track_ids,
-                                                favorite: true,
-                                            },
-                                            cx,
-                                        );
+                                        this.send(Command::ToggleFavorite { track_ids }, cx);
                                         cx.notify();
                                     },
                                 ),
@@ -879,6 +867,12 @@ impl Render for GuiApp {
                                     this.send(Command::DeduplicateQueue, cx);
                                     cx.notify();
                                 },
+                            ))
+                            .child(menu_item(
+                                "queue-save-playlist",
+                                "Save queue as playlist…",
+                                cx,
+                                |this, window, cx| this.save_queue_as_playlist(window, cx),
                             ))
                             .child(menu_item(
                                 "clear-queue",
@@ -1076,7 +1070,7 @@ impl Render for GuiApp {
                     menu = menu.child(
                         menu_item(
                             "queue-create-playlist",
-                            "Save selected queue as new playlist",
+                            "New playlist…",
                             cx,
                             |this, window, cx| {
                                 let mut seen = HashSet::new();

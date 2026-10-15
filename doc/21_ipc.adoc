@@ -453,7 +453,10 @@ SQL transactions retaining only selected identities and positions, not complete
 playlist metadata or an all-entry vector. Actual group moves advance only their playlist's
 scoped token; group removal advances the membership epoch. The existing
 single-entry commands retain their distinct CLI contracts. Bulk favorites use
-the existing atomic `SetFavorite {track_ids, favorite}` command.
+the atomic `SetFavorite {track_ids, favorite}` or `ToggleFavorite {track_ids}`
+commands. Toggle reads and reverses each track's current favorite state in one
+transaction; repeated track IDs toggle once, and any unknown ID rejects the
+whole request without changes.
 
 `EnqueueSources` expands directories and explicit track IDs directly in SQL with
 no total queue cap. `CreatePlaylistFromQueue {name}` atomically saves the complete

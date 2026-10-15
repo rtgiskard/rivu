@@ -366,6 +366,9 @@ pub(super) enum WireCommand {
     EnqueueAlbum {
         key: crate::model::AlbumKey,
     },
+    ToggleFavorite {
+        track_ids: Vec<i64>,
+    },
 }
 
 pub(super) fn wire_usize(value: u64, field: &str) -> Result<usize> {
@@ -750,6 +753,7 @@ impl From<Command> for WireCommand {
                 track_ids,
                 favorite,
             },
+            Command::ToggleFavorite { track_ids } => Self::ToggleFavorite { track_ids },
             Command::RemoveMissingTracks => Self::RemoveMissingTracks,
             Command::Scan { paths, force } => Self::Scan { paths, force },
             Command::Play { track_id } => Self::Play { track_id },
@@ -893,6 +897,7 @@ impl TryFrom<WireCommand> for Command {
                 track_ids,
                 favorite,
             },
+            WireCommand::ToggleFavorite { track_ids } => Self::ToggleFavorite { track_ids },
             WireCommand::RemoveMissingTracks => Self::RemoveMissingTracks,
             WireCommand::Scan { paths, force } => Self::Scan { paths, force },
             WireCommand::Play { track_id } => Self::Play { track_id },

@@ -300,6 +300,18 @@ impl Core {
                         .context("Favorite edit committed, but refreshing views failed; some projections may be stale")?;
                 }
             }
+            Command::ToggleFavorite { track_ids } => {
+                if self.store.toggle_favorite(&track_ids)? {
+                    self.state.library.revision = self.state.library.revision.wrapping_add(1);
+                    for entry in Arc::make_mut(&mut self.state.library.history) {
+                        if track_ids.contains(&entry.track_id) {
+                            entry.favorite = !entry.favorite;
+                        }
+                    }
+                    self.refresh_affected_queue_tracks(&track_ids)
+                        .context("Favorite edit committed, but refreshing views failed; some projections may be stale")?;
+                }
+            }
             Command::RemoveMissingTracks => {
                 if self
                     .state

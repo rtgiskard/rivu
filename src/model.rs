@@ -610,6 +610,9 @@ pub enum Command {
         track_ids: Vec<i64>,
         favorite: bool,
     },
+    ToggleFavorite {
+        track_ids: Vec<i64>,
+    },
     RemoveMissingTracks,
     Scan {
         paths: Vec<PathBuf>,

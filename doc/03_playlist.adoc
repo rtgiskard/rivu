@@ -61,9 +61,6 @@ layout. Click a track to select it; Ctrl/Cmd-click toggles individual entries.
 Shift-click selects the inclusive range from the anchor, including unloaded pages;
 Ctrl/Cmd+Shift-click adds that range to the existing selection. The track count
 shows the selection size. A toolbar control removes selected entries together.
-The selected playlist's actions menu offers Favorite selected tracks and
-Unfavorite selected tracks once the track selection is fully loaded; these
-change the selected tracks' shared Library favorites, not the whole playlist.
 Hover controls for Play, Favorite, and Remove target only that row, never the group.
 Hover row actions are separated by one em, with Play before Favorite.
 Double-click or Enter plays the
@@ -81,7 +78,7 @@ identities and playlist revisions, and are rejected after the playlist changes
 or the selection switches, including switching away and back.
 
 To save selected queue tracks under a chosen name, use the Queue panel menu's
-Add to playlist → Save selected queue as new playlist action. It opens its own
+Add to playlist → New playlist… action. It opens its own
 name dialog; no input in the Playlists panel is required. The tracks selected
 when the dialog opens are saved without changing the queue.
 

@@ -1084,9 +1084,6 @@ impl GuiApp {
         if let PlaylistAction::Menu(target, position) = action {
             let id = target.id;
             let has_tracks = self.state.current_track().is_some();
-            let can_favorite = self.browser.playlists.selected() == Some(id)
-                && self.browser.playlists.track_selection.ready()
-                && self.browser.playlists.track_selection.len() > 0;
             let rename = target.clone();
             let delete = target.clone();
             let menu = super::context_menu_container("playlist-row-menu")
@@ -1120,34 +1117,6 @@ impl GuiApp {
                     .opacity(if has_tracks { 1. } else { 0.4 })
                     .when(!has_tracks, |view| view.cursor_default()),
                 )
-                .child(disabled_control(
-                    super::menu_item(
-                        "playlist-row-favorite-selected",
-                        "Favorite selected tracks",
-                        cx,
-                        move |this, window, cx| {
-                            if this.browser.playlists.selected() == Some(id) {
-                                this.favorite_playlist_selection(true, cx);
-                                this.dismiss_playlist_action(window, cx);
-                            }
-                        },
-                    ),
-                    !can_favorite,
-                ))
-                .child(disabled_control(
-                    super::menu_item(
-                        "playlist-row-unfavorite-selected",
-                        "Unfavorite selected tracks",
-                        cx,
-                        move |this, window, cx| {
-                            if this.browser.playlists.selected() == Some(id) {
-                                this.favorite_playlist_selection(false, cx);
-                                this.dismiss_playlist_action(window, cx);
-                            }
-                        },
-                    ),
-                    !can_favorite,
-                ))
                 .child(super::menu_item(
                     "playlist-row-rename",
                     "Rename…",

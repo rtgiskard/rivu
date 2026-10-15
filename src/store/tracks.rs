@@ -177,6 +177,23 @@ impl Store {
         Ok(updated != 0)
     }
 
+    pub fn toggle_favorite(&self, ids: &[i64]) -> Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        let encoded_ids = self.validated_track_ids(ids)?;
+        let updated = tx.execute(
+            "UPDATE tracks SET favorite=NOT favorite WHERE id IN (SELECT value FROM json_each(?1))",
+            params![encoded_ids],
+        )?;
+        tx.commit()?;
+        if updated != 0 {
+            let mut cache = self.track_cache.borrow_mut();
+            for id in ids {
+                cache.entries.remove(id);
+            }
+        }
+        Ok(updated != 0)
+    }
+
     pub fn library_view_page(
         &self,
         query: Option<&str>,
