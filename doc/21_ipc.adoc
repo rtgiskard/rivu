@@ -275,9 +275,11 @@ Sessions reuse encoding buffers up to 256 KiB capacity. Larger send buffers are
 released after the write and flush, before an idle request or Watch wait; repeated
 bulk transfers therefore allocate again. Large encodings grow with at most 64 KiB
 requested spare capacity rather than doubling, capped at the frame boundary.
-Client receive buffers release a consumed large frame's shared backing allocation
-once decoding finishes and no pending frame bytes remain. Disconnects discard
-partial input and release oversized client buffers. These bounds concern framing
+Client responses decode directly from the receive buffer without splitting or
+copying the payload. Once decoding finishes and no pending frame bytes remain,
+backing allocations above 256 KiB are released, including growth caused by several
+individually smaller frames. Disconnects discard partial input and release
+oversized client buffers. These bounds concern framing
 storage, not decoded response objects or allocator-resident pages; releasing a
 buffer does not guarantee an immediate RSS decrease.
 

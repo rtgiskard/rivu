@@ -223,6 +223,16 @@ pub(super) async fn read_frame<S: AsyncRead + Unpin>(
     limit: usize,
     pending: &mut BytesMut,
 ) -> Result<Bytes> {
+    let length = fill_frame(stream, limit, pending).await?;
+    pending.advance(4);
+    Ok(pending.split_to(length).freeze())
+}
+
+async fn fill_frame<S: AsyncRead + Unpin>(
+    stream: &mut S,
+    limit: usize,
+    pending: &mut BytesMut,
+) -> Result<usize> {
     while pending.len() < 4 {
         let need = 4 - pending.len();
         let read = stream
@@ -248,8 +258,7 @@ pub(super) async fn read_frame<S: AsyncRead + Unpin>(
             bail!("IPC connection closed while reading frame");
         }
     }
-    pending.advance(4);
-    Ok(pending.split_to(length).freeze())
+    Ok(length)
 }
 
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -303,13 +312,21 @@ pub(super) async fn read_response_frame<S: AsyncRead + Unpin>(
     stream: &mut S,
     pending: &mut BytesMut,
 ) -> Result<WireResponse> {
-    let bytes = read_frame(stream, MAX_RESPONSE, pending).await?;
-    let result = decode_response_frame(&bytes);
-    let large = bytes.len() > RETAINED_BUFFER_LIMIT;
-    drop(bytes);
-    // A split frame can share the original allocation with the empty tail.
-    if pending.is_empty() && (large || pending.capacity() > RETAINED_BUFFER_LIMIT) {
-        *pending = BytesMut::new();
+    let length = fill_frame(stream, MAX_RESPONSE, pending).await?;
+    let consumed = 4 + length;
+    let result = decode_response_frame(&pending[4..consumed]);
+    if pending.len() == consumed {
+        // Decode before consuming so capacity still covers the whole allocation,
+        // rather than just an empty split tail. No frame ownership escapes here.
+        pending.clear();
+        // A caller may have prebuffered multiple frames; reclaim any prefix
+        // advanced past on earlier calls without allocating or copying payload.
+        let _ = pending.try_reclaim(RETAINED_BUFFER_LIMIT + 1);
+        if pending.capacity() > RETAINED_BUFFER_LIMIT {
+            *pending = BytesMut::new();
+        }
+    } else {
+        pending.advance(consumed);
     }
     result
 }
@@ -389,6 +406,70 @@ mod tests {
             assert_eq!(actual, "next");
         };
         tokio::join!(send, receive);
+    }
+
+    #[tokio::test]
+    async fn subthreshold_responses_release_doubled_backing_before_idle() {
+        let mut pending = BytesMut::new();
+        let mut encoded = Vec::new();
+        for (index, size) in [150 * 1024, 230 * 1024].into_iter().enumerate() {
+            let payload = "X".repeat(size);
+            encode_response_frame_into(&WireResponse::Error(payload.clone()), &mut encoded)
+                .unwrap();
+            assert!(encoded.len() < RETAINED_BUFFER_LIMIT);
+            let mut stream = encoded.as_slice();
+            fill_frame(&mut stream, MAX_RESPONSE, &mut pending)
+                .await
+                .unwrap();
+            if index == 1 {
+                // Both frames fit the limit individually, but reusing the first
+                // allocation doubles its capacity beyond the idle bound.
+                assert!(pending.capacity() > RETAINED_BUFFER_LIMIT);
+            }
+            assert!(matches!(
+                read_response_frame(&mut stream, &mut pending).await.unwrap(),
+                WireResponse::Error(actual) if actual == payload
+            ));
+            assert!(stream.is_empty());
+            assert!(pending.is_empty());
+            // An empty split tail can hide an oversized backing allocation.
+            // Ask to reclaim enough to expose any such allocation, without
+            // allocating or relying on a process-global allocator in the test.
+            let _ = pending.try_reclaim(RETAINED_BUFFER_LIMIT + 1);
+            assert!(pending.capacity() <= RETAINED_BUFFER_LIMIT);
+        }
+        encode_response_frame_into(&WireResponse::Error("next".into()), &mut encoded).unwrap();
+        assert!(matches!(
+            read_response_frame(&mut encoded.as_slice(), &mut pending)
+                .await
+                .unwrap(),
+            WireResponse::Error(actual) if actual == "next"
+        ));
+    }
+
+    #[tokio::test]
+    async fn malformed_response_releases_backing_and_preserves_buffered_next_frame() {
+        let mut encoded = Vec::new();
+        encode_response_frame_into(&WireResponse::Error("invalid".into()), &mut encoded).unwrap();
+        encoded[4] = PROTOCOL_VERSION.wrapping_add(1);
+        let mut pending = BytesMut::with_capacity(RETAINED_BUFFER_LIMIT + 1);
+        pending.extend_from_slice(&encoded);
+        encode_response_frame_into(&WireResponse::Error("next".into()), &mut encoded).unwrap();
+        pending.extend_from_slice(&encoded);
+        let mut stream = &[][..];
+        assert!(
+            read_response_frame(&mut stream, &mut pending)
+                .await
+                .is_err()
+        );
+        assert_eq!(pending.as_ref(), encoded.as_slice());
+        assert!(matches!(
+            read_response_frame(&mut stream, &mut pending).await.unwrap(),
+            WireResponse::Error(actual) if actual == "next"
+        ));
+        assert!(pending.is_empty());
+        let _ = pending.try_reclaim(RETAINED_BUFFER_LIMIT + 1);
+        assert!(pending.capacity() <= RETAINED_BUFFER_LIMIT);
     }
 
     #[test]
