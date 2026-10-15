@@ -24,6 +24,8 @@ backgrounds retain their existing behavior.
 
 Run `cargo test --manifest-path vendor/gpui_wgpu/Cargo.toml --lib` to exercise
 the patched shader and headless GPU regressions in their isolated test workspace.
+Compilation also requires the pinned upstream `assets/fonts/lilex` and
+`assets/fonts/ibm-plex-sans` fixtures under this repository's `assets/fonts/`.
 Upstream test-only font and image fixtures retain their original licenses.
 
 Album artwork reuses its decoded image and atlas texture while the GPU transforms
@@ -33,6 +35,11 @@ buffers or angle-indexed image cache are created. Texture-filled paths map the
 caller's image to path bounds, preserve path coverage and opacity, and leave
 image retirement to the caller's existing window owner. Spectrum's use and
 bounded ramp ownership are described in <<_spectrum,Spectrum>>.
+
+Color images clamp linear texture sampling to their atlas tile's first and last
+texel centers. This prevents neighboring images from bleeding into magnified
+edges, including Spectrogram's one-pixel-wide history columns, without adding
+atlas padding or disabling interpolation.
 
 Album artwork offers `plain` (default), `vinyl`, `glass`, `halo`, `metal`, `card`,
 and `duotone` styles, independently of static or rotating motion. Metal places a

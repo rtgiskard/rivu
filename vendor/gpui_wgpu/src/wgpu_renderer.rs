@@ -2777,6 +2777,63 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    #[test]
+    fn magnified_images_clamp_to_tile_edges_and_keep_linear_interpolation() -> anyhow::Result<()> {
+        let mut renderer = WgpuHeadlessRenderer::new()?;
+        for (id, (width, height)) in [(1, 1), (1, 4), (4, 1), (2, 2)].into_iter().enumerate() {
+            // A red border makes cross-tile sampling visible without depending on
+            // the atlas allocator's placement of separate images.
+            let mut pixels =
+                image::RgbaImage::from_pixel(width + 2, height + 2, image::Rgba([0, 0, 255, 255]));
+            for y in 0..height {
+                for x in 0..width {
+                    let bgra = if x < width / 2 {
+                        [0, 255, 0, 255]
+                    } else {
+                        [255, 0, 0, 255]
+                    };
+                    pixels.put_pixel(x + 1, y + 1, image::Rgba(bgra));
+                }
+            }
+            let mut tile = image_tile(
+                &renderer,
+                id,
+                (width + 2) as i32,
+                (height + 2) as i32,
+                pixels.as_raw(),
+            )?;
+            tile.bounds.origin.x.0 += 1;
+            tile.bounds.origin.y.0 += 1;
+            tile.bounds.size = device_size(width as i32, height as i32);
+            let bounds = solid_quad(0.0, 0.0, 64.0, 32.0, gpui::blue()).bounds;
+            let mut scene = Scene::default();
+            scene.insert_primitive(PolychromeSprite {
+                order: 0,
+                pad: 0,
+                grayscale: false.into(),
+                opacity: 1.0,
+                bounds,
+                content_mask: ContentMask { bounds },
+                corner_radii: Corners::default(),
+                tile,
+                transformation: gpui::TransformationMatrix::default(),
+            });
+            scene.finish();
+            let image = renderer.render_scene_to_image(&scene, device_size(64, 32))?;
+            let left = if width == 1 { BLUE } else { [0, 255, 0, 255] };
+            for y in [0, 16, 31] {
+                assert_pixel(&image, 0, y, left);
+                assert_pixel(&image, 63, y, BLUE);
+            }
+            if width == 2 {
+                assert_pixel(&image, 31, 16, [0, 131, 124, 255]);
+                assert_pixel(&image, 32, 16, [0, 124, 131, 255]);
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
     fn rectangle_path(x: f32, y: f32, width: f32, height: f32) -> Path<ScaledPixels> {
         let mut builder = gpui::PathBuilder::fill();
         builder.move_to(gpui::point(gpui::px(x), gpui::px(y)));
@@ -2829,8 +2886,6 @@ mod tests {
     fn image_rotation_keeps_rounding_local_mask_screen_space_and_scene_order() -> anyhow::Result<()>
     {
         let mut renderer = WgpuHeadlessRenderer::new()?;
-        // Keep probes inside the tile's texel centers: a magnified one-pixel
-        // atlas tile blends with its transparent border even without rotation.
         let tile = image_tile(&renderer, 2, 8, 8, &[0, 0, 255, 255].repeat(64))?;
         let bounds = solid_quad(0.0, 0.0, 16.0, 8.0, gpui::red()).bounds;
         let transformation = gpui::TransformationMatrix {
