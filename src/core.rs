@@ -5507,6 +5507,69 @@ mod tests {
         assert_ne!(core.generation, generation);
     }
 
+    #[test]
+    fn album_commands_resolve_all_members_and_reject_stale_keys_before_stop() {
+        let (directory, mut core) = fixture();
+        let records = (0..MAX_QUERY_ROWS + 3)
+            .map(|number| ScanRecord {
+                path: directory.path().join(format!("album-{number}.wav")),
+                cue: None,
+                size: 1,
+                modified_ns: 1,
+                fingerprint: None,
+                media: MediaInfo {
+                    title: format!("Track {number}"),
+                    artist: String::new(),
+                    album: "Large".into(),
+                    duration: Some(10.0),
+                    codec: "pcm".into(),
+                    channels: 2,
+                    sample_rate: 48_000,
+                    bitrate_bps: None,
+                    bitrate_exact: false,
+                    track_number: Some(number as u32 + 1),
+                    disc_number: None,
+                    bits_per_sample: None,
+                    release_date: None,
+                },
+            })
+            .collect();
+        core.store
+            .apply_scan(&ScanResult {
+                roots: vec![directory.path().into()],
+                records,
+                ..ScanResult::default()
+            })
+            .unwrap();
+        let key = crate::model::AlbumKey {
+            directory: directory.path().into(),
+            title: "Large".into(),
+        };
+        core.command(Command::EnqueueAlbum { key: key.clone() })
+            .unwrap();
+        assert_eq!(core.queue_ids.len(), MAX_QUERY_ROWS + 8);
+        let first = core.store.album_tracks_page(&key, 0, 1).unwrap().rows[0].id;
+        write_pcm(&core.track(first).unwrap().path);
+        let _commands = recording_audio(&mut core);
+        core.command(Command::PlayAlbum { key }).unwrap();
+        assert_eq!(core.queue_ids.len(), MAX_QUERY_ROWS + 3);
+        assert_eq!(core.store.queue_track_id(core.queue_ids[0]).unwrap(), first);
+        assert_eq!(core.state.queue.current_id, Some(core.queue_ids[0]));
+        let queue = core.queue_ids.clone();
+        let generation = core.generation;
+        assert!(
+            core.command(Command::PlayAlbum {
+                key: crate::model::AlbumKey {
+                    directory: directory.path().into(),
+                    title: "Absent".into()
+                }
+            })
+            .is_err()
+        );
+        assert_eq!(core.queue_ids, queue);
+        assert_eq!(core.generation, generation);
+    }
+
     fn queue_entries(core: &Core) -> Vec<(u64, i64)> {
         core.store
             .queue_page(0, MAX_QUERY_ROWS)

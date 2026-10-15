@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub(super) const PROTOCOL_VERSION: u8 = 16;
+pub(super) const PROTOCOL_VERSION: u8 = 18;
 pub(super) const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub(super) const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub(super) const MAX_CLIENTS: usize = 16;
@@ -188,6 +188,17 @@ pub(super) enum WireQuery {
         playlist_id: i64,
         entry_ids: Vec<i64>,
     },
+    Albums {
+        query: Option<String>,
+        sort: crate::model::AlbumSort,
+        offset: u64,
+        limit: u64,
+    },
+    AlbumTracks {
+        key: crate::model::AlbumKey,
+        offset: u64,
+        limit: u64,
+    },
 }
 
 /// Binary command wire format. Variant order is a protocol contract; append only.
@@ -349,6 +360,12 @@ pub(super) enum WireCommand {
         before_entry_id: Option<i64>,
         expected_revision: u64,
     },
+    PlayAlbum {
+        key: crate::model::AlbumKey,
+    },
+    EnqueueAlbum {
+        key: crate::model::AlbumKey,
+    },
 }
 
 pub(super) fn wire_usize(value: u64, field: &str) -> Result<usize> {
@@ -358,6 +375,22 @@ pub(super) fn wire_usize(value: u64, field: &str) -> Result<usize> {
 impl From<Query> for WireQuery {
     fn from(value: Query) -> Self {
         match value {
+            Query::Albums {
+                query,
+                sort,
+                offset,
+                limit,
+            } => Self::Albums {
+                query,
+                sort,
+                offset: offset as u64,
+                limit: limit as u64,
+            },
+            Query::AlbumTracks { key, offset, limit } => Self::AlbumTracks {
+                key,
+                offset: offset as u64,
+                limit: limit as u64,
+            },
             Query::LibraryPage {
                 query,
                 favorite,
@@ -515,6 +548,22 @@ impl TryFrom<WireQuery> for Query {
 
     fn try_from(value: WireQuery) -> Result<Self> {
         Ok(match value {
+            WireQuery::Albums {
+                query,
+                sort,
+                offset,
+                limit,
+            } => Self::Albums {
+                query,
+                sort,
+                offset: wire_usize(offset, "offset")?,
+                limit: wire_usize(limit, "limit")?,
+            },
+            WireQuery::AlbumTracks { key, offset, limit } => Self::AlbumTracks {
+                key,
+                offset: wire_usize(offset, "offset")?,
+                limit: wire_usize(limit, "limit")?,
+            },
             WireQuery::LibraryPage {
                 query,
                 favorite,
@@ -691,6 +740,8 @@ impl TryFrom<WireCommand> for AppCommand {
 impl From<Command> for WireCommand {
     fn from(value: Command) -> Self {
         match value {
+            Command::PlayAlbum { key } => Self::PlayAlbum { key },
+            Command::EnqueueAlbum { key } => Self::EnqueueAlbum { key },
             Command::OptimizeDatabase => Self::OptimizeDatabase,
             Command::SetFavorite {
                 track_ids,
@@ -831,6 +882,8 @@ impl TryFrom<WireCommand> for Command {
 
     fn try_from(value: WireCommand) -> Result<Self> {
         Ok(match value {
+            WireCommand::PlayAlbum { key } => Self::PlayAlbum { key },
+            WireCommand::EnqueueAlbum { key } => Self::EnqueueAlbum { key },
             WireCommand::ShowWindow => bail!("ShowWindow is an application request"),
             WireCommand::OptimizeDatabase => Self::OptimizeDatabase,
             WireCommand::SetFavorite {

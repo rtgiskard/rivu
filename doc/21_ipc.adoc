@@ -215,7 +215,7 @@ The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
 Bodies use Postcard serialization without COBS framing. The current protocol
-version is `16`; clients and servers must use matching wire schemas. The four-byte
+version is `18`; clients and servers must use matching wire schemas. The four-byte
 frame length remains little-endian; body integers follow Postcard's encoding.
 
 Request frame content is limited to 4 MiB
@@ -473,6 +473,33 @@ independently of these filters. Directory page and range-selection consumers
 discard results when the captured filters, view, request generation, or library
 and structure revisions no longer match. Filtering display rows does not restrict
 directory source expansion: dragging a directory still adds its complete contents.
+
+`Albums { query, sort, offset, limit }` returns `Page<AlbumSummary>`;
+`AlbumTracks { key, offset, limit }` returns `Page<LibraryRow>`. Both cap returned rows at 256 and
+carry library-content revisions. Album identity is the exact effective album
+title plus the immediate parent directory, without a trailing slash except `/`.
+Empty titles remain empty keys and group only within their directory. Artist
+differences do not split compilations; directories never merge, including disc
+subdirectories.
+
+Album browsing searches effective album titles and effective member artists using
+case-insensitive SQLite substring matching. An artist match includes the complete
+album, including its nonmatching members. `query: null` and an empty query match
+all albums. `sort` is `title` (default) or `artist`: title order uses title then
+directory; artist order uses summary artist, title, then directory (binary ordering). Count and page
+rows use the identical album-level filter. Browsing filters never restrict
+whole-album playback or queue command membership.
+
+Members and the representative track use disc number, track number (each null
+last), effective title, then track ID. Summary artist is the sole nonempty
+effective artist, `Various artists` for multiple, or `Unknown artist` for none.
+
+`PlayAlbum { key }` validates nonempty membership before stopping playback,
+replaces the whole queue in member order, and starts its first track.
+`EnqueueAlbum { key }` appends the entire album in that order, preserving current
+playback. Empty or stale keys fail without replacing the queue. Both commands
+resolve all current members in the backend independently of page limits; clients
+must not collect paged track IDs to perform album actions.
 
 `LibraryRootPage` returns the same display projection and filtered total as
 `LibraryPage`, scoped recursively to one root. It preserves the library's search,

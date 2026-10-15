@@ -277,6 +277,20 @@ impl Core {
             return Err(QueryError::RevisionChanged);
         }
         Ok(match query {
+            Query::Albums {
+                query,
+                sort,
+                offset,
+                limit,
+            } => ViewResponse::Albums(self.store.albums_page(
+                query.as_deref(),
+                *sort,
+                *offset,
+                *limit,
+            )?),
+            Query::AlbumTracks { key, offset, limit } => {
+                ViewResponse::AlbumTracks(self.store.album_tracks_page(key, *offset, *limit)?)
+            }
             Query::DuplicateGroups { offset, limit } => ViewResponse::DuplicateGroups(
                 self.store
                     .duplicate_groups_page(*offset, (*limit).min(MAX_QUERY_ROWS))?,

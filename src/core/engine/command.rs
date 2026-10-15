@@ -20,6 +20,23 @@ impl Core {
 
     fn apply_command(&mut self, command: Command) -> Result<()> {
         match command {
+            Command::PlayAlbum { key } => {
+                ensure!(
+                    self.store.album_tracks_page(&key, 0, 0)?.total > 0,
+                    "Album is empty"
+                );
+                self.stop()?;
+                self.store.queue_album(&key, true)?;
+                self.state.current_track = None;
+                self.played.clear();
+                self.played_cursor = 0;
+                self.reload_queue()?;
+                self.start(self.queue_ids[0], true)?;
+            }
+            Command::EnqueueAlbum { key } => {
+                self.store.queue_album(&key, false)?;
+                self.append_queue_ids()?;
+            }
             Command::Scan { paths, force } => return self.scan(paths, force),
             Command::CancelScan { id } => self.cancel_scan(id)?,
             Command::RelocateTrack {

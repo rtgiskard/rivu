@@ -1741,6 +1741,59 @@ fn simultaneous_starters_acquire_one_real_listener() {
 }
 
 #[test]
+fn album_queries_and_commands_round_trip_exact_keys() {
+    let key = crate::model::AlbumKey {
+        directory: "/音楽/album".into(),
+        title: String::new(),
+    };
+    for query in [
+        Query::Albums {
+            query: Some("artist 音楽".into()),
+            sort: crate::model::AlbumSort::Artist,
+            offset: 24,
+            limit: 24,
+        },
+        Query::Albums {
+            query: None,
+            sort: crate::model::AlbumSort::Title,
+            offset: 0,
+            limit: 24,
+        },
+        Query::AlbumTracks {
+            key: key.clone(),
+            offset: 256,
+            limit: 256,
+        },
+    ] {
+        let expected = serde_json::to_value(&query).unwrap();
+        let mut encoded = Vec::new();
+        encode_request_frame_into(&WireRequest::Query(query.into()), &mut encoded).unwrap();
+        let WireRequest::Query(decoded) = decode_request_frame(&encoded[4..]).unwrap() else {
+            panic!("wrong request");
+        };
+        assert_eq!(
+            serde_json::to_value(Query::try_from(decoded).unwrap()).unwrap(),
+            expected
+        );
+    }
+    for command in [
+        Command::PlayAlbum { key: key.clone() },
+        Command::EnqueueAlbum { key },
+    ] {
+        let expected = serde_json::to_value(&command).unwrap();
+        let mut encoded = Vec::new();
+        encode_request_frame_into(&WireRequest::Command(command.into()), &mut encoded).unwrap();
+        let WireRequest::Command(decoded) = decode_request_frame(&encoded[4..]).unwrap() else {
+            panic!("wrong request");
+        };
+        assert_eq!(
+            serde_json::to_value(Command::try_from(decoded).unwrap()).unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
 fn queue_queries_and_full_queue_playlist_commands_round_trip() {
     use crate::model::QueueCursor;
     for query in [

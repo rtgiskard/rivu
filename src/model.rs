@@ -147,6 +147,14 @@ pub enum LibrarySort {
     MostPlayed,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AlbumSort {
+    #[default]
+    Title,
+    Artist,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum DirectoryRow {
     Directory { path: PathBuf },
@@ -454,9 +462,36 @@ pub(crate) fn playback_key_command(key: &str, playback: &PlaybackState) -> Optio
     }
 }
 
+/// Exact effective album title scoped to its immediate parent directory.
+/// Directory has no trailing separator, except for the filesystem root.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlbumKey {
+    pub directory: PathBuf,
+    pub title: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AlbumSummary {
+    pub key: AlbumKey,
+    pub artist: String,
+    pub track_count: usize,
+    pub representative: Track,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Query {
+    Albums {
+        query: Option<String>,
+        sort: AlbumSort,
+        offset: usize,
+        limit: usize,
+    },
+    AlbumTracks {
+        key: AlbumKey,
+        offset: usize,
+        limit: usize,
+    },
     LibraryPage {
         query: Option<String>,
         favorite: Option<bool>,
@@ -563,6 +598,12 @@ pub enum Query {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum Command {
+    PlayAlbum {
+        key: AlbumKey,
+    },
+    EnqueueAlbum {
+        key: AlbumKey,
+    },
     OptimizeDatabase,
     SetFavorite {
         track_ids: Vec<i64>,

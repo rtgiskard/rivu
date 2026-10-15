@@ -85,6 +85,8 @@ pub struct QueryRevisions {
 )]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ViewResponse {
+    Albums(Page<crate::model::AlbumSummary>),
+    AlbumTracks(Page<LibraryRow>),
     LibraryPage(Page<LibraryRow>),
     TrackPage(Page<Track>),
     DirectoryPage(Page<DirectoryRow>),
