@@ -53,7 +53,8 @@
 
 - Prefer one coherent responsibility per commit without requiring strict atomicity
 - Commit clearly separable mainline changes first; leave deeply interwoven miscellaneous changes for other commits
-- Default to buildable commits; when phased cutovers require dependent commits, state boundaries, dependencies, and the validated end state explicitly
+- Default to buildable commits for independent changes; a single logical change MAY span dependent stages without requiring every intermediate commit to be independently buildable or verifiable
+- For dependent staged commits, MUST state boundaries and dependencies and validate the integrated final state; MUST NOT add compatibility scaffolding or run extra checks solely to make intermediate commits independently verifiable
 - Use a concise Conventional Commit subject, one concrete change per body line
 - Use real newlines, no terminal punctuation, and no blank lines between items
 - Prefix every commit body item with `- `, matching repository history
