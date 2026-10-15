@@ -488,6 +488,7 @@ impl Settings {
         cx: &mut Context<Self>,
     ) {
         let devices_changed = !Arc::ptr_eq(&self.devices, devices) && self.devices != *devices;
+        let scale_changed = self.ui_scale != ui_scale;
         let changed = devices_changed
             || self.ffmpeg_status != ffmpeg_status
             || self.mpris_status != mpris_status
@@ -501,7 +502,7 @@ impl Settings {
         self.mpris_status.clear();
         self.mpris_status.push_str(mpris_status);
         self.ui_scale = ui_scale;
-        if devices_changed && self.dropdown.is_open() && self.dropdown_anchor == Measured::Device {
+        if scale_changed || (devices_changed && self.dropdown_anchor == Measured::Device) {
             self.dropdown.close();
         }
         if self.active {
@@ -533,11 +534,24 @@ impl Settings {
         cx.emit(SettingsEvent::Closed);
     }
 
-    fn measurement(&self, key: Measured) -> AnyElement {
+    fn measurement(&self, key: Measured, cx: &Context<Self>) -> AnyElement {
         let measured = Rc::clone(&self.measured);
+        let view = cx.entity().downgrade();
+        let close_on_move = self.dropdown.is_open() && self.dropdown_anchor == key;
         canvas(
-            move |bounds, _, _| {
-                measured.borrow_mut().insert(key, bounds);
+            move |bounds, _, cx| {
+                let previous = measured.borrow_mut().insert(key, bounds);
+                if close_on_move && previous.is_some_and(|previous| previous != bounds) {
+                    let view = view.clone();
+                    cx.defer(move |cx| {
+                        let _ = view.update(cx, |this, cx| {
+                            if this.dropdown.is_open() && this.dropdown_anchor == key {
+                                this.dropdown.close();
+                                cx.notify();
+                            }
+                        });
+                    });
+                }
             },
             |_, _, _, _| {},
         )
@@ -685,24 +699,27 @@ impl Settings {
 
     fn pair(&self, first: Field, second: Field) -> Div {
         two_column(
-            self.field(first).min_w(px(180.)),
-            self.field(second).min_w(px(180.)),
+            self.field(first).min_w(rems(180. / 16.)),
+            self.field(second).min_w(rems(180. / 16.)),
         )
     }
 
     fn single(&self, field: Field) -> Div {
-        row().child(self.field(field).w(relative(0.5)).min_w(px(180.)).pr_2())
+        row().child(
+            self.field(field)
+                .w(relative(0.5))
+                .min_w(rems(180. / 16.))
+                .pr_2(),
+        )
     }
 
     fn field_state(&self, field: Field, enabled: bool, reason: &'static str, cx: &App) -> Div {
         if enabled {
-            return self.field(field).min_w(px(180.));
+            return self.field(field).min_w(rems(180. / 16.));
         }
         // Keep the draft value, but unmount the editor so disabled fields cannot take focus or edits.
         let control = div()
             .id(("inactive-setting", field as usize))
-            .h(rems(36. / 16.))
-            .p(rems(7. / 16.))
             .line_height(rems(20. / 16.))
             .text_size(rems(14. / 16.))
             .bg(rgb(super::PANEL))
@@ -710,7 +727,14 @@ impl Settings {
             .border_color(rgb(BORDER))
             .rounded(rems(5. / 16.))
             .cursor_default()
-            .child(self.value(field, cx))
+            .child(
+                div()
+                    .h(rems(34. / 16.))
+                    .w_full()
+                    .p(rems(7. / 16.))
+                    .overflow_hidden()
+                    .child(self.value(field, cx)),
+            )
             .tooltip(move |_, cx| {
                 cx.new(|_| ButtonTooltip {
                     text: reason.into(),
@@ -718,7 +742,7 @@ impl Settings {
                 .into()
             });
         column()
-            .min_w(px(180.))
+            .min_w(rems(180. / 16.))
             .child(field.form(control).opacity(0.45))
             .child(caption(reason).whitespace_normal())
     }
@@ -1164,8 +1188,8 @@ impl Settings {
                     .absolute()
                     .right(px(1.))
                     .top(px(1.))
-                    .w(px(27.))
-                    .h(px(34.))
+                    .w(rems(27. / 16.))
+                    .h(rems(34. / 16.))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -1188,7 +1212,7 @@ impl Settings {
                         }),
                     ),
             )
-            .child(self.measurement(Measured::SettingsFont));
+            .child(self.measurement(Measured::SettingsFont, cx));
         Field::Font.form(control)
     }
 
@@ -1463,7 +1487,7 @@ impl Settings {
                                 .id("settings-artwork-cache-age")
                                 .child(self.artwork_cache_age.clone()),
                         )
-                        .min_w(px(180.))
+                        .min_w(rems(180. / 16.))
                         .flex_1(),
                     )
                     .child(
@@ -1625,7 +1649,7 @@ impl Settings {
                         .into()
                     }
                 })
-                .child(self.measurement(Measured::Device)),
+                .child(self.measurement(Measured::Device, cx)),
             );
         let draft = &self.draft;
         let (mpris, tray, ffmpeg, remix) = (
@@ -1664,7 +1688,7 @@ impl Settings {
             },
         )
         .relative()
-        .child(self.measurement(Measured::SettingsLogLevel));
+        .child(self.measurement(Measured::SettingsLogLevel, cx));
         let logging = settings_group(
             "Logging",
             column()
@@ -1677,7 +1701,7 @@ impl Settings {
                         .child(
                             column()
                                 .flex_1()
-                                .min_w(px(180.))
+                                .min_w(rems(180. / 16.))
                                 .gap_1()
                                 .child(caption("Log level"))
                                 .child(log_level_dropdown),
@@ -1685,7 +1709,7 @@ impl Settings {
                         .child(
                             self.field(Field::LogRetentionWeeks)
                                 .flex_1()
-                                .min_w(px(180.)),
+                                .min_w(rems(180. / 16.)),
                         ),
                 )
                 .child(row().child(visual_switch(
@@ -1706,8 +1730,12 @@ impl Settings {
                         .items_start()
                         .flex_wrap()
                         .gap_3()
-                        .child(self.field(Field::Roots).flex_1().min_w(px(260.)))
-                        .child(self.field(Field::ScanMaxDepth).flex_1().min_w(px(220.))),
+                        .child(self.field(Field::Roots).flex_1().min_w(rems(260. / 16.)))
+                        .child(
+                            self.field(Field::ScanMaxDepth)
+                                .flex_1()
+                                .min_w(rems(220. / 16.)),
+                        ),
                 )
                 .child(row().child(button(
                     "settings-same-files",
@@ -1734,8 +1762,12 @@ impl Settings {
                         .items_start()
                         .flex_wrap()
                         .gap_3()
-                        .child(device.flex_1().min_w(px(260.)))
-                        .child(self.field(Field::MediaReadBuffer).flex_1().min_w(px(240.))),
+                        .child(device.flex_1().min_w(rems(260. / 16.)))
+                        .child(
+                            self.field(Field::MediaReadBuffer)
+                                .flex_1()
+                                .min_w(rems(240. / 16.)),
+                        ),
                 )
                 .child(
                     row()
@@ -1773,8 +1805,8 @@ impl Settings {
             column()
                 .gap_2()
                 .child(two_column(
-                    self.font_control(cx).min_w(px(180.)),
-                    self.field(Field::Scale).min_w(px(180.)),
+                    self.font_control(cx).min_w(rems(180. / 16.)),
+                    self.field(Field::Scale).min_w(rems(180. / 16.)),
                 ))
                 .child(
                     Field::LayoutSnapGrid.form(
@@ -1922,7 +1954,7 @@ impl Settings {
                     },
                 )
                 .relative()
-                .child(self.measurement(Measured::AlbumArtworkMode));
+                .child(self.measurement(Measured::AlbumArtworkMode, cx));
                 let direction = dropdown_button(
                     "album-artwork-direction",
                     SettingChoice::AlbumArtworkDirection(draft.album_artwork_direction).label(),
@@ -1949,11 +1981,11 @@ impl Settings {
                     },
                 )
                 .relative()
-                .child(self.measurement(Measured::AlbumArtworkDirection));
+                .child(self.measurement(Measured::AlbumArtworkDirection, cx));
                 column().child(settings_group(
                     "Playback motion",
                     column().gap_2()
-                        .child(two_column(form_field("Mode", mode).min_w(px(180.)), form_field("Direction", direction).min_w(px(180.))))
+                        .child(two_column(form_field("Mode", mode).min_w(rems(180. / 16.)), form_field("Direction", direction).min_w(rems(180. / 16.))))
                         .child(settings.single(Field::AlbumArtworkPeriod))
                         .id("settings-album-artwork-help")
                         .tooltip(settings_tooltip("Shared by all Album artwork panels. Rotation follows playback, not audio energy. Still mode freezes rotation without removing the cover.")),
@@ -1988,7 +2020,7 @@ impl Settings {
                     },
                 )
                 .relative()
-                .child(self.measurement(Measured::SettingsStyle));
+                .child(self.measurement(Measured::SettingsStyle, cx));
                 let fft = dropdown_button(
                     "analysis-fft",
                     draft.analysis_fft_size.to_string(),
@@ -2011,7 +2043,7 @@ impl Settings {
                     },
                 )
                 .relative()
-                .child(self.measurement(Measured::SettingsFft));
+                .child(self.measurement(Measured::SettingsFft, cx));
                 let window = dropdown_button(
                     "analysis-window",
                     SettingChoice::Window(draft.analysis_window).label(),
@@ -2041,15 +2073,15 @@ impl Settings {
                     },
                 )
                 .relative()
-                .child(self.measurement(Measured::SettingsWindow));
+                .child(self.measurement(Measured::SettingsWindow, cx));
                 column().gap_3()
                     .child(settings_group("Appearance", column().gap_2()
-                        .child(two_column(settings.field(Field::Background).min_w(px(180.)), form_field("Color scheme", palette).min_w(px(180.))))
+                        .child(two_column(settings.field(Field::Background).min_w(rems(180. / 16.)), form_field("Color scheme", palette).min_w(rems(180. / 16.))))
                         .child(settings.single(Field::VisualizationDb))
                         .id("settings-appearance-help")
                         .tooltip(settings_tooltip("Background: all views. Color scheme: Spectrum, Spectrogram, and Waveform. Display range: Spectrum, Spectrogram, and Audio Visualizer. Fractal styles use it for energy response; playback volume is unchanged."))))
                     .child(settings_group("Frequency analysis", column().gap_2()
-                        .child(two_column(form_field("FFT size (samples)", fft).min_w(px(180.)), form_field("FFT window", window).min_w(px(180.))))
+                        .child(two_column(form_field("FFT size (samples)", fft).min_w(rems(180. / 16.)), form_field("FFT window", window).min_w(rems(180. / 16.))))
                         .child(settings.single(Field::Fps))
                         .id("settings-analysis-help")
                         .tooltip(settings_tooltip("Applies to Spectrum, Spectrogram, and Audio Visualizer. Changing FFT size or window clears visualization history."))))
@@ -2093,10 +2125,10 @@ impl Settings {
                     },
                 )
                 .relative()
-                .child(self.measurement(Measured::SettingsStyle));
+                .child(self.measurement(Measured::SettingsStyle, cx));
                 column().gap_3()
                     .child(settings_group("Appearance", column().gap_2()
-                        .child(two_column(form_field("Style", style).min_w(px(180.)), settings.field_state(Field::SpectrumBars, !solid, "Retained with Solid. Choose another Style to edit.", cx)))
+                        .child(two_column(form_field("Style", style).min_w(rems(180. / 16.)), settings.field_state(Field::SpectrumBars, !solid, "Retained with Solid. Choose another Style to edit.", cx)))
                         .child(two_column(
                             settings.field_state(Field::SpectrumBarWidth, !solid, "Retained with Solid. Choose another Style to edit.", cx),
                             settings.field_state(Field::SpectrumGap, !solid, "Retained with Solid. Choose another Style to edit.", cx),
@@ -2191,7 +2223,7 @@ impl Settings {
                     },
                 )
                 .relative()
-                .child(self.measurement(Measured::SettingsStyle));
+                .child(self.measurement(Measured::SettingsStyle, cx));
                 let hint = match draft.audio_visualizer_style {
                     AudioVisualizerStyle::StereoDensity => {
                         "Fixed Mid/Side axes. Color shows occupancy, not dBFS."
@@ -2558,11 +2590,11 @@ impl Render for Settings {
             .bg(rgb(0x000000).alpha(0.58))
             .child(
                 column()
-                    .max_w(px(620.))
+                    .max_w(rems(620. / 16.))
                     .w(relative(0.9))
                     .h((window.viewport_size().height - px(32.))
                         .max(px(0.))
-                        .min(px(640.)))
+                        .min(window.rem_size() * (640. / 16.)))
                     .gap_0()
                     .overflow_hidden()
                     .bg(rgb(super::PANEL))
