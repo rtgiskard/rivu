@@ -1,5 +1,6 @@
 //! Shared, accepted-audio-clocked generative light views. No simulation in paint.
 use super::{fractal_beams, fractal_flow};
+use crate::i18n::Localizer;
 use crate::{
     analysis::{AnalysisFrame, AnalysisSettings},
     config::{AudioVisualizerOptions, AudioVisualizerStyle, Config},
@@ -8,7 +9,7 @@ use gpui::{
     AnyElement, App, Bounds, PathBuilder, Pixels, TextAlign, Window, canvas, div, fill, point,
     prelude::*, px, rgb, size,
 };
-use std::{cell::RefCell, rc::Rc, time::Duration};
+use std::{cell::RefCell, rc::Rc, sync::Arc, time::Duration};
 
 #[derive(Clone, Copy, Default)]
 pub(super) struct Drive {
@@ -74,6 +75,7 @@ pub(super) struct FractalVisualizer {
 }
 
 struct Data {
+    guide_labels: Option<[gpui::SharedString; 7]>,
     style: AudioVisualizerStyle,
     visible: bool,
     background: u32,
@@ -95,6 +97,7 @@ impl FractalVisualizer {
         let config = Config::default();
         Self {
             data: Rc::new(RefCell::new(Data {
+                guide_labels: None,
                 style,
                 visible: true,
                 background: config.visual_background.rgb(),
@@ -157,8 +160,25 @@ impl FractalVisualizer {
         self.data.borrow_mut().update(frame);
     }
 
-    pub(super) fn view(&self, panel_id: u64, options: AudioVisualizerOptions) -> AnyElement {
+    pub(super) fn view(
+        &self,
+        i18n: &Arc<Localizer>,
+        panel_id: u64,
+        options: AudioVisualizerOptions,
+    ) -> AnyElement {
         let data = Rc::clone(&self.data);
+        self.data.borrow_mut().guide_labels.get_or_insert_with(|| {
+            [
+                i18n.text("visual-scene"),
+                "x −1",
+                "x 0",
+                "x +1",
+                "y −1",
+                "y 0",
+                "y +1",
+            ]
+            .map(|text| text.to_owned().into())
+        });
         div()
             .id(("fractal-visualizer", panel_id))
             .size_full()
@@ -333,13 +353,21 @@ impl Data {
                 }
             }
         }
-        paint_scene_guides(bounds, options, self.background, window, cx);
+        paint_scene_guides(
+            self.guide_labels.as_ref().expect("localized guide labels"),
+            bounds,
+            options,
+            self.background,
+            window,
+            cx,
+        );
     }
 }
 
 // Both simulations use centered scene coordinates with +y down. These fixed
 // spatial references describe the drawing, never audio level or frequency.
 fn paint_scene_guides(
+    labels: &[gpui::SharedString; 7],
     bounds: Bounds<Pixels>,
     options: AudioVisualizerOptions,
     background: u32,
@@ -382,20 +410,20 @@ fn paint_scene_guides(
     }
     // Static text and the exact same transform as the scene; no per-frame format.
     for (text, x, y, align) in [
-        ("Scene coordinates (normalized)", 0.0, -1.0, 0.5),
-        ("x −1", -1.0, 0.0, 0.0),
-        ("x 0", 0.0, 0.0, 0.5),
-        ("x +1", 1.0, 0.0, 1.0),
-        ("y −1", -1.0, -1.0, 0.0),
-        ("y 0", -1.0, 0.0, 0.0),
-        ("y +1", -1.0, 1.0, 0.0),
+        (labels[0].clone(), 0.0, -1.0, 0.5),
+        (labels[1].clone(), -1.0, 0.0, 0.0),
+        (labels[2].clone(), 0.0, 0.0, 0.5),
+        (labels[3].clone(), 1.0, 0.0, 1.0),
+        (labels[4].clone(), -1.0, -1.0, 0.0),
+        (labels[5].clone(), -1.0, 0.0, 0.0),
+        (labels[6].clone(), -1.0, 1.0, 0.0),
     ] {
         let mut style = window.text_style();
         style.color = rgb(0xb1bbc5).into();
         let run = style.to_run(text.len());
         let line = window
             .text_system()
-            .shape_line(text.into(), px(10.0), &[run], None);
+            .shape_line(text.clone(), px(10.0), &[run], None);
         let label_y = if text.starts_with('x') {
             center.y + px(3.0)
         } else if text.starts_with('y') {

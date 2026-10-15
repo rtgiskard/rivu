@@ -55,7 +55,7 @@ impl Render for GuiApp {
                     .items_center()
                     .justify_center()
                     .text_color(rgb(MUTED))
-                    .child("Add a panel to build your layout")
+                    .child(self.tr("shell-empty-layout"))
                     .into_any_element()
             });
         self.layouts.current_mut().root = root;
@@ -389,7 +389,7 @@ impl Render for GuiApp {
                     .child(components::quiet_icon_button(icon_button(
                         "dismiss-error",
                         "",
-                        "Dismiss message",
+                        self.tr("shell-dismiss-message"),
                         cx,
                         |this, _, cx| {
                             this.error = None;
@@ -418,9 +418,9 @@ impl Render for GuiApp {
                         ""
                     },
                     if self.layouts.current().locked {
-                        "Layout locked\nRight-click to unlock"
+                        self.tr("shell-layout-locked-hint")
                     } else {
-                        "Left-click: add panel\nRight-click: lock layout"
+                        self.tr("shell-layout-unlocked-hint")
                     },
                     cx,
                     |this, _, cx| {
@@ -449,19 +449,30 @@ impl Render for GuiApp {
                     }),
                 ),
             )
-            .child(icon_button("app-menu", "", "Menu", cx, |this, _, cx| {
-                this.app_menu_open = !this.app_menu_open;
-                this.catalog_open = false;
-                this.panel_menu = None;
-                cx.notify();
-            }));
+            .child(icon_button(
+                "app-menu",
+                "",
+                self.tr("shell-menu"),
+                cx,
+                |this, _, cx| {
+                    this.app_menu_open = !this.app_menu_open;
+                    this.catalog_open = false;
+                    this.panel_menu = None;
+                    cx.notify();
+                },
+            ));
         if self.app_menu_open {
-            let about = menu_item("app-about", "About", cx, |this, window, cx| {
-                this.app_menu_open = false;
-                this.about_open = true;
-                this.about_focus.focus(window, cx);
-                cx.notify();
-            });
+            let about = menu_item(
+                "app-about",
+                self.tr("shell-about"),
+                cx,
+                |this, window, cx| {
+                    this.app_menu_open = false;
+                    this.about_open = true;
+                    this.about_focus.focus(window, cx);
+                    cx.notify();
+                },
+            );
             app = app.child(
                 column()
                     .id("app-menu-popup")
@@ -488,7 +499,7 @@ impl Render for GuiApp {
                     }))
                     .child(menu_item(
                         "app-settings",
-                        "Settings",
+                        self.tr("shell-settings"),
                         cx,
                         |this, window, cx| {
                             this.app_menu_open = false;
@@ -500,7 +511,7 @@ impl Render for GuiApp {
                     ))
                     .child(menu_item(
                         "app-layouts",
-                        "Layouts",
+                        self.tr("shell-layouts"),
                         cx,
                         |this, window, cx| {
                             if !this.layout_management_allowed(cx) {
@@ -514,16 +525,20 @@ impl Render for GuiApp {
                         },
                     ))
                     .child(
-                        menu_item("app-still-mode", "Still mode", cx, |this, _, cx| {
-                            this.app_menu_open = false;
-                            if let Err(error) = this
-                                .handle
-                                .update_gui_config(crate::core::GuiConfigChange::ToggleStillMode)
-                            {
-                                this.error = Some(format!("{error:#}"));
-                            }
-                            cx.notify();
-                        })
+                        menu_item(
+                            "app-still-mode",
+                            self.tr("shell-still-mode"),
+                            cx,
+                            |this, _, cx| {
+                                this.app_menu_open = false;
+                                if let Err(error) = this.handle.update_gui_config(
+                                    crate::core::GuiConfigChange::ToggleStillMode,
+                                ) {
+                                    this.error = Some(format!("{error:#}"));
+                                }
+                                cx.notify();
+                            },
+                        )
                         .child(
                             div()
                                 .ml_auto()
@@ -533,9 +548,9 @@ impl Render for GuiApp {
                                     MUTED
                                 }))
                                 .child(if self.state.system.config.still_mode {
-                                    "On"
+                                    self.tr("shell-on")
                                 } else {
-                                    "Off"
+                                    self.tr("shell-off")
                                 }),
                         ),
                     )
@@ -543,7 +558,7 @@ impl Render for GuiApp {
                     .child(components::menu_separator())
                     .child(menu_item(
                         "app-close-window",
-                        "Close window",
+                        self.tr("shell-close-window"),
                         cx,
                         |this, window, cx| {
                             this.app_menu_open = false;
@@ -552,7 +567,7 @@ impl Render for GuiApp {
                     ))
                     .child(menu_item(
                         "app-quit",
-                        "Quit application",
+                        self.tr("shell-quit"),
                         cx,
                         |this, _, cx| {
                             this.app_menu_open = false;
@@ -573,7 +588,7 @@ impl Render for GuiApp {
             let mut visualizations = row().gap_1();
             for spec in PANELS {
                 let kind = spec.kind;
-                let choice = button(kind, spec.title, cx, move |this, _, cx| {
+                let choice = button(kind, self.tr(spec.title_id), cx, move |this, _, cx| {
                     if this.layouts.current().locked {
                         return;
                     }
@@ -613,7 +628,12 @@ impl Render for GuiApp {
                     .bg(rgb(PANEL))
                     .border_1()
                     .border_color(rgb(BORDER))
-                    .child(div().text_xs().text_color(rgb(MUTED)).child("Add panel"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MUTED))
+                            .child(self.tr("shell-add-panel")),
+                    )
                     .child(components::menu_separator())
                     .child(choices)
                     .child(visualizations),
@@ -648,7 +668,7 @@ impl Render for GuiApp {
                     if is_library {
                         menu = menu.child(menu_item(
                             "library-columns-menu",
-                            "Track information  ›",
+                            self.tr("shell-track-information-menu"),
                             cx,
                             move |this, _, cx| {
                                 this.panel_menu = Some(PanelMenu {
@@ -662,7 +682,7 @@ impl Render for GuiApp {
                     if is_waveform && !self.state.system.config.still_mode {
                         menu = menu.child(menu_item(
                             "load-full-waveform",
-                            "Load full waveform now",
+                            self.tr("shell-load-waveform"),
                             cx,
                             |this, _, cx| {
                                 this.panel_menu = None;
@@ -673,9 +693,9 @@ impl Render for GuiApp {
                         menu = menu.child(menu_item(
                             "waveform-click-seek",
                             if self.state.system.config.waveform_seek_enabled {
-                                "Click and drag to seek ✓"
+                                self.tr("shell-waveform-seek-on")
                             } else {
-                                "Click and drag to seek"
+                                self.tr("shell-waveform-seek")
                             },
                             cx,
                             |this, _, cx| {
@@ -693,11 +713,16 @@ impl Render for GuiApp {
                         menu = menu
                             .child(menu_item(
                                 "album-artwork-style-menu",
-                                format!(
-                                    "Style: {}  ›",
-                                    settings::album_artwork_style_label(
-                                        self.state.system.config.album_artwork_style
-                                    )
+                                self.i18n.format(
+                                    "shell-style-menu",
+                                    &[(
+                                        "style",
+                                        settings::album_artwork_style_label(
+                                            &self.i18n,
+                                            self.state.system.config.album_artwork_style,
+                                        )
+                                        .into(),
+                                    )],
                                 ),
                                 cx,
                                 move |this, _, cx| {
@@ -719,9 +744,16 @@ impl Render for GuiApp {
                         menu = menu
                             .child(menu_item(
                                 "audio-visualizer-style-menu",
-                                format!(
-                                    "Style: {}  ›",
-                                    settings::audio_visualizer_style_label(options.style)
+                                self.i18n.format(
+                                    "shell-style-menu",
+                                    &[(
+                                        "style",
+                                        settings::audio_visualizer_style_label(
+                                            &self.i18n,
+                                            options.style,
+                                        )
+                                        .into(),
+                                    )],
                                 ),
                                 cx,
                                 move |this, _, cx| {
@@ -737,7 +769,7 @@ impl Render for GuiApp {
                             .child(
                                 menu_item(
                                     "audio-visualizer-grid",
-                                    "Reference lines",
+                                    self.tr("shell-reference-lines"),
                                     cx,
                                     move |this, _, cx| {
                                         this.panel_menu = None;
@@ -765,13 +797,17 @@ impl Render for GuiApp {
                                         } else {
                                             MUTED
                                         }))
-                                        .child(if options.reference_lines { "On" } else { "Off" }),
+                                        .child(if options.reference_lines {
+                                            self.tr("shell-on")
+                                        } else {
+                                            self.tr("shell-off")
+                                        }),
                                 ),
                             )
                             .child(
                                 menu_item(
                                     "audio-visualizer-labels",
-                                    "Labels",
+                                    self.tr("shell-labels"),
                                     cx,
                                     move |this, _, cx| {
                                         this.panel_menu = None;
@@ -799,13 +835,17 @@ impl Render for GuiApp {
                                         } else {
                                             MUTED
                                         }))
-                                        .child(if options.labels { "On" } else { "Off" }),
+                                        .child(if options.labels {
+                                            self.tr("shell-on")
+                                        } else {
+                                            self.tr("shell-off")
+                                        }),
                                 ),
                             )
                             .child(div().h(px(1.)).mx_2().my_1().bg(rgb(BORDER)))
                             .child(menu_item(
                                 "audio-visualizer-settings",
-                                "Visualizer settings…",
+                                self.tr("shell-visualizer-settings"),
                                 cx,
                                 move |this, window, cx| {
                                     this.panel_menu = None;
@@ -833,7 +873,7 @@ impl Render for GuiApp {
                             .child(components::disabled_control(
                                 menu_item(
                                     "queue-add-playlist",
-                                    "Add to playlist  ›",
+                                    self.tr("shell-add-playlist-menu"),
                                     cx,
                                     move |this, _, cx| {
                                         this.refresh(cx);
@@ -854,7 +894,7 @@ impl Render for GuiApp {
                             .child(components::disabled_control(
                                 menu_item(
                                     "queue-toggle-favorite",
-                                    "Toggle favorite",
+                                    self.tr("shell-toggle-favorite"),
                                     cx,
                                     |this, _, cx| {
                                         this.refresh(cx);
@@ -879,7 +919,7 @@ impl Render for GuiApp {
                             ))
                             .child(menu_item(
                                 "randomize-queue",
-                                "Randomize queue",
+                                self.tr("shell-randomize-queue"),
                                 cx,
                                 |this, _, cx| {
                                     this.panel_menu = None;
@@ -889,7 +929,7 @@ impl Render for GuiApp {
                             ))
                             .child(menu_item(
                                 "deduplicate-queue",
-                                "Remove duplicates",
+                                self.tr("shell-remove-duplicates"),
                                 cx,
                                 |this, _, cx| {
                                     this.panel_menu = None;
@@ -899,13 +939,13 @@ impl Render for GuiApp {
                             ))
                             .child(menu_item(
                                 "queue-save-playlist",
-                                "Save as playlist…",
+                                self.tr("shell-save-playlist"),
                                 cx,
                                 |this, window, cx| this.save_queue_as_playlist(window, cx),
                             ))
                             .child(menu_item(
                                 "clear-queue",
-                                "Clear queue",
+                                self.tr("shell-clear-queue"),
                                 cx,
                                 move |this, _, cx| {
                                     this.panel_menu = Some(PanelMenu {
@@ -928,16 +968,16 @@ impl Render for GuiApp {
                                     .py_1()
                                     .text_sm()
                                     .text_color(rgb(MUTED))
-                                    .child("Layout is locked"),
+                                    .child(self.tr("shell-layout-locked")),
                             )
                         })
                         .when(!self.layouts.current().locked, |view| {
                             view.child(menu_item(
                                 "toggle-tab-bar",
                                 if state.tab_bar_visible {
-                                    "Hide tab bar"
+                                    self.tr("shell-hide-tab-bar")
                                 } else {
-                                    "Show tab bar"
+                                    self.tr("shell-show-tab-bar")
                                 },
                                 cx,
                                 move |this, _, cx| {
@@ -956,19 +996,30 @@ impl Render for GuiApp {
                 }
                 PanelMenuPage::LibraryColumns => {
                     menu = menu
-                        .child(components::menu_title("Track information"))
+                        .child(components::menu_title(self.tr("shell-track-information")))
                         .child(components::menu_separator());
                     for column in crate::config::LibraryColumn::ALL {
                         let enabled = self.state.system.config.library_columns.enabled(column);
                         menu = menu.child(
-                            menu_item(column.key(), column.label(), cx, move |this, _, cx| {
-                                if let Err(error) = this.handle.update_gui_config(
-                                    crate::core::GuiConfigChange::ToggleLibraryColumn(column),
-                                ) {
-                                    this.error = Some(format!("{error:#}"));
-                                }
-                                cx.notify();
-                            })
+                            menu_item(
+                                column.key(),
+                                self.tr(match column {
+                                    crate::config::LibraryColumn::Artist => "gl-artist",
+                                    crate::config::LibraryColumn::Album => "gl-album",
+                                    crate::config::LibraryColumn::Duration => "gl-duration",
+                                    crate::config::LibraryColumn::Codec => "gl-codec",
+                                    crate::config::LibraryColumn::Bitrate => "gl-bitrate",
+                                }),
+                                cx,
+                                move |this, _, cx| {
+                                    if let Err(error) = this.handle.update_gui_config(
+                                        crate::core::GuiConfigChange::ToggleLibraryColumn(column),
+                                    ) {
+                                        this.error = Some(format!("{error:#}"));
+                                    }
+                                    cx.notify();
+                                },
+                            )
                             .child(
                                 div()
                                     .ml_auto()
@@ -981,6 +1032,7 @@ impl Render for GuiApp {
                         .child(components::menu_separator())
                         .child(components::menu_back(
                             "library-columns-back",
+                            self.tr("shell-back"),
                             cx,
                             move |this, _, cx| {
                                 this.panel_menu = Some(PanelMenu {
@@ -993,22 +1045,27 @@ impl Render for GuiApp {
                 }
                 PanelMenuPage::AlbumArtworkStyle => {
                     menu = menu
-                        .child(components::menu_title("Artwork style"))
+                        .child(components::menu_title(self.tr("shell-artwork-style")))
                         .child(components::menu_separator());
                     for style in settings::ALBUM_ARTWORK_STYLES {
                         let selected = self.state.system.config.album_artwork_style == style;
-                        let label = settings::album_artwork_style_label(style);
+                        let label = self.tr(settings::album_artwork_style_id(style));
                         menu = menu.child(
-                            menu_item(label, label, cx, move |this, _, cx| {
-                                this.panel_menu = None;
-                                if let Err(error) = this.handle.update_gui_config(
-                                    crate::core::GuiConfigChange::AlbumArtworkStyle(style),
-                                ) {
-                                    this.error = Some(format!("{error:#}"));
-                                }
-                                this.refresh(cx);
-                                cx.notify();
-                            })
+                            menu_item(
+                                ("album-artwork-style", style as usize),
+                                label,
+                                cx,
+                                move |this, _, cx| {
+                                    this.panel_menu = None;
+                                    if let Err(error) = this.handle.update_gui_config(
+                                        crate::core::GuiConfigChange::AlbumArtworkStyle(style),
+                                    ) {
+                                        this.error = Some(format!("{error:#}"));
+                                    }
+                                    this.refresh(cx);
+                                    cx.notify();
+                                },
+                            )
                             .child(
                                 div()
                                     .ml_auto()
@@ -1021,6 +1078,7 @@ impl Render for GuiApp {
                         .child(components::menu_separator())
                         .child(components::menu_back(
                             "album-artwork-style-back",
+                            self.tr("shell-back"),
                             cx,
                             move |this, _, cx| {
                                 this.panel_menu = Some(PanelMenu {
@@ -1033,7 +1091,7 @@ impl Render for GuiApp {
                 }
                 PanelMenuPage::AudioVisualizerStyle => {
                     menu = menu
-                        .child(components::menu_title("Visualizer style"))
+                        .child(components::menu_title(self.tr("shell-visualizer-style")))
                         .child(components::menu_separator());
                     if let Some(options) = self
                         .layouts
@@ -1052,8 +1110,8 @@ impl Render for GuiApp {
                             let selected = options.style == style;
                             menu = menu.child(
                                 menu_item(
-                                    settings::audio_visualizer_style_label(style),
-                                    settings::audio_visualizer_style_label(style),
+                                    ("audio-visualizer-style", style as usize),
+                                    self.tr(settings::audio_visualizer_style_id(style)),
                                     cx,
                                     move |this, _, cx| {
                                         this.panel_menu = None;
@@ -1086,6 +1144,7 @@ impl Render for GuiApp {
                         .child(components::menu_separator())
                         .child(components::menu_back(
                             "audio-visualizer-style-back",
+                            self.tr("shell-back"),
                             cx,
                             move |this, _, cx| {
                                 this.panel_menu = Some(PanelMenu {
@@ -1098,12 +1157,14 @@ impl Render for GuiApp {
                 }
                 PanelMenuPage::ConfirmClearQueue => {
                     menu = menu
-                        .child(div().px(gpui::px(UI_INSET)).py_2().text_sm().child(format!(
-                            "Clear all {} queued entries?",
-                            self.state.queue.total
-                        )))
+                        .child(div().px(gpui::px(UI_INSET)).py_2().text_sm().child(
+                            self.i18n.format(
+                                "shell-clear-queue-confirm",
+                                &[("count", self.state.queue.total.into())],
+                            ),
+                        ))
                         .child(
-                            panels::caption("This also stops playback.")
+                            panels::caption(self.tr("shell-clear-stops-playback"))
                                 .px(gpui::px(UI_INSET))
                                 .pb_2(),
                         )
@@ -1111,7 +1172,7 @@ impl Render for GuiApp {
                             column()
                                 .child(menu_item(
                                     "cancel-clear-queue",
-                                    "Cancel",
+                                    self.tr("shell-cancel"),
                                     cx,
                                     |this, _, cx| {
                                         this.panel_menu = None;
@@ -1120,7 +1181,7 @@ impl Render for GuiApp {
                                 ))
                                 .child(components::danger_control(menu_item(
                                     "confirm-clear-queue",
-                                    "Clear queue",
+                                    self.tr("shell-clear-queue"),
                                     cx,
                                     |this, _, cx| {
                                         this.panel_menu = None;
@@ -1134,12 +1195,12 @@ impl Render for GuiApp {
                 }
                 PanelMenuPage::Playlists => {
                     menu = menu
-                        .child(components::menu_title("Add to playlist"))
+                        .child(components::menu_title(self.tr("shell-add-playlist")))
                         .child(components::menu_separator());
                     menu = menu.child(
                         menu_item(
                             "queue-create-playlist",
-                            "New playlist…",
+                            self.tr("shell-new-playlist"),
                             cx,
                             |this, window, cx| {
                                 let mut seen = HashSet::new();
@@ -1239,14 +1300,14 @@ impl Render for GuiApp {
                             );
                         }
                     } else {
-                        menu = menu.child(panels::caption(
-                            "The selected queue entry is no longer available.",
-                        ));
+                        menu =
+                            menu.child(panels::caption(self.tr("shell-queue-entry-unavailable")));
                     }
                     menu = menu
                         .child(components::menu_separator())
                         .child(components::menu_back(
                             "queue-playlist-back",
+                            self.tr("shell-back"),
                             cx,
                             move |this, _, cx| {
                                 this.panel_menu = Some(PanelMenu {
@@ -1275,7 +1336,7 @@ impl Render for GuiApp {
                 }))
                 .child(menu_item(
                     "remove-library-root",
-                    "Remove library (keep files)",
+                    self.tr("shell-remove-library"),
                     cx,
                     move |this, _, cx| {
                         this.library_root_menu = None;
@@ -1391,19 +1452,31 @@ impl Render for GuiApp {
                                     .child(
                                         column()
                                             .gap(rems(1.))
-                                            .child(caption("A local-first music player"))
+                                            .child(caption(self.tr("shell-tagline")))
                                             .children(
                                                 [
                                                     (
-                                                        "Version",
-                                                        format!(
-                                                            "{} (features: {})",
-                                                            env!("RIVU_GIT_VERSION"),
-                                                            env!("RIVU_BUILD_FEATURES"),
+                                                        self.tr("shell-version"),
+                                                        self.i18n.format(
+                                                            "shell-version-features",
+                                                            &[
+                                                                (
+                                                                    "version",
+                                                                    env!("RIVU_GIT_VERSION").into(),
+                                                                ),
+                                                                (
+                                                                    "features",
+                                                                    env!("RIVU_BUILD_FEATURES")
+                                                                        .into(),
+                                                                ),
+                                                            ],
                                                         ),
                                                     ),
-                                                    ("Built", built),
-                                                    ("License", "GPL-3.0-or-later".to_owned()),
+                                                    (self.tr("shell-built"), built),
+                                                    (
+                                                        self.tr("shell-license"),
+                                                        "GPL-3.0-or-later".to_owned(),
+                                                    ),
                                                 ]
                                                 .into_iter()
                                                 .map(|(label, value)| {
@@ -1424,7 +1497,7 @@ impl Render for GuiApp {
                                 components::quiet_icon_button(icon_button(
                                     "about-close",
                                     "",
-                                    "Close About",
+                                    self.tr("shell-close-about"),
                                     cx,
                                     |this, window, cx| {
                                         this.about_open = false;

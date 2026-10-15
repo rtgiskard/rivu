@@ -10,7 +10,7 @@ pub(in crate::gui) enum Action {
 impl GuiApp {
     pub(in crate::gui) fn layout_management_allowed(&mut self, cx: &mut Context<Self>) -> bool {
         if self.settings_open {
-            self.error = Some("Apply or discard settings before changing layouts.".into());
+            self.error = Some(self.i18n.text("shell-settings-before-layout").to_owned());
             cx.notify();
             false
         } else {
@@ -49,7 +49,10 @@ impl GuiApp {
             self.layouts
                 .select(&old)
                 .expect("previous layout still exists");
-            self.error = Some(format!("Switching layout: {error:#}"));
+            self.error = Some(self.i18n.format(
+                "shell-switch-layout-error",
+                &[("error", format!("{error:#}").into())],
+            ));
             cx.notify();
         } else {
             self.finish_layout_switch(window, cx);
@@ -133,7 +136,12 @@ impl GuiApp {
                     self.focus_layout(window, cx);
                 }
             }
-            Err(error) => self.error = Some(format!("Managing layouts: {error:#}")),
+            Err(error) => {
+                self.error = Some(self.i18n.format(
+                    "shell-manage-layouts-error",
+                    &[("error", format!("{error:#}").into())],
+                ))
+            }
         }
         cx.notify();
     }
@@ -145,11 +153,11 @@ impl GuiApp {
     ) -> AnyElement {
         let mut content = column().gap_2().child(
             row()
-                .child(div().flex_1().text_lg().child("Layouts"))
+                .child(div().flex_1().text_lg().child(self.tr("shell-layouts")))
                 .child(components::quiet_icon_button(icon_button(
                     "layouts-close",
                     "",
-                    "Close layouts",
+                    self.tr("shell-close-layouts"),
                     cx,
                     |this, window, cx| {
                         this.layouts_open = false;
@@ -161,26 +169,37 @@ impl GuiApp {
         );
         if let Some(action) = self.layout_action.clone() {
             let (title, submit) = match &action {
-                Action::Duplicate => ("Duplicate current layout", "Duplicate"),
-                Action::Rename => ("Rename current layout", "Rename"),
-                Action::Delete(_) => ("Delete saved layout", "Delete"),
+                Action::Duplicate => (
+                    self.tr("shell-layout-duplicate-title"),
+                    self.tr("shell-duplicate"),
+                ),
+                Action::Rename => (
+                    self.tr("shell-layout-rename-title"),
+                    self.tr("shell-rename"),
+                ),
+                Action::Delete(_) => (
+                    self.tr("shell-layout-delete-title"),
+                    self.tr("shell-delete"),
+                ),
             };
             content = content.child(caption(title));
             if let Action::Delete(name) = &action {
-                content = content.child(
-                    div()
-                        .text_sm()
-                        .child(format!("Delete “{name}”? This cannot be undone.")),
-                );
+                content = content.child(div().text_sm().child(self.i18n.format(
+                    "shell-delete-layout-confirm",
+                    &[("name", name.as_str().into())],
+                )));
             } else {
-                content = content.child(form_field("Name", self.input(Field::LayoutName)));
+                content = content.child(form_field(
+                    self.tr("shell-name"),
+                    self.input(Field::LayoutName),
+                ));
             }
             content = content.child(
                 row()
                     .child(icon_button(
                         "layout-action-cancel",
                         "",
-                        "Cancel layout action",
+                        self.tr("shell-cancel-layout-action"),
                         cx,
                         |this, window, cx| {
                             this.layout_action = None;
@@ -229,7 +248,10 @@ impl GuiApp {
                         components::quiet_icon_button(icon_button(
                             ("layout-delete", index),
                             "󰆴",
-                            format!("Delete layout “{name}”…"),
+                            self.i18n.format(
+                                "shell-delete-layout-hint",
+                                &[("name", name.as_str().into())],
+                            ),
                             cx,
                             move |this, window, cx| {
                                 this.begin_layout_action(Action::Delete(name.clone()), window, cx)
@@ -260,7 +282,7 @@ impl GuiApp {
                         .child(icon_button(
                             "layout-duplicate",
                             "",
-                            "Duplicate current layout as…",
+                            self.tr("shell-duplicate-layout-as"),
                             cx,
                             |this, window, cx| {
                                 this.begin_layout_action(Action::Duplicate, window, cx)
@@ -269,7 +291,7 @@ impl GuiApp {
                         .child(icon_button(
                             "layout-rename",
                             "󰏫",
-                            "Rename current layout…",
+                            self.tr("shell-rename-layout"),
                             cx,
                             |this, window, cx| this.begin_layout_action(Action::Rename, window, cx),
                         )),

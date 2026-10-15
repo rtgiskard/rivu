@@ -13,7 +13,10 @@ use std::{path::Path, sync::Arc};
 use tree::TreeItem;
 pub(super) use tree::{BranchStatus, DirectoryTree, TreeBranch};
 
-pub(super) fn track_detail(track: &crate::model::LibraryRow) -> String {
+pub(super) fn track_detail(
+    i18n: &crate::i18n::Localizer,
+    track: &crate::model::LibraryRow,
+) -> String {
     let mut detail = track.artist.clone();
     if !track.album.is_empty() {
         if !detail.is_empty() {
@@ -48,7 +51,7 @@ pub(super) fn track_detail(track: &crate::model::LibraryRow) -> String {
         None => detail.push('-'),
     }
     if track.missing {
-        detail.push_str(" · File missing");
+        detail.push_str(i18n.text("gl-file-missing-suffix"));
     }
     detail
 }
@@ -142,7 +145,11 @@ struct LibraryDragPreview {
 }
 
 impl LibraryDragPreview {
-    fn new(nodes: &[LibraryNode], title: gpui::SharedString) -> Self {
+    fn new(
+        i18n: &crate::i18n::Localizer,
+        nodes: &[LibraryNode],
+        title: gpui::SharedString,
+    ) -> Self {
         let directories = nodes
             .iter()
             .filter(|node| matches!(node, LibraryNode::Directory(_)))
@@ -160,11 +167,23 @@ impl LibraryDragPreview {
                 LibraryNode::Track(_) => ("󰈙", title),
             }
         } else if directories == nodes.len() {
-            ("󰉋", format!("{} folders", nodes.len()).into())
+            (
+                "󰉋",
+                i18n.format("gl-folder-count", &[("count", nodes.len().into())])
+                    .into(),
+            )
         } else if directories == 0 {
-            ("󰈙", format!("{} tracks", nodes.len()).into())
+            (
+                "󰈙",
+                i18n.format("gl-track-count", &[("count", nodes.len().into())])
+                    .into(),
+            )
         } else {
-            ("󰉓", format!("{} items", nodes.len()).into())
+            (
+                "󰉓",
+                i18n.format("gl-entry-count", &[("count", nodes.len().into())])
+                    .into(),
+            )
         };
         Self { label, icon }
     }
@@ -461,7 +480,7 @@ impl GuiApp {
                                                     .h_full()
                                                     .pl(gpui::rems(depth as f32 * 1.25))
                                                     .child(
-                                                        super::caption(if failed { "Unavailable" } else { "Loading…" })
+                                                        super::caption(this.tr(if failed { "gl-unavailable" } else { "gl-loading" }))
                                                             .min_w_0()
                                                             .truncate(),
                                                     )
@@ -470,7 +489,7 @@ impl GuiApp {
                                                             super::components::quiet_icon_button(icon_button(
                                                                 gpui::ElementId::named_usize("library-retry", index),
                                                                 "󰑐",
-                                                                "Retry loading folder",
+                                                                this.tr("gl-retry-folder"),
                                                                 cx,
                                                                 move |this, _, cx| {
                                                                     this.browser.library.retry_directory(&branch);
@@ -498,9 +517,9 @@ impl GuiApp {
                                         )
                                     };
                                     let detail = match visible.status {
-                                        BranchStatus::Loading => "Loading…".to_owned(),
-                                        BranchStatus::Empty => "Empty".to_owned(),
-                                        BranchStatus::Error => "Unavailable".to_owned(),
+                                        BranchStatus::Loading => this.i18n.text("gl-loading").to_owned(),
+                                        BranchStatus::Empty => this.i18n.text("gl-empty").to_owned(),
+                                        BranchStatus::Error => this.i18n.text("gl-unavailable").to_owned(),
                                         BranchStatus::Unloaded | BranchStatus::Ready => {
                                             String::new()
                                         }
@@ -526,9 +545,9 @@ impl GuiApp {
                             });
                             let scan = path.clone().map(|scan_path| {
                                 let hint = if retry_counts {
-                                    format!("Retry scanned track counts for {}", scan_path.display())
+                                    this.i18n.format("gl-retry-root-counts", &[("path", scan_path.display().to_string().into())])
                                 } else {
-                                    format!("Rescan {}", scan_path.display())
+                                    this.i18n.format("gl-rescan-path", &[("path", scan_path.display().to_string().into())])
                                 };
                                 super::components::quiet_icon_button(icon_button(
                                     gpui::ElementId::named_usize("library-scan", index),
@@ -689,8 +708,9 @@ impl GuiApp {
                                 tooltip_title,
                                 {
                                     let entry = visible.row;
+                                    let i18n = Arc::clone(&this.i18n);
                                     move || match &entry {
-                                        DirectoryRow::Track(track) => track_detail(track).into(),
+                                        DirectoryRow::Track(track) => track_detail(&i18n, track).into(),
                                         DirectoryRow::Directory { .. } => detail.clone().into(),
                                     }
                                 },
@@ -708,7 +728,7 @@ impl GuiApp {
                                                 this.browser.library.drag_nodes(&drag.source)
                                             });
                                             cx.new(|_| {
-                                                LibraryDragPreview::new(nodes, title.clone())
+                                                LibraryDragPreview::new(&this.i18n, nodes, title.clone())
                                             })
                                         })
                                     },

@@ -25,10 +25,11 @@ use super::{
 fn card_icon_button(
     id: impl Into<ElementId>,
     icon: &'static str,
-    hint: &'static str,
+    hint: impl Into<SharedString>,
     cx: &mut Context<AlbumBrowser>,
     action: impl Fn(&mut AlbumBrowser, &mut Window, &mut Context<AlbumBrowser>) + 'static,
 ) -> Stateful<Div> {
+    let hint = hint.into();
     div()
         .id(id)
         .w(rems(1.4))
@@ -48,7 +49,7 @@ fn card_icon_button(
             cx.stop_propagation();
         }))
         .tooltip(move |_, cx| {
-            cx.new(|_| super::ButtonTooltip { text: hint.into() })
+            cx.new(|_| super::ButtonTooltip { text: hint.clone() })
                 .into()
         })
 }
@@ -59,6 +60,8 @@ const ALBUM_PAGE: usize = 24;
 /// generation and library revision may commit a data request.
 pub(super) struct AlbumBrowser {
     handle: CoreHandle,
+    i18n: Arc<crate::i18n::Localizer>,
+    localized_text: BTreeMap<&'static str, SharedString>,
     manager: Arc<ArtworkManager>,
     default_album: Entity<Artwork>,
     visible: bool,
@@ -91,12 +94,34 @@ pub(super) struct AlbumBrowser {
 
 impl AlbumBrowser {
     pub(super) fn new(
+        i18n: Arc<crate::i18n::Localizer>,
         handle: CoreHandle,
         manager: Arc<ArtworkManager>,
         default_album: Entity<Artwork>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let search = cx.new(|cx| Input::new("", "Search albums or artists", cx));
+        let localized_text = [
+            "gl-album-no-tracks",
+            "gl-album-sort-artist",
+            "gl-album-sort-title",
+            "gl-albums",
+            "gl-albums-empty",
+            "gl-albums-no-matches",
+            "gl-back-albums",
+            "gl-current",
+            "gl-enqueue-album",
+            "gl-enqueue-track",
+            "gl-missing",
+            "gl-paused",
+            "gl-play-album",
+            "gl-play-track",
+            "gl-playing",
+            "gl-retry-loading",
+        ]
+        .into_iter()
+        .map(|id| (id, SharedString::from(i18n.text(id).to_owned())))
+        .collect();
+        let search = cx.new(|cx| Input::new("", i18n.text("gl-search-albums").to_owned(), cx));
         let subscription = cx.subscribe(&search, |this, _, event, cx| {
             if matches!(event, InputEvent::Changed { .. }) {
                 let text = this.search.read(cx).text().trim();
@@ -109,6 +134,8 @@ impl AlbumBrowser {
             }
         });
         Self {
+            i18n,
+            localized_text,
             handle,
             manager,
             default_album,
@@ -139,6 +166,13 @@ impl AlbumBrowser {
             playback_status: PlaybackStatus::Stopped,
             _search_subscription: subscription,
         }
+    }
+
+    fn tr(&self, id: &str) -> SharedString {
+        self.localized_text
+            .get(id)
+            .expect("cached album text")
+            .clone()
     }
 
     pub(super) fn input_focused(&self, window: &Window, cx: &App) -> bool {
@@ -285,7 +319,7 @@ impl AlbumBrowser {
                     }
                     Ok(ViewResponse::AlbumTracks(page)) => this.tracks.accept(page),
                     Err(error) => this.fail_page(error.to_string()),
-                    _ => this.fail_page("Unexpected album query response".into()),
+                    _ => this.fail_page(this.i18n.text("gl-album-response").to_owned()),
                 }
                 this.request_next(false, cx);
                 cx.notify();
@@ -320,12 +354,14 @@ impl AlbumBrowser {
         };
         column()
             .overflow_hidden()
-            .child(caption(error.unwrap_or("Loading…").to_owned()))
+            .child(caption(
+                error.unwrap_or(self.i18n.text("gl-loading")).to_owned(),
+            ))
             .when(error.is_some(), |view| {
                 view.child(icon_button(
                     ("album-retry", index),
                     "󰑐",
-                    "Retry loading",
+                    self.tr("gl-retry-loading"),
                     cx,
                     |this, _, cx| this.retry(cx),
                 ))
@@ -496,7 +532,7 @@ impl AlbumBrowser {
         let enqueue_key = key.clone();
         let image = self.covers.get(&index).and_then(|cover| cover.image(cx));
         let directory = key.directory.to_string_lossy().into_owned();
-        let title = album_title(&key);
+        let title = album_title(&self.i18n, &key);
         let actions = row()
             .id(("album-actions", index))
             .absolute()
@@ -510,7 +546,7 @@ impl AlbumBrowser {
             .child(card_icon_button(
                 ("play-album", index),
                 "",
-                "Replace current queue and play album",
+                self.tr("gl-play-album"),
                 cx,
                 move |this, _, cx| {
                     this.send(
@@ -524,7 +560,7 @@ impl AlbumBrowser {
             .child(card_icon_button(
                 ("enqueue-album", index),
                 "󰐕",
-                "Add album to queue",
+                self.tr("gl-enqueue-album"),
                 cx,
                 move |this, _, cx| {
                     this.send(
@@ -594,11 +630,14 @@ impl AlbumBrowser {
                     .flex_shrink_0(),
             )
             .child(
-                caption(format!("{} tracks", album.track_count))
-                    .w_full()
-                    .text_center()
-                    .h(rems(1.25))
-                    .flex_shrink_0(),
+                caption(
+                    self.i18n
+                        .format("gl-track-count", &[("count", album.track_count.into())]),
+                )
+                .w_full()
+                .text_center()
+                .h(rems(1.25))
+                .flex_shrink_0(),
             )
             .child(actions)
             .into_any_element()
@@ -616,15 +655,15 @@ fn anchored_index(previous: Option<usize>, row: usize, columns: usize, count: us
 
 fn track_marker(current: Option<i64>, status: PlaybackStatus, id: i64) -> Option<&'static str> {
     (current == Some(id)).then_some(match status {
-        PlaybackStatus::Playing => "Playing",
-        PlaybackStatus::Paused => "Paused",
-        PlaybackStatus::Stopped => "Current",
+        PlaybackStatus::Playing => "gl-playing",
+        PlaybackStatus::Paused => "gl-paused",
+        PlaybackStatus::Stopped => "gl-current",
     })
 }
 
-fn album_title(key: &AlbumKey) -> String {
+fn album_title(i18n: &crate::i18n::Localizer, key: &AlbumKey) -> String {
     if key.title.is_empty() {
-        "Unknown album".into()
+        i18n.text("gl-unknown-album").into()
     } else {
         key.title.clone()
     }
@@ -640,7 +679,7 @@ impl Render for AlbumBrowser {
                 .child(icon_button(
                     "albums-back",
                     "",
-                    "Back to albums",
+                    self.tr("gl-back-albums"),
                     cx,
                     |this, _, cx| {
                         this.selected = None;
@@ -653,12 +692,12 @@ impl Render for AlbumBrowser {
                         .min_w_0()
                         .truncate()
                         .text_color(rgb(TEXT))
-                        .child(album_title(key)),
+                        .child(album_title(&self.i18n, key)),
                 )
                 .child(icon_button(
                     "album-play-all",
                     "",
-                    "Replace current queue and play album",
+                    self.tr("gl-play-album"),
                     cx,
                     move |this, _, cx| {
                         this.send(
@@ -672,7 +711,7 @@ impl Render for AlbumBrowser {
                 .child(icon_button(
                     "album-add-all",
                     "󰐕",
-                    "Add album to queue",
+                    self.tr("gl-enqueue-album"),
                     cx,
                     move |this, _, cx| {
                         this.send(
@@ -685,7 +724,7 @@ impl Render for AlbumBrowser {
                 ));
         } else {
             header = header
-                .child(div().text_lg().child("Albums"))
+                .child(div().text_lg().child(self.tr("gl-albums")))
                 .child(div().flex_1().min_w_0().child(self.search.clone()))
                 .child(icon_button(
                     "albums-sort",
@@ -694,8 +733,8 @@ impl Render for AlbumBrowser {
                         AlbumSort::Artist => "󰀄",
                     },
                     match self.sort {
-                        AlbumSort::Title => "Sorted by title; switch to artist",
-                        AlbumSort::Artist => "Sorted by artist; switch to title",
+                        AlbumSort::Title => self.tr("gl-album-sort-title"),
+                        AlbumSort::Artist => self.tr("gl-album-sort-artist"),
                     },
                     cx,
                     |this, _, cx| {
@@ -713,7 +752,7 @@ impl Render for AlbumBrowser {
         let content = if self.selected.is_some() {
             if self.tracks.is_empty() {
                 column()
-                    .child(caption("No tracks in this album"))
+                    .child(caption(self.tr("gl-album-no-tracks")))
                     .into_any_element()
             } else {
                 uniform_list(
@@ -749,8 +788,12 @@ impl Render for AlbumBrowser {
                                         this.send(Command::Play { track_id: id }, cx);
                                     }
                                 }))
-                                .when(track.missing, |row| row.child(caption("Missing")))
-                                .when_some(marker, |row, marker| row.child(caption(marker)))
+                                .when(track.missing, |row| {
+                                    row.child(caption(this.tr("gl-missing")))
+                                })
+                                .when_some(marker, |row, marker| {
+                                    row.child(caption(this.tr(marker)))
+                                })
                                 .child(
                                     caption(track.duration.map_or_else(|| "—".into(), format_time))
                                         .w(rems(4.))
@@ -771,7 +814,7 @@ impl Render for AlbumBrowser {
                                             quiet_icon_button(icon_button(
                                                 ("album-track-play", id as u64),
                                                 "",
-                                                "Play track",
+                                                this.tr("gl-play-track"),
                                                 cx,
                                                 move |this, _, cx| {
                                                     this.send(Command::Play { track_id: id }, cx)
@@ -783,7 +826,7 @@ impl Render for AlbumBrowser {
                                             quiet_icon_button(icon_button(
                                                 ("album-track-add", id as u64),
                                                 "󰐕",
-                                                "Add track to queue",
+                                                this.tr("gl-enqueue-track"),
                                                 cx,
                                                 move |this, _, cx| {
                                                     this.send(
@@ -823,9 +866,9 @@ impl Render for AlbumBrowser {
         } else if self.albums.is_empty() {
             column()
                 .child(caption(if self.query.is_some() {
-                    "No albums match your search"
+                    self.tr("gl-albums-no-matches")
                 } else {
-                    "No albums in the library"
+                    self.tr("gl-albums-empty")
                 }))
                 .into_any_element()
         } else {

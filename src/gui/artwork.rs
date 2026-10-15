@@ -413,13 +413,15 @@ impl DefaultArtworkCache {
 
 /// Square/circular consumers share size-keyed immutable background assets.
 pub(super) struct Artwork {
+    fallback: gpui::SharedString,
     cache: Entity<DefaultArtworkCache>,
     circular: bool,
 }
 
 impl Artwork {
-    pub(super) fn new(cx: &mut App) -> Self {
+    pub(super) fn new(i18n: &crate::i18n::Localizer, cx: &mut App) -> Self {
         Self {
+            fallback: i18n.text("artwork-unavailable").to_owned().into(),
             cache: DefaultArtworkCache::new(cx),
             circular: false,
         }
@@ -427,6 +429,7 @@ impl Artwork {
 
     pub(super) fn circular(&self) -> Self {
         Self {
+            fallback: self.fallback.clone(),
             cache: self.cache.clone(),
             circular: true,
         }
@@ -435,16 +438,18 @@ impl Artwork {
     pub(super) fn image(&self, side: Pixels, window: &Window) -> Img {
         let side = default_artwork_side(side, window.scale_factor());
         let cache = self.cache.clone();
+        let fallback = self.fallback.clone();
         img(move |window: &mut Window, cx: &mut App| {
             cache.update(cx, |cache, cx| cache.load(side, window, cx))
         })
-        .with_fallback(|| super::caption("Artwork unavailable").into_any_element())
+        .with_fallback(move || super::caption(fallback.clone()).into_any_element())
     }
 }
 
 impl Render for Artwork {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let cache = self.cache.clone();
+        let fallback = self.fallback.clone();
         div()
             .size_full()
             .rounded_md()
@@ -455,6 +460,7 @@ impl Render for Artwork {
                 canvas(
                     move |bounds, window, cx| {
                         let artwork = Artwork {
+                            fallback,
                             cache,
                             circular: false,
                         };

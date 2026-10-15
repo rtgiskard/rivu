@@ -17,6 +17,27 @@ use std::{
 
 use crate::gui::metadata::{ManualAction, ManualIntentId};
 
+#[derive(Debug)]
+enum SelectionError {
+    Message(&'static str),
+    Detail(String),
+}
+
+impl From<String> for SelectionError {
+    fn from(detail: String) -> Self {
+        Self::Detail(detail)
+    }
+}
+
+impl SelectionError {
+    fn localize(self, i18n: &crate::i18n::Localizer) -> String {
+        match self {
+            Self::Message(id) => i18n.text(id).to_owned(),
+            Self::Detail(detail) => detail,
+        }
+    }
+}
+
 pub(in crate::gui) struct LibraryRowRequest {
     pub(in crate::gui) node: LibraryNode,
     pub(in crate::gui) index: usize,
@@ -205,10 +226,10 @@ impl RangeJob {
         }
     }
 
-    fn add_row(&mut self, slice: &Slice, row: &DirectoryRow) -> Result<(), String> {
+    fn add_row(&mut self, slice: &Slice, row: &DirectoryRow) -> Result<(), SelectionError> {
         if let Some(expected) = &slice.check {
             if !matches!(row, DirectoryRow::Directory { path } if path == expected.path()) {
-                return Err("Library tree changed while selecting; select the range again.".into());
+                return Err(SelectionError::Message("gl-library-tree-changed"));
             }
         } else {
             self.selected.insert(match row {
@@ -221,10 +242,14 @@ impl RangeJob {
         Ok(())
     }
 
-    fn add_directory(&mut self, slice: &Slice, path: &std::path::Path) -> Result<(), String> {
+    fn add_directory(
+        &mut self,
+        slice: &Slice,
+        path: &std::path::Path,
+    ) -> Result<(), SelectionError> {
         if let Some(expected) = &slice.check {
             if path != expected.path() {
-                return Err("Library tree changed while selecting; select the range again.".into());
+                return Err(SelectionError::Message("gl-library-tree-changed"));
             }
         } else {
             self.selected
@@ -233,9 +258,9 @@ impl RangeJob {
         Ok(())
     }
 
-    fn accept(&mut self, slice: &Slice, response: QueryResponse) -> Result<(), String> {
+    fn accept(&mut self, slice: &Slice, response: QueryResponse) -> Result<(), SelectionError> {
         if !self.scope.accepts(response.revisions) {
-            return Err("Library changed while selecting; select the range again.".into());
+            return Err(SelectionError::Message("gl-library-changed"));
         }
         let result = response.result.map_err(|error| error.to_string())?;
         match (&slice.source, result) {
@@ -250,15 +275,15 @@ impl RangeJob {
                     self.add_row(slice, row)?;
                 }
             }
-            _ => return Err("Unexpected library range query response.".into()),
+            _ => return Err(SelectionError::Message("gl-library-range-response")),
         }
         self.advance(slice.len);
         Ok(())
     }
 
-    fn validate_page(slice: &Slice, total: usize, count: usize) -> Result<(), String> {
+    fn validate_page(slice: &Slice, total: usize, count: usize) -> Result<(), SelectionError> {
         if total != slice.total || count != slice.len {
-            Err("Library rows changed while selecting; select the range again.".into())
+            Err(SelectionError::Message("gl-library-rows-changed"))
         } else {
             Ok(())
         }
@@ -403,7 +428,7 @@ impl LibraryBrowser {
         multi: bool,
         revisions: (u64, u64),
         page_size: usize,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, SelectionError> {
         let scope = Scope::capture(self, revisions);
         if index >= scope.total() {
             return Ok(false);
@@ -411,10 +436,10 @@ impl LibraryBrowser {
         self.cancel_navigation();
         let range = self.range_selection.interval(&scope, index);
         self.range_selection.cancel(false);
-        let spans = self.tree.range_spans(range.clone()).ok_or_else(|| {
-            "Library folders are still loading; select the range again when they are ready."
-                .to_owned()
-        })?;
+        let spans = self
+            .tree
+            .range_spans(range.clone())
+            .ok_or(SelectionError::Message("gl-library-folders-loading"))?;
         let mut slices: VecDeque<_> = self
             .tree
             .range_checks(range)
@@ -456,7 +481,7 @@ impl LibraryBrowser {
         &mut self,
         revisions: (u64, u64),
         roots: &[std::path::PathBuf],
-    ) -> Result<RangeStep, String> {
+    ) -> Result<RangeStep, SelectionError> {
         if self.range_selection.active.is_some() {
             return Ok(RangeStep::Idle);
         }
@@ -488,10 +513,7 @@ impl LibraryBrowser {
                 let result = match &slice.source {
                     Source::Tree(branch) if branch.is_forest() => {
                         if roots.len() != slice.total || slice.offset + slice.len > roots.len() {
-                            Err(
-                                "Library roots changed while selecting; select the range again."
-                                    .into(),
-                            )
+                            Err(SelectionError::Message("gl-library-roots-changed"))
                         } else {
                             roots[slice.offset..slice.offset + slice.len]
                                 .iter()
@@ -538,7 +560,7 @@ impl LibraryBrowser {
         slice: &Slice,
         response: QueryResponse,
         revisions: (u64, u64),
-    ) -> Result<(), String> {
+    ) -> Result<(), SelectionError> {
         if self.range_selection.active == Some(token) {
             self.range_selection.active = None;
         }
@@ -635,7 +657,7 @@ impl GuiApp {
             Ok(false) => self.fail_manual_intent(id),
             Err(error) => {
                 self.fail_manual_intent(id);
-                self.error = Some(error);
+                self.error = Some(error.localize(&self.i18n));
             }
         }
         cx.notify();
@@ -739,7 +761,7 @@ impl GuiApp {
         {
             Err(error) => {
                 self.fail_manual_intent(id);
-                self.error = Some(error);
+                self.error = Some(error.localize(&self.i18n));
                 cx.notify();
             }
             Ok(RangeStep::Idle) => {}
@@ -765,7 +787,7 @@ impl GuiApp {
                             .complete_range(token, &slice, response, revisions)
                         {
                             this.fail_manual_intent(id);
-                            this.error = Some(error);
+                            this.error = Some(error.localize(&this.i18n));
                         }
                         // A cancelled batch cannot apply or overlap its successor.
                         this.pump_library_range(cx);

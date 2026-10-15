@@ -310,6 +310,7 @@ impl EntrySelection {
 
     fn finish_navigation(
         &mut self,
+        unexpected_response: &str,
         job: EntryNavigationJob,
         scope: Option<EntryNavigationScope>,
         response: crate::response::QueryResponse,
@@ -366,7 +367,7 @@ impl EntrySelection {
             result => {
                 let message = match result {
                     Err(error) => error.to_string(),
-                    _ => "Unexpected playlist navigation response".into(),
+                    _ => unexpected_response.into(),
                 };
                 self.fail(message.clone());
                 EntryNavigationEffect::Failed(message)
@@ -490,6 +491,7 @@ impl GuiApp {
         let catalog = self.state.library.playlist_revision;
         let library = self.state.library.revision;
         let handle = self.handle.clone();
+        let i18n = std::sync::Arc::clone(&self.i18n);
         cx.spawn(async move |this, cx| {
             let mut identities = Vec::with_capacity(ids.len());
             for chunk in ids.chunks(crate::model::MAX_QUERY_ROWS) {
@@ -558,7 +560,7 @@ impl GuiApp {
                             .filter(|row| row.playlist_id == playlist_id),
                     ),
                     _ => {
-                        let message = "Unexpected playlist selection response".into();
+                        let message = i18n.text("gl-playlist-selection-response").into();
                         let _ = this.update(cx, |this, cx| {
                             this.entry_job_failed(playlist_id, generation, message, cx)
                         });
@@ -706,6 +708,7 @@ impl GuiApp {
         };
         let generation = job.commit.generation;
         let handle = self.handle.clone();
+        let i18n = std::sync::Arc::clone(&self.i18n);
         cx.spawn(async move |this, cx| {
             let result: Result<Option<Vec<EntryIdentity>>, String> = async {
                 let mut pages = EntryRangePages::new(job.start, job.end);
@@ -741,10 +744,10 @@ impl GuiApp {
                     )
                     .map_err(|error| error.to_string())?;
                     let Some(ViewResponse::PlaylistEntries(page)) = result else {
-                        return Err("Playlist range changed while loading".into());
+                        return Err(i18n.text("gl-playlist-range-changed").into());
                     };
                     if !pages.accept(page) {
-                        return Err("Playlist range changed while loading".into());
+                        return Err(i18n.text("gl-playlist-range-changed").into());
                     }
                 }
                 Ok(Some(pages.identities))
@@ -881,20 +884,19 @@ impl GuiApp {
             let _ = this.update(cx, |this, cx| {
                 this.refresh(cx);
                 let scope = this.playlist_navigation_scope();
-                let effect = this
-                    .browser
-                    .playlists
-                    .track_selection
-                    .finish_navigation(job, scope, response);
+                let effect = this.browser.playlists.track_selection.finish_navigation(
+                    this.i18n.text("gl-playlist-navigation-response"),
+                    job,
+                    scope,
+                    response,
+                );
                 if this.manual_intent_current(intent) {
                     match effect {
                         EntryNavigationEffect::None => {}
                         EntryNavigationEffect::Reload => {
                             this.fail_manual_intent(intent);
                             this.browser.playlists.track_selection.busy = false;
-                            this.error = Some(
-                                "Playlist changed while selecting; select the track again.".into(),
-                            );
+                            this.error = Some(this.i18n.text("gl-playlist-changed-select").into());
                         }
                         EntryNavigationEffect::Failed(message) => {
                             this.fail_manual_intent(intent);
@@ -1039,7 +1041,12 @@ mod tests {
         assert_eq!(selection.len(), 1);
         assert!(selection.ordered_ids().is_empty());
         assert_eq!(
-            selection.finish_navigation(first, Some(scope), navigation_response(first, 1_000)),
+            selection.finish_navigation(
+                "Unexpected playlist navigation response",
+                first,
+                Some(scope),
+                navigation_response(first, 1_000)
+            ),
             EntryNavigationEffect::None
         );
         assert_eq!(selection.active, Some(identity(0, 0)));
@@ -1048,7 +1055,12 @@ mod tests {
         assert_eq!(latest.offset, 255);
         assert!(selection.take_navigation().is_none());
         assert_eq!(
-            selection.finish_navigation(latest, Some(scope), navigation_response(latest, 1_000)),
+            selection.finish_navigation(
+                "Unexpected playlist navigation response",
+                latest,
+                Some(scope),
+                navigation_response(latest, 1_000)
+            ),
             EntryNavigationEffect::Selected {
                 target: identity(255, 255),
                 range: None,
@@ -1076,7 +1088,12 @@ mod tests {
         assert!(selection.navigate(scope, 3, true, false, false));
         let first = selection.take_navigation().unwrap();
         assert_eq!(first.offset, 0);
-        selection.finish_navigation(first, Some(scope), navigation_response(first, 3));
+        selection.finish_navigation(
+            "Unexpected playlist navigation response",
+            first,
+            Some(scope),
+            navigation_response(first, 3),
+        );
         selection.select(identity(0, 0), false);
         let generation = selection.generation;
         for _ in 0..100 {
@@ -1093,7 +1110,12 @@ mod tests {
             assert!(selection.take_navigation().is_none());
         }
         assert_eq!(
-            selection.finish_navigation(first, Some(scope), navigation_response(first, 3)),
+            selection.finish_navigation(
+                "Unexpected playlist navigation response",
+                first,
+                Some(scope),
+                navigation_response(first, 3)
+            ),
             EntryNavigationEffect::None
         );
         let last = selection.take_navigation().unwrap();
@@ -1102,7 +1124,12 @@ mod tests {
             assert!(!selection.navigate(scope, 3, true, false, false));
             assert!(selection.take_navigation().is_none());
         }
-        selection.finish_navigation(last, Some(scope), navigation_response(last, 3));
+        selection.finish_navigation(
+            "Unexpected playlist navigation response",
+            last,
+            Some(scope),
+            navigation_response(last, 3),
+        );
         selection.select(identity(2, 2), false);
         assert_eq!(selection.ordered_ids(), vec![2]);
         assert!(!selection.navigate(scope, 3, true, false, false));
@@ -1123,13 +1150,22 @@ mod tests {
             let first = selection.take_navigation().unwrap();
             assert!(selection.navigate(scope, 20, true, shift, multi));
             assert_eq!(
-                selection.finish_navigation(first, Some(scope), navigation_error("superseded")),
+                selection.finish_navigation(
+                    "Unexpected playlist navigation response",
+                    first,
+                    Some(scope),
+                    navigation_error("superseded")
+                ),
                 EntryNavigationEffect::None
             );
             assert!(selection.error.is_none());
             let latest = selection.take_navigation().unwrap();
-            let effect =
-                selection.finish_navigation(latest, Some(scope), navigation_response(latest, 20));
+            let effect = selection.finish_navigation(
+                "Unexpected playlist navigation response",
+                latest,
+                Some(scope),
+                navigation_response(latest, 20),
+            );
             let target = identity(4, 4);
             if shift {
                 let range = EntryNavigationRange {
@@ -1195,7 +1231,12 @@ mod tests {
         let generation = selection.generation;
         assert!(selection.take_navigation().is_none());
         assert_eq!(
-            selection.finish_navigation(old, Some(scope), navigation_response(old, 10)),
+            selection.finish_navigation(
+                "Unexpected playlist navigation response",
+                old,
+                Some(scope),
+                navigation_response(old, 10)
+            ),
             EntryNavigationEffect::None
         );
         assert!(selection.current(generation));
@@ -1234,7 +1275,12 @@ mod tests {
         });
         assert!(selection.take_range().is_none());
         assert_eq!(
-            selection.finish_navigation(old, Some(scope), navigation_response(old, 10)),
+            selection.finish_navigation(
+                "Unexpected playlist navigation response",
+                old,
+                Some(scope),
+                navigation_response(old, 10)
+            ),
             EntryNavigationEffect::None
         );
         let range = selection.take_range().unwrap();
@@ -1258,7 +1304,12 @@ mod tests {
         let job = selection.take_navigation().unwrap();
         assert_eq!(job.offset, 0);
         assert_eq!(
-            selection.finish_navigation(job, Some(scope), navigation_response(job, 5)),
+            selection.finish_navigation(
+                "Unexpected playlist navigation response",
+                job,
+                Some(scope),
+                navigation_response(job, 5)
+            ),
             EntryNavigationEffect::Selected {
                 target: identity(0, 0),
                 range: Some(EntryNavigationRange {
@@ -1334,7 +1385,12 @@ mod tests {
             assert!(selection.navigate(scope, 10, true, false, false));
             assert!(selection.take_navigation().is_none());
             assert_eq!(
-                selection.finish_navigation(old, Some(scope), navigation_error("old worker")),
+                selection.finish_navigation(
+                    "Unexpected playlist navigation response",
+                    old,
+                    Some(scope),
+                    navigation_error("old worker")
+                ),
                 EntryNavigationEffect::None
             );
             assert!(selection.error.is_none());
@@ -1343,7 +1399,12 @@ mod tests {
             assert_eq!(latest.scope, scope);
             assert_eq!(latest.offset, base.position + 1);
             assert!(selection.take_navigation().is_none());
-            selection.finish_navigation(latest, Some(scope), navigation_response(latest, 10));
+            selection.finish_navigation(
+                "Unexpected playlist navigation response",
+                latest,
+                Some(scope),
+                navigation_response(latest, 10),
+            );
             selection.select(
                 identity((base.position + 1) as i64, base.position + 1),
                 false,
@@ -1366,7 +1427,12 @@ mod tests {
             ..scope
         };
         assert_eq!(
-            selection.finish_navigation(job, Some(changed), navigation_error("stale")),
+            selection.finish_navigation(
+                "Unexpected playlist navigation response",
+                job,
+                Some(changed),
+                navigation_error("stale")
+            ),
             EntryNavigationEffect::None
         );
         assert!(selection.navigation.is_none());
@@ -1395,7 +1461,12 @@ mod tests {
             };
             response.result = Err(QueryError::Message("unavailable".into()));
             assert_eq!(
-                selection.finish_navigation(job, Some(scope), response),
+                selection.finish_navigation(
+                    "Unexpected playlist navigation response",
+                    job,
+                    Some(scope),
+                    response
+                ),
                 EntryNavigationEffect::Failed("unavailable".into())
             );
             assert!(!selection.busy);
@@ -1423,7 +1494,12 @@ mod tests {
         }
         assert!(selection.navigate(scope, 30, true, false, false));
         let job = selection.take_navigation().unwrap();
-        selection.finish_navigation(job, Some(scope), navigation_response(job, 30));
+        selection.finish_navigation(
+            "Unexpected playlist navigation response",
+            job,
+            Some(scope),
+            navigation_response(job, 30),
+        );
         selection.select(identity(20, 20), false);
         assert_eq!(selection.ordered_ids(), vec![20]);
         assert!(selection.ready());
@@ -1436,7 +1512,12 @@ mod tests {
         assert!(selection.navigate(scope, 3, true, false, false));
         let job = selection.take_navigation().unwrap();
         assert_eq!(
-            selection.finish_navigation(job, Some(scope), navigation_error("unavailable")),
+            selection.finish_navigation(
+                "Unexpected playlist navigation response",
+                job,
+                Some(scope),
+                navigation_error("unavailable")
+            ),
             EntryNavigationEffect::Failed("unavailable".into())
         );
         selection.invalidate();
@@ -1444,7 +1525,12 @@ mod tests {
         assert!(selection.ready());
         assert!(selection.navigate(scope, 3, true, false, false));
         let job = selection.take_navigation().unwrap();
-        selection.finish_navigation(job, Some(scope), navigation_response(job, 3));
+        selection.finish_navigation(
+            "Unexpected playlist navigation response",
+            job,
+            Some(scope),
+            navigation_response(job, 3),
+        );
         selection.select(identity(0, 0), false);
         assert_eq!(selection.ordered_ids(), vec![0]);
         assert!(selection.ready());
@@ -1481,7 +1567,12 @@ mod tests {
                 _ => response.revisions.library += 1,
             }
             assert_eq!(
-                selection.finish_navigation(job, Some(scope), response),
+                selection.finish_navigation(
+                    "Unexpected playlist navigation response",
+                    job,
+                    Some(scope),
+                    response
+                ),
                 EntryNavigationEffect::Reload
             );
             assert!(selection.error.is_none());
@@ -1514,7 +1605,12 @@ mod tests {
                 QueryError::RevisionChanged.to_string()
             };
             assert_eq!(
-                selection.finish_navigation(job, Some(scope), response),
+                selection.finish_navigation(
+                    "Unexpected playlist navigation response",
+                    job,
+                    Some(scope),
+                    response
+                ),
                 EntryNavigationEffect::Failed(message.clone())
             );
             assert_eq!(selection.error, Some(message));

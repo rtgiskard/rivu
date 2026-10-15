@@ -12,12 +12,15 @@ embed-nerd-font = []
 [dependencies]
 anyhow = "1"
 blake3 = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "string"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 bytes = "1"
 crossbeam-channel = "0.5"
 crossterm = "0.29"
 directories = "6"
+fluent-bundle = "0.16"
+fluent-syntax = "0.12"
+unic-langid = "0.9"
 gpui = { git = "https://github.com/zed-industries/zed", rev = "df48a139ce9c292738b523252c12f044697e673f", default-features = false }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "df48a139ce9c292738b523252c12f044697e673f", default-features = false, features = ["wayland"] }
 ashpd = { version = "0.13.13", default-features = false, features = ["async-io", "file_chooser"] }

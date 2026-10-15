@@ -78,6 +78,7 @@ pub(in crate::gui) enum MetadataReadState {
     Idle,
     Pending(LoadToken),
     Failed(String),
+    WrongTrack,
 }
 
 #[derive(Default)]
@@ -253,7 +254,7 @@ impl MetadataSession {
             .as_ref()
             .is_some_and(|track| track.id != token.track_id)
         {
-            self.fail_load(token, "Received details for a different track".into());
+            self.read_state = MetadataReadState::WrongTrack;
             return None;
         }
         self.read_state = MetadataReadState::Idle;
@@ -1114,7 +1115,7 @@ mod tests {
                 .accept_load(token, Some(track(2, "wrong")), values("").as_draft())
                 .is_none()
         );
-        assert!(matches!(session.read_state(), MetadataReadState::Failed(_)));
+        assert_eq!(session.read_state(), &MetadataReadState::WrongTrack);
         assert!(!session.accepts_load(token));
         assert!(session.track().is_none());
         assert!(!session.editable());

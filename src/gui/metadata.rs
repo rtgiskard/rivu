@@ -175,7 +175,7 @@ impl GuiApp {
     }
 
     fn reject_stale_manual_action(&mut self, cx: &mut Context<Self>) {
-        self.error = Some("The selection changed while waiting. Select the desired track again; your Details draft has been kept.".into());
+        self.error = Some(self.i18n.text("gl-metadata-stale-action").into());
         cx.notify();
     }
 
@@ -248,9 +248,9 @@ impl GuiApp {
     ) -> Option<AnyElement> {
         self.manual_intents.pending.as_ref()?;
         let detail = if self.metadata.saving() {
-            "The save already submitted may still complete. Discard any remaining draft and continue, or Cancel to keep editing this track."
+            self.i18n.text("gl-metadata-discard-saving")
         } else {
-            "Discard the unsaved Details draft and continue? Cancel keeps the draft and the original selection."
+            self.i18n.text("gl-metadata-discard-note")
         };
         Some(
             div()
@@ -276,21 +276,24 @@ impl GuiApp {
                         .border_1()
                         .border_color(rgb(BORDER))
                         .rounded_md()
-                        .child(panel_header("Discard Details draft?", detail))
+                        .child(panel_header(
+                            self.tr("gl-metadata-discard-title"),
+                            detail.to_owned(),
+                        ))
                         .child(
                             row()
                                 .justify_end()
                                 .child(icon_button(
                                     "metadata-confirmation-cancel",
                                     "",
-                                    "Cancel",
+                                    self.tr("gl-cancel"),
                                     cx,
                                     |this, _, cx| this.cancel_manual_action(cx),
                                 ))
                                 .child(super::components::danger_control(icon_button(
                                     "metadata-confirmation-discard",
                                     "󰆴",
-                                    "Discard metadata changes",
+                                    self.tr("gl-metadata-discard"),
                                     cx,
                                     |this, _, cx| this.discard_metadata_and_continue(cx),
                                 ))),
@@ -396,7 +399,7 @@ impl GuiApp {
                     this.sync_metadata_inputs(cx);
                 } else {
                     this.metadata
-                        .fail_load(token, "Could not load track details".into());
+                        .fail_load(token, this.i18n.text("gl-metadata-load-failed").into());
                 }
                 cx.notify();
             });
@@ -495,7 +498,7 @@ impl GuiApp {
                 } else {
                     this.error = Some(
                         ack.error
-                            .unwrap_or_else(|| "Could not save metadata".into()),
+                            .unwrap_or_else(|| this.i18n.text("gl-metadata-save-failed").into()),
                     );
                 }
                 cx.notify();

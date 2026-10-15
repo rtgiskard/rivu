@@ -2,6 +2,7 @@
 use crate::{
     analysis::{AnalysisFrame, AnalysisSettings, DENSITY_SIDE, SpatialBin},
     config::{AudioVisualizerOptions, AudioVisualizerStyle, Config},
+    i18n::Localizer,
 };
 use gpui::{
     AnyElement, App, Bounds, Hsla, Pixels, Point, RenderImage, SharedString, TextAlign, Window,
@@ -63,6 +64,7 @@ pub(super) struct AnalysisVisualizer {
 }
 
 struct PlotData {
+    labels: Option<[SharedString; 4]>,
     style: AudioVisualizerStyle,
     visible: bool,
     background: u32,
@@ -103,6 +105,7 @@ impl AnalysisVisualizer {
         let config = Config::default();
         Self {
             data: Rc::new(RefCell::new(PlotData {
+                labels: None,
                 style,
                 visible: true,
                 background: config.visual_background.rgb(),
@@ -201,8 +204,23 @@ impl AnalysisVisualizer {
         }
     }
 
-    pub(super) fn view(&self, panel_id: u64, options: AudioVisualizerOptions) -> AnyElement {
+    pub(super) fn view(
+        &self,
+        i18n: &Arc<Localizer>,
+        panel_id: u64,
+        options: AudioVisualizerOptions,
+    ) -> AnyElement {
         let data = Rc::clone(&self.data);
+        self.data.borrow_mut().labels.get_or_insert_with(|| {
+            [
+                "visual-density-title",
+                "visual-spatial-title",
+                "visual-mid",
+                "visual-side",
+            ]
+            .map(|id| i18n.text(id).to_owned().into())
+        });
+        let i18n = Arc::clone(i18n);
         div()
             .id(("analysis-visualizer", panel_id))
             .size_full()
@@ -213,7 +231,7 @@ impl AnalysisVisualizer {
                 canvas(
                     |_, _, _| (),
                     move |bounds, _, window, cx| {
-                        data.borrow_mut().paint(bounds, options, window, cx);
+                        data.borrow_mut().paint(&i18n, bounds, options, window, cx);
                     },
                 )
                 .size_full(),
@@ -391,6 +409,7 @@ impl PlotData {
 
     fn paint(
         &mut self,
+        i18n: &Localizer,
         bounds: Bounds<Pixels>,
         options: AudioVisualizerOptions,
         window: &mut Window,
@@ -506,21 +525,22 @@ impl PlotData {
             return;
         }
         if self.range_label.is_empty() {
-            let (reference, unit) = if density {
-                ("Occupancy ", "dB")
-            } else {
-                ("Power ", "dBFS")
-            };
-            self.range_label =
-                format!("{reference}−{:.0} … 0 {unit} · 0.5 s trail", self.db_range).into();
+            self.range_label = i18n
+                .format(
+                    if density {
+                        "visual-density-range"
+                    } else {
+                        "visual-power-range"
+                    },
+                    &[("range", format!("{:.0}", self.db_range).into())],
+                )
+                .into();
         }
-        let title = if density {
-            "M/S density · fixed ±1 scale"
-        } else {
-            "Spatial spectrum · energy balance"
-        };
+        let title = self.labels.as_ref().expect("localized plot labels")
+            [if density { 0 } else { 1 }]
+        .clone();
         label(
-            title.into(),
+            title,
             point(bounds.left() + px(10.0), bounds.top() + px(5.0)),
             0.0,
             width - 20.0,
@@ -548,7 +568,7 @@ impl PlotData {
         }
         if density {
             if self.readout.is_empty() {
-                self.readout = stereo_readout(self.stereo_metrics).into();
+                self.readout = stereo_readout(i18n, self.stereo_metrics).into();
             }
             for (text, fraction) in [("+1", 0.0), ("0", 0.5), ("−1", 1.0)] {
                 label(
@@ -564,7 +584,7 @@ impl PlotData {
                 );
             }
             label(
-                "Mid".into(),
+                self.labels.as_ref().expect("localized plot labels")[2].clone(),
                 point(bounds.left() + px(5.0), plot.top() + px(16.0)),
                 0.0,
                 35.0,
@@ -572,7 +592,7 @@ impl PlotData {
                 cx,
             );
             label(
-                "Side (L−R)/2".into(),
+                self.labels.as_ref().expect("localized plot labels")[3].clone(),
                 point(
                     plot.left() + plot.size.width * 0.5,
                     plot.bottom() + px(18.0),
@@ -700,7 +720,7 @@ fn field_strength(value: f32, db_range: f32) -> f32 {
     }
 }
 
-fn stereo_readout(metrics: [Option<f32>; 3]) -> String {
+fn stereo_readout(i18n: &Localizer, metrics: [Option<f32>; 3]) -> String {
     let value = |value: Option<f32>| value.filter(|value| value.is_finite());
     let correlation = value(metrics[0])
         .map(|v| format!("{:+.2}", v.clamp(-1.0, 1.0)))
@@ -714,7 +734,14 @@ fn stereo_readout(metrics: [Option<f32>; 3]) -> String {
     let side = value(metrics[2])
         .map(|v| format!("{:.0}%", v.clamp(0.0, 1.0) * 100.0))
         .unwrap_or_else(|| "—".into());
-    format!("Corr {correlation}   L/R {balance}   Side {side}")
+    i18n.format(
+        "visual-stereo-readout",
+        &[
+            ("correlation", correlation.into()),
+            ("balance", balance.into()),
+            ("side", side.into()),
+        ],
+    )
 }
 
 fn frequency_label(hz: f32) -> String {

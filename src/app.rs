@@ -269,6 +269,7 @@ impl App {
         let socket_owner = ipc::SocketOwner::acquire(&data_dir)?;
         let signals = Signals::new([SIGINT, SIGTERM]).context("Registering shutdown signals")?;
         let config = Config::load(&config_path)?;
+        let i18n = crate::i18n::Localizer::new(&config.ui_language);
         let session = logging::Session::start(&data_dir, &config)?;
         let runtime =
             Runtime::start_with_logging(&data_dir, &config_path, config, session.control())?;
@@ -317,7 +318,13 @@ impl App {
                 quitting: false,
             });
         } else {
-            println!("Rivu core ready. Data: {}", data_dir.display());
+            println!(
+                "{}",
+                i18n.format(
+                    "core-ready",
+                    &[("path", data_dir.display().to_string().into())]
+                )
+            );
         }
         Ok(app)
     }

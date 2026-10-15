@@ -2,6 +2,7 @@ use crate::{
     app::AppHandle,
     artwork::DEFAULT_IMAGE,
     core::CoreHandle,
+    i18n::Localizer,
     model::{Command, PlaybackStatus, RepeatMode},
     projection::TraySnapshot,
 };
@@ -55,6 +56,7 @@ fn icon_pixmap() -> &'static Vec<IconPixmap> {
 }
 
 struct TrayData {
+    i18n: Localizer,
     snapshot: TraySnapshot,
     menu_revision: u32,
 }
@@ -87,6 +89,7 @@ impl TrayController {
         let (stop, stop_receiver) = bounded(1);
         let (ready_sender, ready_receiver) = bounded(1);
         let data = Arc::new(RwLock::new(TrayData {
+            i18n: Localizer::new(&handle.config_snapshot().ui_language),
             snapshot: handle.tray_snapshot(),
             menu_revision: 1,
         }));
@@ -418,14 +421,15 @@ impl StatusNotifierItem {
 
     #[zbus(property(emits_changed_signal = "false"))]
     fn tool_tip(&self) -> (String, Vec<IconPixmap>, String, String) {
-        let snapshot = self.data.read().snapshot.clone();
+        let data = self.data.read();
+        let snapshot = &data.snapshot;
         let description = match snapshot.current_track() {
             Some(track) if track.artist.is_empty() => track.title.clone(),
             Some(track) => format!("{} — {}", track.title, track.artist),
             None => match snapshot.status {
-                PlaybackStatus::Playing => "Playing".to_owned(),
-                PlaybackStatus::Paused => "Paused".to_owned(),
-                PlaybackStatus::Stopped => "Stopped".to_owned(),
+                PlaybackStatus::Playing => data.i18n.text("core-playing").to_owned(),
+                PlaybackStatus::Paused => data.i18n.text("core-paused").to_owned(),
+                PlaybackStatus::Stopped => data.i18n.text("core-stopped").to_owned(),
             },
         };
         (
@@ -464,11 +468,14 @@ struct MenuLayout {
 }
 
 impl MenuLayout {
-    fn root(snapshot: &TraySnapshot, recursion_depth: i32) -> Self {
+    fn root(snapshot: &TraySnapshot, recursion_depth: i32, i18n: &Localizer) -> Self {
         let children = if recursion_depth == 0 {
             Vec::new()
         } else {
-            menu_items(snapshot).into_iter().map(Value::from).collect()
+            menu_items(snapshot, i18n)
+                .into_iter()
+                .map(Value::from)
+                .collect()
         };
         Self {
             id: 0,
@@ -535,8 +542,12 @@ impl DbusMenu {
         if parent_id != 0 {
             return Err(fdo::Error::InvalidArgs("Unknown menu parent".into()));
         }
-        let (snapshot, revision) = self.data.read().layout_snapshot();
-        Ok((revision, MenuLayout::root(&snapshot, recursion_depth)))
+        let data = self.data.read();
+        let (snapshot, revision) = data.layout_snapshot();
+        Ok((
+            revision,
+            MenuLayout::root(&snapshot, recursion_depth, &data.i18n),
+        ))
     }
 
     fn get_group_properties(
@@ -553,14 +564,15 @@ impl DbusMenu {
         Ok(ids
             .into_iter()
             .filter_map(|id| {
-                menu_properties(&snapshot, id, &property_names).map(|props| (id, props))
+                menu_properties(&snapshot, id, &property_names, &self.data.read().i18n)
+                    .map(|props| (id, props))
             })
             .collect())
     }
 
     fn get_property(&self, id: i32, name: String) -> fdo::Result<OwnedValue> {
         let snapshot = self.data.read().snapshot.clone();
-        menu_properties(&snapshot, id, &[name])
+        menu_properties(&snapshot, id, &[name], &self.data.read().i18n)
             .and_then(|mut properties| properties.drain().next().map(|(_, value)| value))
             .ok_or_else(|| fdo::Error::InvalidArgs("Unknown menu property".into()))
     }
@@ -669,35 +681,35 @@ impl DbusMenu {
     }
 }
 
-fn menu_items(snapshot: &TraySnapshot) -> Vec<MenuLayout> {
+fn menu_items(snapshot: &TraySnapshot, i18n: &Localizer) -> Vec<MenuLayout> {
     let play_label = if snapshot.status == PlaybackStatus::Playing {
-        "Pause"
+        i18n.text("core-pause")
     } else {
-        "Play"
+        i18n.text("core-play")
     };
     vec![
         MenuLayout::item(2, play_label),
-        MenuLayout::item(3, "Previous"),
-        MenuLayout::item(4, "Next"),
+        MenuLayout::item(3, i18n.text("core-previous")),
+        MenuLayout::item(4, i18n.text("core-next")),
         MenuLayout::separator(5),
         MenuLayout::item(
             6,
             if snapshot.shuffle {
-                "Shuffle ✓"
+                i18n.text("core-shuffle-on")
             } else {
-                "Shuffle"
+                i18n.text("core-shuffle")
             },
         ),
         MenuLayout::item(
             7,
             if snapshot.repeat == RepeatMode::Off {
-                "Repeat"
+                i18n.text("core-repeat")
             } else {
-                "Repeat ✓"
+                i18n.text("core-repeat-on")
             },
         ),
         MenuLayout::separator(8),
-        MenuLayout::item(9, "Quit"),
+        MenuLayout::item(9, i18n.text("core-quit")),
     ]
 }
 
@@ -705,37 +717,38 @@ fn menu_properties(
     snapshot: &TraySnapshot,
     id: i32,
     requested: &[String],
+    i18n: &Localizer,
 ) -> Option<HashMap<String, OwnedValue>> {
     if !(2..=9).contains(&id) {
         return None;
     }
     let play_label = if snapshot.status == PlaybackStatus::Playing {
-        "Pause"
+        i18n.text("core-pause")
     } else {
-        "Play"
+        i18n.text("core-play")
     };
     let (label, item_type) = match id {
         2 => (play_label, "standard"),
-        3 => ("Previous", "standard"),
-        4 => ("Next", "standard"),
+        3 => (i18n.text("core-previous"), "standard"),
+        4 => (i18n.text("core-next"), "standard"),
         5 | 8 => ("", "separator"),
         6 => (
             if snapshot.shuffle {
-                "Shuffle ✓"
+                i18n.text("core-shuffle-on")
             } else {
-                "Shuffle"
+                i18n.text("core-shuffle")
             },
             "standard",
         ),
         7 => (
             if snapshot.repeat == RepeatMode::Off {
-                "Repeat"
+                i18n.text("core-repeat")
             } else {
-                "Repeat ✓"
+                i18n.text("core-repeat-on")
             },
             "standard",
         ),
-        9 => ("Quit", "standard"),
+        9 => (i18n.text("core-quit"), "standard"),
         _ => unreachable!(),
     };
     let all = requested.is_empty();
@@ -770,6 +783,7 @@ mod tests {
         assert!(!app.can_raise());
         let menu = DbusMenu {
             data: Arc::new(RwLock::new(TrayData {
+                i18n: Localizer::new(&handle.config_snapshot().ui_language),
                 snapshot: handle.tray_snapshot(),
                 menu_revision: 1,
             })),
@@ -803,6 +817,7 @@ mod tests {
             shutting_down: false,
         };
         let mut data = TrayData {
+            i18n: Localizer::new("en-US"),
             snapshot: baseline.clone(),
             menu_revision: 1,
         };
@@ -828,7 +843,7 @@ mod tests {
         latest.shuffle = true;
         assert_eq!(data.publish(&latest).unwrap().1, 0);
         let (snapshot, revision) = data.layout_snapshot();
-        let root_only = MenuLayout::root(&snapshot, 0);
+        let root_only = MenuLayout::root(&snapshot, 0, &data.i18n);
         assert_eq!(revision, 0);
         assert!(root_only.children.is_empty());
     }

@@ -23,6 +23,7 @@ mod visualization;
 use crate::{
     config::{AudioVisualizerOptions, AudioVisualizerStyle},
     core::CoreHandle,
+    i18n::Localizer,
     model::{Command, PlaybackStatus, Query, Track},
     projection::GuiSnapshot,
 };
@@ -91,70 +92,70 @@ enum Field {
 
 struct PanelSpec {
     kind: &'static str,
-    title: &'static str,
+    title_id: &'static str,
     render: fn(&mut GuiApp, &layout::Panel, &mut Window, &mut Context<GuiApp>) -> AnyElement,
 }
 const PANELS: &[PanelSpec] = &[
     PanelSpec {
         kind: "transport",
-        title: "Playback",
+        title_id: "shell-panel-playback",
         render: |app, panel, window, cx| app.transport_panel(panel.id, window, cx),
     },
     PanelSpec {
         kind: "library",
-        title: "Library",
+        title_id: "shell-panel-library",
         render: |app, panel, window, cx| {
             app.library_panel(panel.id, panel.show_tab_bar, window, cx)
         },
     },
     PanelSpec {
         kind: "albums",
-        title: "Albums",
+        title_id: "shell-panel-albums",
         render: |app, panel, window, cx| app.album_browser_panel(panel.id, window, cx),
     },
     PanelSpec {
         kind: "queue",
-        title: "Queue",
+        title_id: "shell-panel-queue",
         render: |app, panel, window, cx| app.queue_panel(panel.id, panel.show_tab_bar, window, cx),
     },
     PanelSpec {
         kind: "playlists",
-        title: "Playlists",
+        title_id: "shell-panel-playlists",
         render: |app, panel, window, cx| app.playlists_panel(panel.id, window, cx),
     },
     PanelSpec {
         kind: "history",
-        title: "Recent tracks",
+        title_id: "shell-panel-history",
         render: |app, panel, window, cx| app.history_panel(panel.id, window, cx),
     },
     PanelSpec {
         kind: "metadata",
-        title: "Track details",
+        title_id: "shell-panel-metadata",
         render: |app, panel, window, cx| app.metadata_panel(panel.id, window, cx),
     },
     PanelSpec {
         kind: "album_artwork",
-        title: "Album artwork",
+        title_id: "shell-panel-album-artwork",
         render: |app, _, _, _| app.album_artwork.clone().into_any_element(),
     },
     PanelSpec {
         kind: "spectrum",
-        title: "Spectrum",
+        title_id: "shell-panel-spectrum",
         render: |app, panel, window, cx| app.spectrum_panel(panel.id, window, cx),
     },
     PanelSpec {
         kind: "spectrogram",
-        title: "Spectrogram",
+        title_id: "shell-panel-spectrogram",
         render: |app, panel, window, cx| app.spectrogram_panel(panel.id, window, cx),
     },
     PanelSpec {
         kind: "waveform",
-        title: "Waveform",
+        title_id: "shell-panel-waveform",
         render: |app, panel, window, cx| app.waveform_panel(panel.id, window, cx),
     },
     PanelSpec {
         kind: "audio_visualizer",
-        title: "Audio Visualizer",
+        title_id: "shell-panel-audio-visualizer",
         render: GuiApp::audio_visualizer_panel,
     },
 ];
@@ -240,16 +241,17 @@ impl Render for PanelDrag {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct QueueDrag {
     pub(super) queue_id: u64,
     pub(super) position: usize,
     pub(super) revision: u64,
+    pub(super) label: SharedString,
 }
 
 impl Render for QueueDrag {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        drag_preview("Move queue entry")
+        drag_preview(self.label.clone())
     }
 }
 
@@ -399,6 +401,8 @@ impl FullWaveformRequest {
 }
 
 pub(super) struct GuiApp {
+    pub(super) i18n: Arc<Localizer>,
+    localized_text: HashMap<String, SharedString>,
     handle: CoreHandle,
     state: GuiSnapshot,
     layouts: LayoutSet,
@@ -451,6 +455,13 @@ pub(super) struct GuiApp {
     _subscriptions: Vec<Subscription>,
 }
 impl GuiApp {
+    pub(super) fn tr(&self, id: &str) -> SharedString {
+        self.localized_text
+            .get(id)
+            .expect("cached localized GUI text")
+            .clone()
+    }
+
     fn input_focused(&self, window: &Window, cx: &App) -> bool {
         self.inputs
             .values()
@@ -490,9 +501,7 @@ impl GuiApp {
             }
             self.persist_layout(cx);
         } else if self.layouts.current().locked {
-            self.error = Some(
-                "Library panel is not in this locked layout; unlock it to add Library.".into(),
-            );
+            self.error = Some(self.i18n.text("shell-library-locked").to_owned());
             cx.notify();
         } else {
             let panel_id = self
@@ -610,12 +619,20 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) -> Self {
         let state = handle.gui_snapshot();
+        let i18n = Arc::new(Localizer::new(&state.system.config.ui_language));
+        let localized_text = i18n
+            .fixed_texts()
+            .map(|(id, text)| (id.to_owned(), SharedString::from(text.to_owned())))
+            .collect();
         let (mut layouts, mut error) = if layout_path.exists() {
             match LayoutSet::load(&layout_path) {
                 Ok(layouts) => (layouts, None),
                 Err(error) => (
                     LayoutSet::default(),
-                    Some(format!("Could not load layouts: {error:#}")),
+                    Some(i18n.format(
+                        "shell-load-layouts-error",
+                        &[("error", format!("{error:#}").into())],
+                    )),
                 ),
             }
         } else {
@@ -628,28 +645,37 @@ impl GuiApp {
             ))
             && let Err(save_error) = layouts.save(&layout_path)
         {
-            error = Some(format!("Saving layouts: {save_error:#}"));
+            error = Some(i18n.format(
+                "shell-save-layouts-error",
+                &[("error", format!("{save_error:#}").into())],
+            ));
         }
         let ui_font = fonts::resolve(&state.system.config.ui_font, cx);
         let mut inputs = HashMap::new();
         for (field, placeholder) in [
-            (Field::Search, "Search title, artist or album"),
-            (Field::PlaylistName, "Playlist name"),
-            (Field::LayoutName, "Layout name"),
-            (Field::Title, "Title"),
-            (Field::Artist, "Artist"),
-            (Field::Album, "Album"),
+            (Field::Search, "shell-search-placeholder"),
+            (Field::PlaylistName, "shell-playlist-name"),
+            (Field::LayoutName, "shell-layout-name"),
+            (Field::Title, "shell-title"),
+            (Field::Artist, "shell-artist"),
+            (Field::Album, "shell-album"),
         ] {
-            inputs.insert(field, cx.new(|cx| Input::new("", placeholder, cx)));
+            inputs.insert(
+                field,
+                cx.new(|cx| Input::new("", i18n.text(placeholder).to_owned(), cx)),
+            );
         }
         let mut subscriptions = Vec::new();
         let settings = cx.new(|cx| {
             settings::Settings::new(
+                Arc::clone(&i18n),
                 handle.clone(),
                 Arc::clone(&artwork_manager),
                 Arc::clone(&state.system.devices),
-                state.system.ffmpeg_status.clone(),
-                state.system.mpris_status.clone(),
+                (
+                    state.system.ffmpeg_status.clone(),
+                    state.system.mpris_status.clone(),
+                ),
                 state.system.config.ui_scale,
                 cx,
             )
@@ -685,11 +711,14 @@ impl GuiApp {
                                         .current_mut()
                                         .set_audio_visualizer_options(*panel_id, previous);
                                 }
-                                Err(format!("Saving layout: {error:#}"))
+                                Err(this.i18n.format(
+                                    "shell-save-layout-error",
+                                    &[("error", format!("{error:#}").into())],
+                                ))
                             }
                         }
                     } else {
-                        Err("This visualizer instance no longer exists".into())
+                        Err(this.i18n.text("shell-visualizer-gone").to_owned())
                     };
                     settings.update(cx, |settings, cx| {
                         settings.complete_visualizer_apply(*session, result, cx)
@@ -830,9 +859,11 @@ impl GuiApp {
             }
         })
         .detach();
-        let default_album = cx.new(|cx| artwork::Artwork::new(cx));
+        let default_album = cx.new(|cx| artwork::Artwork::new(&i18n, cx));
         let album_default = default_album.read(cx).circular();
         let mut app = Self {
+            i18n: Arc::clone(&i18n),
+            localized_text,
             settings,
             handle,
             state,
@@ -935,17 +966,27 @@ impl GuiApp {
         }
         self.begin_playlist_name(
             playlist_editor::PlaylistNameAction::SaveQueue,
-            format!("Queue {}", chrono::Local::now().format("%Y-%m-%d %H-%M-%S")),
+            self.i18n.format(
+                "shell-queue-name",
+                &[(
+                    "date",
+                    chrono::Local::now()
+                        .format("%Y-%m-%d %H-%M-%S")
+                        .to_string()
+                        .into(),
+                )],
+            ),
             window,
             cx,
         );
     }
 
     fn choose_playlist_import(&mut self, cx: &mut Context<Self>) {
+        let i18n = Arc::clone(&self.i18n);
         cx.spawn(async move |this, cx| {
             let result = SelectedFiles::open_file()
-                .title("Import M3U playlist")
-                .accept_label("Import")
+                .title(i18n.text("shell-import-playlist"))
+                .accept_label(i18n.text("shell-import"))
                 .modal(true)
                 .send()
                 .await
@@ -958,7 +999,12 @@ impl GuiApp {
                         }
                     }
                     Ok(None) => return,
-                    Err(error) => this.error = Some(format!("Opening playlist: {error}")),
+                    Err(error) => {
+                        this.error = Some(this.i18n.format(
+                            "shell-open-playlist-error",
+                            &[("error", error.to_string().into())],
+                        ))
+                    }
                 }
                 cx.notify();
             });
@@ -967,10 +1013,11 @@ impl GuiApp {
     }
 
     fn choose_playlist_export(&mut self, playlist_id: i64, cx: &mut Context<Self>) {
+        let i18n = Arc::clone(&self.i18n);
         cx.spawn(async move |this, cx| {
             let result = SelectedFiles::save_file()
-                .title("Export M3U playlist")
-                .accept_label("Export")
+                .title(i18n.text("shell-export-playlist"))
+                .accept_label(i18n.text("shell-export"))
                 .modal(true)
                 .send()
                 .await
@@ -984,7 +1031,10 @@ impl GuiApp {
                     }
                     Ok(None) => return,
                     Err(error) => {
-                        this.error = Some(format!("Opening playlist destination: {error}"))
+                        this.error = Some(this.i18n.format(
+                            "shell-open-playlist-destination-error",
+                            &[("error", error.to_string().into())],
+                        ))
                     }
                 }
                 cx.notify();
@@ -993,10 +1043,11 @@ impl GuiApp {
         .detach();
     }
     fn choose_library_root(&mut self, cx: &mut Context<Self>) {
+        let i18n = Arc::clone(&self.i18n);
         cx.spawn(async move |this, cx| {
             let result = SelectedFiles::open_file()
-                .title("Add library folder")
-                .accept_label("Add")
+                .title(i18n.text("shell-add-library-folder"))
+                .accept_label(i18n.text("shell-add"))
                 .directory(true)
                 .modal(true)
                 .send()
@@ -1014,7 +1065,12 @@ impl GuiApp {
                         }
                     }
                     Ok(None) => return,
-                    Err(error) => this.error = Some(format!("Opening library folder: {error}")),
+                    Err(error) => {
+                        this.error = Some(this.i18n.format(
+                            "shell-open-library-error",
+                            &[("error", error.to_string().into())],
+                        ))
+                    }
                 }
                 cx.notify();
             });
@@ -1045,9 +1101,9 @@ impl GuiApp {
         };
         list_row(("loading-row", index), false)
             .child(caption(if error.is_some() {
-                "Loading failed · click to retry"
+                self.tr("shell-loading-failed")
             } else {
-                "Loading…"
+                self.tr("shell-loading")
             }))
             .when_some(error.map(str::to_owned), |row, error| {
                 row.tooltip(move |_, cx| {
@@ -1381,6 +1437,7 @@ impl GuiApp {
         let albums = self.album_browsers.entry(id).or_insert_with(|| {
             let albums = cx.new(|cx| {
                 album_browser::AlbumBrowser::new(
+                    Arc::clone(&self.i18n),
                     self.handle.clone(),
                     Arc::clone(&self.artwork_manager),
                     self.default_album.clone(),
@@ -1617,13 +1674,16 @@ impl GuiApp {
         self.interaction
             .retain_layout(self.layouts.current().root.as_ref());
         if let Err(error) = self.layouts.save(&self.layout_path) {
-            self.error = Some(format!("Saving layout: {error:#}"));
+            self.error = Some(self.i18n.format(
+                "shell-save-layout-error",
+                &[("error", format!("{error:#}").into())],
+            ));
         }
         self.sync_analysis(cx);
         cx.notify();
     }
     fn spectrum_panel(&mut self, id: u64, _: &mut Window, _: &mut Context<Self>) -> AnyElement {
-        self.visuals.spectrum(id)
+        self.visuals.spectrum(&self.i18n, id)
     }
     fn audio_visualizer_panel(
         &mut self,
@@ -1635,13 +1695,14 @@ impl GuiApp {
             .audio_visualizer
             .unwrap_or_else(|| AudioVisualizerOptions::from(self.state.system.config.as_ref()));
         self.audio_visualizer.view(
+            &self.i18n,
             panel.id,
             self.state.playback.status == PlaybackStatus::Playing,
             options,
         )
     }
     fn spectrogram_panel(&mut self, id: u64, _: &mut Window, _: &mut Context<Self>) -> AnyElement {
-        self.visuals.spectrogram(id)
+        self.visuals.spectrogram(&self.i18n, id)
     }
     fn waveform_panel(&mut self, id: u64, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let current = self.state.current_track();
@@ -1661,7 +1722,7 @@ impl GuiApp {
         .or_else(|| track.and_then(|track| track.duration));
         let config = self.state.system.config.clone();
         self.waveform.update(cx, |waveform, cx| {
-            waveform.view(id, position, duration, &config, cx)
+            waveform.view(&self.i18n, id, position, duration, &config, cx)
         })
     }
     fn measurement(&self, key: Measured) -> AnyElement {
@@ -1940,13 +2001,14 @@ impl GuiApp {
                     .border_color(rgb(BORDER));
                 for panel in panels.iter().filter(|_| show_tab_bar) {
                     let panel_id = panel.id;
-                    let title = panel_spec(&panel.kind)
-                        .map_or(panel.kind.as_str(), |spec| spec.title)
-                        .to_owned();
+                    let title = panel_spec(&panel.kind).map_or_else(
+                        || SharedString::from(panel.kind.clone()),
+                        |spec| self.tr(spec.title_id),
+                    );
                     let tab_bar_visible = panel.show_tab_bar;
                     let drag = PanelDrag {
                         panel_id,
-                        title: title.clone().into(),
+                        title: title.clone(),
                     };
                     tabs = tabs.child(
                         div()
@@ -2004,7 +2066,7 @@ impl GuiApp {
                                     components::quiet_icon_button(icon_button(
                                         ("close", panel_id),
                                         "",
-                                        "Remove panel",
+                                        self.tr("shell-remove-panel"),
                                         cx,
                                         move |this, _, cx| {
                                             if this.layouts.current().locked {
@@ -2035,7 +2097,7 @@ impl GuiApp {
                                 .items_center()
                                 .justify_center()
                                 .text_color(rgb(MUTED))
-                                .child("Visualizations paused · Still Mode")
+                                .child(self.tr("shell-visualizations-paused"))
                                 .into_any_element();
                         }
                         panel_spec(&panel.kind)
@@ -2043,7 +2105,10 @@ impl GuiApp {
                             .unwrap_or_else(|| {
                                 div()
                                     .p(gpui::px(UI_INSET))
-                                    .child(format!("Unknown panel: {}", panel.kind))
+                                    .child(self.i18n.format(
+                                        "shell-unknown-panel",
+                                        &[("kind", panel.kind.as_str().into())],
+                                    ))
                                     .into_any_element()
                             })
                     })

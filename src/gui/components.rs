@@ -297,11 +297,15 @@ pub(crate) fn metadata_item(
 }
 
 /// Full-row artwork with a centered preview occupying 70% of the card content.
-pub(crate) fn artwork_preview(image: impl IntoElement, aspect_ratio: Option<f32>) -> Div {
+pub(crate) fn artwork_preview(
+    label: impl Into<SharedString>,
+    image: impl IntoElement,
+    aspect_ratio: Option<f32>,
+) -> Div {
     super::column()
         .w_full()
         .gap_2()
-        .child(caption("Album artwork"))
+        .child(caption(label))
         .child(
             div().flex().justify_center().child(
                 div()
@@ -342,14 +346,16 @@ pub(crate) fn menu_title(title: impl Into<SharedString>) -> Div {
 
 pub(crate) fn menu_back(
     id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
     cx: &mut Context<GuiApp>,
     action: impl Fn(&mut GuiApp, &mut Window, &mut Context<GuiApp>) + 'static,
 ) -> Stateful<Div> {
+    let label = label.into();
     menu_item(id, "", cx, action)
         .font_family(super::fonts::SYMBOLS_FAMILY)
-        .tooltip(|_, cx| {
+        .tooltip(move |_, cx| {
             cx.new(|_| ButtonTooltip {
-                text: "Back".into(),
+                text: label.clone(),
             })
             .into()
         })

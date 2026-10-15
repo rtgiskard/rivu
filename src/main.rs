@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
+use rivu::i18n::Localizer;
 use rivu::{
     app::App,
     audio, config, ipc,
@@ -260,8 +261,127 @@ fn main() {
         std::process::exit(1);
     }
 }
+// Resolve the same configuration before clap renders --help. Only path options
+// are inspected here; clap remains authoritative for syntax and diagnostics.
+fn startup_config_path() -> PathBuf {
+    let mut config_path = None;
+    let mut data_dir = None;
+    let mut args = std::env::args_os().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--" {
+            break;
+        }
+        if arg == "--config" {
+            config_path = args.next().map(PathBuf::from);
+        } else if arg == "--data-dir" {
+            data_dir = args.next().map(PathBuf::from);
+        } else if let Some(value) = arg.to_str().and_then(|arg| arg.strip_prefix("--config=")) {
+            config_path = Some(value.into());
+        } else if let Some(value) = arg.to_str().and_then(|arg| arg.strip_prefix("--data-dir=")) {
+            data_dir = Some(PathBuf::from(value));
+        }
+    }
+    config_path.unwrap_or_else(|| {
+        data_dir.map_or_else(config::default_path, |directory| {
+            directory.join("config.toml")
+        })
+    })
+}
+
+fn localize_help(command: &mut clap::Command, i18n: &Localizer, path: &str) {
+    let messages = i18n
+        .fixed_texts()
+        .collect::<std::collections::HashMap<_, _>>();
+    localize_command_help(command, i18n, path, &messages);
+}
+
+fn localize_command_help(
+    command: &mut clap::Command,
+    i18n: &Localizer,
+    path: &str,
+    messages: &std::collections::HashMap<&str, &str>,
+) {
+    let id = if path.is_empty() {
+        "core-help-about".to_owned()
+    } else {
+        format!("core-help-{path}")
+    };
+    if let Some(text) = messages.get(id.as_str()) {
+        *command = command
+            .clone()
+            .about((*text).to_owned())
+            .long_about((*text).to_owned());
+    }
+    if path.is_empty() {
+        *command = command
+            .clone()
+            .long_about(i18n.text("core-help-long").to_owned());
+    }
+    *command = command.clone()
+        .help_template(format!("{{before-help}}{{name}} {{version}}\n{{about-with-newline}}\n{} {{usage}}\n\n{{all-args}}{{after-help}}", i18n.text("core-help-usage")))
+        .subcommand_help_heading(i18n.text("core-help-commands").to_owned());
+    let arguments = command
+        .get_arguments()
+        .map(|arg| (arg.get_id().to_string(), arg.is_positional()))
+        .collect::<Vec<_>>();
+    for (name, positional) in arguments {
+        let name_key = name.replace('_', "-");
+        let id = if path.is_empty() {
+            format!("core-help-{name_key}")
+        } else {
+            format!("core-help-{path}-{name_key}")
+        };
+        let text = if name == "help" {
+            Some(i18n.text("core-help-help"))
+        } else if name == "version" {
+            Some(i18n.text("core-help-version"))
+        } else if matches!(name.as_str(), "data_dir" | "config" | "json") {
+            messages
+                .get(format!("core-help-{name_key}").as_str())
+                .copied()
+        } else {
+            messages.get(id.as_str()).copied()
+        };
+        *command = command.clone().mut_arg(name.clone(), |arg| {
+            let arg = arg.help_heading(
+                i18n.text(if positional {
+                    "core-help-arguments"
+                } else {
+                    "core-help-options"
+                })
+                .to_owned(),
+            );
+            if let Some(text) = text {
+                arg.help(text.to_owned()).long_help(text.to_owned())
+            } else {
+                arg
+            }
+        });
+    }
+    for child in command.get_subcommands_mut() {
+        let child_path = if path.is_empty() {
+            child.get_name().to_owned()
+        } else {
+            format!("{path}-{}", child.get_name())
+        };
+        localize_command_help(child, i18n, &child_path, messages);
+    }
+}
+
 fn run() -> Result<()> {
-    let args = Args::parse();
+    let startup_config = config::Config::load(&startup_config_path());
+    let i18n = Localizer::new(
+        startup_config
+            .as_ref()
+            .map_or("auto", |config| config.ui_language.as_str()),
+    );
+    let mut command = Args::command();
+    command.build();
+    localize_help(&mut command, &i18n, "");
+    let args = Args::from_arg_matches(&command.get_matches())?;
+    // Help/version exit inside clap before reaching this check, so recovery
+    // information remains available even when the saved config is malformed.
+    let startup_config = startup_config?;
     let config_path = args.config.unwrap_or_else(|| {
         args.data_dir
             .as_ref()
@@ -288,7 +408,7 @@ fn run() -> Result<()> {
             false,
         )?
         .run(),
-        Action::Tui => terminal::run(&data_dir),
+        Action::Tui => terminal::run(&data_dir, &startup_config.ui_language),
         Action::Library(LibraryAction::Probe { path, enhanced }) => {
             let probe_config = config::Config::load(&config_path)?;
             let ffmpeg_enabled = probe_config.ffmpeg_enabled || enhanced;
@@ -318,31 +438,60 @@ fn run() -> Result<()> {
                 return Ok(());
             }
             println!(
-                "{}\n  title: {}\n  artist: {}\n  album: {}\n  codec: {}\n  channels: {}\n  sample rate: {} Hz\n  duration: {}\n  bitrate: {}\n  source bits/sample: {}\n  track number: {}\n  disc number: {}\n  release date: {}\n  probe backend: {}\n  decoder backend: {}\n  FFmpeg extension audio decoding: {}",
-                path.display(),
-                info.title,
-                info.artist,
-                info.album,
-                info.codec,
-                info.channels,
-                info.sample_rate,
-                info.duration
-                    .map_or("unknown".into(), |value| format!("{value:.3} s")),
-                info.bitrate_bps.map_or("—".into(), |value| format!(
-                    "{}{:.1} kbps",
-                    if info.bitrate_exact { "" } else { "≈" },
-                    value as f64 / 1000.0
-                )),
-                info.bits_per_sample
-                    .map_or("—".into(), |value| value.to_string()),
-                info.track_number
-                    .map_or("—".into(), |value| value.to_string()),
-                info.disc_number
-                    .map_or("—".into(), |value| value.to_string()),
-                info.release_date.as_deref().unwrap_or("—"),
-                result.probe_backend,
-                result.decoder_backend,
-                decoder_status,
+                "{}",
+                i18n.format(
+                    "core-probe",
+                    &[
+                        ("path", path.display().to_string().into()),
+                        ("title", info.title.as_str().into()),
+                        ("artist", info.artist.as_str().into()),
+                        ("album", info.album.as_str().into()),
+                        ("codec", info.codec.as_str().into()),
+                        ("channels", info.channels.to_string().into()),
+                        ("sample-rate", info.sample_rate.to_string().into()),
+                        (
+                            "duration",
+                            info.duration
+                                .map_or_else(
+                                    || i18n.text("core-unknown").to_owned(),
+                                    |value| format!("{value:.3} s")
+                                )
+                                .into()
+                        ),
+                        (
+                            "bitrate",
+                            info.bitrate_bps
+                                .map_or("—".into(), |value| format!(
+                                    "{}{:.1} kbps",
+                                    if info.bitrate_exact { "" } else { "≈" },
+                                    value as f64 / 1000.0
+                                ))
+                                .into()
+                        ),
+                        (
+                            "bits",
+                            info.bits_per_sample
+                                .map_or("—".into(), |v| v.to_string())
+                                .into()
+                        ),
+                        (
+                            "track",
+                            info.track_number
+                                .map_or("—".into(), |v| v.to_string())
+                                .into()
+                        ),
+                        (
+                            "disc",
+                            info.disc_number
+                                .map_or("—".into(), |v| v.to_string())
+                                .into()
+                        ),
+                        ("date", info.release_date.as_deref().unwrap_or("—").into()),
+                        ("probe", result.probe_backend.to_string().into()),
+                        ("decoder", result.decoder_backend.to_string().into()),
+                        ("ffmpeg", decoder_status.into()),
+                    ]
+                )
             );
             Ok(())
         }
@@ -359,13 +508,13 @@ fn run() -> Result<()> {
         }
         Action::Library(LibraryAction::Status) => {
             let response = ipc::get_state(&data_dir, StateSections::ALL)?;
-            show_state(&response, args.json)
+            show_state(&i18n, &response, args.json)
         }
         Action::Library(LibraryAction::List {
             query,
             favorites,
             missing,
-        }) => list_library(&data_dir, args.json, query, favorites, missing),
+        }) => list_library(&i18n, &data_dir, args.json, query, favorites, missing),
         Action::Library(LibraryAction::Stats) => {
             let response = ipc::query(&data_dir, &Query::LibraryStats)?;
             let ViewResponse::LibraryStats(stats) = response.result.map_err(anyhow::Error::from)?
@@ -375,7 +524,16 @@ fn run() -> Result<()> {
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&stats)?);
             } else {
-                println!("Tracks: {}\nPlays: {}", stats.total, stats.play_count);
+                println!(
+                    "{}",
+                    i18n.format(
+                        "core-stats",
+                        &[
+                            ("tracks", stats.total.to_string().into()),
+                            ("plays", stats.play_count.to_string().into())
+                        ]
+                    )
+                );
             }
             Ok(())
         }
@@ -388,7 +546,7 @@ fn run() -> Result<()> {
                 },
             )?;
             if args.json {
-                return show_state(&response, true);
+                return show_state(&i18n, &response, true);
             }
             let state = response
                 .library
@@ -399,8 +557,8 @@ fn run() -> Result<()> {
             }
             Ok(())
         }
-        Action::Queue(QueueAction::List) => list_queue(&data_dir, args.json),
-        Action::Playlist(PlaylistAction::List) => list_playlists(&data_dir, args.json),
+        Action::Queue(QueueAction::List) => list_queue(&i18n, &data_dir, args.json),
+        Action::Playlist(PlaylistAction::List) => list_playlists(&i18n, &data_dir, args.json),
         Action::Library(LibraryAction::Edit {
             track_id,
             title,
@@ -415,7 +573,7 @@ fn run() -> Result<()> {
                 decoder_hint: None,
             };
             let ack = ipc::request_ack(&data_dir, &command)?;
-            show_ack(&ack, args.json)
+            show_ack(&i18n, &ack, args.json)
         }
         Action::Library(LibraryAction::Duplicates {
             fingerprint,
@@ -439,37 +597,87 @@ fn run() -> Result<()> {
                 match view {
                     ViewResponse::DuplicateGroups(page) => {
                         println!(
-                            "Historical same-content groups: {} (cached hashes, not fresh verification)",
-                            page.total
+                            "{}",
+                            i18n.format(
+                                "core-duplicate-groups",
+                                &[("count", page.total.to_string().into())]
+                            )
                         );
                         for group in page.rows {
                             println!(
-                                "{}\t{} members\t{} missing\t{} present",
-                                group.fingerprint,
-                                group.total_members,
-                                group.missing_members,
-                                group.present_members
+                                "{}",
+                                i18n.format(
+                                    "core-duplicate-group",
+                                    &[
+                                        ("fingerprint", group.fingerprint.into()),
+                                        ("total", group.total_members.to_string().into()),
+                                        ("missing", group.missing_members.to_string().into()),
+                                        ("present", group.present_members.to_string().into()),
+                                    ]
+                                )
                             );
                         }
                     }
                     ViewResponse::DuplicateMembers(page) => {
-                        println!("Historical same-content members: {}", page.total);
+                        println!(
+                            "{}",
+                            i18n.format(
+                                "core-duplicate-members",
+                                &[("count", page.total.to_string().into())]
+                            )
+                        );
                         for member in page.rows {
                             println!(
-                                "{}\t{}\t{}\tfavorite={} overrides={} plays={} playlist_refs={} queue_refs={} independent={}",
-                                member.track.id,
-                                member.track.path.display(),
-                                if member.track.missing {
-                                    "missing (last scan)"
-                                } else {
-                                    "present (last scan)"
-                                },
-                                member.track.favorite,
-                                member.has_overrides,
-                                member.track.play_count,
-                                member.playlist_references,
-                                member.queue_references,
-                                member.independent
+                                "{}",
+                                i18n.format(
+                                    "core-duplicate-member",
+                                    &[
+                                        ("id", member.track.id.to_string().into()),
+                                        ("path", member.track.path.display().to_string().into()),
+                                        (
+                                            "status",
+                                            i18n.text(if member.track.missing {
+                                                "core-last-scan-missing"
+                                            } else {
+                                                "core-last-scan-present"
+                                            })
+                                            .into()
+                                        ),
+                                        (
+                                            "favorite",
+                                            i18n.text(if member.track.favorite {
+                                                "core-yes"
+                                            } else {
+                                                "core-no"
+                                            })
+                                            .into()
+                                        ),
+                                        (
+                                            "overrides",
+                                            i18n.text(if member.has_overrides {
+                                                "core-yes"
+                                            } else {
+                                                "core-no"
+                                            })
+                                            .into()
+                                        ),
+                                        ("plays", member.track.play_count.to_string().into()),
+                                        (
+                                            "playlists",
+                                            member.playlist_references.to_string().into()
+                                        ),
+                                        ("queue", member.queue_references.to_string().into()),
+                                        (
+                                            "independent",
+                                            i18n.text(if member.independent {
+                                                "core-yes"
+                                            } else {
+                                                "core-no"
+                                            })
+                                            .into()
+                                        ),
+                                    ]
+                                )
                             );
                         }
                     }
@@ -485,7 +693,31 @@ fn run() -> Result<()> {
             let ViewResponse::RelocationTask(task) = view else {
                 bail!("Unexpected relocation status response");
             };
-            println!("{}", serde_json::to_string_pretty(&task)?);
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&task)?);
+            } else {
+                let phase = i18n.text(match task.phase {
+                    rivu::model::RelocationPhase::Verifying => "core-verifying",
+                    rivu::model::RelocationPhase::Completed => "core-completed",
+                    rivu::model::RelocationPhase::Cancelled => "core-cancelled",
+                    rivu::model::RelocationPhase::Failed => "core-failed",
+                });
+                println!(
+                    "{}",
+                    i18n.format(
+                        "core-relocation-status",
+                        &[
+                            ("id", task.id.to_string().into()),
+                            ("source", task.source_id.to_string().into()),
+                            ("target", task.target_id.to_string().into()),
+                            ("phase", phase.into()),
+                        ]
+                    )
+                );
+                if let Some(error) = task.error {
+                    eprintln!("{error}");
+                }
+            }
             Ok(())
         }
         Action::Library(LibraryAction::Relocate {
@@ -508,7 +740,10 @@ fn run() -> Result<()> {
                 if args.json {
                     println!("{}", serde_json::to_string_pretty(&ack)?);
                 } else {
-                    println!("Relocation verification accepted: task {id}");
+                    println!(
+                        "{}",
+                        i18n.format("core-relocation-accepted", &[("id", id.to_string().into())])
+                    );
                 }
                 return Ok(());
             }
@@ -528,7 +763,14 @@ fn run() -> Result<()> {
                             println!("{}", serde_json::to_string_pretty(&task)?);
                         } else {
                             println!(
-                                "Relocation committed: old track {source_id} now uses target {target_id}'s path"
+                                "{}",
+                                i18n.format(
+                                    "core-relocation-completed",
+                                    &[
+                                        ("source", source_id.to_string().into()),
+                                        ("target", target_id.to_string().into())
+                                    ]
+                                )
                             );
                             if let Some(error) = task.error {
                                 eprintln!("{error}");
@@ -546,7 +788,7 @@ fn run() -> Result<()> {
         Action::Library(LibraryAction::Optimize) => {
             let ack = ipc::request_ack(&data_dir, &Command::OptimizeDatabase)?;
             if !ack.ok {
-                return show_ack(&ack, args.json);
+                return show_ack(&i18n, &ack, args.json);
             }
             let response = ipc::get_state(
                 &data_dir,
@@ -556,7 +798,7 @@ fn run() -> Result<()> {
                 },
             )?;
             if args.json {
-                return show_state(&response, true);
+                return show_state(&i18n, &response, true);
             }
             let report = response
                 .system
@@ -570,18 +812,23 @@ fn run() -> Result<()> {
                 .database_bytes_after
                 .saturating_add(report.wal_bytes_after);
             println!(
-                "Database optimization completed\nDatabase: {} -> {} bytes\nWAL: {} -> {} bytes\nReclaimed total: {} bytes",
-                report.database_bytes_before,
-                report.database_bytes_after,
-                report.wal_bytes_before,
-                report.wal_bytes_after,
-                before.saturating_sub(after)
+                "{}",
+                i18n.format(
+                    "core-optimization",
+                    &[
+                        ("before", report.database_bytes_before.to_string().into()),
+                        ("after", report.database_bytes_after.to_string().into()),
+                        ("wal-before", report.wal_bytes_before.to_string().into()),
+                        ("wal-after", report.wal_bytes_after.to_string().into()),
+                        ("reclaimed", before.saturating_sub(after).to_string().into()),
+                    ]
+                )
             );
             Ok(())
         }
         Action::Quit => {
             let ack = ipc::request_ack(&data_dir, &rivu::app::AppCommand::Shutdown)?;
-            show_ack(&ack, args.json)
+            show_ack(&i18n, &ack, args.json)
         }
         action => {
             let (command, wait_scan) = translate(action)?;
@@ -608,7 +855,7 @@ fn run() -> Result<()> {
                             if args.json {
                                 println!("{}", serde_json::to_string_pretty(&task)?);
                             } else {
-                                println!("{}", task.message);
+                                show_scan(&i18n, &task.progress);
                             }
                             return Ok(());
                         }
@@ -622,14 +869,20 @@ fn run() -> Result<()> {
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&ack)?);
             } else {
-                println!("Command accepted at revision {}", ack.revision);
+                println!(
+                    "{}",
+                    i18n.format(
+                        "core-command-accepted",
+                        &[("revision", ack.revision.to_string().into())]
+                    )
+                );
             }
             Ok(())
         }
     }
 }
 
-fn list_queue(data_dir: &Path, json: bool) -> Result<()> {
+fn list_queue(i18n: &Localizer, data_dir: &Path, json: bool) -> Result<()> {
     let mut session = ipc::client_session(data_dir)?;
     let state = session.get_state(StateSections {
         queue: true,
@@ -654,7 +907,7 @@ fn list_queue(data_dir: &Path, json: bool) -> Result<()> {
             expected,
         })?;
         expected.get_or_insert(response.revisions);
-        let view = match listing_result(response.result)? {
+        let view = match listing_result(i18n, response.result)? {
             Some(view) => view,
             None => return Ok(()),
         };
@@ -695,6 +948,7 @@ fn list_queue(data_dir: &Path, json: bool) -> Result<()> {
 }
 
 fn list_library(
+    i18n: &Localizer,
     data_dir: &Path,
     json: bool,
     query: Option<String>,
@@ -721,7 +975,7 @@ fn list_library(
             expected,
         })?;
         expected.get_or_insert(response.revisions);
-        let view = match listing_result(response.result)? {
+        let view = match listing_result(i18n, response.result)? {
             Some(view) => view,
             None => return Ok(()),
         };
@@ -744,8 +998,16 @@ fn list_library(
                     track.artist,
                     track.album,
                     track.path.display(),
-                    if track.missing { " [missing]" } else { "" },
-                    if track.favorite { " [favorite]" } else { "" }
+                    if track.missing {
+                        i18n.text("core-missing-marker")
+                    } else {
+                        ""
+                    },
+                    if track.favorite {
+                        i18n.text("core-favorite-marker")
+                    } else {
+                        ""
+                    }
                 )?;
                 match track.bitrate_bps {
                     Some(value) => writeln!(
@@ -775,7 +1037,7 @@ fn list_library(
     Ok(())
 }
 
-fn list_playlists(data_dir: &Path, json: bool) -> Result<()> {
+fn list_playlists(i18n: &Localizer, data_dir: &Path, json: bool) -> Result<()> {
     let mut session = ipc::client_session(data_dir)?;
     let _ = session.get_state(StateSections::default())?;
     let mut expected = None;
@@ -793,7 +1055,7 @@ fn list_playlists(data_dir: &Path, json: bool) -> Result<()> {
             expected,
         })?;
         expected.get_or_insert(response.revisions);
-        let view = match listing_result(response.result)? {
+        let view = match listing_result(i18n, response.result)? {
             Some(view) => view,
             None => return Ok(()),
         };
@@ -815,8 +1077,15 @@ fn list_playlists(data_dir: &Path, json: bool) -> Result<()> {
             } else {
                 writeln!(
                     output,
-                    "{}\t{}\t{} entries",
-                    playlist.id, playlist.name, playlist.entry_count
+                    "{}",
+                    i18n.format(
+                        "core-playlist-summary",
+                        &[
+                            ("id", playlist.id.to_string().into()),
+                            ("name", playlist.name.as_str().into()),
+                            ("count", playlist.entry_count.to_string().into()),
+                        ]
+                    )
                 )?;
             }
             let mut entry_after = None;
@@ -833,7 +1102,7 @@ fn list_playlists(data_dir: &Path, json: bool) -> Result<()> {
                     expected: entry_expected,
                 })?;
                 entry_expected = Some(response.revisions);
-                let view = match listing_result(response.result)? {
+                let view = match listing_result(i18n, response.result)? {
                     Some(view) => view,
                     None => return Ok(()),
                 };
@@ -850,8 +1119,15 @@ fn list_playlists(data_dir: &Path, json: bool) -> Result<()> {
                     } else {
                         writeln!(
                             output,
-                            "  {}\tentry {}\ttrack {}",
-                            entry_index, entry.id, entry.track_id
+                            "  {}",
+                            i18n.format(
+                                "core-playlist-entry",
+                                &[
+                                    ("index", entry_index.to_string().into()),
+                                    ("entry", entry.id.to_string().into()),
+                                    ("track", entry.track_id.to_string().into()),
+                                ]
+                            )
                         )?;
                     }
                     entry_index += 1;
@@ -877,29 +1153,38 @@ fn list_playlists(data_dir: &Path, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn listing_result<T>(result: std::result::Result<T, QueryError>) -> Result<Option<T>> {
+fn listing_result<T>(
+    i18n: &Localizer,
+    result: std::result::Result<T, QueryError>,
+) -> Result<Option<T>> {
     match result {
         Ok(value) => Ok(Some(value)),
         Err(QueryError::RevisionChanged) => {
-            eprintln!("Listing incomplete: data changed while reading; retry the command.");
+            eprintln!("{}", i18n.text("core-listing-changed"));
             Ok(None)
         }
         Err(error) => Err(anyhow::Error::from(error)),
     }
 }
 
-fn show_ack(ack: &rivu::response::Ack, json: bool) -> Result<()> {
+fn show_ack(i18n: &Localizer, ack: &rivu::response::Ack, json: bool) -> Result<()> {
     if !ack.ok {
         bail!("{}", ack.error.as_deref().unwrap_or("Command failed"));
     }
     if json {
         println!("{}", serde_json::to_string_pretty(ack)?);
     } else {
-        println!("Command accepted at revision {}", ack.revision);
+        println!(
+            "{}",
+            i18n.format(
+                "core-command-accepted",
+                &[("revision", ack.revision.to_string().into())]
+            )
+        );
     }
     Ok(())
 }
-fn show_state(response: &StateResponse, json: bool) -> Result<()> {
+fn show_state(i18n: &Localizer, response: &StateResponse, json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(response)?);
         return Ok(());
@@ -917,38 +1202,99 @@ fn show_state(response: &StateResponse, json: bool) -> Result<()> {
         .as_ref()
         .context("State omitted system section")?;
     let status = match playback.playback.status {
-        PlaybackStatus::Stopped => "stopped",
-        PlaybackStatus::Playing => "playing",
-        PlaybackStatus::Paused => "paused",
+        PlaybackStatus::Stopped => i18n.text("core-stopped"),
+        PlaybackStatus::Playing => i18n.text("core-playing"),
+        PlaybackStatus::Paused => i18n.text("core-paused"),
     };
     if let Some(track) = playback.current_track.as_deref() {
         println!(
-            "{status}: {} — {}  {:.1}/{} s  volume {:.0}%",
-            track.artist,
-            track.title,
-            playback.playback.position,
-            playback
-                .playback
-                .duration
-                .map_or("?".into(), |v| format!("{v:.1}")),
-            playback.playback.volume * 100.0
+            "{}",
+            i18n.format(
+                "core-state-track",
+                &[
+                    ("status", status.into()),
+                    ("artist", track.artist.as_str().into()),
+                    ("title", track.title.as_str().into()),
+                    (
+                        "position",
+                        format!("{:.1}", playback.playback.position).into()
+                    ),
+                    (
+                        "duration",
+                        playback
+                            .playback
+                            .duration
+                            .map_or("?".into(), |v| format!("{v:.1}"))
+                            .into()
+                    ),
+                    (
+                        "volume",
+                        format!("{:.0}", playback.playback.volume * 100.0).into()
+                    ),
+                ]
+            )
         );
     } else {
         let queued = response.queue.as_ref().map_or(0, |queue| queue.total);
         println!(
-            "{status} · {} tracks · {} queued",
-            library.track_total, queued
+            "{}",
+            i18n.format(
+                "core-state-empty",
+                &[
+                    ("status", status.into()),
+                    ("tracks", library.track_total.to_string().into()),
+                    ("queued", queued.to_string().into()),
+                ]
+            )
         );
     }
-    if !system.scan_message.is_empty() {
-        println!("{}", system.scan_message);
+    if let Some(progress) = &system.scan_progress {
+        show_scan(i18n, progress);
     }
-    println!("FFmpeg extension audio decoding: {}", system.ffmpeg_status);
+    println!(
+        "{}",
+        i18n.format(
+            "core-ffmpeg",
+            &[("status", system.ffmpeg_status.as_str().into())]
+        )
+    );
     if let Some(error) = &system.last_error {
         eprintln!("{error}");
     }
     Ok(())
 }
+fn show_scan(i18n: &Localizer, progress: &rivu::model::ScanProgress) {
+    let phase = i18n.text(match progress.phase {
+        rivu::model::ScanPhase::Discovering => "core-discovering",
+        rivu::model::ScanPhase::ReadingMetadata => "core-reading-metadata",
+        rivu::model::ScanPhase::Saving => "core-saving",
+        rivu::model::ScanPhase::Completed => "core-completed",
+        rivu::model::ScanPhase::Failed => "core-failed",
+        rivu::model::ScanPhase::Cancelled => "core-cancelled",
+    });
+    println!(
+        "{}",
+        i18n.format(
+            "core-scan-progress",
+            &[
+                ("phase", phase.into()),
+                ("processed", progress.processed.to_string().into()),
+                (
+                    "total",
+                    progress
+                        .total
+                        .map_or_else(|| "?".to_owned(), |total| total.to_string())
+                        .into()
+                ),
+                ("errors", progress.errors.to_string().into()),
+            ]
+        )
+    );
+    if let Some(path) = &progress.path {
+        println!("{}", path.display());
+    }
+}
+
 // Resolve against the caller's cwd, without expanding or canonicalizing input.
 // In particular, playlist export destinations need not exist yet.
 fn client_path(path: PathBuf) -> Result<PathBuf> {
@@ -1080,6 +1426,20 @@ fn translate(action: Action) -> Result<(Command, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn localized_help_keeps_command_names_and_builtin_help_behavior() {
+        let i18n = Localizer::new("zh-CN");
+        let mut command = Args::command();
+        command.build();
+        localize_help(&mut command, &i18n, "");
+        let help = command.render_long_help().to_string();
+        assert!(help.contains("playback"));
+        let help = command
+            .try_get_matches_from(["rivu", "help", "library"])
+            .unwrap_err();
+        assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp);
+    }
 
     #[test]
     fn scan_paths_are_anchored_without_expansion() -> Result<()> {

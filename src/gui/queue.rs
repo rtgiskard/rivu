@@ -230,6 +230,7 @@ impl GuiApp {
         let generation = queue.generation;
         let revision = queue.revision;
         let handle = self.handle.clone();
+        let i18n = std::sync::Arc::clone(&self.i18n);
         cx.spawn(async move |this, cx| {
             let mut selected = Vec::with_capacity(ids.len());
             for chunk in ids.chunks(crate::model::MAX_QUERY_ROWS) {
@@ -264,7 +265,7 @@ impl GuiApp {
                     result => {
                         let error = match result {
                             Err(error) => error.to_string(),
-                            _ => "Unexpected queue selection response".to_owned(),
+                            _ => i18n.text("gl-queue-selection-response").to_owned(),
                         };
                         let _ = this.update(cx, |this, cx| {
                             if this.browser.queue.current(generation, revision) {
@@ -320,7 +321,7 @@ impl GuiApp {
                             .browser
                             .queue
                             .rows
-                            .fail("Unexpected queue page response".to_owned()),
+                            .fail(this.i18n.text("gl-queue-page-response").to_owned()),
                     }
                 }
                 cx.notify();
@@ -479,6 +480,7 @@ impl GuiApp {
             return;
         };
         let handle = self.handle.clone();
+        let i18n = std::sync::Arc::clone(&self.i18n);
         cx.spawn(async move |this, cx| {
             let result: Result<Option<QueueCommit>, String> = async {
                 if !this
@@ -501,16 +503,16 @@ impl GuiApp {
                             )
                             .await;
                         if response.revisions.queue != job.revision {
-                            return Err("Queue changed while selecting".into());
+                            return Err(i18n.text("gl-queue-changed").into());
                         }
                         let ViewResponse::QueuePage(page) =
                             response.result.map_err(|error| error.to_string())?
                         else {
-                            return Err("Unexpected queue selection response".into());
+                            return Err(i18n.text("gl-queue-selection-response").into());
                         };
                         let Some(row) = page.rows.first().filter(|row| row.position == offset)
                         else {
-                            return Err("Queue changed while selecting".into());
+                            return Err(i18n.text("gl-queue-changed").into());
                         };
                         QueueIdentity::from(row)
                     }
@@ -541,12 +543,12 @@ impl GuiApp {
                             .spawn(async move { handle.query(Query::QueuePage { offset, limit }) })
                             .await;
                         if response.revisions.queue != job.revision {
-                            return Err("Queue changed while selecting".into());
+                            return Err(i18n.text("gl-queue-changed").into());
                         }
                         let ViewResponse::QueuePage(Page { rows: page, total }) =
                             response.result.map_err(|error| error.to_string())?
                         else {
-                            return Err("Unexpected queue range response".into());
+                            return Err(i18n.text("gl-queue-range-response").into());
                         };
                         if total != job.total
                             || page.len() != limit
@@ -555,7 +557,7 @@ impl GuiApp {
                                 .enumerate()
                                 .any(|(index, row)| row.position != offset + index)
                         {
-                            return Err("Queue changed while selecting".into());
+                            return Err(i18n.text("gl-queue-changed").into());
                         }
                         offset += page.len();
                         identities.extend(page.iter().map(QueueIdentity::from));

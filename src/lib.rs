@@ -6,6 +6,7 @@ pub mod config;
 pub mod core;
 pub mod cue;
 pub mod gui;
+pub mod i18n;
 pub mod ipc;
 pub mod library;
 pub mod logging;

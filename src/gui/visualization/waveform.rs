@@ -8,6 +8,7 @@
 //! Pointer captures require a live interactive panel, not just cached peaks.
 //! Losing that surface cancels its generation and the matching window seek;
 //! ordinary MouseUp keeps the queued final Seek valid until consumption.
+use crate::i18n::Localizer;
 
 use std::{
     cell::RefCell,
@@ -536,7 +537,7 @@ fn cursor_wobble(position: f64) -> f32 {
 
 fn preview_message(source: &Source, frame: &WaveformFrame) -> Option<&'static str> {
     if !source.matches_target(frame) || !frame.peaks.iter().any(Option::is_some) {
-        return Some("Play or buffer this track to build its waveform");
+        return Some("waveform-play");
     }
     None
 }
@@ -927,9 +928,7 @@ impl Waveform {
             self.full = Some(completed);
         }
         self.manual = None;
-        self.manual_error = result
-            .err()
-            .map(|error| format!("Cannot load full waveform: {error:#}").into());
+        self.manual_error = result.err().map(|error| format!("{error:#}").into());
         true
     }
 
@@ -940,11 +939,14 @@ impl Waveform {
             .map_or(progressive, |full| &full.frame)
     }
 
-    fn manual_message(&self) -> Option<SharedString> {
+    fn manual_message(&self, i18n: &Localizer) -> Option<SharedString> {
         if self.manual.is_some() {
-            Some("Loading full waveform…".into())
+            Some(i18n.text("waveform-loading").to_owned().into())
         } else {
-            self.manual_error.clone()
+            self.manual_error.as_ref().map(|error| {
+                i18n.format("waveform-error", &[("error", error.as_ref().into())])
+                    .into()
+            })
         }
     }
 
@@ -1018,6 +1020,7 @@ impl Waveform {
     /// playback position. The caller observes this entity for data changes.
     pub(in crate::gui) fn view(
         &mut self,
+        i18n: &Arc<Localizer>,
         panel_id: u64,
         position: f64,
         duration: Option<f64>,
@@ -1043,7 +1046,7 @@ impl Waveform {
             }
             return panel.into_any_element();
         };
-        let status = self.manual_message();
+        let status = self.manual_message(i18n);
         let (message, label_duration, full) = {
             let shared = self.shared.read();
             let frame = self.display_frame(&shared);
@@ -1064,7 +1067,7 @@ impl Waveform {
             }
             return panel
                 .child(super::super::components::visualization_status(
-                    status.unwrap_or_else(|| message.into()),
+                    status.unwrap_or_else(|| i18n.text(message).to_owned().into()),
                 ))
                 .into_any_element();
         }
@@ -2122,7 +2125,7 @@ mod tests {
         let mut waveform = preview(frame(vec![Some(0.25), None]));
         let (generation, _) = waveform.start_full(DecoderHint::Auto);
         assert_eq!(waveform.shared.read().peaks, vec![Some(0.25), None]);
-        assert!(waveform.manual_message().is_some());
+        assert!(waveform.manual_message(&Localizer::new("en-US")).is_some());
         assert!(waveform.finish_full(generation, Err(anyhow::anyhow!("decode failed"))));
         assert!(
             waveform

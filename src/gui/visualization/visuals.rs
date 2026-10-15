@@ -12,6 +12,7 @@
 //! redraw Spectrum in place. Unchanged buckets reuse their GPU image.
 //! Spectrogram image rows use half the active panel height, never fewer than
 //! the visible source frequency points, and remain capped by configuration.
+use crate::i18n::Localizer;
 
 use super::super::{ERROR, ERROR_BG};
 use gpui::{
@@ -601,12 +602,12 @@ impl Visuals {
         }
     }
 
-    pub(in crate::gui) fn spectrum(&self, panel_id: u64) -> AnyElement {
-        self.view(panel_id, VisualMode::Spectrum)
+    pub(in crate::gui) fn spectrum(&self, i18n: &Arc<Localizer>, panel_id: u64) -> AnyElement {
+        self.view(i18n, panel_id, VisualMode::Spectrum)
     }
 
-    pub(in crate::gui) fn spectrogram(&self, panel_id: u64) -> AnyElement {
-        self.view(panel_id, VisualMode::Spectrogram)
+    pub(in crate::gui) fn spectrogram(&self, i18n: &Arc<Localizer>, panel_id: u64) -> AnyElement {
+        self.view(i18n, panel_id, VisualMode::Spectrogram)
     }
     pub(in crate::gui) fn retain_spectrogram_panels(&mut self, panel_ids: &[u64]) {
         let mut data = self.data.borrow_mut();
@@ -691,26 +692,27 @@ impl Visuals {
         }
     }
 
-    fn view(&self, panel_id: u64, mode: VisualMode) -> AnyElement {
+    fn view(&self, i18n: &Arc<Localizer>, panel_id: u64, mode: VisualMode) -> AnyElement {
         let data = Rc::clone(&self.data);
         let message: Option<SharedString> = {
             let data = self.data.borrow();
             if data.error.is_some() {
                 None
             } else if data.latest_levels.is_empty() {
-                Some("Analysis waiting for playback".into())
+                Some(i18n.text("visual-wait").to_owned().into())
             } else {
                 match mode {
                     VisualMode::Spectrum if data.spectrum_range().is_none() => {
-                        Some("No audible spectrum data".into())
+                        Some(i18n.text("visual-no-spectrum").to_owned().into())
                     }
                     VisualMode::Spectrogram if data.visible_range().is_none() => {
-                        Some("No spectrogram data in 16 Hz–Nyquist".into())
+                        Some(i18n.text("visual-no-spectrogram").to_owned().into())
                     }
                     _ => None,
                 }
             }
         };
+        let i18n = Arc::clone(i18n);
         let showing_status = message.is_some();
         let prepaint_data = Rc::clone(&data);
         let kind = match mode {
@@ -768,7 +770,8 @@ impl Visuals {
                                 rgb(ERROR_BG),
                             ));
                             paint_label(
-                                format!("Visualization error: {error}").into(),
+                                i18n.format("visual-error", &[("error", error.as_str().into())])
+                                    .into(),
                                 point(bounds.left() + px(6.0), bounds.top() + px(3.0)),
                                 ERROR,
                                 window,

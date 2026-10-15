@@ -260,18 +260,17 @@ impl GuiApp {
                 .absolute()
                 .size_full(),
             );
-            let direction = match hover.request.target.edge {
-                Edge::Left => "left",
-                Edge::Right => "right",
-                Edge::Top => "above",
-                Edge::Bottom => "below",
-                Edge::Center => "tab",
-            };
-            let text = if preview.is_none() {
-                "Cannot dock here".to_owned()
+            let text = self.tr(if preview.is_none() {
+                "shell-cannot-dock"
             } else {
-                format!("Panel · {direction}")
-            };
+                match hover.request.target.edge {
+                    Edge::Left => "shell-dock-left",
+                    Edge::Right => "shell-dock-right",
+                    Edge::Top => "shell-dock-above",
+                    Edge::Bottom => "shell-dock-below",
+                    Edge::Center => "shell-dock-tab",
+                }
+            });
             overlay = overlay.child(
                 div()
                     .absolute()

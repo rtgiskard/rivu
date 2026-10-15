@@ -3,6 +3,7 @@
 //! Its radial Bars, Rings, and Bars + Rings renderers follow the Noctalia v5
 //! control's concept and parameter model using GPUI-native paths. Analysis and
 //! fractal styles are delegated to their respective rendering backends.
+use crate::i18n::Localizer;
 
 use super::super::layout;
 use super::{analysis_visualizer::AnalysisVisualizer, fractal_visualizer::FractalVisualizer};
@@ -19,6 +20,7 @@ use std::{
     f32::consts::PI,
     ops::Range,
     rc::Rc,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -123,6 +125,7 @@ pub(in crate::gui) struct AudioVisualizer {
 }
 
 struct VisualizerData {
+    guide_labels: Option<[gpui::SharedString; 3]>,
     background: u32,
     sensitivity: f32,
     rotation_speed: f32,
@@ -150,6 +153,7 @@ impl AudioVisualizer {
             analysis: ANALYSIS_STYLES.map(AnalysisVisualizer::new),
             fractal: FRACTAL_STYLES.map(FractalVisualizer::new),
             data: Rc::new(RefCell::new(VisualizerData {
+                guide_labels: None,
                 background: 0x08090c,
                 sensitivity: 1.5,
                 rotation_speed: 0.5,
@@ -345,22 +349,37 @@ impl AudioVisualizer {
 
     pub(in crate::gui) fn view(
         &self,
+        i18n: &Arc<Localizer>,
         panel_id: u64,
         playing: bool,
         options: AudioVisualizerOptions,
     ) -> AnyElement {
         match options.style {
-            AudioVisualizerStyle::StereoDensity => return self.analysis[0].view(panel_id, options),
-            AudioVisualizerStyle::SpatialSpectrum => {
-                return self.analysis[1].view(panel_id, options);
+            AudioVisualizerStyle::StereoDensity => {
+                return self.analysis[0].view(i18n, panel_id, options);
             }
-            AudioVisualizerStyle::FractalBeams => return self.fractal[0].view(panel_id, options),
-            AudioVisualizerStyle::FractalFlow => return self.fractal[1].view(panel_id, options),
+            AudioVisualizerStyle::SpatialSpectrum => {
+                return self.analysis[1].view(i18n, panel_id, options);
+            }
+            AudioVisualizerStyle::FractalBeams => {
+                return self.fractal[0].view(i18n, panel_id, options);
+            }
+            AudioVisualizerStyle::FractalFlow => {
+                return self.fractal[1].view(i18n, panel_id, options);
+            }
             AudioVisualizerStyle::Bars
             | AudioVisualizerStyle::Rings
             | AudioVisualizerStyle::BarsRings => {}
         }
         let data = Rc::clone(&self.data);
+        self.data.borrow_mut().guide_labels.get_or_insert_with(|| {
+            [
+                "visual-level-zero",
+                "visual-level-half",
+                "visual-level-full",
+            ]
+            .map(|id| i18n.text(id).to_owned().into())
+        });
         div()
             .id(("audio-visualizer", panel_id))
             .size_full()
@@ -374,7 +393,14 @@ impl AudioVisualizer {
                         let mut data = data.borrow_mut();
                         window.paint_quad(gpui::fill(bounds, rgb(data.background)));
                         if data.displayed.is_empty() {
-                            paint_guides(bounds, options, data.background, window, cx);
+                            paint_guides(
+                                data.guide_labels.as_ref().expect("localized guide labels"),
+                                bounds,
+                                options,
+                                data.background,
+                                window,
+                                cx,
+                            );
                             return;
                         }
                         let fade_alpha = if playing || !data.fade_when_idle {
@@ -392,7 +418,14 @@ impl AudioVisualizer {
                             alpha
                         };
                         if fade_alpha == 0.0 {
-                            paint_guides(bounds, options, data.background, window, cx);
+                            paint_guides(
+                                data.guide_labels.as_ref().expect("localized guide labels"),
+                                bounds,
+                                options,
+                                data.background,
+                                window,
+                                cx,
+                            );
                             return;
                         }
                         match options.style {
@@ -413,7 +446,14 @@ impl AudioVisualizer {
                                 rgb(data.background).alpha(1.0 - fade_alpha),
                             ));
                         }
-                        paint_guides(bounds, options, data.background, window, cx);
+                        paint_guides(
+                            data.guide_labels.as_ref().expect("localized guide labels"),
+                            bounds,
+                            options,
+                            data.background,
+                            window,
+                            cx,
+                        );
                     },
                 )
                 .size_full(),
@@ -429,6 +469,7 @@ fn bar_level_radius(scale: f32, level: f32) -> f32 {
 }
 
 fn paint_guides(
+    labels: &[gpui::SharedString; 3],
     bounds: Bounds<gpui::Pixels>,
     options: AudioVisualizerOptions,
     background: u32,
@@ -448,9 +489,9 @@ fn paint_guides(
     );
     let scale = side * 0.5;
     for (level, label) in [
-        (0.0, "Bar level 0%"),
-        (0.5, "Bar level 50%"),
-        (1.0, "Bar level 100%"),
+        (0.0, labels[0].clone()),
+        (0.5, labels[1].clone()),
+        (1.0, labels[2].clone()),
     ] {
         let radius = bar_level_radius(scale, level);
         if options.reference_lines {
@@ -473,7 +514,7 @@ fn paint_guides(
         let run = style.to_run(label.len());
         let line = window
             .text_system()
-            .shape_line(label.into(), px(10.0), &[run], None);
+            .shape_line(label, px(10.0), &[run], None);
         let origin = point(center.x - line.width() * 0.5, center.y - px(radius + 7.0));
         if origin.x < bounds.left() + px(2.0) || origin.x + line.width() > bounds.right() - px(2.0)
         {

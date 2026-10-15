@@ -1,4 +1,5 @@
 use crate::{
+    i18n::Localizer,
     ipc,
     model::{
         ClientSnapshot, Command, DirectoryRow, LibraryRow, LibrarySort, PlaybackStatus,
@@ -37,7 +38,8 @@ use std::{
 
 /// Connect to an existing core over IPC. This never creates an audio engine and
 /// quitting the screen only restores the terminal; the server keeps playing.
-pub fn run(data_dir: &Path) -> Result<()> {
+pub fn run(data_dir: &Path, language: &str) -> Result<()> {
+    let i18n = Arc::new(Localizer::new(language));
     enable_raw_mode().context("enable terminal raw mode")?;
     let mut stdout = io::stdout();
     if let Err(error) = execute!(stdout, EnterAlternateScreen) {
@@ -53,7 +55,7 @@ pub fn run(data_dir: &Path) -> Result<()> {
             return Err(error.into());
         }
     };
-    let result = run_loop(data_dir, &mut terminal);
+    let result = run_loop(data_dir, &mut terminal, i18n);
     let cleanup = restore_terminal(&mut terminal);
     match result {
         Err(error) => Err(error),
@@ -467,7 +469,11 @@ fn spawn_query_worker(data_dir: &Path, instance_id: u32) -> QueryWorker {
     }
 }
 
-fn run_loop(data_dir: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+fn run_loop(
+    data_dir: &Path,
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    i18n: Arc<Localizer>,
+) -> Result<()> {
     let updates = spawn_watcher(data_dir);
     let mut workers = None;
     let mut tui = None::<TuiState>;
@@ -487,13 +493,13 @@ fn run_loop(data_dir: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>>) 
             let next = TuiSnapshot::from_client(&state, tui.as_ref().map(|tui| &tui.snapshot));
             match &mut tui {
                 Some(tui) => tui.apply_snapshot(next),
-                None => tui = Some(TuiState::new(next)),
+                None => tui = Some(TuiState::new(next, Arc::clone(&i18n))),
             }
             redraw = true;
         }
         let Some(tui) = &mut tui else {
             if redraw {
-                terminal.draw(draw_loading)?;
+                terminal.draw(|frame| draw_loading(frame, &i18n))?;
                 redraw = false;
             }
             if event::poll(Duration::from_millis(50))? {
@@ -513,8 +519,10 @@ fn run_loop(data_dir: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>>) 
         while let Ok(result) = commands.results.try_recv() {
             match result {
                 Ok(ack) if !ack.ok => {
-                    tui.ui
-                        .set_message(Some(ack.error.unwrap_or_else(|| "Command rejected".into())));
+                    tui.ui.set_message(Some(
+                        ack.error
+                            .unwrap_or_else(|| i18n.text("terminal-command-rejected").into()),
+                    ));
                 }
                 Ok(_) => {}
                 Err(error) => tui.ui.set_message(Some(error.into_message()?)),
@@ -588,7 +596,8 @@ fn run_loop(data_dir: &Path, terminal: &mut Terminal<CrosstermBackend<Stdout>>) 
                                 .as_ref()
                                 .is_some_and(|sender| sender.try_send(command).is_ok());
                             if !queued {
-                                tui.ui.set_message(Some("Command queue busy".into()));
+                                tui.ui
+                                    .set_message(Some(i18n.text("terminal-command-busy").into()));
                                 redraw = true;
                                 immediate_redraw = true;
                             }
@@ -620,8 +629,8 @@ struct TuiState {
 }
 
 impl TuiState {
-    fn new(snapshot: TuiSnapshot) -> Self {
-        let mut ui = UiState::default();
+    fn new(snapshot: TuiSnapshot, i18n: Arc<Localizer>) -> Self {
+        let mut ui = UiState::new(i18n);
         ui.queue.total = snapshot.queue.total;
         ui.queue.loaded = true;
         ui.queue
@@ -665,29 +674,39 @@ impl TuiState {
             self.ui.requested = None;
         }
         self.ui.sync_queue(&self.snapshot, &next);
-        if let Some(message) = snapshot_message(&self.snapshot, &next) {
+        if let Some(message) = snapshot_message(&self.snapshot, &next, &self.ui.i18n) {
             self.ui.set_message(Some(message));
         }
         self.snapshot = next;
     }
 }
 
-fn snapshot_message(previous: &TuiSnapshot, next: &TuiSnapshot) -> Option<String> {
+fn snapshot_message(
+    previous: &TuiSnapshot,
+    next: &TuiSnapshot,
+    i18n: &Localizer,
+) -> Option<String> {
     if previous.playback.status != next.playback.status {
         return Some(match next.playback.status {
-            PlaybackStatus::Playing => "Playing".into(),
-            PlaybackStatus::Paused => "Paused".into(),
-            PlaybackStatus::Stopped => "Stopped".into(),
+            PlaybackStatus::Playing => i18n.text("terminal-playing").into(),
+            PlaybackStatus::Paused => i18n.text("terminal-paused").into(),
+            PlaybackStatus::Stopped => i18n.text("terminal-stopped").into(),
         });
     }
     if previous.queue.current_id != next.queue.current_id {
-        return next
-            .current_track()
-            .map(|track| format!("Now playing: {} — {}", track.artist, track.title));
+        return next.current_track().map(|track| {
+            i18n.format(
+                "terminal-now-playing",
+                &[
+                    ("artist", track.artist.as_str().into()),
+                    ("title", track.title.as_str().into()),
+                ],
+            )
+        });
     }
     match next.queue.total.cmp(&previous.queue.total) {
-        std::cmp::Ordering::Greater => Some("Added to queue".into()),
-        std::cmp::Ordering::Less => Some("Removed from queue".into()),
+        std::cmp::Ordering::Greater => Some(i18n.text("terminal-queue-added").into()),
+        std::cmp::Ordering::Less => Some(i18n.text("terminal-queue-removed").into()),
         std::cmp::Ordering::Equal => None,
     }
 }
@@ -710,8 +729,8 @@ enum View {
     },
 }
 
-#[derive(Default)]
 struct UiState {
+    i18n: Arc<Localizer>,
     view: View,
     queue: PagedList<QueueRow>,
     // Resolve the selected occurrence after edits before requesting its new viewport.
@@ -726,6 +745,22 @@ struct UiState {
     page_size: usize,
 }
 impl UiState {
+    fn new(i18n: Arc<Localizer>) -> Self {
+        Self {
+            i18n,
+            view: View::default(),
+            queue: PagedList::default(),
+            queue_anchor: None,
+            show_help: false,
+            message: None,
+            requested: None,
+            query_revision: 0,
+            failed_request: None,
+            local_revision: 0,
+            page_size: 0,
+        }
+    }
+
     fn prepare_local_view(&mut self, state: &TuiSnapshot) -> bool {
         let View::Tree(tree) = &mut self.view else {
             return false;
@@ -868,7 +903,7 @@ impl UiState {
                     }
                     self.queue_anchor = None;
                 } else {
-                    self.set_message(Some("Unexpected view response".into()));
+                    self.set_message(Some(self.i18n.text("terminal-unexpected-response").into()));
                 }
             }
             (View::Search(search), ViewResponse::LibraryPage(page)) => {
@@ -904,11 +939,11 @@ impl UiState {
                     }
                     detail.entry_anchor = None;
                 } else {
-                    self.set_message(Some("Unexpected view response".into()));
+                    self.set_message(Some(self.i18n.text("terminal-unexpected-response").into()));
                 }
             }
             _ => {
-                self.set_message(Some("Unexpected view response".into()));
+                self.set_message(Some(self.i18n.text("terminal-unexpected-response").into()));
                 return true;
             }
         }
@@ -1205,6 +1240,14 @@ impl UiState {
         command.map_or(KeyAction::Ignored, KeyAction::Command)
     }
 }
+
+#[cfg(test)]
+impl Default for UiState {
+    fn default() -> Self {
+        Self::new(Arc::new(Localizer::new("en-US")))
+    }
+}
+
 struct PagedList<T> {
     pages: HashMap<usize, Vec<T>>,
     total: usize,
@@ -1515,15 +1558,16 @@ fn key_action(key: KeyEvent, state: &TuiSnapshot) -> KeyAction {
     playback_key_command(key_name, &state.playback).map_or(KeyAction::Ignored, KeyAction::Command)
 }
 
-fn draw_loading(frame: &mut ratatui::Frame<'_>) {
+fn draw_loading(frame: &mut ratatui::Frame<'_>, i18n: &Localizer) {
     frame.render_widget(
-        Paragraph::new("Connecting to core…\nq to quit")
+        Paragraph::new(i18n.text("terminal-connecting"))
             .block(Block::default().title("Rivu").borders(Borders::ALL)),
         frame.area(),
     );
 }
 
 fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
+    let i18n = &ui.i18n;
     let area = frame.area();
     let outer = Layout::default()
         .direction(Direction::Vertical)
@@ -1537,11 +1581,11 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
     let now = state
         .current_track()
         .map(|t| format!("{} — {}", t.artist, t.title))
-        .unwrap_or_else(|| "Nothing playing".into());
+        .unwrap_or_else(|| i18n.text("terminal-nothing-playing").into());
     let (status, status_icon) = match state.playback.status {
-        PlaybackStatus::Playing => ("Playing", "󰐊"),
-        PlaybackStatus::Paused => ("Paused", "󰏤"),
-        PlaybackStatus::Stopped => ("Stopped", "󰓛"),
+        PlaybackStatus::Playing => (i18n.text("terminal-playing"), "󰐊"),
+        PlaybackStatus::Paused => (i18n.text("terminal-paused"), "󰏤"),
+        PlaybackStatus::Stopped => (i18n.text("terminal-stopped"), "󰓛"),
     };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -1573,11 +1617,13 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
         ui.page_size = columns[0].height.saturating_sub(2).max(1) as usize;
     }
     match &mut ui.view {
-        View::Search(search) => draw_search(frame, columns[0], search),
-        View::Tree(tree) => draw_tree(frame, columns[0], tree),
-        View::PlaylistDetail { detail, .. } => draw_playlist_detail(frame, columns[0], detail),
-        View::Playlists(playlists) => draw_playlists(frame, columns[0], playlists),
-        View::Queue => draw_queue(frame, columns[0], state, &mut ui.queue),
+        View::Search(search) => draw_search(frame, columns[0], search, i18n),
+        View::Tree(tree) => draw_tree(frame, columns[0], tree, i18n),
+        View::PlaylistDetail { detail, .. } => {
+            draw_playlist_detail(frame, columns[0], detail, i18n)
+        }
+        View::Playlists(playlists) => draw_playlists(frame, columns[0], playlists, i18n),
+        View::Queue => draw_queue(frame, columns[0], state, &mut ui.queue, i18n),
     }
     let position = state.playback.position.max(0.0);
     let duration = state.playback.duration.unwrap_or(0.0).max(position + 0.001);
@@ -1597,34 +1643,30 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
             .ratio(ratio),
         outer[2],
     );
-    let keys = match &ui.view {
-        View::Search(_) => {
-            "Type    search library\nTab     query/results focus\n↑/↓     select result\nPgUp/Dn scroll screen\nR       retry loading\nBackspace edit query\nEnter   focus results\nEsc     return to queue\n\nSearch matches title, artist, album and path."
-        }
-        View::Tree(_) => {
-            "↑/↓     select entry\nPgUp/Dn scroll screen\nR       retry loading\nEnter   open directory/add track\nBackspace/← parent directory\nEsc     return to queue\n/       search library\nP       playlists\nSpace   play/pause\nn/p       next/previous\n→       seek forward 5 sec\nHome/End seek start/end\nr       repeat mode\ns       shuffle\n[/]     volume\nq       quit"
-        }
-        View::PlaylistDetail { .. } => {
-            "↑/↓     select track\nPgUp/Dn scroll screen\nR       retry loading\nEnter   play track\na       add track to queue\n←/Esc   back to playlists\nSpace   play/pause\nn/p       next/previous\nHome/End seek start/end\nr       repeat mode\ns       shuffle\n[/]     volume\nq       quit"
-        }
-        View::Playlists(_) => {
-            "↑/↓     select playlist\nPgUp/Dn scroll screen\nR       retry loading\n→       open playlist\nEnter   play playlist\nEsc     return to queue\nP       playlists\n/       search library\nt       browse library tree\nSpace   play/pause\nn/p       next/previous\nHome/End seek start/end\nr       repeat mode\ns       shuffle\n[/]     volume\nq       quit"
-        }
-        View::Queue => {
-            "↑/↓     select queue\nPgUp/Dn scroll screen\nR       retry loading\nEnter   play selected\nd/Del   remove selected\n/       search library\nt       browse library tree\nP       playlists\nSpace   play/pause\n←/→     seek 5 sec\nHome/End seek start/end\nr       repeat mode\ns       shuffle\n[/]     volume\nq       quit"
-        }
-    };
+    let keys = i18n.text(match &ui.view {
+        View::Search(_) => "terminal-help-search",
+        View::Tree(_) => "terminal-help-tree",
+        View::PlaylistDetail { .. } => "terminal-help-playlist",
+        View::Playlists(_) => "terminal-help-playlists",
+        View::Queue => "terminal-help-queue",
+    });
     if ui.show_help {
-        let help = Paragraph::new(keys)
-            .wrap(Wrap { trim: true })
-            .block(Block::default().title("Keys").borders(Borders::ALL));
+        let help = Paragraph::new(keys).wrap(Wrap { trim: true }).block(
+            Block::default()
+                .title(i18n.text("terminal-keys"))
+                .borders(Borders::ALL),
+        );
         frame.render_widget(help, columns[1]);
     }
     let status = format!(
         "󰕾 {:>3}% 󰒝 {} 󰑖 {} 󰘦 {}",
         (state.playback.volume * 100.0).round() as u8,
-        if state.playback.shuffle { "on" } else { "off" },
-        repeat_label(state.playback.repeat),
+        i18n.text(if state.playback.shuffle {
+            "terminal-on"
+        } else {
+            "terminal-off"
+        }),
+        repeat_label(state.playback.repeat, i18n),
         state.queue.total
     );
     let status_columns = Layout::default()
@@ -1637,9 +1679,9 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
     );
     let prompt = ui.message.as_ref().map_or(
         if ui.show_help {
-            "?  close help"
+            i18n.text("terminal-close-help")
         } else {
-            "?  help"
+            i18n.text("terminal-open-help")
         },
         |notice| notice.text.as_str(),
     );
@@ -1656,18 +1698,27 @@ fn draw_queue(
     area: Rect,
     state: &TuiSnapshot,
     queue: &mut PagedList<QueueRow>,
+    i18n: &Localizer,
 ) {
     queue.set_viewport(area.height.saturating_sub(2) as usize);
     let loading =
         (queue.selection.offset()..queue.visible_end()).any(|index| queue.get(index).is_none());
     let title = if state.queue.total == 0 {
-        "Queue — empty; / to search, t to browse".into()
+        i18n.text("terminal-empty-queue").into()
     } else {
-        format!(
-            "Queue — {}/{}{}",
-            queue.selection.selected().unwrap_or(0) + 1,
-            state.queue.total,
-            if loading { " — loading" } else { "" },
+        i18n.format(
+            if loading {
+                "terminal-queue-loading"
+            } else {
+                "terminal-queue-range"
+            },
+            &[
+                (
+                    "selected",
+                    (queue.selection.selected().unwrap_or(0) + 1).into(),
+                ),
+                ("total", state.queue.total.into()),
+            ],
         )
     };
     let items = (queue.selection.offset()..queue.visible_end()).map(|index| {
@@ -1708,19 +1759,26 @@ fn draw_paged_list<T>(
     title: String,
     page: &mut PagedList<T>,
     row: impl Fn(&T) -> String,
+    i18n: &Localizer,
 ) {
     page.set_viewport(area.height.saturating_sub(2) as usize);
     let loading = !page.loaded
         || (page.selection.offset()..page.visible_end()).any(|index| page.get(index).is_none());
     let title = if loading {
-        format!("{title} — loading")
+        i18n.format("terminal-page-loading", &[("title", title.as_str().into())])
     } else if page.total == 0 {
-        format!("{title} — empty")
+        i18n.format("terminal-page-empty", &[("title", title.as_str().into())])
     } else {
-        format!(
-            "{title} — {}/{}",
-            page.selection.selected().unwrap_or(0) + 1,
-            page.total
+        i18n.format(
+            "terminal-page-range",
+            &[
+                ("title", title.as_str().into()),
+                (
+                    "selected",
+                    (page.selection.selected().unwrap_or(0) + 1).into(),
+                ),
+                ("total", page.total.into()),
+            ],
         )
     };
     let items = (page.selection.offset()..page.visible_end())
@@ -1744,21 +1802,34 @@ fn draw_paged_list<T>(
     );
 }
 
-fn draw_playlist_detail(frame: &mut ratatui::Frame<'_>, area: Rect, detail: &mut PlaylistDetail) {
+fn draw_playlist_detail(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    detail: &mut PlaylistDetail,
+    i18n: &Localizer,
+) {
     let marker = "󰎆 ";
     draw_paged_list(
         frame,
         area,
-        format!("Playlist — {}", detail.name),
+        i18n.format(
+            "terminal-playlist-name",
+            &[("name", detail.name.as_str().into())],
+        ),
         &mut detail.entries,
         |entry| {
             format!(
                 "{marker}{} — {}{}",
                 entry.artist,
                 entry.title,
-                if entry.missing { " [missing]" } else { "" }
+                if entry.missing {
+                    i18n.text("terminal-missing-suffix")
+                } else {
+                    ""
+                }
             )
         },
+        i18n,
     );
 }
 
@@ -1766,17 +1837,34 @@ fn draw_playlists(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     playlists: &mut PagedList<PlaylistSummary>,
+    i18n: &Localizer,
 ) {
     let marker = "󰲋 ";
-    draw_paged_list(frame, area, "Playlists".into(), playlists, |playlist| {
-        format!(
-            "{marker}{}  ({} tracks)",
-            playlist.name, playlist.entry_count
-        )
-    });
+    draw_paged_list(
+        frame,
+        area,
+        i18n.text("terminal-playlists").into(),
+        playlists,
+        |playlist| {
+            let label = i18n.format(
+                "terminal-playlist-count",
+                &[
+                    ("name", playlist.name.as_str().into()),
+                    ("count", playlist.entry_count.into()),
+                ],
+            );
+            format!("{marker}{label}")
+        },
+        i18n,
+    );
 }
 
-fn draw_search(frame: &mut ratatui::Frame<'_>, area: Rect, search: &mut LibrarySearch) {
+fn draw_search(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    search: &mut LibrarySearch,
+    i18n: &Localizer,
+) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(3), Constraint::Min(0)])
@@ -1785,65 +1873,90 @@ fn draw_search(frame: &mut ratatui::Frame<'_>, area: Rect, search: &mut LibraryS
         Paragraph::new(search.query.as_str()).block(
             Block::default()
                 .title(if search.focus == SearchFocus::Query {
-                    "Search query — Tab to results"
+                    i18n.text("terminal-query-to-results")
                 } else {
-                    "Search query"
+                    i18n.text("terminal-query")
                 })
                 .borders(Borders::ALL),
         ),
         rows[0],
     );
     let title = if search.focus == SearchFocus::Results {
-        "Library".into()
+        i18n.text("terminal-library").into()
     } else {
-        "Library — Tab to focus".into()
+        i18n.text("terminal-library-focus").into()
     };
-    draw_paged_list(frame, rows[1], title, &mut search.results, |track| {
-        format!(
-            "{} — {} [{}]{}",
-            track.artist,
-            track.title,
-            track.album,
-            if track.missing { " [missing]" } else { "" }
-        )
-    });
-}
-
-fn draw_tree(frame: &mut ratatui::Frame<'_>, area: Rect, tree: &mut LibraryTree) {
-    let title = if tree.directory.as_os_str().is_empty() {
-        "Library tree".into()
-    } else {
-        format!("Library tree — {}", tree.directory.display())
-    };
-    draw_paged_list(frame, area, title, &mut tree.entries, |entry| match entry {
-        DirectoryRow::Directory { path } => {
-            let marker = "\u{f07b} ";
-            let name = path
-                .file_name()
-                .unwrap_or(path.as_os_str())
-                .to_string_lossy();
+    draw_paged_list(
+        frame,
+        rows[1],
+        title,
+        &mut search.results,
+        |track| {
             format!(
-                "{marker}{name}{}",
-                if name.ends_with('/') { "" } else { "/" }
-            )
-        }
-        DirectoryRow::Track(track) => {
-            let marker = "\u{f001} ";
-            format!(
-                "{marker}{} — {}{}",
+                "{} — {} [{}]{}",
                 track.artist,
                 track.title,
-                if track.missing { " [missing]" } else { "" }
+                track.album,
+                if track.missing {
+                    i18n.text("terminal-missing-suffix")
+                } else {
+                    ""
+                }
             )
-        }
-    });
+        },
+        i18n,
+    );
 }
 
-fn repeat_label(mode: RepeatMode) -> &'static str {
+fn draw_tree(frame: &mut ratatui::Frame<'_>, area: Rect, tree: &mut LibraryTree, i18n: &Localizer) {
+    let title = if tree.directory.as_os_str().is_empty() {
+        i18n.text("terminal-library-tree").into()
+    } else {
+        i18n.format(
+            "terminal-library-directory",
+            &[("path", tree.directory.to_string_lossy().as_ref().into())],
+        )
+    };
+    draw_paged_list(
+        frame,
+        area,
+        title,
+        &mut tree.entries,
+        |entry| match entry {
+            DirectoryRow::Directory { path } => {
+                let marker = "\u{f07b} ";
+                let name = path
+                    .file_name()
+                    .unwrap_or(path.as_os_str())
+                    .to_string_lossy();
+                format!(
+                    "{marker}{name}{}",
+                    if name.ends_with('/') { "" } else { "/" }
+                )
+            }
+            DirectoryRow::Track(track) => {
+                let marker = "\u{f001} ";
+                format!(
+                    "{marker}{} — {}{}",
+                    track.artist,
+                    track.title,
+                    if track.missing {
+                        i18n.text("terminal-missing-suffix")
+                    } else {
+                        ""
+                    }
+                )
+            }
+        },
+        i18n,
+    );
+}
+
+fn repeat_label(mode: RepeatMode, i18n: &Localizer) -> &str {
     match mode {
-        RepeatMode::Off => "off",
-        RepeatMode::All => "all",
-        RepeatMode::One => "one",
+        RepeatMode::Off => i18n.text("terminal-off"),
+        RepeatMode::All => i18n.text("terminal-repeat-all"),
+        RepeatMode::One => i18n.text("terminal-repeat-one"),
     }
 }
 fn fmt_time(seconds: f64) -> String {
@@ -1858,6 +1971,90 @@ mod tests {
     use super::*;
     use crate::{model::Page, response::QueryRevisions};
     use ratatui::backend::TestBackend;
+
+    fn terminal_text(terminal: &Terminal<TestBackend>) -> String {
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in buffer.area.y..buffer.area.bottom() {
+            let mut x = buffer.area.x;
+            while x < buffer.area.right() {
+                let symbol = buffer[(x, y)].symbol();
+                text.push_str(symbol);
+                x += Line::from(symbol).width().max(1) as u16;
+            }
+            text.push('\n');
+        }
+        text
+    }
+
+    #[test]
+    fn search_query_clips_at_terminal_cells_without_changing_input() {
+        let i18n = Localizer::new("zh-CN");
+        let mut search = LibrarySearch {
+            query: "春风A".into(),
+            ..LibrarySearch::default()
+        };
+        for width in [6, 7] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
+            terminal
+                .draw(|frame| {
+                    draw_search(frame, frame.area(), &mut search, &i18n);
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            assert_eq!(buffer[(1, 1)].symbol(), "春");
+            assert_eq!(buffer[(3, 1)].symbol(), "风");
+            if width == 7 {
+                assert_eq!(buffer[(5, 1)].symbol(), "A");
+            } else {
+                assert_ne!(buffer[(5, 1)].symbol(), "A");
+            }
+            assert_eq!(search.query, "春风A");
+        }
+    }
+
+    #[test]
+    fn localized_playlist_rendering_preserves_user_metadata() {
+        let mut detail = PlaylistDetail {
+            playlist_id: 1,
+            name: "我的列表".into(),
+            entries: PagedList::default(),
+            entry_anchor: None,
+        };
+        detail.entries.set_viewport(4);
+        detail.entries.insert(
+            0,
+            4,
+            1,
+            vec![PlaylistEntryRow {
+                id: 1,
+                track_id: 1,
+                artist: "原始艺人".into(),
+                title: "Original title".into(),
+                album: "原始专辑".into(),
+                favorite: false,
+                missing: true,
+            }],
+        );
+        for language in ["en-US", "zh-CN"] {
+            let i18n = Localizer::new(language);
+            let mut terminal = Terminal::new(TestBackend::new(80, 8)).unwrap();
+            terminal
+                .draw(|frame| {
+                    draw_playlist_detail(frame, frame.area(), &mut detail, &i18n);
+                })
+                .unwrap();
+            let text = terminal_text(&terminal);
+            for metadata in ["我的列表", "原始艺人", "Original title"] {
+                assert!(text.contains(metadata), "{text}");
+            }
+            let path = "/music/我的专辑";
+            assert!(
+                i18n.format("terminal-library-directory", &[("path", path.into()),])
+                    .contains(path)
+            );
+        }
+    }
 
     #[test]
     fn watcher_shutdown_closes_stalled_initial_handshake() {
@@ -1904,7 +2101,7 @@ mod tests {
         let mut state = TuiSnapshot::default();
         state.queue.total = 200_000;
         state.system.page_size = 3;
-        let mut tui = TuiState::new(state.clone());
+        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
         tui.ui.page_size = 4;
         tui.ui.queue.selection.select(Some(50_000));
         *tui.ui.queue.selection.offset_mut() = 49_999;
@@ -1927,7 +2124,7 @@ mod tests {
         assert!(tui.ui.query_request(&state).is_none());
         let mut terminal = Terminal::new(TestBackend::new(60, 6)).unwrap();
         terminal
-            .draw(|frame| draw_queue(frame, frame.area(), &state, &mut tui.ui.queue))
+            .draw(|frame| draw_queue(frame, frame.area(), &state, &mut tui.ui.queue, &tui.ui.i18n))
             .unwrap();
         let text: String = terminal
             .backend()
@@ -1956,7 +2153,7 @@ mod tests {
         let mut state = TuiSnapshot::default();
         state.queue.total = 12;
         state.system.page_size = 3;
-        let mut tui = TuiState::new(state.clone());
+        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
         tui.ui.queue.selection.select(Some(8));
         load_queue(&mut tui.ui, &state);
         state.queue.total = 11;
@@ -2014,7 +2211,7 @@ mod tests {
         ));
         let mut terminal = Terminal::new(TestBackend::new(60, 6)).unwrap();
         terminal
-            .draw(|frame| draw_queue(frame, frame.area(), &state, &mut tui.ui.queue))
+            .draw(|frame| draw_queue(frame, frame.area(), &state, &mut tui.ui.queue, &tui.ui.i18n))
             .unwrap();
         let text: String = terminal
             .backend()
@@ -2031,7 +2228,7 @@ mod tests {
         let mut state = TuiSnapshot::default();
         state.queue.total = 30;
         state.system.page_size = 3;
-        let mut tui = TuiState::new(state.clone());
+        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
         let delayed = tui.ui.query_request(&state).unwrap();
         assert!(matches!(
             delayed.query(),
@@ -2103,7 +2300,7 @@ mod tests {
     #[test]
     fn empty_queue_addition_updates_count_message_and_waits_for_occurrence_rows() {
         let mut state = TuiSnapshot::default();
-        let mut tui = TuiState::new(state.clone());
+        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
         assert!(tui.ui.query_request(&state).is_none());
         state.queue.total = 2;
         state.queue.revision = 1;
@@ -2233,11 +2430,11 @@ mod tests {
             .draw(|frame| {
                 let area = frame.area();
                 match &mut ui.view {
-                    View::Search(search) => draw_search(frame, area, search),
-                    View::Tree(tree) => draw_tree(frame, area, tree),
-                    View::Playlists(playlists) => draw_playlists(frame, area, playlists),
+                    View::Search(search) => draw_search(frame, area, search, &ui.i18n),
+                    View::Tree(tree) => draw_tree(frame, area, tree, &ui.i18n),
+                    View::Playlists(playlists) => draw_playlists(frame, area, playlists, &ui.i18n),
                     View::PlaylistDetail { detail, .. } => {
-                        draw_playlist_detail(frame, area, detail)
+                        draw_playlist_detail(frame, area, detail, &ui.i18n)
                     }
                     View::Queue => panic!("expected a queried view"),
                 }
@@ -2273,7 +2470,7 @@ mod tests {
                 },
             },
         ] {
-            let mut tui = TuiState::new(snapshot.clone());
+            let mut tui = TuiState::new(snapshot.clone(), Arc::new(Localizer::new("en-US")));
             tui.ui.view = view;
             load_visible(&mut tui.ui, &snapshot);
             let revision = tui.ui.query_revision;
@@ -2289,7 +2486,7 @@ mod tests {
     fn terminal_playlist_reorder_relocates_identity_and_rejects_stale_results() {
         let mut snapshot = TuiSnapshot::default();
         snapshot.system.page_size = 1;
-        let mut tui = TuiState::new(snapshot);
+        let mut tui = TuiState::new(snapshot, Arc::new(Localizer::new("en-US")));
         tui.ui.view = View::PlaylistDetail {
             playlists: (ListState::default(), 1),
             detail: PlaylistDetail {

@@ -258,6 +258,8 @@ pub struct Config {
     /// Default number of rows fetched by GUI and TUI paginated views.
     pub page_size: u32,
     pub library_columns: LibraryColumns,
+    /// Startup presentation language: auto, en-US, or zh-CN.
+    pub ui_language: String,
     /// UI font family; defaults to sans-serif, including empty saved values.
     pub ui_font: String,
     pub ui_scale: f32,
@@ -354,6 +356,7 @@ impl Default for Config {
             log_retention_weeks: 4,
             page_size: DEFAULT_PAGE_SIZE,
             library_columns: LibraryColumns::default(),
+            ui_language: "auto".to_owned(),
             ui_font: "sans-serif".to_owned(),
             ui_scale: 1.0,
             layout_snap_enabled: true,
@@ -450,6 +453,7 @@ impl Config {
         let file: file::FileConfig = toml::from_str(&contents)
             .with_context(|| format!("cannot parse TOML configuration {}", path.display()))?;
         let mut config = file.into_config();
+        config.ui_language = crate::i18n::normalize_language(&config.ui_language).to_owned();
         if config.ui_font.is_empty() {
             config.ui_font = "sans-serif".to_owned();
         }
@@ -460,6 +464,11 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        ensure!(
+            matches!(self.ui_language.as_str(), "auto" | "en-US" | "zh-CN"),
+            "interface.language must be auto, en-US, or zh-CN; got {}",
+            self.ui_language
+        );
         ensure!(
             self.scan_max_depth >= 1,
             "library.scan_max_depth must be at least 1; got {}",
@@ -742,6 +751,25 @@ pub fn default_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interface_language_normalizes_and_round_trips_without_resolving_auto() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        assert_eq!(Config::load(&path).unwrap().ui_language, "auto");
+        for (input, expected) in [("AUTO", "auto"), ("en_us", "en-US"), ("ZH_cn", "zh-CN")] {
+            fs::write(&path, format!("[interface]\nlanguage = '{input}'\n")).unwrap();
+            let config = Config::load(&path).unwrap();
+            assert_eq!(config.ui_language, expected);
+            config.save(&path).unwrap();
+            assert_eq!(Config::load(&path).unwrap(), config);
+        }
+        for value in ["", "fr-FR", "zh-TW", "zh-Hant"] {
+            fs::write(&path, format!("[interface]\nlanguage = '{value}'\n")).unwrap();
+            let error = Config::load(&path).unwrap_err();
+            assert!(format!("{error:#}").contains("interface.language"));
+        }
+    }
 
     #[test]
     fn library_column_selections_preserve_partial_defaults_and_round_trip() {
@@ -1070,6 +1098,7 @@ mod tests {
                 bitrate: true,
             },
             ui_font: "Noto Sans".to_owned(),
+            ui_language: "zh-CN".to_owned(),
             ui_scale: 1.5,
             layout_snap_enabled: false,
             layout_snap_grid_px: 12,

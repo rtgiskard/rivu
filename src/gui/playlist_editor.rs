@@ -61,7 +61,7 @@ impl GuiApp {
             return;
         }
         if name.is_empty() {
-            editor.error = Some("Enter a playlist name.".into());
+            editor.error = Some(self.i18n.text("gl-playlist-name-required").into());
             cx.notify();
             return;
         }
@@ -98,7 +98,7 @@ impl GuiApp {
                     editor.pending = false;
                     editor.error = Some(
                         ack.error
-                            .unwrap_or_else(|| "Could not save playlist.".into()),
+                            .unwrap_or_else(|| this.i18n.text("gl-playlist-save-failed").into()),
                     );
                     this.input(Field::PlaylistName)
                         .read(cx)
@@ -119,22 +119,37 @@ impl GuiApp {
     ) -> AnyElement {
         let editor = self.playlist_editor.as_ref().expect("playlist editor open");
         let (title, submit) = match editor.action {
-            PlaylistNameAction::Create { .. } => ("New playlist", "Create"),
-            PlaylistNameAction::Rename { .. } => ("Rename playlist", "Save"),
-            PlaylistNameAction::SaveQueue => ("Save queue as playlist", "Save"),
+            PlaylistNameAction::Create { .. } => (
+                self.tr("gl-playlist-new-title"),
+                self.tr("gl-playlist-create"),
+            ),
+            PlaylistNameAction::Rename { .. } => (
+                self.tr("gl-playlist-rename-title"),
+                self.tr("gl-playlist-save"),
+            ),
+            PlaylistNameAction::SaveQueue => (
+                self.tr("gl-playlist-save-queue-title"),
+                self.tr("gl-playlist-save"),
+            ),
         };
         let mut content = column().gap_3().child(div().text_lg().child(title));
         if let PlaylistNameAction::Create { track_ids } = &editor.action
             && !track_ids.is_empty()
         {
-            content = content.child(caption(format!("{} selected tracks", track_ids.len())));
+            content = content.child(caption(
+                self.i18n
+                    .format("gl-tracks-selected", &[("count", track_ids.len().into())]),
+            ));
         }
         if editor.pending {
             content = content
                 .child(caption(self.value(Field::PlaylistName, cx)))
-                .child(status_message("Saving…", StatusKind::Info));
+                .child(status_message(self.tr("gl-saving"), StatusKind::Info));
         } else {
-            content = content.child(form_field("Name", self.input(Field::PlaylistName)));
+            content = content.child(form_field(
+                self.tr("gl-name"),
+                self.input(Field::PlaylistName),
+            ));
             if let Some(error) = &editor.error {
                 content = content.child(status_message(error.clone(), StatusKind::Error));
             }
@@ -144,14 +159,14 @@ impl GuiApp {
                     .child(icon_button(
                         "playlist-name-cancel",
                         "",
-                        "Cancel playlist name editing",
+                        self.tr("gl-playlist-name-cancel"),
                         cx,
                         |this, window, cx| this.cancel_playlist_name(window, cx),
                     ))
                     .child(icon_button(
                         "playlist-name-submit",
                         "",
-                        format!("{submit} playlist"),
+                        submit,
                         cx,
                         |this, window, cx| this.submit_playlist_name(window, cx),
                     )),

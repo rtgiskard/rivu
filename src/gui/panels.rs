@@ -50,7 +50,7 @@ pub(super) fn hover_actions(group: &'static str) -> Div {
 }
 
 fn metadata_rows(
-    rows: impl IntoIterator<Item = [(&'static str, SharedString); 2]>,
+    rows: impl IntoIterator<Item = [(SharedString, SharedString); 2]>,
     label_widths: [gpui::Pixels; 2],
 ) -> Div {
     column()
@@ -73,12 +73,13 @@ fn metadata_row(first: Div, second: Div) -> Div {
         .child(second.min_w_0())
 }
 
-fn metadata_group(title: &'static str, content: impl IntoElement) -> Div {
+fn metadata_group(title: impl Into<SharedString>, content: impl IntoElement) -> Div {
     section_group(title, content)
 }
 
 #[derive(Clone)]
 pub(super) struct PlaylistDrag {
+    i18n: std::sync::Arc<crate::i18n::Localizer>,
     playlist_id: i64,
     source_id: i64,
     // GPUI keeps the original on_drag value; the constructor creates only its preview.
@@ -105,9 +106,9 @@ impl PlaylistDrag {
 
 impl gpui::Render for PlaylistDrag {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        super::drag_preview(format!(
-            "Move {} playlist entries",
-            self.entry_ids.get().map_or(0, Vec::len)
+        super::drag_preview(self.i18n.format(
+            "gl-move-playlist-entries",
+            &[("count", (self.entry_ids.get().map_or(0, Vec::len)).into())],
         ))
     }
 }
@@ -135,7 +136,7 @@ impl GuiApp {
             && self.state.playback.status == PlaybackStatus::Playing
             && self.state.playback.last_heard_at.is_some()
         {
-            return "Last played · 0s ago (playing)".into();
+            return self.i18n.text("gl-played-now").into();
         }
 
         let played_at = if current && self.state.playback.status == PlaybackStatus::Paused {
@@ -144,16 +145,27 @@ impl GuiApp {
             stored_at
         };
         match played_at.and_then(|time| DateTime::from_timestamp(time, 0)) {
-            Some(time) => format!(
-                "Last played · {}{}",
-                time.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S"),
-                if current && self.state.playback.status == PlaybackStatus::Paused {
-                    " (paused)"
-                } else {
-                    ""
-                }
+            Some(time) => self.i18n.format(
+                "gl-played-at",
+                &[
+                    (
+                        "time",
+                        (time
+                            .with_timezone(&Local)
+                            .format("%Y-%m-%d %H:%M:%S")
+                            .to_string())
+                        .into(),
+                    ),
+                    (
+                        "paused",
+                        (usize::from(
+                            current && self.state.playback.status == PlaybackStatus::Paused,
+                        ))
+                        .into(),
+                    ),
+                ],
             ),
-            None => "Last played —".into(),
+            None => self.i18n.text("gl-played-none").into(),
         }
     }
     pub(super) fn transport_panel(
@@ -165,12 +177,12 @@ impl GuiApp {
         let track = self.state.current_track();
         let title = track
             .map(|track| track.title.clone())
-            .unwrap_or_else(|| "Choose something to listen to".into());
+            .unwrap_or_else(|| self.i18n.text("gl-choose-track").into());
         let artist = track.map(|track| track.artist.clone()).unwrap_or_default();
         let status = match self.state.playback.status {
-            PlaybackStatus::Playing => "Playing",
-            PlaybackStatus::Paused => "Paused",
-            PlaybackStatus::Stopped => "Stopped",
+            PlaybackStatus::Playing => self.tr("gl-playing"),
+            PlaybackStatus::Paused => self.tr("gl-paused"),
+            PlaybackStatus::Stopped => self.tr("gl-stopped"),
         };
         let duration = self
             .state
@@ -207,9 +219,9 @@ impl GuiApp {
                     ("shuffle", panel_id),
                     "󰒟",
                     if self.state.playback.shuffle {
-                        "Shuffle: on (s)"
+                        self.tr("gl-shuffle-on")
                     } else {
-                        "Shuffle: off (s)"
+                        self.tr("gl-shuffle-off")
                     },
                     cx,
                     |this, _, cx| {
@@ -229,7 +241,7 @@ impl GuiApp {
                 quiet_icon_button(icon_button(
                     ("previous", panel_id),
                     "󰒮",
-                    "Previous track (p)",
+                    self.tr("gl-previous-track"),
                     cx,
                     |this, _, cx| this.send(Command::Previous, cx),
                 ))
@@ -245,9 +257,9 @@ impl GuiApp {
                         "󰐊"
                     },
                     if self.state.playback.status == PlaybackStatus::Playing {
-                        "Pause (space)"
+                        self.tr("gl-pause")
                     } else {
-                        "Play (space)"
+                        self.tr("gl-play")
                     },
                     cx,
                     |this, _, cx| this.send(Command::Toggle, cx),
@@ -263,7 +275,7 @@ impl GuiApp {
                 quiet_icon_button(icon_button(
                     ("next", panel_id),
                     "󰒭",
-                    "Next track (n)",
+                    self.tr("gl-next-track"),
                     cx,
                     |this, _, cx| this.send(Command::Next, cx),
                 ))
@@ -279,9 +291,9 @@ impl GuiApp {
                         "󰑖"
                     },
                     match self.state.playback.repeat {
-                        RepeatMode::Off => "Repeat: off (r)",
-                        RepeatMode::All => "Repeat: all (r)",
-                        RepeatMode::One => "Repeat: one (r)",
+                        RepeatMode::Off => self.tr("gl-repeat-off"),
+                        RepeatMode::All => self.tr("gl-repeat-all"),
+                        RepeatMode::One => self.tr("gl-repeat-one"),
                     },
                     cx,
                     |this, _, cx| {
@@ -309,11 +321,12 @@ impl GuiApp {
                     .text_color(rgb(MUTED))
                     .font_family(super::fonts::SYMBOLS_FAMILY)
                     .child("󰕾")
-                    .tooltip(|_, cx| {
-                        cx.new(|_| super::ButtonTooltip {
-                            text: "Volume ([ / ])".into(),
-                        })
-                        .into()
+                    .tooltip({
+                        let text = self.tr("gl-volume");
+                        move |_, cx| {
+                            cx.new(|_| super::ButtonTooltip { text: text.clone() })
+                                .into()
+                        }
                     }),
             )
             .child(div().flex_1().min_w_0().child(volume))
@@ -381,7 +394,7 @@ impl GuiApp {
             )
             .into_any_element()
     }
-    fn panel_field(&self, field: Field, label: &'static str) -> Div {
+    fn panel_field(&self, field: Field, label: impl Into<SharedString>) -> Div {
         form_field(label, self.input(field))
     }
 
@@ -394,7 +407,7 @@ impl GuiApp {
         tracks.sort_unstable();
         tracks
     }
-    pub(super) fn panel_track_text(track: &crate::model::LibraryRow) -> (String, String) {
+    pub(super) fn panel_track_text(&self, track: &crate::model::LibraryRow) -> (String, String) {
         let detail = format!(
             "{}{}{} · {}{}",
             track.artist,
@@ -406,7 +419,7 @@ impl GuiApp {
             track.album,
             format_time(track.duration.unwrap_or(0.)),
             if track.missing {
-                " · File missing"
+                self.i18n.text("gl-file-missing-suffix")
             } else {
                 ""
             }
@@ -414,8 +427,8 @@ impl GuiApp {
         (track.title.clone(), detail)
     }
 
-    pub(super) fn panel_error(&mut self, message: &'static str, cx: &mut Context<Self>) {
-        self.error = Some(message.into());
+    pub(super) fn panel_error(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.error = Some(message.into().to_string());
         cx.notify();
     }
 
@@ -423,21 +436,35 @@ impl GuiApp {
         use crate::model::ScanPhase;
         let progress = self.state.system.scan_progress.as_ref();
         let header_text = progress.map_or_else(
-            || "Scanning library…".to_owned(),
+            || self.i18n.text("gl-scanning").to_owned(),
             |progress| {
                 let phase = match progress.phase {
-                    ScanPhase::Discovering => "Discovering files",
-                    ScanPhase::ReadingMetadata => "Reading metadata",
-                    ScanPhase::Saving => "Saving library",
-                    ScanPhase::Completed => "Scan completed",
-                    ScanPhase::Failed => "Scan failed",
-                    ScanPhase::Cancelled => "Scan cancelled",
+                    ScanPhase::Discovering => self.i18n.text("gl-scan-discovering"),
+                    ScanPhase::ReadingMetadata => self.i18n.text("gl-scan-metadata"),
+                    ScanPhase::Saving => self.i18n.text("gl-scan-saving"),
+                    ScanPhase::Completed => self.i18n.text("gl-scan-completed"),
+                    ScanPhase::Failed => self.i18n.text("gl-scan-failed"),
+                    ScanPhase::Cancelled => self.i18n.text("gl-scan-cancelled"),
                 };
-                let count = match progress.total {
-                    Some(total) => format!("{} / {total} files", progress.processed),
-                    None => format!("{} files found", progress.processed),
-                };
-                format!("{phase} · {count} · {} errors", progress.errors)
+                match progress.total {
+                    Some(total) => self.i18n.format(
+                        "gl-scan-progress",
+                        &[
+                            ("phase", (phase).into()),
+                            ("processed", (progress.processed).into()),
+                            ("total", (total).into()),
+                            ("errors", (progress.errors).into()),
+                        ],
+                    ),
+                    None => self.i18n.format(
+                        "gl-scan-found",
+                        &[
+                            ("phase", (phase).into()),
+                            ("processed", (progress.processed).into()),
+                            ("errors", (progress.errors).into()),
+                        ],
+                    ),
+                }
             },
         );
         let dismissible = !self.state.system.scanning
@@ -454,7 +481,7 @@ impl GuiApp {
                 slot.child(quiet_icon_button(icon_button(
                     ("dismiss-scan-result", panel_id),
                     "",
-                    "Dismiss scan result",
+                    self.tr("gl-dismiss-scan"),
                     cx,
                     |this, _, cx| this.send(Command::DismissScanResult, cx),
                 )))
@@ -531,9 +558,9 @@ impl GuiApp {
             id,
             if favorite { "󰓎" } else { "󰓐" },
             if favorite {
-                "Remove from favorites"
+                self.tr("gl-unfavorite")
             } else {
-                "Add to favorites"
+                self.tr("gl-favorite")
             },
             cx,
             move |this, _, cx| {
@@ -571,24 +598,39 @@ impl GuiApp {
             .filter(|node| matches!(node, super::library::LibraryNode::Directory(_)))
             .count();
         let selection_label = if range_pending {
-            "Selecting…".to_owned()
+            self.i18n.text("gl-selecting").to_owned()
         } else if selected_directories > 0 && self.browser.library.selected().is_empty() {
-            format!("{selected_directories} folders selected")
+            self.i18n.format(
+                "gl-folders-selected",
+                &[("count", (selected_directories).into())],
+            )
         } else if selected_directories > 0 {
-            format!(
-                "{} tracks · {selected_directories} folders selected",
-                self.browser.library.selected().len()
+            self.i18n.format(
+                "gl-mixed-selected",
+                &[
+                    ("tracks", (self.browser.library.selected().len()).into()),
+                    ("folders", (selected_directories).into()),
+                ],
             )
         } else if !self.browser.library.selected().is_empty() {
-            format!("{} tracks selected", self.browser.library.selected().len())
+            self.i18n.format(
+                "gl-tracks-selected",
+                &[("count", (self.browser.library.selected().len()).into())],
+            )
         } else {
-            format!("{total} entries")
+            self.i18n
+                .format("gl-entry-count", &[("count", (total).into())])
         };
         let can_edit_tracks = !range_pending && !self.browser.library.selected().is_empty();
         let mut tools = panel_toolbar();
         tools = tools
             .when(!tab_bar_visible, |tools| {
-                tools.child(div().text_sm().text_color(rgb(TEXT)).child("Library"))
+                tools.child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(TEXT))
+                        .child(self.tr("gl-library")),
+                )
             })
             .child(
                 caption(selection_label.clone())
@@ -612,9 +654,9 @@ impl GuiApp {
                     "󰉢"
                 },
                 if self.browser.library.tree_active() {
-                    "Switch to flat list view"
+                    self.tr("gl-flat-view")
                 } else {
-                    "Switch to directory tree view"
+                    self.tr("gl-tree-view")
                 },
                 cx,
                 |this, _, cx| this.toggle_library_view(cx),
@@ -623,7 +665,7 @@ impl GuiApp {
                 icon_button(
                     ("library-filter-favorites", panel_id),
                     "󰓎",
-                    "Toggle favorites filter",
+                    self.tr("gl-filter-favorites"),
                     cx,
                     |this, _, cx| {
                         this.refresh_favorite_filter(cx);
@@ -635,7 +677,7 @@ impl GuiApp {
                 icon_button(
                     ("library-filter-missing", panel_id),
                     "󰌶",
-                    "Toggle missing filter",
+                    self.tr("gl-filter-missing"),
                     cx,
                     |this, _, cx| {
                         this.browser.library.toggle_missing();
@@ -647,7 +689,7 @@ impl GuiApp {
             .child(icon_button(
                 ("library-add-root", panel_id),
                 "󰐕",
-                "Add library folder",
+                self.tr("gl-add-root"),
                 cx,
                 |this, _, cx| this.choose_library_root(cx),
             ))
@@ -656,9 +698,9 @@ impl GuiApp {
                     ("library-force-scan", panel_id),
                     "󰑐",
                     if self.browser.library.force_scan() {
-                        "Force rescans: on"
+                        self.tr("gl-force-on")
                     } else {
-                        "Force rescans: off"
+                        self.tr("gl-force-off")
                     },
                     cx,
                     |this, _, cx| {
@@ -673,7 +715,7 @@ impl GuiApp {
                 icon_button(
                     ("library-enqueue", panel_id),
                     "󰐕",
-                    "Append selected tracks to queue",
+                    self.tr("gl-enqueue-selected"),
                     cx,
                     |this, _, cx| {
                         if this.library_range_pending()
@@ -695,7 +737,7 @@ impl GuiApp {
                 danger_control(icon_button(
                     ("library-remove", panel_id),
                     "󰆴",
-                    "Remove selected tracks from library",
+                    self.tr("gl-remove-library-selected"),
                     cx,
                     |this, _, cx| {
                         if this.library_range_pending()
@@ -805,20 +847,29 @@ impl GuiApp {
             .flex_wrap()
             .flex_shrink_0()
             .when(!tab_bar_visible, |header| {
-                header.child(div().text_sm().text_color(rgb(TEXT)).child("Queue"))
+                header.child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(TEXT))
+                        .child(self.tr("gl-queue")),
+                )
             })
             .child(
-                caption(format!(
-                    "{} queued · {} selected",
-                    self.state.queue.total, selection_count,
+                caption(self.i18n.format(
+                    "gl-queue-count",
+                    &[
+                        ("total", (self.state.queue.total).into()),
+                        ("selected", (selection_count).into()),
+                    ],
                 ))
                 .flex_shrink_0()
                 .id(("queue-count", panel_id))
-                .tooltip(|_, cx| {
-                    cx.new(|_| super::ButtonTooltip {
-                        text: "Drag an entry onto its new position".into(),
-                    })
-                    .into()
+                .tooltip({
+                    let text = self.tr("gl-queue-drag-hint");
+                    move |_, cx| {
+                        cx.new(|_| super::ButtonTooltip { text: text.clone() })
+                            .into()
+                    }
                 }),
             );
         let mut tools = panel_toolbar().min_h(px(32.));
@@ -826,7 +877,7 @@ impl GuiApp {
             tools = tools.child(icon_button(
                 ("queue-remove", panel_id),
                 "",
-                "Remove selected queue entries",
+                self.tr("gl-remove-queue-selected"),
                 cx,
                 |this, _, cx| {
                     let queue_ids = this.selected_queue_ids_in_order();
@@ -843,7 +894,10 @@ impl GuiApp {
             if let Some(error) = &self.browser.queue.selection_error {
                 (error.clone().into(), StatusKind::Error)
             } else if self.browser.queue.busy {
-                ("Loading selection…".into(), StatusKind::Info)
+                (
+                    self.i18n.text("gl-selection-loading").into(),
+                    StatusKind::Info,
+                )
             } else {
                 ("".into(), StatusKind::Info)
             };
@@ -868,7 +922,7 @@ impl GuiApp {
                 status.child(icon_button(
                     ("queue-selection-retry", panel_id),
                     "󰑐",
-                    "Retry selection",
+                    self.tr("gl-retry-selection"),
                     cx,
                     |this, _, cx| {
                         if this.browser.queue.selection_error.is_some() {
@@ -907,9 +961,10 @@ impl GuiApp {
                                 let favorite = entry.track.favorite;
                                 let can_move_down = index + 1 < this.state.queue.total;
                                 let revision = this.state.queue.revision;
-                                let (title, detail) = Self::panel_track_text(&entry.track);
+                                let (title, detail) = this.panel_track_text(&entry.track);
                                 let playing = this.state.queue.current_id == Some(id);
                                 let drag = QueueDrag {
+                                    label: this.tr("shell-move-queue-entry"),
                                     queue_id: id,
                                     position: index,
                                     revision: this.state.queue.revision,
@@ -933,7 +988,7 @@ impl GuiApp {
                                         .child(compact_icon_button(icon_button(
                                             ("queue-entry-play", id),
                                             "󰐊",
-                                            "Play this queue entry",
+                                            this.tr("gl-play-queue-entry"),
                                             cx,
                                             move |this, _, cx| {
                                                 this.send_queue_row_action(
@@ -953,7 +1008,7 @@ impl GuiApp {
                                         .child(compact_icon_button(icon_button(
                                             ("queue-entry-remove", id),
                                             "",
-                                            "Remove from queue",
+                                            this.tr("gl-remove-queue"),
                                             cx,
                                             move |this, _, cx| {
                                                 this.send_queue_row_action(
@@ -969,7 +1024,7 @@ impl GuiApp {
                                             compact_icon_button(icon_button(
                                                 ("queue-entry-up", id),
                                                 "",
-                                                "Move this entry up",
+                                                this.tr("gl-entry-up"),
                                                 cx,
                                                 move |this, _, cx| {
                                                     if index > 0 {
@@ -990,7 +1045,7 @@ impl GuiApp {
                                             compact_icon_button(icon_button(
                                                 ("queue-entry-down", id),
                                                 "",
-                                                "Move this entry down",
+                                                this.tr("gl-entry-down"),
                                                 cx,
                                                 move |this, _, cx| {
                                                     if can_move_down {
@@ -1035,7 +1090,7 @@ impl GuiApp {
                                         }
                                     },
                                 ))
-                                .on_drag(drag, |drag, _, _, cx| cx.new(|_| *drag))
+                                .on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone()))
                                 .on_drop(cx.listener(move |this, drag: &QueueDrag, window, cx| {
                                     window.prevent_default();
                                     this.move_queue_entry(drag, id, cx);
@@ -1111,7 +1166,7 @@ impl GuiApp {
                 .child(
                     super::menu_item(
                         "playlist-row-add",
-                        "Add current track",
+                        self.tr("gl-add-current"),
                         cx,
                         move |this, window, cx| {
                             let Some(track_id) = this.state.current_track().map(|track| track.id)
@@ -1133,7 +1188,7 @@ impl GuiApp {
                 )
                 .child(super::menu_item(
                     "playlist-row-rename",
-                    "Rename…",
+                    self.tr("gl-rename"),
                     cx,
                     move |this, window, cx| {
                         this.playlist_action = None;
@@ -1149,7 +1204,7 @@ impl GuiApp {
                 ))
                 .child(super::menu_item(
                     "playlist-row-delete",
-                    "Delete…",
+                    self.tr("gl-delete"),
                     cx,
                     move |this, _, cx| {
                         this.playlist_action = Some(PlaylistAction::Delete(delete.clone()));
@@ -1168,16 +1223,22 @@ impl GuiApp {
             PlaylistAction::Menu(..) => unreachable!(),
         };
         let title = if deleting {
-            format!("Delete “{}”?", target.name)
+            self.i18n.format(
+                "gl-confirm-delete-playlist",
+                &[("name", (target.name.as_str()).into())],
+            )
         } else {
-            format!("Play “{}”?", target.name)
+            self.i18n.format(
+                "gl-confirm-play-playlist",
+                &[("name", (target.name.as_str()).into())],
+            )
         };
         let detail = if deleting {
-            "Only the playlist is deleted. Music files are not touched.".to_owned()
+            self.i18n.text("gl-delete-playlist-note").to_owned()
         } else {
-            format!(
-                "Replace all {} queued entries and start from the playlist's first track?",
-                self.state.queue.total
+            self.i18n.format(
+                "gl-replace-queue-confirm",
+                &[("count", (self.state.queue.total).into())],
             )
         };
         div()
@@ -1213,7 +1274,7 @@ impl GuiApp {
                             .child(icon_button(
                                 "playlist-action-cancel",
                                 "",
-                                "Cancel",
+                                self.tr("gl-cancel"),
                                 cx,
                                 |this, window, cx| this.dismiss_playlist_action(window, cx),
                             ))
@@ -1221,9 +1282,9 @@ impl GuiApp {
                                 "playlist-action-confirm",
                                 if deleting { "󰆴" } else { "󰐊" },
                                 if deleting {
-                                    "Delete playlist"
+                                    self.tr("gl-delete-playlist")
                                 } else {
-                                    "Replace queue and play playlist"
+                                    self.tr("gl-replace-playlist")
                                 },
                                 cx,
                                 move |this, window, cx| {
@@ -1267,13 +1328,13 @@ impl GuiApp {
         let pending = self.browser.requests.pending(kind);
         let playlist_id = self.browser.playlists.selected();
         let message = if pending {
-            "Loading…"
+            self.i18n.text("gl-loading")
         } else if let Some(error) = rows_error {
             error
         } else if kind == ViewRequestKind::Entries {
-            "This playlist is empty"
+            self.i18n.text("gl-playlist-empty")
         } else {
-            "No playlists yet"
+            self.i18n.text("gl-no-playlists")
         };
         let message: SharedString = message.to_owned().into();
         row()
@@ -1321,7 +1382,7 @@ impl GuiApp {
                         panel_id,
                     ),
                     "󰑐",
-                    "Retry",
+                    self.tr("gl-retry"),
                     cx,
                     move |this, _, cx| {
                         if this.browser.requests.pending(kind) {
@@ -1353,12 +1414,12 @@ impl GuiApp {
         let selection_entry = self.browser.playlists.selected_entry();
         let selection_unavailable = !self.browser.playlists.track_selection.ready();
         let selection_pending = self.browser.playlists.track_selection.busy;
-        let selection_message = if !selection_unavailable {
-            ""
+        let selection_message: SharedString = if !selection_unavailable {
+            "".into()
         } else if selection_pending {
-            "Refreshing selection…"
+            self.tr("gl-selection-refreshing")
         } else {
-            "Selection unavailable"
+            self.tr("gl-selection-unavailable")
         };
         let selection_status = row()
             .flex_1()
@@ -1366,14 +1427,14 @@ impl GuiApp {
             .h_full()
             .overflow_hidden()
             .child(
-                status_message(selection_message, StatusKind::Info)
+                status_message(selection_message.clone(), StatusKind::Info)
                     .id(("playlist-selection-status", panel_id))
                     .flex_1()
                     .min_w_0()
                     .truncate()
                     .tooltip(move |_, cx| {
                         cx.new(|_| super::ButtonTooltip {
-                            text: selection_message.into(),
+                            text: selection_message.clone(),
                         })
                         .into()
                     }),
@@ -1384,7 +1445,7 @@ impl GuiApp {
                     slot.child(icon_button(
                         ("retry-playlist-entry", panel_id),
                         "󰑐",
-                        "Retry",
+                        self.tr("gl-retry"),
                         cx,
                         move |this, _, cx| {
                             this.refresh(cx);
@@ -1432,13 +1493,14 @@ impl GuiApp {
                         .child(row_text(
                             ("playlist-text", id as u64),
                             name.clone(),
-                            format!("{} tracks", p.entry_count),
+                            this.i18n
+                                .format("gl-track-count", &[("count", (p.entry_count).into())]),
                         ))
                         .child(
                             compact_icon_button(icon_button(
                                 ("playlist-row-play", id as u64),
                                 "󰐊",
-                                "Play playlist",
+                                this.tr("gl-play-playlist"),
                                 cx,
                                 move |this, window, cx| {
                                     if !playable {
@@ -1470,7 +1532,7 @@ impl GuiApp {
                             compact_icon_button(icon_button(
                                 ("playlist-row-menu", id as u64),
                                 "󰇙",
-                                "Playlist actions",
+                                this.tr("gl-playlist-actions"),
                                 cx,
                                 move |this, window, cx| {
                                     this.focus_layout(window, cx);
@@ -1566,6 +1628,7 @@ impl GuiApp {
                                 this.browser.playlists.selection_generation();
                             let drag_owner = cx.entity().downgrade();
                             let drag = PlaylistDrag {
+                                i18n: std::sync::Arc::clone(&this.i18n),
                                 playlist_id,
                                 source_id: id,
                                 entry_ids: Default::default(),
@@ -1601,7 +1664,7 @@ impl GuiApp {
                                         compact_icon_button(icon_button(
                                             ("playlist-entry-play", id as u64),
                                             "󰐊",
-                                            "Play this track",
+                                            this.tr("gl-play-track"),
                                             cx,
                                             move |this, _, cx| {
                                                 this.send(Command::Play { track_id }, cx)
@@ -1626,7 +1689,7 @@ impl GuiApp {
                                         compact_icon_button(icon_button(
                                             ("playlist-entry-remove", id as u64),
                                             "",
-                                            "Remove from playlist",
+                                            this.tr("gl-remove-playlist"),
                                             cx,
                                             move |this, _, cx| {
                                                 this.refresh(cx);
@@ -1774,15 +1837,20 @@ impl GuiApp {
                         cx,
                     );
                 } else {
-                    this.panel_error("Select a playlist before dropping tracks.", cx);
+                    this.panel_error(this.tr("gl-drop-select-playlist"), cx);
                 }
             }))
             .child(panel_header(
-                "Playlists",
-                format!(
-                    "{} playlists · {} selected tracks",
-                    self.browser.playlists.summaries().total,
-                    self.browser.playlists.track_selection.len()
+                self.tr("gl-playlists"),
+                self.i18n.format(
+                    "gl-playlist-count",
+                    &[
+                        ("total", (self.browser.playlists.summaries().total).into()),
+                        (
+                            "selected",
+                            (self.browser.playlists.track_selection.len()).into(),
+                        ),
+                    ],
                 ),
             ))
             .child(
@@ -1793,7 +1861,7 @@ impl GuiApp {
                     .child(icon_button(
                         ("playlist-create", panel_id),
                         "",
-                        "New playlist…",
+                        self.tr("gl-new-playlist"),
                         cx,
                         |this, window, cx| {
                             this.begin_playlist_name(
@@ -1809,7 +1877,7 @@ impl GuiApp {
                     .child(icon_button(
                         ("playlist-import", panel_id),
                         "",
-                        "Import M3U",
+                        self.tr("gl-import-m3u"),
                         cx,
                         |this, _, cx| this.choose_playlist_import(cx),
                     ))
@@ -1817,7 +1885,7 @@ impl GuiApp {
                         icon_button(
                             ("playlist-export", panel_id),
                             "",
-                            "Export playlist",
+                            self.tr("gl-export-playlist"),
                             cx,
                             move |this, _, cx| {
                                 if let Some(id) = playlist_id {
@@ -1833,7 +1901,7 @@ impl GuiApp {
                             icon_button(
                                 ("playlist-remove-selected", panel_id),
                                 "",
-                                "Remove selected entries",
+                                self.tr("gl-remove-entries"),
                                 cx,
                                 |this, _, cx| this.remove_playlist_selection(cx),
                             ),
@@ -1870,53 +1938,80 @@ impl GuiApp {
         let follow_paused = self.metadata.selected().is_none()
             && protected
             && identity != self.state.current_track().map(|track| track.id);
-        let placeholder: SharedString = "Not loaded".into();
+        let placeholder: SharedString = self.tr("gl-not-loaded");
         let presence_status = match self.metadata.availability() {
-            MetadataAvailability::Unknown if identity.is_none() => "No track selected",
-            MetadataAvailability::Unknown => "Track details not loaded",
-            MetadataAvailability::Present(_) => "Ready",
-            MetadataAvailability::Unavailable(_) => "Track unavailable",
+            MetadataAvailability::Unknown if identity.is_none() => self.i18n.text("gl-no-track"),
+            MetadataAvailability::Unknown => self.i18n.text("gl-details-not-loaded"),
+            MetadataAvailability::Present(_) => self.i18n.text("gl-ready"),
+            MetadataAvailability::Unavailable(_) => self.i18n.text("gl-track-unavailable"),
         };
         let status: SharedString = match self.metadata.read_state() {
-            MetadataReadState::Idle => presence_status.into(),
-            MetadataReadState::Pending(_) => {
-                format!("{presence_status} · Loading track details…").into()
-            }
-            MetadataReadState::Failed(error) => {
-                format!("{presence_status} · Could not load track details: {error}").into()
-            }
+            MetadataReadState::Idle => presence_status.to_owned().into(),
+            MetadataReadState::Pending(_) => self
+                .i18n
+                .format(
+                    "gl-details-loading-status",
+                    &[("status", (presence_status).into())],
+                )
+                .into(),
+            MetadataReadState::Failed(error) => self
+                .i18n
+                .format(
+                    "gl-details-failed-status",
+                    &[
+                        ("status", (presence_status).into()),
+                        ("error", (error.as_str()).into()),
+                    ],
+                )
+                .into(),
+            MetadataReadState::WrongTrack => self
+                .i18n
+                .format(
+                    "gl-details-failed-status",
+                    &[
+                        ("status", presence_status.into()),
+                        ("error", self.i18n.text("gl-metadata-wrong-track").into()),
+                    ],
+                )
+                .into(),
         };
         let status: SharedString = if protected {
-            format!(
-                "{status} · {}{}",
-                if self.metadata.saving() {
-                    "Saving metadata…"
-                } else {
-                    "Unsaved changes"
-                },
-                if follow_paused {
-                    " · Playback follow paused"
-                } else {
-                    ""
-                }
-            )
-            .into()
+            self.i18n
+                .format(
+                    "gl-details-protected-status",
+                    &[
+                        ("status", (status.as_ref()).into()),
+                        (
+                            "draft",
+                            (self.i18n.text(if self.metadata.saving() {
+                                "gl-metadata-saving"
+                            } else {
+                                "gl-unsaved"
+                            }))
+                            .into(),
+                        ),
+                        ("follow", (usize::from(follow_paused)).into()),
+                    ],
+                )
+                .into()
         } else {
             status
         };
-        let heading = self
-            .metadata
-            .selected()
-            .or(id)
-            .map_or_else(|| "Track details".to_owned(), |id| format!("Track #{id}"));
-        let file: [[(&'static str, SharedString); 2]; 1] = [[
+        let heading = self.metadata.selected().or(id).map_or_else(
+            || self.i18n.text("gl-track-details").to_owned(),
+            |id| {
+                self.i18n
+                    .format("gl-track-id", &[("id", (id.to_string()).into())])
+            },
+        );
+        let file: [[(SharedString, SharedString); 2]; 1] = [[
             (
-                "File path",
+                self.tr("gl-file-path"),
                 track.map_or_else(
                     || placeholder.clone(),
                     |track| {
                         if track.missing {
-                            "Missing".into()
+                            self.tr("gl-missing")
                         } else {
                             track.path.to_string_lossy().into_owned().into()
                         }
@@ -1924,23 +2019,23 @@ impl GuiApp {
                 ),
             ),
             (
-                "Availability",
+                self.tr("gl-availability"),
                 track.map_or_else(
                     || placeholder.clone(),
                     |track| {
                         if track.missing {
-                            "Missing".into()
+                            self.tr("gl-missing")
                         } else {
-                            "Available".into()
+                            self.tr("gl-available")
                         }
                     },
                 ),
             ),
         ]];
-        let metadata: [[(&'static str, SharedString); 2]; 3] = [
+        let metadata: [[(SharedString, SharedString); 2]; 3] = [
             [
                 (
-                    "Codec",
+                    self.tr("gl-codec"),
                     track.map_or_else(
                         || placeholder.clone(),
                         |track| {
@@ -1953,7 +2048,7 @@ impl GuiApp {
                     ),
                 ),
                 (
-                    "Sample rate",
+                    self.tr("gl-sample-rate"),
                     track.map_or_else(
                         || placeholder.clone(),
                         |track| {
@@ -1968,7 +2063,7 @@ impl GuiApp {
             ],
             [
                 (
-                    "Channels",
+                    self.tr("gl-channels"),
                     track.map_or_else(
                         || placeholder.clone(),
                         |track| {
@@ -1981,7 +2076,7 @@ impl GuiApp {
                     ),
                 ),
                 (
-                    "Duration",
+                    self.tr("gl-duration"),
                     track.map_or_else(
                         || placeholder.clone(),
                         |track| {
@@ -1994,7 +2089,7 @@ impl GuiApp {
             ],
             [
                 (
-                    "Bitrate",
+                    self.tr("gl-bitrate"),
                     track.map_or_else(
                         || placeholder.clone(),
                         |track| {
@@ -2010,7 +2105,7 @@ impl GuiApp {
                     ),
                 ),
                 (
-                    "Bits/sample",
+                    self.tr("gl-bits-sample"),
                     track.map_or_else(
                         || placeholder.clone(),
                         |track| {
@@ -2022,8 +2117,8 @@ impl GuiApp {
                 ),
             ],
         ];
-        let disc: (&'static str, SharedString) = (
-            "Disc",
+        let disc: (SharedString, SharedString) = (
+            self.tr("gl-disc"),
             track.map_or_else(
                 || placeholder.clone(),
                 |track| {
@@ -2033,10 +2128,10 @@ impl GuiApp {
                 },
             ),
         );
-        let tags: [[(&'static str, SharedString); 2]; 2] = [
+        let tags: [[(SharedString, SharedString); 2]; 2] = [
             [
                 (
-                    "Track",
+                    self.tr("gl-track"),
                     track.map_or_else(
                         || placeholder.clone(),
                         |track| {
@@ -2047,7 +2142,7 @@ impl GuiApp {
                     ),
                 ),
                 (
-                    "Release",
+                    self.tr("gl-release"),
                     track.map_or_else(
                         || placeholder.clone(),
                         |track| {
@@ -2063,23 +2158,17 @@ impl GuiApp {
             ],
             [
                 (
-                    "Play count",
+                    self.tr("gl-play-count"),
                     track.map_or_else(
                         || placeholder.clone(),
                         |track| track.play_count.to_string().into(),
                     ),
                 ),
                 (
-                    "Last played",
+                    self.tr("gl-last-played"),
                     track.map_or_else(
                         || placeholder.clone(),
-                        |track| {
-                            let text = self.last_played_text(track.id, track.last_played);
-                            text.strip_prefix("Last played · ")
-                                .unwrap_or(&text)
-                                .to_owned()
-                                .into()
-                        },
+                        |track| self.last_played_text(track.id, track.last_played).into(),
                     ),
                 ),
             ],
@@ -2090,8 +2179,8 @@ impl GuiApp {
             file.iter()
                 .chain(&metadata)
                 .chain(&tags)
-                .map(|fields| fields[index].0)
-                .chain((index == 1).then_some(disc.0))
+                .map(|fields| &fields[index].0)
+                .chain((index == 1).then_some(&disc.0))
                 .map(|label| {
                     let run = gpui::TextRun {
                         len: label.len(),
@@ -2103,7 +2192,7 @@ impl GuiApp {
                     };
                     window
                         .text_system()
-                        .shape_line(label.into(), window.rem_size() * 0.75, &[run], None)
+                        .shape_line(label.clone(), window.rem_size() * 0.75, &[run], None)
                         .width()
                         .ceil()
                 })
@@ -2116,115 +2205,234 @@ impl GuiApp {
         let scroll = self.scroll_views.content(("metadata", panel_id));
         let details = div()
             .id(("metadata-details", panel_id))
-            .flex().flex_col().flex_1().min_h_0()
-            .overflow_y_scroll().track_scroll(&scroll)
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&scroll)
             .child(
-                column().flex_shrink_0().p(px(UI_INSET)).gap_3()
+                column()
+                    .flex_shrink_0()
+                    .p(px(UI_INSET))
+                    .gap_3()
                     .child(
-                        column().gap_1()
+                        column()
+                            .gap_1()
                             .child(
-                                row().justify_between().items_center()
+                                row()
+                                    .justify_between()
+                                    .items_center()
                                     .child(caption(heading).text_lg().text_color(rgb(TEXT)))
                                     .child(
-                                        row().gap_2()
-                                            .child(
-                                                disabled_control(icon_button(
+                                        row()
+                                            .gap_2()
+                                            .child(disabled_control(
+                                                icon_button(
                                                     ("metadata-favorite", panel_id),
                                                     if favorite { "󰓎" } else { "󰓐" },
-                                                    if favorite { "Remove from favorites" } else { "Add to favorites" },
+                                                    if favorite {
+                                                        self.tr("gl-unfavorite")
+                                                    } else {
+                                                        self.tr("gl-favorite")
+                                                    },
                                                     cx,
                                                     move |this, _, cx| {
-                                                        if this.metadata.editor_identity() != editor_identity {
+                                                        if this.metadata.editor_identity()
+                                                            != editor_identity
+                                                        {
                                                             return;
                                                         }
-                                                        let Some((track_id, favorite)) = this.metadata.track()
-                                                            .map(|track| (track.id, track.favorite)) else {
+                                                        let Some((track_id, favorite)) =
+                                                            this.metadata.track().map(|track| {
+                                                                (track.id, track.favorite)
+                                                            })
+                                                        else {
                                                             return;
                                                         };
-                                                        this.send(Command::SetFavorite {
-                                                            track_ids: vec![track_id], favorite: !favorite,
-                                                        }, cx);
+                                                        this.send(
+                                                            Command::SetFavorite {
+                                                                track_ids: vec![track_id],
+                                                                favorite: !favorite,
+                                                            },
+                                                            cx,
+                                                        );
                                                     },
-                                                ).text_color(rgb(if favorite { ACCENT } else { TEXT })), !editable),
-                                            )
-                                            .child(
-                                                disabled_control(icon_button(
-                                                    ("metadata-save", panel_id), "󰆓",
-                                                    "Save metadata. Media files are never modified.", cx,
+                                                )
+                                                .text_color(rgb(if favorite {
+                                                    ACCENT
+                                                } else {
+                                                    TEXT
+                                                })),
+                                                !editable,
+                                            ))
+                                            .child(disabled_control(
+                                                icon_button(
+                                                    ("metadata-save", panel_id),
+                                                    "󰆓",
+                                                    self.tr("gl-save-metadata"),
+                                                    cx,
                                                     move |this, _, cx| {
-                                                        if this.metadata.editor_identity() == editor_identity {
+                                                        if this.metadata.editor_identity()
+                                                            == editor_identity
+                                                        {
                                                             this.save_metadata(cx);
                                                         }
                                                     },
-                                                ), !can_save),
-                                            )
-                                            .child(
-                                                icon_button(("metadata-retry", panel_id), "󰑐", "Reload current playback track", cx, move |this, _, cx| {
-                                                    if this.metadata.editor_identity() == editor_identity {
+                                                ),
+                                                !can_save,
+                                            ))
+                                            .child(icon_button(
+                                                ("metadata-retry", panel_id),
+                                                "󰑐",
+                                                self.tr("gl-reload-playback"),
+                                                cx,
+                                                move |this, _, cx| {
+                                                    if this.metadata.editor_identity()
+                                                        == editor_identity
+                                                    {
                                                         this.reload_playback_metadata(cx);
                                                     }
-                                                }),
-                                            ),
+                                                },
+                                            )),
                                     ),
                             )
                             .child(
-                                div().id(("metadata-status", panel_id)).min_w_0()
+                                div()
+                                    .id(("metadata-status", panel_id))
+                                    .min_w_0()
                                     .h(gpui::rems(1.25))
-                                    .child(caption(status.clone()).text_xs().text_color(rgb(MUTED)).truncate())
+                                    .child(
+                                        caption(status.clone())
+                                            .text_xs()
+                                            .text_color(rgb(MUTED))
+                                            .truncate(),
+                                    )
                                     .tooltip(move |_, cx| {
-                                        cx.new(|_| super::ButtonTooltip { text: status.clone() }).into()
+                                        cx.new(|_| super::ButtonTooltip {
+                                            text: status.clone(),
+                                        })
+                                        .into()
                                     }),
                             ),
                     )
-                    .child(metadata_group("File", metadata_row(
-                        div().flex_1().min_w_0().child(
-                            metadata_item(file[0][0].0, file[0][0].1.clone(), label_widths[0])
+                    .child(metadata_group(
+                        self.tr("gl-file"),
+                        metadata_row(
+                            div().flex_1().min_w_0().child(
+                                metadata_item(
+                                    file[0][0].0.clone(),
+                                    file[0][0].1.clone(),
+                                    label_widths[0],
+                                )
                                 .id(("metadata-path", panel_id))
                                 .tooltip(move |_, cx| {
-                                    cx.new(|_| super::ButtonTooltip { text: path_tooltip.clone() }).into()
+                                    cx.new(|_| super::ButtonTooltip {
+                                        text: path_tooltip.clone(),
+                                    })
+                                    .into()
                                 }),
+                            ),
+                            metadata_item(
+                                file[0][1].0.clone(),
+                                file[0][1].1.clone(),
+                                label_widths[1],
+                            ),
                         ),
-                        metadata_item(file[0][1].0, file[0][1].1.clone(), label_widths[1]),
-                    )))
-                    .child(metadata_group("Metadata", metadata_rows(metadata, label_widths)))
-                    .child(metadata_group(
-                        "Decoder hint",
-                        column().gap_2()
-                            .child(row().flex_wrap().children(
-                                [
-                                    ("metadata-decoder-auto", "Auto", DecoderHint::Auto),
-                                    ("metadata-decoder-native", "Native", DecoderHint::Native),
-                                    ("metadata-decoder-ffmpeg", "FFmpeg", DecoderHint::Ffmpeg),
-                                ].into_iter().map(|(key, label, decoder_hint)| {
-                                    disabled_control(active_control(
-                                        button((key, panel_id), label, cx, move |this, _, cx| {
-                                            if this.metadata.editor_identity() == editor_identity && this.metadata.editable() {
-                                                this.metadata_decoder_hint = decoder_hint;
-                                                cx.notify();
-                                            }
-                                        }),
-                                        editable && self.metadata_decoder_hint == decoder_hint,
-                                    ), !editable)
-                                }),
-                            ))
-                            .child(caption(
-                                "Use Save to apply metadata and decoder hint changes together. The saved hint applies on the next track open or full waveform request.",
-                            ).text_xs().text_color(rgb(MUTED)))
-                            .child(caption(
-                                "FFmpeg requires the extension to be enabled. Native may play DTS-WAV as noise.",
-                            ).text_xs().text_color(rgb(MUTED))),
                     ))
                     .child(metadata_group(
-                        "Tags",
-                        column().gap_2()
-                            .child(metadata_row(self.panel_field(Field::Title, "Title"), self.panel_field(Field::Artist, "Artist")))
-                            .child(metadata_row(self.panel_field(Field::Album, "Album"), metadata_item(disc.0, disc.1, label_widths[1])))
+                        self.tr("gl-metadata"),
+                        metadata_rows(metadata, label_widths),
+                    ))
+                    .child(metadata_group(
+                        self.tr("gl-decoder-hint"),
+                        column()
+                            .gap_2()
+                            .child(
+                                row().flex_wrap().children(
+                                    [
+                                        (
+                                            "metadata-decoder-auto",
+                                            self.tr("gl-auto"),
+                                            DecoderHint::Auto,
+                                        ),
+                                        (
+                                            "metadata-decoder-native",
+                                            self.tr("gl-native"),
+                                            DecoderHint::Native,
+                                        ),
+                                        (
+                                            "metadata-decoder-ffmpeg",
+                                            SharedString::from("FFmpeg"),
+                                            DecoderHint::Ffmpeg,
+                                        ),
+                                    ]
+                                    .into_iter()
+                                    .map(
+                                        |(key, label, decoder_hint)| {
+                                            disabled_control(
+                                                active_control(
+                                                    button(
+                                                        (key, panel_id),
+                                                        label,
+                                                        cx,
+                                                        move |this, _, cx| {
+                                                            if this.metadata.editor_identity()
+                                                                == editor_identity
+                                                                && this.metadata.editable()
+                                                            {
+                                                                this.metadata_decoder_hint =
+                                                                    decoder_hint;
+                                                                cx.notify();
+                                                            }
+                                                        },
+                                                    ),
+                                                    editable
+                                                        && self.metadata_decoder_hint
+                                                            == decoder_hint,
+                                                ),
+                                                !editable,
+                                            )
+                                        },
+                                    ),
+                                ),
+                            )
+                            .child(
+                                caption(self.tr("gl-decoder-save-note"))
+                                    .text_xs()
+                                    .text_color(rgb(MUTED)),
+                            )
+                            .child(
+                                caption(self.tr("gl-decoder-warning"))
+                                    .text_xs()
+                                    .text_color(rgb(MUTED)),
+                            ),
+                    ))
+                    .child(metadata_group(
+                        self.tr("gl-tags"),
+                        column()
+                            .gap_2()
+                            .child(metadata_row(
+                                self.panel_field(Field::Title, self.tr("gl-title")),
+                                self.panel_field(Field::Artist, self.tr("gl-artist")),
+                            ))
+                            .child(metadata_row(
+                                self.panel_field(Field::Album, self.tr("gl-album")),
+                                metadata_item(disc.0, disc.1, label_widths[1]),
+                            ))
                             .child(metadata_rows(tags, label_widths).gap_2())
                             .when(track.is_some(), |tags| {
                                 tags.child(match self.artwork_view.image(cx) {
-                                    Some(image) => artwork_preview(image.size_full(), self.artwork_view.aspect_ratio(cx)),
+                                    Some(image) => artwork_preview(
+                                        self.tr("shell-panel-album-artwork"),
+                                        image.size_full(),
+                                        self.artwork_view.aspect_ratio(cx),
+                                    ),
                                     None => artwork_preview(
-                                        self.default_album.clone().cached(gpui::StyleRefinement::default().size_full()),
+                                        self.tr("shell-panel-album-artwork"),
+                                        self.default_album
+                                            .clone()
+                                            .cached(gpui::StyleRefinement::default().size_full()),
                                         Some(1.0),
                                     ),
                                 })
@@ -2239,7 +2447,7 @@ impl GuiApp {
     fn history_sort_button(
         &self,
         panel_id: u64,
-        label: &'static str,
+        label: impl Into<SharedString>,
         sort: HistorySort,
         width: Option<gpui::Pixels>,
         cx: &mut Context<Self>,
@@ -2318,20 +2526,14 @@ impl GuiApp {
             )) + rem_size * 0.25;
             let mut widths = [
                 text_width("#".into()),
-                text_width("Play count".into()) + arrow,
-                text_width("Last played".into()) + arrow,
+                text_width(self.tr("gl-play-count")) + arrow,
+                text_width(self.tr("gl-last-played")) + arrow,
             ];
             for (index, item) in source.iter().enumerate() {
                 widths[0] = widths[0].max(text_width((index + 1).to_string().into()));
                 widths[1] = widths[1].max(text_width(item.play_count.to_string().into()));
                 let last_played = self.last_played_text(item.track_id, Some(item.played_at));
-                widths[2] = widths[2].max(text_width(
-                    last_played
-                        .strip_prefix("Last played · ")
-                        .unwrap_or(&last_played)
-                        .to_owned()
-                        .into(),
-                ));
+                widths[2] = widths[2].max(text_width(last_played.into()));
             }
             // Match px_2 on both header controls and data cells.
             let widths = widths.map(|width| width + rem_size);
@@ -2363,17 +2565,23 @@ impl GuiApp {
                     .min_w_0()
                     .truncate(),
             )
-            .child(self.history_sort_button(panel_id, "Track", HistorySort::Title, None, cx))
             .child(self.history_sort_button(
                 panel_id,
-                "Play count",
+                self.tr("gl-track"),
+                HistorySort::Title,
+                None,
+                cx,
+            ))
+            .child(self.history_sort_button(
+                panel_id,
+                self.tr("gl-play-count"),
                 HistorySort::Plays,
                 Some(widths[1]),
                 cx,
             ))
             .child(self.history_sort_button(
                 panel_id,
-                "Last played",
+                self.tr("gl-last-played"),
                 HistorySort::Recent,
                 Some(widths[2]),
                 cx,
@@ -2381,8 +2589,9 @@ impl GuiApp {
         let scroll = self.scroll_views.list(("history", panel_id));
         panel_surface(("history-panel", panel_id))
             .child(panel_header(
-                "Recent tracks",
-                format!("{} tracks", history_len),
+                self.tr("gl-recent-tracks"),
+                self.i18n
+                    .format("gl-track-count", &[("count", (history_len).into())]),
             ))
             .child(list_viewport(
                 column().size_full().child(header).child(
@@ -2396,15 +2605,12 @@ impl GuiApp {
                                     let id = item.track_id;
                                     let favorite = item.favorite;
                                     let title = if item.title.is_empty() {
-                                        "Untitled".to_owned()
+                                        this.i18n.text("gl-untitled").to_owned()
                                     } else {
                                         item.title.clone()
                                     };
                                     let last_played =
                                         this.last_played_text(id, Some(item.played_at));
-                                    let last_played = last_played
-                                        .strip_prefix("Last played · ")
-                                        .unwrap_or(&last_played);
                                     Some(
                                         list_row(
                                             ("history-entry", id as u64),
@@ -2488,6 +2694,7 @@ mod playlist_drag_tests {
     #[test]
     fn group_drop_uses_stable_target_and_original_order_or_append() {
         let drag = PlaylistDrag {
+            i18n: std::sync::Arc::new(crate::i18n::Localizer::new("en-US")),
             playlist_id: 8,
             source_id: 40,
             entry_ids: Default::default(),

@@ -68,6 +68,7 @@ file_group!(Playback, PlaybackView {
 });
 
 file_group!(Interface, InterfaceView {
+    language => ui_language: String,
     tray_enabled => tray_enabled: bool,
     mpris_enabled => mpris_enabled: bool,
     page_size => page_size: u32,

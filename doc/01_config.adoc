@@ -73,6 +73,19 @@ query batch tuning stays in the configuration file, not desktop settings. Queue 
 link:04_playback.adoc#_queue[Playback]; query and batch contracts in
 link:02_library.adoc#_paged_views[Library].
 
+`interface.language` selects the presentation language: `auto` (default), `en-US`,
+or `zh-CN`. Translations are embedded; no language pack installation is needed.
+`auto` uses the first nonempty `LC_ALL`, `LC_MESSAGES`, or `LANG` value, ignoring
+encoding and modifier suffixes. English and Simplified Chinese are supported;
+unavailable languages, including Traditional Chinese, fall back to English.
+Explicit configuration values are `auto`, `en-US`, or `zh-CN` (case-insensitive;
+underscores are accepted and normalized to hyphens); other values are errors.
+Language changes take effect when the corresponding GUI, TUI, CLI, or tray host
+restarts; restarting a command-line client does not change a running desktop host.
+Missing translations fall back to English. Configuration keys, command names,
+machine-readable output, paths, and user metadata are not translated. Diagnostic
+details may remain in English.
+
 `playback.media_read_buffer_mb` defaults to `2`; accepted sizes are `1`, `2`, `4`, `8`,
 and `16` MiB.
 
