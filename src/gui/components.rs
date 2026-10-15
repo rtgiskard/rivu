@@ -1,6 +1,6 @@
 mod dropdown;
 
-use super::{ACCENT, BORDER, GuiApp, HIGHLIGHT, PANEL, TEXT, UI_INSET};
+use super::{ACCENT, BORDER, GuiApp, HIGHLIGHT, MUTED, PANEL, TEXT, UI_INSET};
 
 use gpui::{
     Context, Div, ElementId, Render, SharedString, Stateful, Window, div, prelude::*, px, rgb,
@@ -325,6 +325,34 @@ pub(crate) fn menu_item(
         action(this, window, cx);
         cx.stop_propagation();
     }))
+}
+
+pub(crate) fn menu_separator() -> Div {
+    div().h(gpui::px(1.)).mx_2().my_1().bg(rgb(BORDER))
+}
+
+pub(crate) fn menu_title(title: impl Into<SharedString>) -> Div {
+    div()
+        .px(gpui::px(UI_INSET))
+        .py_1()
+        .text_xs()
+        .text_color(rgb(MUTED))
+        .child(title.into())
+}
+
+pub(crate) fn menu_back(
+    id: impl Into<ElementId>,
+    cx: &mut Context<GuiApp>,
+    action: impl Fn(&mut GuiApp, &mut Window, &mut Context<GuiApp>) + 'static,
+) -> Stateful<Div> {
+    menu_item(id, "", cx, action)
+        .font_family(super::fonts::SYMBOLS_FAMILY)
+        .tooltip(|_, cx| {
+            cx.new(|_| ButtonTooltip {
+                text: "Back".into(),
+            })
+            .into()
+        })
 }
 
 /// Shared bordered section used by settings and metadata panels.

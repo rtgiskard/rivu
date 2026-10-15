@@ -477,6 +477,8 @@ impl Render for GuiApp {
                         cx.stop_propagation();
                         cx.notify();
                     }))
+                    .child(components::menu_title("Menu"))
+                    .child(components::menu_separator())
                     .child(menu_item(
                         "app-settings",
                         "Settings",
@@ -531,7 +533,7 @@ impl Render for GuiApp {
                         ),
                     )
                     .child(about)
-                    .child(div().h(px(1.)).mx_2().my_1().bg(rgb(BORDER)))
+                    .child(components::menu_separator())
                     .child(menu_item(
                         "app-close-window",
                         "Close window",
@@ -605,6 +607,7 @@ impl Render for GuiApp {
                     .border_1()
                     .border_color(rgb(BORDER))
                     .child(div().text_xs().text_color(rgb(MUTED)).child("Add panel"))
+                    .child(components::menu_separator())
                     .child(choices)
                     .child(visualizations),
             );
@@ -930,19 +933,8 @@ impl Render for GuiApp {
                 }
                 PanelMenuPage::LibraryColumns => {
                     menu = menu
-                        .child(menu_item(
-                            "library-columns-back",
-                            "‹ Back",
-                            cx,
-                            move |this, _, cx| {
-                                this.panel_menu = Some(PanelMenu {
-                                    page: PanelMenuPage::Main,
-                                    ..state
-                                });
-                                cx.notify();
-                            },
-                        ))
-                        .child(div().h(px(1.)).mx_2().my_1().bg(rgb(BORDER)));
+                        .child(components::menu_title("Track information"))
+                        .child(components::menu_separator());
                     for column in crate::config::LibraryColumn::ALL {
                         let enabled = self.state.system.config.library_columns.enabled(column);
                         menu = menu.child(
@@ -962,12 +954,10 @@ impl Render for GuiApp {
                             ),
                         );
                     }
-                }
-                PanelMenuPage::AudioVisualizerStyle => {
                     menu = menu
-                        .child(menu_item(
-                            "audio-visualizer-style-back",
-                            "‹ Back",
+                        .child(components::menu_separator())
+                        .child(components::menu_back(
+                            "library-columns-back",
                             cx,
                             move |this, _, cx| {
                                 this.panel_menu = Some(PanelMenu {
@@ -976,8 +966,12 @@ impl Render for GuiApp {
                                 });
                                 cx.notify();
                             },
-                        ))
-                        .child(div().h(px(1.)).mx_2().my_1().bg(rgb(BORDER)));
+                        ));
+                }
+                PanelMenuPage::AudioVisualizerStyle => {
+                    menu = menu
+                        .child(components::menu_title("Visualizer style"))
+                        .child(components::menu_separator());
                     if let Some(options) = self
                         .layouts
                         .current()
@@ -1025,6 +1019,19 @@ impl Render for GuiApp {
                             );
                         }
                     }
+                    menu = menu
+                        .child(components::menu_separator())
+                        .child(components::menu_back(
+                            "audio-visualizer-style-back",
+                            cx,
+                            move |this, _, cx| {
+                                this.panel_menu = Some(PanelMenu {
+                                    page: PanelMenuPage::Main,
+                                    ..state
+                                });
+                                cx.notify();
+                            },
+                        ));
                 }
                 PanelMenuPage::ConfirmClearQueue => {
                     menu = menu
@@ -1063,6 +1070,9 @@ impl Render for GuiApp {
                         );
                 }
                 PanelMenuPage::Playlists => {
+                    menu = menu
+                        .child(components::menu_title("Add to playlist"))
+                        .child(components::menu_separator());
                     menu = menu.child(
                         menu_item(
                             "queue-create-playlist",
@@ -1170,18 +1180,19 @@ impl Render for GuiApp {
                             "The selected queue entry is no longer available.",
                         ));
                     }
-                    menu = menu.child(menu_item(
-                        "queue-playlist-back",
-                        "Back",
-                        cx,
-                        move |this, _, cx| {
-                            this.panel_menu = Some(PanelMenu {
-                                page: PanelMenuPage::Main,
-                                ..state
-                            });
-                            cx.notify();
-                        },
-                    ));
+                    menu = menu
+                        .child(components::menu_separator())
+                        .child(components::menu_back(
+                            "queue-playlist-back",
+                            cx,
+                            move |this, _, cx| {
+                                this.panel_menu = Some(PanelMenu {
+                                    page: PanelMenuPage::Main,
+                                    ..state
+                                });
+                                cx.notify();
+                            },
+                        ));
                 }
             }
             app = app.child(
