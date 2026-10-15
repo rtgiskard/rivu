@@ -927,19 +927,12 @@ impl GuiApp {
                                 .group("queue-track-row")
                                 .child(
                                     row()
-                                        .gap_0()
+                                        .gap(gpui::rems(1.))
                                         .opacity(0.)
                                         .group_hover("queue-track-row", |style| style.opacity(1.))
                                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
                                             cx.stop_propagation();
                                         })
-                                        .child(this.track_favorite_toggle(
-                                            ("queue-entry-favorite", id),
-                                            "queue-track-row",
-                                            track_id,
-                                            favorite,
-                                            cx,
-                                        ))
                                         .child(quiet_icon_button(icon_button(
                                             ("queue-entry-play", id),
                                             "󰐊",
@@ -953,6 +946,13 @@ impl GuiApp {
                                                 )
                                             },
                                         )))
+                                        .child(this.track_favorite_toggle(
+                                            ("queue-entry-favorite", id),
+                                            "queue-track-row",
+                                            track_id,
+                                            favorite,
+                                            cx,
+                                        ))
                                         .child(quiet_icon_button(icon_button(
                                             ("queue-entry-remove", id),
                                             "",
@@ -1430,6 +1430,7 @@ impl GuiApp {
                             this.browser.playlists.selected() == Some(id),
                         )
                         .group("playlist-catalog-row")
+                        .gap(gpui::rems(1.))
                         .child(row_text(
                             ("playlist-text", id as u64),
                             name.clone(),
@@ -1579,13 +1580,7 @@ impl GuiApp {
                                 this.browser.playlists.track_selection.contains(id),
                             )
                             .group("playlist-track-row")
-                            .child(this.track_favorite_toggle(
-                                ("playlist-entry-favorite", id as u64),
-                                "playlist-track-row",
-                                track_id,
-                                favorite,
-                                cx,
-                            ))
+                            .gap(gpui::rems(1.))
                             .child(
                                 quiet_icon_button(icon_button(
                                     ("playlist-entry-play", id as u64),
@@ -1600,6 +1595,13 @@ impl GuiApp {
                                     cx.stop_propagation()
                                 }),
                             )
+                            .child(this.track_favorite_toggle(
+                                ("playlist-entry-favorite", id as u64),
+                                "playlist-track-row",
+                                track_id,
+                                favorite,
+                                cx,
+                            ))
                             .child(
                                 quiet_icon_button(icon_button(
                                     ("playlist-entry-remove", id as u64),

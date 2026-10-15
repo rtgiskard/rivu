@@ -673,6 +673,7 @@ impl Render for AlbumBrowser {
                                     .h(rems(3.5))
                                     .w_full()
                                     .p_2()
+                                    .group("album-track-row")
                                     .border_b_1()
                                     .border_color(rgb(BORDER))
                                     .child(
@@ -688,27 +689,35 @@ impl Render for AlbumBrowser {
                                     .child(caption(
                                         track.duration.map_or_else(|| "—".into(), format_time),
                                     ))
-                                    .child(button(
-                                        ("album-track-play", id as u64),
-                                        "Play",
-                                        cx,
-                                        move |this, _, cx| {
-                                            this.send(Command::Play { track_id: id }, cx)
-                                        },
-                                    ))
-                                    .child(button(
-                                        ("album-track-add", id as u64),
-                                        "Add",
-                                        cx,
-                                        move |this, _, cx| {
-                                            this.send(
-                                                Command::Enqueue {
-                                                    track_ids: vec![id],
-                                                },
+                                    .child(
+                                        row()
+                                            .gap(rems(1.))
+                                            .invisible()
+                                            .group_hover("album-track-row", |style| style.visible())
+                                            .child(icon_button(
+                                                ("album-track-play", id as u64),
+                                                "",
+                                                "Play track",
                                                 cx,
-                                            )
-                                        },
-                                    ))
+                                                move |this, _, cx| {
+                                                    this.send(Command::Play { track_id: id }, cx)
+                                                },
+                                            ))
+                                            .child(icon_button(
+                                                ("album-track-add", id as u64),
+                                                "󰐕",
+                                                "Add track to queue",
+                                                cx,
+                                                move |this, _, cx| {
+                                                    this.send(
+                                                        Command::Enqueue {
+                                                            track_ids: vec![id],
+                                                        },
+                                                        cx,
+                                                    )
+                                                },
+                                            )),
+                                    )
                             })
                             .collect::<Vec<_>>()
                     }),
