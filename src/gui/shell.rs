@@ -797,6 +797,12 @@ impl Render for GuiApp {
                             ));
                     }
                     if is_queue {
+                        menu = menu.child(menu_item(
+                            "queue-save-playlist",
+                            "Save queue as playlist…",
+                            cx,
+                            |this, window, cx| this.save_queue_as_playlist(window, cx),
+                        ));
                         menu = menu
                             .child(components::disabled_control(
                                 menu_item(

@@ -80,13 +80,16 @@ Add to playlist → Save selected queue as new playlist action. It opens its own
 name dialog; no input in the Playlists panel is required. The tracks selected
 when the dialog opens are saved without changing the queue.
 
-Use the Queue panel's Save queue as playlist control to save a non-empty queue.
-The playlist name is generated from the current date and time; duplicate queue
-occurrences become one playlist entry.
-Saving runs in the background; the control stays unavailable until its result
-arrives. Closing the window does not cancel a save already submitted to the core.
-Saving feedback and queue selection errors use a persistent status area; Retry
-is available for a failed selection load without moving the queue controls.
+Use the Queue panel context menu's Save queue as playlist action to save a
+non-empty queue. The shared playlist name dialog starts with a date-and-time
+name that can be edited; duplicate queue occurrences become one playlist entry.
+Saving runs in the background and prevents repeat submissions. Failures retain
+the dialog and draft for correction and retry. Closing the window does not
+cancel a save already submitted to the core. Queue selection status appears
+only while loading or after an error; Retry remains available after an error.
+
+Recent tracks has sortable, shrinking columns and padded header hover targets.
+Hover a recent track to reveal its shared Library favorite toggle.
 
 Playlist catalogs, entries, and the Queue panel's playlist-destination menu
 load rows automatically while scrolling. Entry numbering and drag reordering use

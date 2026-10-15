@@ -422,8 +422,6 @@ pub(super) struct GuiApp {
     default_album: Entity<artwork::Artwork>,
     album_artwork: Entity<album_artwork::AlbumArtwork>,
     album_browsers: HashMap<u64, Entity<album_browser::AlbumBrowser>>,
-    queue_save_pending: bool,
-    queue_save_feedback: Option<Result<String, String>>,
     playlist_editor: Option<playlist_editor::PlaylistEditor>,
     playlist_action: Option<panels::PlaylistAction>,
     settings: Entity<settings::Settings>,
@@ -850,8 +848,6 @@ impl GuiApp {
             scroll_views: scrolling::ScrollViews::default(),
             interaction: LayoutInteraction::default(),
             error,
-            queue_save_pending: false,
-            queue_save_feedback: None,
             playlist_editor: None,
             playlist_action: None,
             album_artwork: cx.new(|cx| {
@@ -927,33 +923,16 @@ impl GuiApp {
         }
         cx.notify();
     }
-    fn save_queue_as_playlist(&mut self, cx: &mut Context<Self>) {
-        if self.queue_save_pending || self.state.queue.total == 0 {
+    fn save_queue_as_playlist(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.state.queue.total == 0 {
             return;
         }
-        let name = format!("Queue {}", chrono::Local::now().format("%Y-%m-%d %H-%M-%S"));
-        self.queue_save_pending = true;
-        self.queue_save_feedback = None;
-        let handle = self.handle.clone();
-        cx.spawn(async move |this, cx| {
-            let ack = cx
-                .background_executor()
-                .spawn(async move { handle.request_ack(Command::CreatePlaylistFromQueue { name }) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                this.queue_save_pending = false;
-                this.queue_save_feedback = Some(if ack.ok {
-                    Ok("Saved queue as playlist".to_owned())
-                } else {
-                    Err(ack
-                        .error
-                        .unwrap_or_else(|| "Could not save queue as playlist".to_owned()))
-                });
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
+        self.begin_playlist_name(
+            playlist_editor::PlaylistNameAction::SaveQueue,
+            format!("Queue {}", chrono::Local::now().format("%Y-%m-%d %H-%M-%S")),
+            window,
+            cx,
+        );
     }
 
     fn choose_playlist_import(&mut self, cx: &mut Context<Self>) {

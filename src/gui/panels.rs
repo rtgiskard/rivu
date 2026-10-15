@@ -823,22 +823,6 @@ impl GuiApp {
                 }),
             );
         let mut tools = panel_toolbar().min_h(px(32.));
-        if self.state.queue.total > 0 {
-            tools = tools.child(disabled_control(
-                icon_button(
-                    ("queue-save-playlist", panel_id),
-                    "\u{f0193}",
-                    if self.queue_save_pending {
-                        "Saving queue as playlist"
-                    } else {
-                        "Save queue as playlist"
-                    },
-                    cx,
-                    |this, _, cx| this.save_queue_as_playlist(cx),
-                ),
-                self.queue_save_pending,
-            ));
-        }
         if selection_count > 1 {
             tools = tools.child(icon_button(
                 ("queue-remove", panel_id),
@@ -856,15 +840,6 @@ impl GuiApp {
                 },
             ));
         }
-        let (save_message, save_kind): (SharedString, _) = if self.queue_save_pending {
-            ("Saving…".into(), StatusKind::Info)
-        } else {
-            match &self.queue_save_feedback {
-                Some(Ok(message)) => (message.clone().into(), StatusKind::Success),
-                Some(Err(message)) => (message.clone().into(), StatusKind::Error),
-                None => ("".into(), StatusKind::Info),
-            }
-        };
         let (selection_message, selection_kind): (SharedString, _) =
             if let Some(error) = &self.browser.queue.selection_error {
                 (error.clone().into(), StatusKind::Error)
@@ -878,19 +853,6 @@ impl GuiApp {
             .flex_shrink_0()
             .overflow_hidden()
             .child(
-                status_message(save_message.clone(), save_kind)
-                    .id(("queue-save-status", panel_id))
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .tooltip(move |_, cx| {
-                        cx.new(|_| super::ButtonTooltip {
-                            text: save_message.clone(),
-                        })
-                        .into()
-                    }),
-            )
-            .child(
                 status_message(selection_message.clone(), selection_kind)
                     .id(("queue-selection-status", panel_id))
                     .flex_1()
@@ -903,23 +865,20 @@ impl GuiApp {
                         .into()
                     }),
             )
-            .child(div().w(gpui::rems(8.)).h_full().flex_shrink_0().when(
-                self.browser.queue.selection_error.is_some(),
-                |slot| {
-                    slot.child(icon_button(
-                        ("queue-selection-retry", panel_id),
-                        "󰑐",
-                        "Retry selection",
-                        cx,
-                        |this, _, cx| {
-                            if this.browser.queue.selection_error.is_some() {
-                                this.refresh_queue(cx);
-                                cx.notify();
-                            }
-                        },
-                    ))
-                },
-            ));
+            .when(self.browser.queue.selection_error.is_some(), |status| {
+                status.child(icon_button(
+                    ("queue-selection-retry", panel_id),
+                    "󰑐",
+                    "Retry selection",
+                    cx,
+                    |this, _, cx| {
+                        if this.browser.queue.selection_error.is_some() {
+                            this.refresh_queue(cx);
+                            cx.notify();
+                        }
+                    },
+                ))
+            });
         let scroll = self.scroll_views.list(("queue", panel_id));
         panel_surface(("queue-panel", panel_id))
             .on_drop(cx.listener(|this, drag: &LibraryDrag, window, cx| {
@@ -927,8 +886,11 @@ impl GuiApp {
                 this.resolve_library_drag(drag.nodes(), super::DragDestination::Queue, cx);
             }))
             .drag_over::<LibraryDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
-            .child(header.when(self.state.queue.total > 0, |header| header.child(tools)))
-            .child(status)
+            .child(header.when(selection_count > 1, |header| header.child(tools)))
+            .when(
+                self.browser.queue.busy || self.browser.queue.selection_error.is_some(),
+                |panel| panel.child(status),
+            )
             .child(list_viewport(
                 uniform_list(
                     ("queue-rows", panel_id),

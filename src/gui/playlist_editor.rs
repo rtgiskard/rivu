@@ -3,6 +3,7 @@ use super::*;
 pub(super) enum PlaylistNameAction {
     Create { track_ids: Vec<i64> },
     Rename { playlist_id: i64 },
+    SaveQueue,
 }
 
 pub(super) struct PlaylistEditor {
@@ -76,6 +77,7 @@ impl GuiApp {
                 playlist_id: *playlist_id,
                 name,
             },
+            PlaylistNameAction::SaveQueue => Command::CreatePlaylistFromQueue { name },
         };
         editor.pending = true;
         editor.error = None;
@@ -119,6 +121,7 @@ impl GuiApp {
         let (title, submit) = match editor.action {
             PlaylistNameAction::Create { .. } => ("New playlist", "Create"),
             PlaylistNameAction::Rename { .. } => ("Rename playlist", "Save"),
+            PlaylistNameAction::SaveQueue => ("Save queue as playlist", "Save"),
         };
         let mut content = column().gap_3().child(div().text_lg().child(title));
         if let PlaylistNameAction::Create { track_ids } = &editor.action
