@@ -74,6 +74,13 @@ impl Render for GuiApp {
             .font(self.ui_font.clone())
             .track_focus(&self.layout_focus)
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if this.manual_confirmation_open() {
+                    if event.keystroke.key == "escape" {
+                        this.cancel_manual_action(cx);
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
                 if event.keystroke.key == "escape"
                     && (this.interaction.docking().is_some()
                         || this.interaction.dragging().is_some()
@@ -91,7 +98,7 @@ impl Render for GuiApp {
                     && !modifiers.shift
                     && !modifiers.function
                 {
-                    window.remove_window();
+                    this.request_close_window(window, cx);
                     cx.stop_propagation();
                 }
             }))
@@ -194,12 +201,10 @@ impl Render for GuiApp {
                 match key {
                     "escape" => {
                         this.focus_layout(window, cx);
-                        this.browser.clear_selection();
-                        this.clear_metadata_selection(cx);
-                        cx.notify();
+                        this.request_clear_selection(cx);
                     }
                     "q" => {
-                        window.remove_window();
+                        this.request_close_window(window, cx);
                     }
                     "/" => this.activate_library(window, cx, true),
                     "t" => this.activate_library(window, cx, false),
@@ -241,7 +246,8 @@ impl Render for GuiApp {
                 cx.stop_propagation();
             }))
             .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _, _| {
-                let modal = this.settings_open
+                let modal = this.manual_confirmation_open()
+                    || this.settings_open
                     || this.about_open
                     || this.duplicate_review.open
                     || this.playlist_editor.is_some()
@@ -530,9 +536,9 @@ impl Render for GuiApp {
                         "app-close-window",
                         "Close window",
                         cx,
-                        |this, window, _| {
+                        |this, window, cx| {
                             this.app_menu_open = false;
-                            window.remove_window();
+                            this.request_close_window(window, cx);
                         },
                     ))
                     .child(menu_item(
@@ -541,9 +547,7 @@ impl Render for GuiApp {
                         cx,
                         |this, _, cx| {
                             this.app_menu_open = false;
-                            if let Some(session) = this.session.upgrade() {
-                                session.borrow().request_shutdown();
-                            }
+                            this.request_quit(cx);
                             cx.notify();
                         },
                     )),
@@ -1329,6 +1333,9 @@ impl Render for GuiApp {
                             ),
                     ),
             );
+        }
+        if let Some(confirmation) = self.render_manual_confirmation(cx) {
+            app = app.child(confirmation);
         }
         self.scroll_views.finish_frame();
         app

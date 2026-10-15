@@ -15,6 +15,25 @@ use std::{
     sync::Arc,
 };
 
+use crate::gui::metadata::{ManualAction, ManualIntentId};
+
+pub(in crate::gui) struct LibraryRowRequest {
+    pub(in crate::gui) node: LibraryNode,
+    pub(in crate::gui) index: usize,
+    pub(in crate::gui) shift: bool,
+    pub(in crate::gui) multi: bool,
+    pub(in crate::gui) scroll: bool,
+}
+
+pub(in crate::gui) struct LibraryCommit {
+    scope: Scope,
+    endpoint: LibraryNode,
+    index: usize,
+    selected: Option<HashSet<LibraryNode>>,
+    multi: bool,
+    scroll: bool,
+}
+
 // Query payloads never enter the viewport LRU or survive the current batch.
 const MAX_RANGE_BATCH: usize = 256;
 
@@ -298,11 +317,13 @@ pub(super) struct LibrarySelection {
     pending: Option<RangeJob>,
     // Cancellation keeps this slot occupied until the outstanding query returns.
     active: Option<u64>,
+    intent: Option<ManualIntentId>,
 }
 
 impl LibrarySelection {
     pub(super) fn cancel(&mut self, clear_anchor: bool) {
         self.token = self.token.wrapping_add(1);
+        self.intent = None;
         self.pending = None;
         if clear_anchor {
             self.anchor = None;
@@ -327,20 +348,58 @@ impl LibrarySelection {
 /// Range state stays behind the browser owner; the window only dispatches work.
 enum RangeStep {
     Idle,
-    Selected(LibraryNode),
+    Selected(LibraryCommit),
     Query { token: u64, slice: Slice },
 }
 
 impl LibraryBrowser {
+    fn publish_selection(&mut self, commit: LibraryCommit) -> LibraryNode {
+        if let Some(selected) = commit.selected {
+            self.apply_range(selected, commit.multi);
+            if !self
+                .range_selection
+                .anchor
+                .as_ref()
+                .is_some_and(|anchor| anchor.scope == commit.scope)
+            {
+                self.range_selection.anchor = Some(Anchor {
+                    index: commit.index,
+                    scope: commit.scope,
+                });
+            }
+        } else {
+            self.select_node(&commit.endpoint, commit.multi);
+            self.range_selection.anchor = Some(Anchor {
+                index: commit.index,
+                scope: commit.scope,
+            });
+        }
+        self.pin_selection(&commit.endpoint, commit.index);
+        if commit.scroll {
+            self.tree
+                .scroll
+                .scroll_to_item(commit.index, gpui::ScrollStrategy::Nearest);
+        }
+        commit.endpoint
+    }
+
+    pub(in crate::gui) fn cancel_manual_selection(&mut self) {
+        self.range_selection.cancel(false);
+        self.cancel_navigation();
+    }
+
+    pub(in crate::gui) fn defer_manual_navigation(&mut self, id: ManualIntentId) {
+        self.navigation_intent = Some(id);
+    }
+
     pub(in crate::gui) fn range_pending(&self) -> bool {
         self.range_selection.pending.is_some()
     }
 
-    fn start_selection(
+    fn start_range_selection(
         &mut self,
         node: &LibraryNode,
         index: usize,
-        shift: bool,
         multi: bool,
         revisions: (u64, u64),
         page_size: usize,
@@ -350,26 +409,7 @@ impl LibraryBrowser {
             return Ok(false);
         }
         self.cancel_navigation();
-        if !shift {
-            self.range_selection.cancel(false);
-            self.select_node(node, multi);
-            self.range_selection.anchor = Some(Anchor { index, scope });
-            self.pin_selection(node, index);
-            return Ok(true);
-        }
         let range = self.range_selection.interval(&scope, index);
-        // Shift never moves a valid anchor; the first Shift click anchors itself.
-        if !self
-            .range_selection
-            .anchor
-            .as_ref()
-            .is_some_and(|anchor| anchor.scope == scope)
-        {
-            self.range_selection.anchor = Some(Anchor {
-                index,
-                scope: scope.clone(),
-            });
-        }
         self.range_selection.cancel(false);
         let spans = self.tree.range_spans(range.clone()).ok_or_else(|| {
             "Library folders are still loading; select the range again when they are ready."
@@ -426,9 +466,14 @@ impl LibraryBrowser {
                 return Ok(RangeStep::Idle);
             }
             let Some(slice) = job.next() else {
-                self.apply_range(job.selected, job.additive);
-                self.pin_selection(&job.endpoint, job.endpoint_index);
-                return Ok(RangeStep::Selected(job.endpoint));
+                return Ok(RangeStep::Selected(LibraryCommit {
+                    scope: job.scope,
+                    endpoint: job.endpoint,
+                    index: job.endpoint_index,
+                    selected: Some(job.selected),
+                    multi: job.additive,
+                    scroll: true,
+                }));
             };
             let cached = match &slice.source {
                 Source::Tree(branch) | Source::Flat(branch) => {
@@ -531,28 +576,130 @@ impl GuiApp {
         multi: bool,
         cx: &mut Context<Self>,
     ) {
+        let id = self.begin_manual_intent();
+        self.prepare_library_row(
+            id,
+            LibraryRowRequest {
+                node,
+                index,
+                shift,
+                multi,
+                scroll: false,
+            },
+            cx,
+        );
+    }
+
+    pub(in crate::gui) fn prepare_library_row(
+        &mut self,
+        id: ManualIntentId,
+        request: LibraryRowRequest,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.manual_intent_current(id) {
+            return;
+        }
+        let LibraryRowRequest {
+            node,
+            index,
+            shift,
+            multi,
+            scroll,
+        } = request;
         let revisions = (
             self.state.library.revision,
             self.state.library.structure_revision,
         );
+        if !shift {
+            let commit = LibraryCommit {
+                scope: Scope::capture(&self.browser.library, revisions),
+                endpoint: node,
+                index,
+                selected: None,
+                multi,
+                scroll,
+            };
+            self.ready_manual_action(id, ManualAction::Library(commit), cx);
+            return;
+        }
         let page_size = self.view_page_size();
         match self
             .browser
             .library
-            .start_selection(&node, index, shift, multi, revisions, page_size)
+            .start_range_selection(&node, index, multi, revisions, page_size)
         {
-            Ok(false) => return,
-            Err(error) => self.error = Some(error),
             Ok(true) => {
-                self.browser.focus_list(ListFocus::Library);
-                if shift {
-                    self.pump_library_range(cx);
-                } else {
-                    self.finish_library_selection(&node, cx);
-                }
+                self.browser.library.range_selection.intent = Some(id);
+                self.pump_library_range(cx);
+            }
+            Ok(false) => self.fail_manual_intent(id),
+            Err(error) => {
+                self.fail_manual_intent(id);
+                self.error = Some(error);
             }
         }
         cx.notify();
+    }
+
+    pub(in crate::gui) fn library_commit_valid(&self, commit: &LibraryCommit) -> bool {
+        commit.scope.matches(
+            &self.browser.library,
+            (
+                self.state.library.revision,
+                self.state.library.structure_revision,
+            ),
+        ) && commit.index < commit.scope.total()
+    }
+
+    pub(in crate::gui) fn library_commit_target(&self, commit: &LibraryCommit) -> Option<i64> {
+        if let Some(selected) = &commit.selected {
+            let tracks = selected.iter().filter_map(|node| match node {
+                LibraryNode::Track(id) => Some(*id),
+                _ => None,
+            });
+            if let LibraryNode::Track(id) = &commit.endpoint
+                && selected.contains(&commit.endpoint)
+            {
+                return Some(*id);
+            }
+            return tracks
+                .chain(
+                    self.browser
+                        .library
+                        .selected()
+                        .iter()
+                        .copied()
+                        .filter(|_| commit.multi),
+                )
+                .min();
+        }
+        match &commit.endpoint {
+            LibraryNode::Track(id)
+                if !commit.multi || !self.browser.library.selected().contains(id) =>
+            {
+                Some(*id)
+            }
+            LibraryNode::Track(id) => self
+                .browser
+                .library
+                .selected()
+                .iter()
+                .copied()
+                .filter(|other| other != id)
+                .min(),
+            _ if commit.multi => self.browser.library.selected().iter().copied().min(),
+            _ => None,
+        }
+    }
+
+    pub(in crate::gui) fn commit_library_selection(
+        &mut self,
+        commit: LibraryCommit,
+        cx: &mut Context<Self>,
+    ) {
+        let endpoint = self.browser.library.publish_selection(commit);
+        self.browser.focus_list(ListFocus::Library);
+        self.finish_library_selection(&endpoint, cx);
     }
 
     fn finish_library_selection(&mut self, endpoint: &LibraryNode, cx: &mut Context<Self>) {
@@ -565,11 +712,22 @@ impl GuiApp {
         } else {
             self.clear_metadata_selection(cx);
         }
+        self.browser.library.remember_selection();
         self.sync_waveform(cx);
         cx.notify();
     }
 
     fn pump_library_range(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.browser.library.range_selection.intent else {
+            return;
+        };
+        if !self.manual_intent_current(id) {
+            return;
+        }
+        self.pump_library_range_unchecked(id, cx);
+    }
+
+    fn pump_library_range_unchecked(&mut self, id: ManualIntentId, cx: &mut Context<Self>) {
         let revisions = (
             self.state.library.revision,
             self.state.library.structure_revision,
@@ -580,11 +738,14 @@ impl GuiApp {
             .advance_range(revisions, &self.state.system.config.library_roots)
         {
             Err(error) => {
+                self.fail_manual_intent(id);
                 self.error = Some(error);
                 cx.notify();
             }
             Ok(RangeStep::Idle) => {}
-            Ok(RangeStep::Selected(endpoint)) => self.finish_library_selection(&endpoint, cx),
+            Ok(RangeStep::Selected(commit)) => {
+                self.ready_manual_action(id, ManualAction::Library(commit), cx)
+            }
             Ok(RangeStep::Query { token, slice }) => {
                 let query = self.browser.library.range_query(token, &slice);
                 let handle = self.handle.clone();
@@ -603,6 +764,7 @@ impl GuiApp {
                             .library
                             .complete_range(token, &slice, response, revisions)
                         {
+                            this.fail_manual_intent(id);
                             this.error = Some(error);
                         }
                         // A cancelled batch cannot apply or overlap its successor.
@@ -621,6 +783,18 @@ mod tests {
     use super::*;
     use crate::gui::browser::merge_selection;
     use crate::model::{LibraryRow, Page};
+
+    fn publish_row(library: &mut LibraryBrowser, endpoint: LibraryNode, index: usize) {
+        let scope = Scope::capture(library, (7, 3));
+        library.publish_selection(LibraryCommit {
+            scope,
+            endpoint,
+            index,
+            selected: None,
+            multi: false,
+            scroll: false,
+        });
+    }
 
     fn scope() -> Scope {
         Scope {
@@ -652,6 +826,65 @@ mod tests {
             play_count: 0,
         }
     }
+
+    #[test]
+    fn deferred_navigation_retains_its_manual_intent_when_its_child_page_loads() {
+        let cancellations: [Option<fn(&mut LibraryBrowser)>; 3] = [
+            None,
+            Some(LibraryBrowser::cancel_navigation),
+            Some(LibraryBrowser::cancel_manual_selection),
+        ];
+        for cancellation in cancellations {
+            let mut library = LibraryBrowser::default();
+            let forest = TreeBranch::default();
+            library.prepare_directory(forest.clone(), 0, 256, 1);
+            library.accept_directory(
+                &forest,
+                1,
+                Page {
+                    total: 1,
+                    rows: vec![DirectoryRow::Directory {
+                        path: "/music".into(),
+                    }],
+                },
+            );
+            let crate::gui::library::tree::TreeItem::Entry(root) = library.tree.item(0).unwrap()
+            else {
+                panic!("loaded root directory");
+            };
+            let branch = root.branch.unwrap();
+            let original = LibraryNode::Directory(Arc::from(branch.path()));
+            library.select_node(&original, false);
+            library.tree.focus_selection(&original, 0);
+            assert!(library.expand_directory(&branch, true));
+            library.prepare_directory(branch.clone(), 0, 256, 2);
+            let mut intents = crate::gui::metadata::ManualIntents::default();
+            let id = intents.begin();
+            assert!(library.navigate_tree_row(1).is_none());
+            library.defer_manual_navigation(id);
+            if let Some(cancel) = cancellation {
+                cancel(&mut library);
+            }
+            let projection = library.tree.projection_revision();
+            library.accept_directory(
+                &branch,
+                2,
+                Page {
+                    total: 2,
+                    rows: vec![DirectoryRow::Track(row(7)), DirectoryRow::Track(row(8))],
+                },
+            );
+            assert_ne!(library.tree.projection_revision(), projection);
+            assert_eq!(library.selected_nodes(), &HashSet::from([original]));
+            assert_eq!(library.tree.selected_index(), Some(0));
+            assert_eq!(
+                library.take_ready_manual_navigation(),
+                cancellation.is_none().then_some((id, 1)),
+            );
+            assert_eq!(library.take_ready_manual_navigation(), None);
+        }
+    }
+
     fn grouped(
         total: usize,
         page_size: usize,
@@ -704,11 +937,9 @@ mod tests {
     #[test]
     fn cancelled_owner_range_releases_its_batch_before_loading_the_replacement() {
         let (mut library, branch, roots) = grouped(100, 20);
+        publish_row(&mut library, LibraryNode::Track(1), 2);
         library
-            .start_selection(&LibraryNode::Track(1), 2, false, false, (7, 3), 20)
-            .unwrap();
-        library
-            .start_selection(&LibraryNode::Track(30), 31, true, false, (7, 3), 20)
+            .start_range_selection(&LibraryNode::Track(30), 31, false, (7, 3), 20)
             .unwrap();
         let RangeStep::Query { token, slice } = library.advance_range((7, 3), &roots).unwrap()
         else {
@@ -728,7 +959,7 @@ mod tests {
             },
         );
         library
-            .start_selection(&LibraryNode::Track(50), 51, true, false, (7, 3), 20)
+            .start_range_selection(&LibraryNode::Track(50), 51, false, (7, 3), 20)
             .unwrap();
         assert!(matches!(
             library.advance_range((7, 3), &roots).unwrap(),
@@ -786,10 +1017,12 @@ mod tests {
                 (7, 3),
             )
             .unwrap();
-        assert!(matches!(
-            library.advance_range((7, 3), &roots).unwrap(),
-            RangeStep::Selected(LibraryNode::Track(50))
-        ));
+        let RangeStep::Selected(commit) = library.advance_range((7, 3), &roots).unwrap() else {
+            panic!("range ready")
+        };
+        assert_eq!(commit.endpoint, LibraryNode::Track(50));
+        assert_eq!(library.selected(), &HashSet::from([1]));
+        library.publish_selection(commit);
         assert_eq!(library.selected(), &HashSet::from([50]));
     }
 
@@ -797,23 +1030,23 @@ mod tests {
     fn owner_range_selection_keeps_evicted_identities_and_rejects_changed_scope() {
         let (mut library, branch, roots) = grouped(1000, 20);
         load_group(&mut library, &branch, 20, 1000, 20, 3);
+        publish_row(&mut library, LibraryNode::Track(1), 2);
         library
-            .start_selection(&LibraryNode::Track(1), 2, false, false, (7, 3), 20)
+            .start_range_selection(&LibraryNode::Track(21), 22, false, (7, 3), 20)
             .unwrap();
-        library
-            .start_selection(&LibraryNode::Track(21), 22, true, false, (7, 3), 20)
-            .unwrap();
-        assert!(matches!(
-            library.advance_range((7, 3), &roots).unwrap(),
-            RangeStep::Selected(LibraryNode::Track(21))
-        ));
+        let RangeStep::Selected(commit) = library.advance_range((7, 3), &roots).unwrap() else {
+            panic!("range ready")
+        };
+        assert_eq!(commit.endpoint, LibraryNode::Track(21));
+        assert_eq!(library.selected(), &HashSet::from([1]));
+        library.publish_selection(commit);
         for offset in (100..500).step_by(20) {
             load_group(&mut library, &branch, offset, 1000, 20, offset as u64);
         }
         assert!(library.tree.cached_row(&branch, 1).is_none());
         assert_eq!(library.selected(), &(1..=21).collect::<HashSet<_>>());
         library
-            .start_selection(&LibraryNode::Track(50), 51, true, false, (7, 3), 20)
+            .start_range_selection(&LibraryNode::Track(50), 51, false, (7, 3), 20)
             .unwrap();
         assert!(matches!(
             library.advance_range((8, 3), &roots).unwrap(),
@@ -855,11 +1088,9 @@ mod tests {
         );
         assert_eq!(library.tree.row_count(), 8);
         let header = LibraryNode::Directory(Arc::from(roots[0].as_path()));
+        publish_row(&mut library, header, 0);
         library
-            .start_selection(&header, 0, false, false, (7, 3), 2)
-            .unwrap();
-        library
-            .start_selection(&LibraryNode::Track(3), 7, true, false, (7, 3), 2)
+            .start_range_selection(&LibraryNode::Track(3), 7, false, (7, 3), 2)
             .unwrap();
         let mut requests = Vec::new();
         loop {
@@ -899,7 +1130,11 @@ mod tests {
                         )
                         .unwrap();
                 }
-                RangeStep::Selected(LibraryNode::Track(3)) => break,
+                RangeStep::Selected(commit) => {
+                    assert_eq!(commit.endpoint, LibraryNode::Track(3));
+                    library.publish_selection(commit);
+                    break;
+                }
                 _ => panic!("range must converge"),
             }
         }
@@ -1116,11 +1351,9 @@ mod tests {
                     rows: vec![DirectoryRow::Track(row(0)), DirectoryRow::Track(row(1))],
                 },
             );
+            publish_row(&mut library, LibraryNode::Track(0), 1);
             library
-                .start_selection(&LibraryNode::Track(0), 1, false, false, (7, 3), 2)
-                .unwrap();
-            library
-                .start_selection(&LibraryNode::Track(3), 4, true, false, (7, 3), 2)
+                .start_range_selection(&LibraryNode::Track(3), 4, false, (7, 3), 2)
                 .unwrap();
             let RangeStep::Query { token, slice } =
                 library.advance_range((7, 3), &["/music".into()]).unwrap()

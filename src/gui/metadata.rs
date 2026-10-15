@@ -6,322 +6,310 @@
 //! previous selection, including a switch away and back to the same track.
 //! Playlist container/membership changes do not change this track identity;
 //! they must not cancel the editor or its in-flight save.
+//! Dirty or saving playback-follow sessions stay on their original identity.
+//! Manual changes defer the whole selection operation behind one confirmation;
+//! no browser selection is mutated until Discard (or a clean save) resolves it.
 
-use crate::model::{DecoderHint, Track};
+pub(in crate::gui) mod session;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(super) struct MetadataValues {
-    pub(super) title: String,
-    pub(super) artist: String,
-    pub(super) album: String,
-    pub(super) decoder_hint: DecoderHint,
-}
-
-impl MetadataValues {
-    fn from_track(track: &Track) -> Self {
-        Self {
-            title: track.title.clone(),
-            artist: track.artist.clone(),
-            album: track.album.clone(),
-            decoder_hint: track.decoder_hint,
-        }
-    }
-
-    pub(super) fn as_draft(&self) -> MetadataDraft<'_> {
-        MetadataDraft {
-            title: &self.title,
-            artist: &self.artist,
-            album: &self.album,
-            decoder_hint: self.decoder_hint,
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(super) struct MetadataDraft<'a> {
-    pub(super) title: &'a str,
-    pub(super) artist: &'a str,
-    pub(super) album: &'a str,
-    pub(super) decoder_hint: DecoderHint,
-}
+use super::{BORDER, Field, GuiApp, PANEL, UI_INSET, button, column, panel_header, row};
+use crate::{model::Query, response::ViewResponse};
+use gpui::{AnyElement, App, Context, div, prelude::*, px, rgb};
+use session::{MetadataDraft, MetadataValues};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct LoadToken {
-    epoch: u64,
-    request: u64,
-    track_id: i64,
-}
+pub(in crate::gui) struct ManualIntentId(u64);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct SaveToken {
-    epoch: u64,
-    request: u64,
-    pub(super) track_id: i64,
-}
-
-#[derive(Debug, Default, PartialEq, Eq)]
-pub(super) enum MetadataLoadState {
-    #[default]
-    Empty,
-    Loading,
-    Ready,
-    Unavailable,
-    Failed(String),
-}
-
+/// Only explicit input advances this identity. Completion supplies data for that
+/// input, but cannot create, replace or cancel a newer desired action.
 #[derive(Default)]
-pub(super) struct MetadataSession {
-    selected: Option<i64>,
-    identity: Option<i64>,
-    track: Option<Track>,
-    baseline: Option<MetadataValues>,
-    load_state: MetadataLoadState,
-    loading: Option<LoadToken>,
-    epoch: u64,
-    request: u64,
-    saving: Option<SaveToken>,
+pub(in crate::gui) struct ManualIntents {
+    serial: u64,
+    preparing: bool,
+    pending: Option<(ManualIntentId, ManualAction)>,
 }
 
-impl MetadataSession {
-    pub(super) fn selected(&self) -> Option<i64> {
-        self.selected
-    }
-    pub(super) fn track(&self) -> Option<&Track> {
-        self.track.as_ref()
-    }
-    pub(super) fn load_state(&self) -> &MetadataLoadState {
-        &self.load_state
-    }
-    pub(super) fn ready(&self) -> bool {
-        self.track
-            .as_ref()
-            .is_some_and(|track| self.identity == Some(track.id))
+impl ManualIntents {
+    pub(in crate::gui) fn begin(&mut self) -> ManualIntentId {
+        self.serial = self.serial.wrapping_add(1);
+        self.pending = None;
+        self.preparing = true;
+        ManualIntentId(self.serial)
     }
 
-    pub(super) fn saving(&self) -> bool {
-        self.saving.is_some()
+    pub(in crate::gui) fn current(&self, id: ManualIntentId) -> bool {
+        self.serial == id.0 && self.preparing
     }
 
-    pub(super) fn dirty(&self, draft: MetadataDraft<'_>) -> bool {
-        self.baseline.as_ref().is_some_and(|baseline| {
-            baseline.title != draft.title
-                || baseline.artist != draft.artist
-                || baseline.album != draft.album
-                || baseline.decoder_hint != draft.decoder_hint
-        })
-    }
-
-    fn change_identity(&mut self, id: Option<i64>) {
-        self.identity = id;
-        self.epoch = self.epoch.wrapping_add(1);
-        self.request = self.request.wrapping_add(1);
-        self.track = None;
-        self.baseline = None;
-        self.saving = None;
-        self.loading = None;
-        self.load_state = MetadataLoadState::Empty;
-    }
-
-    /// Returns whether inputs must be cleared before this selection loads.
-    pub(super) fn select(&mut self, id: i64) -> bool {
-        let changed = self.identity != Some(id);
-        if changed {
-            self.change_identity(Some(id));
-        }
-        self.selected = Some(id);
-        changed
-    }
-
-    pub(super) fn clear_selection(&mut self) {
-        self.selected = None;
-        self.change_identity(None);
-    }
-
-    pub(super) fn begin_load(&mut self, id: i64) -> LoadToken {
-        debug_assert_eq!(self.identity, Some(id));
-        self.request = self.request.wrapping_add(1);
-        let token = LoadToken {
-            epoch: self.epoch,
-            request: self.request,
-            track_id: id,
-        };
-        self.loading = Some(token);
-        self.load_state = MetadataLoadState::Loading;
-        token
-    }
-
-    pub(super) fn accepts_load(&self, token: LoadToken) -> bool {
-        self.loading == Some(token)
-            && self.epoch == token.epoch
-            && self.request == token.request
-            && self.identity == Some(token.track_id)
-    }
-
-    pub(super) fn fail_load(&mut self, token: LoadToken, error: String) -> bool {
-        if !self.accepts_load(token) {
-            return false;
-        }
-        self.loading = None;
-        self.load_state = MetadataLoadState::Failed(error);
-        true
-    }
-
-    /// `Some(values)` replaces widget text. Dirty drafts keep their old baseline.
-    pub(super) fn accept_load(
+    fn offer(
         &mut self,
-        token: LoadToken,
-        track: Option<Track>,
-        draft: MetadataDraft<'_>,
-    ) -> Option<MetadataValues> {
-        if !self.accepts_load(token) {
+        id: ManualIntentId,
+        action: ManualAction,
+        protected: bool,
+    ) -> Option<ManualAction> {
+        if !self.current(id) {
             return None;
         }
-        if track
-            .as_ref()
-            .is_some_and(|track| track.id != token.track_id)
-        {
-            self.fail_load(token, "Received details for a different track".into());
-            return None;
+        self.preparing = false;
+        if protected {
+            self.pending = Some((id, action));
+            None
+        } else {
+            Some(action)
         }
-        self.loading = None;
-        self.accept_track(track, draft)
     }
 
-    fn accept_track(
-        &mut self,
-        track: Option<Track>,
-        draft: MetadataDraft<'_>,
-    ) -> Option<MetadataValues> {
-        let Some(track) = track else {
-            self.track = None;
-            self.baseline = None;
-            self.saving = None;
-            self.load_state = MetadataLoadState::Unavailable;
-            return Some(MetadataValues::default());
-        };
-        let first_load = self.baseline.is_none();
-        let replace = first_load || (!self.dirty(draft) && !self.saving());
-        let values = replace.then(|| MetadataValues::from_track(&track));
-        if let Some(values) = values.as_ref() {
-            self.baseline = Some(values.clone());
-        }
-        self.track = Some(track);
-        self.load_state = MetadataLoadState::Ready;
-        values
+    fn take_pending(&mut self) -> Option<ManualAction> {
+        let (id, action) = self.pending.take()?;
+        (self.serial == id.0).then_some(action)
     }
 
-    pub(super) fn sync_playback(
-        &mut self,
-        track: Option<&Track>,
-        draft: MetadataDraft<'_>,
-    ) -> Option<MetadataValues> {
-        if self.selected.is_some() {
-            return None;
+    fn reject(&mut self, id: ManualIntentId) {
+        if self.current(id) {
+            self.preparing = false;
         }
-        let id = track.map(|track| track.id);
-        if self.identity != id {
-            self.change_identity(id);
-            if track.is_none() {
-                return Some(MetadataValues::default());
-            }
-            let empty = MetadataValues::default();
-            return self.accept_track(track.cloned(), empty.as_draft());
-        }
-        if self.track.as_ref() == track {
-            return None;
-        }
-        self.accept_track(track.cloned(), draft)
-    }
-
-    pub(super) fn begin_save(&mut self, draft: MetadataDraft<'_>) -> Option<(SaveToken, Command)> {
-        let track_id = self.track.as_ref()?.id;
-        if self.saving() || !self.dirty(draft) {
-            return None;
-        }
-        let baseline = self.baseline.as_ref()?;
-        let command = Command::EditTrack {
-            track_id,
-            title: (baseline.title != draft.title).then(|| draft.title.to_owned()),
-            artist: (baseline.artist != draft.artist).then(|| draft.artist.to_owned()),
-            album: (baseline.album != draft.album).then(|| draft.album.to_owned()),
-            decoder_hint: (baseline.decoder_hint != draft.decoder_hint)
-                .then_some(draft.decoder_hint),
-        };
-        let token = SaveToken {
-            epoch: self.epoch,
-            request: self.request.wrapping_add(1),
-            track_id,
-        };
-        self.saving = Some(token);
-        Some((token, command))
-    }
-
-    /// Capture the committed source before an acknowledgement can outlive this editor.
-    fn submitted_hint_change(&self, command: &Command) -> Option<Track> {
-        let Command::EditTrack {
-            decoder_hint: Some(hint),
-            ..
-        } = command
-        else {
-            return None;
-        };
-        let track = self.track.as_ref()?;
-        (track.decoder_hint != *hint).then(|| {
-            let mut track = track.clone();
-            track.decoder_hint = *hint;
-            track
-        })
-    }
-
-    /// Never writes widgets: edits typed while saving remain the active draft.
-    pub(super) fn complete_save(
-        &mut self,
-        token: SaveToken,
-        values: MetadataValues,
-        ok: bool,
-    ) -> bool {
-        if self.saving != Some(token)
-            || self.epoch != token.epoch
-            || self.identity != Some(token.track_id)
-        {
-            return false;
-        }
-        self.saving = None;
-        if ok {
-            self.request = self.request.wrapping_add(1);
-            self.loading = None;
-            self.load_state = MetadataLoadState::Ready;
-            if let (Some(track), Some(baseline)) = (self.track.as_mut(), self.baseline.as_ref()) {
-                // Refreshes may have updated other fields while this save was in flight.
-                // Only the submitted changes are acknowledged; untouched draft fields
-                // keep their baseline so a later save cannot turn them into overrides.
-                if values.title != baseline.title {
-                    track.title.clone_from(&values.title);
-                }
-                if values.artist != baseline.artist {
-                    track.artist.clone_from(&values.artist);
-                }
-                if values.album != baseline.album {
-                    track.album.clone_from(&values.album);
-                }
-                if values.decoder_hint != baseline.decoder_hint {
-                    track.decoder_hint = values.decoder_hint;
-                }
-            }
-            self.baseline = Some(values);
-        }
-        true
     }
 }
 
-use super::{Field, GuiApp};
-use crate::{
-    model::{Command, Query},
-    response::ViewResponse,
-};
-use gpui::{App, Context};
+pub(in crate::gui) enum ManualAction {
+    Library(super::browser::selection::LibraryCommit),
+    Playlist(super::playlist_selection::EntryCommit),
+    Queue(super::queue::QueueCommit),
+    History {
+        track_id: i64,
+        multi: bool,
+    },
+    Clear,
+    Discard {
+        editor: Option<session::EditorIdentity>,
+        selected: Option<i64>,
+    },
+    Close(gpui::AnyWindowHandle),
+    Quit,
+}
 
 impl GuiApp {
+    pub(super) fn metadata_protected(&self, cx: &App) -> bool {
+        self.metadata.saving() || self.metadata_dirty(cx)
+    }
+
+    pub(in crate::gui) fn begin_manual_intent(&mut self) -> ManualIntentId {
+        let id = self.manual_intents.begin();
+        self.browser.library.cancel_manual_selection();
+        self.browser.playlists.track_selection.cancel_manual();
+        self.browser.queue.cancel_manual();
+        id
+    }
+
+    pub(in crate::gui) fn manual_intent_current(&self, id: ManualIntentId) -> bool {
+        self.manual_intents.current(id)
+    }
+
+    pub(in crate::gui) fn fail_manual_intent(&mut self, id: ManualIntentId) {
+        self.manual_intents.reject(id);
+    }
+
+    fn manual_action_valid(&self, action: &ManualAction) -> bool {
+        match action {
+            ManualAction::Library(commit) => self.library_commit_valid(commit),
+            ManualAction::Playlist(commit) => self.entry_commit_valid(commit),
+            ManualAction::Queue(commit) => self.queue_commit_valid(commit),
+            ManualAction::Discard { editor, .. } => self.metadata.editor_identity() == *editor,
+            _ => true,
+        }
+    }
+
+    fn manual_action_target(&self, action: &ManualAction) -> Option<i64> {
+        match action {
+            ManualAction::Library(commit) => self.library_commit_target(commit),
+            ManualAction::Playlist(commit) => Some(commit.target.track_id),
+            ManualAction::Queue(commit) => Some(commit.target.track_id),
+            ManualAction::History { track_id, multi } => {
+                if *multi && self.browser.library.selected().contains(track_id) {
+                    self.browser
+                        .library
+                        .selected()
+                        .iter()
+                        .copied()
+                        .filter(|id| id != track_id)
+                        .min()
+                } else {
+                    Some(*track_id)
+                }
+            }
+            _ => None,
+        }
+    }
+
+    pub(in crate::gui) fn ready_manual_action(
+        &mut self,
+        id: ManualIntentId,
+        action: ManualAction,
+        cx: &mut Context<Self>,
+    ) {
+        self.refresh(cx);
+        if !self.manual_intent_current(id) {
+            return;
+        }
+        if !self.manual_action_valid(&action) {
+            self.manual_intents.reject(id);
+            self.reject_stale_manual_action(cx);
+            return;
+        }
+        let draft = MetadataDraft {
+            title: self.inputs[&Field::Title].read(cx).text(),
+            artist: self.inputs[&Field::Artist].read(cx).text(),
+            album: self.inputs[&Field::Album].read(cx).text(),
+            decoder_hint: self.metadata_decoder_hint,
+        };
+        let protected = self
+            .metadata
+            .needs_confirmation(self.manual_action_target(&action), draft);
+        if let Some(action) = self.manual_intents.offer(id, action, protected) {
+            self.commit_manual_action(action, cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    fn reject_stale_manual_action(&mut self, cx: &mut Context<Self>) {
+        self.error = Some("The selection changed while waiting. Select the desired track again; your Details draft has been kept.".into());
+        cx.notify();
+    }
+
+    pub(super) fn manual_confirmation_open(&self) -> bool {
+        self.manual_intents.pending.is_some()
+    }
+
+    pub(super) fn cancel_manual_action(&mut self, cx: &mut Context<Self>) {
+        self.begin_manual_intent();
+        cx.notify();
+    }
+
+    fn resume_manual_action(&mut self, discard: bool, cx: &mut Context<Self>) {
+        let Some(action) = self.manual_intents.take_pending() else {
+            return;
+        };
+        self.refresh(cx);
+        // Validate the frozen target before touching the original editor or draft.
+        if !self.manual_action_valid(&action) {
+            self.reject_stale_manual_action(cx);
+            return;
+        }
+        if discard && !matches!(action, ManualAction::Discard { .. }) {
+            self.metadata.discard_draft();
+            self.set_metadata_values(MetadataValues::default(), cx);
+        }
+        self.commit_manual_action(action, cx);
+        cx.notify();
+    }
+
+    fn discard_metadata_and_continue(&mut self, cx: &mut Context<Self>) {
+        self.resume_manual_action(true, cx);
+    }
+
+    fn commit_manual_action(&mut self, action: ManualAction, cx: &mut Context<Self>) {
+        match action {
+            ManualAction::Library(commit) => self.commit_library_selection(commit, cx),
+            ManualAction::Playlist(commit) => self.commit_entry_selection(commit, cx),
+            ManualAction::Queue(commit) => self.commit_queue_selection(commit, cx),
+            ManualAction::History { track_id, multi } => {
+                self.commit_history_selection(track_id, multi, cx)
+            }
+            ManualAction::Clear => {
+                self.browser.clear_selection();
+                self.clear_metadata_selection(cx);
+            }
+            ManualAction::Discard { selected, .. } => {
+                self.metadata.discard_draft();
+                self.set_metadata_values(MetadataValues::default(), cx);
+                if let Some(id) = selected {
+                    self.request_track(id, cx);
+                } else {
+                    self.sync_metadata_default(cx);
+                    self.sync_waveform(cx);
+                }
+            }
+            ManualAction::Close(window) => {
+                cx.defer(move |cx| {
+                    let _ = window.update(cx, |_, window, _| window.remove_window());
+                });
+            }
+            ManualAction::Quit => self.finish_quit(),
+        }
+        cx.notify();
+    }
+
+    pub(super) fn request_discard_metadata(&mut self, cx: &mut Context<Self>) {
+        let action = ManualAction::Discard {
+            editor: self.metadata.editor_identity(),
+            selected: self.metadata.selected(),
+        };
+        let id = self.begin_manual_intent();
+        self.ready_manual_action(id, action, cx);
+    }
+
+    pub(super) fn request_clear_selection(&mut self, cx: &mut Context<Self>) {
+        let id = self.begin_manual_intent();
+        self.ready_manual_action(id, ManualAction::Clear, cx);
+    }
+
+    pub(super) fn render_manual_confirmation(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        self.manual_intents.pending.as_ref()?;
+        let detail = if self.metadata.saving() {
+            "The save already submitted may still complete. Discard any remaining draft and continue, or Cancel to keep editing this track."
+        } else {
+            "Discard the unsaved Details draft and continue? Cancel keeps the draft and the original selection."
+        };
+        Some(
+            div()
+                .id("metadata-confirmation-modal")
+                .occlude()
+                .absolute()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(rgb(0x000000).alpha(0.58))
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_mouse_down(gpui::MouseButton::Right, |_, _, cx| cx.stop_propagation())
+                .on_mouse_down(gpui::MouseButton::Middle, |_, _, cx| cx.stop_propagation())
+                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                .child(
+                    column()
+                        .id("metadata-confirmation-card")
+                        .w(gpui::rems(26.25))
+                        .max_w(gpui::relative(0.9))
+                        .p(px(UI_INSET))
+                        .bg(rgb(PANEL))
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .rounded_md()
+                        .child(panel_header("Discard Details draft?", detail))
+                        .child(
+                            row()
+                                .justify_end()
+                                .child(button(
+                                    "metadata-confirmation-cancel",
+                                    "Cancel",
+                                    cx,
+                                    |this, _, cx| this.cancel_manual_action(cx),
+                                ))
+                                .child(super::components::danger_control(button(
+                                    "metadata-confirmation-discard",
+                                    "Discard",
+                                    cx,
+                                    |this, _, cx| this.discard_metadata_and_continue(cx),
+                                ))),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
     pub(super) fn metadata_dirty(&self, cx: &App) -> bool {
         self.metadata.dirty(MetadataDraft {
             title: self.inputs[&Field::Title].read(cx).text(),
@@ -332,7 +320,7 @@ impl GuiApp {
     }
 
     pub(super) fn sync_metadata_inputs(&mut self, cx: &mut Context<Self>) {
-        let enabled = self.metadata.ready();
+        let enabled = self.metadata.editable();
         for field in [Field::Title, Field::Artist, Field::Album] {
             self.inputs[&field].update(cx, |input, cx| input.set_enabled(enabled, cx));
         }
@@ -347,9 +335,20 @@ impl GuiApp {
     }
 
     pub(super) fn request_track(&mut self, id: i64, cx: &mut Context<Self>) {
+        debug_assert!(self.metadata.identity() == Some(id) || !self.metadata_protected(cx));
         if self.metadata.select(id) {
             self.set_metadata_values(MetadataValues::default(), cx);
         }
+        self.load_metadata_track(id, cx);
+    }
+
+    pub(super) fn retry_metadata(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.metadata.identity() {
+            self.load_metadata_track(id, cx);
+        }
+    }
+
+    fn load_metadata_track(&mut self, id: i64, cx: &mut Context<Self>) {
         self.sync_full_waveform_request();
         let token = self.metadata.begin_load(id);
         self.sync_metadata_inputs(cx);
@@ -384,7 +383,7 @@ impl GuiApp {
                     }
                 };
                 if response.revisions.library != this.state.library.revision {
-                    this.request_track(id, cx);
+                    this.load_metadata_track(id, cx);
                     return;
                 }
                 if let ViewResponse::Track(track) = result {
@@ -397,6 +396,7 @@ impl GuiApp {
                     if let Some(values) = this.metadata.accept_load(token, track, draft) {
                         this.set_metadata_values(values, cx);
                     }
+                    this.resume_metadata_follow(cx);
                     this.sync_waveform(cx);
                     this.sync_metadata_inputs(cx);
                 } else {
@@ -432,6 +432,18 @@ impl GuiApp {
         self.sync_metadata_inputs(cx);
     }
 
+    fn resume_metadata_follow(&mut self, cx: &mut Context<Self>) {
+        if self.metadata.selected().is_none()
+            && self.metadata.identity() != self.state.current_track().map(|track| track.id)
+            && !matches!(
+                self.metadata.read_state(),
+                session::MetadataReadState::Pending(_)
+            )
+        {
+            self.sync_metadata_default(cx);
+        }
+    }
+
     pub(super) fn save_metadata(&mut self, cx: &mut Context<Self>) {
         let values = MetadataValues {
             title: self.value(Field::Title, cx),
@@ -440,6 +452,9 @@ impl GuiApp {
             decoder_hint: self.metadata_decoder_hint,
         };
         let Some((token, command)) = self.metadata.begin_save(values.as_draft()) else {
+            if !self.metadata.saving() && !self.metadata_dirty(cx) {
+                self.resume_manual_action(false, cx);
+            }
             return;
         };
         let hint_change = self.metadata.submitted_hint_change(&command);
@@ -463,10 +478,25 @@ impl GuiApp {
                     return;
                 }
                 if ack.ok {
-                    this.sync_waveform(cx);
-                    if let Some(id) = this.metadata.selected() {
-                        this.request_track(id, cx);
+                    // Acknowledging only the submitted baseline leaves later edits
+                    // dirty. Resume the latest desired operation only when clean.
+                    if !this.metadata_dirty(cx) {
+                        let draft = MetadataDraft {
+                            title: this.inputs[&Field::Title].read(cx).text(),
+                            artist: this.inputs[&Field::Artist].read(cx).text(),
+                            album: this.inputs[&Field::Album].read(cx).text(),
+                            decoder_hint: this.metadata_decoder_hint,
+                        };
+                        if let Some(values) = this.metadata.reconcile_clean(draft) {
+                            this.set_metadata_values(values, cx);
+                        }
+                        if this.manual_intents.pending.is_some() {
+                            this.resume_manual_action(false, cx);
+                        } else {
+                            this.resume_metadata_follow(cx);
+                        }
                     }
+                    this.sync_waveform(cx);
                 } else {
                     this.error = Some(
                         ack.error
@@ -483,533 +513,78 @@ impl GuiApp {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn decoder_hint_draft_refresh_and_save_lifecycle() {
-        let mut session = MetadataSession::default();
-        let baseline = load(&mut session, 1, "original");
-        let submitted = MetadataValues {
-            decoder_hint: DecoderHint::Ffmpeg,
-            ..baseline.clone()
-        };
-        assert!(session.dirty(submitted.as_draft()));
-        assert!(!session.dirty(baseline.as_draft()));
-        assert!(session.begin_save(baseline.as_draft()).is_none());
-        assert_eq!(session.track().unwrap().decoder_hint, DecoderHint::Auto);
+    use super::{ManualAction, ManualIntents};
 
-        let refresh = session.begin_load(1);
-        let mut remote = track(1, "remote title");
-        remote.decoder_hint = DecoderHint::Native;
+    #[test]
+    fn late_range_cannot_replace_newer_exit_or_clean_selection() {
+        let mut owner = ManualIntents::default();
+        let range = owner.begin();
+        let quit = owner.begin();
+        assert!(owner.offer(quit, ManualAction::Quit, true).is_none());
         assert!(
-            session
-                .accept_load(refresh, Some(remote), submitted.as_draft())
+            owner
+                .offer(
+                    range,
+                    ManualAction::History {
+                        track_id: 2,
+                        multi: false
+                    },
+                    true
+                )
                 .is_none()
         );
-        assert!(session.dirty(submitted.as_draft()));
-        assert!(!session.dirty(baseline.as_draft()));
-        let (failed, command) = session.begin_save(submitted.as_draft()).unwrap();
+        assert!(matches!(owner.take_pending(), Some(ManualAction::Quit)));
+        let navigation = owner.begin();
+        let clean_selection = owner.begin();
         assert!(matches!(
-            command,
-            Command::EditTrack {
-                title: None,
-                artist: None,
-                album: None,
-                decoder_hint: Some(DecoderHint::Ffmpeg),
-                ..
-            }
+            owner.offer(
+                clean_selection,
+                ManualAction::History {
+                    track_id: 7,
+                    multi: false
+                },
+                false
+            ),
+            Some(ManualAction::History { track_id: 7, .. })
         ));
-        assert_eq!(session.track().unwrap().decoder_hint, DecoderHint::Native);
-        assert!(session.complete_save(failed, submitted.clone(), false));
-        assert!(session.dirty(submitted.as_draft()));
-        assert_eq!(session.track().unwrap().decoder_hint, DecoderHint::Native);
-
-        let (saved, _) = session.begin_save(submitted.as_draft()).unwrap();
-        let edited_during_save = MetadataValues {
-            title: "new title".into(),
-            decoder_hint: DecoderHint::Auto,
-            ..submitted.clone()
-        };
-        assert!(session.complete_save(saved, submitted.clone(), true));
-        assert_eq!(session.track().unwrap().decoder_hint, DecoderHint::Ffmpeg);
-        assert_eq!(session.track().unwrap().title, "remote title");
-        assert!(!session.dirty(submitted.as_draft()));
-        assert!(session.dirty(edited_during_save.as_draft()));
-        let (pending, command) = session.begin_save(edited_during_save.as_draft()).unwrap();
-        assert!(matches!(&command, Command::EditTrack {
-            title: Some(title), artist: None, album: None,
-            decoder_hint: Some(DecoderHint::Auto), ..
-        } if title == "new title"));
-        let switched = load(&mut session, 2, "other");
-        assert_eq!(switched.decoder_hint, DecoderHint::Auto);
-        assert!(!session.dirty(switched.as_draft()));
-        assert!(!session.complete_save(pending, edited_during_save.clone(), true));
-        load(&mut session, 1, "reopened");
-        assert!(!session.complete_save(pending, edited_during_save, true));
-        assert_eq!(session.track().unwrap().decoder_hint, DecoderHint::Auto);
-        let refresh = session.begin_load(1);
-        let mut remote = track(1, "reopened");
-        remote.decoder_hint = DecoderHint::Native;
-        let clean = session
-            .accept_load(refresh, Some(remote), values("reopened").as_draft())
-            .unwrap();
-        assert_eq!(clean.decoder_hint, DecoderHint::Native);
-        assert!(!session.dirty(clean.as_draft()));
-        session.clear_selection();
-        let playing = session
-            .sync_playback(Some(&track(2, "playing")), clean.as_draft())
-            .unwrap();
-        assert_eq!(playing.decoder_hint, DecoderHint::Auto);
-        assert!(!session.dirty(playing.as_draft()));
-    }
-
-    use super::super::FullWaveformRequest;
-    use super::*;
-
-    fn track(id: i64, title: &str) -> Track {
-        Track {
-            id,
-            title: title.into(),
-            path: Default::default(),
-            fingerprint: None,
-            cue: None,
-            artist: String::new(),
-            album: String::new(),
-            duration: None,
-            codec: String::new(),
-            channels: 0,
-            sample_rate: 0,
-            bitrate_bps: None,
-            bitrate_exact: false,
-            track_number: None,
-            disc_number: None,
-            bits_per_sample: None,
-            release_date: None,
-            favorite: false,
-            decoder_hint: Default::default(),
-            missing: false,
-            play_count: 0,
-            last_played: None,
-        }
-    }
-    fn values(title: &str) -> MetadataValues {
-        MetadataValues {
-            title: title.into(),
-            ..Default::default()
-        }
-    }
-    fn load(session: &mut MetadataSession, id: i64, title: &str) -> MetadataValues {
-        session.select(id);
-        let token = session.begin_load(id);
-        session
-            .accept_load(token, Some(track(id, title)), values("").as_draft())
-            .unwrap()
+        assert!(owner.offer(navigation, ManualAction::Clear, true).is_none());
+        assert!(owner.take_pending().is_none());
     }
 
     #[test]
-    fn changed_hint_ack_keeps_original_source_after_editor_switch() {
-        let mut session = MetadataSession::default();
-        let baseline = load(&mut session, 1, "original");
-        let mut original = track(1, "original");
-        original.path = "album.flac".into();
-        original.cue = Some(crate::model::CueSegment {
-            sheet: "album.cue".into(),
-            number: 1,
-            start_frame: 75,
-            end_frame: Some(750),
-        });
-        let token = session.begin_load(1);
-        session.accept_load(token, Some(original.clone()), baseline.as_draft());
-        let submitted = MetadataValues {
-            decoder_hint: DecoderHint::Ffmpeg,
-            ..baseline
-        };
-        let (save, command) = session.begin_save(submitted.as_draft()).unwrap();
-        let committed = session.submitted_hint_change(&command).unwrap();
-        assert_eq!(committed.path, original.path);
-        assert_eq!(committed.cue, original.cue);
-        assert_eq!(committed.decoder_hint, DecoderHint::Ffmpeg);
-        let mut request = FullWaveformRequest::default();
-        let generation = request.begin(&original);
-
-        load(&mut session, 2, "other");
-        assert!(!session.complete_save(save, submitted, true));
-        request.saved_hint_changed(&committed);
-        assert!(!request.accepts(generation, Some(&original)));
-        assert_eq!(session.track().unwrap().id, 2);
-        assert_eq!(session.track().unwrap().decoder_hint, DecoderHint::Auto);
+    fn cancel_and_new_input_prevent_old_save_resume() {
+        let mut owner = ManualIntents::default();
+        let first = owner.begin();
+        assert!(owner.offer(first, ManualAction::Clear, true).is_none());
+        owner.begin(); // Cancel invalidates intent, not the editor or draft.
+        assert!(owner.take_pending().is_none());
+        assert!(owner.offer(first, ManualAction::Clear, false).is_none());
+        let next = owner.begin();
+        assert!(owner.offer(next, ManualAction::Quit, true).is_none());
+        assert!(matches!(owner.take_pending(), Some(ManualAction::Quit)));
+        assert!(owner.take_pending().is_none());
     }
 
     #[test]
-    fn tag_save_and_already_committed_hint_do_not_invalidate_scans() {
-        let mut session = MetadataSession::default();
-        let baseline = load(&mut session, 1, "original");
-        let (save, command) = session.begin_save(values("new title").as_draft()).unwrap();
-        assert!(session.submitted_hint_change(&command).is_none());
-        assert!(session.complete_save(save, values("new title"), false));
-
-        let submitted = MetadataValues {
-            decoder_hint: DecoderHint::Native,
-            ..baseline
-        };
-        let token = session.begin_load(1);
-        let mut remote = track(1, "original");
-        remote.decoder_hint = DecoderHint::Native;
-        session.accept_load(token, Some(remote), submitted.as_draft());
-        let (_, command) = session.begin_save(submitted.as_draft()).unwrap();
+    fn completion_and_confirmation_can_each_publish_only_once() {
+        let mut owner = ManualIntents::default();
+        let clean = owner.begin();
         assert!(matches!(
-            &command,
-            Command::EditTrack {
-                decoder_hint: Some(DecoderHint::Native),
-                ..
-            }
+            owner.offer(clean, ManualAction::Clear, false),
+            Some(ManualAction::Clear)
         ));
-        assert!(session.submitted_hint_change(&command).is_none());
-    }
-
-    #[test]
-    fn explicit_waveform_queries_use_latest_request_and_allow_fresh_saved_hint() {
-        let original = track(1, "original");
-        let mut request = FullWaveformRequest::default();
-        let first = request.begin(&original);
-        let latest = request.begin(&original);
-        let mut committed = original.clone();
-        committed.decoder_hint = DecoderHint::Ffmpeg;
-        committed.title = "updated tags".into();
-        request.retain_target(Some(&original), false);
-        assert!(!request.accepts(first, Some(&committed)));
-        assert!(request.accepts(latest, Some(&committed)));
-        assert!(!request.accepts(latest, Some(&track(2, "other"))));
-        committed.path = "moved.flac".into();
-        assert!(!request.accepts(latest, Some(&committed)));
-    }
-
-    #[test]
-    fn explicit_waveform_queries_do_not_revive_after_target_or_still_mode_changes() {
-        let original = track(1, "original");
-        let other = track(2, "other");
-        let mut request = FullWaveformRequest::default();
-        for (target, still_mode) in [
-            (Some(&other), false),
-            (None, false),
-            (Some(&original), true),
-        ] {
-            let generation = request.begin(&original);
-            request.retain_target(target, still_mode);
-            request.retain_target(Some(&original), false);
-            assert!(!request.accepts(generation, Some(&original)));
-        }
-    }
-
-    #[test]
-    fn saved_hint_invalidates_only_the_matching_path_and_cue_range() {
-        let mut original = track(1, "original");
-        original.path = "album.flac".into();
-        original.cue = Some(crate::model::CueSegment {
-            sheet: "album.cue".into(),
-            number: 1,
-            start_frame: 75,
-            end_frame: Some(750),
-        });
-        let mut request = FullWaveformRequest::default();
-        let generation = request.begin(&original);
-        let mut committed = original.clone();
-        committed.path = "other.flac".into();
-        request.saved_hint_changed(&committed);
-        assert!(request.accepts(generation, Some(&original)));
-        committed.path.clone_from(&original.path);
-        committed.cue.as_mut().unwrap().end_frame = Some(1500);
-        request.saved_hint_changed(&committed);
-        assert!(request.accepts(generation, Some(&original)));
-        assert!(!request.accepts(generation, Some(&committed)));
-        committed.cue.clone_from(&original.cue);
-        committed.id = 99;
-        committed.decoder_hint = DecoderHint::Native;
-        request.saved_hint_changed(&committed);
-        assert!(!request.accepts(generation, Some(&original)));
-    }
-
-    #[test]
-    fn dirty_refresh_keeps_baseline_even_when_remote_matches_the_draft() {
-        let mut session = MetadataSession::default();
-        load(&mut session, 1, "original");
-        let draft = values("edited");
-        let token = session.begin_load(1);
-        assert!(
-            session
-                .accept_load(token, Some(track(1, "edited")), draft.as_draft())
-                .is_none()
-        );
-        assert!(session.dirty(draft.as_draft()));
-        let token = session.begin_load(1);
-        assert!(
-            session
-                .accept_load(token, Some(track(1, "new remote")), draft.as_draft())
-                .is_none()
-        );
-        assert!(!session.dirty(values("original").as_draft()));
-        assert_eq!(session.track().unwrap().title, "new remote");
-    }
-
-    #[test]
-    fn switched_identity_rejects_old_load_and_save_even_after_switching_back() {
-        let mut session = MetadataSession::default();
-        load(&mut session, 1, "one");
-        let old_load = session.begin_load(1);
-        let (save, _) = session.begin_save(values("edit").as_draft()).unwrap();
-        load(&mut session, 2, "two");
-        load(&mut session, 1, "fresh");
-        assert!(!session.accepts_load(old_load));
-        assert!(!session.complete_save(save, values("edit"), true));
-        assert_eq!(session.track().unwrap().title, "fresh");
-    }
-
-    #[test]
-    fn save_patches_baseline_not_refreshed_track_and_preserves_untouched_fields() {
-        let mut session = MetadataSession::default();
-        load(&mut session, 1, "original");
-        let submitted = values("saved title");
-        let (token, command) = session.begin_save(submitted.as_draft()).unwrap();
-        let Command::EditTrack {
-            title,
-            artist,
-            album,
-            ..
-        } = command
-        else {
-            panic!("expected metadata patch");
-        };
-        assert_eq!(title.as_deref(), Some("saved title"));
-        assert_eq!(artist, None);
-        assert_eq!(album, None);
-        let load_token = session.begin_load(1);
-        let mut remote = track(1, "saved title");
-        remote.artist = "External artist".into();
-        let newer_draft = values("typed while saving");
-        assert!(
-            session
-                .accept_load(load_token, Some(remote), newer_draft.as_draft())
-                .is_none()
-        );
-        assert!(session.complete_save(token, submitted.clone(), true));
-        assert!(!session.dirty(submitted.as_draft()));
-        assert_eq!(session.track().unwrap().artist, "External artist");
-        assert!(session.dirty(newer_draft.as_draft()));
-        let (_, command) = session.begin_save(newer_draft.as_draft()).unwrap();
-        let Command::EditTrack {
-            title,
-            artist,
-            album,
-            ..
-        } = command
-        else {
-            panic!("expected metadata patch");
-        };
-        assert_eq!(title.as_deref(), Some("typed while saving"));
-        assert_eq!(artist, None);
-        assert_eq!(album, None);
-    }
-
-    #[test]
-    fn explicitly_cleared_field_is_included_but_clean_draft_cannot_save() {
-        let mut session = MetadataSession::default();
-        let baseline = load(&mut session, 1, "original");
-        assert!(session.begin_save(baseline.as_draft()).is_none());
-        let (_, command) = session.begin_save(values("").as_draft()).unwrap();
-        let Command::EditTrack {
-            title,
-            artist,
-            album,
-            ..
-        } = command
-        else {
-            panic!("expected metadata patch");
-        };
-        assert_eq!(title.as_deref(), Some(""));
-        assert_eq!(artist, None);
-        assert_eq!(album, None);
-    }
-
-    #[test]
-    fn different_field_typed_during_save_is_the_only_next_patch() {
-        let mut session = MetadataSession::default();
-        load(&mut session, 1, "original");
-        let submitted = values("saved title");
-        let (token, _) = session.begin_save(submitted.as_draft()).unwrap();
-        let newer_draft = MetadataValues {
-            artist: "New artist typed while saving".into(),
-            ..submitted.clone()
-        };
-        assert!(session.complete_save(token, submitted, true));
-        assert!(session.dirty(newer_draft.as_draft()));
-        let (_, command) = session.begin_save(newer_draft.as_draft()).unwrap();
-        let Command::EditTrack {
-            title,
-            artist,
-            album,
-            ..
-        } = command
-        else {
-            panic!("expected metadata patch");
-        };
-        assert_eq!(title, None);
-        assert_eq!(artist.as_deref(), Some("New artist typed while saving"));
-        assert_eq!(album, None);
-    }
-
-    #[test]
-    fn save_ack_advances_only_submitted_baseline_and_preserves_new_edits() {
-        let mut session = MetadataSession::default();
-        load(&mut session, 1, "one");
-        let submitted = values("saved");
-        let (token, _) = session.begin_save(submitted.as_draft()).unwrap();
-        let pending_load = session.begin_load(1);
-        assert!(session.complete_save(token, submitted.clone(), true));
-        assert!(!session.accepts_load(pending_load));
-        assert!(!session.dirty(submitted.as_draft()));
-        assert!(session.dirty(values("typed while saving").as_draft()));
-        let (token, _) = session.begin_save(values("failed").as_draft()).unwrap();
-        assert!(session.complete_save(token, values("failed"), false));
-        assert!(session.dirty(values("failed").as_draft()));
-    }
-
-    #[test]
-    fn unloaded_removed_and_cancelled_sessions_cannot_save_old_drafts() {
-        let mut session = MetadataSession::default();
-        session.select(1);
-        assert!(session.begin_save(values("premature").as_draft()).is_none());
-        load(&mut session, 1, "one");
-        let token = session.begin_load(1);
-        assert_eq!(
-            session.accept_load(token, None, values("dirty").as_draft()),
-            Some(values(""))
-        );
-        assert!(session.track().is_none());
-        assert!(session.begin_save(values("dirty").as_draft()).is_none());
-        session.clear_selection();
-        assert_eq!(
-            session.sync_playback(Some(&track(2, "playing")), values("").as_draft()),
-            Some(values("playing"))
-        );
-        assert_eq!(session.selected(), None);
-    }
-
-    #[test]
-    fn selection_of_playback_identity_keeps_draft() {
-        let mut session = MetadataSession::default();
-        session.sync_playback(Some(&track(1, "playing")), values("").as_draft());
-        assert!(!session.select(1));
-        assert!(session.dirty(values("draft").as_draft()));
-    }
-
-    #[test]
-    fn selection_loading_failure_unavailable_and_retry_are_identity_owned() {
-        let mut session = MetadataSession::default();
-        assert_eq!(session.load_state(), &MetadataLoadState::Empty);
-        assert!(!session.ready());
-        load(&mut session, 1, "one");
-        let old = session.begin_load(1);
-        assert!(session.select(2));
-        let pending = session.begin_load(2);
-        assert_eq!(session.load_state(), &MetadataLoadState::Loading);
-        assert!(session.track().is_none());
-        assert!(!session.ready());
-        assert!(session.begin_save(values("old draft").as_draft()).is_none());
-        assert!(!session.fail_load(old, "late failure".into()));
-        assert!(
-            session
-                .accept_load(old, Some(track(1, "late one")), values("").as_draft())
-                .is_none()
-        );
-        assert_eq!(session.load_state(), &MetadataLoadState::Loading);
-        assert!(session.fail_load(pending, "query failed".into()));
-        assert_eq!(
-            session.load_state(),
-            &MetadataLoadState::Failed("query failed".into())
-        );
-        assert!(!session.accepts_load(pending));
-        assert!(!session.fail_load(pending, "duplicate failure".into()));
-        assert!(!session.ready());
-        assert!(session.begin_save(values("old draft").as_draft()).is_none());
-
-        let retry = session.begin_load(2);
-        session.accept_load(retry, None, values("").as_draft());
-        assert_eq!(session.selected(), Some(2));
-        assert_eq!(session.load_state(), &MetadataLoadState::Unavailable);
-        assert!(!session.ready());
-        assert!(!session.accepts_load(retry));
-        let retry = session.begin_load(2);
-        let loaded = session
-            .accept_load(retry, Some(track(2, "two")), values("").as_draft())
-            .unwrap();
-        assert_eq!(loaded.title, "two");
-        assert!(session.ready());
-        assert_eq!(session.load_state(), &MetadataLoadState::Ready);
-        assert!(!session.accepts_load(retry));
-        session.clear_selection();
-        assert!(!session.fail_load(retry, "after cancellation".into()));
-        assert_eq!(session.load_state(), &MetadataLoadState::Empty);
-        assert!(session.track().is_none());
-    }
-
-    #[test]
-    fn same_track_refresh_keeps_ready_data_and_dirty_draft_through_failure() {
-        let mut session = MetadataSession::default();
-        load(&mut session, 1, "one");
-        let draft = values("draft");
-        assert!(!session.select(1));
-        let token = session.begin_load(1);
-        assert!(session.ready());
-        assert_eq!(session.track().unwrap().title, "one");
-        assert!(session.fail_load(token, "refresh failed".into()));
-        assert!(session.ready());
-        assert!(session.dirty(draft.as_draft()));
-        assert_eq!(session.track().unwrap().title, "one");
-        let retry = session.begin_load(1);
-        assert!(
-            session
-                .accept_load(retry, Some(track(1, "remote")), draft.as_draft())
-                .is_none()
-        );
-        assert_eq!(session.load_state(), &MetadataLoadState::Ready);
-        assert_eq!(session.track().unwrap().title, "remote");
-        assert!(session.dirty(draft.as_draft()));
-        let (_, command) = session.begin_save(draft.as_draft()).unwrap();
-        assert!(
-            matches!(command, Command::EditTrack { title: Some(title), .. } if title == "draft")
-        );
-    }
-
-    #[test]
-    fn mismatched_track_response_completes_as_failure_without_ready_data() {
-        let mut session = MetadataSession::default();
-        session.select(1);
-        let token = session.begin_load(1);
-        assert!(
-            session
-                .accept_load(token, Some(track(2, "wrong")), values("").as_draft())
-                .is_none()
-        );
-        assert!(matches!(session.load_state(), MetadataLoadState::Failed(_)));
-        assert!(!session.accepts_load(token));
-        assert!(session.track().is_none());
-        assert!(!session.ready());
-    }
-    #[test]
-    fn snapshot_reload_supersedes_old_metadata_and_completes_without_a_frame() {
-        let mut session = MetadataSession::default();
-        session.select(1);
-        let old = session.begin_load(1);
-        let current = session.begin_load(1);
-        assert!(!session.accepts_load(old));
-        assert!(
-            session
-                .accept_load(old, Some(track(1, "stale")), values("").as_draft())
-                .is_none()
-        );
-        let loaded = session
-            .accept_load(current, Some(track(1, "current")), values("").as_draft())
-            .unwrap();
-        assert_eq!(loaded.title, "current");
-        assert_eq!(session.track().unwrap().title, "current");
-        assert!(!session.dirty(loaded.as_draft()));
+        assert!(!owner.current(clean));
+        assert!(owner.offer(clean, ManualAction::Quit, true).is_none());
+        assert!(owner.take_pending().is_none());
+        let protected = owner.begin();
+        assert!(owner.offer(protected, ManualAction::Quit, true).is_none());
+        assert!(owner.offer(protected, ManualAction::Clear, true).is_none());
+        assert!(matches!(owner.take_pending(), Some(ManualAction::Quit)));
+        assert!(owner.offer(protected, ManualAction::Clear, false).is_none());
+        assert!(owner.take_pending().is_none());
+        let failed = owner.begin();
+        owner.reject(failed);
+        assert!(owner.offer(failed, ManualAction::Clear, false).is_none());
+        assert!(owner.take_pending().is_none());
     }
 }

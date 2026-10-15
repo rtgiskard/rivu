@@ -7,12 +7,13 @@
 //! pin payloads or start and complete range selection.
 
 #[path = "library/selection.rs"]
-mod selection;
+pub(super) mod selection;
 
 use super::queue::QueueSelection;
 use super::{
     BrowserFocus, HistorySort, ListFocus,
     library::{DirectoryTree, LibraryNode, TreeBranch},
+    metadata::ManualIntentId,
     paged::PagedRows,
     queries::ViewRequests,
 };
@@ -141,6 +142,7 @@ pub(super) struct LibraryBrowser {
     buffer: LibraryViewBuffer,
     tree: DirectoryTree,
     range_selection: LibrarySelection,
+    navigation_intent: Option<ManualIntentId>,
     selected: HashSet<i64>,
     selected_nodes: HashSet<LibraryNode>,
     tree_active: bool,
@@ -159,6 +161,7 @@ impl Default for LibraryBrowser {
             },
             tree: DirectoryTree::default(),
             range_selection: LibrarySelection::default(),
+            navigation_intent: None,
             selected: HashSet::new(),
             selected_nodes: HashSet::new(),
             tree_active: true,
@@ -241,8 +244,13 @@ impl LibraryBrowser {
         &self.tree
     }
 
-    pub(super) fn take_ready_selection(&mut self) -> Option<usize> {
-        self.tree.ready_selection()
+    pub(in crate::gui) fn take_ready_manual_navigation(
+        &mut self,
+    ) -> Option<(ManualIntentId, usize)> {
+        let id = self.navigation_intent?;
+        let index = self.tree.ready_selection()?;
+        self.navigation_intent = None;
+        Some((id, index))
     }
 
     pub(super) fn focus_track(&mut self, id: i64) {
@@ -318,6 +326,7 @@ impl LibraryBrowser {
 
     pub(super) fn expand_directory(&mut self, branch: &TreeBranch, expanded: bool) -> bool {
         self.invalidate_selection();
+        self.cancel_navigation();
         if expanded {
             self.tree.expand(branch);
             matches!(
@@ -335,15 +344,11 @@ impl LibraryBrowser {
     }
 
     pub(super) fn navigate_tree_row(&mut self, index: usize) -> Option<LibraryNode> {
-        self.invalidate_selection();
-        self.tree
-            .scroll
-            .scroll_to_item(index, ScrollStrategy::Nearest);
         let Some(super::library::tree::TreeItem::Entry(visible)) = self.tree.item(index) else {
             self.tree.defer_selection(index);
             return None;
         };
-        self.tree.cancel_navigation();
+        self.cancel_navigation();
         Some(match visible.row {
             DirectoryRow::Directory { path } => LibraryNode::Directory(std::sync::Arc::from(path)),
             DirectoryRow::Track(track) => LibraryNode::Track(track.id),
@@ -385,6 +390,7 @@ impl LibraryBrowser {
     }
     pub(super) fn cancel_navigation(&mut self) {
         self.tree.cancel_navigation();
+        self.navigation_intent = None;
     }
 
     pub(super) fn invalidate_selection(&mut self) {
@@ -393,7 +399,7 @@ impl LibraryBrowser {
 
     pub(super) fn invalidate_projection(&mut self) {
         self.invalidate_selection();
-        self.tree.cancel_navigation();
+        self.cancel_navigation();
     }
 
     pub(super) fn clear_selection(&mut self) {
@@ -404,7 +410,7 @@ impl LibraryBrowser {
     }
 
     pub(super) fn select_node(&mut self, node: &LibraryNode, multi: bool) {
-        self.tree.cancel_navigation();
+        self.cancel_navigation();
         if !multi {
             self.selected.clear();
             self.selected_nodes.clear();
@@ -998,13 +1004,13 @@ mod tests {
         library.tree.defer_selection(0);
         library.toggle_missing();
         library.refresh_filter();
-        assert_eq!(library.take_ready_selection(), None);
+        assert_eq!(library.tree.ready_selection(), None);
         assert!(library.tree_active());
         assert_eq!(library.buffer().missing, Some(true));
         assert!(library.selected().contains(&41));
         library.tree.defer_selection(0);
         library.toggle_view();
-        assert_eq!(library.take_ready_selection(), None);
+        assert_eq!(library.tree.ready_selection(), None);
         assert!(!library.tree_active());
         assert_eq!(library.buffer().missing, Some(true));
         library.toggle_view();
@@ -1019,7 +1025,7 @@ mod tests {
         library.select_node(&LibraryNode::Track(41), false);
         library.tree.defer_selection(0);
         library.prepare_query(String::new());
-        assert_eq!(library.take_ready_selection(), None);
+        assert_eq!(library.tree.ready_selection(), None);
         assert!(library.selected().contains(&41));
     }
 
@@ -1048,7 +1054,7 @@ mod tests {
                 library.tree.defer_selection(0);
                 library.refresh_search(query.into());
                 assert_eq!(library.tree_active(), tree_active);
-                assert_eq!(library.take_ready_selection(), None);
+                assert_eq!(library.tree.ready_selection(), None);
                 assert!(library.selected().contains(&41));
                 assert!(!library.directory_request_pending(
                     &branch,

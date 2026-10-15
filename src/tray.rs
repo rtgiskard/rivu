@@ -640,7 +640,7 @@ impl DbusMenu {
 impl DbusMenu {
     fn activate(&self, id: i32) {
         if id == 9 {
-            if let Err(error) = self.app.request_shutdown() {
+            if let Err(error) = self.app.request_user_shutdown() {
                 tracing::warn!(error = %error, "tray_quit_failed");
             }
             return;

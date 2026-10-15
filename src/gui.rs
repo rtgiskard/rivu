@@ -45,7 +45,7 @@ use layout::interaction::{
 };
 use layout::{Axis, Edge, LayoutSet, Node};
 use library::LibraryNode;
-use metadata::MetadataSession;
+use metadata::session::MetadataSession;
 use queries::ViewRequestKind;
 pub(crate) use session::UiSession;
 use shell::{PanelMenu, PanelMenuPage};
@@ -407,6 +407,7 @@ pub(super) struct GuiApp {
     inputs: HashMap<Field, Entity<Input>>,
     browser: BrowserState,
     metadata: MetadataSession,
+    manual_intents: metadata::ManualIntents,
     duplicate_review: duplicates::DuplicateReview,
     duplicate_focus: FocusHandle,
     metadata_decoder_hint: crate::model::DecoderHint,
@@ -549,10 +550,7 @@ impl GuiApp {
 
     fn navigate_list(&mut self, focus: ListFocus, down: bool, cx: &mut Context<Self>) {
         match focus {
-            ListFocus::Library => {
-                self.browser.library.invalidate_selection();
-                self.navigate_library_tree(down, cx);
-            }
+            ListFocus::Library => self.navigate_library_tree(down, cx),
             ListFocus::Queue => self.navigate_queue(down, cx),
             ListFocus::PlaylistTracks => self.navigate_playlist(down, false, false, cx),
         }
@@ -844,6 +842,7 @@ impl GuiApp {
             inputs,
             browser: BrowserState::default(),
             metadata: MetadataSession::default(),
+            manual_intents: metadata::ManualIntents::default(),
             duplicate_review: duplicates::DuplicateReview::default(),
             duplicate_focus: cx.focus_handle(),
             metadata_decoder_hint: Default::default(),
@@ -1080,6 +1079,18 @@ impl GuiApp {
     }
 
     fn select_track(&mut self, id: i64, multi: bool, cx: &mut Context<Self>) {
+        let intent = self.begin_manual_intent();
+        self.ready_manual_action(
+            intent,
+            metadata::ManualAction::History {
+                track_id: id,
+                multi,
+            },
+            cx,
+        );
+    }
+
+    fn commit_history_selection(&mut self, id: i64, multi: bool, cx: &mut Context<Self>) {
         self.browser.library.invalidate_selection();
         self.browser
             .library

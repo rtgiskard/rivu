@@ -1,6 +1,8 @@
 pub(super) mod tree;
 
-use super::{GuiApp, ListFocus, icon_button, list_viewport, row};
+use super::{
+    GuiApp, ListFocus, browser::selection::LibraryRowRequest, icon_button, list_viewport, row,
+};
 use crate::{
     config::{LibraryColumn, LibraryColumns},
     model::{Command, DirectoryRow, LibraryRow},
@@ -285,14 +287,38 @@ impl GuiApp {
     }
 
     fn select_tree_row(&mut self, index: usize, cx: &mut Context<Self>) {
+        let id = self.begin_manual_intent();
+        self.prepare_tree_row(id, index, cx);
+    }
+
+    fn prepare_tree_row(
+        &mut self,
+        id: super::metadata::ManualIntentId,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.manual_intent_current(id) {
+            return;
+        }
         let Some(node) = self.browser.library.navigate_tree_row(index) else {
+            self.browser.library.defer_manual_navigation(id);
             for (branch, offset) in self.browser.library.demand_directories(index..index + 1) {
                 self.request_directory_page(branch, offset, cx);
             }
             cx.notify();
             return;
         };
-        self.select_library_row(node, index, false, false, cx);
+        self.prepare_library_row(
+            id,
+            LibraryRowRequest {
+                node,
+                index,
+                shift: false,
+                multi: false,
+                scroll: true,
+            },
+            cx,
+        );
     }
 
     fn set_directory_expanded(
@@ -318,7 +344,8 @@ impl GuiApp {
             None if down => 0,
             None => count - 1,
         };
-        self.select_tree_row(index, cx);
+        let id = self.begin_manual_intent();
+        self.prepare_tree_row(id, index, cx);
     }
 
     pub(super) fn activate_library_tree(&mut self, cx: &mut Context<Self>) {
@@ -706,7 +733,6 @@ impl GuiApp {
                                             );
                                         }
                                     }
-                                    this.browser.library.remember_selection();
                                 },
                             ));
                             Some(row_view.into_any_element())
@@ -719,8 +745,8 @@ impl GuiApp {
                     for (path, offset) in this.browser.library.demand_directories(range) {
                         this.request_directory_page(path, offset, cx);
                     }
-                    if let Some(index) = this.browser.library.take_ready_selection() {
-                        this.select_tree_row(index, cx);
+                    if let Some((id, index)) = this.browser.library.take_ready_manual_navigation() {
+                        this.prepare_tree_row(id, index, cx);
                     }
                 },
             )))

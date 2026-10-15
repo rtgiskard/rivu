@@ -18,26 +18,33 @@ impl GuiApp {
         }
     }
 
-    fn reload_layout_gui(&self, cx: &mut Context<Self>) {
-        let session = self.session.clone();
-        cx.defer(move |cx| {
-            if let Some(session) = session.upgrade() {
-                session.borrow_mut().reload_window(cx);
-            }
-        });
+    fn finish_layout_switch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Layouts only replace the panel tree. Keep the window/editor and its
+        // in-flight metadata save alive even when Details is no longer visible.
+        self.begin_manual_intent();
+        self.layouts_open = false;
+        self.layout_action = None;
+        self.catalog_open = false;
+        self.layout_changed(cx);
+        self.focus_layout(window, cx);
+        self.sync_analysis(cx);
+        cx.notify();
     }
 
-    fn select_layout(&mut self, name: &str, cx: &mut Context<Self>) {
+    fn select_layout(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         if !self.layout_management_allowed(cx) || name == self.layouts.active_name() {
             return;
         }
         let cancellation = self.interaction.cancel();
         self.apply_interaction_cancellation(cancellation, cx);
         let old = self.layouts.active_name().to_owned();
-        let result = self
-            .layouts
-            .select(name)
-            .and_then(|_| self.layouts.save(&self.layout_path));
+        let result =
+            self.layouts.select(name).and_then(|_| {
+                self.layouts.current_mut().initialize_audio_visualizers(
+                    AudioVisualizerOptions::from(self.state.system.config.as_ref()),
+                );
+                self.layouts.save(&self.layout_path)
+            });
         if let Err(error) = result {
             self.layouts
                 .select(&old)
@@ -45,8 +52,7 @@ impl GuiApp {
             self.error = Some(format!("Switching layout: {error:#}"));
             cx.notify();
         } else {
-            self.layout_changed(cx);
-            self.reload_layout_gui(cx);
+            self.finish_layout_switch(window, cx);
         }
     }
 
@@ -83,7 +89,7 @@ impl GuiApp {
         };
         let old = self.layouts.active_name().to_owned();
         let name = self.value(Field::LayoutName, cx).trim().to_owned();
-        let (result, reload) = match action {
+        let (result, switched) = match action {
             Action::Duplicate => {
                 let cancellation = self.interaction.cancel();
                 self.apply_interaction_cancellation(cancellation, cx);
@@ -121,9 +127,8 @@ impl GuiApp {
             Ok(()) => {
                 self.layout_action = None;
                 self.error = None;
-                if reload {
-                    self.layout_changed(cx);
-                    self.reload_layout_gui(cx);
+                if switched {
+                    self.finish_layout_switch(window, cx);
                 } else {
                     self.focus_layout(window, cx);
                 }
@@ -214,7 +219,7 @@ impl GuiApp {
                             name.to_owned()
                         },
                         cx,
-                        move |this, _, cx| this.select_layout(&target, cx),
+                        move |this, window, cx| this.select_layout(&target, window, cx),
                     )
                     .flex_1(),
                 );

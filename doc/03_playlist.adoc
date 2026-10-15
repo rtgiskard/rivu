@@ -97,7 +97,8 @@ Deleting the selected playlist from another client clears its selection on
 refresh. Empty playlists and unloaded pages do not imply deletion.
 
 Ranges stream bounded metadata pages and commit only after the complete range
-is available. A failed range leaves the previous selection intact. Refreshes
+is available and any Details draft confirmation is resolved. A failed range
+leaves the previous selection and Details unchanged. Refreshes
 resolve selected, active, and anchor identities in bounded lookup batches,
 relocate still-existing entries, and discard missing entries. Stale range and
 lookup results cannot overwrite a newer selection or playlist revision. Pending

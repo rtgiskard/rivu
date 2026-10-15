@@ -277,11 +277,12 @@ row to reveal Delete. Names must be
 nonempty and unique after trimming surrounding whitespace. To delete the current
 layout, switch to another one first; the collection always retains a layout.
 
-Switching or duplicating rebuilds the interface inside the same window. Playback,
-queue, global configuration, and window placement are unchanged. Searches,
-filters, selections, scroll positions, and visualization history reset. Finish
-or discard settings before changing layouts. Renaming and deleting an inactive
-layout do not rebuild the interface. Press `Escape` to close the layout manager,
+Switching or duplicating updates the panel tree inside the same window. Playback,
+queue, global configuration, window placement, and the active Track details draft
+are unchanged. The current searches, filters, selections, and browser state remain
+available if their panels are shown again. Finish or discard settings before
+changing layouts. Renaming and deleting an inactive layout do not rebuild the interface.
+Press `Escape` to close the layout manager,
 including after renaming the current layout.
 
 While unlocked, panels can be added, removed, moved, resized, and reordered.

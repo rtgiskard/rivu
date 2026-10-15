@@ -39,7 +39,17 @@ impl UiSession {
         })
     }
 
-    pub(crate) fn request_shutdown(&self) {
+    pub(crate) fn request_shutdown(&self, cx: &mut App) {
+        if let Some(window) = self.window
+            && window
+                .update(cx, |view, window, cx| {
+                    window.activate_window();
+                    view.request_quit(cx);
+                })
+                .is_ok()
+        {
+            return;
+        }
         if let Err(error) = self.app.request_shutdown() {
             tracing::warn!(%error, "gui_quit_failed");
         }
@@ -79,36 +89,18 @@ impl UiSession {
                 ..Default::default()
             },
             move |window, cx| {
-                cx.new(|cx| GuiApp::new(handle, layout_path, artwork_manager, session, window, cx))
+                cx.new(|cx| {
+                    let view =
+                        GuiApp::new(handle, layout_path, artwork_manager, session, window, cx);
+                    view.install_close_guard(window, cx);
+                    view
+                })
             },
         )?;
         self.window = Some(window);
         tracing::info!("gui_window_created");
         cx.activate(true);
         Ok(())
-    }
-
-    pub(crate) fn reload_window(&mut self, cx: &mut App) {
-        if self.handle.is_shutting_down() {
-            return;
-        }
-        let Some(window) = self.window else {
-            return;
-        };
-        let handle = self.handle.clone();
-        let layout_path = self.layout_path.clone();
-        let artwork_manager = Arc::clone(&self.artwork_manager);
-        let session = self.self_weak.clone();
-        self.clear_window_state();
-        if let Err(error) = window.update(cx, |old, window, cx| {
-            old.release_render_images(window, cx);
-            window.replace_root(cx, |window, cx| {
-                GuiApp::new(handle, layout_path, artwork_manager, session, window, cx)
-            });
-        }) {
-            tracing::error!(%error, "Could not reload Rivu window; activate the tray icon or use rivu gui to retry");
-            self.window_closed(window.window_id());
-        }
     }
 
     pub(crate) fn window_closed(&mut self, id: WindowId) {
@@ -126,6 +118,42 @@ impl UiSession {
     pub(crate) fn release_window(&mut self) {
         if self.window.take().is_some() {
             self.clear_window_state();
+        }
+    }
+}
+
+impl GuiApp {
+    fn install_close_guard(&self, window: &Window, cx: &Context<Self>) {
+        let view = cx.weak_entity();
+        window.on_window_should_close(cx, move |window, cx| {
+            // Always finish through the deferred close action. The platform must
+            // not remove the window while its confirmation is still pending.
+            let _ = view.update(cx, |view, cx| view.request_close_window(window, cx));
+            false
+        });
+    }
+
+    pub(super) fn request_close_window(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let id = self.begin_manual_intent();
+        self.ready_manual_action(
+            id,
+            super::metadata::ManualAction::Close(window.window_handle()),
+            cx,
+        );
+    }
+
+    pub(super) fn request_quit(&mut self, cx: &mut Context<Self>) {
+        let id = self.begin_manual_intent();
+        self.ready_manual_action(id, super::metadata::ManualAction::Quit, cx);
+    }
+
+    pub(super) fn finish_quit(&self) {
+        let Some(session) = self.session.upgrade() else {
+            return;
+        };
+        let app = session.borrow().app.clone();
+        if let Err(error) = app.request_shutdown() {
+            tracing::warn!(%error, "gui_quit_failed");
         }
     }
 }

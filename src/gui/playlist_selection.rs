@@ -1,10 +1,28 @@
 //! Playlist occurrence selection is independent of bounded metadata pages.
 //! Jobs retain compact identities and publish atomically for their original token.
+use super::metadata::{ManualAction, ManualIntentId};
 use super::*;
 use crate::{
     model::{Page, PlaylistEntryLocation, PlaylistEntryRow, Query},
     response::{PlaylistEntryRevision, ViewResponse},
 };
+
+pub(in crate::gui) struct EntryCommit {
+    scope: EntryNavigationScope,
+    generation: u64,
+    pub(in crate::gui) target: EntryIdentity,
+    anchor: Option<EntryIdentity>,
+    rows: Option<Vec<EntryIdentity>>,
+    multi: bool,
+    scroll: bool,
+}
+
+struct EntryRangeRequest {
+    intent: ManualIntentId,
+    commit: EntryCommit,
+    start: usize,
+    end: usize,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct EntryIdentity {
@@ -79,6 +97,9 @@ pub(super) struct EntrySelection {
     navigation: Option<EntryNavigationJob>,
     // Cancellation invalidates intent, but cannot stop a blocking core query.
     navigation_in_flight: Option<EntryNavigationJob>,
+    intent: Option<ManualIntentId>,
+    range_request: Option<EntryRangeRequest>,
+    range_in_flight: Option<u64>,
 }
 impl EntrySelection {
     pub(super) fn len(&self) -> usize {
@@ -96,6 +117,13 @@ impl EntrySelection {
         self.error = None;
         // The physical worker owns its gate until completion, including after a switch.
         self.navigation = None;
+        self.intent = None;
+        self.range_request = None;
+    }
+    pub(in crate::gui) fn cancel_manual(&mut self) {
+        if self.intent.is_some() || self.range_request.is_some() {
+            self.cancel();
+        }
     }
     pub(super) fn clear(&mut self) {
         self.cancel();
@@ -225,6 +253,7 @@ impl EntrySelection {
         }
         let current = self
             .navigation
+            .filter(|job| job.scope == scope)
             .map(|job| job.offset)
             .or(self.active.map(|row| row.position));
         let offset = match current {
@@ -266,13 +295,28 @@ impl EntrySelection {
         });
     }
     fn take_navigation(&mut self) -> Option<EntryNavigationJob> {
-        if self.navigation_in_flight.is_some() {
+        if self.navigation_in_flight.is_some() || self.range_in_flight.is_some() {
             return None;
         }
         let job = self.navigation?;
         self.navigation_in_flight = Some(job);
         Some(job)
     }
+    fn take_range(&mut self) -> Option<EntryRangeRequest> {
+        if self.range_in_flight.is_some() || self.navigation_in_flight.is_some() {
+            return None;
+        }
+        let job = self.range_request.take()?;
+        self.range_in_flight = Some(job.commit.generation);
+        Some(job)
+    }
+
+    fn release_range_worker(&mut self, generation: u64) {
+        if self.range_in_flight == Some(generation) {
+            self.range_in_flight = None;
+        }
+    }
+
     fn finish_navigation(
         &mut self,
         job: EntryNavigationJob,
@@ -283,9 +327,8 @@ impl EntrySelection {
             return EntryNavigationEffect::None;
         }
         self.navigation_in_flight = None;
-        if self
-            .navigation
-            .is_some_and(|intent| scope != Some(intent.scope))
+        if let Some(intent) = self.navigation
+            && scope != Some(intent.scope)
         {
             self.invalidate();
         }
@@ -324,7 +367,6 @@ impl EntrySelection {
                         additive: job.multi,
                     })
                 } else {
-                    self.select(target, false);
                     None
                 };
                 EntryNavigationEffect::Selected { target, range }
@@ -544,6 +586,19 @@ impl GuiApp {
         })
         .detach();
     }
+    pub(super) fn select_playlist_container(
+        &mut self,
+        id: i64,
+        name: String,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        self.begin_manual_intent();
+        if self.browser.playlists.select(id, name, index) {
+            self.request_playlist_entries(id, 0, cx);
+        }
+    }
+
     pub(super) fn select_playlist_entry(
         &mut self,
         id: i64,
@@ -567,145 +622,180 @@ impl GuiApp {
         else {
             return;
         };
-        if shift && let Some(anchor) = self.browser.playlists.track_selection.anchor {
-            self.select_playlist_range(
+        let Some(scope) = self.playlist_navigation_scope() else {
+            return;
+        };
+        let anchor = self.browser.playlists.track_selection.anchor;
+        let intent = self.begin_manual_intent();
+        self.browser.playlists.track_selection.intent = Some(intent);
+        let generation = self.browser.playlists.track_selection.generation;
+        let commit = EntryCommit {
+            scope,
+            generation,
+            target: row,
+            anchor,
+            rows: None,
+            multi,
+            scroll: false,
+        };
+        if shift && let Some(anchor) = anchor {
+            self.queue_playlist_range(
+                intent,
+                commit,
                 anchor.position.min(index),
                 anchor.position.max(index) + 1,
-                Some(anchor),
-                row,
-                multi,
                 cx,
             );
         } else {
-            self.browser.playlists.track_selection.select(row, multi);
-            self.browser.playlists.sync_active_entry();
+            self.ready_manual_action(intent, ManualAction::Playlist(commit), cx);
         }
-        self.request_track(row.track_id, cx);
-        cx.notify();
     }
-    fn select_playlist_range(
+
+    pub(in crate::gui) fn entry_commit_valid(&self, commit: &EntryCommit) -> bool {
+        self.entry_job_current(
+            commit.scope.playlist_id,
+            commit.generation,
+            commit.scope.revision,
+            commit.scope.catalog,
+            commit.scope.library,
+        )
+    }
+
+    pub(in crate::gui) fn commit_entry_selection(
         &mut self,
-        start: usize,
-        end: usize,
-        anchor: Option<EntryIdentity>,
-        target: EntryIdentity,
-        additive: bool,
+        commit: EntryCommit,
         cx: &mut Context<Self>,
     ) {
-        let Some(playlist_id) = self.browser.playlists.selected() else {
+        let selection = &mut self.browser.playlists.track_selection;
+        if let Some(rows) = commit.rows {
+            selection.complete_range(
+                commit.generation,
+                commit.anchor,
+                commit.target,
+                rows,
+                commit.multi,
+            );
+        } else {
+            selection.select(commit.target, commit.multi);
+        }
+        self.browser.playlists.sync_active_entry();
+        self.browser.focus_list(ListFocus::PlaylistTracks);
+        self.request_track(commit.target.track_id, cx);
+        if commit.scroll {
+            self.scroll_views
+                .scroll_list_to("playlist-entries", commit.target.position);
+        }
+        self.sync_waveform(cx);
+        cx.notify();
+    }
+
+    fn queue_playlist_range(
+        &mut self,
+        intent: ManualIntentId,
+        commit: EntryCommit,
+        start: usize,
+        end: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let selection = &mut self.browser.playlists.track_selection;
+        selection.busy = true;
+        selection.intent = Some(intent);
+        selection.range_request = Some(EntryRangeRequest {
+            intent,
+            commit,
+            start,
+            end,
+        });
+        self.dispatch_playlist_range(cx);
+    }
+
+    fn dispatch_playlist_range(&mut self, cx: &mut Context<Self>) {
+        let Some(mut job) = self.browser.playlists.track_selection.take_range() else {
             return;
         };
-        let selection = &mut self.browser.playlists.track_selection;
-        selection.cancel();
-        selection.busy = true;
-        let generation = selection.generation;
-        let revision = self.playlist_revision(playlist_id);
-        let catalog = self.state.library.playlist_revision;
-        let library = self.state.library.revision;
+        let generation = job.commit.generation;
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
-            let mut pages = EntryRangePages::new(start, end);
-            while let Some((offset, limit)) = pages.next() {
-                if !this
-                    .update(cx, |this, cx| {
-                        this.refresh(cx);
-                        this.entry_job_current(playlist_id, generation, revision, catalog, library)
-                    })
-                    .unwrap_or(false)
-                {
-                    return;
-                }
-                let handle = handle.clone();
-                let response = cx
-                    .background_executor()
-                    .spawn(async move {
-                        handle.query(Query::PlaylistEntries {
-                            playlist_id,
-                            offset,
-                            limit,
+            let result: Result<Option<Vec<EntryIdentity>>, String> = async {
+                let mut pages = EntryRangePages::new(job.start, job.end);
+                while let Some((offset, limit)) = pages.next() {
+                    if !this
+                        .update(cx, |this, cx| {
+                            this.refresh(cx);
+                            this.manual_intent_current(job.intent)
+                                && this.entry_commit_valid(&job.commit)
                         })
-                    })
-                    .await;
-                let result =
-                    match entry_query_result(response, playlist_id, revision, catalog, library) {
-                        Ok(result) => result,
-                        Err(error) => {
-                            let _ = this.update(cx, |this, cx| {
-                                this.refresh(cx);
-                                if this.entry_job_current(
-                                    playlist_id,
-                                    generation,
-                                    revision,
-                                    catalog,
-                                    library,
-                                ) {
-                                    this.entry_job_failed(
-                                        playlist_id,
-                                        generation,
-                                        error.to_string(),
-                                        cx,
-                                    );
-                                }
-                            });
-                            return;
-                        }
+                        .unwrap_or(false)
+                    {
+                        return Ok(None);
+                    }
+                    let handle = handle.clone();
+                    let scope = job.commit.scope;
+                    let response = cx
+                        .background_executor()
+                        .spawn(async move {
+                            handle.query(Query::PlaylistEntries {
+                                playlist_id: scope.playlist_id,
+                                offset,
+                                limit,
+                            })
+                        })
+                        .await;
+                    let result = entry_query_result(
+                        response,
+                        scope.playlist_id,
+                        scope.revision,
+                        scope.catalog,
+                        scope.library,
+                    )
+                    .map_err(|error| error.to_string())?;
+                    let Some(ViewResponse::PlaylistEntries(page)) = result else {
+                        return Err("Playlist range changed while loading".into());
                     };
-                let Some(result) = result else {
-                    let _ = this.update(cx, |this, cx| {
-                        this.refresh(cx);
-                        if this.entry_job_current(
-                            playlist_id,
-                            generation,
-                            revision,
-                            catalog,
-                            library,
-                        ) {
-                            this.refresh_entry_selection(cx);
-                        }
-                    });
-                    return;
-                };
-                match result {
-                    ViewResponse::PlaylistEntries(page) => {
-                        if !pages.accept(page) {
-                            let _ = this.update(cx, |this, cx| {
-                                this.entry_job_failed(
-                                    playlist_id,
-                                    generation,
-                                    "Playlist range changed while loading".into(),
-                                    cx,
-                                )
-                            });
-                            return;
-                        }
-                    }
-                    _ => {
-                        let message = "Playlist range changed while loading".into();
-                        let _ = this.update(cx, |this, cx| {
-                            this.entry_job_failed(playlist_id, generation, message, cx)
-                        });
-                        return;
+                    if !pages.accept(page) {
+                        return Err("Playlist range changed while loading".into());
                     }
                 }
+                Ok(Some(pages.identities))
             }
+            .await;
             let _ = this.update(cx, |this, cx| {
+                this.browser
+                    .playlists
+                    .track_selection
+                    .release_range_worker(generation);
                 this.refresh(cx);
-                if !this.entry_job_current(playlist_id, generation, revision, catalog, library) {
-                    return;
+                if this.manual_intent_current(job.intent) && this.entry_commit_valid(&job.commit) {
+                    this.browser.playlists.track_selection.busy = false;
+                    match result {
+                        Ok(Some(rows)) => {
+                            job.commit.rows = Some(rows);
+                            this.ready_manual_action(
+                                job.intent,
+                                ManualAction::Playlist(job.commit),
+                                cx,
+                            );
+                        }
+                        Err(message) => {
+                            this.fail_manual_intent(job.intent);
+                            this.entry_job_failed(
+                                job.commit.scope.playlist_id,
+                                generation,
+                                message,
+                                cx,
+                            );
+                        }
+                        Ok(None) => {}
+                    }
                 }
-                this.browser.playlists.track_selection.complete_range(
-                    generation,
-                    anchor,
-                    target,
-                    pages.identities,
-                    additive,
-                );
-                this.browser.playlists.sync_active_entry();
+                this.dispatch_playlist_range(cx);
+                this.dispatch_playlist_navigation(cx);
                 cx.notify();
             });
         })
         .detach();
     }
+
     fn playlist_navigation_scope(&self) -> Option<EntryNavigationScope> {
         let playlist_id = self.browser.playlists.selected()?;
         (self.browser.playlists.entries().playlist_id == Some(playlist_id)).then(|| {
@@ -717,23 +807,29 @@ impl GuiApp {
             }
         })
     }
+
     pub(super) fn select_all_playlist_entries(&mut self, cx: &mut Context<Self>) {
         self.refresh(cx);
         let Some(scope) = self.playlist_navigation_scope() else {
             return;
         };
         let total = self.browser.playlists.entries().total;
-        // Fetching the first row also establishes an active occurrence for an empty selection.
-        if self
+        if !self
             .browser
             .playlists
             .track_selection
             .navigate_all(scope, total)
         {
-            self.dispatch_playlist_navigation(cx);
-            cx.notify();
+            return;
         }
+        let intent = self.begin_manual_intent();
+        let selection = &mut self.browser.playlists.track_selection;
+        selection.navigate_to(scope, 0, false, false, true);
+        selection.intent = Some(intent);
+        self.dispatch_playlist_navigation(cx);
+        cx.notify();
     }
+
     pub(super) fn navigate_playlist(
         &mut self,
         down: bool,
@@ -746,17 +842,36 @@ impl GuiApp {
             return;
         };
         let total = self.browser.playlists.entries().total;
-        if self
+        if !self
             .browser
             .playlists
             .track_selection
             .navigate(scope, total, down, shift, multi)
         {
-            self.dispatch_playlist_navigation(cx);
-            cx.notify();
+            return;
         }
+        let offset = self
+            .browser
+            .playlists
+            .track_selection
+            .navigation
+            .unwrap()
+            .offset;
+        let intent = self.begin_manual_intent();
+        let selection = &mut self.browser.playlists.track_selection;
+        selection.navigate_to(scope, offset, shift, multi, false);
+        selection.intent = Some(intent);
+        self.dispatch_playlist_navigation(cx);
+        cx.notify();
     }
+
     fn dispatch_playlist_navigation(&mut self, cx: &mut Context<Self>) {
+        let Some(intent) = self.browser.playlists.track_selection.intent else {
+            return;
+        };
+        if !self.manual_intent_current(intent) {
+            return;
+        }
         let Some(job) = self.browser.playlists.track_selection.take_navigation() else {
             return;
         };
@@ -780,29 +895,50 @@ impl GuiApp {
                     .playlists
                     .track_selection
                     .finish_navigation(job, scope, response);
-                match effect {
-                    EntryNavigationEffect::None => {}
-                    EntryNavigationEffect::Reload => this.refresh_entry_selection(cx),
-                    EntryNavigationEffect::Failed(message) => this.error = Some(message),
-                    EntryNavigationEffect::Selected { target, range } => {
-                        if let Some(range) = range {
-                            this.select_playlist_range(
-                                range.start,
-                                range.end,
-                                Some(range.anchor),
-                                target,
-                                range.additive,
-                                cx,
+                if this.manual_intent_current(intent) {
+                    match effect {
+                        EntryNavigationEffect::None => {}
+                        EntryNavigationEffect::Reload => {
+                            this.fail_manual_intent(intent);
+                            this.browser.playlists.track_selection.busy = false;
+                            this.error = Some(
+                                "Playlist changed while selecting; select the track again.".into(),
                             );
-                        } else {
-                            this.browser.playlists.sync_active_entry();
                         }
-                        this.request_track(target.track_id, cx);
-                        this.scroll_views
-                            .scroll_list_to("playlist-entries", target.position);
+                        EntryNavigationEffect::Failed(message) => {
+                            this.fail_manual_intent(intent);
+                            this.error = Some(message);
+                        }
+                        EntryNavigationEffect::Selected { target, range } => {
+                            let commit = EntryCommit {
+                                scope: job.scope,
+                                generation: job.generation,
+                                target,
+                                anchor: range.as_ref().map(|range| range.anchor),
+                                rows: None,
+                                multi: range.as_ref().map_or(job.multi, |range| range.additive),
+                                scroll: true,
+                            };
+                            if let Some(range) = range {
+                                this.queue_playlist_range(
+                                    intent,
+                                    commit,
+                                    range.start,
+                                    range.end,
+                                    cx,
+                                );
+                            } else {
+                                this.browser.playlists.track_selection.busy = false;
+                                this.ready_manual_action(
+                                    intent,
+                                    ManualAction::Playlist(commit),
+                                    cx,
+                                );
+                            }
+                        }
                     }
                 }
-                // Superseded completions only release the gate for the latest intent.
+                this.dispatch_playlist_range(cx);
                 this.dispatch_playlist_navigation(cx);
                 cx.notify();
             });
@@ -940,6 +1076,13 @@ mod tests {
                 range: None,
             }
         );
+        assert_eq!(selection.active, Some(identity(0, 0)));
+        assert_eq!(selection.anchor, Some(identity(0, 0)));
+        assert!(selection.contains(0));
+        assert!(!selection.contains(255));
+        selection.cancel();
+        assert_eq!(selection.ordered_ids(), vec![0]);
+        selection.select(identity(255, 255), false);
         assert!(selection.ready());
         assert_eq!(selection.ordered_ids(), vec![255]);
         assert_eq!(selection.favorite_ids(), vec![355]);
@@ -957,6 +1100,7 @@ mod tests {
         let first = selection.take_navigation().unwrap();
         assert_eq!(first.offset, 0);
         selection.finish_navigation(first, Some(scope), navigation_response(first, 3));
+        selection.select(identity(0, 0), false);
         let generation = selection.generation;
         for _ in 0..100 {
             assert!(!selection.navigate(scope, 3, false, true, true));
@@ -982,6 +1126,7 @@ mod tests {
             assert!(selection.take_navigation().is_none());
         }
         selection.finish_navigation(last, Some(scope), navigation_response(last, 3));
+        selection.select(identity(2, 2), false);
         assert_eq!(selection.ordered_ids(), vec![2]);
         assert!(!selection.navigate(scope, 3, true, false, false));
         assert!(selection.take_navigation().is_none());
@@ -1050,6 +1195,8 @@ mod tests {
                         range: None
                     }
                 );
+                assert_eq!(selection.active, Some(identity(2, 2)));
+                selection.select(target, false);
                 assert_eq!(selection.ordered_ids(), vec![4]);
                 assert_eq!(selection.anchor, Some(target));
             }
@@ -1057,6 +1204,71 @@ mod tests {
             assert!(selection.ready());
             assert!(selection.take_navigation().is_none());
         }
+    }
+
+    #[test]
+    fn cancelled_navigation_releases_worker_without_replacing_newer_selection() {
+        let scope = navigation_scope();
+        let mut selection = EntrySelection::default();
+        selection.select(identity(0, 0), false);
+        assert!(selection.navigate(scope, 10, true, false, false));
+        let old = selection.take_navigation().unwrap();
+        selection.cancel();
+        assert!(selection.navigate(scope, 10, true, true, true));
+        let generation = selection.generation;
+        assert!(selection.take_navigation().is_none());
+        assert_eq!(
+            selection.finish_navigation(old, Some(scope), navigation_response(old, 10)),
+            EntryNavigationEffect::None
+        );
+        assert!(selection.current(generation));
+        assert_eq!(selection.active, Some(identity(0, 0)));
+        let next = selection.take_navigation().unwrap();
+        assert!(next.shift && next.multi);
+        assert_eq!(next.offset, 1);
+    }
+
+    #[test]
+    fn range_and_navigation_share_one_worker_even_after_cancellation() {
+        use super::{EntryCommit, EntryRangeRequest};
+        use crate::gui::metadata::ManualIntents;
+        let scope = navigation_scope();
+        let mut intents = ManualIntents::default();
+        let mut selection = EntrySelection::default();
+        selection.select(identity(0, 0), false);
+        assert!(selection.navigate(scope, 10, true, false, false));
+        let old = selection.take_navigation().unwrap();
+        selection.cancel();
+        let intent = intents.begin();
+        let generation = selection.generation;
+        selection.range_request = Some(EntryRangeRequest {
+            intent,
+            start: 0,
+            end: 5,
+            commit: EntryCommit {
+                scope,
+                generation,
+                target: identity(4, 4),
+                anchor: Some(identity(0, 0)),
+                rows: None,
+                multi: false,
+                scroll: true,
+            },
+        });
+        assert!(selection.take_range().is_none());
+        assert_eq!(
+            selection.finish_navigation(old, Some(scope), navigation_response(old, 10)),
+            EntryNavigationEffect::None
+        );
+        let range = selection.take_range().unwrap();
+        assert_eq!(range.commit.target, identity(4, 4));
+        selection.cancel();
+        assert!(selection.navigate(scope, 10, true, false, false));
+        assert!(selection.take_navigation().is_none());
+        assert_eq!(selection.active, Some(identity(0, 0)));
+        selection.release_range_worker(generation);
+        assert!(selection.take_navigation().is_some());
+        assert_eq!(selection.anchor, Some(identity(0, 0)));
     }
 
     #[test]
@@ -1155,6 +1367,10 @@ mod tests {
             assert_eq!(latest.offset, base.position + 1);
             assert!(selection.take_navigation().is_none());
             selection.finish_navigation(latest, Some(scope), navigation_response(latest, 10));
+            selection.select(
+                identity((base.position + 1) as i64, base.position + 1),
+                false,
+            );
             assert_eq!(selection.ordered_ids(), vec![(base.position + 1) as i64]);
             assert!(selection.ready());
             assert!(selection.navigation_in_flight.is_none());
@@ -1232,6 +1448,7 @@ mod tests {
         assert!(selection.navigate(scope, 30, true, false, false));
         let job = selection.take_navigation().unwrap();
         selection.finish_navigation(job, Some(scope), navigation_response(job, 30));
+        selection.select(identity(20, 20), false);
         assert_eq!(selection.ordered_ids(), vec![20]);
         assert!(selection.ready());
     }
@@ -1252,6 +1469,7 @@ mod tests {
         assert!(selection.navigate(scope, 3, true, false, false));
         let job = selection.take_navigation().unwrap();
         selection.finish_navigation(job, Some(scope), navigation_response(job, 3));
+        selection.select(identity(0, 0), false);
         assert_eq!(selection.ordered_ids(), vec![0]);
         assert!(selection.ready());
     }

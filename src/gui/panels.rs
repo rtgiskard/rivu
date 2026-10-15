@@ -6,8 +6,10 @@ use super::{
     },
     form_field, format_time, icon_button,
     library::LibraryDrag,
-    list_viewport, metadata_item, paged, panel_header, panel_surface, panel_toolbar, row, row_text,
-    section_group, sortable_header, status_message,
+    list_viewport,
+    metadata::session::{MetadataAvailability, MetadataDraft, MetadataReadState},
+    metadata_item, paged, panel_header, panel_surface, panel_toolbar, row, row_text, section_group,
+    sortable_header, status_message,
 };
 pub(super) use super::{caption, list_row};
 use crate::{
@@ -1530,9 +1532,7 @@ impl GuiApp {
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.focus_layout(window, cx);
                             this.browser.focus_playlists();
-                            if this.browser.playlists.select(id, name.to_string(), index) {
-                                this.request_playlist_entries(id, 0, cx);
-                            }
+                            this.select_playlist_container(id, name.to_string(), index, cx);
                             cx.notify();
                         }))
                         .into_any_element()
@@ -1889,23 +1889,53 @@ impl GuiApp {
         let track = self.metadata.track();
         let id = track.map(|track| track.id);
         let favorite = track.is_some_and(|track| track.favorite);
-        let ready = self.metadata.ready();
-        let metadata_dirty = ready && self.metadata_dirty(cx) && !self.metadata.saving();
-        let selected = self.metadata.selected();
-        let can_retry = selected.is_some()
-            && matches!(
-                self.metadata.load_state(),
-                super::metadata::MetadataLoadState::Failed(_)
-            );
+        let editable = self.metadata.editable();
+        let editor_identity = self.metadata.editor_identity();
+        let protected = self.metadata_protected(cx);
+        let can_save = self.metadata.can_save(MetadataDraft {
+            title: self.inputs[&Field::Title].read(cx).text(),
+            artist: self.inputs[&Field::Artist].read(cx).text(),
+            album: self.inputs[&Field::Album].read(cx).text(),
+            decoder_hint: self.metadata_decoder_hint,
+        });
+        let identity = self.metadata.identity();
+        let follow_paused = self.metadata.selected().is_none()
+            && protected
+            && identity != self.state.current_track().map(|track| track.id);
+        let can_retry = self.metadata.can_retry();
         let placeholder: SharedString = "Not loaded".into();
-        let status: SharedString = match self.metadata.load_state() {
-            super::metadata::MetadataLoadState::Empty => "No track selected".into(),
-            super::metadata::MetadataLoadState::Loading => "Loading track details…".into(),
-            super::metadata::MetadataLoadState::Ready => "Ready".into(),
-            super::metadata::MetadataLoadState::Unavailable => "Track unavailable".into(),
-            super::metadata::MetadataLoadState::Failed(error) => {
-                format!("Could not load track details: {error}").into()
+        let presence_status = match self.metadata.availability() {
+            MetadataAvailability::Unknown if identity.is_none() => "No track selected",
+            MetadataAvailability::Unknown => "Track details not loaded",
+            MetadataAvailability::Present(_) => "Ready",
+            MetadataAvailability::Unavailable(_) => "Track unavailable",
+        };
+        let status: SharedString = match self.metadata.read_state() {
+            MetadataReadState::Idle => presence_status.into(),
+            MetadataReadState::Pending(_) => {
+                format!("{presence_status} · Loading track details…").into()
             }
+            MetadataReadState::Failed(error) => {
+                format!("{presence_status} · Could not load track details: {error}").into()
+            }
+        };
+        let status: SharedString = if protected {
+            format!(
+                "{status} · {}{}",
+                if self.metadata.saving() {
+                    "Saving metadata…"
+                } else {
+                    "Unsaved changes"
+                },
+                if follow_paused {
+                    " · Playback follow paused"
+                } else {
+                    ""
+                }
+            )
+            .into()
+        } else {
+            status
         };
         let heading = self
             .metadata
@@ -2133,8 +2163,10 @@ impl GuiApp {
                                                     if favorite { "Remove from favorites" } else { "Add to favorites" },
                                                     cx,
                                                     move |this, _, cx| {
+                                                        if this.metadata.editor_identity() != editor_identity {
+                                                            return;
+                                                        }
                                                         let Some((track_id, favorite)) = this.metadata.track()
-                                                            .filter(|track| Some(track.id) == id)
                                                             .map(|track| (track.id, track.favorite)) else {
                                                             return;
                                                         };
@@ -2142,26 +2174,33 @@ impl GuiApp {
                                                             track_ids: vec![track_id], favorite: !favorite,
                                                         }, cx);
                                                     },
-                                                ).text_color(rgb(if favorite { ACCENT } else { TEXT })), !ready),
+                                                ).text_color(rgb(if favorite { ACCENT } else { TEXT })), !editable),
                                             )
                                             .child(
                                                 disabled_control(icon_button(
                                                     ("metadata-save", panel_id), "󰆓",
                                                     "Save metadata. Media files are never modified.", cx,
                                                     move |this, _, cx| {
-                                                        if this.metadata.track().is_some_and(|track| Some(track.id) == id) {
+                                                        if this.metadata.editor_identity() == editor_identity {
                                                             this.save_metadata(cx);
                                                         }
                                                     },
-                                                ), !metadata_dirty),
+                                                ), !can_save),
                                             )
+                                            .child(disabled_control(danger_control(button(
+                                                ("metadata-discard", panel_id), "Discard", cx,
+                                                move |this, _, cx| {
+                                                    if this.metadata.editor_identity() == editor_identity {
+                                                        this.request_discard_metadata(cx);
+                                                    }
+                                                },
+                                            )), !protected))
                                             .child(
                                                 disabled_control(icon_button(("metadata-retry", panel_id), "󰑐", "Retry loading track details", cx, move |this, _, cx| {
-                                                    if this.metadata.selected() == selected
-                                                        && matches!(this.metadata.load_state(), super::metadata::MetadataLoadState::Failed(_))
-                                                        && let Some(id) = selected
+                                                    if this.metadata.editor_identity() == editor_identity
+                                                        && this.metadata.can_retry()
                                                     {
-                                                        this.request_track(id, cx);
+                                                        this.retry_metadata(cx);
                                                         cx.notify();
                                                     }
                                                 }), !can_retry),
@@ -2190,13 +2229,13 @@ impl GuiApp {
                                 ].into_iter().map(|(key, label, decoder_hint)| {
                                     disabled_control(active_control(
                                         button((key, panel_id), label, cx, move |this, _, cx| {
-                                            if this.metadata.track().is_some_and(|track| Some(track.id) == id) {
+                                            if this.metadata.editor_identity() == editor_identity && this.metadata.editable() {
                                                 this.metadata_decoder_hint = decoder_hint;
                                                 cx.notify();
                                             }
                                         }),
-                                        ready && self.metadata_decoder_hint == decoder_hint,
-                                    ), !ready)
+                                        editable && self.metadata_decoder_hint == decoder_hint,
+                                    ), !editable)
                                 }),
                             ))
                             .child(caption(

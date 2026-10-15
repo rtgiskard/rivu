@@ -40,6 +40,7 @@ impl From<Command> for AppCommand {
 struct ControlState {
     graphical: bool,
     raise_pending: bool,
+    quit_pending: bool,
     shutting_down: bool,
     wakeup: Option<Arc<dyn Fn() + Send + Sync>>,
 }
@@ -63,6 +64,7 @@ impl AppHandle {
             let mut state = completion_state.lock();
             state.shutting_down = true;
             state.raise_pending = false;
+            state.quit_pending = false;
             let wakeup = state.wakeup.clone();
             drop(state);
             if let Some(wakeup) = wakeup {
@@ -102,7 +104,31 @@ impl AppHandle {
         Ok(())
     }
 
-    /// Constant-capacity shutdown signal; never blocks a GPUI callback.
+    /// User-driven Quit is offered to the GUI draft guard before core shutdown.
+    /// A single pending bit keeps tray callbacks bounded and nonblocking.
+    pub(crate) fn request_user_shutdown(&self) -> Result<()> {
+        let mut state = self.state.lock();
+        if state.shutting_down {
+            return Ok(());
+        }
+        if !state.graphical {
+            drop(state);
+            return self.request_shutdown();
+        }
+        let wakeup = if state.quit_pending {
+            None
+        } else {
+            state.wakeup.clone()
+        };
+        state.quit_pending = true;
+        drop(state);
+        if let Some(wakeup) = wakeup {
+            wakeup();
+        }
+        Ok(())
+    }
+
+    /// Forced IPC/signal shutdown bypasses UI confirmation and never blocks a GPUI callback.
     pub(crate) fn request_shutdown(&self) -> Result<()> {
         let mut state = self.state.lock();
         if state.shutting_down {
@@ -110,6 +136,7 @@ impl AppHandle {
         }
         state.shutting_down = true;
         state.raise_pending = false;
+        state.quit_pending = false;
         let wakeup = state.wakeup.clone();
         drop(state);
         let result = self.runtime.request_shutdown();
@@ -127,7 +154,7 @@ impl AppHandle {
         let wakeup: Arc<dyn Fn() + Send + Sync> = Arc::new(callback);
         let mut state = self.state.lock();
         state.wakeup = Some(Arc::clone(&wakeup));
-        let pending = state.raise_pending || state.shutting_down;
+        let pending = state.raise_pending || state.quit_pending || state.shutting_down;
         drop(state);
         if pending {
             wakeup();
@@ -138,12 +165,18 @@ impl AppHandle {
         let mut state = self.state.lock();
         state.graphical = false;
         state.raise_pending = false;
+        state.quit_pending = false;
         state.wakeup = None;
     }
 
     fn take_raise_request(&self) -> bool {
         let mut state = self.state.lock();
         std::mem::take(&mut state.raise_pending) && !state.shutting_down
+    }
+
+    fn take_quit_request(&self) -> bool {
+        let mut state = self.state.lock();
+        std::mem::take(&mut state.quit_pending) && !state.shutting_down
     }
 
     pub(crate) fn request_ack(&self, command: AppCommand) -> Ack {
@@ -316,6 +349,14 @@ impl App {
         };
         if app.handle.is_shutting_down() {
             app.quit_gui(cx);
+            return;
+        }
+        if app.handle.take_quit_request() {
+            let session = Rc::clone(&gui.session);
+            // The draft guard updates the root entity. Do not retain the App
+            // owner borrow across that update or its eventual close observers.
+            drop(app);
+            session.borrow().request_shutdown(cx);
             return;
         }
         // Leave Raise pending while a connection switch is in flight. Its
@@ -661,6 +702,44 @@ mod tests {
         .unwrap();
         let runtime = Runtime::start(directory.path(), &config).unwrap();
         (directory, runtime)
+    }
+
+    #[test]
+    fn user_quit_coalesces_without_starting_core_shutdown() {
+        let (_directory, mut runtime) = runtime_fixture();
+        let app = AppHandle::new(&runtime, true);
+        for _ in 0..1000 {
+            app.request_user_shutdown().unwrap();
+        }
+        let (wake, wakes) = bounded(1);
+        app.set_wakeup(move || {
+            let _ = wake.try_send(());
+        });
+        assert_eq!(wakes.try_recv(), Ok(()));
+        assert!(!app.is_shutting_down());
+        assert!(!runtime.is_finished());
+        assert!(app.take_quit_request());
+        assert!(!app.take_quit_request());
+        // Cancelling the GUI confirmation consumes only this intent; another
+        // tray Quit must be deliverable without an earlier shutdown leaking.
+        app.request_user_shutdown().unwrap();
+        assert_eq!(wakes.try_recv(), Ok(()));
+        assert!(app.take_quit_request());
+        assert!(!app.is_shutting_down());
+        app.request_user_shutdown().unwrap();
+        app.request_shutdown().unwrap();
+        assert!(!app.take_quit_request());
+        runtime.join().unwrap();
+    }
+
+    #[test]
+    fn headless_user_quit_shuts_down_without_a_gui_guard() {
+        let (_directory, mut runtime) = runtime_fixture();
+        let app = AppHandle::new(&runtime, false);
+        app.request_user_shutdown().unwrap();
+        assert!(app.is_shutting_down());
+        assert!(!app.take_quit_request());
+        runtime.join().unwrap();
     }
 
     #[test]
