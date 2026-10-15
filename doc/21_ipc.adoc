@@ -188,6 +188,10 @@ content revision; unrelated library pages cannot substitute stale values. GUI hi
 sorting index for the current immutable history and sort choice, rebuilding it
 on source or sort changes rather than during painting. Tree selection locations
 are updated when selection or accepted pages change, not on each viewport demand.
+Page acceptance indexes borrowed row identities once, then revalidates retained
+selection locations with keyed lookups rather than rescanning the page per
+selection. Expected work is linear in page rows plus retained selections; the
+temporary index is bounded by the accepted page and copies no directory paths.
 The TUI builds queue widgets only for visible rows, retaining global occurrence
 selection and scroll position; position-only updates do not rescan the queue.
 Configured TUI roots reuse their immutable storage until the paths change.

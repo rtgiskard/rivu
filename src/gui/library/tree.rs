@@ -85,6 +85,30 @@ struct CachedPage {
     touched: u64,
 }
 
+#[derive(PartialEq, Eq, Hash)]
+enum RowIdentity<'a> {
+    Directory(&'a Path),
+    Track(i64),
+}
+
+impl<'a> From<&'a DirectoryRow> for RowIdentity<'a> {
+    fn from(row: &'a DirectoryRow) -> Self {
+        match row {
+            DirectoryRow::Directory { path } => Self::Directory(path),
+            DirectoryRow::Track(track) => Self::Track(track.id),
+        }
+    }
+}
+
+impl<'a> From<&'a super::LibraryNode> for RowIdentity<'a> {
+    fn from(node: &'a super::LibraryNode) -> Self {
+        match node {
+            super::LibraryNode::Directory(path) => Self::Directory(path),
+            super::LibraryNode::Track(id) => Self::Track(*id),
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 struct Segment {
     start: usize,
@@ -252,21 +276,25 @@ impl DirectoryTree {
                 }
             }
         }
-        self.selected_locations.retain(|(node, candidate), index| {
-            if candidate != key {
-                return true;
+        if !self.selected_locations.is_empty() {
+            let mut locations = HashMap::with_capacity(page.rows.len());
+            for (position, row) in page.rows.iter().enumerate() {
+                locations
+                    .entry(RowIdentity::from(row))
+                    .or_insert(offset + position);
             }
-            if let Some(position) = page
-                .rows
-                .iter()
-                .position(|row| Self::row_matches(node, row))
-            {
-                *index = offset + position;
-                true
-            } else {
-                *index < page.total && (*index < offset || *index >= end)
-            }
-        });
+            self.selected_locations.retain(|(node, candidate), index| {
+                if candidate != key {
+                    return true;
+                }
+                if let Some(position) = locations.get(&RowIdentity::from(node)) {
+                    *index = *position;
+                    true
+                } else {
+                    *index < page.total && (*index < offset || *index >= end)
+                }
+            });
+        }
         self.pages
             .retain(|(candidate, start), _| candidate != key || *start < page.total);
         self.clock += 1;
@@ -786,16 +814,6 @@ impl DirectoryTree {
             .collect();
         self.evict();
         requests
-    }
-
-    fn row_matches(node: &super::LibraryNode, row: &DirectoryRow) -> bool {
-        match (node, row) {
-            (super::LibraryNode::Directory(selected), DirectoryRow::Directory { path }) => {
-                selected.as_ref() == path
-            }
-            (super::LibraryNode::Track(id), DirectoryRow::Track(track)) => *id == track.id,
-            _ => false,
-        }
     }
 
     pub(in crate::gui) fn remember_selection(
@@ -1376,6 +1394,64 @@ mod tests {
         assert_eq!(tree.selected_index(), Some(0));
         assert!(matches!(tree.item(0), Some(TreeItem::Placeholder { .. })));
         assert!(tree.pages.len() <= MAX_CACHED_PAGES);
+    }
+
+    #[test]
+    fn page_refresh_relocates_selected_identities_without_erasing_other_pages_or_roots() {
+        use crate::gui::library::LibraryNode;
+
+        let mut tree = DirectoryTree::default();
+        tree.configure_page_size(2);
+        let root = branch("/a");
+        let other = branch("/b");
+        let directory = |path: &str| LibraryNode::Directory(std::sync::Arc::from(Path::new(path)));
+        let moved = directory("/a/moved");
+        let removed = directory("/a/removed");
+        let outside = directory("/a/outside");
+        let truncated = directory("/a/truncated");
+        tree.selected_locations = HashMap::from([
+            ((moved.clone(), root.clone()), 900),
+            ((LibraryNode::Track(7), root.clone()), 0),
+            ((removed, root.clone()), 10),
+            ((outside.clone(), root.clone()), 2),
+            ((truncated, root.clone()), 999),
+            ((moved.clone(), other.clone()), 10),
+        ]);
+        tree.begin(root.clone(), 10, 1);
+        assert!(tree.accept(
+            &root,
+            1,
+            Page {
+                total: 20,
+                rows: vec![
+                    DirectoryRow::Track(crate::model::LibraryRow {
+                        id: 7,
+                        title: "Selected track".into(),
+                        artist: String::new(),
+                        album: String::new(),
+                        duration: None,
+                        codec: String::new(),
+                        bitrate_bps: None,
+                        bitrate_exact: false,
+                        favorite: false,
+                        missing: false,
+                        play_count: 0,
+                    }),
+                    DirectoryRow::Directory {
+                        path: "/a/moved".into(),
+                    },
+                ],
+            },
+        ));
+        assert_eq!(
+            tree.selected_locations,
+            HashMap::from([
+                ((moved.clone(), root.clone()), 11),
+                ((LibraryNode::Track(7), root.clone()), 10),
+                ((outside, root), 2),
+                ((moved, other), 10),
+            ])
+        );
     }
 
     #[test]
