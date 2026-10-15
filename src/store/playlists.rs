@@ -1,4 +1,4 @@
-use super::positions::{PositionScope, close_gaps, move_entry};
+use super::positions::{PositionScope, close_gaps, move_selection};
 use super::rows::{TRACK_COLUMNS, track_from_row};
 use super::tracks::{SOURCE_FILTER, validate_encoded_track_ids};
 use super::{Store, batch_limit, changed};
@@ -428,10 +428,14 @@ impl Store {
         if index >= n as usize {
             bail!("playlist index out of range");
         }
-        if old == index as i64 {
+        if !move_selection(
+            &tx,
+            PositionScope::Playlist(pid),
+            &[(id, old)],
+            index as i64,
+        )? {
             return Ok(None);
         }
-        move_entry(&tx, PositionScope::Playlist(pid), id, old, index as i64)?;
         tx.commit()?;
         Ok(Some(pid))
     }
@@ -453,7 +457,7 @@ impl Store {
     }
 
     /// Move stable occurrences as a group in their original playlist order.
-    /// Rust retains only selected positions, never the whole playlist or metadata.
+    /// Rust retains only selected identities and positions, never the whole playlist.
     pub fn move_playlist_entries(
         &self,
         playlist_id: i64,
@@ -462,7 +466,16 @@ impl Store {
     ) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
         let ids = serde_json::to_string(entry_ids)?;
-        let selected = selected_entries(&tx, playlist_id, &ids)?;
+        validate_selected_entries(&tx, playlist_id, &ids)?;
+        let selected = tx
+            .prepare(
+                "SELECT id,position FROM playlist_entries WHERE playlist_id=?1
+                 AND id IN (SELECT value FROM json_each(?2)) ORDER BY position,id",
+            )?
+            .query_map(params![playlist_id, ids], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<(i64, i64)>>>()?;
         let target: i64 = match before_entry_id {
             Some(id) => tx
                 .query_row(
@@ -478,57 +491,29 @@ impl Store {
                 |row| row.get(0),
             )?,
         };
-        if selected.is_empty() || selected.binary_search(&target).is_ok() {
-            return Ok(false);
-        }
-        let count = i64::try_from(selected.len())?;
-        let insertion = target - selected.partition_point(|&position| position < target) as i64;
-        if selected
-            .iter()
-            .enumerate()
-            .all(|(ordinal, &position)| position == insertion + ordinal as i64)
+        if selected.is_empty()
+            || selected
+                .binary_search_by_key(&target, |&(_, position)| position)
+                .is_ok()
         {
             return Ok(false);
         }
-        if let [old] = selected.as_slice() {
-            // Validation collapsed duplicate IDs to this one stable occurrence.
-            // Shift only the intervening interval, not the unchanged suffix twice.
-            move_entry(
-                &tx,
-                PositionScope::Playlist(playlist_id),
-                entry_ids[0],
-                *old,
-                insertion,
-            )?;
-            tx.commit()?;
-            return Ok(true);
+        let insertion =
+            target - selected.partition_point(|&(_, position)| position < target) as i64;
+        if !move_selection(
+            &tx,
+            PositionScope::Playlist(playlist_id),
+            &selected,
+            insertion,
+        )? {
+            return Ok(false);
         }
-        // Temporarily park selected rows outside the nonnegative position domain.
-        // The shared gap closer then touches survivors only, once per original interval.
-        tx.execute(
-            "WITH selected AS MATERIALIZED (
-                SELECT id,-row_number() OVER (ORDER BY position,id) AS parked
-                FROM playlist_entries WHERE playlist_id=?1
-                AND id IN (SELECT value FROM json_each(?2))
-             ) UPDATE playlist_entries SET position=selected.parked
-               FROM selected WHERE playlist_entries.id=selected.id",
-            params![playlist_id, ids],
-        )?;
-        close_gaps(&tx, &selected, PositionScope::Playlist(playlist_id))?;
-        tx.execute(
-            "UPDATE playlist_entries SET position=position+?1 WHERE playlist_id=?2 AND position>=?3",
-            params![count, playlist_id, insertion],
-        )?;
-        tx.execute(
-            "UPDATE playlist_entries SET position=?1-position-1 WHERE playlist_id=?2 AND position<0",
-            params![insertion, playlist_id],
-        )?;
         tx.commit()?;
         Ok(true)
     }
 }
 
-fn selected_entries(tx: &Transaction<'_>, playlist_id: i64, ids: &str) -> Result<Vec<i64>> {
+fn validate_selected_entries(tx: &Transaction<'_>, playlist_id: i64, ids: &str) -> Result<()> {
     exists_playlist(tx, playlist_id)?;
     let invalid: Option<i64> = tx
         .query_row(
@@ -541,6 +526,11 @@ fn selected_entries(tx: &Transaction<'_>, playlist_id: i64, ids: &str) -> Result
     if let Some(id) = invalid {
         bail!("playlist entry {id} does not exist in playlist {playlist_id}");
     }
+    Ok(())
+}
+
+fn selected_entries(tx: &Transaction<'_>, playlist_id: i64, ids: &str) -> Result<Vec<i64>> {
+    validate_selected_entries(tx, playlist_id, ids)?;
     let mut statement = tx.prepare(
         "SELECT position FROM playlist_entries WHERE playlist_id=?1
          AND id IN (SELECT value FROM json_each(?2)) ORDER BY position,id",
@@ -1016,32 +1006,48 @@ mod group_tests {
     }
 
     #[test]
-    fn noncontiguous_groups_move_before_after_and_to_end_in_source_order() -> Result<()> {
-        for (target, expected) in [
-            (Some(100), vec![101, 103, 100, 102, 104, 105]),
-            (Some(102), vec![100, 101, 103, 102, 104, 105]),
-            (Some(105), vec![100, 102, 104, 101, 103, 105]),
-            (None, vec![100, 102, 104, 105, 101, 103]),
-        ] {
-            let store = fixture()?;
-            assert!(store.move_playlist_entries(10, &[103, 101, 103], target)?);
-            assert_eq!(order(&store, 10)?, expected);
-            assert_eq!(order(&store, 20)?, [200]);
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn singleton_groups_preserve_identity_in_both_directions_and_at_end() -> Result<()> {
-        for (id, target, expected) in [
-            (100, Some(102), vec![101, 100, 102, 103, 104, 105]),
-            (103, Some(100), vec![103, 100, 101, 102, 104, 105]),
-            (101, None, vec![100, 102, 103, 104, 105, 101]),
-        ] {
-            let store = fixture()?;
-            assert!(store.move_playlist_entries(10, &[id, id], target)?);
-            assert_eq!(order(&store, 10)?, expected);
-            assert_eq!(order(&store, 20)?, [200]);
+    fn all_selection_shapes_match_stable_remove_then_insert_order() -> Result<()> {
+        let original: Vec<i64> = (100..106).collect();
+        for mask in 0..64 {
+            let selected: Vec<_> = original
+                .iter()
+                .copied()
+                .enumerate()
+                .filter(|(index, _)| mask & (1 << index) != 0)
+                .map(|(_, id)| id)
+                .collect();
+            for target in original.iter().copied().map(Some).chain([None]) {
+                let store = fixture()?;
+                let mut expected = original.clone();
+                if !target.is_some_and(|id| selected.contains(&id)) {
+                    expected.retain(|id| !selected.contains(id));
+                    let insertion = target.map_or(expected.len(), |id| {
+                        expected.iter().position(|&entry| entry == id).unwrap()
+                    });
+                    expected.splice(insertion..insertion, selected.iter().copied());
+                }
+                let mut submitted: Vec<_> = selected.iter().rev().copied().collect();
+                submitted.extend_from_slice(&selected);
+                assert_eq!(
+                    store.move_playlist_entries(10, &submitted, target)?,
+                    expected != original
+                );
+                assert_eq!(
+                    order(&store, 10)?,
+                    expected,
+                    "mask={mask}, target={target:?}"
+                );
+                assert_eq!(order(&store, 20)?, [200]);
+                if let [id] = selected.as_slice() {
+                    let position = expected.iter().position(|entry| entry == id).unwrap();
+                    let single = fixture()?;
+                    assert_eq!(
+                        single.move_playlist_entry(*id, position)?,
+                        (expected != original).then_some(10)
+                    );
+                    assert_eq!(order(&single, 10)?, expected);
+                }
+            }
         }
         Ok(())
     }
@@ -1101,17 +1107,17 @@ mod group_tests {
     }
 
     #[test]
-    fn group_mutation_failure_rolls_back_intermediate_positions_and_deletes() -> Result<()> {
+    fn group_mutation_failure_rolls_back_positions_and_deletes() -> Result<()> {
         let store = fixture()?;
         let before = order(&store, 10)?;
         store.conn.execute_batch(
-            "CREATE TRIGGER reject_restore BEFORE UPDATE OF position ON playlist_entries
-             WHEN OLD.position<0 AND NEW.position>=0 BEGIN SELECT RAISE(ABORT,'reject restore'); END;",
+            "CREATE TRIGGER reject_move BEFORE UPDATE OF position ON playlist_entries
+             WHEN OLD.id=103 BEGIN SELECT RAISE(ABORT,'reject move'); END;",
         )?;
         assert!(store.move_playlist_entries(10, &[101, 103], None).is_err());
         assert_eq!(order(&store, 10)?, before);
         store.conn.execute_batch(
-            "DROP TRIGGER reject_restore;
+            "DROP TRIGGER reject_move;
              CREATE TRIGGER reject_gap BEFORE UPDATE OF position ON playlist_entries
              BEGIN SELECT RAISE(ABORT,'reject gap'); END;",
         )?;

@@ -5753,6 +5753,7 @@ mod tests {
                 if let Some(&id) = selected.first() {
                     requested.push(id);
                 }
+                let revision = core.state.queue.revision;
                 core.command(Command::MoveQueueEntries {
                     queue_ids: requested,
                     index: target,
@@ -5760,6 +5761,11 @@ mod tests {
                 .unwrap();
                 assert_eq!(core.queue_ids, expected, "mask={mask} target={target}");
                 assert_queue_saved(&core);
+                assert_eq!(
+                    core.state.queue.revision,
+                    revision + u64::from(expected != original),
+                    "mask={mask} target={target}"
+                );
                 assert_eq!(core.state.queue.current_id, Some(current));
                 assert_eq!(
                     core.state.queue.current_position,
@@ -5787,6 +5793,44 @@ mod tests {
                         .collect::<Vec<_>>()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn failed_queue_moves_preserve_memory_order_current_history_and_revision() {
+        let (directory, mut core) = fixture_with_database(Some(10.0), true);
+        playing(&mut core, 3);
+        core.played = vec![1, 3, 5];
+        core.played_cursor = 2;
+        let order = core.queue_ids.clone();
+        let state = core.state.queue.clone();
+        let generation = core.generation;
+        let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER reject_queue_move AFTER UPDATE OF revision ON queue_meta
+                 BEGIN SELECT RAISE(ABORT,'queue move rejected'); END;",
+            )
+            .unwrap();
+        for command in [
+            Command::MoveQueue {
+                queue_id: 3,
+                index: 0,
+            },
+            Command::MoveQueueEntries {
+                queue_ids: vec![5, 1, 3, 1],
+                index: 1,
+            },
+        ] {
+            assert!(core.command(command).is_err());
+            assert_eq!(core.queue_ids, order);
+            assert_eq!(core.state.queue, state);
+            assert_eq!(core.store.queue_state().unwrap(), state);
+            assert_eq!(core.generation, generation);
+            assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
+            assert_eq!(core.played, [1, 3, 5]);
+            assert_eq!(core.played_cursor, 2);
+            assert_queue_saved(&core);
         }
     }
 

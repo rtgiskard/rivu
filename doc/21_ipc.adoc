@@ -19,10 +19,25 @@ Compaction executes one SQL update per contiguous run of deleted positions; the
 final suffix update may affect zero rows. Bounded-interval updates reuse a prepared
 statement, and these local executions do not add client IPC round trips.
 
-Single-entry moves update only the positions between the old and new locations.
-Bulk queue moves rewrite the affected interval rather than the full queue;
-reorders skip rows whose position is already correct. Entry identities and the
-current occurrence remain stable, and no-op moves leave queue content valid.
+Queue and playlist moves share one interval displacement algorithm for single
+entries and selections. Only the span covering the selection and its destination
+is updated, and each entry whose position changes is written once. Selected IDs
+and original positions are captured before mutation; queue moves use the core's
+existing ID order rather than loading it again. Explicit arbitrary reorders, such
+as shuffle, retain a separate order-writing operation that skips unchanged rows.
+Entry identities and the current occurrence remain stable, and no-op moves leave
+queue content valid.
+
+Deletion compaction, selection movement, and arbitrary order replacement remain
+distinct operations. They share position ownership and scoped storage primitives,
+not a generic list controller: business operations retain validation, transaction
+ownership, playback state, and revision publication. Selection movement favors
+ordinary small selections over uncommon dense scattered selections: interval SQL
+avoids materializing survivor mappings and requires no size/density thresholds or
+single-entry strategy branch. Its accepted cost is more local SQL executions for
+many scattered selected runs; necessary position writes still scale with the
+affected span. Arbitrary permutations keep a separate order writer rather than
+being decomposed into repeated moves.
 Structural queue mutations advance the content revision once inside their changing
 Store transaction, including reference deletion and gap compaction. Metadata
 invalidation remains field-sensitive; failures roll back structural revision and
@@ -418,14 +433,22 @@ ID order; `before_entry_id = None` appends the group. The target is a stable ent
 identity in the same playlist, not a row index. Moving onto a selected target or
 requesting an already-current order is a no-op.
 
+Playlist moves use the shared queue/playlist interval algorithm described above.
+Only selected identities and positions are retained, without building a mapping
+for surviving entries. Left shifts run in ascending original-position order and
+right shifts in descending order; selected entries are then placed by identity.
+Dense, scattered selections require many interval SQL updates; widely separated
+selections can still require work proportional to the playlist length. No track
+metadata is loaded for movement.
+
 Both commands compare `expected_revision` with that playlist's current scalar
 entry token at core dispatch, before storage mutation. A nonexistent playlist,
 missing/foreign selected ID, missing/foreign move target, or stale token fails
 without changing membership or positions. Duplicate selected IDs are applied
 once. Empty selections still validate the playlist, revision, and move target;
 valid empty selections and other no-ops do not advance revisions. Mutations are
-SQL transactions retaining only selected positions in Rust, not complete playlist
-metadata or an all-entry vector. Actual group moves advance only their playlist's
+SQL transactions retaining only selected identities and positions, not complete
+playlist metadata or an all-entry vector. Actual group moves advance only their playlist's
 scoped token; group removal advances the membership epoch. The existing
 single-entry commands retain their distinct CLI contracts. Bulk favorites use
 the existing atomic `SetFavorite {track_ids, favorite}` command.

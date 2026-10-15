@@ -74,49 +74,46 @@ impl Core {
         if ids.is_empty() {
             return Ok(());
         }
-        let mut selected = self
-            .queue_ids
-            .iter()
-            .enumerate()
-            .filter(|(_, id)| ids.contains(id));
-        let (first, &first_id) = selected.next().context("Queue entry not found")?;
-        let mut last = first;
-        let mut found = 1;
-        if ids.len() > 1 {
-            for (position, _) in selected {
-                last = position;
-                found += 1;
-                if found == ids.len() {
+        let mut selected = Vec::with_capacity(ids.len());
+        for (position, &id) in self.queue_ids.iter().enumerate() {
+            if ids.contains(&id) {
+                selected.push((
+                    i64::try_from(id).context("Queue ID exceeds database range")?,
+                    i64::try_from(position).context("Queue position exceeds database range")?,
+                ));
+                if selected.len() == ids.len() {
                     break;
                 }
             }
         }
-        ensure!(found == ids.len(), "Queue entry not found");
-        let insertion = index.min(self.queue_ids.len() - ids.len());
-        if ids.len() == 1 {
-            if first == insertion {
-                return Ok(());
+        ensure!(selected.len() == ids.len(), "Queue entry not found");
+        let insertion = index.min(self.queue_ids.len() - selected.len());
+        if !self.store.move_queue_entries(&selected, insertion)? {
+            return Ok(());
+        }
+
+        let first = selected[0].1 as usize;
+        let last = selected[selected.len() - 1].1 as usize;
+        let start = first.min(insertion);
+        let end = (last + 1).max(insertion + selected.len());
+        let span = &mut self.queue_ids[start..end];
+        // Compact survivors stably, then open the selected block in place.
+        // Only the K selected identities are buffered; work is linear in the span.
+        let mut remaining = 0;
+        for position in 0..span.len() {
+            let id = span[position];
+            if !ids.contains(&id) {
+                span[remaining] = id;
+                remaining += 1;
             }
-            self.store.move_queue_entry(first_id, insertion)?;
-            if insertion < first {
-                self.queue_ids[insertion..=first].rotate_right(1);
-            } else {
-                self.queue_ids[first..=insertion].rotate_left(1);
-            }
-        } else {
-            let start = first.min(insertion);
-            let end = (last + 1).max(insertion + ids.len());
-            let span = &self.queue_ids[start..end];
-            let mut order = Vec::with_capacity(span.len());
-            let mut remaining = span.iter().copied().filter(|id| !ids.contains(id));
-            order.extend(remaining.by_ref().take(insertion - start));
-            order.extend(span.iter().copied().filter(|id| ids.contains(id)));
-            order.extend(remaining);
-            if order == span {
-                return Ok(());
-            }
-            self.store.reorder_queue_range(start, &order)?;
-            self.queue_ids[start..end].copy_from_slice(&order);
+        }
+        let offset = insertion - start;
+        span[offset..].rotate_right(selected.len());
+        for (slot, &(id, _)) in span[offset..offset + selected.len()]
+            .iter_mut()
+            .zip(&selected)
+        {
+            *slot = id as u64;
         }
         self.state.queue = self.store.queue_projection(self.queue_ids.len())?;
         Ok(())

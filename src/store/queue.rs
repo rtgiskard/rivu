@@ -1,4 +1,4 @@
-use super::positions::{PositionScope, close_gaps, move_entry};
+use super::positions::{PositionScope, close_gaps, move_selection};
 use super::rows::{LIBRARY_ROW_COLUMNS_QUALIFIED, library_row_at};
 use super::tracks::SOURCE_FILTER;
 use super::{Store, batch_limit};
@@ -275,40 +275,13 @@ impl Store {
         Ok(())
     }
 
-    pub(crate) fn move_queue_entry(&self, id: u64, index: usize) -> Result<()> {
+    pub(crate) fn move_queue_entries(&self, selected: &[(i64, i64)], index: usize) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
-        let id = i64::try_from(id).context("Queue ID exceeds database range")?;
-        let (old, last): (i64, i64) = tx.query_row(
-            "SELECT position,(SELECT MAX(position) FROM queue_entries) FROM queue_entries WHERE id=?1",
-            [id], |row| Ok((row.get(0)?, row.get(1)?)),
-        ).optional()?.context("Queue entry not found")?;
-        let new = i64::try_from(index).context("Queue target exceeds database range")?;
-        ensure!(new <= last, "Queue target position out of range");
-        move_entry(&tx, PositionScope::Queue, id, old, new)?;
-        invalidate_structure(&tx, old != new)?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    pub(crate) fn reorder_queue_range(&self, offset: usize, ids: &[u64]) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
-        let start = i64::try_from(offset).context("Queue offset exceeds database range")?;
-        let end = start
-            .checked_add(i64::try_from(ids.len())?)
-            .context("Queue range exceeds database positions")?;
-        let total: usize = tx.query_row(
-            "SELECT COUNT(*) FROM queue_entries WHERE position>=?1 AND position<?2",
-            params![start, end],
-            |row| integer(row, 0),
-        )?;
-        ensure!(
-            total == ids.len(),
-            "Queue range does not contain every entry"
-        );
-        let changed = reorder_interval(&tx, start, ids)?;
+        let insertion = i64::try_from(index).context("Queue target exceeds database range")?;
+        let changed = move_selection(&tx, PositionScope::Queue, selected, insertion)?;
         invalidate_structure(&tx, changed)?;
         tx.commit()?;
-        Ok(())
+        Ok(changed)
     }
 
     pub(crate) fn clear_queue(&self) -> Result<()> {
@@ -372,7 +345,7 @@ mod tests {
         store.enqueue_sources(&[], &[])?;
         store.enqueue_sources(&["/absent".into()], &[])?;
         store.reorder_queue(&[])?;
-        store.reorder_queue_range(0, &[])?;
+        assert!(!store.move_queue_entries(&[], 0)?);
         store.remove_queue_entries(&[])?;
         store.clear_queue()?;
         assert!(!store.deduplicate_queue()?);
@@ -383,19 +356,19 @@ mod tests {
         let ids = store.queue_ids()?;
         store.set_queue_current(Some(ids[1]))?;
         let before = store.queue_state()?;
-        store.move_queue_entry(ids[1], 1)?;
+        assert!(!store.move_queue_entries(&[(ids[1] as i64, 1)], 1)?);
         store.reorder_queue(&ids)?;
-        store.reorder_queue_range(1, &ids[1..])?;
+        assert!(!store.move_queue_entries(&[(ids[1] as i64, 1), (ids[2] as i64, 2)], 1)?);
         store.remove_queue_entries(&[])?;
         assert!(!store.deduplicate_queue()?);
         assert_eq!(store.queue_state()?, before);
 
-        store.move_queue_entry(ids[0], 2)?;
+        assert!(store.move_queue_entries(&[(ids[0] as i64, 0)], 2)?);
         revision = assert_invalidated(&store, revision)?;
         assert_eq!(store.queue_ids()?, [ids[1], ids[2], ids[0]]);
         store.reorder_queue(&ids)?;
         revision = assert_invalidated(&store, revision)?;
-        store.reorder_queue_range(1, &[ids[2], ids[1]])?;
+        assert!(store.move_queue_entries(&[(ids[2] as i64, 2)], 1)?);
         revision = assert_invalidated(&store, revision)?;
         store.remove_queue_entries(&[ids[0]])?;
         revision = assert_invalidated(&store, revision)?;
@@ -479,8 +452,6 @@ mod tests {
                 .reorder_queue(&[ids[0], ids[0], ids[2], ids[3]])
                 .is_err()
         );
-        assert!(store.reorder_queue_range(0, &[ids[0], ids[3]]).is_err());
-        assert!(store.move_queue_entry(ids[0], 99).is_err());
         assert!(store.remove_queue_entries(&[ids[0], 999]).is_err());
         assert!(store.enqueue_tracks(&[1, 999]).is_err());
         assert_eq!(store.queue_state()?, before);
@@ -495,13 +466,17 @@ mod tests {
         )?;
         assert!(store.enqueue_tracks(&[1]).is_err());
         assert!(store.enqueue_sources(&[], &[1]).is_err());
-        assert!(store.move_queue_entry(ids[0], 3).is_err());
+        assert!(store.move_queue_entries(&[(ids[0] as i64, 0)], 3).is_err());
         assert!(
             store
                 .reorder_queue(&[ids[3], ids[2], ids[1], ids[0]])
                 .is_err()
         );
-        assert!(store.reorder_queue_range(0, &[ids[1], ids[0]]).is_err());
+        assert!(
+            store
+                .move_queue_entries(&[(ids[0] as i64, 0), (ids[2] as i64, 2)], 2)
+                .is_err()
+        );
         assert!(store.remove_queue_entries(&[ids[2]]).is_err());
         assert!(store.deduplicate_queue().is_err());
         assert!(store.clear_queue().is_err());

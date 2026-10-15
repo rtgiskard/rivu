@@ -57,43 +57,89 @@ pub(super) fn close_gaps(
     Ok(())
 }
 
-/// Move one validated occurrence, shifting only the intervening positions.
-pub(super) fn move_entry(
+/// Move a validated, position-sorted selection without mapping survivors.
+/// Shift original intervals left in ascending order and right in descending order.
+pub(super) fn move_selection(
     tx: &Transaction<'_>,
     scope: PositionScope,
-    id: i64,
-    old: i64,
-    new: i64,
-) -> Result<()> {
-    if old == new {
-        return Ok(());
+    selected: &[(i64, i64)],
+    insertion: i64,
+) -> Result<bool> {
+    if selected.is_empty()
+        || selected
+            .iter()
+            .enumerate()
+            .all(|(ordinal, &(_, position))| position == insertion + ordinal as i64)
+    {
+        return Ok(false);
     }
-    let (lower, upper, shift) = if new < old {
-        (new, old - 1, 1)
-    } else {
-        (old + 1, new, -1)
-    };
-    match scope {
+    let count = i64::try_from(selected.len())?;
+    let first = selected[0].1.min(insertion);
+    let last = selected[selected.len() - 1].1.max(insertion + count - 1);
+    let mut destinations = Vec::new();
+    serde::ser::Serializer::collect_seq(
+        &mut serde_json::Serializer::new(&mut destinations),
+        selected
+            .iter()
+            .enumerate()
+            .map(|(ordinal, &(id, _))| (id, insertion + ordinal as i64)),
+    )?;
+    let destinations = String::from_utf8(destinations)?;
+    let sql = match scope {
         PositionScope::Queue => {
-            tx.execute(
-                "UPDATE queue_entries SET position=position+?3 WHERE position>=?1 AND position<=?2",
-                params![lower, upper, shift],
-            )?;
-            tx.execute(
-                "UPDATE queue_entries SET position=?1 WHERE id=?2",
-                params![new, id],
-            )?;
+            "UPDATE queue_entries SET position=position+?1 WHERE position BETWEEN ?2 AND ?3"
         }
-        PositionScope::Playlist(playlist) => {
-            tx.execute(
-                "UPDATE playlist_entries SET position=position+?3 WHERE playlist_id=?4 AND position>=?1 AND position<=?2",
-                params![lower, upper, shift, playlist],
-            )?;
-            tx.execute(
-                "UPDATE playlist_entries SET position=?1 WHERE id=?2",
-                params![new, id],
-            )?;
+        PositionScope::Playlist(_) => {
+            "UPDATE playlist_entries SET position=position+?1 WHERE position BETWEEN ?2 AND ?3 AND playlist_id=?4"
         }
+    };
+    let mut update = tx.prepare(sql)?;
+    let mut shift_interval = |index: usize, left: bool| -> Result<()> {
+        let lower = if index == 0 {
+            first
+        } else {
+            selected[index - 1].1 + 1
+        };
+        let upper = if index == selected.len() {
+            last
+        } else {
+            selected[index].1 - 1
+        };
+        let picked = i64::try_from(index)?;
+        // Split at the insertion point in positions compressed by removal.
+        let (lower, upper, shift) = if left {
+            (lower, upper.min(insertion + picked - 1), -picked)
+        } else {
+            (lower.max(insertion + picked), upper, count - picked)
+        };
+        if lower <= upper && shift != 0 {
+            match scope {
+                PositionScope::Queue => update.execute(params![shift, lower, upper])?,
+                PositionScope::Playlist(id) => update.execute(params![shift, lower, upper, id])?,
+            };
+        }
+        Ok(())
+    };
+    for index in 0..=selected.len() {
+        shift_interval(index, true)?;
     }
-    Ok(())
+    for index in (0..=selected.len()).rev() {
+        shift_interval(index, false)?;
+    }
+    let sql = match scope {
+        PositionScope::Queue => {
+            "UPDATE queue_entries SET position=json_extract(destination.value,'$[1]')
+             FROM json_each(?1) AS destination
+             WHERE queue_entries.id=json_extract(destination.value,'$[0]')
+             AND queue_entries.position<>json_extract(destination.value,'$[1]')"
+        }
+        PositionScope::Playlist(_) => {
+            "UPDATE playlist_entries SET position=json_extract(destination.value,'$[1]')
+             FROM json_each(?1) AS destination
+             WHERE playlist_entries.id=json_extract(destination.value,'$[0]')
+             AND playlist_entries.position<>json_extract(destination.value,'$[1]')"
+        }
+    };
+    tx.execute(sql, [destinations])?;
+    Ok(true)
 }
