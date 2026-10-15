@@ -557,6 +557,7 @@ fn scan_cue(
     sheets: Option<&mut HashMap<PathBuf, crate::cue::CueSheet>>,
 ) -> Result<Vec<ScanRecord>> {
     cancellation.check()?;
+    path.to_str().context("CUE sheet path is not UTF-8")?;
     let sheet = match sheets {
         Some(sheets) => sheets
             .remove(path)

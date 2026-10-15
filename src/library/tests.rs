@@ -359,6 +359,35 @@ fn failed_cue_read_preserves_owned_tracks_without_suppressing_full_audio() -> Re
 }
 
 #[test]
+#[cfg(unix)]
+fn non_utf8_cue_name_does_not_prevent_valid_audio_from_being_saved() -> Result<()> {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().to_path_buf();
+    let audio = root.join("audio.wav");
+    let unrelated = root.join("unrelated.wav");
+    let sheet = root.join(OsStr::from_bytes(b"album-\xff.cue"));
+    wav(&audio, 225)?;
+    wav(&unrelated, 75)?;
+    two_track_sheet(&sheet)?;
+
+    let scan = scan_paths(std::slice::from_ref(&root), &[], false)?;
+    assert_eq!(scan.uncertainties, [ScanUncertainty::CueSheet(sheet)]);
+    assert_eq!(scan.errors.len(), 1);
+    assert!(scan.suppressed_sources.is_empty());
+    let store = crate::store::Store::open(Path::new(":memory:"))?;
+    store.apply_scan(&scan)?;
+    assert_eq!(store.track_count()?, 2);
+    for path in [audio, unrelated] {
+        let id = store.track_id_for_source(&path, None)?.unwrap();
+        assert!(!store.track(id)?.unwrap().missing);
+    }
+    Ok(())
+}
+
+#[test]
 fn failed_cue_source_not_found_keeps_segments_until_the_sheet_is_deleted() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let audio = directory.path().join("audio.wav");
