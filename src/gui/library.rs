@@ -51,8 +51,6 @@ pub(super) fn track_detail(track: &crate::model::LibraryRow) -> String {
     detail
 }
 
-const LIBRARY_ROW_HEIGHT: f32 = 28.0;
-
 fn track_columns(track: &LibraryRow, columns: LibraryColumns) -> Option<gpui::Div> {
     if !LibraryColumn::ALL
         .into_iter()
@@ -398,7 +396,6 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let row_count = self.browser.library.tree().row_count();
-        let ui_scale = self.state.system.config.ui_scale;
         let scroll = &self.browser.library.tree().scroll;
         let view = list_viewport(
             uniform_list(
@@ -422,7 +419,6 @@ impl GuiApp {
                                         0,
                                         false,
                                     )
-                                    .h(px(LIBRARY_ROW_HEIGHT * ui_scale.max(0.5)))
                                     .gap_0()
                                     .overflow_hidden()
                                     .child(
@@ -455,7 +451,7 @@ impl GuiApp {
                                                                 },
                                                             ))
                                                             .min_h_0()
-                                                            .size(px(24.0 * ui_scale.max(0.5))),
+                                                            .size(gpui::rems(1.5)),
                                                         )
                                                     }),
                                             ),
@@ -587,12 +583,12 @@ impl GuiApp {
                                                 |this, _, cx| this.request_root_counts(cx),
                                             ))
                                             .min_h_0()
-                                            .size(px(24.0 * ui_scale.max(0.5))),
+                                            .size(gpui::rems(1.5)),
                                         )
                                     })
                                 })
                                 .when_some(scan, |view, scan| {
-                                    view.child(scan.min_h_0().size(px(24.0 * ui_scale.max(0.5))))
+                                    view.child(scan.min_h_0().size(gpui::rems(1.5)))
                                 });
                             let name_cell = div()
                                 .w(gpui::rems(14.0))
@@ -609,7 +605,6 @@ impl GuiApp {
                                     0,
                                     selected,
                                 )
-                                .h(px(LIBRARY_ROW_HEIGHT * ui_scale.max(0.5)))
                                 .gap_0()
                                 .overflow_hidden()
                                 .group("library-track-row")
@@ -637,7 +632,7 @@ impl GuiApp {
                                             )
                                             .flex_shrink_0()
                                             .min_h_0()
-                                            .size(px(24.0 * ui_scale.max(0.5))),
+                                            .size(gpui::rems(1.5)),
                                         )
                                     },
                                 ),

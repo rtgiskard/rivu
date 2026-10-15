@@ -29,11 +29,11 @@ use anyhow::Result;
 use ashpd::desktop::file_chooser::SelectedFiles;
 use browser::BrowserState;
 pub(super) use components::{
-    ButtonTooltip, DropdownItem, DropdownState, POPOVER_MAX_HEIGHT, StatusKind, TRACK_HEIGHT,
-    active_control, artwork_preview, button, caption, context_menu_container, drag_preview,
-    dropdown_container, dropdown_row, dropdown_trigger, form_field, icon_button, list_row,
-    list_viewport, menu_item, metadata_item, panel_header, panel_surface, panel_toolbar, row_text,
-    section_group, sortable_header, status_message, toggle_button, tree_row, two_column,
+    ButtonTooltip, DropdownItem, DropdownState, POPOVER_MAX_REMS, StatusKind, active_control,
+    artwork_preview, button, caption, context_menu_container, drag_preview, dropdown_container,
+    dropdown_row, dropdown_trigger, form_field, icon_button, list_row, list_viewport, menu_item,
+    metadata_item, panel_header, panel_surface, panel_toolbar, row_text, section_group,
+    sortable_header, status_message, toggle_button, tree_row, two_column,
 };
 use futures::{StreamExt, channel::mpsc};
 use gpui::{prelude::*, *};

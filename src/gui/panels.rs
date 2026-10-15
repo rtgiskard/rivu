@@ -1,13 +1,15 @@
 use super::{
     ACCENT, BORDER, Dragging, Field, GuiApp, HIGHLIGHT, HistorySort, ListFocus, MUTED, Measured,
     StatusKind, TEXT, UI_INSET, ViewRequestKind, active_control, artwork_preview, button, column,
-    components::{danger_control, disabled_control, quiet_icon_button},
+    components::{
+        LIST_ROW_REMS, danger_control, disabled_control, list_row_height, quiet_icon_button,
+    },
     form_field, format_time, icon_button,
     library::LibraryDrag,
     list_viewport, metadata_item, paged, panel_header, panel_surface, panel_toolbar, row, row_text,
     section_group, sortable_header, status_message,
 };
-pub(super) use super::{TRACK_HEIGHT, caption, list_row};
+pub(super) use super::{caption, list_row};
 use crate::{
     gui::QueueDrag,
     model::{Command, DecoderHint, PlaybackStatus, RepeatMode},
@@ -105,7 +107,7 @@ fn track_list_row(
     list_row(id, selected)
         .child(
             div()
-                .w(px(32.))
+                .w(gpui::rems(2.))
                 .flex_shrink_0()
                 .text_xs()
                 .whitespace_nowrap()
@@ -947,7 +949,7 @@ impl GuiApp {
                                 let Some(entry) = this.browser.queue.rows.get(index) else {
                                     return this
                                         .paged_loading_row(ViewRequestKind::Queue, index, cx)
-                                        .h(px(TRACK_HEIGHT));
+                                        .h(gpui::rems(LIST_ROW_REMS));
                                 };
                                 let id = entry.id;
                                 let track_id = entry.track_id;
@@ -1324,7 +1326,8 @@ impl GuiApp {
         let message: SharedString = message.to_owned().into();
         row()
             .p_2()
-            .h(px(TRACK_HEIGHT))
+            .h(gpui::rems(LIST_ROW_REMS))
+            .flex_shrink_0()
             .w_full()
             .overflow_hidden()
             .min_h_0()
@@ -1390,9 +1393,10 @@ impl GuiApp {
     pub(super) fn playlists_panel(
         &mut self,
         panel_id: u64,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let row_height = list_row_height(window);
         let playlist_id = self.browser.playlists.selected();
         let selection_entry = self.browser.playlists.selected_entry();
         let selection_unavailable = !self.browser.playlists.track_selection.ready();
@@ -1458,7 +1462,7 @@ impl GuiApp {
                         let Some(p) = this.browser.playlists.summaries().rows.get(index) else {
                             return this
                                 .paged_loading_row(ViewRequestKind::Summaries, index, cx)
-                                .h(px(TRACK_HEIGHT))
+                                .h(gpui::rems(LIST_ROW_REMS))
                                 .into_any_element();
                         };
                         let id = p.id;
@@ -1564,7 +1568,7 @@ impl GuiApp {
             .gap_2()
             .child(list_viewport(catalog).when(playlist_id.is_some(), |view| {
                 view.flex_none()
-                    .h(px(catalog_len.max(1) as f32 * TRACK_HEIGHT + 2.))
+                    .h(row_height * catalog_len.max(1) as f32 + px(2.))
                     .max_h(gpui::relative(1. / 3.))
             }));
         if let Some(playlist_id) = playlist_id {
@@ -1582,7 +1586,7 @@ impl GuiApp {
                             let Some(e) = this.browser.playlists.entries().rows.get(index) else {
                                 return this
                                     .paged_loading_row(ViewRequestKind::Entries, index, cx)
-                                    .h(px(TRACK_HEIGHT))
+                                    .h(gpui::rems(LIST_ROW_REMS))
                                     .into_any_element();
                             };
                             let id = e.id;
@@ -1763,14 +1767,14 @@ impl GuiApp {
                         list_viewport(entries)
                             .flex_none()
                             .flex_shrink_1()
-                            .h(px(entries_len.max(1) as f32 * TRACK_HEIGHT + 2.))
+                            .h(row_height * entries_len.max(1) as f32 + px(2.))
                             .max_h(gpui::relative(1.)),
                     )
                     .child(
                         div()
                             .id(("playlist-append", panel_id))
                             .flex_1()
-                            .min_h(px(16.))
+                            .min_h(gpui::rems(1.))
                             .w_full()
                             .on_drop(cx.listener(|this, drag: &PlaylistDrag, window, cx| {
                                 window.prevent_default();

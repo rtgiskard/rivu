@@ -5,9 +5,9 @@ use super::{ACCENT, BORDER, GuiApp, HIGHLIGHT, PANEL, TEXT, UI_INSET};
 use gpui::{
     Context, Div, ElementId, Render, SharedString, Stateful, Window, div, prelude::*, px, rgb,
 };
-pub(crate) const ROW_HEIGHT: f32 = 42.0;
+pub(crate) const LIST_ROW_REMS: f32 = 2.625;
 pub(crate) const MENU_WIDTH: f32 = 260.0;
-pub(crate) const POPOVER_MAX_HEIGHT: f32 = 240.0;
+pub(crate) const POPOVER_MAX_REMS: f32 = 15.0;
 pub(crate) const DROPDOWN_ROW_REMS: f32 = 2.0;
 pub(crate) use dropdown::{DropdownItem, DropdownState};
 
@@ -476,7 +476,10 @@ pub(crate) fn dropdown_row(
         .child(div().flex_1().min_w_0().truncate().child(label.into()))
 }
 
-pub(crate) const TRACK_HEIGHT: f32 = ROW_HEIGHT;
+pub(crate) fn list_row_height(window: &Window) -> gpui::Pixels {
+    window.rem_size() * LIST_ROW_REMS
+}
+
 /// Secondary text used throughout panels and controls.
 pub(crate) fn caption(text: impl Into<SharedString>) -> Div {
     div()
@@ -490,7 +493,7 @@ pub(crate) fn list_row(id: impl Into<ElementId>, selected: bool) -> Stateful<Div
     div()
         .id(id)
         .w_full()
-        .h(gpui::rems(2.625))
+        .h(gpui::rems(LIST_ROW_REMS))
         .flex_shrink_0()
         .flex()
         .items_center()

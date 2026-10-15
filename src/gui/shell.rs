@@ -1077,10 +1077,11 @@ impl Render for GuiApp {
                     );
                     if has_selected_queue {
                         if !self.browser.playlists.summaries().rows.is_empty() {
-                            let height = (self.browser.playlists.summaries().rows.len() as f32
-                                * panels::TRACK_HEIGHT)
-                                .min(240.)
-                                .min(f32::from(window.viewport_size().height) * 0.5);
+                            let row_height = components::list_row_height(window);
+                            let height = (row_height
+                                * self.browser.playlists.summaries().rows.len() as f32)
+                                .min(window.rem_size() * components::POPOVER_MAX_REMS)
+                                .min(window.viewport_size().height * 0.5);
                             menu = menu.child(
                                 uniform_list(
                                     "queue-playlist-targets",
@@ -1102,7 +1103,7 @@ impl Render for GuiApp {
                                                                 index,
                                                                 cx,
                                                             )
-                                                            .h(px(panels::TRACK_HEIGHT));
+                                                            .h(row_height);
                                                     };
                                                     let playlist_id = playlist.id;
                                                     menu_item(
@@ -1128,7 +1129,7 @@ impl Render for GuiApp {
                                                             cx.notify();
                                                         },
                                                     )
-                                                    .h(px(panels::TRACK_HEIGHT))
+                                                    .h(row_height)
                                                     .w_full()
                                                     .overflow_hidden()
                                                 })
@@ -1141,7 +1142,8 @@ impl Render for GuiApp {
                                         this.ensure_playlist_range(range, cx);
                                     },
                                 )))
-                                .h(px(height))
+                                .h(height)
+                                .flex_shrink_0()
                                 .w_full(),
                             );
                         }

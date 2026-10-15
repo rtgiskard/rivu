@@ -1,5 +1,5 @@
 use super::{
-    BORDER, ButtonTooltip, DropdownItem, DropdownState, ERROR, POPOVER_MAX_HEIGHT, StatusKind,
+    BORDER, ButtonTooltip, DropdownItem, DropdownState, ERROR, POPOVER_MAX_REMS, StatusKind,
     UI_INSET, active_control, button, caption, column,
     components::{DROPDOWN_ROW_REMS, disabled_control},
     copyable_message, dropdown_container, dropdown_row, dropdown_trigger, form_field, icon_button,
@@ -2433,7 +2433,7 @@ impl Settings {
                 let item_count = self.dropdown.filtered().count();
                 let row_height = DROPDOWN_ROW_REMS * f32::from(window.rem_size());
                 let height = (item_count as f32 * row_height)
-                    .min(POPOVER_MAX_HEIGHT * self.ui_scale)
+                    .min(f32::from(window.rem_size()) * POPOVER_MAX_REMS)
                     .min(f32::from(window.viewport_size().height) * 0.45);
                 let choices = uniform_list(
                     "settings-dropdown",
