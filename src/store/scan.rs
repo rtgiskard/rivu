@@ -216,21 +216,25 @@ impl Store {
             .filter(|record| record.cue.is_none())
             .filter_map(|record| record.fingerprint.as_deref())
             .collect();
-        let mut q = tx.prepare(
-            "SELECT id,path,fingerprint,cue_sheet,cue_number,cue_start_frame,cue_end_frame,relocation_independent
-             FROM tracks INDEXED BY tracks_fingerprint WHERE fingerprint=?1",
-        )?;
-        for hash in &candidate_hashes {
-            let hash = blake3::Hash::from_hex(hash).context("Invalid scan BLAKE3 fingerprint")?;
-            let mut rows = q.query([hash.as_bytes().as_slice()])?;
-            while let Some(row) = rows.next()? {
-                let id = row.get::<_, i64>(0)?;
-                if let std::collections::hash_map::Entry::Vacant(entry) = selected.entry(id) {
-                    entry.insert(read_existing(row)?);
+        // Incomplete scans cannot relocate or mark missing. Exact record identities
+        // are already in scope, so global same-content rows cannot affect this commit.
+        if !result.scan_incomplete {
+            let mut q = tx.prepare(
+                "SELECT id,path,fingerprint,cue_sheet,cue_number,cue_start_frame,cue_end_frame,relocation_independent
+                 FROM tracks INDEXED BY tracks_fingerprint WHERE fingerprint=?1",
+            )?;
+            for hash in &candidate_hashes {
+                let hash =
+                    blake3::Hash::from_hex(hash).context("Invalid scan BLAKE3 fingerprint")?;
+                let mut rows = q.query([hash.as_bytes().as_slice()])?;
+                while let Some(row) = rows.next()? {
+                    let id = row.get::<_, i64>(0)?;
+                    if let std::collections::hash_map::Entry::Vacant(entry) = selected.entry(id) {
+                        entry.insert(read_existing(row)?);
+                    }
                 }
             }
         }
-        drop(q);
         // The original table scan visited integer primary keys in row order.
         // Preserve that order for identities and global relocation candidates.
         let mut old: Vec<Existing> = selected.into_values().collect();

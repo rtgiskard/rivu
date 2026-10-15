@@ -258,6 +258,7 @@ impl Core {
                     .ok()
                     .filter(|result| !result.errors().is_empty())
                     .map(|result| result.errors().join("\n"));
+                let importing = scan.import.is_some();
                 let progress = scan.progress.clone();
                 let outcome = if cancelled {
                     Ok(false)
@@ -286,7 +287,11 @@ impl Core {
                             task.status.progress.phase = ScanPhase::Failed;
                             task.status.progress.errors =
                                 task.status.progress.errors.saturating_add(1);
-                            task.status.message = "Scan failed".into();
+                            task.status.message = if importing {
+                                error.to_string()
+                            } else {
+                                "Scan failed".into()
+                            };
                             task.status.error = Some(format!("{error:#}"));
                         }
                     }
@@ -328,34 +333,51 @@ impl Core {
     pub(in crate::core) fn finish_scan(&mut self, scan: ScanFinished) -> Result<bool> {
         let result = scan.result?;
         let successful = result.errors().is_empty();
-        if self.store.apply_scan(&result)? {
-            self.reload(true)?;
+        let saved = self.store.apply_scan(&result);
+        let changed = if scan.import.is_some() {
+            saved.context("Failed to save scan; playlist not created")
+        } else {
+            saved
+        }?;
+        if changed {
+            let refreshed = self.reload(true);
+            if scan.import.is_some() {
+                refreshed
+                    .context("Scan saved, but library refresh failed before playlist creation")?;
+            } else {
+                refreshed?;
+            }
         }
         if let Some((name, items)) = scan.import {
-            let accessible: HashSet<_> = result
-                .records
-                .iter()
-                .map(|record| match &record.cue {
-                    Some(cue) => (cue.sheet.as_path(), Some(cue.number)),
-                    None => (record.path.as_path(), None),
-                })
-                .collect();
-            let mut ids = Vec::with_capacity(items.len());
-            for item in items {
-                let path = library::logical_path(&item.path)?;
-                if !accessible.contains(&(path.as_path(), item.cue_track)) {
-                    continue;
+            (|| -> Result<()> {
+                let accessible: HashSet<_> = result
+                    .records
+                    .iter()
+                    .map(|record| match &record.cue {
+                        Some(cue) => (cue.sheet.as_path(), Some(cue.number)),
+                        None => (record.path.as_path(), None),
+                    })
+                    .collect();
+                let mut ids = Vec::with_capacity(items.len());
+                for item in items {
+                    let path = library::logical_path(&item.path)?;
+                    if !accessible.contains(&(path.as_path(), item.cue_track)) {
+                        continue;
+                    }
+                    if let Some(id) = self.store.track_id_for_source(&path, item.cue_track)? {
+                        ids.push(id);
+                    }
                 }
-                if let Some(id) = self.store.track_id_for_source(&path, item.cue_track)? {
-                    ids.push(id);
+                ids.dedup();
+                if ids.is_empty() {
+                    bail!("Playlist contains no supported, accessible audio tracks");
                 }
-            }
-            ids.dedup();
-            if ids.is_empty() {
-                bail!("Playlist contains no supported, accessible audio tracks");
-            }
-            self.store.create_playlist_with_tracks(&name, &ids)?;
-            self.reload_playlists()?;
+                self.store.create_playlist_with_tracks(&name, &ids)?;
+                Ok(())
+            })()
+            .context("Scan saved, but playlist creation failed")?;
+            self.reload_playlists()
+                .context("Scan saved and playlist created, but playlist refresh failed")?;
         }
         Ok(successful)
     }

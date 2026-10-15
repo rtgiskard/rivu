@@ -200,17 +200,18 @@ impl Core {
                 if self.active_scan.is_some() {
                     bail!("A library scan is already running");
                 }
-                let items = library::import_playlist(&path)?;
-                let paths = items
-                    .iter()
-                    .map(|item| item.path.clone())
-                    .collect::<Vec<_>>();
                 let name = name.unwrap_or_else(|| {
                     path.file_stem()
                         .unwrap_or_default()
                         .to_string_lossy()
                         .into_owned()
                 });
+                Store::validate_playlist_name(&name)?;
+                let items = library::import_playlist(&path)?;
+                let paths = items
+                    .iter()
+                    .map(|item| item.path.clone())
+                    .collect::<Vec<_>>();
                 return self.scan(paths, Some((name, items)), false);
             }
             Command::ExportPlaylist { playlist_id, path } => {

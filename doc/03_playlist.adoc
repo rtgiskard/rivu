@@ -17,6 +17,10 @@ and move bounds; invalid requests do not change any entries.
 Creating a playlist from a queue commits the name and entries together. If an
 entry cannot be saved, no empty playlist is left behind.
 
+Playlist names must contain a non-whitespace character and must not contain
+control characters. Creating, renaming, saving a queue, and importing use the
+same rule. Accepted names retain their leading and trailing whitespace.
+
 [source,sh]
 ----
 rivu playlist new "Mix"
@@ -116,8 +120,16 @@ partial playlists: `--wait` reports scan errors even when readable tracks were
 saved. Only identities successfully read or validly reused by that import's scan
 can enter its playlist; an old library row does not make a failed source eligible.
 Import fails if no entries resolve successfully. Without `--name`, the playlist
-name comes from the imported file's name without its extension. Another import
-or scan cannot start while scanning is active.
+name comes from the imported file's name without its extension. Both explicit
+and default names are validated before a scan starts or any scan data is saved.
+Another import or scan cannot start while scanning is active.
+
+Scan saving, playlist creation, and playlist refresh are separate stages. A
+failure to save the scan does not create a playlist. Once the scan has been
+saved, a later library refresh or playlist creation failure does not roll back
+the saved tracks; once the playlist has been created, a playlist refresh failure
+does not delete it. Task errors identify these committed stages. The import is
+not automatically replayed after a failure.
 
 Listings and exports include every entry, not only the visible rows. For listing
 changes and retry behavior, see link:02_library.adoc#_paged_views[Paged views].

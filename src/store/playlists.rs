@@ -339,12 +339,19 @@ impl Store {
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    pub(crate) fn validate_playlist_name(name: &str) -> Result<()> {
+        if name.trim().is_empty() || name.chars().any(char::is_control) {
+            bail!("invalid name")
+        }
+        Ok(())
+    }
+
     pub fn create_playlist(&self, name: &str) -> Result<i64> {
         self.create_playlist_with_tracks(name, &[])
     }
 
     pub fn create_playlist_with_tracks(&self, name: &str, tracks: &[i64]) -> Result<i64> {
-        valid_name(name)?;
+        Self::validate_playlist_name(name)?;
         let tx = self.conn.unchecked_transaction()?;
         tx.execute("INSERT INTO playlists(name)VALUES(?)", [name])?;
         let id = tx.last_insert_rowid();
@@ -353,7 +360,7 @@ impl Store {
         Ok(id)
     }
     pub fn create_playlist_from_queue(&self, name: &str) -> Result<i64> {
-        valid_name(name)?;
+        Self::validate_playlist_name(name)?;
         let tx = self.conn.unchecked_transaction()?;
         tx.execute("INSERT INTO playlists(name) VALUES(?1)", [name])?;
         let id = tx.last_insert_rowid();
@@ -362,7 +369,7 @@ impl Store {
         Ok(id)
     }
     pub fn rename_playlist(&self, id: i64, name: &str) -> Result<bool> {
-        valid_name(name)?;
+        Self::validate_playlist_name(name)?;
         let tx = self.conn.unchecked_transaction()?;
         exists_playlist(&tx, id)?;
         let updated = tx.execute(
@@ -547,13 +554,6 @@ fn exists_playlist(tx: &Transaction<'_>, id: i64) -> Result<()> {
     Ok(())
 }
 
-fn valid_name(s: &str) -> Result<()> {
-    if s.trim().is_empty() || s.chars().any(char::is_control) {
-        bail!("invalid name")
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod deletion_tests {
     use super::*;
@@ -656,6 +656,44 @@ mod request_tests {
             "INSERT INTO tracks(id,path) VALUES (1,'one'),(2,'two'),(3,'three'),(4,'four');",
         )?;
         Ok(store)
+    }
+
+    #[test]
+    fn create_and_rename_share_name_rules_without_normalizing_whitespace() -> Result<()> {
+        let store = store()?;
+        let original = store.create_playlist_with_tracks("Original", &[3, 1])?;
+        let before = store.playlist_summary_page(0, 10)?;
+        let entries = store.playlist_entries_page(original, 0, 10)?;
+        for name in [
+            "",
+            " ",
+            "\u{2003}",
+            "\tMix",
+            "Mix\n",
+            "Mix\u{7f}",
+            "Mix\u{85}",
+        ] {
+            assert!(store.create_playlist(name).is_err());
+            assert!(store.create_playlist_with_tracks(name, &[1]).is_err());
+            assert!(store.create_playlist_from_queue(name).is_err());
+            assert!(store.rename_playlist(original, name).is_err());
+            assert_eq!(store.playlist_summary_page(0, 10)?, before);
+            assert_eq!(store.playlist_entries_page(original, 0, 10)?, entries);
+        }
+        for name in ["  Mix \u{2003} ", "混音", "Mix\u{200b}"] {
+            let plain = store.create_playlist(name)?;
+            let with_tracks = store.create_playlist_with_tracks(name, &[1])?;
+            let from_queue = store.create_playlist_from_queue(name)?;
+            assert!(store.rename_playlist(original, name)?);
+            let summaries = store.playlist_summary_page(0, 100)?.rows;
+            for id in [plain, with_tracks, from_queue, original] {
+                assert_eq!(
+                    summaries.iter().find(|row| row.id == id).unwrap().name,
+                    name
+                );
+            }
+        }
+        Ok(())
     }
 
     #[test]

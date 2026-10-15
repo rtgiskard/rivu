@@ -53,6 +53,10 @@ indexes relocation candidates by fingerprint, segment number and frame bounds.
 Multiple compatible old identities remain ambiguous; exact identities still take
 precedence. These indexes are merge-local, not persistent source-probe caches;
 only `NotFound` permits relocation, and scan uncertainty protection is unchanged.
+Incomplete scans skip global fingerprint candidates because both relocation and
+missing detection are disabled; exact input identities remain covered by the
+requested scopes and record paths. Fingerprint validation still runs before
+commit, and complete scans retain scope-external missing-source discovery.
 
 Track-ID mutations serialize each input list once. Library deletion validates
 before playback-side effects, then consumes the prepared input in the same
@@ -65,6 +69,13 @@ Count-only pages omit row projection; queue and playlist totals do not join
 track metadata. Equivalent normalized root prefixes are counted once per request,
 then expanded to the original paths and order. Root aggregation state is
 request-local and bounded by the 256-root query limit.
+Library track/display pages retain only the latest exact filtered total, keyed
+by normalized query, favorite/missing predicates and optional root prefix. Local
+SQLite change counts and external-commit data versions invalidate that slot;
+explicit transactions neither use nor populate it, preventing rollback leakage.
+No row payloads or multi-query map are retained. Unfiltered root counts use the
+covering path index. Directory child aggregation remains request-local; offset
+pages still pay the traversal cost of skipping preceding matches.
 Queue and playlist entry pages seek by their contiguous position rather than
 skipping an OFFSET prefix. Playlist entry totals use the indexed maximum position;
 this relies on the same Store-owned contiguous-order invariant.
@@ -453,7 +464,8 @@ regardless of view filters; a root without scanned tracks returns zero. An empty
 path requests the entire library. Overlapping roots
 each count their own subtree independently. Clients keep unavailable counts
 distinct from zero, split larger root sets into bounded requests, and discard
-results when their roots, request generation, or library revision have changed.
+results when their roots, request generation, or structure revision have changed.
+Library-content-only changes do not invalidate these unfiltered root totals.
 These requests run on the same core owner and revision boundary as other queries;
 frontends must not query storage from rendering.
 

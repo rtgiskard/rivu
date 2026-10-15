@@ -113,7 +113,7 @@ impl BrowserState {
 #[derive(Default)]
 struct RootCounts {
     generation: u64,
-    revision: u64,
+    structure_revision: u64,
     roots: Vec<std::path::PathBuf>,
     totals: std::collections::HashMap<std::path::PathBuf, usize>,
     pending: HashSet<usize>,
@@ -174,12 +174,12 @@ impl LibraryBrowser {
     pub(super) fn begin_root_counts(
         &mut self,
         roots: &[std::path::PathBuf],
-        revision: u64,
+        structure_revision: u64,
     ) -> (u64, Vec<usize>) {
-        if self.counts.roots != roots || self.counts.revision != revision {
+        if self.counts.roots != roots || self.counts.structure_revision != structure_revision {
             self.counts.invalidate();
             self.counts.roots = roots.to_vec();
-            self.counts.revision = revision;
+            self.counts.structure_revision = structure_revision;
         }
         let batches = (0..roots.len())
             .step_by(crate::model::MAX_QUERY_ROWS)
@@ -199,11 +199,11 @@ impl LibraryBrowser {
         &self,
         generation: u64,
         roots: &[std::path::PathBuf],
-        revision: u64,
+        structure_revision: u64,
     ) -> bool {
         self.counts.generation == generation
             && self.counts.roots == roots
-            && self.counts.revision == revision
+            && self.counts.structure_revision == structure_revision
     }
 
     pub(super) fn accept_root_counts(
@@ -1240,6 +1240,18 @@ mod tests {
             library.begin_root_counts(&roots, 7).1,
             vec![crate::model::MAX_QUERY_ROWS]
         );
+        assert!(!library.root_counts_failed());
+        assert!(library.begin_root_counts(&roots, 7).1.is_empty());
+        library.accept_root_counts(
+            generation,
+            crate::model::MAX_QUERY_ROWS,
+            vec![crate::model::LibraryRootCount {
+                path: roots.last().unwrap().clone(),
+                total: 2,
+            }],
+        );
+        assert_eq!(library.root_count(roots.last().unwrap()), Some(2));
+        assert!(library.begin_root_counts(&roots, 7).1.is_empty());
         library.refresh_search("needle".into());
         assert_eq!(library.root_count(&roots[0]), Some(0));
         let (scanned, _) = library.begin_root_counts(&roots, 8);
@@ -1269,6 +1281,51 @@ mod tests {
         let empty = library.begin_root_counts(&[], 8);
         assert!(empty.1.is_empty());
     }
+
+    #[test]
+    fn replacing_roots_rejects_in_flight_counts_at_the_same_structure_revision() {
+        let mut library = LibraryBrowser::default();
+        let roots = vec![std::path::PathBuf::from("/music")];
+        let (generation, batches) = library.begin_root_counts(&roots, 7);
+        assert_eq!(batches, vec![0]);
+        library.accept_root_counts(
+            generation,
+            0,
+            vec![crate::model::LibraryRootCount {
+                path: roots[0].clone(),
+                total: 4,
+            }],
+        );
+        assert_eq!(library.root_count(&roots[0]), Some(4));
+
+        let replacement = vec![std::path::PathBuf::from("/other")];
+        assert!(!library.counts_current(generation, &replacement, 7));
+        let (next, batches) = library.begin_root_counts(&replacement, 7);
+        assert_ne!(next, generation);
+        assert_eq!(batches, vec![0]);
+        library.fail_root_counts(generation, 0);
+        library.accept_root_counts(
+            generation,
+            0,
+            vec![crate::model::LibraryRootCount {
+                path: roots[0].clone(),
+                total: 99,
+            }],
+        );
+        assert!(!library.root_counts_failed());
+        assert_eq!(library.root_count(&roots[0]), None);
+        assert!(library.begin_root_counts(&replacement, 7).1.is_empty());
+        library.accept_root_counts(
+            next,
+            0,
+            vec![crate::model::LibraryRootCount {
+                path: replacement[0].clone(),
+                total: 6,
+            }],
+        );
+        assert_eq!(library.root_count(&replacement[0]), Some(6));
+    }
+
     #[test]
     fn replacing_roots_rejects_old_forest_and_group_pages() {
         use crate::gui::library::tree::TreeItem;

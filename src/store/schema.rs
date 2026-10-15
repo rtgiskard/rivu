@@ -114,7 +114,7 @@ impl Store {
                     [],
                     |row| row.get(0),
                 )
-                .context("Unsupported library database; remove the old database and rescan")?;
+                .context("Unsupported library database; back up the database and WAL before replacing it; rescanning cannot restore user state")?;
             if version == 11 {
                 let tx = c.unchecked_transaction()?;
                 tx.execute_batch(
@@ -126,7 +126,9 @@ impl Store {
                 tx.execute("UPDATE schema_meta SET value=12 WHERE key='version'", [])?;
                 tx.commit()?;
             } else if version != 12 {
-                bail!("Unsupported database version {version}; remove the old database and rescan");
+                bail!(
+                    "Unsupported database version {version}; back up the database and WAL before replacing it; rescanning cannot restore user state"
+                );
             }
         }
         // SQLite's built-in lower() is ASCII-only; preserve frontend Unicode search.
@@ -150,6 +152,7 @@ impl Store {
                 capacity: (crate::config::DEFAULT_PAGE_SIZE as usize).saturating_mul(2),
                 clock: 0,
             }),
+            count_cache: RefCell::new(None),
         };
         Ok(store)
     }

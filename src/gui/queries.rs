@@ -100,8 +100,11 @@ impl ViewRequests {
 impl GuiApp {
     pub(super) fn request_root_counts(&mut self, cx: &mut Context<Self>) {
         let roots = self.state.system.config.library_roots.clone();
-        let revision = self.state.library.revision;
-        let (generation, batches) = self.browser.library.begin_root_counts(&roots, revision);
+        let structure_revision = self.state.library.structure_revision;
+        let (generation, batches) = self
+            .browser
+            .library
+            .begin_root_counts(&roots, structure_revision);
         for offset in batches {
             let batch =
                 roots[offset..(offset + crate::model::MAX_QUERY_ROWS).min(roots.len())].to_vec();
@@ -116,11 +119,11 @@ impl GuiApp {
                     if !this.browser.library.counts_current(
                         generation,
                         &this.state.system.config.library_roots,
-                        this.state.library.revision,
+                        this.state.library.structure_revision,
                     ) {
                         return;
                     }
-                    if response.revisions.library != revision {
+                    if response.revisions.structure != structure_revision {
                         this.browser.library.fail_root_counts(generation, offset);
                         this.request_root_counts(cx);
                         return;
