@@ -561,7 +561,7 @@ impl GuiApp {
                                                 "󰉋"
                                             }
                                         } else {
-                                            "󰈙"
+                                            "󰎇"
                                         }),
                                 )
                                 .child(
