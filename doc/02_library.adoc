@@ -247,9 +247,11 @@ disabled. Missing values appear as `-`.
 Root headers in both views show the number of scanned library tracks beneath
 that root, including missing files. These counts do not change with search,
 favorites, or the missing filter. `—` means the count is not available yet,
-not zero; failed counts offer a retry control. Counts refresh after library
-changes such as scans. Overlapping roots count their own recursive contents
-independently and can show the same track in more than one group.
+not zero; failed counts offer a retry control. Counts refresh after structural
+library changes such as scans, removals, or path relocation. Editing tags,
+favorites, or playback statistics does not reload them. Overlapping roots count
+their own recursive contents independently and can show the same track in more
+than one group.
 
 Search, favorites, and the missing filter apply to both the flat list and directory
 tree without switching views, and can be combined. Tree filtering shows only

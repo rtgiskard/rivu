@@ -1021,6 +1021,31 @@ fn incomplete_scan_preserves_absent_identities_and_avoids_relocation() {
 }
 
 #[test]
+fn invalid_fingerprints_roll_back_complete_and_incomplete_scans() {
+    for incomplete in [false, true] {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let mut original = rec("/music/old.wav", "old", "Original", 10.0);
+        store.apply_scan(&scan(vec![original.clone()])).unwrap();
+        let id = store
+            .track_id_for_source(&original.path, None)
+            .unwrap()
+            .unwrap();
+        store.set_favorite(&[id], true).unwrap();
+        let before = store.track(id).unwrap().unwrap();
+        original.media.title = "Uncommitted".into();
+        let mut invalid = rec("/music/new.wav", "new", "New", 10.0);
+        invalid.fingerprint = Some("not-a-fingerprint".into());
+        let mut result = scan(vec![original, invalid]);
+        result.scan_incomplete = incomplete;
+        assert!(store.apply_scan(&result).is_err());
+        assert_eq!(store.track_count().unwrap(), 1);
+        assert_eq!(store.track(id).unwrap().unwrap(), before);
+        store.track_cache.borrow_mut().entries.clear();
+        assert_eq!(store.track(id).unwrap().unwrap(), before);
+    }
+}
+
+#[test]
 fn uncertain_scopes_preserve_owned_rows_and_reject_relocation_candidates() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().to_path_buf();
@@ -1438,6 +1463,11 @@ fn bounded_view_queries_filter_order_and_count() {
         page.rows.iter().map(|track| track.id).collect::<Vec<_>>(),
         vec![ids[0], ids[1]]
     );
+    let count_only = store
+        .library_page(Some("a"), None, None, usize::MAX, 0)
+        .unwrap();
+    assert_eq!(count_only.total, 3);
+    assert!(count_only.rows.is_empty());
 
     let playlist = store.create_playlist("mix").unwrap();
     store.add_playlist(playlist, &ids).unwrap();
@@ -1450,6 +1480,83 @@ fn bounded_view_queries_filter_order_and_count() {
     assert_eq!(entries.rows.len(), 1);
     assert_eq!(entries.rows[0].track_id, ids[1]);
     assert_eq!(store.playlist_track_ids(playlist, 2).unwrap(), ids[..2]);
+}
+
+#[test]
+fn paged_totals_follow_local_writes_external_commits_and_rollback() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("counts.db");
+    let store = Store::open(&path).unwrap();
+    store
+        .apply_scan(&scan(vec![
+            rec("/music/a/one.wav", "one", "Needle One", 1.0),
+            rec("/music/a/two.wav", "two", "Needle Two", 1.0),
+            rec("/music/b/three.wav", "three", "Other", 1.0),
+        ]))
+        .unwrap();
+    let count = || {
+        store
+            .library_page(Some("needle"), None, None, 0, 0)
+            .unwrap()
+            .total
+    };
+    assert_eq!(count(), 2);
+    let first = store
+        .library_page(Some("needle"), None, None, 0, 1)
+        .unwrap()
+        .rows[0]
+        .id;
+    store
+        .edit_track(first, Some("Other"), None, None, None)
+        .unwrap();
+    assert_eq!(count(), 1);
+    let external = Connection::open(&path).unwrap();
+    external
+        .execute(
+            "UPDATE tracks SET raw_title='Needle Three' WHERE path='/music/b/three.wav'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(count(), 2);
+    // A count read before rollback must not leak the transaction's uncommitted total.
+    let tx = store.conn.unchecked_transaction().unwrap();
+    tx.execute("UPDATE tracks SET title_override='Other'", [])
+        .unwrap();
+    assert_eq!(count(), 0);
+    tx.rollback().unwrap();
+    assert_eq!(count(), 2);
+    for (root, total) in [("/music/a", 1), ("/music/b", 1), ("/music", 2)] {
+        let page = store
+            .library_root_page(
+                Path::new(root),
+                Some("needle"),
+                None,
+                None,
+                crate::model::LibrarySort::Id,
+                0,
+                10,
+            )
+            .unwrap();
+        assert_eq!(page.total, total);
+        assert_eq!(page.rows.len(), total);
+    }
+    // A different predicate or projection must not inherit another scope's count.
+    assert_eq!(
+        store
+            .library_page(Some("other"), None, None, 0, 0)
+            .unwrap()
+            .total,
+        1
+    );
+    store.set_favorite(&[first], true).unwrap();
+    assert_eq!(
+        store
+            .library_page(None, Some(true), None, 0, 0)
+            .unwrap()
+            .total,
+        1
+    );
+    assert_eq!(count(), 2);
 }
 
 #[test]

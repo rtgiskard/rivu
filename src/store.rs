@@ -21,6 +21,7 @@ pub(crate) use tracks::PlaybackSource;
 pub struct Store {
     conn: Connection,
     track_cache: RefCell<cache::TrackCache>,
+    count_cache: RefCell<Option<tracks::TrackCount>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -54,6 +54,17 @@ pub(crate) struct PlaybackSource {
     fingerprint: Option<blake3::Hash>,
 }
 
+// Only the latest scope is retained; no row payloads or per-query map accumulate.
+pub(super) struct TrackCount {
+    changes: u64,
+    data_version: i64,
+    query: Option<String>,
+    favorite: Option<bool>,
+    missing: Option<bool>,
+    prefix: Option<String>,
+    total: usize,
+}
+
 impl Store {
     pub(crate) fn playback_source(&self, track: &Track) -> Result<Option<PlaybackSource>> {
         if track.bitrate_bps.is_some() && track.bitrate_exact {
@@ -178,7 +189,7 @@ impl Store {
         let query = query
             .filter(|query| !query.is_empty())
             .map(str::to_lowercase);
-        let total = self.filtered_track_count(query.as_deref(), favorite, missing)?;
+        let total = self.filtered_track_count(query.as_deref(), favorite, missing, None)?;
         if limit == 0 {
             return Ok(Page {
                 total,
@@ -226,11 +237,8 @@ impl Store {
             .filter(|query| !query.is_empty())
             .map(str::to_lowercase);
         let scope = DIRECTORY_SCOPE;
-        let total = self.conn.query_row(
-            &format!("SELECT COUNT(*) FROM tracks {TRACK_SEARCH_FILTER}{scope}"),
-            params![query, favorite, missing, prefix],
-            |row| row.get::<_, i64>(0),
-        )? as usize;
+        let total =
+            self.filtered_track_count(query.as_deref(), favorite, missing, Some(&prefix))?;
         if limit == 0 {
             return Ok(Page {
                 total,
@@ -315,15 +323,63 @@ impl Store {
         query: Option<&str>,
         favorite: Option<bool>,
         missing: Option<bool>,
+        prefix: Option<&str>,
     ) -> Result<usize> {
-        if query.is_none() && favorite.is_none() && missing.is_none() {
+        if query.is_none() && favorite.is_none() && missing.is_none() && prefix.is_none() {
             return self.track_count();
         }
-        Ok(self.conn.query_row(
-            &format!("SELECT COUNT(*) FROM tracks {TRACK_SEARCH_FILTER}"),
-            params![query, favorite, missing],
-            |row| row.get::<_, i64>(0),
-        )? as usize)
+        // total_changes detects local writes, data_version other connections' commits.
+        // Never retain or reuse an explicit transaction's snapshot: a rollback does
+        // not advance either counter after that snapshot was read.
+        let cacheable = self.conn.is_autocommit();
+        let changes = self.conn.total_changes();
+        let data_version = self
+            .conn
+            .prepare_cached("PRAGMA data_version")?
+            .query_row([], |row| row.get::<_, i64>(0))?;
+        if cacheable
+            && let Some(cached) = self.count_cache.borrow().as_ref()
+            && cached.changes == changes
+            && cached.data_version == data_version
+            && cached.query.as_deref() == query
+            && cached.favorite == favorite
+            && cached.missing == missing
+            && cached.prefix.as_deref() == prefix
+        {
+            return Ok(cached.total);
+        }
+        let total = match prefix {
+            Some(prefix) if query.is_none() && favorite.is_none() && missing.is_none() => {
+                // Omitting nullable predicates keeps this count on the covering path index.
+                self.conn.query_row(
+                    "SELECT COUNT(*) FROM tracks WHERE path>=?1 AND path<(rtrim(?1,'/')||'0')",
+                    [prefix],
+                    |row| row.get::<_, i64>(0),
+                )?
+            }
+            Some(prefix) => self.conn.query_row(
+                &format!("SELECT COUNT(*) FROM tracks {TRACK_SEARCH_FILTER}{DIRECTORY_SCOPE}"),
+                params![query, favorite, missing, prefix],
+                |row| row.get::<_, i64>(0),
+            )?,
+            None => self.conn.query_row(
+                &format!("SELECT COUNT(*) FROM tracks {TRACK_SEARCH_FILTER}"),
+                params![query, favorite, missing],
+                |row| row.get::<_, i64>(0),
+            )?,
+        } as usize;
+        if cacheable {
+            *self.count_cache.borrow_mut() = Some(TrackCount {
+                changes,
+                data_version,
+                query: query.map(str::to_owned),
+                favorite,
+                missing,
+                prefix: prefix.map(str::to_owned),
+                total,
+            });
+        }
+        Ok(total)
     }
 
     pub fn library_stats(&self) -> Result<crate::model::LibraryStats> {
@@ -495,6 +551,13 @@ impl Store {
         let pattern = query
             .filter(|value| !value.is_empty())
             .map(str::to_lowercase);
+        let total = self.filtered_track_count(pattern.as_deref(), favorite, missing, None)?;
+        if limit == 0 {
+            return Ok(Page {
+                total,
+                rows: Vec::new(),
+            });
+        }
         let sql = format!(
             "SELECT {TRACK_COLUMNS} FROM tracks {TRACK_SEARCH_FILTER} ORDER BY id LIMIT ?4 OFFSET ?5"
         );
@@ -507,7 +570,6 @@ impl Store {
                 track_from_row,
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let total = self.filtered_track_count(pattern.as_deref(), favorite, missing)?;
         Ok(Page { total, rows })
     }
 

@@ -150,6 +150,7 @@ impl Store {
                 capacity: (crate::config::DEFAULT_PAGE_SIZE as usize).saturating_mul(2),
                 clock: 0,
             }),
+            count_cache: RefCell::new(None),
         };
         Ok(store)
     }
