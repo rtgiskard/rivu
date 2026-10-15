@@ -521,7 +521,7 @@ impl GuiApp {
                             };
                             let selected = this.directory_row_selected(entry);
                             let id = node.clone();
-                            let scan = path.clone().filter(|_| selected).map(|scan_path| {
+                            let scan = path.clone().map(|scan_path| {
                                 let hint = format!("Rescan {}", scan_path.display());
                                 super::components::quiet_icon_button(icon_button(
                                     gpui::ElementId::named_usize("library-scan", index),
@@ -597,8 +597,11 @@ impl GuiApp {
                                 .when(visible.depth == 0 && path.is_some(), |view| {
                                     let count = this.browser.library.root_count(path.as_deref().expect("root path"));
                                     view.child(
-                                        super::caption(count.map_or_else(|| "—".to_owned(), |total| total.to_string()))
-                                            .flex_shrink_0(),
+                                        row()
+                                            .gap_1()
+                                            .flex_shrink_0()
+                                            .child(super::caption("󰎇").font_family(super::fonts::SYMBOLS_FAMILY))
+                                            .child(super::caption(count.map_or_else(|| "—".to_owned(), |total| total.to_string()))),
                                     )
                                     .when(this.browser.library.root_counts_failed(), |view| {
                                         view.child(
@@ -613,9 +616,6 @@ impl GuiApp {
                                             .size(gpui::rems(1.5)),
                                         )
                                     })
-                                })
-                                .when_some(scan, |view, scan| {
-                                    view.child(scan.min_h_0().size(gpui::rems(1.5)))
                                 });
                             let name_cell = div()
                                 .w(gpui::rems(14.0))
@@ -625,7 +625,23 @@ impl GuiApp {
                                 .relative()
                                 .overflow_hidden()
                                 .child(tree_guides(this.browser.library.tree(), index))
-                                .child(name_content);
+                                .child(name_content)
+                                .when_some(scan, |view, scan| {
+                                    view.child(
+                                        row()
+                                            .id(gpui::ElementId::named_usize("library-scan-overlay", index))
+                                            .absolute()
+                                            .right_0()
+                                            .top_0()
+                                            .h_full()
+                                            .bg(gpui::rgb(super::HIGHLIGHT))
+                                            .invisible()
+                                            .group_hover("library-track-row", |style| style.visible())
+                                            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                            .on_click(|_, _, cx| cx.stop_propagation())
+                                            .child(scan.min_h_0().size(gpui::rems(1.5))),
+                                    )
+                                });
                             let row_view = super::components::lazy_row_tooltip(
                                 super::tree_row(
                                     gpui::ElementId::named_usize("library-node", index),
