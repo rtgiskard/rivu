@@ -20,9 +20,10 @@ use crate::{
     StrikethroughStyle, Style, SubpixelSprite, SubscriberSet, Subscription, SystemWindowTab,
     SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextInputConfiguration,
     TextInputStateChange, TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState,
-    TransformationMatrix, Underline, UnderlineStyle, WindowAppearance, WindowBackgroundAppearance,
-    WindowBounds, WindowControls, WindowDecorations, WindowOptions, WindowParams, WindowTextSystem,
-    WindowVisibility, point, prelude::*, px, rems, size, transparent_black,
+    Transformation, TransformationMatrix, Underline, UnderlineStyle, WindowAppearance,
+    WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations, WindowOptions,
+    WindowParams, WindowTextSystem, WindowVisibility, point, prelude::*, px, rems, size,
+    transparent_black,
 };
 
 use crate::gestures::{GestureTuning, RecognizedTouchGesture, TouchGestureRecognizer};
@@ -5117,12 +5118,12 @@ impl Window {
             data,
             frame_index,
             grayscale,
-            TransformationMatrix::unit(),
+            None,
         )
     }
 
-    /// Paint an image with a device-space transformation after cropping and
-    /// rounding in local coordinates. The content mask remains screen-space.
+    /// Paint an image with a transformation around its pixel-aligned visible
+    /// center, after cropping and rounding. The content mask remains screen-space.
     /// Native Metal backends reject non-unit transformations.
     pub fn paint_image_with_transformation(
         &mut self,
@@ -5132,14 +5133,9 @@ impl Window {
         data: Arc<RenderImage>,
         frame_index: usize,
         grayscale: bool,
-        transformation: TransformationMatrix,
+        transformation: Option<Transformation>,
     ) -> Result<()> {
         self.invalidator.debug_assert_paint();
-        #[cfg(any(target_os = "macos", target_os = "ios"))]
-        anyhow::ensure!(
-            transformation == TransformationMatrix::unit(),
-            "image transformations require a WGPU backend"
-        );
 
         let visible_bounds = bounds.intersect(&image_bounds);
         if visible_bounds.size.width <= Pixels::ZERO || visible_bounds.size.height <= Pixels::ZERO {
@@ -5168,6 +5164,23 @@ impl Window {
             .expect("Callback above only returns Some");
 
         let visible_bounds_snapped = self.snap_bounds(visible_bounds);
+        // Use the same geometry for the pivot and the GPU sprite. A logical
+        // center can differ by a fraction of a device pixel after edge snapping,
+        // making an otherwise stationary circular image orbit as it rotates.
+        let transformation = transformation
+            .map(|transformation| {
+                let scale_factor = self.scale_factor();
+                let center = visible_bounds_snapped
+                    .center()
+                    .map(|coordinate| px(coordinate.0 / scale_factor));
+                transformation.into_matrix(center, scale_factor)
+            })
+            .unwrap_or_default();
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        anyhow::ensure!(
+            transformation == TransformationMatrix::unit(),
+            "image transformations require a WGPU backend"
+        );
 
         let sub_tile = if visible_bounds == image_bounds {
             tile

@@ -511,12 +511,7 @@ impl Element for Img {
                             data,
                             layout_state.frame_index,
                             self.style.grayscale,
-                            self.transformation
-                                .map(|transformation| {
-                                    transformation
-                                        .into_matrix(bounds.center(), window.scale_factor())
-                                })
-                                .unwrap_or_default(),
+                            self.transformation,
                         )
                         .log_err();
                 } else if let Some(replacement) = &mut layout_state.replacement {
@@ -976,6 +971,40 @@ mod tests {
             )
         });
         assert_eq!(corner_radius, Some(expected_corner_radius));
+    }
+
+    #[gpui::test]
+    fn fractional_image_rotation_keeps_the_painted_center_fixed(cx: &mut TestAppContext) {
+        let window = cx.add_empty_window();
+        let image = test_image_with_size(200, 100);
+        for degrees in [0.0_f32, 45.0, 90.0, 180.0, 270.0] {
+            window.draw(
+                point(px(100.25), px(100.25)),
+                size(px(200.0), px(200.0)),
+                |_, _| {
+                    img(ImageSource::Render(image.clone()))
+                        .size_full()
+                        .object_fit(ObjectFit::Cover)
+                        .rounded_full()
+                        .with_transformation(Transformation::rotate(crate::radians(
+                            degrees.to_radians(),
+                        )))
+                        .into_any_element()
+                },
+            );
+            window.update(|window, _| {
+                let sprite = window
+                    .rendered_frame
+                    .scene
+                    .polychrome_sprites
+                    .last()
+                    .unwrap();
+                let center = sprite.bounds.center().map(|coordinate| px(coordinate.0));
+                let rotated = sprite.transformation.apply(center);
+                assert!((f32::from(rotated.x) - f32::from(center.x)).abs() < 0.001);
+                assert!((f32::from(rotated.y) - f32::from(center.y)).abs() < 0.001);
+            });
+        }
     }
 
     #[gpui::test]
