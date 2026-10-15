@@ -1,4 +1,5 @@
 mod dropdown;
+mod scrollbar;
 
 use super::{ACCENT, BORDER, GuiApp, HIGHLIGHT, MUTED, PANEL, TEXT, UI_INSET};
 
@@ -82,6 +83,16 @@ pub(crate) fn list_viewport(child: impl IntoElement) -> Div {
         .border_1()
         .border_color(rgb(BORDER))
         .child(child)
+}
+
+/// Adds a reserved scrollbar gutter to a full-height virtualized list.
+/// The stable id scopes the scrollbar's retained pointer interaction state.
+pub(crate) fn scrollable_list(
+    id: impl Into<gpui::ElementId>,
+    child: impl gpui::IntoElement,
+    scroll: &gpui::UniformListScrollHandle,
+) -> impl gpui::IntoElement {
+    scrollbar::scrollable_list(id, child, scroll)
 }
 
 /// Compact floating surface shared by action and row tooltips.

@@ -3,7 +3,7 @@ use super::{
     StatusKind, TEXT, UI_INSET, ViewRequestKind, active_control, artwork_preview, button, column,
     components::{
         LIST_ROW_REMS, danger_control, disabled_control, list_row_height, quiet_icon_button,
-        track_list_row,
+        scrollable_list, track_list_row,
     },
     form_field, format_time, icon_button,
     library::LibraryDrag,
@@ -1013,7 +1013,8 @@ impl GuiApp {
                 self.browser.queue.busy || self.browser.queue.selection_error.is_some(),
                 |panel| panel.child(status),
             )
-            .child(list_viewport(
+            .child(list_viewport(scrollable_list(
+                ("queue-scrollbar", panel_id),
                 uniform_list(
                     ("queue-rows", panel_id),
                     self.state.queue.total,
@@ -1184,7 +1185,8 @@ impl GuiApp {
                 .min_h_0()
                 .w_full()
                 .track_scroll(&scroll),
-            ))
+                &scroll,
+            )))
             .into_any_element()
     }
 
@@ -1661,7 +1663,12 @@ impl GuiApp {
             self.empty_playlist_view(ViewRequestKind::Summaries, panel_id, cx)
                 .into_any_element()
         } else {
-            catalog.into_any_element()
+            scrollable_list(
+                ("playlist-catalog-scrollbar", panel_id),
+                catalog,
+                &self.browser.playlists.summaries().scroll,
+            )
+            .into_any_element()
         };
         let mut lists = column()
             .flex_1()
@@ -1872,7 +1879,12 @@ impl GuiApp {
                 self.empty_playlist_view(ViewRequestKind::Entries, panel_id, cx)
                     .into_any_element()
             } else {
-                entries.into_any_element()
+                scrollable_list(
+                    ("playlist-entries-scrollbar", panel_id),
+                    entries,
+                    &self.browser.playlists.entries().scroll,
+                )
+                .into_any_element()
             };
             lists = lists.child(
                 column()
@@ -2657,7 +2669,8 @@ impl GuiApp {
                 HistorySort::Recent,
                 Some(widths[2]),
                 cx,
-            ));
+            ))
+            .child(div().w(px(12.)).flex_shrink_0());
         let scroll = self.scroll_views.list(("history", panel_id));
         panel_surface(("history-panel", panel_id))
             .child(panel_header(
@@ -2666,7 +2679,8 @@ impl GuiApp {
                     .format("gl-track-count", &[("count", (history_len).into())]),
             ))
             .child(list_viewport(
-                column().size_full().child(header).child(
+                column().size_full().child(header).child(scrollable_list(
+                    ("history-scrollbar", panel_id),
                     uniform_list(
                         ("history-rows", panel_id),
                         history_len,
@@ -2753,7 +2767,8 @@ impl GuiApp {
                     .min_h_0()
                     .w_full()
                     .track_scroll(&scroll),
-                ),
+                    &scroll,
+                )),
             ))
             .into_any_element()
     }

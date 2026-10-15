@@ -467,6 +467,8 @@ impl GuiApp {
         let row_count = self.browser.library.tree().row_count();
         let scroll = &self.browser.library.tree().scroll;
         let view = list_viewport(
+            super::components::scrollable_list(
+                ("library-directory-scrollbar", panel_id),
             uniform_list(
                 ("library-directory-tree", panel_id),
                 row_count,
@@ -825,6 +827,8 @@ impl GuiApp {
             .min_h_0()
             .w_full()
             .track_scroll(scroll),
+                scroll,
+            ),
         );
         view.into_any_element()
     }
