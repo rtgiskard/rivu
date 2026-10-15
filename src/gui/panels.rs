@@ -21,6 +21,19 @@ use gpui::{
     AnyElement, Context, Div, SharedString, Window, div, prelude::*, px, rgb, uniform_list,
 };
 
+// Out-of-flow actions leave the full text width available until the row is hovered.
+fn hover_actions(group: &'static str) -> Div {
+    row()
+        .absolute()
+        .right_0()
+        .top_0()
+        .h_full()
+        .gap_0()
+        .bg(rgb(HIGHLIGHT))
+        .invisible()
+        .group_hover(group, |style| style.visible())
+}
+
 fn metadata_rows(
     rows: impl IntoIterator<Item = [(&'static str, SharedString); 2]>,
     label_widths: [gpui::Pixels; 2],
@@ -925,11 +938,9 @@ impl GuiApp {
                                     this.browser.queue.contains(&id),
                                 )
                                 .group("queue-track-row")
+                                .relative()
                                 .child(
-                                    row()
-                                        .gap(gpui::rems(1.))
-                                        .opacity(0.)
-                                        .group_hover("queue-track-row", |style| style.opacity(1.))
+                                    hover_actions("queue-track-row")
                                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
                                             cx.stop_propagation();
                                         })
@@ -1462,7 +1473,7 @@ impl GuiApp {
                             this.browser.playlists.selected() == Some(id),
                         )
                         .group("playlist-catalog-row")
-                        .gap(gpui::rems(1.))
+                        .gap_0()
                         .child(row_text(
                             ("playlist-text", id as u64),
                             name.clone(),
@@ -1627,58 +1638,70 @@ impl GuiApp {
                                 this.browser.playlists.track_selection.contains(id),
                             )
                             .group("playlist-track-row")
-                            .gap(gpui::rems(1.))
+                            .relative()
+                            .gap_0()
                             .child(
-                                quiet_icon_button(icon_button(
-                                    ("playlist-entry-play", id as u64),
-                                    "󰐊",
-                                    "Play this track",
-                                    cx,
-                                    move |this, _, cx| this.send(Command::Play { track_id }, cx),
-                                ))
-                                .opacity(0.)
-                                .group_hover("playlist-track-row", |style| style.opacity(1.))
-                                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                    cx.stop_propagation()
-                                }),
-                            )
-                            .child(this.track_favorite_toggle(
-                                ("playlist-entry-favorite", id as u64),
-                                "playlist-track-row",
-                                track_id,
-                                favorite,
-                                cx,
-                            ))
-                            .child(
-                                quiet_icon_button(icon_button(
-                                    ("playlist-entry-remove", id as u64),
-                                    "",
-                                    "Remove from playlist",
-                                    cx,
-                                    move |this, _, cx| {
-                                        this.refresh(cx);
-                                        if this.browser.playlists.selected() != Some(playlist_id)
-                                            || this.playlist_revision(playlist_id) != revision
-                                            || this.state.library.playlist_revision
-                                                != catalog_revision
-                                        {
-                                            return;
-                                        }
-                                        this.send(
-                                            Command::RemovePlaylistEntries {
-                                                playlist_id,
-                                                entry_ids: vec![id],
-                                                expected_revision: revision,
-                                            },
+                                hover_actions("playlist-track-row")
+                                    .child(
+                                        quiet_icon_button(icon_button(
+                                            ("playlist-entry-play", id as u64),
+                                            "󰐊",
+                                            "Play this track",
                                             cx,
-                                        );
-                                    },
-                                ))
-                                .opacity(0.)
-                                .group_hover("playlist-track-row", |style| style.opacity(1.))
-                                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                    cx.stop_propagation()
-                                }),
+                                            move |this, _, cx| {
+                                                this.send(Command::Play { track_id }, cx)
+                                            },
+                                        ))
+                                        .opacity(0.)
+                                        .group_hover("playlist-track-row", |style| {
+                                            style.opacity(1.)
+                                        })
+                                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        }),
+                                    )
+                                    .child(this.track_favorite_toggle(
+                                        ("playlist-entry-favorite", id as u64),
+                                        "playlist-track-row",
+                                        track_id,
+                                        favorite,
+                                        cx,
+                                    ))
+                                    .child(
+                                        quiet_icon_button(icon_button(
+                                            ("playlist-entry-remove", id as u64),
+                                            "",
+                                            "Remove from playlist",
+                                            cx,
+                                            move |this, _, cx| {
+                                                this.refresh(cx);
+                                                if this.browser.playlists.selected()
+                                                    != Some(playlist_id)
+                                                    || this.playlist_revision(playlist_id)
+                                                        != revision
+                                                    || this.state.library.playlist_revision
+                                                        != catalog_revision
+                                                {
+                                                    return;
+                                                }
+                                                this.send(
+                                                    Command::RemovePlaylistEntries {
+                                                        playlist_id,
+                                                        entry_ids: vec![id],
+                                                        expected_revision: revision,
+                                                    },
+                                                    cx,
+                                                );
+                                            },
+                                        ))
+                                        .opacity(0.)
+                                        .group_hover("playlist-track-row", |style| {
+                                            style.opacity(1.)
+                                        })
+                                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        }),
+                                    ),
                             )
                             .on_mouse_down(
                                 gpui::MouseButton::Left,

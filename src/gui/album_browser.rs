@@ -711,7 +711,7 @@ impl Render for AlbumBrowser {
                                     ))
                                     .child(
                                         row()
-                                            .gap(rems(1.))
+                                            .gap_0()
                                             .invisible()
                                             .group_hover("album-track-row", |style| style.visible())
                                             .child(icon_button(
