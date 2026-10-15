@@ -9,8 +9,9 @@ use super::{
 use crate::{
     artwork::{ArtworkCacheReport, ArtworkManager},
     config::{
-        AlbumArtworkDirection, AlbumArtworkMode, AnalysisWindow, AudioVisualizerOptions,
-        AudioVisualizerStyle, Config, LogLevel, RgbColor, SpectrumStyle, VisualizationPalette,
+        AlbumArtworkDirection, AlbumArtworkMode, AlbumArtworkStyle, AnalysisWindow,
+        AudioVisualizerOptions, AudioVisualizerStyle, Config, LogLevel, RgbColor, SpectrumStyle,
+        VisualizationPalette,
     },
     core::CoreHandle,
 };
@@ -32,6 +33,7 @@ enum SettingChoice {
     Palette(VisualizationPalette),
     LogLevel(LogLevel),
     Window(AnalysisWindow),
+    AlbumArtworkStyle(AlbumArtworkStyle),
     AlbumArtworkMode(AlbumArtworkMode),
     AlbumArtworkDirection(AlbumArtworkDirection),
 }
@@ -40,6 +42,10 @@ impl SettingChoice {
     fn label(self) -> String {
         match self {
             Self::Device(_) | Self::Font(_) | Self::CustomFont => String::new(),
+            Self::AlbumArtworkStyle(AlbumArtworkStyle::Plain) => "Plain".to_owned(),
+            Self::AlbumArtworkStyle(AlbumArtworkStyle::Vinyl) => "Vinyl".to_owned(),
+            Self::AlbumArtworkStyle(AlbumArtworkStyle::Glass) => "Glass".to_owned(),
+            Self::AlbumArtworkStyle(AlbumArtworkStyle::Halo) => "Halo".to_owned(),
             Self::AlbumArtworkMode(AlbumArtworkMode::Static) => "Static".to_owned(),
             Self::AlbumArtworkMode(AlbumArtworkMode::Rotating) => "Rotating".to_owned(),
             Self::AlbumArtworkDirection(AlbumArtworkDirection::Clockwise) => "Clockwise".to_owned(),
@@ -367,6 +373,7 @@ enum Measured {
     SettingsFft,
     SettingsLogLevel,
     SettingsWindow,
+    AlbumArtworkStyle,
     AlbumArtworkMode,
     AlbumArtworkDirection,
 }
@@ -1337,6 +1344,7 @@ impl Settings {
             SettingChoice::Fft(value) => self.draft.analysis_fft_size = value,
             SettingChoice::LogLevel(value) => self.draft.log_level = value,
             SettingChoice::Window(value) => self.draft.analysis_window = value,
+            SettingChoice::AlbumArtworkStyle(value) => self.draft.album_artwork_style = value,
             SettingChoice::AlbumArtworkMode(value) => self.draft.album_artwork_mode = value,
             SettingChoice::AlbumArtworkDirection(value) => {
                 self.draft.album_artwork_direction = value
@@ -1358,6 +1366,7 @@ impl Settings {
                 SettingChoice::AudioVisualizerStyle(_) => Measured::SettingsStyle,
                 SettingChoice::Palette(_) => Measured::SettingsStyle,
                 SettingChoice::Device(_) => Measured::Device,
+                SettingChoice::AlbumArtworkStyle(_) => Measured::AlbumArtworkStyle,
                 SettingChoice::AlbumArtworkMode(_) => Measured::AlbumArtworkMode,
                 SettingChoice::AlbumArtworkDirection(_) => Measured::AlbumArtworkDirection,
             };
@@ -1932,6 +1941,35 @@ impl Settings {
         let draft = &settings.draft;
         match settings.visual_page {
             VisualPage::AlbumArtwork => {
+                let style = dropdown_button(
+                    "album-artwork-style",
+                    SettingChoice::AlbumArtworkStyle(draft.album_artwork_style).label(),
+                    cx,
+                    |this, _, _| {
+                        let values = [
+                            AlbumArtworkStyle::Plain,
+                            AlbumArtworkStyle::Vinyl,
+                            AlbumArtworkStyle::Glass,
+                            AlbumArtworkStyle::Halo,
+                        ];
+                        let selected = values
+                            .iter()
+                            .position(|value| *value == this.draft.album_artwork_style)
+                            .unwrap_or(0);
+                        this.open_setting_dropdown(
+                            values
+                                .into_iter()
+                                .map(|value| {
+                                    let choice = SettingChoice::AlbumArtworkStyle(value);
+                                    DropdownItem::new(choice, choice.label())
+                                })
+                                .collect(),
+                            selected,
+                        );
+                    },
+                )
+                .relative()
+                .child(self.measurement(Measured::AlbumArtworkStyle, cx));
                 let mode = dropdown_button(
                     "album-artwork-mode",
                     SettingChoice::AlbumArtworkMode(draft.album_artwork_mode).label(),
@@ -1986,6 +2024,7 @@ impl Settings {
                 column().child(settings_group(
                     "Playback motion",
                     column().gap_2()
+                        .child(form_field("Style", style))
                         .child(two_column(form_field("Mode", mode).min_w(rems(180. / 16.)), form_field("Direction", direction).min_w(rems(180. / 16.))))
                         .child(settings.single(Field::AlbumArtworkPeriod))
                         .id("settings-album-artwork-help")

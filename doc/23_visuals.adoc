@@ -34,6 +34,13 @@ caller's image to path bounds, preserve path coverage and opacity, and leave
 image retirement to the caller's existing window owner. Spectrum's use and
 bounded ramp ownership are described in <<_spectrum,Spectrum>>.
 
+Album artwork offers `plain` (default), `vinyl`, `glass`, and `halo` styles,
+independently of static or rotating motion. Real and generated default covers
+share animation, interaction, and lifecycle rules. Changing style does not reset
+the rotation angle. The existing approximately 16.7 ms animation timer throttle
+is retained; styles introduce neither per-frame CPU geometry rotation nor a new
+application cache system.
+
 == Analysis boundary
 
 Visualization analysis is separate from audio output and observes samples

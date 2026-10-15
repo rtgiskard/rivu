@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub(super) const PROTOCOL_VERSION: u8 = 19;
+pub(super) const PROTOCOL_VERSION: u8 = 20;
 pub(super) const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub(super) const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub(super) const MAX_CLIENTS: usize = 16;
@@ -1104,6 +1104,7 @@ pub(super) struct WireConfig {
     audio_visualizer_fade_when_idle: bool,
     audio_visualizer_primary_color: crate::config::RgbColor,
     audio_visualizer_secondary_color: crate::config::RgbColor,
+    album_artwork_style: crate::config::AlbumArtworkStyle,
     album_artwork_mode: crate::config::AlbumArtworkMode,
     album_artwork_period_seconds: f32,
     album_artwork_direction: crate::config::AlbumArtworkDirection,
@@ -1188,6 +1189,7 @@ impl From<&crate::config::Config> for WireConfig {
             audio_visualizer_fade_when_idle: value.audio_visualizer_fade_when_idle,
             audio_visualizer_primary_color: value.audio_visualizer_primary_color,
             audio_visualizer_secondary_color: value.audio_visualizer_secondary_color,
+            album_artwork_style: value.album_artwork_style,
             album_artwork_mode: value.album_artwork_mode,
             album_artwork_period_seconds: value.album_artwork_period_seconds,
             album_artwork_direction: value.album_artwork_direction,
@@ -1274,6 +1276,7 @@ impl From<WireConfig> for crate::config::Config {
             audio_visualizer_fade_when_idle: value.audio_visualizer_fade_when_idle,
             audio_visualizer_primary_color: value.audio_visualizer_primary_color,
             audio_visualizer_secondary_color: value.audio_visualizer_secondary_color,
+            album_artwork_style: value.album_artwork_style,
             album_artwork_mode: value.album_artwork_mode,
             album_artwork_period_seconds: value.album_artwork_period_seconds,
             album_artwork_direction: value.album_artwork_direction,

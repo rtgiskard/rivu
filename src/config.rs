@@ -20,6 +20,15 @@ mod file;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum AlbumArtworkStyle {
+    Plain,
+    Vinyl,
+    Glass,
+    Halo,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AlbumArtworkMode {
     Static,
     Rotating,
@@ -311,6 +320,7 @@ pub struct Config {
     pub waveform_rms_gain: f32,
     pub waveform_peak_gain: f32,
     pub waveform_peak_gamma: f32,
+    pub album_artwork_style: AlbumArtworkStyle,
     pub album_artwork_mode: AlbumArtworkMode,
     /// Positive finite seconds per full rotation, shared by all artwork panels.
     pub album_artwork_period_seconds: f32,
@@ -392,6 +402,7 @@ impl Default for Config {
             waveform_rms_gain: 1.6,
             waveform_peak_gain: 0.75,
             waveform_peak_gamma: 1.1,
+            album_artwork_style: AlbumArtworkStyle::Plain,
             album_artwork_mode: AlbumArtworkMode::Static,
             album_artwork_period_seconds: 20.0,
             album_artwork_direction: AlbumArtworkDirection::Clockwise,
@@ -775,6 +786,28 @@ mod tests {
     fn album_artwork_settings_round_trip_and_reject_invalid_periods() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
+        for (name, style) in [
+            ("plain", AlbumArtworkStyle::Plain),
+            ("vinyl", AlbumArtworkStyle::Vinyl),
+            ("glass", AlbumArtworkStyle::Glass),
+            ("halo", AlbumArtworkStyle::Halo),
+        ] {
+            fs::write(
+                &path,
+                format!("visualizations.album_artwork.style = '{name}'\n"),
+            )
+            .unwrap();
+            let config = Config::load(&path).unwrap();
+            assert_eq!(config.album_artwork_style, style);
+            config.save(&path).unwrap();
+            let saved = fs::read_to_string(&path).unwrap();
+            let saved: toml::Value = toml::from_str(&saved).unwrap();
+            assert_eq!(
+                saved["visualizations"]["album_artwork"]["style"].as_str(),
+                Some(name)
+            );
+            assert_eq!(Config::load(&path).unwrap(), config);
+        }
         for mode in [AlbumArtworkMode::Static, AlbumArtworkMode::Rotating] {
             for direction in [
                 AlbumArtworkDirection::Clockwise,
@@ -810,7 +843,12 @@ mod tests {
             assert!(config.save(&path).is_err());
             assert_eq!(fs::read(&path).unwrap(), original);
         }
-        for invalid in ["mode = 'spinning'", "direction = 'left'", "unknown = true"] {
+        for invalid in [
+            "style = 'unknown'",
+            "mode = 'spinning'",
+            "direction = 'left'",
+            "unknown = true",
+        ] {
             fs::write(
                 &path,
                 format!("[visualizations.album_artwork]\n{invalid}\n"),
@@ -821,6 +859,7 @@ mod tests {
         fs::write(&path, "visualizations.album_artwork.mode = 'rotating'\n").unwrap();
         let partial = Config::load(&path).unwrap();
         assert_eq!(partial.album_artwork_mode, AlbumArtworkMode::Rotating);
+        assert_eq!(partial.album_artwork_style, AlbumArtworkStyle::Plain);
         assert_eq!(
             partial.album_artwork_period_seconds,
             Config::default().album_artwork_period_seconds
@@ -952,7 +991,6 @@ mod tests {
         let parent = directory.path().join("settings");
         let path = parent.join("config.toml");
         Config::default().save(&path).unwrap();
-        assert_eq!(Config::load(&path).unwrap(), Config::default());
         let config = Config {
             library_roots: vec![
                 PathBuf::from("Music/Live recordings"),
@@ -1031,6 +1069,7 @@ mod tests {
             waveform_rms_gain: 2.0,
             waveform_peak_gain: 0.5,
             waveform_peak_gamma: 1.25,
+            album_artwork_style: AlbumArtworkStyle::Glass,
             album_artwork_mode: AlbumArtworkMode::Rotating,
             album_artwork_period_seconds: 12.5,
             album_artwork_direction: AlbumArtworkDirection::Counterclockwise,

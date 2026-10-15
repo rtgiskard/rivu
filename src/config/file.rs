@@ -121,6 +121,7 @@ file_group!(Waveform, WaveformView {
 });
 
 file_group!(AlbumArtwork, AlbumArtworkView {
+    style => album_artwork_style: AlbumArtworkStyle,
     mode => album_artwork_mode: AlbumArtworkMode,
     period_seconds => album_artwork_period_seconds: f32,
     direction => album_artwork_direction: AlbumArtworkDirection,

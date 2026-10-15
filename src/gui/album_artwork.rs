@@ -4,13 +4,13 @@ use std::{
 };
 
 use gpui::{
-    App, Bounds, Context, Entity, ObjectFit, Pixels, Render, Task, Transformation, Window, canvas,
-    div, point, prelude::*, px, radians, size,
+    App, Bounds, BoxShadow, Context, Entity, Image, ImageFormat, ObjectFit, Pixels, Render, Task,
+    Transformation, Window, canvas, div, img, point, prelude::*, px, radians, rgb, size,
 };
 
 use crate::{
     artwork::{Artwork as LoadedArtwork, ArtworkIdentity, ArtworkManager},
-    config::{AlbumArtworkDirection, AlbumArtworkMode, Config},
+    config::{AlbumArtworkDirection, AlbumArtworkMode, AlbumArtworkStyle, Config},
     model::{PlaybackStatus, Track},
 };
 
@@ -35,7 +35,7 @@ impl RotationSettings {
     }
 }
 
-/// Time is accumulated only while a real cover is visible and playing. Removing
+/// Time is accumulated only while the panel is visible and playing. Removing
 /// the baseline at every suspension prevents hidden time from being caught up.
 struct Rotation {
     angle: f64,
@@ -96,8 +96,8 @@ impl Rotation {
     }
 }
 
-/// All panel instances render this same entity: one source load, decoded image,
-/// rotation state, frame callback and cancellable deadline per window owner.
+/// All panel instances share one source owner, rotation state, frame callback
+/// and cancellable deadline. Source type and style never select another clock.
 pub(super) struct AlbumArtwork {
     manager: Arc<ArtworkManager>,
     loader: ArtworkLoader,
@@ -107,8 +107,8 @@ pub(super) struct AlbumArtwork {
     status: PlaybackStatus,
     visible: bool,
     still: bool,
-    has_cover: bool,
-    decoded_ready: bool,
+    style: AlbumArtworkStyle,
+    decorations: [Arc<Image>; 3],
     rotation: Rotation,
     frame_pending: bool,
     frame_generation: u64,
@@ -126,8 +126,13 @@ impl AlbumArtwork {
             status: PlaybackStatus::Stopped,
             visible: false,
             still: false,
-            has_cover: false,
-            decoded_ready: false,
+            style: AlbumArtworkStyle::Plain,
+            decorations: [
+                include_bytes!("../../assets/album_vinyl.svg").as_slice(),
+                include_bytes!("../../assets/album_glass.svg").as_slice(),
+                include_bytes!("../../assets/album_halo.svg").as_slice(),
+            ]
+            .map(|bytes| Arc::new(Image::from_bytes(ImageFormat::Svg, bytes.to_vec()))),
             rotation: Rotation::new(),
             frame_pending: false,
             frame_generation: 0,
@@ -156,17 +161,17 @@ impl AlbumArtwork {
             || self.status != status
             || self.visible != visible
             || self.still != config.still_mode
+            || self.style != config.album_artwork_style
             || self.rotation.settings != settings;
         if switched {
             self.track = track.cloned();
             // Do not show the previous track while the latest lookup is pending.
             self.view.replace(None, cx);
-            self.has_cover = false;
-            self.decoded_ready = false;
         }
         self.status = status;
         self.visible = visible;
         self.still = config.still_mode;
+        self.style = config.album_artwork_style;
         self.sync_rotation(settings, switched || stopped);
         self.prepare_artwork(cx);
         if changed {
@@ -175,11 +180,7 @@ impl AlbumArtwork {
     }
 
     fn sync_rotation(&mut self, settings: RotationSettings, reset: bool) {
-        let eligible = self.visible
-            && !self.still
-            && self.has_cover
-            && self.decoded_ready
-            && self.status == PlaybackStatus::Playing;
+        let eligible = self.visible && !self.still && self.status == PlaybackStatus::Playing;
         if self
             .rotation
             .sync(Instant::now(), settings, eligible, reset)
@@ -198,9 +199,7 @@ impl AlbumArtwork {
 
     fn replace_artwork(&mut self, artwork: Option<LoadedArtwork>, cx: &mut Context<Self>) {
         let artwork = artwork.filter(|artwork| !artwork.is_placeholder());
-        self.has_cover = artwork.is_some();
         let changed = self.view.replace(artwork, cx);
-        self.decoded_ready = self.view.aspect_ratio(cx).is_some();
         self.sync_rotation(self.rotation.settings, false);
         if changed {
             cx.notify();
@@ -294,8 +293,6 @@ impl AlbumArtwork {
     pub(super) fn release_all_images(&mut self, window: &mut Window, cx: &mut App) {
         self.visible = false;
         self.track = None;
-        self.has_cover = false;
-        self.decoded_ready = false;
         let _ = self.loader.prepare(None);
         self.rotation.running = false;
         self.rotation.last_tick = None;
@@ -316,35 +313,98 @@ fn circle_bounds(bounds: Bounds<Pixels>) -> Bounds<Pixels> {
     }
 }
 
+fn artwork_bounds(bounds: Bounds<Pixels>, style: AlbumArtworkStyle, scale: f32) -> Bounds<Pixels> {
+    let circle = circle_bounds(bounds);
+    let reserve = match style {
+        AlbumArtworkStyle::Vinyl | AlbumArtworkStyle::Glass => 0.94,
+        AlbumArtworkStyle::Plain | AlbumArtworkStyle::Halo => 1.0,
+    };
+    let side = (f32::from(circle.size.width) * scale * reserve / 2.0).floor() * 2.0;
+    let center = circle
+        .center()
+        .map(|coordinate| (f32::from(coordinate) * scale).round());
+    Bounds {
+        origin: center.map(|coordinate| px((coordinate - side / 2.0) / scale)),
+        size: size(px(side / scale), px(side / scale)),
+    }
+}
+
 impl Render for AlbumArtwork {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.decoded_ready = self.view.aspect_ratio(cx).is_some();
         self.sync_rotation(self.rotation.settings, false);
         self.request_frame(window, cx);
-        let image = self.view.image(cx);
-        let default_album = self.default_album.clone();
+        let image = self
+            .view
+            .image(cx)
+            .unwrap_or_else(|| self.default_album.read(cx).image());
+        let style = self.style;
+        let decoration = match style {
+            AlbumArtworkStyle::Plain => None,
+            AlbumArtworkStyle::Vinyl => Some(self.decorations[0].clone()),
+            AlbumArtworkStyle::Glass => Some(self.decorations[1].clone()),
+            AlbumArtworkStyle::Halo => Some(self.decorations[2].clone()),
+        };
         let angle = self.rotation.angle as f32;
         canvas(
             move |bounds, window, cx| {
-                let circle = circle_bounds(bounds);
+                let scale = window.scale_factor();
+                let circle = artwork_bounds(bounds, style, scale);
                 let side = circle.size.width;
-                let mut element = if let Some(image) = image {
-                    image
-                        .size(side)
-                        .object_fit(ObjectFit::Cover)
-                        .rounded_full()
-                        // GPUI transforms the already cropped circular sprite
-                        // around its center; the image cache and atlas are reused.
-                        .when(angle != 0., |image| {
-                            image.with_transformation(Transformation::rotate(radians(angle)))
-                        })
-                        .into_any_element()
-                } else {
-                    div()
-                        .size(side)
-                        .child(default_album.cached(gpui::StyleRefinement::default().size_full()))
-                        .into_any_element()
+                let ratio = match style {
+                    AlbumArtworkStyle::Plain => 1.0,
+                    AlbumArtworkStyle::Vinyl => 0.875,
+                    AlbumArtworkStyle::Glass => 0.96875,
+                    AlbumArtworkStyle::Halo => 0.75,
                 };
+                // Even device-pixel diameters keep all concentric layers on the
+                // same center after pixel snapping, including fractional scale.
+                let image_side = px((f32::from(side) * scale * ratio / 2.0).floor() * 2.0 / scale);
+                let inset = (side - image_side) / 2.0;
+                let surface = div()
+                    .absolute()
+                    .left(inset)
+                    .top(inset)
+                    .size(image_side)
+                    .rounded_full()
+                    .bg(rgb(super::BG))
+                    .when(
+                        matches!(style, AlbumArtworkStyle::Vinyl | AlbumArtworkStyle::Glass),
+                        |surface| {
+                            surface.shadow(vec![BoxShadow {
+                                color: rgb(0x000000).alpha(0.28).into(),
+                                offset: point(px(0.0), side * 0.008),
+                                blur_radius: side * 0.025,
+                                spread_radius: px(0.0),
+                                inset: false,
+                            }])
+                        },
+                    )
+                    .child(
+                        image
+                            .size_full()
+                            .object_fit(ObjectFit::Cover)
+                            .rounded_full()
+                            .with_transformation(Transformation::rotate(radians(angle))),
+                    );
+                let mut element = div().relative().size(side);
+                if style == AlbumArtworkStyle::Halo {
+                    element =
+                        element.child(img(decoration.clone().unwrap()).absolute().size_full());
+                }
+                element = element.child(surface);
+                if let Some(decoration) = decoration.filter(|_| style != AlbumArtworkStyle::Halo) {
+                    element = element.child(
+                        img(decoration)
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full()
+                            .when(style == AlbumArtworkStyle::Vinyl, |image| {
+                                image.with_transformation(Transformation::rotate(radians(angle)))
+                            }),
+                    );
+                }
+                let mut element = element.into_any_element();
                 let _ = element.prepaint_as_root(
                     circle.origin,
                     circle.size.map(Into::into),
@@ -434,15 +494,12 @@ mod tests {
     }
 
     #[test]
-    fn missing_cover_has_no_clock_and_long_rotation_wraps() {
+    fn long_rotation_wraps() {
         let start = Instant::now();
         let mut rotation = Rotation::new();
-        rotation.sync(start, rotating(), false, true);
-        rotation.advance(start + Duration::from_secs(100));
-        assert_angle(&rotation, 0.);
-        rotation.sync(start + Duration::from_secs(100), rotating(), true, false);
-        rotation.advance(start + Duration::from_secs(100));
-        rotation.advance(start + Duration::from_secs(145));
+        rotation.sync(start, rotating(), true, true);
+        rotation.advance(start);
+        rotation.advance(start + Duration::from_secs(45));
         assert_angle(&rotation, std::f64::consts::FRAC_PI_2);
     }
 
@@ -462,6 +519,35 @@ mod tests {
                 circle.size,
                 size(px(width.min(height)), px(width.min(height)))
             );
+        }
+    }
+
+    #[test]
+    fn styled_artwork_stays_bounded_and_concentric_at_fractional_scale() {
+        let bounds = Bounds {
+            origin: point(px(10.25), px(20.25)),
+            size: size(px(997.5), px(601.25)),
+        };
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let center = bounds
+                .center()
+                .map(|coordinate| (f32::from(coordinate) * scale).round());
+            for style in [
+                AlbumArtworkStyle::Plain,
+                AlbumArtworkStyle::Vinyl,
+                AlbumArtworkStyle::Glass,
+                AlbumArtworkStyle::Halo,
+            ] {
+                let circle = artwork_bounds(bounds, style, scale);
+                assert!(circle.size.width >= px(0.0));
+                assert!(circle.size.width <= bounds.size.height);
+                assert_eq!(circle.size.width, circle.size.height);
+                let actual = circle
+                    .center()
+                    .map(|coordinate| f32::from(coordinate) * scale);
+                assert!((actual.x - center.x).abs() < 0.001);
+                assert!((actual.y - center.y).abs() < 0.001);
+            }
         }
     }
 }
