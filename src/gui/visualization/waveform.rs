@@ -275,6 +275,16 @@ impl WaveformPlot {
         }
     }
 
+    fn finish_paint(&mut self, cache_enabled: bool) {
+        if !cache_enabled {
+            self.pending_images
+                .extend(self.paint_tiles.drain(..).map(|(_, _, image)| image));
+            self.clear_cache();
+        } else {
+            self.paint_tiles.clear();
+        }
+    }
+
     fn release_images(&mut self, mut release: impl FnMut(Arc<RenderImage>)) {
         while let Some(image) = self.retired.pop() {
             release(image);
@@ -1187,20 +1197,7 @@ impl Waveform {
                                         .map_err(|_| ())
                                         .ok();
                                 }
-                                if !cache_enabled {
-                                    waveform.clear_cache();
-                                }
-                                if !cache_enabled {
-                                    let WaveformPlot {
-                                        pending_images,
-                                        paint_tiles,
-                                        ..
-                                    } = &mut *waveform;
-                                    pending_images.extend(
-                                        paint_tiles.iter().map(|(_, _, image)| Arc::clone(image)),
-                                    );
-                                }
-                                waveform.paint_tiles.clear();
+                                waveform.finish_paint(cache_enabled);
                                 if let Some(fraction) = progress {
                                     // Slow periodic easing gives the droplet a deliberate rhythm;
                                     // it never snaps at a cycle boundary.
@@ -1412,7 +1409,7 @@ mod tests {
     }
 
     #[test]
-    fn removed_panels_retire_without_repainting_and_pending_waits_a_frame() {
+    fn removed_panels_retire_without_repainting() {
         let mut plot = WaveformPlot::default();
         let data = frame(vec![Some(0.25); 100]);
         let palette = super::super::visuals::active_palette_lut(
@@ -1441,25 +1438,58 @@ mod tests {
         plot.release_images(|_| released += 1);
         assert_eq!(released, 4);
         assert!(tile.upgrade().is_none());
-        let image = WaveformPlot::build_tile(
-            &[WaveformColumn {
-                left_rms: Some(0.2),
-                left_peak: Some(0.3),
-                right_rms: None,
-                right_peak: None,
-            }],
-            0,
-            1,
-            1,
-            10,
-            &palette,
+    }
+
+    #[test]
+    fn uncached_waveform_images_survive_one_boundary_then_retire() {
+        let mut plot = WaveformPlot::default();
+        let data = frame(vec![Some(0.25); 100]);
+        let palette = super::super::visuals::active_palette_lut(
+            crate::config::VisualizationPalette::Deadbeef,
         );
-        let pending = Arc::downgrade(&image);
-        plot.pending_images.push(image);
-        plot.release_images(|_| panic!("pending image released in its first boundary"));
-        assert!(pending.upgrade().is_some());
-        plot.release_images(drop);
-        assert!(pending.upgrade().is_none());
+        let mut previous = std::collections::HashSet::new();
+        for _ in 0..32 {
+            plot.columns_with_cache(
+                1,
+                100,
+                &data,
+                false,
+                WaveformMapping {
+                    rms_gain: 1.0,
+                    peak_gain: 1.0,
+                    peak_gamma: 1.0,
+                },
+            );
+            plot.update_tiles(
+                1,
+                LayerKey {
+                    source: Rc::new(Source::from_frame(&data).unwrap()),
+                    width: 101,
+                    height: 40,
+                    rms_gain: 1.0_f32.to_bits(),
+                    peak_gain: 1.0_f32.to_bits(),
+                    peak_gamma: 1.0_f32.to_bits(),
+                    palette: crate::config::VisualizationPalette::Deadbeef,
+                },
+                false,
+                &palette,
+            );
+            let painted: std::collections::HashSet<_> = plot
+                .paint_tiles
+                .iter()
+                .map(|(_, _, image)| image.id)
+                .collect();
+            assert_eq!(painted.len(), 4);
+            plot.finish_paint(false);
+            let mut released = std::collections::HashSet::new();
+            plot.release_images(|image| assert!(released.insert(image.id)));
+            assert_eq!(released, previous);
+            previous = painted;
+        }
+        let mut released = std::collections::HashSet::new();
+        plot.release_images(|image| assert!(released.insert(image.id)));
+        assert_eq!(released, previous);
+        plot.release_images(|_| panic!("image retired twice"));
     }
 
     #[test]

@@ -102,7 +102,9 @@ An image cannot be dropped merely because the application has stopped reusing
 it: a submitted scene can still reference it. Replaced cached waveform and
 Spectrogram images retire at a subsequent window-frame boundary; transient
 uncached images and uploaded stereo-analysis images survive a complete
-intervening frame. Retirement runs from the root window independently of panel
+intervening frame. Clearing uncached waveform graphics transfers submitted
+tiles to retirement before discarding reusable data, so every upload retains
+an explicit release owner. Retirement runs from the root window independently of panel
 visibility. Final cleanup uses a frame callback without invalidating content,
 including in Still Mode with analysis frame scheduling inactive. Uncached image creation
 therefore cannot drive its own redraw loop. The last submitted scene retains its
