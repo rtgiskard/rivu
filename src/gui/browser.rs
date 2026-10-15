@@ -232,8 +232,13 @@ impl LibraryBrowser {
         self.counts.totals.get(path).copied()
     }
 
-    pub(super) fn root_counts_failed(&self) -> bool {
-        !self.counts.failed.is_empty()
+    pub(super) fn root_count_failed(&self, path: &std::path::Path) -> bool {
+        self.counts.failed.iter().any(|&offset| {
+            self.counts.roots
+                [offset..(offset + crate::model::MAX_QUERY_ROWS).min(self.counts.roots.len())]
+                .iter()
+                .any(|root| root == path)
+        })
     }
 
     pub(super) fn buffer(&self) -> &LibraryViewBuffer {
@@ -1306,13 +1311,15 @@ mod tests {
         );
         assert_eq!(library.root_count(&roots[0]), Some(0));
         library.fail_root_counts(generation, crate::model::MAX_QUERY_ROWS);
-        assert!(library.root_counts_failed());
+        assert!(!library.root_count_failed(&roots[0]));
+        assert!(library.root_count_failed(roots.last().unwrap()));
+        assert!(!library.root_count_failed(std::path::Path::new("/other")));
         assert_eq!(library.root_count(roots.last().unwrap()), None);
         assert_eq!(
             library.begin_root_counts(&roots, 7).1,
             vec![crate::model::MAX_QUERY_ROWS]
         );
-        assert!(!library.root_counts_failed());
+        assert!(!library.root_count_failed(roots.last().unwrap()));
         assert!(library.begin_root_counts(&roots, 7).1.is_empty());
         library.accept_root_counts(
             generation,
@@ -1384,7 +1391,7 @@ mod tests {
                 total: 99,
             }],
         );
-        assert!(!library.root_counts_failed());
+        assert!(!library.root_count_failed(&replacement[0]));
         assert_eq!(library.root_count(&roots[0]), None);
         assert!(library.begin_root_counts(&replacement, 7).1.is_empty());
         library.accept_root_counts(

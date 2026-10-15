@@ -521,23 +521,35 @@ impl GuiApp {
                             };
                             let selected = this.directory_row_selected(entry);
                             let id = node.clone();
+                            let retry_counts = path.as_deref().is_some_and(|path| {
+                                this.browser.library.root_count_failed(path)
+                            });
                             let scan = path.clone().map(|scan_path| {
-                                let hint = format!("Rescan {}", scan_path.display());
+                                let hint = if retry_counts {
+                                    format!("Retry scanned track counts for {}", scan_path.display())
+                                } else {
+                                    format!("Rescan {}", scan_path.display())
+                                };
                                 super::components::quiet_icon_button(icon_button(
                                     gpui::ElementId::named_usize("library-scan", index),
                                     "󰑐",
                                     hint,
                                     cx,
                                     move |this, _, cx| {
-                                        this.send(
-                                            Command::Scan {
-                                                paths: vec![scan_path.clone()],
-                                                force: this.browser.library.force_scan(),
-                                            },
-                                            cx,
-                                        );
+                                        if this.browser.library.root_count_failed(&scan_path) {
+                                            this.request_root_counts(cx);
+                                        } else {
+                                            this.send(
+                                                Command::Scan {
+                                                    paths: vec![scan_path.clone()],
+                                                    force: this.browser.library.force_scan(),
+                                                },
+                                                cx,
+                                            );
+                                        }
                                     },
                                 ))
+                                .when(retry_counts, |view| view.text_color(gpui::rgb(super::ERROR)))
                             });
                             let title = gpui::SharedString::from(title);
                             let tooltip_title = path.as_ref().map_or_else(
@@ -603,19 +615,6 @@ impl GuiApp {
                                             .child(super::caption("󰎇").font_family(super::fonts::SYMBOLS_FAMILY))
                                             .child(super::caption(count.map_or_else(|| "—".to_owned(), |total| total.to_string()))),
                                     )
-                                    .when(this.browser.library.root_counts_failed(), |view| {
-                                        view.child(
-                                            super::components::quiet_icon_button(icon_button(
-                                                gpui::ElementId::named_usize("library-count-retry", index),
-                                                "󰑐",
-                                                "Retry scanned track counts",
-                                                cx,
-                                                |this, _, cx| this.request_root_counts(cx),
-                                            ))
-                                            .min_h_0()
-                                            .size(gpui::rems(1.5)),
-                                        )
-                                    })
                                 });
                             let name_cell = div()
                                 .w(gpui::rems(14.0))
@@ -635,8 +634,10 @@ impl GuiApp {
                                             .top_0()
                                             .h_full()
                                             .bg(gpui::rgb(super::HIGHLIGHT))
-                                            .invisible()
-                                            .group_hover("library-track-row", |style| style.visible())
+                                            .when(!retry_counts, |view| {
+                                                view.invisible()
+                                                    .group_hover("library-track-row", |style| style.visible())
+                                            })
                                             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                             .on_click(|_, _, cx| cx.stop_propagation())
                                             .child(scan.min_h_0().h(gpui::rems(1.5)).w(gpui::rems(1.4))),
