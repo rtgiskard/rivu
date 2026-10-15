@@ -490,6 +490,19 @@ impl Store {
         {
             return Ok(false);
         }
+        if let [old] = selected.as_slice() {
+            // Validation collapsed duplicate IDs to this one stable occurrence.
+            // Shift only the intervening interval, not the unchanged suffix twice.
+            move_entry(
+                &tx,
+                PositionScope::Playlist(playlist_id),
+                entry_ids[0],
+                *old,
+                insertion,
+            )?;
+            tx.commit()?;
+            return Ok(true);
+        }
         // Temporarily park selected rows outside the nonnegative position domain.
         // The shared gap closer then touches survivors only, once per original interval.
         tx.execute(
@@ -1019,6 +1032,21 @@ mod group_tests {
     }
 
     #[test]
+    fn singleton_groups_preserve_identity_in_both_directions_and_at_end() -> Result<()> {
+        for (id, target, expected) in [
+            (100, Some(102), vec![101, 100, 102, 103, 104, 105]),
+            (103, Some(100), vec![103, 100, 101, 102, 104, 105]),
+            (101, None, vec![100, 102, 103, 104, 105, 101]),
+        ] {
+            let store = fixture()?;
+            assert!(store.move_playlist_entries(10, &[id, id], target)?);
+            assert_eq!(order(&store, 10)?, expected);
+            assert_eq!(order(&store, 20)?, [200]);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn group_noops_validate_every_identity_and_target() -> Result<()> {
         let store = fixture()?;
         let before = order(&store, 10)?;
@@ -1089,6 +1117,24 @@ mod group_tests {
         )?;
         assert!(store.remove_playlist_entries(10, &[101, 103]).is_err());
         assert_eq!(order(&store, 10)?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn singleton_group_failure_rolls_back_the_shifted_interval() -> Result<()> {
+        let store = fixture()?;
+        let before = order(&store, 10)?;
+        store.conn.execute_batch(
+            "CREATE TRIGGER reject_selected BEFORE UPDATE OF position ON playlist_entries
+             WHEN OLD.id=100 BEGIN SELECT RAISE(ABORT,'reject selected'); END;",
+        )?;
+        assert!(
+            store
+                .move_playlist_entries(10, &[100, 100], Some(103))
+                .is_err()
+        );
+        assert_eq!(order(&store, 10)?, before);
+        assert_eq!(order(&store, 20)?, [200]);
         Ok(())
     }
 
