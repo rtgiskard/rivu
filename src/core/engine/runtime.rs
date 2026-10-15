@@ -371,6 +371,23 @@ impl Core {
             Query::LibraryRootCounts { roots } => {
                 ViewResponse::LibraryRootCounts(self.store.library_root_counts(roots)?)
             }
+            Query::LibraryLocate {
+                track_id,
+                path,
+                tree,
+                query,
+                favorite,
+                missing,
+                sort,
+            } => ViewResponse::LibraryLocate(self.store.library_location(
+                *track_id,
+                path,
+                *tree,
+                query.as_deref(),
+                *favorite,
+                *missing,
+                *sort,
+            )?),
             Query::TrackPage {
                 query,
                 favorite,

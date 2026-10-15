@@ -3147,3 +3147,114 @@ fn unsupported_database_versions_are_rejected_without_migration() {
         );
     }
 }
+
+#[test]
+fn library_locate_matches_tree_and_flat_projection_without_identity_fallback() {
+    use crate::model::{DirectoryRow, LibraryLocateResult, LibrarySort};
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    store.conn.execute_batch(
+        "INSERT INTO tracks(id,path,raw_title,raw_album,play_count,favorite,missing,cue_sheet,cue_number,cue_start_frame) VALUES
+         (1,'/音楽/Album/shared.wav','Z','Album',2,1,0,'/音楽/Album/album.cue',1,0),
+         (2,'/音楽/Album/shared.wav','A','Album',5,0,0,'/音楽/Album/album.cue',2,75),
+         (3,'/音楽/top.wav','Top','',1,0,1,NULL,NULL,NULL),
+         (4,'/音楽-extra/out.wav','Outside','',0,0,0,NULL,NULL,NULL);"
+    ).unwrap();
+    for sort in [LibrarySort::Id, LibrarySort::Album, LibrarySort::MostPlayed] {
+        let page = store
+            .library_root_page(Path::new("/音楽"), None, None, None, sort, 0, 20)
+            .unwrap();
+        for (index, row) in page.rows.iter().enumerate() {
+            let LibraryLocateResult::Located(location) = store
+                .library_location(row.id, Path::new("/音楽"), false, None, None, None, sort)
+                .unwrap()
+            else {
+                panic!("expected exact flat identity");
+            };
+            assert_eq!(
+                (location.offset, location.total, location.child),
+                (index, page.total, None)
+            );
+        }
+    }
+    let LibraryLocateResult::Located(parent) = store
+        .library_location(
+            2,
+            Path::new("/音楽"),
+            true,
+            None,
+            None,
+            None,
+            LibrarySort::Album,
+        )
+        .unwrap()
+    else {
+        panic!("expected directory ancestry");
+    };
+    assert_eq!(parent.child.as_deref(), Some(Path::new("/音楽/Album")));
+    let LibraryLocateResult::Located(track) = store
+        .library_location(
+            2,
+            parent.child.as_deref().unwrap(),
+            true,
+            None,
+            None,
+            None,
+            LibrarySort::Album,
+        )
+        .unwrap()
+    else {
+        panic!("expected CUE entry");
+    };
+    let page = store
+        .directory_page(Path::new("/音楽/Album"), None, None, None, track.offset, 1)
+        .unwrap();
+    assert!(matches!(&page.rows[..], [DirectoryRow::Track(row)] if row.id == 2));
+    for (query, favorite, missing) in [
+        (Some("not present"), None, None),
+        (None, Some(true), None),
+        (None, None, Some(true)),
+    ] {
+        assert_eq!(
+            store
+                .library_location(
+                    2,
+                    Path::new("/音楽"),
+                    true,
+                    query,
+                    favorite,
+                    missing,
+                    LibrarySort::Album
+                )
+                .unwrap(),
+            LibraryLocateResult::Filtered
+        );
+    }
+    assert_eq!(
+        store
+            .library_location(
+                4,
+                Path::new("/音楽"),
+                false,
+                None,
+                None,
+                None,
+                LibrarySort::Id
+            )
+            .unwrap(),
+        LibraryLocateResult::OutsideRoot
+    );
+    assert_eq!(
+        store
+            .library_location(
+                999,
+                Path::new("/音楽"),
+                true,
+                None,
+                None,
+                None,
+                LibrarySort::Id
+            )
+            .unwrap(),
+        LibraryLocateResult::Unavailable
+    );
+}

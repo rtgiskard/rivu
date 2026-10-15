@@ -15,6 +15,7 @@ pub(super) const SOURCE_FILTER: &str = "tracks.id IN (SELECT value FROM json_eac
 // Normalized nonempty prefixes end in ASCII '/'; replacing that final byte with
 // '0' gives the exclusive BINARY upper bound, including every Unicode suffix.
 const DIRECTORY_SCOPE: &str = " AND tracks.path>=?4 AND tracks.path<(rtrim(?4,'/')||'0')";
+const DIRECTORY_CHILDREN: &str = "(SELECT 0 AS kind,CASE WHEN ?4='' AND instr(rest,'/')=1 THEN '/' ELSE ?4||substr(rest,1,instr(rest,'/')-1) END AS child,MIN(id) AS track_id FROM sources WHERE instr(rest,'/')>0 GROUP BY child UNION ALL SELECT 1,path,id FROM sources WHERE instr(rest,'/')=0)";
 
 fn directory_prefix(path: &Path) -> Result<String> {
     if path.as_os_str().is_empty() {
@@ -282,6 +283,91 @@ impl Store {
         Ok(Page { total, rows })
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Match the library projection filters when resolving one exact identity"
+    )]
+    pub fn library_location(
+        &self,
+        track_id: i64,
+        path: &Path,
+        tree: bool,
+        query: Option<&str>,
+        favorite: Option<bool>,
+        missing: Option<bool>,
+        sort: crate::model::LibrarySort,
+    ) -> Result<crate::model::LibraryLocateResult> {
+        use crate::model::{LibraryLocateResult, LibraryLocation};
+        let Some(source) = self
+            .conn
+            .query_row("SELECT path FROM tracks WHERE id=?1", [track_id], |row| {
+                row.get::<_, String>(0)
+            })
+            .optional()?
+        else {
+            return Ok(LibraryLocateResult::Unavailable);
+        };
+        let prefix = directory_prefix(path)?;
+        let Some(rest) = source.strip_prefix(&prefix).filter(|rest| !rest.is_empty()) else {
+            return Ok(LibraryLocateResult::OutsideRoot);
+        };
+        let query = query
+            .filter(|query| !query.is_empty())
+            .map(str::to_lowercase);
+        let matches = self.conn.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM tracks {TRACK_SEARCH_FILTER} AND id=?4)"),
+            params![query, favorite, missing, track_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !matches {
+            return Ok(LibraryLocateResult::Filtered);
+        }
+        let child = if tree {
+            rest.find('/')
+                .map(|separator| PathBuf::from(format!("{}{}", prefix, &rest[..separator])))
+        } else {
+            None
+        };
+        let (sql, target) = if tree {
+            (
+                format!(
+                    "WITH sources AS (SELECT id,path,substr(path,length(?4)+1) AS rest FROM tracks {TRACK_SEARCH_FILTER}{DIRECTORY_SCOPE}), children AS {DIRECTORY_CHILDREN}, ranked AS (SELECT kind,child,track_id,row_number() OVER (ORDER BY kind,child,track_id)-1 AS position,COUNT(*) OVER () AS total FROM children) SELECT position,total FROM ranked WHERE (?5 IS NOT NULL AND kind=0 AND child=?5) OR (?5 IS NULL AND kind=1 AND track_id=?6)"
+                ),
+                child.as_deref().and_then(Path::to_str),
+            )
+        } else {
+            (
+                format!(
+                    "WITH ranked AS (SELECT id,row_number() OVER (ORDER BY {})-1 AS position,COUNT(*) OVER () AS total FROM tracks {TRACK_SEARCH_FILTER}{DIRECTORY_SCOPE}) SELECT position,total FROM ranked WHERE id=?6 AND ?5 IS NULL",
+                    library_order(sort)
+                ),
+                None,
+            )
+        };
+        let location = self
+            .conn
+            .query_row(
+                &sql,
+                params![query, favorite, missing, prefix, target, track_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)? as usize,
+                        row.get::<_, i64>(1)? as usize,
+                    ))
+                },
+            )
+            .optional()?;
+        Ok(
+            location.map_or(LibraryLocateResult::Unavailable, |(offset, total)| {
+                LibraryLocateResult::Located(LibraryLocation {
+                    offset,
+                    total,
+                    child,
+                })
+            }),
+        )
+    }
+
     /// One aggregate query for all roots; overlapping and duplicate inputs remain independent.
     pub fn library_root_counts(
         &self,
@@ -436,7 +522,7 @@ impl Store {
         let sources =
             "WITH sources AS (SELECT id,path,substr(path,length(?4)+1) AS rest FROM tracks ";
         let children_prefix = "), children AS ";
-        let children = "(SELECT 0 AS kind,CASE WHEN ?4='' AND instr(rest,'/')=1 THEN '/' ELSE ?4||substr(rest,1,instr(rest,'/')-1) END AS child,MIN(id) AS track_id FROM sources WHERE instr(rest,'/')>0 GROUP BY child UNION ALL SELECT 1,path,id FROM sources WHERE instr(rest,'/')=0)";
+        let children = DIRECTORY_CHILDREN;
         let page_columns = ", page AS MATERIALIZED (SELECT kind,child,track_id FROM children ORDER BY kind,child,track_id LIMIT ?5 OFFSET ?6) SELECT total.total,p.kind,p.child,";
         // Join payload only after pagination; empty pages retain the total row.
         let page_tail = " FROM (SELECT COUNT(*) AS total FROM children) total LEFT JOIN page p ON 1 LEFT JOIN tracks t ON p.kind=1 AND t.id=p.track_id ORDER BY p.kind,p.child,p.track_id";

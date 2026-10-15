@@ -4,6 +4,17 @@ gl-played-none = Never
 
 gl-choose-track = Choose something to listen to
 
+gl-locate-playing-entry = Locate playing entry in Queue
+gl-locate-library = Locate playing track in Library
+gl-locate-library-filtered = Playing track is hidden by Library filters
+gl-locate-clear-filters = Clear filters and locate
+gl-locate-library-outside = Playing track is outside configured Library roots
+gl-locate-library-unavailable = Playing track is unavailable in the Library
+gl-locate-queue-locked = Add a Queue panel before locating playback, or unlock the layout
+gl-queue-locate-response = Unexpected playing queue entry response
+gl-queue-locate-missing = Playing queue entry is no longer available
+gl-locate-library-inconsistent = Library locate returned inconsistent ancestry
+gl-locate-library-response = Unexpected Library locate response
 
 gl-playing = Playing
 

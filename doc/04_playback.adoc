@@ -12,6 +12,10 @@ seconds; CLI volume is an integer percentage from 0 to 100.
 The desktop Playback panel shows the current title, artist and album, playback
 progress, transport controls, and volume. Controls wrap in narrow panels;
 overflow remains scrollable. Use the separate Album artwork panel for covers.
+The crosshair beside its title (*Locate playing entry in Queue*) reveals the
+Queue tab and locates the current occurrence; see <<_queue,Queue>>. If the layout
+has no Queue panel, it adds one only while the layout is unlocked. With a locked
+layout, it reports that a Queue panel must be added or the layout unlocked.
 
 Repeat cycles Off, All, and One. Previous restarts the current entry when its
 position exceeds three seconds; at or before three seconds it navigates back,
@@ -140,6 +144,17 @@ double-click plays the selected occurrence. A right-click on an already
 selected row preserves the selection; otherwise it selects that row. Up/Down
 navigate the focused queue, Enter plays the selected occurrence, and Delete
 removes selected occurrences.
+
+Use the crosshair button (*Locate playing entry in Queue*) in the Queue toolbar
+or beside the Playback title to scroll to the current occurrence and briefly
+emphasize it. The Playback button reveals an existing Queue tab first, or adds a
+Queue panel when the layout is unlocked; it reports an error rather than adding
+a missing panel to a locked layout. Duplicate tracks are located by occurrence,
+not by their shared track identity. Both buttons also work while paused and are
+unavailable without a current occurrence. Locating never changes selection,
+playback, or an unsaved Track details draft, and playback changes do not
+automatically scroll the queue. A removed occurrence is not replaced by another
+duplicate.
 
 Hover a queue row to reveal its favorite, play, remove, move-up and move-down
 controls. Each action targets that occurrence without changing the selection;

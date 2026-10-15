@@ -1,3 +1,4 @@
+mod locate;
 pub(super) mod tree;
 
 use super::{
@@ -12,6 +13,28 @@ use std::{path::Path, sync::Arc};
 
 use tree::TreeItem;
 pub(super) use tree::{BranchStatus, DirectoryTree, TreeBranch};
+
+#[derive(Default)]
+pub(super) struct LibraryLocateState {
+    pub(super) generation: u64,
+    pub(super) pending: bool,
+    pub(super) notice: Option<(i64, crate::model::LibraryLocateResult)>,
+    pub(super) reveal: Option<(i64, TreeBranch, usize)>,
+    pub(super) reveal_scrolled: bool,
+    pub(super) highlight: Option<(i64, std::time::Instant)>,
+    pub(super) highlight_task: Option<gpui::Task<()>>,
+}
+
+impl LibraryLocateState {
+    pub(super) fn invalidate(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.notice = None;
+        self.reveal = None;
+        self.reveal_scrolled = false;
+        self.highlight = None;
+        self.highlight_task = None;
+    }
+}
 
 pub(super) fn track_detail(
     i18n: &crate::i18n::Localizer,
@@ -672,6 +695,11 @@ impl GuiApp {
                                 .overflow_hidden()
                                 .group("library-track-row")
                                 .relative()
+                                .when(matches!(entry, DirectoryRow::Track(track)
+                                    if this.browser.library.locate.highlight.is_some_and(|(id, started)|
+                                        id == track.id && started.elapsed() < std::time::Duration::from_secs(2))), |view| {
+                                    view.bg(gpui::rgb(super::HIGHLIGHT)).border_l_2().border_color(gpui::rgb(super::ACCENT))
+                                })
                                 .when_some(path.clone().filter(|path| this.state.system.config.library_roots.contains(path)), |view, root| {
                                     view.on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
                                         this.panel_menu = None;

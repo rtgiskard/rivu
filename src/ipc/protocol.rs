@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub(super) const PROTOCOL_VERSION: u8 = 22;
+pub(super) const PROTOCOL_VERSION: u8 = 23;
 pub(super) const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub(super) const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub(super) const MAX_CLIENTS: usize = 16;
@@ -150,6 +150,15 @@ pub(super) enum WireQuery {
         sort: crate::model::LibrarySort,
         offset: u64,
         limit: u64,
+    },
+    LibraryLocate {
+        track_id: i64,
+        path: PathBuf,
+        tree: bool,
+        query: Option<String>,
+        favorite: Option<bool>,
+        missing: Option<bool>,
+        sort: crate::model::LibrarySort,
     },
     LibraryRootCounts {
         roots: Vec<PathBuf>,
@@ -511,6 +520,23 @@ impl From<Query> for WireQuery {
                 offset: offset as u64,
                 limit: limit as u64,
             },
+            Query::LibraryLocate {
+                track_id,
+                path,
+                tree,
+                query,
+                favorite,
+                missing,
+                sort,
+            } => Self::LibraryLocate {
+                track_id,
+                path,
+                tree,
+                query,
+                favorite,
+                missing,
+                sort,
+            },
             Query::LibraryRootCounts { roots } => Self::LibraryRootCounts { roots },
             Query::ScanTask { id } => Self::ScanTask { id },
             Query::QueuePage { offset, limit } => Self::QueuePage {
@@ -683,6 +709,23 @@ impl TryFrom<WireQuery> for Query {
                 sort,
                 offset: wire_usize(offset, "offset")?,
                 limit: wire_usize(limit, "limit")?,
+            },
+            WireQuery::LibraryLocate {
+                track_id,
+                path,
+                tree,
+                query,
+                favorite,
+                missing,
+                sort,
+            } => Self::LibraryLocate {
+                track_id,
+                path,
+                tree,
+                query,
+                favorite,
+                missing,
+                sort,
             },
             WireQuery::LibraryRootCounts { roots } => Self::LibraryRootCounts { roots },
             WireQuery::ScanTask { id } => Self::ScanTask { id },

@@ -859,6 +859,43 @@ impl DirectoryTree {
         }
     }
 
+    /// Install query-verified positional anchors without touching selection/focus.
+    /// Only one ancestry chain is retained; payloads still use the bounded page LRU.
+    pub(in crate::gui) fn reveal_playing(
+        &mut self,
+        root_index: usize,
+        roots: &[PathBuf],
+        locations: &[crate::model::LibraryLocation],
+    ) -> Option<(TreeBranch, usize)> {
+        let root = roots.get(root_index)?;
+        let forest = TreeBranch::default();
+        self.branches.entry(forest.clone()).or_default().total = Some(roots.len());
+        let mut branch = forest.child(root_index, root);
+        self.attach(&forest, root_index, &branch);
+        for location in locations {
+            let entry = self.branches.entry(branch.clone()).or_default();
+            entry.expanded = true;
+            entry.total = Some(location.total);
+            if let Some(path) = &location.child {
+                let child = branch.child(location.offset, path);
+                self.attach(&branch, location.offset, &child);
+                branch = child;
+            }
+        }
+        self.refresh_visible();
+        let offset = locations.last()?.offset;
+        self.visible_index(&branch, offset)?;
+        Some((branch, offset))
+    }
+
+    pub(in crate::gui) fn location_index(
+        &self,
+        branch: &TreeBranch,
+        offset: usize,
+    ) -> Option<usize> {
+        self.visible_index(branch, offset)
+    }
+
     fn visible_index(&self, key: &TreeBranch, index: usize) -> Option<usize> {
         self.segments
             .iter()

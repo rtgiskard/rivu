@@ -479,6 +479,22 @@ pub struct AlbumSummary {
     pub representative: Track,
 }
 
+/// One exact sibling position; no library payload or unbounded ID list is returned.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibraryLocation {
+    pub offset: usize,
+    pub total: usize,
+    pub child: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LibraryLocateResult {
+    Located(LibraryLocation),
+    Filtered,
+    Unavailable,
+    OutsideRoot,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Query {
@@ -560,6 +576,15 @@ pub enum Query {
         sort: LibrarySort,
         offset: usize,
         limit: usize,
+    },
+    LibraryLocate {
+        track_id: i64,
+        path: PathBuf,
+        tree: bool,
+        query: Option<String>,
+        favorite: Option<bool>,
+        missing: Option<bool>,
+        sort: LibrarySort,
     },
     LibraryRootCounts {
         roots: Vec<PathBuf>,

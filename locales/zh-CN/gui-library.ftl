@@ -4,6 +4,17 @@ gl-played-none = 从未
 
 gl-choose-track = 选择要播放的音乐
 
+gl-locate-playing-entry = 在队列中定位当前播放条目
+gl-locate-library = 在曲库中定位当前播放曲目
+gl-locate-library-filtered = 当前播放曲目被曲库过滤条件隐藏
+gl-locate-clear-filters = 清除过滤并定位
+gl-locate-library-outside = 当前播放曲目不在配置的曲库根目录内
+gl-locate-library-unavailable = 当前播放曲目在曲库中不可用
+gl-locate-queue-locked = 请先添加队列面板，或解锁布局后再定位播放条目
+gl-queue-locate-response = 当前播放队列条目查询返回了非预期结果
+gl-queue-locate-missing = 当前播放队列条目已不可用
+gl-locate-library-inconsistent = 曲库定位返回了不一致的目录层级
+gl-locate-library-response = 曲库定位查询返回了非预期结果
 
 gl-playing = 播放中
 

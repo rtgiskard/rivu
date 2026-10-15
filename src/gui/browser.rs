@@ -150,6 +150,7 @@ pub(super) struct LibraryBrowser {
     missing_only: bool,
     force_scan: bool,
     counts: RootCounts,
+    pub(super) locate: super::library::LibraryLocateState,
 }
 
 impl Default for LibraryBrowser {
@@ -169,6 +170,7 @@ impl Default for LibraryBrowser {
             missing_only: false,
             force_scan: false,
             counts: RootCounts::default(),
+            locate: Default::default(),
         }
     }
 }
@@ -344,6 +346,26 @@ impl LibraryBrowser {
         }
     }
 
+    pub(super) fn reveal_playing(
+        &mut self,
+        root_index: usize,
+        roots: &[std::path::PathBuf],
+        locations: &[crate::model::LibraryLocation],
+    ) -> Option<(TreeBranch, usize)> {
+        self.invalidate_selection();
+        self.tree.reveal_playing(root_index, roots, locations)
+    }
+
+    pub(super) fn clear_locate_filters(&mut self) {
+        self.favorites_only = false;
+        self.missing_only = false;
+        self.buffer.query = None;
+        self.buffer.favorite = None;
+        self.buffer.missing = None;
+        self.invalidate_projection();
+        self.tree.invalidate();
+    }
+
     pub(super) fn demand_directories(&mut self, range: Range<usize>) -> Vec<(TreeBranch, usize)> {
         self.tree.requests_for_range(range)
     }
@@ -394,6 +416,7 @@ impl LibraryBrowser {
         self.force_scan
     }
     pub(super) fn cancel_navigation(&mut self) {
+        self.locate.invalidate();
         self.tree.cancel_navigation();
         self.navigation_intent = None;
     }
@@ -869,6 +892,45 @@ impl HistoryBrowser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn library_locate_expands_ancestry_without_changing_selected_identities() {
+        use crate::model::LibraryLocation;
+        let mut library = LibraryBrowser::default();
+        let folder =
+            LibraryNode::Directory(std::sync::Arc::from(std::path::Path::new("/music/other")));
+        library.select_node(&LibraryNode::Track(41), false);
+        library.select_node(&folder, true);
+        let selected = library.selected().clone();
+        let nodes = library.selected_nodes().clone();
+        let roots = vec!["/music".into(), "/music/Album".into()];
+        let (branch, offset) = library
+            .reveal_playing(
+                0,
+                &roots,
+                &[
+                    LibraryLocation {
+                        offset: 4,
+                        total: 100,
+                        child: Some("/music/Album".into()),
+                    },
+                    LibraryLocation {
+                        offset: 79,
+                        total: 80,
+                        child: None,
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(offset, 79);
+        assert_eq!(branch.path(), std::path::Path::new("/music/Album"));
+        assert_eq!(library.tree().location_index(&branch, offset), Some(85));
+        assert_eq!(library.selected(), &selected);
+        assert_eq!(library.selected_nodes(), &nodes);
+        library.clear_locate_filters();
+        assert_eq!(library.selected(), &selected);
+        assert_eq!(library.selected_nodes(), &nodes);
+    }
 
     #[test]
     fn history_sort_survives_reopening_and_tracks_source_replacement() {

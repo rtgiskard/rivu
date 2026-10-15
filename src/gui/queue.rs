@@ -2,6 +2,8 @@
 //! payloads and relocate selected occurrence IDs through bounded worker lookups;
 //! current-only playback updates do not invalidate pages. Range selection streams
 //! pages into compact identities and commits only for its original selection token.
+//! Explicit now-playing locate has its own bounded worker and never enters selection
+//! or metadata intent handling.
 
 use super::metadata::{ManualAction, ManualIntentId};
 use super::*;
@@ -9,7 +11,7 @@ use crate::{
     model::{Page, Query, QueueRow},
     response::ViewResponse,
 };
-use std::ops::Range;
+use std::{ops::Range, time::Duration};
 
 pub(in crate::gui) struct QueueCommit {
     revision: u64,
@@ -56,6 +58,85 @@ impl From<&QueueRow> for QueueIdentity {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct QueueLocateRequest {
+    generation: u64,
+    revision: u64,
+    id: u64,
+}
+
+#[derive(Clone, Copy)]
+struct QueueLocateReveal {
+    request: QueueLocateRequest,
+    position: usize,
+    scroll: bool,
+}
+
+#[derive(Default)]
+struct QueueLocate {
+    generation: u64,
+    pending: Option<QueueLocateRequest>,
+    worker: Option<QueueLocateRequest>,
+    reveal: Option<QueueLocateReveal>,
+    emphasized: Option<QueueLocateRequest>,
+    timer: Option<gpui::Task<()>>,
+}
+
+impl QueueLocate {
+    fn invalidate(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.pending = None;
+        self.reveal = None;
+        self.emphasized = None;
+        self.timer = None;
+        // A cancelled lookup still owns the worker gate until its response arrives.
+    }
+
+    fn begin(&mut self, id: u64, revision: u64) -> QueueLocateRequest {
+        self.invalidate();
+        let request = QueueLocateRequest {
+            generation: self.generation,
+            revision,
+            id,
+        };
+        self.pending = Some(request);
+        request
+    }
+
+    fn current(&self, request: QueueLocateRequest, revision: u64, current_id: Option<u64>) -> bool {
+        request.generation == self.generation
+            && request.revision == revision
+            && current_id == Some(request.id)
+    }
+
+    fn take_job(&mut self) -> Option<QueueLocateRequest> {
+        if self.worker.is_some() {
+            return None;
+        }
+        let request = self.pending.take()?;
+        self.worker = Some(request);
+        Some(request)
+    }
+
+    fn release_worker(&mut self, request: QueueLocateRequest) {
+        if self.worker == Some(request) {
+            self.worker = None;
+        }
+    }
+
+    fn resolve(&mut self, request: QueueLocateRequest, position: usize) {
+        if request.generation != self.generation {
+            return;
+        }
+        self.pending = None;
+        self.reveal = Some(QueueLocateReveal {
+            request,
+            position,
+            scroll: true,
+        });
+    }
+}
+
 #[derive(Default)]
 pub(super) struct QueueSelection {
     pub(super) rows: paged::PagedRows<QueueRow>,
@@ -71,6 +152,7 @@ pub(super) struct QueueSelection {
     pending: Option<QueueJob>,
     worker: Option<u64>,
     manual: Option<ManualIntentId>,
+    locate: QueueLocate,
 }
 impl QueueSelection {
     pub(super) fn len(&self) -> usize {
@@ -210,8 +292,141 @@ impl QueueSelection {
 }
 
 impl GuiApp {
+    pub(super) fn locate_playing_queue(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.refresh(cx);
+        let Some(id) = self.state.queue.current_id else {
+            return;
+        };
+        let request = self
+            .browser
+            .queue
+            .locate
+            .begin(id, self.state.queue.revision);
+        let position = self.state.queue.current_position.or_else(|| {
+            self.browser
+                .queue
+                .rows
+                .iter()
+                .find(|row| row.id == id)
+                .map(|row| row.position)
+        });
+        if let Some(position) = position {
+            self.browser.queue.locate.resolve(request, position);
+            self.ensure_queue_range(position..position.saturating_add(1), cx);
+        } else {
+            self.dispatch_queue_locate(cx);
+        }
+        cx.notify();
+    }
+
+    fn queue_locate_current(&self, request: QueueLocateRequest) -> bool {
+        self.browser.queue.locate.current(
+            request,
+            self.state.queue.revision,
+            self.state.queue.current_id,
+        )
+    }
+
+    fn dispatch_queue_locate(&mut self, cx: &mut Context<Self>) {
+        let Some(request) = self.browser.queue.locate.take_job() else {
+            return;
+        };
+        if !self.queue_locate_current(request) {
+            self.browser.queue.locate.release_worker(request);
+            return;
+        }
+        let handle = self.handle.clone();
+        cx.spawn(async move |this, cx| {
+            let response = cx
+                .background_executor()
+                .spawn(async move {
+                    handle.query(Query::QueueEntries {
+                        queue_ids: vec![request.id],
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.browser.queue.locate.release_worker(request);
+                this.refresh(cx);
+                if this.queue_locate_current(request)
+                    && response.revisions.queue == request.revision
+                {
+                    match response.result {
+                        Ok(ViewResponse::QueueEntries(rows)) => {
+                            if let Some(row) = rows.into_iter().find(|row| row.id == request.id) {
+                                this.browser.queue.locate.resolve(request, row.position);
+                                this.ensure_queue_range(
+                                    row.position..row.position.saturating_add(1),
+                                    cx,
+                                );
+                            } else {
+                                this.error =
+                                    Some(this.i18n.text("gl-queue-locate-missing").to_owned());
+                            }
+                        }
+                        Err(error) => this.error = Some(error.to_string()),
+                        _ => {
+                            this.error =
+                                Some(this.i18n.text("gl-queue-locate-response").to_owned());
+                        }
+                    }
+                }
+                this.dispatch_queue_locate(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(super) fn reveal_queue_locate(
+        &mut self,
+        scroll: &gpui::UniformListScrollHandle,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(reveal) = self.browser.queue.locate.reveal else {
+            return;
+        };
+        if !self.queue_locate_current(reveal.request) {
+            self.browser.queue.locate.invalidate();
+            return;
+        }
+        if reveal.scroll {
+            scroll.scroll_to_item(reveal.position, gpui::ScrollStrategy::Nearest);
+            self.browser.queue.locate.reveal.as_mut().unwrap().scroll = false;
+        }
+        let Some(row) = self.browser.queue.rows.get(reveal.position) else {
+            return;
+        };
+        let id = row.id;
+        self.browser.queue.locate.reveal = None;
+        if id != reveal.request.id {
+            return;
+        }
+        let request = reveal.request;
+        self.browser.queue.locate.emphasized = Some(request);
+        let timer = cx.background_executor().timer(Duration::from_millis(1500));
+        self.browser.queue.locate.timer = Some(cx.spawn(async move |this, cx| {
+            timer.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.browser.queue.locate.emphasized == Some(request) {
+                    this.browser.queue.locate.emphasized = None;
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
+    pub(super) fn queue_locate_emphasized(&self, id: u64) -> bool {
+        self.browser
+            .queue
+            .locate
+            .emphasized
+            .is_some_and(|request| request.id == id && self.queue_locate_current(request))
+    }
+
     pub(super) fn refresh_queue(&mut self, cx: &mut Context<Self>) {
         let queue = &mut self.browser.queue;
+        queue.locate.invalidate();
         queue.rows.invalidate();
         queue.rows.set_total(self.state.queue.total);
         queue.page_generation = queue.page_generation.wrapping_add(1);
@@ -611,6 +826,51 @@ mod tests {
             position,
         }
     }
+    #[test]
+    fn playing_locate_reveals_exact_duplicate_occurrence_without_selecting() {
+        let mut queue = QueueSelection::default();
+        queue.select(identity(10, 4), false);
+        let selected = queue.ordered();
+        let anchor = queue.anchor;
+        let active = queue.active;
+        let generation = queue.generation;
+        let request = queue.locate.begin(11, 7);
+        assert!(queue.locate.current(request, 7, Some(11)));
+        queue.locate.resolve(request, 199_999);
+        let reveal = queue.locate.reveal.unwrap();
+        assert_eq!(reveal.request.id, 11);
+        assert_eq!(reveal.position, 199_999);
+        assert!(reveal.scroll);
+        assert_eq!(queue.ordered(), selected);
+        assert_eq!(queue.anchor, anchor);
+        assert_eq!(queue.active, active);
+        assert_eq!(queue.generation, generation);
+        assert!(queue.ready());
+    }
+
+    #[test]
+    fn playing_locate_rejects_replaced_targets_and_revisions_with_one_worker() {
+        let mut queue = QueueSelection::default();
+        let old = queue.locate.begin(10, 7);
+        assert_eq!(queue.locate.take_job(), Some(old));
+        let latest = queue.locate.begin(11, 7);
+        assert!(queue.locate.take_job().is_none());
+        assert!(!queue.locate.current(old, 7, Some(10)));
+        assert!(!queue.locate.current(latest, 7, Some(10)));
+        assert!(!queue.locate.current(latest, 7, None));
+        assert!(!queue.locate.current(latest, 8, Some(11)));
+        queue.locate.resolve(old, 3);
+        assert!(queue.locate.reveal.is_none());
+        queue.locate.release_worker(old);
+        assert_eq!(queue.locate.take_job(), Some(latest));
+        assert!(queue.locate.take_job().is_none());
+        queue.locate.invalidate();
+        assert!(!queue.locate.current(latest, 7, Some(11)));
+        assert_eq!(queue.locate.worker, Some(latest));
+        queue.locate.release_worker(latest);
+        assert!(queue.locate.take_job().is_none());
+    }
+
     #[test]
     fn occurrence_selection_survives_eviction_and_relocates_without_track_deduplication() {
         let mut queue = QueueSelection::default();

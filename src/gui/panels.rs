@@ -352,6 +352,22 @@ impl GuiApp {
                     .min_w_0()
                     .flex_shrink_0()
                     .child(div().flex_1().min_w_0().text_lg().truncate().child(title))
+                    .child(disabled_control(
+                        quiet_icon_button(icon_button(
+                            ("playback-locate", panel_id),
+                            "󰍉",
+                            self.tr("gl-locate-playing-entry"),
+                            cx,
+                            |this, window, cx| {
+                                if this.state.queue.current_id.is_some()
+                                    && this.reveal_queue_panel(window, cx)
+                                {
+                                    this.locate_playing_queue(window, cx);
+                                }
+                            },
+                        )),
+                        self.state.queue.current_id.is_none(),
+                    ))
                     .child(caption(status).flex_shrink_0()),
             )
             .child(
@@ -585,9 +601,10 @@ impl GuiApp {
         &mut self,
         panel_id: u64,
         tab_bar_visible: bool,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.finish_library_locate_render(window, cx);
         let total = self.browser.library.tree().root_total();
         let range_pending = self.library_range_pending();
         let selected_directories = self
@@ -646,6 +663,16 @@ impl GuiApp {
                         .into()
                     }),
             )
+            .child(disabled_control(
+                icon_button(
+                    ("library-locate-playing", panel_id),
+                    "󰍉",
+                    self.tr("gl-locate-library"),
+                    cx,
+                    |this, window, cx| this.locate_playing_library(window, cx),
+                ),
+                self.state.current_track().is_none() || self.browser.library.locate.pending,
+            ))
             .child(icon_button(
                 ("library-view", panel_id),
                 if self.browser.library.tree_active() {
@@ -763,6 +790,38 @@ impl GuiApp {
                     .flex_shrink_0()
                     .child(self.input(Field::Search)),
             );
+        if let Some((track_id, result)) = &self.browser.library.locate.notice
+            && self
+                .state
+                .current_track()
+                .is_some_and(|track| track.id == *track_id)
+        {
+            use crate::model::LibraryLocateResult;
+            let message = match result {
+                LibraryLocateResult::Filtered => Some("gl-locate-library-filtered"),
+                LibraryLocateResult::OutsideRoot => Some("gl-locate-library-outside"),
+                LibraryLocateResult::Unavailable => Some("gl-locate-library-unavailable"),
+                LibraryLocateResult::Located(_) => None,
+            };
+            if let Some(message) = message {
+                panel = panel.child(
+                    row()
+                        .flex_shrink_0()
+                        .flex_wrap()
+                        .child(caption(self.tr(message)))
+                        .when(matches!(result, LibraryLocateResult::Filtered), |view| {
+                            view.child(button(
+                                ("library-clear-filters-locate", panel_id),
+                                self.tr("gl-locate-clear-filters"),
+                                cx,
+                                |this, window, cx| {
+                                    this.clear_filters_and_locate_library(window, cx)
+                                },
+                            ))
+                        }),
+                );
+            }
+        }
         if self.state.system.scan_progress.is_some() || self.state.system.scanning {
             panel = panel.child(self.library_scan_status(panel_id, cx));
         }
@@ -872,7 +931,16 @@ impl GuiApp {
                     }
                 }),
             );
-        let mut tools = panel_toolbar().min_h(px(32.));
+        let mut tools = panel_toolbar().min_h(px(32.)).child(disabled_control(
+            icon_button(
+                ("queue-locate-playing", panel_id),
+                "󰍉",
+                self.tr("gl-locate-playing-entry"),
+                cx,
+                |this, window, cx| this.locate_playing_queue(window, cx),
+            ),
+            self.state.queue.current_id.is_none(),
+        ));
         if selection_count > 1 {
             tools = tools.child(icon_button(
                 ("queue-remove", panel_id),
@@ -933,13 +1001,14 @@ impl GuiApp {
                 ))
             });
         let scroll = self.scroll_views.list(("queue", panel_id));
+        self.reveal_queue_locate(&scroll, cx);
         panel_surface(("queue-panel", panel_id))
             .on_drop(cx.listener(|this, drag: &LibraryDrag, window, cx| {
                 window.prevent_default();
                 this.resolve_library_drag(drag.nodes(), super::DragDestination::Queue, cx);
             }))
             .drag_over::<LibraryDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
-            .child(header.when(selection_count > 1, |header| header.child(tools)))
+            .child(header.child(tools))
             .when(
                 self.browser.queue.busy || self.browser.queue.selection_error.is_some(),
                 |panel| panel.child(status),
@@ -978,6 +1047,9 @@ impl GuiApp {
                                     playing,
                                     this.browser.queue.contains(&id),
                                 )
+                                .when(this.queue_locate_emphasized(id), |row| {
+                                    row.border_1().border_color(rgb(ACCENT)).bg(rgb(HIGHLIGHT))
+                                })
                                 .group("queue-track-row")
                                 .relative()
                                 .child(

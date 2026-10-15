@@ -246,6 +246,32 @@ fn directory_query_wire_round_trip_preserves_filter_and_page() {
 }
 
 #[test]
+fn library_locate_wire_round_trip_preserves_exact_identity_and_projection() {
+    for tree in [false, true] {
+        let query = Query::LibraryLocate {
+            track_id: 42,
+            path: "/音楽/Album".into(),
+            tree,
+            query: Some("needle".into()),
+            favorite: Some(true),
+            missing: Some(false),
+            sort: crate::model::LibrarySort::MostPlayed,
+        };
+        let expected = serde_json::to_value(&query).unwrap();
+        let mut encoded = Vec::new();
+        encode_request_frame_into(&WireRequest::Query(WireQuery::from(query)), &mut encoded)
+            .unwrap();
+        let WireRequest::Query(wire) = decode_request_frame(&encoded[4..]).unwrap() else {
+            panic!("expected query");
+        };
+        assert_eq!(
+            serde_json::to_value(Query::try_from(wire).unwrap()).unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
 fn library_root_query_wire_round_trip_preserves_paths_filters_and_pages() {
     use crate::model::LibrarySort;
     for sort in [LibrarySort::Id, LibrarySort::Album, LibrarySort::MostPlayed] {
@@ -942,9 +968,9 @@ fn request_encoding_rejects_oversized_body_before_completion() {
 fn postcard_frame_headers_and_bodies_preserve_wire_contract() {
     let mut encoded = Vec::new();
     encode_request_frame_into(&WireRequest::Hello(StateSections::ALL), &mut encoded).unwrap();
-    assert_eq!(encoded, [6, 0, 0, 0, PROTOCOL_VERSION, 0, 1, 1, 1, 1]);
+    assert_eq!(encoded, [6, 0, 0, 0, 23, 0, 1, 1, 1, 1]);
     encode_response_frame_into(&WireResponse::Error("x".into()), &mut encoded).unwrap();
-    assert_eq!(encoded, [4, 0, 0, 0, PROTOCOL_VERSION, 255, 1, b'x']);
+    assert_eq!(encoded, [4, 0, 0, 0, 23, 255, 1, b'x']);
 }
 
 #[tokio::test]

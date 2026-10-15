@@ -521,6 +521,34 @@ impl GuiApp {
         }
     }
 
+    fn reveal_queue_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.cancel_interaction(window, cx);
+        let panel = self
+            .layouts
+            .current()
+            .panels()
+            .into_iter()
+            .find(|panel| panel.kind == "queue")
+            .map(|panel| panel.id);
+        if let Some(panel) = panel {
+            self.layouts.current_mut().activate(panel);
+        } else if self.layouts.current().locked {
+            self.error = Some(self.i18n.text("gl-locate-queue-locked").to_owned());
+            cx.notify();
+            return false;
+        } else {
+            self.layouts
+                .current_mut()
+                .add("queue", self.interaction.target_group());
+            self.layout_changed(cx);
+        }
+        self.catalog_open = false;
+        self.browser.focus_list(ListFocus::Queue);
+        self.focus_layout(window, cx);
+        self.persist_layout(cx);
+        true
+    }
+
     fn active_list_focus(&self) -> Option<ListFocus> {
         visible_list_focus(
             self.browser.focus(),

@@ -133,6 +133,22 @@ during the scan are picked up by a subsequent scan.
 
 Supported formats and playlist exchange: link:03_playlist.adoc#_cue_import[CUE import].
 
+== Locate the playing track
+
+Use Library's `Locate playing track in Library` control to reveal the current
+track, including while paused. With no current track, the control is disabled.
+Tree view expands its configured root and parent directories; flat view uses the
+current sort within the configured root. The exact library identity is revealed,
+including separate CUE entries sharing a source file and logical symlink aliases.
+The row is scrolled into view and briefly emphasized without changing selection,
+playback, or unsaved Details edits. Track changes do not automatically follow.
+
+If search, favorites, or missing-only filters hide the track, Library offers
+`Clear filters and locate`; only that explicit action clears the filters.
+A track outside configured roots or no longer available in the library is
+reported rather than locating a different row. Location queries run in the
+background; changed tracks, views, roots, or library revisions discard stale results.
+
 == Metadata and favorites
 
 `rivu library probe PATH` reads audio metadata and decoder support without
