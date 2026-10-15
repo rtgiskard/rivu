@@ -2158,14 +2158,6 @@ impl GuiApp {
                                                     },
                                                 ), !can_save),
                                             )
-                                            .child(disabled_control(danger_control(icon_button(
-                                                ("metadata-discard", panel_id), "󰆴", "Discard metadata changes", cx,
-                                                move |this, _, cx| {
-                                                    if this.metadata.editor_identity() == editor_identity {
-                                                        this.request_discard_metadata(cx);
-                                                    }
-                                                },
-                                            )), !protected))
                                             .child(
                                                 icon_button(("metadata-retry", panel_id), "󰑐", "Reload current playback track", cx, move |this, _, cx| {
                                                     if this.metadata.editor_identity() == editor_identity {

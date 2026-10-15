@@ -82,10 +82,6 @@ pub(in crate::gui) enum ManualAction {
     },
     Clear,
     ReloadPlayback,
-    Discard {
-        editor: Option<session::EditorIdentity>,
-        selected: Option<i64>,
-    },
     Close(gpui::AnyWindowHandle),
     Quit,
 }
@@ -119,7 +115,6 @@ impl GuiApp {
             ManualAction::History {
                 structure_revision, ..
             } => *structure_revision == self.state.library.structure_revision,
-            ManualAction::Discard { editor, .. } => self.metadata.editor_identity() == *editor,
             _ => true,
         }
     }
@@ -203,7 +198,7 @@ impl GuiApp {
             self.reject_stale_manual_action(cx);
             return;
         }
-        if discard && !matches!(action, ManualAction::Discard { .. }) {
+        if discard {
             self.metadata.discard_draft();
             self.set_metadata_values(MetadataValues::default(), cx);
         }
@@ -232,16 +227,6 @@ impl GuiApp {
                 self.clear_metadata_selection(cx);
                 self.retry_metadata(cx);
             }
-            ManualAction::Discard { selected, .. } => {
-                self.metadata.discard_draft();
-                self.set_metadata_values(MetadataValues::default(), cx);
-                if let Some(id) = selected {
-                    self.request_track(id, cx);
-                } else {
-                    self.sync_metadata_default(cx);
-                    self.sync_waveform(cx);
-                }
-            }
             ManualAction::Close(window) => {
                 cx.defer(move |cx| {
                     let _ = window.update(cx, |_, window, _| window.remove_window());
@@ -250,15 +235,6 @@ impl GuiApp {
             ManualAction::Quit => self.finish_quit(),
         }
         cx.notify();
-    }
-
-    pub(super) fn request_discard_metadata(&mut self, cx: &mut Context<Self>) {
-        let action = ManualAction::Discard {
-            editor: self.metadata.editor_identity(),
-            selected: self.metadata.selected(),
-        };
-        let id = self.begin_manual_intent();
-        self.ready_manual_action(id, action, cx);
     }
 
     pub(super) fn request_clear_selection(&mut self, cx: &mut Context<Self>) {

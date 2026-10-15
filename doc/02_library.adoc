@@ -210,8 +210,9 @@ values become the next edit's baseline, so clearing a newly displayed value stil
 explicitly clears that field. Later edits and unavailable records stay protected.
 Only one track's draft is retained at a time. Playback continues normally when
 the playing track changes; unsaved or saving details stay on the original track
-instead of following playback. Save or Discard resolves that draft before details
-resume following playback. Edits made during a save remain protected.
+instead of following playback. Saving resolves that draft; to abandon it, select
+another track, clear the selection, or reload and confirm Discard. Track details
+has no standalone Discard button. Edits made during a save remain protected.
 Selecting a different track or clearing selection asks for Discard or Cancel;
 Cancel retains the draft and previous selection. Escape first leaves a focused
 input; Escape from the layout requests selection clearing with the same protection.
@@ -222,7 +223,7 @@ operation is rejected without discarding the draft; select the target again.
 For a selection from Recent tracks, a library structure change during confirmation
 also rejects the pending action and keeps the draft. Metadata-only updates and
 Recent tracks sorting do not invalidate that target.
-The latest manual selection, clear, discard, window-close, or quit request takes
+The latest manual selection, clear, reload, window-close, or quit request takes
 precedence over earlier pending navigation in Library, Playlists, Queue, and Recent tracks.
 Late results cannot replace that request or reopen a cancelled confirmation.
 Range selection keeps the previous selection and details until the complete
