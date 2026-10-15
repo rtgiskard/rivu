@@ -291,6 +291,11 @@ impl Core {
             } => {
                 if self.store.set_favorite(&track_ids, favorite)? {
                     self.state.library.revision = self.state.library.revision.wrapping_add(1);
+                    for entry in Arc::make_mut(&mut self.state.library.history) {
+                        if track_ids.contains(&entry.track_id) {
+                            entry.favorite = favorite;
+                        }
+                    }
                     self.refresh_affected_queue_tracks(&track_ids)
                         .context("Favorite edit committed, but refreshing views failed; some projections may be stale")?;
                 }

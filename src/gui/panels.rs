@@ -2254,7 +2254,7 @@ impl GuiApp {
                 cx.notify();
             },
         )
-        .pr_2()
+        .px_2()
         .py_1()
         .rounded_sm()
     }
@@ -2277,14 +2277,20 @@ impl GuiApp {
             .overflow_hidden()
             .border_b_1()
             .border_color(rgb(BORDER))
-            .child(caption("#").w(gpui::relative(0.08)).pr_2().flex_shrink_0())
+            .child(
+                caption("#")
+                    .w(gpui::relative(0.08))
+                    .pr_2()
+                    .min_w_0()
+                    .truncate(),
+            )
             .child(self.history_sort_button(panel_id, "Track", HistorySort::Title, cx))
             .child(
                 div()
                     .flex()
                     .w(gpui::relative(0.2))
                     .h_full()
-                    .flex_shrink_0()
+                    .min_w_0()
                     .child(self.history_sort_button(
                         panel_id,
                         "Play count",
@@ -2297,14 +2303,15 @@ impl GuiApp {
                     .flex()
                     .w(gpui::relative(0.3))
                     .h_full()
-                    .flex_shrink_0()
+                    .min_w_0()
                     .child(self.history_sort_button(
                         panel_id,
                         "Last played",
                         HistorySort::Recent,
                         cx,
                     )),
-            );
+            )
+            .child(div().w(gpui::rems(2.)).flex_shrink_0());
         let scroll = self.scroll_views.list(("history", panel_id));
         panel_surface(("history-panel", panel_id))
             .child(panel_header(
@@ -2321,6 +2328,7 @@ impl GuiApp {
                                 .filter_map(|index| {
                                     let item = this.browser.history.get(index)?;
                                     let id = item.track_id;
+                                    let favorite = item.favorite;
                                     let title = if item.title.is_empty() {
                                         "Untitled".to_owned()
                                     } else {
@@ -2337,11 +2345,13 @@ impl GuiApp {
                                             this.browser.library.selected().contains(&id),
                                         )
                                         .gap_0()
+                                        .group("history-track-row")
                                         .child(
                                             caption((index + 1).to_string())
                                                 .w(gpui::relative(0.08))
                                                 .pr_2()
-                                                .flex_shrink_0(),
+                                                .min_w_0()
+                                                .truncate(),
                                         )
                                         .child(
                                             div()
@@ -2356,16 +2366,23 @@ impl GuiApp {
                                             caption(item.play_count.to_string())
                                                 .w(gpui::relative(0.2))
                                                 .pr_2()
-                                                .flex_shrink_0()
+                                                .min_w_0()
                                                 .truncate(),
                                         )
                                         .child(
                                             caption(last_played.to_owned())
                                                 .w(gpui::relative(0.3))
                                                 .pr_2()
-                                                .flex_shrink_0()
+                                                .min_w_0()
                                                 .truncate(),
                                         )
+                                        .child(this.track_favorite_toggle(
+                                            ("history-entry-favorite", id as u64),
+                                            "history-track-row",
+                                            id,
+                                            favorite,
+                                            cx,
+                                        ))
                                         .on_click(cx.listener(
                                             move |this, event: &gpui::ClickEvent, window, cx| {
                                                 this.focus_layout(window, cx);

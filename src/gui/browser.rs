@@ -856,18 +856,21 @@ mod tests {
                 title: "beta".into(),
                 play_count: 2,
                 played_at: 30,
+                favorite: false,
             },
             HistoryEntry {
                 track_id: 2,
                 title: "ALPHA".into(),
                 play_count: 4,
                 played_at: 10,
+                favorite: true,
             },
             HistoryEntry {
                 track_id: 3,
                 title: "alpha".into(),
                 play_count: 1,
                 played_at: 20,
+                favorite: false,
             },
         ]);
         let mut history = HistoryBrowser::default();

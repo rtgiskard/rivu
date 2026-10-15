@@ -252,6 +252,7 @@ pub struct HistoryEntry {
     pub title: String,
     pub play_count: u64,
     pub played_at: i64,
+    pub favorite: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

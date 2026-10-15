@@ -5097,6 +5097,8 @@ mod tests {
         assert!(core.track(1).unwrap().favorite);
         assert!(core.track(2).unwrap().favorite);
         assert!(!core.track(3).unwrap().favorite);
+        assert!(core.store.history(200).unwrap()[0].favorite);
+        assert!(core.state.library.history[0].favorite);
         core.command(Command::SetFavorite {
             track_ids: vec![1],
             favorite: false,
@@ -5104,6 +5106,8 @@ mod tests {
         .unwrap();
         assert!(!core.track(1).unwrap().favorite);
         assert!(core.track(2).unwrap().favorite);
+        assert!(!core.store.history(200).unwrap()[0].favorite);
+        assert!(!core.state.library.history[0].favorite);
         assert_eq!(play_count(&core, 1), 1);
         assert_eq!(core.store.history(200).unwrap()[0].played_at, played_at);
         assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
