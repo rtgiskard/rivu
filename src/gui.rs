@@ -133,6 +133,11 @@ const PANELS: &[PanelSpec] = &[
         render: |app, panel, window, cx| app.metadata_panel(panel.id, window, cx),
     },
     PanelSpec {
+        kind: "album_artwork",
+        title: "Album artwork",
+        render: |app, _, _, _| app.album_artwork.clone().into_any_element(),
+    },
+    PanelSpec {
         kind: "spectrum",
         title: "Spectrum",
         render: |app, panel, window, cx| app.spectrum_panel(panel.id, window, cx),
@@ -151,11 +156,6 @@ const PANELS: &[PanelSpec] = &[
         kind: "audio_visualizer",
         title: "Audio Visualizer",
         render: GuiApp::audio_visualizer_panel,
-    },
-    PanelSpec {
-        kind: "album_artwork",
-        title: "Album artwork",
-        render: |app, _, _, _| app.album_artwork.clone().into_any_element(),
     },
 ];
 fn panel_spec(kind: &str) -> Option<&'static PanelSpec> {
