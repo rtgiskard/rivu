@@ -59,9 +59,13 @@ uses the remaining panel space. Track rows use the Queue's numbering and text
 layout. Click a track to select it; Ctrl/Cmd-click toggles individual entries.
 Shift-click selects the inclusive range from the anchor, including unloaded pages;
 Ctrl/Cmd+Shift-click adds that range to the existing selection. The track count
-shows the selection size. Toolbar controls remove selected entries together or
-set/clear their shared Library favorites. Hover controls for Play, Favorite, and
-Remove target only that row, never the group. Double-click or Enter plays the
+shows the selection size. A toolbar control removes selected entries together.
+The selected playlist's actions menu offers Favorite selected tracks and
+Unfavorite selected tracks once the track selection is fully loaded; these
+change the selected tracks' shared Library favorites, not the whole playlist.
+Hover controls for Play, Favorite, and Remove target only that row, never the group.
+Hover row actions are separated by one em, with Play before Favorite.
+Double-click or Enter plays the
 active track individually. With playlist tracks focused, arrows move the active
 track, Shift+arrows extend a range, Ctrl/Cmd+A selects every entry, and Delete
 removes the selection. These keys do not target the playlist catalog or steal

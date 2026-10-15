@@ -1100,8 +1100,10 @@ impl GuiApp {
         };
         if let PlaylistAction::Menu(target, position) = action {
             let id = target.id;
-            let has_tracks =
-                !self.library_range_pending() && !self.browser.library.selected().is_empty();
+            let has_tracks = self.state.current_track().is_some();
+            let can_favorite = self.browser.playlists.selected() == Some(id)
+                && self.browser.playlists.track_selection.ready()
+                && self.browser.playlists.track_selection.len() > 0;
             let rename = target.clone();
             let delete = target.clone();
             let menu = super::context_menu_container("playlist-row-menu")
@@ -1135,6 +1137,34 @@ impl GuiApp {
                     .opacity(if has_tracks { 1. } else { 0.4 })
                     .when(!has_tracks, |view| view.cursor_default()),
                 )
+                .child(disabled_control(
+                    super::menu_item(
+                        "playlist-row-favorite-selected",
+                        "Favorite selected tracks",
+                        cx,
+                        move |this, window, cx| {
+                            if this.browser.playlists.selected() == Some(id) {
+                                this.favorite_playlist_selection(true, cx);
+                                this.dismiss_playlist_action(window, cx);
+                            }
+                        },
+                    ),
+                    !can_favorite,
+                ))
+                .child(disabled_control(
+                    super::menu_item(
+                        "playlist-row-unfavorite-selected",
+                        "Unfavorite selected tracks",
+                        cx,
+                        move |this, window, cx| {
+                            if this.browser.playlists.selected() == Some(id) {
+                                this.favorite_playlist_selection(false, cx);
+                                this.dismiss_playlist_action(window, cx);
+                            }
+                        },
+                    ),
+                    !can_favorite,
+                ))
                 .child(super::menu_item(
                     "playlist-row-rename",
                     "Rename…",
@@ -1424,6 +1454,7 @@ impl GuiApp {
                         let name = gpui::SharedString::from(p.name.clone());
                         let play_name = name.clone();
                         let menu_name = name.clone();
+                        let context_name = name.clone();
                         let playable = p.entry_count > 0;
                         list_row(
                             ("playlist", id as u64),
@@ -1490,6 +1521,21 @@ impl GuiApp {
                             .group_hover("playlist-catalog-row", |style| style.opacity(1.))
                             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
                                 cx.stop_propagation()
+                            }),
+                        )
+                        .on_mouse_down(
+                            gpui::MouseButton::Right,
+                            cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                                this.focus_layout(window, cx);
+                                this.playlist_action = Some(PlaylistAction::Menu(
+                                    PlaylistTarget {
+                                        id,
+                                        name: context_name.to_string(),
+                                    },
+                                    event.position,
+                                ));
+                                cx.stop_propagation();
+                                cx.notify();
                             }),
                         )
                         .on_click(cx.listener(move |this, _, window, cx| {
@@ -1804,37 +1850,16 @@ impl GuiApp {
                     ))
                     .when(self.browser.playlists.track_selection.len() > 0, |tools| {
                         let disabled = !self.browser.playlists.track_selection.ready();
-                        tools
-                            .child(disabled_control(
-                                icon_button(
-                                    ("playlist-remove-selected", panel_id),
-                                    "",
-                                    "Remove selected entries",
-                                    cx,
-                                    |this, _, cx| this.remove_playlist_selection(cx),
-                                ),
-                                disabled,
-                            ))
-                            .child(disabled_control(
-                                icon_button(
-                                    ("playlist-favorite-selected", panel_id),
-                                    "󰋑",
-                                    "Favorite selected tracks",
-                                    cx,
-                                    |this, _, cx| this.favorite_playlist_selection(true, cx),
-                                ),
-                                disabled,
-                            ))
-                            .child(disabled_control(
-                                icon_button(
-                                    ("playlist-unfavorite-selected", panel_id),
-                                    "󰋕",
-                                    "Unfavorite selected tracks",
-                                    cx,
-                                    |this, _, cx| this.favorite_playlist_selection(false, cx),
-                                ),
-                                disabled,
-                            ))
+                        tools.child(disabled_control(
+                            icon_button(
+                                ("playlist-remove-selected", panel_id),
+                                "",
+                                "Remove selected entries",
+                                cx,
+                                |this, _, cx| this.remove_playlist_selection(cx),
+                            ),
+                            disabled,
+                        ))
                     })
                     .child(selection_status),
             )
