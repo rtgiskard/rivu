@@ -55,6 +55,7 @@ pub(crate) enum GuiConfigChange {
     ToggleWaveformSeek,
     ToggleLibraryColumn(LibraryColumn),
     AddLibraryRoot(std::path::PathBuf),
+    RemoveLibraryRoot(std::path::PathBuf),
     Settings(Config),
 }
 struct Request {

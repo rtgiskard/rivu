@@ -27,6 +27,12 @@ impl Core {
                 }
                 config.library_roots.push(path);
             }
+            GuiConfigChange::RemoveLibraryRoot(path) => {
+                if !config.library_roots.contains(&path) {
+                    return Ok(());
+                }
+                config.library_roots.retain(|root| root != &path);
+            }
             GuiConfigChange::Settings(_) => unreachable!(),
         }
         config.volume = self.state.playback.volume;

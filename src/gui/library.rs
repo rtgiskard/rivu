@@ -651,6 +651,15 @@ impl GuiApp {
                                 .gap_0()
                                 .overflow_hidden()
                                 .group("library-track-row")
+                                .relative()
+                                .when_some(path.clone().filter(|path| this.state.system.config.library_roots.contains(path)), |view, root| {
+                                    view.on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                                        this.panel_menu = None;
+                                        this.library_root_menu = Some((root.clone(), event.position));
+                                        cx.stop_propagation();
+                                        cx.notify();
+                                    }))
+                                })
                                 .child(name_cell)
                                 .when_some(
                                     match entry {

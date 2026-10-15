@@ -153,6 +153,14 @@ impl Render for GuiApp {
                     }
                     return;
                 }
+                if this.library_root_menu.is_some() {
+                    if key == "escape" {
+                        this.library_root_menu = None;
+                        cx.notify();
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
                 if this.app_menu_open || this.panel_menu.is_some() || this.catalog_open {
                     if key == "escape" {
                         this.app_menu_open = false;
@@ -1195,6 +1203,31 @@ impl Render for GuiApp {
                     .snap_to_window()
                     .child(menu),
             );
+        if let Some((root, position)) = self.library_root_menu.clone() {
+            let menu = context_menu_container("library-root-menu")
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.library_root_menu = None;
+                    cx.stop_propagation();
+                    cx.notify();
+                }))
+                .child(menu_item(
+                    "remove-library-root",
+                    "Remove library (keep files)",
+                    cx,
+                    move |this, _, cx| {
+                        this.library_root_menu = None;
+                        if let Err(error) = this.handle.update_gui_config(
+                            crate::core::GuiConfigChange::RemoveLibraryRoot(root.clone()),
+                        ) {
+                            this.error = Some(format!("{error:#}"));
+                        }
+                        this.refresh(cx);
+                        cx.notify();
+                    },
+                ));
+            app = app.child(anchored().position(position).snap_to_window().child(menu));
+        }
+
         }
 
         if self.playlist_action.is_some() {

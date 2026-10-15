@@ -330,6 +330,11 @@ Dragging a selected row carries the selection at drag start; dragging an
 unselected row carries that row alone. The dragged set stays fixed for the
 gesture even if the underlying selection changes.
 
+Right-click a configured root in the desktop Library panel and choose
+`Remove library (keep files)` to remove its configured path. Audio files and
+stored track records are retained; the root no longer appears in this view or
+participates in scans of configured roots. Add the path again to restore access.
+
 Configured roots are identified by their paths. Click a directory or group
 header to expand or collapse it. Tree and grouped-list expansion choices are
 kept separately when switching views; changing or clearing search preserves
