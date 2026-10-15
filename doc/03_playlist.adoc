@@ -104,6 +104,16 @@ lookup results cannot overwrite a newer selection or playlist revision. Pending
 or failed selection loads disable group actions and show status with Retry;
 loaded row controls stay row-local. Bulk removal is revision-checked and atomic;
 a failed command leaves selection intact until an authoritative refresh.
+
+Selection query failures, including an unavailable core, stop loading and preserve
+the previous selection without automatic retries. Retry reconciles that selection;
+it does not replay the failed range or key command. With no previous selection,
+Retry restores an empty selection so another click or navigation command can proceed.
+
+While keyboard navigation loads, repeated arrows retain only the latest target;
+superseded targets never replace the active track. Repeating an arrow at a list
+boundary does not start another navigation load.
+
 Moving entries refreshes only that playlist's entries and selected locations;
 the unchanged playlist catalog and library views stay loaded. This also applies
 to moves submitted by another client. Renaming, creating, deleting, or changing
