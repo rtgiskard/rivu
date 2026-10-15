@@ -21,7 +21,7 @@ A minimal example (all omitted settings retain their defaults):
 roots = [] # Add music-directory paths before scanning
 
 [playback]
-volume = 0.7
+volume = 70
 
 [interface]
 font = "sans-serif"
@@ -86,10 +86,11 @@ are reported when needed; native decoders continue to work. A load failure is
 retained until restart. Disabling stops a track currently decoded through FFmpeg;
 native-decoded playback is unaffected.
 
-`playback.volume` accepts finite values from `0` to `1` and defaults to `0.7`.
-Settings → General → Playback displays Volume as a percentage with three decimal places.
-Applying other settings preserves the original volume precision unless the
-Volume field was edited; its display rounding does not change the saved value.
+`playback.volume` is an integer percentage from `0` to `100`, defaulting to `70`.
+Settings and CLI volume inputs also accept integer percentages. Slider and MPRIS
+changes round to the nearest whole percent. Audio and IPC use a `0–1` gain in
+steps of `0.01`. Old fractional configuration values are rejected: replace
+`volume = 0.7` with `volume = 70`; integer `1` now means 1%, not 100%.
 `playback.shuffle` defaults to `false`; `playback.repeat` accepts `off`, `all`, or `one` and defaults
 to `off`. `playback.play_count_threshold_percent` defaults to `20` and must be finite and
 in `[0, 100)`; zero still requires some confirmed heard time. Edit the threshold

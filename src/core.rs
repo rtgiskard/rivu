@@ -3070,6 +3070,27 @@ mod tests {
     }
 
     #[test]
+    fn volume_commands_and_configuration_share_integer_percent_steps() {
+        let (_directory, mut core) = fixture();
+        for (input, expected) in [(0.1234, 0.12), (0.126, 0.13), (0., 0.), (1., 1.)] {
+            core.command(Command::Volume { value: input }).unwrap();
+            assert_eq!(core.state.playback.volume, expected);
+            let mut config = core.state.system.config.as_ref().clone();
+            config.volume = input;
+            core.command(Command::Configure {
+                config: Arc::new(config),
+            })
+            .unwrap();
+            assert_eq!(core.state.playback.volume, expected);
+            assert_eq!(core.state.system.config.volume, expected);
+            assert_eq!(
+                Config::load(&core.state.system.config_path).unwrap().volume,
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn settings_apply_resolves_unedited_playback_and_library_columns_at_execution() {
         let (_directory, mut core) = fixture();
         let mut draft = core.state.system.config.as_ref().clone();

@@ -116,6 +116,7 @@ impl Core {
                 if !value.is_finite() || !(0.0..=1.0).contains(&value) {
                     bail!("Volume must be between 0 and 1");
                 }
+                let value = (value * 100.).round() / 100.;
                 self.audio(AudioCommand::Volume(value))?;
                 self.state.playback.volume = value;
             }
@@ -359,6 +360,8 @@ impl Core {
             }
             Command::Configure { mut config } => {
                 config.validate()?;
+                let volume = (config.volume * 100.).round() / 100.;
+                Arc::make_mut(&mut config).volume = volume;
                 let roots = config
                     .library_roots
                     .iter()

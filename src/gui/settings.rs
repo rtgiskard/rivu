@@ -434,7 +434,6 @@ pub(super) struct Settings {
     active_scroll: Option<ScrollHandle>,
     _subscriptions: Vec<Subscription>,
     draft: Config,
-    volume_edited: bool,
     inputs: HashMap<Field, Entity<Input>>,
     initialized: bool,
     dropdown: DropdownState<SettingChoice>,
@@ -495,7 +494,6 @@ impl Settings {
             active_scroll: None,
             _subscriptions: vec![artwork_cache_subscription],
             draft: config.as_ref().clone(),
-            volume_edited: false,
             inputs: HashMap::new(),
             initialized: false,
             dropdown: DropdownState::default(),
@@ -819,7 +817,6 @@ impl Settings {
         self.session = self.session.wrapping_add(1);
         self.visualizer_panel = None;
         self.draft = config.clone();
-        self.volume_edited = false;
         self.applying = false;
         self.feedback = None;
         self.artwork_cache_report = None;
@@ -845,7 +842,7 @@ impl Settings {
         );
         self.set_value(
             Field::Volume,
-            format!("{:.3}", self.draft.volume * 100.),
+            format!("{:.0}", self.draft.volume * 100.),
             cx,
         );
         self.set_value(
@@ -1045,9 +1042,7 @@ impl Settings {
             .map(PathBuf::from)
             .collect();
         config.scan_max_depth = self.number(Field::ScanMaxDepth, cx)?;
-        if self.volume_edited {
-            config.volume = self.number::<f32>(Field::Volume, cx)? / 100.;
-        }
+        config.volume = f32::from(self.number::<u8>(Field::Volume, cx)?) / 100.;
         config.play_count_threshold_percent = self.number(Field::PlayCountThreshold, cx)?;
         config.log_retention_weeks = self.number(Field::LogRetentionWeeks, cx)?;
         config.media_read_buffer_mb = self.number(Field::MediaReadBuffer, cx)?;
@@ -1143,14 +1138,6 @@ impl Settings {
             return;
         }
         self.initialize(cx);
-        self._subscriptions.push(cx.subscribe(
-            &self.inputs[&Field::Volume],
-            |this, _, event, _| {
-                if matches!(event, InputEvent::Changed { user: true }) {
-                    this.volume_edited = true;
-                }
-            },
-        ));
         self._subscriptions.push(
             cx.subscribe(&self.inputs[&Field::Font], |this, _, event, cx| {
                 if matches!(event, InputEvent::Submit) {

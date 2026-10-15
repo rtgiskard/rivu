@@ -73,7 +73,7 @@ enum PlaybackAction {
     },
     /// Set volume as a percentage, 0..100.
     Volume {
-        percent: f32,
+        percent: u8,
     },
     Shuffle {
         #[arg(value_enum)]
@@ -986,11 +986,11 @@ fn translate(action: Action) -> Result<(Command, bool)> {
         Action::Playback(PlaybackAction::Previous) => Command::Previous,
         Action::Playback(PlaybackAction::Seek { seconds }) => Command::Seek { seconds },
         Action::Playback(PlaybackAction::Volume { percent }) => {
-            if !percent.is_finite() || !(0.0..=100.0).contains(&percent) {
-                bail!("Volume must be between 0 and 100");
+            if percent > 100 {
+                bail!("Volume must be an integer between 0 and 100");
             }
             Command::Volume {
-                value: percent / 100.0,
+                value: f32::from(percent) / 100.0,
             }
         }
         Action::Playback(PlaybackAction::Shuffle { mode }) => Command::Shuffle {

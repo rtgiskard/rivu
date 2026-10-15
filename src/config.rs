@@ -941,6 +941,24 @@ mod tests {
     }
 
     #[test]
+    fn volume_file_uses_integer_percent_and_rejects_fractional_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        for percent in [0, 1, 70, 100] {
+            fs::write(&path, format!("[playback]\nvolume = {percent}\n")).unwrap();
+            let config = Config::load(&path).unwrap();
+            assert_eq!(config.volume, percent as f32 / 100.);
+            config.save(&path).unwrap();
+            let saved: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(saved["playback"]["volume"].as_integer(), Some(percent));
+        }
+        for value in ["-1", "101", "0.7", "70.0"] {
+            fs::write(&path, format!("[playback]\nvolume = {value}\n")).unwrap();
+            assert!(Config::load(&path).is_err());
+        }
+    }
+
+    #[test]
     fn unknown_misplaced_legacy_and_mixed_file_keys_are_rejected() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");

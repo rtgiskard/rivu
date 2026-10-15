@@ -8,7 +8,7 @@ macro_rules! file_group {
         #[derive(Default, Deserialize)]
         #[serde(default, deny_unknown_fields)]
         struct $owned {
-            $( $key: Option<$ty>, )*
+            $( $(#[$attr])* $key: Option<$ty>, )*
         }
 
         impl $owned {
@@ -35,9 +35,29 @@ file_group!(Library, LibraryView {
     scan_max_depth => scan_max_depth: u32,
 });
 
+fn deserialize_volume<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<f32>, D::Error> {
+    let percent = u8::deserialize(deserializer)?;
+    if percent > 100 {
+        return Err(serde::de::Error::custom(
+            "playback.volume must be an integer from 0 to 100",
+        ));
+    }
+    Ok(Some(f32::from(percent) / 100.))
+}
+
+fn serialize_volume<S: serde::Serializer>(
+    volume: &f32,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    serializer.serialize_u8((volume * 100.).round() as u8)
+}
+
 file_group!(Playback, PlaybackView {
     #[serde(skip_serializing_if = "Option::is_none")]
     output_device => output_device: Option<String>,
+    #[serde(serialize_with = "serialize_volume", deserialize_with = "deserialize_volume")]
     volume => volume: f32,
     shuffle => shuffle: bool,
     repeat => repeat: RepeatMode,
