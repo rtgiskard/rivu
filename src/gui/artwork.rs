@@ -1,4 +1,10 @@
-use std::{cell::RefCell, rc::Rc, sync::Arc};
+use std::{
+    cell::RefCell,
+    collections::VecDeque,
+    hash::{Hash, Hasher},
+    rc::Rc,
+    sync::Arc,
+};
 
 use crate::{
     artwork::{Artwork as LoadedArtwork, ArtworkIdentity},
@@ -6,8 +12,9 @@ use crate::{
 };
 
 use gpui::{
-    App, Context, Entity, Image, ImageCache, ImageCacheError, ImageCacheItem, ImageFormat, Img,
-    Render, RenderImage, Resource, Window, div, img, prelude::*, rgb,
+    App, Asset, Context, Entity, ImageCache, ImageCacheError, ImageCacheItem, Img, ParsedSvg,
+    Pixels, Render, RenderImage, Resource, SvgRenderer, SvgSize, Window, canvas, div, img,
+    prelude::*, rgb,
 };
 
 use super::{BG, GuiApp};
@@ -216,46 +223,258 @@ impl GuiApp {
     }
 }
 
-/// The square and circular views share one immutable SVG image identity. GPUI
-/// decodes it asynchronously through its asset system, just like other images.
+// Final BGRA images are memory-only. Limit both key count and bytes, including
+// pending assets, so resizing cannot queue unbounded unique-size work.
+const DEFAULT_ARTWORK_MAX_SIDE: u32 = 2048;
+const DEFAULT_ARTWORK_MAX_ENTRIES: usize = 16;
+const DEFAULT_ARTWORK_MAX_BYTES: u64 = 32 * 1024 * 1024;
+
+fn default_artwork_side(side: Pixels, scale: f32) -> u32 {
+    (f32::from(side).max(0.) * scale)
+        .ceil()
+        .clamp(1., DEFAULT_ARTWORK_MAX_SIDE as f32) as u32
+}
+
+#[derive(Default)]
+struct DefaultArtworkSizes {
+    recent: VecDeque<u32>,
+    bytes: u64,
+}
+
+impl DefaultArtworkSizes {
+    fn touch(&mut self, side: u32) -> bool {
+        let Some(index) = self.recent.iter().position(|&cached| cached == side) else {
+            return false;
+        };
+        self.recent.remove(index);
+        self.recent.push_back(side);
+        true
+    }
+
+    fn evict_for(&mut self, side: u32) -> Option<u32> {
+        if self.recent.len() < DEFAULT_ARTWORK_MAX_ENTRIES
+            && self.bytes + u64::from(side).pow(2) * 4 <= DEFAULT_ARTWORK_MAX_BYTES
+        {
+            return None;
+        }
+        let evicted = self.recent.pop_front()?;
+        self.bytes -= u64::from(evicted).pow(2) * 4;
+        Some(evicted)
+    }
+
+    fn insert(&mut self, side: u32) {
+        self.bytes += u64::from(side).pow(2) * 4;
+        self.recent.push_back(side);
+    }
+}
+
+struct DefaultArtworkRasterizer {
+    renderer: SvgRenderer,
+    // The lock is async and acquired only by background asset futures. There is
+    // one raster/filter operation at a time, not one worker per card or size.
+    parsed: futures::lock::Mutex<Option<ParsedSvg>>,
+}
+
+#[derive(Clone)]
+struct DefaultArtworkSource {
+    side: u32,
+    rasterizer: Arc<DefaultArtworkRasterizer>,
+}
+
+impl Hash for DefaultArtworkSource {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.side.hash(state);
+        Arc::as_ptr(&self.rasterizer).hash(state);
+    }
+}
+
+struct DefaultArtworkBitmap;
+
+impl Asset for DefaultArtworkBitmap {
+    type Source = DefaultArtworkSource;
+    type Output = Result<Arc<RenderImage>, ImageCacheError>;
+
+    fn load(
+        source: Self::Source,
+        _: &mut App,
+    ) -> impl Future<Output = Self::Output> + Send + 'static {
+        Self::rasterize(source)
+    }
+}
+
+impl DefaultArtworkBitmap {
+    async fn rasterize(source: DefaultArtworkSource) -> Result<Arc<RenderImage>, ImageCacheError> {
+        let result = async {
+            let mut parsed = source.rasterizer.parsed.lock().await;
+            if parsed.is_none() {
+                *parsed = Some(
+                    source
+                        .rasterizer
+                        .renderer
+                        .parse_svg(include_bytes!("../../assets/default_artwork.svg"))?,
+                );
+            }
+            // Filter at the final physical size, rather than asking the GPU
+            // to minify the old 1024px texture without mipmaps. 2x sampling
+            // also resolves subpixel SVG strokes before Lanczos filtering.
+            let sample_side = (source.side * 2) as i32;
+            let sampled = source.rasterizer.renderer.render_parsed(
+                parsed.as_ref().expect("parsed default artwork"),
+                SvgSize::ExactSize(gpui::size(
+                    gpui::DevicePixels(sample_side),
+                    gpui::DevicePixels(sample_side),
+                )),
+            )?;
+            // Borrow the BGRA pixels: no full supersampled-buffer copy.
+            // The SVG is opaque, so filtering needs no alpha conversion.
+            let buffer = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
+                sample_side as u32,
+                sample_side as u32,
+                sampled.as_bytes(0).expect("rasterized default artwork"),
+            )
+            .expect("square default artwork buffer");
+            let filtered = image::imageops::resize(
+                &buffer,
+                source.side,
+                source.side,
+                image::imageops::FilterType::Lanczos3,
+            );
+            Ok(Arc::new(RenderImage::new([image::Frame::new(filtered)])))
+        }
+        .await;
+        if let Err(error) = &result {
+            tracing::error!(?error, side = source.side, "default_artwork_raster_failed");
+        }
+        result
+    }
+}
+
+struct DefaultArtworkCache {
+    sizes: DefaultArtworkSizes,
+    rasterizer: Arc<DefaultArtworkRasterizer>,
+}
+
+impl DefaultArtworkCache {
+    fn new(cx: &mut App) -> Entity<Self> {
+        let renderer = cx.svg_renderer();
+        let cache = cx.new(|_| Self {
+            sizes: DefaultArtworkSizes::default(),
+            rasterizer: Arc::new(DefaultArtworkRasterizer {
+                renderer,
+                parsed: futures::lock::Mutex::new(None),
+            }),
+        });
+        cx.observe_release(&cache, |cache, cx| {
+            for &side in &cache.sizes.recent {
+                let source = cache.source(side);
+                let result = cx.fetch_asset::<DefaultArtworkBitmap>(&source);
+                cx.remove_asset::<DefaultArtworkBitmap>(&source);
+                if let Some(Ok(image)) = result {
+                    cx.drop_image(image, None);
+                }
+            }
+        })
+        .detach();
+        cache
+    }
+
+    fn source(&self, side: u32) -> DefaultArtworkSource {
+        DefaultArtworkSource {
+            side,
+            rasterizer: Arc::clone(&self.rasterizer),
+        }
+    }
+
+    fn load(
+        &mut self,
+        side: u32,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
+        if !self.sizes.touch(side) {
+            while let Some(evicted) = self.sizes.evict_for(side) {
+                let source = self.source(evicted);
+                let result = cx.fetch_asset::<DefaultArtworkBitmap>(&source);
+                // Removing the Asset cancels a pending load, including waiters
+                // for the rasterizer. Immutable keys never replace another size.
+                cx.remove_asset::<DefaultArtworkBitmap>(&source);
+                if let Some(Ok(image)) = result {
+                    // Keep the old scene's image until the frame boundary.
+                    window.on_next_frame(move |window, cx| {
+                        cx.drop_image(image, Some(window));
+                    });
+                }
+            }
+            self.sizes.insert(side);
+        }
+        window.use_asset::<DefaultArtworkBitmap>(&self.source(side), cx)
+    }
+}
+
+/// Square/circular consumers share size-keyed immutable background assets.
 pub(super) struct Artwork {
-    source: Arc<Image>,
+    cache: Entity<DefaultArtworkCache>,
     circular: bool,
 }
 
 impl Artwork {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(cx: &mut App) -> Self {
         Self {
-            source: Arc::new(Image::from_bytes(
-                ImageFormat::Svg,
-                include_bytes!("../../assets/default_artwork.svg").to_vec(),
-            )),
+            cache: DefaultArtworkCache::new(cx),
             circular: false,
         }
     }
 
     pub(super) fn circular(&self) -> Self {
         Self {
-            source: Arc::clone(&self.source),
+            cache: self.cache.clone(),
             circular: true,
         }
     }
 
-    pub(super) fn image(&self) -> Img {
-        img(Arc::clone(&self.source))
+    pub(super) fn image(&self, side: Pixels, window: &Window) -> Img {
+        let side = default_artwork_side(side, window.scale_factor());
+        let cache = self.cache.clone();
+        img(move |window: &mut Window, cx: &mut App| {
+            cache.update(cx, |cache, cx| cache.load(side, window, cx))
+        })
+        .with_fallback(|| super::caption("Artwork unavailable").into_any_element())
     }
 }
 
 impl Render for Artwork {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let image = self.image();
+        let cache = self.cache.clone();
         div()
             .size_full()
             .rounded_md()
             .when(self.circular, |view| view.rounded_full())
             .overflow_hidden()
             .bg(rgb(BG))
-            .child(image.size_full())
+            .child(
+                canvas(
+                    move |bounds, window, cx| {
+                        let artwork = Artwork {
+                            cache,
+                            circular: false,
+                        };
+                        let mut image = artwork
+                            .image(bounds.size.width, window)
+                            .size(bounds.size.width)
+                            .into_any_element();
+                        let _ = image.prepaint_as_root(
+                            bounds.origin,
+                            gpui::size(bounds.size.width, bounds.size.width).map(Into::into),
+                            window,
+                            cx,
+                        );
+                        image
+                    },
+                    |_, mut image, window, cx| image.paint(window, cx),
+                )
+                .size_full()
+                .aspect_ratio(1.),
+            )
             .into_any_element()
     }
 }
@@ -263,6 +482,64 @@ impl Render for Artwork {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_artwork_uses_physical_size_and_bounds_large_rasters() {
+        assert_eq!(default_artwork_side(gpui::px(180.), 1.), 180);
+        assert_eq!(default_artwork_side(gpui::px(180.), 2.), 360);
+        assert_eq!(default_artwork_side(gpui::px(111.1), 1.25), 139);
+        assert_eq!(default_artwork_side(gpui::px(0.), 2.), 1);
+        assert_eq!(default_artwork_side(gpui::px(4096.), 2.), 2048);
+    }
+
+    fn request_size(sizes: &mut DefaultArtworkSizes, side: u32) {
+        if !sizes.touch(side) {
+            while sizes.evict_for(side).is_some() {}
+            sizes.insert(side);
+        }
+    }
+
+    #[test]
+    fn default_artwork_resize_demand_stays_bounded_and_reuses_hot_sizes() {
+        let mut sizes = DefaultArtworkSizes::default();
+        for side in 1..=DEFAULT_ARTWORK_MAX_SIDE {
+            request_size(&mut sizes, 180);
+            request_size(&mut sizes, 512);
+            request_size(&mut sizes, side);
+            assert!(sizes.recent.len() <= DEFAULT_ARTWORK_MAX_ENTRIES);
+            assert!(sizes.bytes <= DEFAULT_ARTWORK_MAX_BYTES);
+            assert!(sizes.recent.contains(&180));
+            assert!(sizes.recent.contains(&512));
+            assert_eq!(
+                sizes.bytes,
+                sizes
+                    .recent
+                    .iter()
+                    .map(|&side| u64::from(side).pow(2) * 4)
+                    .sum::<u64>()
+            );
+        }
+        let bytes = sizes.bytes;
+        let count = sizes.recent.len();
+        for _ in 0..100 {
+            assert!(sizes.touch(180));
+            assert!(sizes.touch(512));
+        }
+        assert_eq!(sizes.bytes, bytes);
+        assert_eq!(sizes.recent.len(), count);
+    }
+
+    #[test]
+    fn default_artwork_evicts_idle_sizes_before_exceeding_byte_budget() {
+        let mut sizes = DefaultArtworkSizes::default();
+        request_size(&mut sizes, 2048);
+        request_size(&mut sizes, 2047);
+        request_size(&mut sizes, 180);
+        assert!(!sizes.recent.contains(&2048));
+        assert!(sizes.recent.contains(&2047));
+        assert!(sizes.recent.contains(&180));
+        assert!(sizes.bytes <= DEFAULT_ARTWORK_MAX_BYTES);
+    }
 
     fn track(id: i64, fingerprint: &str) -> Track {
         Track {

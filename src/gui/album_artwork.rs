@@ -412,10 +412,8 @@ impl Render for AlbumArtwork {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_rotation(self.rotation.settings, false);
         self.request_frame(window, cx);
-        let image = self
-            .view
-            .image(cx)
-            .unwrap_or_else(|| self.default_album.read(cx).image());
+        let image = self.view.image(cx);
+        let default_album = self.default_album.clone();
         let style = self.style;
         let decoration = match style {
             AlbumArtworkStyle::Plain => None,
@@ -437,6 +435,8 @@ impl Render for AlbumArtwork {
                 // same center after pixel snapping, including fractional scale.
                 let image_side = px((f32::from(side) * scale * ratio / 2.0).floor() * 2.0 / scale);
                 let inset = (side - image_side) / 2.0;
+                let image =
+                    image.unwrap_or_else(|| default_album.read(cx).image(image_side, window));
                 let surface = if style == AlbumArtworkStyle::Card {
                     // The complete source fits inside the SVG's 32..480 inner
                     // square. Source and frame rotate about the same center;

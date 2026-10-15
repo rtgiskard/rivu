@@ -830,7 +830,7 @@ impl GuiApp {
             }
         })
         .detach();
-        let default_album = cx.new(|_| artwork::Artwork::new());
+        let default_album = cx.new(|cx| artwork::Artwork::new(cx));
         let album_default = default_album.read(cx).circular();
         let mut app = Self {
             settings,

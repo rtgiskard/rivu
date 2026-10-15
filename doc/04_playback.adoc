@@ -224,7 +224,7 @@ disable and re-enable the setting after restoring the session bus.
 
 MPRIS and Track details prefer embedded front-cover artwork, then another
 supported image. Without a cover, MPRIS uses the bundled icon; Track details uses
-the generated path-drawn artwork, including while a cold lookup is pending.
+the generated default artwork, including while a cold lookup is pending.
 Actual covers keep their original aspect ratio in the full, static preview.
 Local images are cached under the data directory's `artwork/` and exposed through
 `mpris:artUrl` when available. Background loading updates the selected preview
