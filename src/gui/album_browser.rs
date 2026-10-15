@@ -17,7 +17,7 @@ use super::{
     artwork::{Artwork, ArtworkLoader, ArtworkView},
     button, caption, column,
     components::disabled_control,
-    format_time,
+    format_time, icon_button,
     input::{Input, InputEvent},
     paged, panel_surface, panel_toolbar, row,
 };
@@ -452,9 +452,10 @@ impl AlbumBrowser {
             .child(caption(format!("{} tracks", album.track_count)))
             .child(
                 panel_toolbar()
-                    .child(button(
+                    .child(icon_button(
                         ("play-album", index),
-                        "Play",
+                        "",
+                        "Play album",
                         cx,
                         move |this, _, cx| {
                             this.send(
@@ -465,9 +466,10 @@ impl AlbumBrowser {
                             )
                         },
                     ))
-                    .child(button(
+                    .child(icon_button(
                         ("enqueue-album", index),
-                        "Add to queue",
+                        "󰐕",
+                        "Add album to queue",
                         cx,
                         move |this, _, cx| {
                             this.send(
@@ -515,10 +517,16 @@ impl Render for AlbumBrowser {
             let play_key = key.clone();
             let enqueue_key = key.clone();
             header = header
-                .child(button("albums-back", "Back", cx, |this, _, cx| {
-                    this.selected = None;
-                    this.load(cx);
-                }))
+                .child(icon_button(
+                    "albums-back",
+                    "",
+                    "Back to albums",
+                    cx,
+                    |this, _, cx| {
+                        this.selected = None;
+                        this.load(cx);
+                    },
+                ))
                 .child(
                     div()
                         .flex_1()
@@ -527,8 +535,9 @@ impl Render for AlbumBrowser {
                         .text_color(rgb(TEXT))
                         .child(album_title(key)),
                 )
-                .child(button(
+                .child(icon_button(
                     "album-play-all",
+                    "",
                     "Play album",
                     cx,
                     move |this, _, cx| {
@@ -540,9 +549,10 @@ impl Render for AlbumBrowser {
                         )
                     },
                 ))
-                .child(button(
+                .child(icon_button(
                     "album-add-all",
-                    "Add to queue",
+                    "󰐕",
+                    "Add album to queue",
                     cx,
                     move |this, _, cx| {
                         this.send(
@@ -586,25 +596,31 @@ impl Render for AlbumBrowser {
         };
         let pager = panel_toolbar()
             .child(disabled_control(
-                button("albums-previous", "Previous", cx, |this, _, cx| {
-                    let offset = if this.selected.is_some() {
-                        this.track_offset
-                    } else {
-                        this.album_offset
-                    };
-                    if this.loading || offset == 0 {
-                        return;
-                    }
-                    if this.selected.is_some() {
-                        this.track_offset = this.track_offset.saturating_sub(this.page_size);
-                        this.track_scroll
-                            .scroll_to_item_strict(0, ScrollStrategy::Top);
-                    } else {
-                        this.album_offset = this.album_offset.saturating_sub(ALBUM_PAGE);
-                        this.reset_grid_scroll();
-                    }
-                    this.load(cx);
-                }),
+                icon_button(
+                    "albums-previous",
+                    "",
+                    "Previous page",
+                    cx,
+                    |this, _, cx| {
+                        let offset = if this.selected.is_some() {
+                            this.track_offset
+                        } else {
+                            this.album_offset
+                        };
+                        if this.loading || offset == 0 {
+                            return;
+                        }
+                        if this.selected.is_some() {
+                            this.track_offset = this.track_offset.saturating_sub(this.page_size);
+                            this.track_scroll
+                                .scroll_to_item_strict(0, ScrollStrategy::Top);
+                        } else {
+                            this.album_offset = this.album_offset.saturating_sub(ALBUM_PAGE);
+                            this.reset_grid_scroll();
+                        }
+                        this.load(cx);
+                    },
+                ),
                 self.loading || offset == 0,
             ))
             .child(caption(if self.total == 0 {
@@ -618,7 +634,7 @@ impl Render for AlbumBrowser {
                 )
             }))
             .child(disabled_control(
-                button("albums-next", "Next", cx, |this, _, cx| {
+                icon_button("albums-next", "", "Next page", cx, |this, _, cx| {
                     let offset = if this.selected.is_some() {
                         this.track_offset
                     } else {
@@ -649,9 +665,13 @@ impl Render for AlbumBrowser {
         } else if let Some(error) = &self.error {
             column()
                 .child(caption(error.clone()))
-                .child(button("albums-retry", "Retry", cx, |this, _, cx| {
-                    this.load(cx)
-                }))
+                .child(icon_button(
+                    "albums-retry",
+                    "󰑐",
+                    "Retry loading albums",
+                    cx,
+                    |this, _, cx| this.load(cx),
+                ))
                 .into_any_element()
         } else if self.selected.is_some() {
             if self.tracks.is_empty() {

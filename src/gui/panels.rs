@@ -1251,12 +1251,13 @@ impl GuiApp {
                                 cx,
                                 |this, window, cx| this.dismiss_playlist_action(window, cx),
                             ))
-                            .child(danger_control(button(
+                            .child(danger_control(icon_button(
                                 "playlist-action-confirm",
+                                if deleting { "󰆴" } else { "󰐊" },
                                 if deleting {
-                                    "Delete"
+                                    "Delete playlist"
                                 } else {
-                                    "Replace and play"
+                                    "Replace queue and play playlist"
                                 },
                                 cx,
                                 move |this, window, cx| {
@@ -2176,8 +2177,8 @@ impl GuiApp {
                                                     },
                                                 ), !can_save),
                                             )
-                                            .child(disabled_control(danger_control(button(
-                                                ("metadata-discard", panel_id), "Discard", cx,
+                                            .child(disabled_control(danger_control(icon_button(
+                                                ("metadata-discard", panel_id), "󰆴", "Discard metadata changes", cx,
                                                 move |this, _, cx| {
                                                     if this.metadata.editor_identity() == editor_identity {
                                                         this.request_discard_metadata(cx);

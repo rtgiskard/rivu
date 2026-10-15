@@ -12,7 +12,7 @@
 
 pub(in crate::gui) mod session;
 
-use super::{BORDER, Field, GuiApp, PANEL, UI_INSET, button, column, panel_header, row};
+use super::{BORDER, Field, GuiApp, PANEL, UI_INSET, column, icon_button, panel_header, row};
 use crate::{model::Query, response::ViewResponse};
 use gpui::{AnyElement, App, Context, div, prelude::*, px, rgb};
 use session::{MetadataDraft, MetadataValues};
@@ -298,15 +298,17 @@ impl GuiApp {
                         .child(
                             row()
                                 .justify_end()
-                                .child(button(
+                                .child(icon_button(
                                     "metadata-confirmation-cancel",
+                                    "",
                                     "Cancel",
                                     cx,
                                     |this, _, cx| this.cancel_manual_action(cx),
                                 ))
-                                .child(super::components::danger_control(button(
+                                .child(super::components::danger_control(icon_button(
                                     "metadata-confirmation-discard",
-                                    "Discard",
+                                    "󰆴",
+                                    "Discard metadata changes",
                                     cx,
                                     |this, _, cx| this.discard_metadata_and_continue(cx),
                                 ))),
