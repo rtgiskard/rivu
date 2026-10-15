@@ -485,8 +485,6 @@ impl Render for GuiApp {
                         cx.stop_propagation();
                         cx.notify();
                     }))
-                    .child(components::menu_title("Menu"))
-                    .child(components::menu_separator())
                     .child(menu_item(
                         "app-settings",
                         "Settings",
@@ -878,7 +876,7 @@ impl Render for GuiApp {
                             ))
                             .child(menu_item(
                                 "queue-save-playlist",
-                                "Save queue as playlist…",
+                                "Save as playlist…",
                                 cx,
                                 |this, window, cx| this.save_queue_as_playlist(window, cx),
                             ))
@@ -1203,6 +1201,8 @@ impl Render for GuiApp {
                     .snap_to_window()
                     .child(menu),
             );
+        }
+
         if let Some((root, position)) = self.library_root_menu.clone() {
             let menu = context_menu_container("library-root-menu")
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
@@ -1226,8 +1226,6 @@ impl Render for GuiApp {
                     },
                 ));
             app = app.child(anchored().position(position).snap_to_window().child(menu));
-        }
-
         }
 
         if self.playlist_action.is_some() {
