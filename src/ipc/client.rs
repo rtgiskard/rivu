@@ -119,6 +119,10 @@ impl ClientSession {
         self.stream = None;
         self.session = SessionState::Unbound;
         self.read_buffer.clear();
+        if self.read_buffer.capacity() > super::transport::RETAINED_BUFFER_LIMIT {
+            self.read_buffer = BytesMut::new();
+        }
+        super::transport::release_large_buffer(&mut self.write_buffer);
     }
 
     fn ensure_handshake(&mut self) -> Result<()> {
@@ -252,4 +256,22 @@ pub fn get_state(data_dir: &Path, sections: StateSections) -> Result<StateRespon
 
 pub fn request_ack(data_dir: &Path, command: &(impl Clone + Into<AppCommand>)) -> Result<Ack> {
     client_session(data_dir)?.request_ack(command)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancelled_exchange_releases_partial_bulk_buffers() {
+        let directory = super::super::tests::socket_test_directory();
+        let mut client = client_session(directory.path()).unwrap();
+        client.read_buffer.resize(1024 * 1024, 0);
+        client.write_buffer.resize(1024 * 1024, 0);
+        client.cancel();
+        assert!(client.get_state(StateSections::ALL).is_err());
+        assert!(client.read_buffer.is_empty());
+        assert!(client.read_buffer.capacity() <= super::super::transport::RETAINED_BUFFER_LIMIT);
+        assert!(client.write_buffer.capacity() <= super::super::transport::RETAINED_BUFFER_LIMIT);
+    }
 }

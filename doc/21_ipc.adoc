@@ -245,6 +245,16 @@ The transport retains partial input across cancelled reads and keeps frames
 independent. Sessions process requests serially; frames have no request IDs or
 multiplexed response matching.
 
+Sessions reuse encoding buffers up to 256 KiB capacity. Larger send buffers are
+released after the write and flush, before an idle request or Watch wait; repeated
+bulk transfers therefore allocate again. Large encodings grow with at most 64 KiB
+requested spare capacity rather than doubling, capped at the frame boundary.
+Client receive buffers release a consumed large frame's shared backing allocation
+once decoding finishes and no pending frame bytes remain. Disconnects discard
+partial input and release oversized client buffers. These bounds concern framing
+storage, not decoded response objects or allocator-resident pages; releasing a
+buffer does not guarantee an immediate RSS decrease.
+
 == Session handshake
 
 A client session starts unbound and must send Hello before State, Query, Command,

@@ -72,6 +72,16 @@ pub(super) fn decode_response_frame(bytes: &[u8]) -> Result<WireResponse> {
     Ok(response)
 }
 
+// Reuse small frames, but never retain a bulk transfer for an idle session.
+pub(super) const RETAINED_BUFFER_LIMIT: usize = 256 * 1024;
+const FRAME_GROWTH_SLACK: usize = 64 * 1024;
+
+pub(super) fn release_large_buffer(buffer: &mut Vec<u8>) {
+    if buffer.capacity() > RETAINED_BUFFER_LIMIT {
+        *buffer = Vec::new();
+    }
+}
+
 struct FrameWriter<'a> {
     bytes: &'a mut Vec<u8>,
     limit: usize,
@@ -84,6 +94,13 @@ impl Write for FrameWriter<'_> {
                 io::ErrorKind::InvalidData,
                 "IPC frame exceeds maximum size",
             ));
+        }
+        let required = self.bytes.len() + bytes.len();
+        if required > self.bytes.capacity() && required > FRAME_GROWTH_SLACK {
+            let target = required
+                .saturating_add(FRAME_GROWTH_SLACK)
+                .min(4 + self.limit);
+            self.bytes.reserve_exact(target - self.bytes.len());
         }
         self.bytes.extend_from_slice(bytes);
         Ok(bytes.len())
@@ -245,7 +262,7 @@ pub(super) async fn write_frame_buffered<S: AsyncWrite + Unpin>(
     encode_response_frame_into(value, buffer)?;
     // Finish accepted replies, including shutdown acknowledgements, but never
     // let a nonreading peer hold a session (or server teardown) indefinitely.
-    timeout(WRITE_TIMEOUT, async {
+    let result = timeout(WRITE_TIMEOUT, async {
         stream
             .write_all(buffer)
             .await
@@ -253,7 +270,9 @@ pub(super) async fn write_frame_buffered<S: AsyncWrite + Unpin>(
         stream.flush().await.context("Flushing IPC frame")
     })
     .await
-    .context("IPC response write timed out")?
+    .context("IPC response write timed out");
+    release_large_buffer(buffer);
+    result?
 }
 
 pub(super) async fn write_error_frame<S: AsyncWrite + Unpin>(
@@ -276,6 +295,7 @@ pub(super) async fn write_request_frame_buffered<S: AsyncWrite + Unpin>(
         .await
         .context("Writing IPC frame")?;
     stream.flush().await.context("Flushing IPC frame")?;
+    release_large_buffer(buffer);
     Ok(())
 }
 
@@ -284,7 +304,14 @@ pub(super) async fn read_response_frame<S: AsyncRead + Unpin>(
     pending: &mut BytesMut,
 ) -> Result<WireResponse> {
     let bytes = read_frame(stream, MAX_RESPONSE, pending).await?;
-    decode_response_frame(&bytes)
+    let result = decode_response_frame(&bytes);
+    let large = bytes.len() > RETAINED_BUFFER_LIMIT;
+    drop(bytes);
+    // A split frame can share the original allocation with the empty tail.
+    if pending.is_empty() && (large || pending.capacity() > RETAINED_BUFFER_LIMIT) {
+        *pending = BytesMut::new();
+    }
+    result
 }
 
 pub(super) fn error_frame(error: impl Into<String>) -> WireResponse {
@@ -320,6 +347,86 @@ mod tests {
         pin::Pin,
         task::{Context as TaskContext, Poll},
     };
+
+    #[tokio::test]
+    async fn bulk_response_releases_buffers_before_idle_and_accepts_next_frame() {
+        let payload = "X".repeat(6 * 1024 * 1024);
+        let (mut sender, mut receiver) = tokio::io::duplex(4096);
+        let send = async {
+            let mut buffer = Vec::new();
+            write_frame_buffered(
+                &mut sender,
+                &WireResponse::Error(payload.clone()),
+                &mut buffer,
+            )
+            .await
+            .unwrap();
+            assert!(buffer.capacity() <= RETAINED_BUFFER_LIMIT);
+            write_frame_buffered(
+                &mut sender,
+                &WireResponse::Error("next".into()),
+                &mut buffer,
+            )
+            .await
+            .unwrap();
+        };
+        let receive = async {
+            let mut pending = BytesMut::new();
+            let WireResponse::Error(actual) = read_response_frame(&mut receiver, &mut pending)
+                .await
+                .unwrap()
+            else {
+                panic!("error response")
+            };
+            assert_eq!(actual, payload);
+            assert!(pending.capacity() <= RETAINED_BUFFER_LIMIT);
+            let WireResponse::Error(actual) = read_response_frame(&mut receiver, &mut pending)
+                .await
+                .unwrap()
+            else {
+                panic!("error response")
+            };
+            assert_eq!(actual, "next");
+        };
+        tokio::join!(send, receive);
+    }
+
+    #[test]
+    fn bulk_frame_growth_is_bounded_and_limit_is_still_enforced() {
+        let mut buffer = Vec::new();
+        let payload = "X".repeat(6 * 1024 * 1024);
+        encode_message_into(
+            PROTOCOL_VERSION,
+            0,
+            &(payload.as_str(), 1u8),
+            &mut buffer,
+            MAX_RESPONSE,
+        )
+        .unwrap();
+        assert!(buffer.capacity() <= buffer.len() + FRAME_GROWTH_SLACK);
+        assert!(
+            encode_message_into(PROTOCOL_VERSION, 0, &payload, &mut buffer, MAX_REQUEST).is_err()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_bulk_response_releases_encoding_buffer() {
+        let (mut sender, _peer) = tokio::io::duplex(8);
+        let mut buffer = Vec::new();
+        let result = write_frame_buffered(
+            &mut sender,
+            &WireResponse::Error("X".repeat(1024 * 1024)),
+            &mut buffer,
+        )
+        .await;
+        assert!(
+            result
+                .unwrap_err()
+                .downcast_ref::<tokio::time::error::Elapsed>()
+                .is_some()
+        );
+        assert!(buffer.capacity() <= RETAINED_BUFFER_LIMIT);
+    }
 
     #[tokio::test(start_paused = true)]
     async fn response_write_timeout_ends_a_partial_frame_when_peer_stops_reading() {
