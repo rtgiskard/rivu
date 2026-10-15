@@ -2132,6 +2132,10 @@ impl GuiApp {
                 })
                 .fold(px(0.), gpui::Pixels::max)
         });
+        let path_tooltip: SharedString = track
+            .filter(|track| track.missing)
+            .map(|track| track.path.to_string_lossy().into_owned().into())
+            .unwrap_or_else(|| file[0][0].1.clone());
         let scroll = self.scroll_views.content(("metadata", panel_id));
         let details = div()
             .id(("metadata-details", panel_id))
@@ -2206,7 +2210,16 @@ impl GuiApp {
                                     }),
                             ),
                     )
-                    .child(metadata_group("File", metadata_rows(file, label_widths)))
+                    .child(metadata_group("File", metadata_row(
+                        div().flex_1().min_w_0().child(
+                            metadata_item(file[0][0].0, file[0][0].1.clone(), label_widths[0])
+                                .id(("metadata-path", panel_id))
+                                .tooltip(move |_, cx| {
+                                    cx.new(|_| super::ButtonTooltip { text: path_tooltip.clone() }).into()
+                                }),
+                        ),
+                        metadata_item(file[0][1].0, file[0][1].1.clone(), label_widths[1]),
+                    )))
                     .child(metadata_group("Metadata", metadata_rows(metadata, label_widths)))
                     .child(metadata_group(
                         "Decoder hint",
