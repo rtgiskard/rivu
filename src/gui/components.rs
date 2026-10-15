@@ -508,6 +508,36 @@ pub(crate) fn list_row_height(window: &Window) -> gpui::Pixels {
     window.rem_size() * LIST_ROW_REMS
 }
 
+/// Numbered track row shared by album, playlist, and queue views.
+pub(crate) fn track_list_row(
+    id: impl Into<gpui::ElementId>,
+    text_id: impl Into<gpui::ElementId>,
+    title: String,
+    detail: String,
+    index: usize,
+    playing: bool,
+    selected: bool,
+) -> gpui::Stateful<Div> {
+    list_row(id, selected)
+        .child(
+            div()
+                .w(gpui::rems(2.))
+                .flex_shrink_0()
+                .text_xs()
+                .whitespace_nowrap()
+                .text_color(rgb(if playing { ACCENT } else { MUTED }))
+                .when(playing, |view| {
+                    view.font_family(super::fonts::SYMBOLS_FAMILY)
+                })
+                .child(if playing {
+                    "󰐊".to_owned()
+                } else {
+                    (index + 1).to_string()
+                }),
+        )
+        .child(row_text(text_id, title, detail))
+}
+
 /// Secondary text used throughout panels and controls.
 pub(crate) fn caption(text: impl Into<SharedString>) -> Div {
     div()

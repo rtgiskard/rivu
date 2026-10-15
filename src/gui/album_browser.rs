@@ -1,4 +1,4 @@
-use std::{ops::Range, sync::Arc};
+use std::{collections::BTreeMap, ops::Range, sync::Arc};
 
 use gpui::{prelude::*, *};
 
@@ -15,8 +15,8 @@ use crate::{
 use super::{
     BORDER, TEXT,
     artwork::{Artwork, ArtworkLoader, ArtworkView},
-    button, caption, column,
-    components::disabled_control,
+    caption, column,
+    components::{LIST_ROW_REMS, quiet_icon_button, track_list_row},
     format_time, icon_button,
     input::{Input, InputEvent},
     paged, panel_surface, panel_toolbar, row,
@@ -24,8 +24,8 @@ use super::{
 
 const ALBUM_PAGE: usize = 24;
 
-/// One bounded page and one sequential cover lookup per panel. Data requests
-/// and cover completions are accepted only by their current generation/demand.
+/// Sparse absolute rows and viewport-owned covers per panel. Only the current
+/// generation and library revision may commit a data request.
 pub(super) struct AlbumBrowser {
     handle: CoreHandle,
     manager: Arc<ArtworkManager>,
@@ -38,12 +38,9 @@ pub(super) struct AlbumBrowser {
     loading: bool,
     error: Option<String>,
     selected: Option<AlbumKey>,
-    album_offset: usize,
-    track_offset: usize,
-    total: usize,
-    albums: Vec<AlbumSummary>,
-    tracks: Vec<LibraryRow>,
-    covers: Vec<ArtworkView>,
+    albums: paged::PagedRows<AlbumSummary>,
+    tracks: paged::PagedRows<LibraryRow>,
+    covers: BTreeMap<usize, ArtworkView>,
     retired: Vec<ArtworkView>,
     loader: ArtworkLoader,
     demand: Range<usize>,
@@ -92,12 +89,9 @@ impl AlbumBrowser {
             loading: false,
             error: None,
             selected: None,
-            album_offset: 0,
-            track_offset: 0,
-            total: 0,
-            albums: Vec::new(),
-            tracks: Vec::new(),
-            covers: Vec::new(),
+            albums: paged::PagedRows::default(),
+            tracks: paged::PagedRows::default(),
+            covers: BTreeMap::new(),
             retired: Vec::new(),
             loader: ArtworkLoader::default(),
             demand: 0..0,
@@ -153,7 +147,7 @@ impl AlbumBrowser {
     fn clear_covers(&mut self, cx: &mut App) {
         self.demand = 0..0;
         let _ = self.loader.prepare(None);
-        for cover in self.covers.drain(..) {
+        for cover in std::mem::take(&mut self.covers).into_values() {
             cover.replace(None, cx);
             self.retired.push(cover);
         }
@@ -165,8 +159,15 @@ impl AlbumBrowser {
         self.request = None;
         self.loading = false;
         self.clear_covers(cx);
-        self.albums.clear();
-        self.tracks.clear();
+        self.albums.invalidate();
+        self.tracks.invalidate();
+        // Empty results still need a bootstrap row when the library changes.
+        if self.albums.is_empty() {
+            self.albums.clear();
+        }
+        if self.tracks.is_empty() {
+            self.tracks.clear();
+        }
     }
 
     fn load(&mut self, cx: &mut Context<Self>) {
@@ -178,25 +179,47 @@ impl AlbumBrowser {
         if !self.visible {
             return;
         }
-        self.loading = true;
+        if self.selected.is_none() {
+            self.restore_grid_anchor();
+        }
         self.error = None;
+        self.request_next(debounce, cx);
+    }
+
+    fn request_next(&mut self, debounce: bool, cx: &mut Context<Self>) {
+        if !self.visible || self.loading {
+            return;
+        }
+        let query = match &self.selected {
+            Some(key) => {
+                let Some(offset) = self.tracks.demand(self.tracks.visible(), self.page_size) else {
+                    return;
+                };
+                self.tracks.begin(offset, self.page_size);
+                Query::AlbumTracks {
+                    key: key.clone(),
+                    offset,
+                    limit: self.page_size,
+                }
+            }
+            None => {
+                let Some(offset) = self.albums.demand(self.albums.visible(), ALBUM_PAGE) else {
+                    return;
+                };
+                self.albums.begin(offset, ALBUM_PAGE);
+                Query::Albums {
+                    query: self.query.clone(),
+                    sort: self.sort,
+                    offset,
+                    limit: ALBUM_PAGE,
+                }
+            }
+        };
+        self.loading = true;
         let generation = self.generation;
         let revision = self.revision;
         let handle = self.handle.clone();
         let debounce = debounce && self.query.is_some();
-        let query = match &self.selected {
-            Some(key) => Query::AlbumTracks {
-                key: key.clone(),
-                offset: self.track_offset,
-                limit: self.page_size,
-            },
-            None => Query::Albums {
-                query: self.query.clone(),
-                sort: self.sort,
-                offset: self.album_offset,
-                limit: ALBUM_PAGE,
-            },
-        };
         self.request = Some(cx.spawn(async move |this, cx| {
             if debounce {
                 cx.background_executor().timer(SEARCH_DEBOUNCE).await;
@@ -226,39 +249,56 @@ impl AlbumBrowser {
                 this.loading = false;
                 match response.result {
                     Ok(ViewResponse::Albums(page)) => {
-                        this.total = page.total;
-                        this.albums = page.rows;
-                        this.covers = (0..this.albums.len())
-                            .map(|_| ArtworkView::default())
-                            .collect();
-                        this.restore_grid_anchor();
+                        this.albums.accept(page);
+                        this.prepare_cover(cx);
                     }
-                    Ok(ViewResponse::AlbumTracks(page)) => {
-                        this.total = page.total;
-                        this.tracks = page.rows;
-                    }
-                    Err(error) => this.error = Some(error.to_string()),
-                    _ => this.error = Some("Unexpected album query response".into()),
+                    Ok(ViewResponse::AlbumTracks(page)) => this.tracks.accept(page),
+                    Err(error) => this.fail_page(error.to_string()),
+                    _ => this.fail_page("Unexpected album query response".into()),
                 }
-                let offset = if this.selected.is_some() {
-                    &mut this.track_offset
-                } else {
-                    &mut this.album_offset
-                };
-                if *offset >= this.total && *offset != 0 {
-                    *offset = 0;
-                    if this.selected.is_some() {
-                        this.track_scroll
-                            .scroll_to_item_strict(0, ScrollStrategy::Top);
-                    } else {
-                        this.reset_grid();
-                    }
-                    this.load(cx);
-                }
+                this.request_next(false, cx);
                 cx.notify();
             });
         }));
         cx.notify();
+    }
+
+    fn fail_page(&mut self, message: String) {
+        if self.selected.is_some() {
+            self.tracks.fail(message);
+        } else {
+            self.albums.fail(message);
+        }
+    }
+
+    fn retry(&mut self, cx: &mut Context<Self>) {
+        if self.selected.is_some() {
+            self.tracks.retry();
+        } else {
+            self.albums.retry();
+        }
+        self.request_next(false, cx);
+        cx.notify();
+    }
+
+    fn loading_row(&self, index: usize, cx: &mut Context<Self>) -> Div {
+        let error = if self.selected.is_some() {
+            self.tracks.error(index)
+        } else {
+            self.albums.error(index)
+        };
+        column()
+            .overflow_hidden()
+            .child(caption(error.unwrap_or("Loading…").to_owned()))
+            .when(error.is_some(), |view| {
+                view.child(icon_button(
+                    ("album-retry", index),
+                    "󰑐",
+                    "Retry loading",
+                    cx,
+                    |this, _, cx| this.retry(cx),
+                ))
+            })
     }
 
     fn send(&mut self, command: Command, cx: &mut Context<Self>) {
@@ -271,7 +311,7 @@ impl AlbumBrowser {
     fn open(&mut self, key: AlbumKey, cx: &mut Context<Self>) {
         self.capture_grid_anchor();
         if self.selected.as_ref() != Some(&key) {
-            self.track_offset = 0;
+            self.tracks.clear();
             self.track_scroll
                 .scroll_to_item_strict(0, ScrollStrategy::Top);
         }
@@ -280,7 +320,7 @@ impl AlbumBrowser {
     }
 
     fn reset_grid(&mut self) {
-        self.album_offset = 0;
+        self.albums.clear();
         self.reset_grid_scroll();
     }
 
@@ -312,9 +352,10 @@ impl AlbumBrowser {
         let previous = self
             .grid_anchor
             .as_ref()
-            .and_then(|key| self.albums.iter().position(|album| &album.key == key));
+            .and_then(|key| self.albums.position(|album| &album.key == key))
+            .or(Some(self.grid_anchor_index));
         let index = anchored_index(previous, grid_row, self.columns, self.albums.len());
-        self.grid_anchor = Some(self.albums[index].key.clone());
+        self.grid_anchor = self.albums.get(index).map(|album| album.key.clone());
         self.grid_anchor_index = index;
     }
 
@@ -322,7 +363,7 @@ impl AlbumBrowser {
         let index = self
             .grid_anchor
             .as_ref()
-            .and_then(|key| self.albums.iter().position(|album| &album.key == key))
+            .and_then(|key| self.albums.position(|album| &album.key == key))
             .unwrap_or(self.grid_anchor_index)
             .min(self.albums.len().saturating_sub(1));
         self.grid_scroll
@@ -341,30 +382,37 @@ impl AlbumBrowser {
             .saturating_mul(self.columns)
             .min(self.albums.len());
         let start = range.start.saturating_mul(self.columns).min(end);
-        let next = start..end;
-        if self.demand != next {
-            for index in self.demand.clone() {
-                if !next.contains(&index) {
-                    self.covers[index].replace(None, cx);
-                }
-            }
-            self.demand = next;
-        }
+        self.demand = start..end;
+        // Updating demand while a request is pending still records the latest viewport.
+        let _ = self.albums.demand(self.demand.clone(), ALBUM_PAGE);
         self.prepare_cover(cx);
+        self.request_next(false, cx);
     }
 
     fn prepare_cover(&mut self, cx: &mut Context<Self>) {
+        if !self.visible || self.selected.is_some() {
+            return;
+        }
+        for (_, cover) in self.covers.extract_if(.., |index, _| {
+            !self.demand.contains(index) || self.albums.get(*index).is_none()
+        }) {
+            cover.replace(None, cx);
+            self.retired.push(cover);
+        }
         let mut changed = false;
         for index in self.demand.clone() {
-            changed |= self.covers[index].replace(
+            let Some(album) = self.albums.get(index) else {
+                continue;
+            };
+            changed |= self.covers.entry(index).or_default().replace(
                 self.manager
-                    .cached(&self.albums[index].representative)
+                    .cached(&album.representative)
                     .filter(|artwork| !artwork.is_placeholder()),
                 cx,
             );
         }
         let next = self.demand.clone().find_map(|index| {
-            let track = &self.albums[index].representative;
+            let track = &self.albums.get(index)?.representative;
             (!self.manager.is_loaded(track)).then_some(track)
         });
         if let Some(track) = self.loader.prepare(next) {
@@ -391,30 +439,46 @@ impl AlbumBrowser {
     }
 
     pub(super) fn retire_images(&mut self, window: &mut Window) {
-        for cover in self.retired.drain(..).chain(self.covers.iter().cloned()) {
+        for cover in self.retired.drain(..).chain(self.covers.values().cloned()) {
             cover.release_retired(window);
         }
     }
 
     pub(super) fn release_all_images(&mut self, window: &mut Window, cx: &mut App) {
-        for cover in self.retired.drain(..).chain(self.covers.iter().cloned()) {
+        for cover in self.retired.drain(..).chain(self.covers.values().cloned()) {
             cover.release_all_images(window, cx);
         }
     }
 
     fn card(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
-        let album = &self.albums[index];
+        let Some(album) = self.albums.get(index) else {
+            return self
+                .loading_row(index, cx)
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .p_2()
+                .into_any_element();
+        };
         let key = album.key.clone();
         let play_key = key.clone();
         let enqueue_key = key.clone();
-        let image = self.covers[index].image(cx);
-        let directory: SharedString = key.directory.to_string_lossy().into_owned().into();
+        let image = self.covers.get(&index).and_then(|cover| cover.image(cx));
+        let directory = key.directory.to_string_lossy().into_owned();
+        let title = album_title(&key);
         column()
             .id(("album-card", index))
             .flex_1()
             .min_w_0()
             .h_full()
             .p_2()
+            .gap_1()
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                if event.click_count() == 2 {
+                    this.open(key.clone(), cx);
+                }
+            }))
             .rounded_md()
             .border_1()
             .border_color(rgb(BORDER))
@@ -433,25 +497,38 @@ impl AlbumBrowser {
                     }),
             )
             .child(
-                button(
-                    ("open-album", index),
-                    album_title(&key),
-                    cx,
-                    move |this, _, cx| this.open(key.clone(), cx),
-                )
-                .w_full()
-                .overflow_hidden()
-                .tooltip(move |_, cx| {
-                    cx.new(|_| super::ButtonTooltip {
-                        text: directory.clone(),
-                    })
-                    .into()
-                }),
+                div()
+                    .id(("album-title", index))
+                    .w_full()
+                    .h(rems(1.5))
+                    .flex_shrink_0()
+                    .text_sm()
+                    .text_color(rgb(TEXT))
+                    .truncate()
+                    .child(title.clone())
+                    .tooltip(move |_, cx| {
+                        cx.new(|_| super::ButtonTooltip {
+                            text: format!("{title}\n{directory}").into(),
+                        })
+                        .into()
+                    }),
             )
-            .child(caption(album.artist.clone()).truncate())
-            .child(caption(format!("{} tracks", album.track_count)))
+            .child(
+                caption(album.artist.clone())
+                    .truncate()
+                    .h(rems(1.25))
+                    .flex_shrink_0(),
+            )
+            .child(
+                caption(format!("{} tracks", album.track_count))
+                    .h(rems(1.25))
+                    .flex_shrink_0(),
+            )
             .child(
                 panel_toolbar()
+                    .id(("album-actions", index))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(|_, _, cx| cx.stop_propagation())
                     .child(icon_button(
                         ("play-album", index),
                         "",
@@ -567,11 +644,15 @@ impl Render for AlbumBrowser {
             header = header
                 .child(div().text_lg().child("Albums"))
                 .child(div().flex_1().min_w_0().child(self.search.clone()))
-                .child(button(
+                .child(icon_button(
                     "albums-sort",
                     match self.sort {
-                        AlbumSort::Title => "Sort: Title",
-                        AlbumSort::Artist => "Sort: Artist",
+                        AlbumSort::Title => "󰉿",
+                        AlbumSort::Artist => "󰀄",
+                    },
+                    match self.sort {
+                        AlbumSort::Title => "Sorted by title; switch to artist",
+                        AlbumSort::Artist => "Sorted by artist; switch to title",
                     },
                     cx,
                     |this, _, cx| {
@@ -584,96 +665,9 @@ impl Render for AlbumBrowser {
                     },
                 ));
         }
-        let offset = if self.selected.is_some() {
-            self.track_offset
-        } else {
-            self.album_offset
-        };
-        let limit = if self.selected.is_some() {
-            self.page_size
-        } else {
-            ALBUM_PAGE
-        };
-        let pager = panel_toolbar()
-            .child(disabled_control(
-                icon_button(
-                    "albums-previous",
-                    "",
-                    "Previous page",
-                    cx,
-                    |this, _, cx| {
-                        let offset = if this.selected.is_some() {
-                            this.track_offset
-                        } else {
-                            this.album_offset
-                        };
-                        if this.loading || offset == 0 {
-                            return;
-                        }
-                        if this.selected.is_some() {
-                            this.track_offset = this.track_offset.saturating_sub(this.page_size);
-                            this.track_scroll
-                                .scroll_to_item_strict(0, ScrollStrategy::Top);
-                        } else {
-                            this.album_offset = this.album_offset.saturating_sub(ALBUM_PAGE);
-                            this.reset_grid_scroll();
-                        }
-                        this.load(cx);
-                    },
-                ),
-                self.loading || offset == 0,
-            ))
-            .child(caption(if self.total == 0 {
-                "0 items".into()
-            } else {
-                format!(
-                    "{}–{} of {}",
-                    offset + 1,
-                    (offset + limit).min(self.total),
-                    self.total
-                )
-            }))
-            .child(disabled_control(
-                icon_button("albums-next", "", "Next page", cx, |this, _, cx| {
-                    let offset = if this.selected.is_some() {
-                        this.track_offset
-                    } else {
-                        this.album_offset
-                    };
-                    let limit = if this.selected.is_some() {
-                        this.page_size
-                    } else {
-                        ALBUM_PAGE
-                    };
-                    if this.loading || offset.saturating_add(limit) >= this.total {
-                        return;
-                    }
-                    if this.selected.is_some() {
-                        this.track_offset += this.page_size;
-                        this.track_scroll
-                            .scroll_to_item_strict(0, ScrollStrategy::Top);
-                    } else {
-                        this.album_offset += ALBUM_PAGE;
-                        this.reset_grid_scroll();
-                    }
-                    this.load(cx);
-                }),
-                self.loading || offset.saturating_add(limit) >= self.total,
-            ));
-        let content = if self.loading {
-            column().child(caption("Loading…")).into_any_element()
-        } else if let Some(error) = &self.error {
-            column()
-                .child(caption(error.clone()))
-                .child(icon_button(
-                    "albums-retry",
-                    "󰑐",
-                    "Retry loading albums",
-                    cx,
-                    |this, _, cx| this.load(cx),
-                ))
-                .into_any_element()
-        } else if self.selected.is_some() {
+        let generation = self.generation;
+        let track_demand_owner = cx.weak_entity();
+        let content = if self.selected.is_some() {
             if self.tracks.is_empty() {
                 column()
                     .child(caption("No tracks in this album"))
@@ -685,64 +679,85 @@ impl Render for AlbumBrowser {
                     cx.processor(|this, range: Range<usize>, _, cx| {
                         range
                             .map(|index| {
-                                let track = &this.tracks[index];
+                                let Some(track) = this.tracks.get(index) else {
+                                    return this
+                                        .loading_row(index, cx)
+                                        .h(rems(LIST_ROW_REMS))
+                                        .w_full()
+                                        .p_2()
+                                        .into_any_element();
+                                };
                                 let id = track.id;
                                 let marker =
                                     track_marker(this.current_track, this.playback_status, id);
-                                row()
-                                    .h(rems(3.5))
-                                    .w_full()
-                                    .p_2()
-                                    .group("album-track-row")
-                                    .border_b_1()
-                                    .border_color(rgb(BORDER))
-                                    .child(
-                                        column()
-                                            .flex_1()
-                                            .overflow_hidden()
-                                            .gap_0()
-                                            .child(div().truncate().child(track.title.clone()))
-                                            .child(caption(track.artist.clone()).truncate()),
-                                    )
-                                    .when(track.missing, |row| row.child(caption("Missing")))
-                                    .when_some(marker, |row, marker| row.child(caption(marker)))
-                                    .child(caption(
-                                        track.duration.map_or_else(|| "—".into(), format_time),
-                                    ))
-                                    .child(
-                                        row()
-                                            .gap_0()
-                                            .invisible()
-                                            .group_hover("album-track-row", |style| style.visible())
-                                            .child(icon_button(
-                                                ("album-track-play", id as u64),
-                                                "",
-                                                "Play track",
-                                                cx,
-                                                move |this, _, cx| {
-                                                    this.send(Command::Play { track_id: id }, cx)
-                                                },
-                                            ))
-                                            .child(icon_button(
-                                                ("album-track-add", id as u64),
-                                                "󰐕",
-                                                "Add track to queue",
-                                                cx,
-                                                move |this, _, cx| {
-                                                    this.send(
-                                                        Command::Enqueue {
-                                                            track_ids: vec![id],
-                                                        },
-                                                        cx,
-                                                    )
-                                                },
-                                            )),
-                                    )
+                                track_list_row(
+                                    ("album-track", id as u64),
+                                    ("album-track-text", id as u64),
+                                    track.title.clone(),
+                                    track.artist.clone(),
+                                    index,
+                                    marker.is_some()
+                                        && this.playback_status == PlaybackStatus::Playing,
+                                    false,
+                                )
+                                .group("album-track-row")
+                                .when(track.missing, |row| row.child(caption("Missing")))
+                                .when_some(marker, |row, marker| row.child(caption(marker)))
+                                .child(
+                                    caption(track.duration.map_or_else(|| "—".into(), format_time))
+                                        .w(rems(4.))
+                                        .flex_shrink_0()
+                                        .text_right(),
+                                )
+                                .child(
+                                    row()
+                                        .gap_0()
+                                        .invisible()
+                                        .group_hover("album-track-row", |style| style.visible())
+                                        .child(quiet_icon_button(icon_button(
+                                            ("album-track-play", id as u64),
+                                            "",
+                                            "Play track",
+                                            cx,
+                                            move |this, _, cx| {
+                                                this.send(Command::Play { track_id: id }, cx)
+                                            },
+                                        )))
+                                        .child(quiet_icon_button(icon_button(
+                                            ("album-track-add", id as u64),
+                                            "󰐕",
+                                            "Add track to queue",
+                                            cx,
+                                            move |this, _, cx| {
+                                                this.send(
+                                                    Command::Enqueue {
+                                                        track_ids: vec![id],
+                                                    },
+                                                    cx,
+                                                )
+                                            },
+                                        ))),
+                                )
+                                .into_any_element()
                             })
                             .collect::<Vec<_>>()
                     }),
                 )
                 .track_scroll(&self.track_scroll)
+                .with_decoration(paged::viewport_demand(move |range, _, cx| {
+                    let owner = track_demand_owner.clone();
+                    cx.defer(move |cx| {
+                        let _ = owner.update(cx, |this, cx| {
+                            if generation == this.generation
+                                && this.selected.is_some()
+                                && this.visible
+                            {
+                                let _ = this.tracks.demand(range, this.page_size);
+                                this.request_next(false, cx);
+                            }
+                        });
+                    });
+                }))
                 .size_full()
                 .into_any_element()
             }
@@ -794,13 +809,15 @@ impl Render for AlbumBrowser {
                                 .map(|grid_row| {
                                     let start = grid_row * columns;
                                     let end = (start + columns).min(this.albums.len());
-                                    let mut cards =
-                                        row().w_full().h(rems(17.)).items_start().pb_2();
+                                    let mut cards = div()
+                                        .grid()
+                                        .grid_cols(columns as u16)
+                                        .gap_2()
+                                        .w_full()
+                                        .h(rems(17.))
+                                        .pb_2();
                                     for index in start..end {
                                         cards = cards.child(this.card(index, cx));
-                                    }
-                                    for _ in end..start + columns {
-                                        cards = cards.child(div().flex_1().min_w_0());
                                     }
                                     cards
                                 })
@@ -825,8 +842,8 @@ impl Render for AlbumBrowser {
         panel_surface("albums-browser")
             .p_2()
             .child(header)
+            .when_some(self.error.clone(), |view, error| view.child(caption(error)))
             .child(div().flex_1().min_h_0().min_w_0().child(content))
-            .child(pager)
     }
 }
 

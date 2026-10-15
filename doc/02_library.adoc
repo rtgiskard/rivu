@@ -347,24 +347,30 @@ separate error message. A new scan shows progress again.
 
 == Albums
 
-Add the dockable `Albums` panel to browse a paged cover grid. Open an album to
-browse its paged tracks; use Back to return to the grid. `Play album` replaces
-the queue with the complete album and starts its first track. `Add to queue`
-appends the complete album without changing current playback. Track rows also
+Add the dockable `Albums` panel to browse a continuously scrolling cover grid.
+Double-click an album card to browse its continuously scrolling tracks; use Back
+to return to the grid. Both views load automatically while scrolling, without
+page controls. Clicking once does not open the album; its title is plain text.
+`Play album` replaces the queue with the complete album and starts its first
+track. `Add to queue` appends the complete album without changing current playback.
+These buttons do not open album details. Track rows also
 offer individual playback and queue actions. Album actions include tracks beyond
-the currently loaded page.
+the currently loaded rows.
 
 Search matches effective album titles or any member artist across the library,
-not just the current page. Matching an artist keeps the complete album visible,
-including compilation tracks by other artists. `Sort: Title` / `Sort: Artist`
-switches ordering; searches and sort changes return to the first page.
+not just the loaded rows. Matching an artist keeps the complete album visible,
+including compilation tracks by other artists. The sort icon beside the search
+field switches between title and artist order; its tooltip identifies the current
+order and the next action. Searches and sort changes return to the top.
 Each Albums panel keeps its own search, sort, detail view, and scrolling position;
 resizing or navigating one panel does not change another panel.
 
-Back preserves the grid page and visible album; changing grid width preserves
-that album as the scroll anchor. Hiding and reopening the panel retains its
-browsing position. Changing pages starts at the top of the new page. Track rows
-show duration, missing-file status, and the current track's playback state.
+Back preserves the grid's browsing position and visible album; changing grid
+width preserves that album as the scroll anchor. Hiding and reopening the panel
+retains its browsing position. Unloaded positions show a loading placeholder;
+failed loads offer a retry action without replacing the rest of the list.
+Track rows show duration, missing-file status, and the current track's playback
+state.
 The current-track marker identifies the library track, not a particular queue
 occurrence when the same track appears more than once.
 
@@ -378,9 +384,10 @@ numbers last), title, then library ID. Metadata overrides affect grouping.
 
 == Paged views
 
-GUI/TUI library and playlist views load results automatically while scrolling;
-there are no page numbers or manual load-more controls. Expand a GUI directory
-to browse its children. Collapsing it preserves descendant expansion choices
+GUI/TUI library and playlist views, and the GUI Albums panel, load results
+automatically while scrolling; there are no page numbers or manual load-more
+controls. Expand a GUI directory to browse its children. Collapsing it preserves
+descendant expansion choices
 for reopening. Loading more rows does not clear selections or metadata drafts.
 Failed GUI loads offer a retry action; press `R` in the TUI to retry.
 Pending keyboard navigation is cancelled when library data, filters, or batch

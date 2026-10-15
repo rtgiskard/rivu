@@ -3,6 +3,7 @@ use super::{
     StatusKind, TEXT, UI_INSET, ViewRequestKind, active_control, artwork_preview, button, column,
     components::{
         LIST_ROW_REMS, danger_control, disabled_control, list_row_height, quiet_icon_button,
+        track_list_row,
     },
     form_field, format_time, icon_button,
     library::LibraryDrag,
@@ -108,35 +109,6 @@ pub(super) enum PlaylistAction {
     Menu(PlaylistTarget, gpui::Point<gpui::Pixels>),
     Play(PlaylistTarget),
     Delete(PlaylistTarget),
-}
-
-fn track_list_row(
-    id: impl Into<gpui::ElementId>,
-    text_id: impl Into<gpui::ElementId>,
-    title: String,
-    detail: String,
-    index: usize,
-    playing: bool,
-    selected: bool,
-) -> gpui::Stateful<Div> {
-    list_row(id, selected)
-        .child(
-            div()
-                .w(gpui::rems(2.))
-                .flex_shrink_0()
-                .text_xs()
-                .whitespace_nowrap()
-                .text_color(rgb(if playing { ACCENT } else { MUTED }))
-                .when(playing, |view| {
-                    view.font_family(super::fonts::SYMBOLS_FAMILY)
-                })
-                .child(if playing {
-                    "󰐊".to_owned()
-                } else {
-                    (index + 1).to_string()
-                }),
-        )
-        .child(row_text(text_id, title, detail))
 }
 
 impl GuiApp {

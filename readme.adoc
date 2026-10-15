@@ -7,8 +7,8 @@ terminal, and headless modes that share one playback instance.
 
 * Local audio and CUE libraries with search, favorites, metadata overrides,
   missing-track cleanup, play counts, and recent history
-* link:doc/02_library.adoc#_albums[Album browsing] with paged covers, track lists,
-  and whole-album playback or queue actions
+* link:doc/02_library.adoc#_albums[Album browsing] with continuous scrolling,
+  cover grids, track lists, and whole-album playback or queue actions
 * Playlists with M3U/M3U8 import/export and CUE import; database-backed editable
   queues with duplicate occurrences and no total-size cap
 * PipeWire playback, multichannel routing, seek, volume, shuffle, and repeat
