@@ -1,6 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
-  <defs><linearGradient id="shine" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#fff" stop-opacity=".2"/><stop offset=".5" stop-color="#fff" stop-opacity=".035"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient><clipPath id="disc"><circle cx="256" cy="256" r="248"/></clipPath></defs>
-  <g clip-path="url(#disc)"><path d="M0 0h512v110C345 81 240 164 121 329C65 398 24 423 0 421Z" fill="url(#shine)"/></g>
-  <circle cx="256" cy="256" r="247" fill="none" stroke="#dbe7ff" stroke-opacity=".26" stroke-width="2"/>
-  <path d="M79 131a217 217 0 0 1 200-90" fill="none" stroke="#fff" stroke-opacity=".24" stroke-width="3" stroke-linecap="round"/>
+  <defs>
+    <linearGradient id="shine" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#fff" stop-opacity=".06"/><stop offset=".38" stop-color="#fff" stop-opacity=".28"/><stop offset=".64" stop-color="#fff" stop-opacity=".5"/><stop offset="1" stop-color="#fff" stop-opacity=".08"/></linearGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#f2f8ff" stop-opacity=".85"/><stop offset=".45" stop-color="#c3ddff" stop-opacity=".32"/><stop offset=".7" stop-color="#162238" stop-opacity=".6"/><stop offset="1" stop-color="#dbe7ff" stop-opacity=".5"/></linearGradient>
+    <clipPath id="disc"><circle cx="256" cy="256" r="248"/></clipPath>
+  </defs>
+  <g clip-path="url(#disc)"><path d="M-32 270 300-30h134L-32 416Z" fill="url(#shine)"/><path d="M116 530 530 168v22L143 530Z" fill="#e7f3ff" fill-opacity=".1"/></g>
+  <circle cx="256" cy="256" r="247" fill="none" stroke="url(#rim)" stroke-width="3"/>
+  <circle cx="256" cy="256" r="243" fill="none" stroke="#050b16" stroke-opacity=".42" stroke-width="2"/>
+  <path d="M57 174a215 215 0 0 1 245-128" fill="none" stroke="#fff" stroke-opacity=".58" stroke-width="2" stroke-linecap="round"/>
 </svg>
