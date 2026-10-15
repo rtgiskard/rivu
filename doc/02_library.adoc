@@ -176,6 +176,20 @@ overrides, favorites, decoder hints, counts, and last-played timestamps. `librar
 they never delete media files. Missing rows remain visible in playlist views
 until removed or cleaned.
 
+Committed edits, deletions, scans, and playlist changes invalidate their affected
+library, structure, and playlist query domains before refreshing counts, history,
+or current-track projections. A playlist catalog change also resets scoped entry
+tokens above the previous epoch's entry tokens. Queue-content revisions are saved
+in the same database transaction as the change; queue refresh is attempted even
+if refreshing the catalog fails.
+
+A refresh error explicitly reports that the change was committed, not rolled
+back. Some previous projections may remain visible until a later successful
+refresh; queries read the committed database state. Rivu does not automatically
+replay committed operations. Repeating an identical edit or cleaning when no
+missing records remain is a no-op, not another mutation or a projection retry.
+Write failures do not advance mutation tokens.
+
 Metadata edits override only fields you change. An omitted CLI option or an
 unchanged Track details field keeps its current value and continues to follow
 rescanned metadata if it has no previous override. Concurrent edits to different
@@ -184,7 +198,8 @@ Passing an empty string explicitly clears that field's displayed text.
 
 In Track details, a background refresh preserves unsaved title, artist, album,
 and decoder-hint edits. Save commits changed fields together; edits made while
-saving remain unsaved. A failed save preserves the draft for correction or retry.
+saving remain unsaved. A failed write preserves the draft for correction or retry;
+a committed-change refresh error does not mean the edit was rolled back.
 Selecting another track discards the previous draft. Changing or deleting a
 playlist, or removing one of its entries, does not discard a track's draft.
 Escape first leaves a focused input; Escape from the layout clears selection

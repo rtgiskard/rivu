@@ -103,21 +103,13 @@ impl Core {
         self.state.system.config = Arc::new(config);
         Ok(true)
     }
-    pub(in crate::core) fn reload_library(&mut self, structure_changed: bool) -> Result<()> {
-        self.state.library.track_total = self.store.track_count()?;
-        self.state.library.revision = self.state.library.revision.wrapping_add(1);
-        if structure_changed {
-            self.state.library.structure_revision =
-                self.state.library.structure_revision.wrapping_add(1);
-        }
-        Ok(())
-    }
 
     pub(in crate::core) fn update_track_stats(
         &mut self,
         track_id: i64,
         stats: crate::store::TrackStats,
     ) -> Result<()> {
+        self.state.library.revision = self.state.library.revision.wrapping_add(1);
         if let Some(index) =
             self.state.library.history.iter().position(|entry| {
                 entry.track_id == track_id && entry.play_count != stats.play_count
@@ -125,7 +117,6 @@ impl Core {
         {
             Arc::make_mut(&mut self.state.library.history)[index].play_count = stats.play_count;
         }
-        self.state.queue = self.store.queue_projection(self.queue_ids.len())?;
         if let Some(current) = self.state.current_track.as_mut()
             && current.id == track_id
             && (current.play_count != stats.play_count || current.last_played != stats.last_played)
@@ -134,7 +125,8 @@ impl Core {
             current.play_count = stats.play_count;
             current.last_played = stats.last_played;
         }
-        self.state.library.revision = self.state.library.revision.wrapping_add(1);
+        self.state.queue = self.store.queue_projection(self.queue_ids.len())
+            .context("Playback statistics committed, but refreshing queue failed; previous queue projection retained")?;
         Ok(())
     }
 
@@ -158,7 +150,16 @@ impl Core {
     }
 
     pub(in crate::core) fn reload_playlists(&mut self) -> Result<()> {
-        self.state.library.playlist_total = self.store.playlist_summary_page(0, 0)?.total;
+        self.invalidate_playlists();
+        self.state.library.playlist_total = self
+            .store
+            .playlist_summary_page(0, 0)
+            .context("Playlist change committed, but refreshing playlists failed; previous projection retained")?
+            .total;
+        Ok(())
+    }
+
+    fn invalidate_playlists(&mut self) {
         // The catalog epoch is also the floor for scalar entry tokens. Advancing
         // past every scoped token prevents an old command becoming valid after reset.
         self.state.library.playlist_revision = self
@@ -175,18 +176,44 @@ impl Core {
         if !self.state.library.playlist_entry_revisions.is_empty() {
             self.state.library.playlist_entry_revisions = Arc::default();
         }
-        Ok(())
     }
 
     pub(in crate::core) fn reload_catalog(&mut self, structure_changed: bool) -> Result<()> {
-        self.reload_library(structure_changed)?;
-        self.reload_playlists()?;
-        self.state.library.history = Arc::new(self.store.history(MAX_QUERY_ROWS)?);
-        Ok(())
+        // Announce every committed domain before reading any fallible projection.
+        self.state.library.revision = self.state.library.revision.wrapping_add(1);
+        if structure_changed {
+            self.state.library.structure_revision =
+                self.state.library.structure_revision.wrapping_add(1);
+        }
+        self.invalidate_playlists();
+        let library = self
+            .store
+            .track_count()
+            .map(|total| {
+                self.state.library.track_total = total;
+            })
+            .context("Refreshing library count failed; previous count retained");
+        let playlists = self
+            .store
+            .playlist_summary_page(0, 0)
+            .map(|page| {
+                self.state.library.playlist_total = page.total;
+            })
+            .context("Refreshing playlist count failed; previous count retained");
+        let history = self
+            .store
+            .history(MAX_QUERY_ROWS)
+            .map(|history| {
+                self.state.library.history = Arc::new(history);
+            })
+            .context("Refreshing history failed; previous history retained");
+        library.and(playlists).and(history)
     }
 
     pub(in crate::core) fn reload(&mut self, structure_changed: bool) -> Result<()> {
-        self.reload_catalog(structure_changed)?;
-        self.refresh_queue_tracks()
+        let catalog = self.reload_catalog(structure_changed);
+        // A failed catalog projection cannot hide a committed queue revision.
+        let queue = self.refresh_queue_tracks();
+        catalog.and(queue)
     }
 }

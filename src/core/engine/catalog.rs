@@ -258,7 +258,6 @@ impl Core {
                     .ok()
                     .filter(|result| !result.errors().is_empty())
                     .map(|result| result.errors().join("\n"));
-                let importing = scan.import.is_some();
                 let progress = scan.progress.clone();
                 let outcome = if cancelled {
                     Ok(false)
@@ -287,11 +286,7 @@ impl Core {
                             task.status.progress.phase = ScanPhase::Failed;
                             task.status.progress.errors =
                                 task.status.progress.errors.saturating_add(1);
-                            task.status.message = if importing {
-                                error.to_string()
-                            } else {
-                                "Scan failed".into()
-                            };
+                            task.status.message = error.to_string();
                             task.status.error = Some(format!("{error:#}"));
                         }
                     }
@@ -337,15 +332,17 @@ impl Core {
         let changed = if scan.import.is_some() {
             saved.context("Failed to save scan; playlist not created")
         } else {
-            saved
+            saved.context("Failed to save scan")
         }?;
         if changed {
             let refreshed = self.reload(true);
             if scan.import.is_some() {
                 refreshed
-                    .context("Scan saved, but library refresh failed before playlist creation")?;
+                    .context("Scan saved, but library refresh failed before playlist creation; some projections may be stale")?;
             } else {
-                refreshed?;
+                refreshed.context(
+                    "Scan committed, but refreshing views failed; some projections may be stale",
+                )?;
             }
         }
         if let Some((name, items)) = scan.import {

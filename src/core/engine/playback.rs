@@ -93,8 +93,9 @@ impl Core {
             && let Some(bitrate) = bitrate.filter(|bitrate| *bitrate > 0)
             && self.persist_playback_bitrate(bitrate, true)
         {
-            self.state.queue = self.store.queue_projection(self.queue_ids.len())?;
             self.state.library.revision = self.state.library.revision.wrapping_add(1);
+            self.state.queue = self.store.queue_projection(self.queue_ids.len())
+                .context("Bitrate update committed, but refreshing queue failed; previous queue projection retained")?;
         }
         Ok(())
     }
@@ -174,11 +175,10 @@ impl Core {
             return Ok(());
         };
         let stats = self.store.increment_play_count(track_id)?;
-        self.update_track_stats(track_id, stats)?;
         if let Some(playback) = self.playback.as_mut() {
             playback.counted = true;
         }
-        Ok(())
+        self.update_track_stats(track_id, stats)
     }
     pub(in crate::core) fn playback_started(&mut self, info: MediaInfo) -> Result<()> {
         let track_id = self.playback.as_ref().map(|playback| playback.track_id);
@@ -212,7 +212,6 @@ impl Core {
         if let Some(bitrate) = info.bitrate_bps.filter(|bitrate| *bitrate > 0) {
             self.persist_playback_bitrate(bitrate, info.bitrate_exact);
         }
-        self.update_track_stats(track_id, stats)?;
         let playback = self.playback.as_mut().expect("playback was checked above");
         playback.started = true;
         playback.last_heard_at = Some(played_at);
@@ -225,7 +224,10 @@ impl Core {
                 .playback
                 .duration
                 .filter(|duration| duration.is_finite() && *duration > 0.0));
-        self.state.library.history = Arc::new(self.store.history(MAX_QUERY_ROWS)?);
+        self.update_track_stats(track_id, stats)?;
+        self.state.library.history = Arc::new(self.store.history(MAX_QUERY_ROWS).context(
+            "Playback start committed, but refreshing history failed; previous history retained",
+        )?);
         self.count_play()
     }
     pub(in crate::core) fn playback_progress(&mut self, position: f64, heard: f64) -> Result<()> {
@@ -339,7 +341,8 @@ impl Core {
             if let Some((track_id, played_at)) = final_activity {
                 let stats = self.store.mark_played(track_id, played_at)?;
                 self.update_track_stats(track_id, stats)?;
-                self.state.library.history = Arc::new(self.store.history(MAX_QUERY_ROWS)?);
+                self.state.library.history = Arc::new(self.store.history(MAX_QUERY_ROWS)
+                    .context("Playback statistics committed, but refreshing history failed; previous history retained")?);
             }
             self.count_play()
         })();

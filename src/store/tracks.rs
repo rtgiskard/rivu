@@ -716,7 +716,7 @@ impl Store {
         Ok(())
     }
 
-    pub fn remove_missing_tracks(&self) -> Result<()> {
+    pub fn remove_missing_tracks(&self) -> Result<bool> {
         self.track_cache.borrow_mut().entries.clear();
         let tx = self.conn.unchecked_transaction()?;
         let queue_positions = tx
@@ -728,17 +728,18 @@ impl Store {
             "SELECT playlist_id,position FROM playlist_entries WHERE track_id IN (SELECT id FROM tracks WHERE missing=1) ORDER BY playlist_id,position",
             [],
         )?;
-        tx.execute_batch(
-            "DELETE FROM playlist_entries WHERE track_id IN (SELECT id FROM tracks WHERE missing=1);
-             DELETE FROM tracks WHERE missing=1;",
+        tx.execute(
+            "DELETE FROM playlist_entries WHERE track_id IN (SELECT id FROM tracks WHERE missing=1)",
+            [],
         )?;
+        let removed = tx.execute("DELETE FROM tracks WHERE missing=1", [])?;
         close_gaps(&tx, &queue_positions, PositionScope::Queue)?;
         for (playlist_id, positions) in playlist_positions {
             close_gaps(&tx, &positions, PositionScope::Playlist(playlist_id))?;
         }
         super::queue::invalidate_structure(&tx, !queue_positions.is_empty())?;
         tx.commit()?;
-        Ok(())
+        Ok(removed != 0)
     }
     pub fn mark_played(&self, track: i64, at: i64) -> Result<super::TrackStats> {
         let stats = self

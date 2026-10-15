@@ -238,12 +238,9 @@ impl Core {
                 Ok(()) => {
                     task.status.phase = RelocationPhase::Completed;
                     // The transaction is committed even if projection refresh fails.
-                    if let Err(error) = self
-                        .reload_catalog(true)
-                        .and_then(|()| self.refresh_queue_tracks())
-                    {
+                    if let Err(error) = self.reload(true) {
                         task.status.error = Some(format!(
-                            "Relocation committed; refreshing library failed: {error:#}"
+                            "Relocation committed; refreshing views failed; some projections may be stale: {error:#}"
                         ));
                     }
                 }

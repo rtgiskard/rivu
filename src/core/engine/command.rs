@@ -231,24 +231,31 @@ impl Core {
                     album.as_deref(),
                     decoder_hint,
                 )? {
-                    self.refresh_affected_queue_tracks(&[track_id])?;
-                    if title.is_some()
-                        && self
-                            .state
-                            .library
-                            .history
-                            .iter()
-                            .any(|entry| entry.track_id == track_id)
-                    {
-                        let track = self.store.track(track_id)?.context("Track not found")?;
-                        self.refresh_history_track(&track);
-                    }
                     self.state.library.revision = self.state.library.revision.wrapping_add(1);
+                    (|| -> Result<()> {
+                        self.refresh_affected_queue_tracks(&[track_id])?;
+                        if title.is_some()
+                            && self
+                                .state
+                                .library
+                                .history
+                                .iter()
+                                .any(|entry| entry.track_id == track_id)
+                        {
+                            let track = self.store.track(track_id)?.context("Track not found")?;
+                            self.refresh_history_track(&track);
+                        }
+                        Ok(())
+                    })()
+                    .context("Track edit committed, but refreshing views failed; some projections may be stale")?;
                 }
             }
             Command::RemoveTracks { mut track_ids } => {
                 track_ids.sort_unstable();
                 track_ids.dedup();
+                if track_ids.is_empty() {
+                    return Ok(());
+                }
                 let removal = self.store.prepare_track_removal(&track_ids)?;
                 if self
                     .state
@@ -259,9 +266,12 @@ impl Core {
                 }
                 // Keep the selection on failure; only a committed cascade clears it.
                 self.store.remove_prepared_tracks(removal)?;
-                self.reload_queue()?;
-                self.refresh_queue_tracks()?;
-                self.reload_catalog(true)?;
+                let catalog = self.reload_catalog(true);
+                let queue = self
+                    .reload_queue()
+                    .and_then(|()| self.refresh_queue_tracks());
+                catalog.and(queue)
+                    .context("Track deletion committed, but refreshing views failed; some projections may be stale")?;
             }
             Command::SetFavorite {
                 track_ids,
@@ -269,7 +279,8 @@ impl Core {
             } => {
                 if self.store.set_favorite(&track_ids, favorite)? {
                     self.state.library.revision = self.state.library.revision.wrapping_add(1);
-                    self.refresh_affected_queue_tracks(&track_ids)?;
+                    self.refresh_affected_queue_tracks(&track_ids)
+                        .context("Favorite edit committed, but refreshing views failed; some projections may be stale")?;
                 }
             }
             Command::RemoveMissingTracks => {
@@ -281,10 +292,14 @@ impl Core {
                     self.stop()?;
                 }
                 // A stopped decoder does not imply the database deletion succeeded.
-                self.store.remove_missing_tracks()?;
-                self.reload_queue()?;
-                self.refresh_queue_tracks()?;
-                self.reload_catalog(true)?;
+                if self.store.remove_missing_tracks()? {
+                    let catalog = self.reload_catalog(true);
+                    let queue = self
+                        .reload_queue()
+                        .and_then(|()| self.refresh_queue_tracks());
+                    catalog.and(queue)
+                        .context("Track deletion committed, but refreshing views failed; some projections may be stale")?;
+                }
             }
             Command::Device { name } => {
                 if let Some(name) = &name

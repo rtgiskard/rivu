@@ -856,6 +856,317 @@ mod tests {
         (directory, core)
     }
 
+    #[test]
+    fn committed_track_edit_invalidates_before_failed_refresh_and_same_edit_is_noop() {
+        let (directory, mut core) = fixture_with_database(Some(10.0), true);
+        core.state.queue.current_id = Some(1);
+        core.state.current_track = Some(Arc::new(core.track(1).unwrap()));
+        core.save(false).unwrap();
+        let current = Arc::clone(core.state.current_track.as_ref().unwrap());
+        let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+        // SQLite accepts text in this INTEGER-affinity column; Track decoding does not.
+        connection
+            .execute_batch(
+                "CREATE TRIGGER fail_edit_refresh AFTER UPDATE OF title_override ON tracks
+             WHEN NEW.id=1 BEGIN UPDATE tracks SET channels='unreadable' WHERE id=NEW.id; END;",
+            )
+            .unwrap();
+        let edit = || Command::EditTrack {
+            track_id: 1,
+            title: Some("Committed title".into()),
+            artist: None,
+            album: None,
+            decoder_hint: None,
+        };
+        let before = core.state.query_revisions();
+        let error = core.command(edit()).unwrap_err();
+        assert!(error.to_string().contains("Track edit committed"));
+        let title: String = connection
+            .query_row("SELECT title_override FROM tracks WHERE id=1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(title, "Committed title");
+        let committed = core.state.query_revisions();
+        assert_eq!(committed.library, before.library + 1);
+        assert_eq!(committed.structure, before.structure);
+        assert_eq!(committed.playlist, before.playlist);
+        assert!(committed.queue > before.queue);
+        assert!(Arc::ptr_eq(
+            core.state.current_track.as_ref().unwrap(),
+            &current
+        ));
+        assert!(matches!(
+            core.view(&Query::TrackBatch {
+                query: None,
+                favorite: None,
+                missing: None,
+                after: None,
+                limit: 1,
+                expected: Some(before),
+            }),
+            Err(QueryError::RevisionChanged)
+        ));
+        // A retry cannot replay a committed change or disguise it as a new mutation.
+        core.command(edit()).unwrap();
+        assert_eq!(core.state.query_revisions(), committed);
+        assert!(Arc::ptr_eq(
+            core.state.current_track.as_ref().unwrap(),
+            &current
+        ));
+        connection
+            .execute_batch(
+                "DROP TRIGGER fail_edit_refresh; UPDATE tracks SET channels=2 WHERE id=1;",
+            )
+            .unwrap();
+        core.refresh_queue_tracks().unwrap();
+        assert_eq!(core.state.current_track().unwrap().title, "Committed title");
+        assert_eq!(core.state.query_revisions(), committed);
+    }
+
+    #[test]
+    fn failed_edits_and_empty_deletions_do_not_invalidate() {
+        let (directory, mut core) = fixture_with_database(Some(10.0), true);
+        let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER reject_edit BEFORE UPDATE OF title_override ON tracks
+             BEGIN SELECT RAISE(ABORT,'edit rejected'); END;",
+            )
+            .unwrap();
+        let before = core.state.query_revisions();
+        let error = core
+            .command(Command::EditTrack {
+                track_id: 1,
+                title: Some("Not committed".into()),
+                artist: None,
+                album: None,
+                decoder_hint: None,
+            })
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("edit rejected"));
+        assert!(!error.to_string().contains("committed"));
+        assert_eq!(core.track(1).unwrap().title, "Track 1");
+        assert_eq!(core.state.query_revisions(), before);
+        core.command(Command::RemoveTracks {
+            track_ids: Vec::new(),
+        })
+        .unwrap();
+        core.command(Command::RemoveMissingTracks).unwrap();
+        assert_eq!(core.state.query_revisions(), before);
+    }
+
+    #[test]
+    fn committed_track_deletions_invalidate_before_failed_refresh() {
+        for missing in [false, true] {
+            let (directory, mut core) = fixture_with_database(Some(10.0), true);
+            if missing {
+                let path = core.track(2).unwrap().path;
+                core.store
+                    .apply_scan(&ScanResult {
+                        roots: vec![path],
+                        ..ScanResult::default()
+                    })
+                    .unwrap();
+                core.reload(true).unwrap();
+            }
+            // The injected change targets a surviving row, not a deletion-cache entry.
+            core.store.set_track_cache_page_size(0);
+            core.state.queue.current_id = Some(1);
+            core.state.current_track = Some(Arc::new(core.track(1).unwrap()));
+            core.save(false).unwrap();
+            let current = Arc::clone(core.state.current_track.as_ref().unwrap());
+            let connection =
+                rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TRIGGER fail_delete_refresh AFTER DELETE ON tracks WHEN OLD.id=2
+                 BEGIN UPDATE tracks SET channels='unreadable' WHERE id=1; END;",
+                )
+                .unwrap();
+            let before = core.state.query_revisions();
+            let command = if missing {
+                Command::RemoveMissingTracks
+            } else {
+                Command::RemoveTracks { track_ids: vec![2] }
+            };
+            let error = core.command(command).unwrap_err();
+            assert!(error.to_string().contains("Track deletion committed"));
+            assert!(core.store.track(2).unwrap().is_none());
+            let committed = core.state.query_revisions();
+            assert_eq!(committed.library, before.library + 1);
+            assert_eq!(committed.structure, before.structure + 1);
+            assert_eq!(committed.playlist, before.playlist + 1);
+            assert!(committed.queue > before.queue);
+            assert_eq!(core.state.library.track_total, 3);
+            assert_eq!(core.queue_ids, [1, 4, 5]);
+            assert!(Arc::ptr_eq(
+                core.state.current_track.as_ref().unwrap(),
+                &current
+            ));
+            core.command(Command::RemoveMissingTracks).unwrap();
+            assert_eq!(core.state.query_revisions(), committed);
+        }
+    }
+
+    #[test]
+    fn committed_scan_invalidates_before_failed_refresh() {
+        let (directory, mut core) = fixture_with_database(Some(10.0), true);
+        let track = core.track(1).unwrap();
+        let path = track.path.clone();
+        core.state.queue.current_id = Some(1);
+        core.state.current_track = Some(Arc::new(track));
+        core.save(false).unwrap();
+        let current = Arc::clone(core.state.current_track.as_ref().unwrap());
+        let floor = core.state.library.playlist_revision + 8;
+        Arc::make_mut(&mut core.state.library.playlist_entry_revisions).insert(99, floor);
+        let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER fail_scan_refresh AFTER UPDATE OF missing ON tracks WHEN NEW.id=1
+             BEGIN UPDATE tracks SET channels='unreadable' WHERE id=1; END;",
+            )
+            .unwrap();
+        let before = core.state.query_revisions();
+        let error = core
+            .finish_scan(ScanFinished {
+                id: 1,
+                result: Ok(ScanResult {
+                    roots: vec![path],
+                    ..ScanResult::default()
+                }),
+                import: None,
+                progress: ScanProgress {
+                    phase: ScanPhase::Saving,
+                    processed: 1,
+                    total: Some(1),
+                    errors: 0,
+                    path: None,
+                },
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("Scan committed"));
+        let missing: bool = connection
+            .query_row("SELECT missing FROM tracks WHERE id=1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(missing);
+        let committed = core.state.query_revisions();
+        assert_eq!(committed.library, before.library + 1);
+        assert_eq!(committed.structure, before.structure + 1);
+        assert_eq!(committed.playlist, floor + 1);
+        assert!(core.state.library.playlist_entry_revisions.is_empty());
+        assert!(committed.queue > before.queue);
+        assert!(Arc::ptr_eq(
+            core.state.current_track.as_ref().unwrap(),
+            &current
+        ));
+    }
+
+    #[test]
+    fn catalog_count_failure_still_invalidates_all_domains_and_refreshes_queue() {
+        let (directory, mut core) = fixture_with_database(Some(10.0), true);
+        let history = Arc::clone(&core.state.library.history);
+        let before = core.state.query_revisions();
+        let floor = before.playlist + 9;
+        Arc::make_mut(&mut core.state.library.playlist_entry_revisions).insert(99, floor);
+        core.store.create_playlist("Committed playlist").unwrap();
+        core.store
+            .edit_track(1, Some("Committed title"), None, None, None)
+            .unwrap();
+        let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+        // Remove the first count's source after the writes, using a separate fixture connection.
+        connection
+            .execute_batch("PRAGMA foreign_keys=OFF; DROP TABLE tracks;")
+            .unwrap();
+        let error = core.reload(true).unwrap_err();
+        assert!(format!("{error:#}").contains("no such table: tracks"));
+        let after = core.state.query_revisions();
+        assert_eq!(after.library, before.library + 1);
+        assert_eq!(after.structure, before.structure + 1);
+        assert_eq!(after.playlist, floor + 1);
+        assert!(core.state.library.playlist_entry_revisions.is_empty());
+        assert_eq!(core.state.library.track_total, 4);
+        assert_eq!(core.state.library.playlist_total, 1);
+        assert!(Arc::ptr_eq(&core.state.library.history, &history));
+        assert!(after.queue > before.queue);
+        assert_eq!(core.state.queue, core.store.queue_state().unwrap());
+    }
+
+    #[test]
+    fn playlist_count_failure_resets_scoped_epoch_before_read() {
+        let (directory, mut core) = fixture_with_database(Some(10.0), true);
+        let before = core.state.query_revisions();
+        let floor = before.playlist + 7;
+        Arc::make_mut(&mut core.state.library.playlist_entry_revisions).insert(99, floor);
+        core.store.create_playlist("Committed playlist").unwrap();
+        let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+        connection
+            .execute_batch("PRAGMA foreign_keys=OFF; DROP TABLE playlists;")
+            .unwrap();
+        let error = core.reload_playlists().unwrap_err();
+        assert!(error.to_string().contains("Playlist change committed"));
+        assert_eq!(core.state.library.playlist_revision, floor + 1);
+        assert!(core.state.library.playlist_entry_revisions.is_empty());
+        assert_eq!(core.state.library.playlist_total, 0);
+        assert_eq!(core.state.library.revision, before.library);
+        assert_eq!(core.state.queue.revision, before.queue);
+    }
+
+    #[test]
+    fn committed_play_count_invalidates_and_is_not_replayed_after_projection_failure() {
+        let (directory, mut core) = fixture_with_database(Some(10.0), true);
+        playing(&mut core, 1);
+        let before_count = core.state.current_track().unwrap().play_count;
+        let before = core.state.query_revisions();
+        let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER fail_stats_refresh AFTER UPDATE OF revision ON queue_meta
+             WHEN typeof(NEW.revision)='integer'
+             BEGIN UPDATE queue_meta SET revision='unreadable' WHERE singleton=1; END;",
+            )
+            .unwrap();
+        let error = core.playback_progress(8.0, 8.0).unwrap_err();
+        assert!(error.to_string().contains("Playback statistics committed"));
+        assert_eq!(core.state.library.revision, before.library + 1);
+        assert_eq!(
+            core.state.current_track().unwrap().play_count,
+            before_count + 1
+        );
+        assert!(core.playback.as_ref().unwrap().counted);
+        let count = || {
+            connection
+                .query_row("SELECT play_count FROM tracks WHERE id=1", [], |row| {
+                    row.get::<_, i64>(0)
+                        .map(|value| u64::try_from(value).unwrap())
+                })
+                .unwrap()
+        };
+        assert_eq!(count(), before_count + 1);
+        core.playback_progress(9.0, 9.0).unwrap();
+        assert_eq!(count(), before_count + 1);
+        assert_eq!(core.state.library.revision, before.library + 1);
+        // Queue tokens are persisted authority, never synthesized from a failed read.
+        assert_eq!(core.state.queue.revision, before.queue);
+        connection
+            .execute_batch("DROP TRIGGER fail_stats_refresh;")
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE queue_meta SET revision=?1 WHERE singleton=1",
+                [i64::try_from(before.queue + 1).unwrap()],
+            )
+            .unwrap();
+        core.refresh_queue_tracks().unwrap();
+        assert_eq!(core.state.queue.revision, before.queue + 1);
+        assert_eq!(
+            core.state.current_track().unwrap().play_count,
+            before_count + 1
+        );
+    }
+
     fn relocation_fixture() -> (tempfile::TempDir, Core, i64, i64) {
         let (directory, mut core) = fixture();
         let paths =
