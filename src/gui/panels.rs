@@ -308,8 +308,8 @@ impl GuiApp {
             )
             .child(div().flex_1().min_w_0().child(volume))
             .child(
-                caption(format!("{:.0}%", self.state.playback.volume * 100.))
-                    .w(gpui::rems(2.5))
+                caption(format!("{:.1}%", self.state.playback.volume * 100.))
+                    .w(gpui::rems(3.5))
                     .whitespace_nowrap()
                     .flex_shrink_0(),
             );

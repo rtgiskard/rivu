@@ -826,7 +826,7 @@ impl Settings {
         );
         self.set_value(
             Field::Volume,
-            format!("{:.3}", self.draft.volume * 100.),
+            format!("{:.1}", self.draft.volume * 100.),
             cx,
         );
         self.set_value(
