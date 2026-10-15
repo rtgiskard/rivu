@@ -1085,6 +1085,7 @@ impl GuiApp {
             metadata::ManualAction::History {
                 track_id: id,
                 multi,
+                structure_revision: self.state.library.structure_revision,
             },
             cx,
         );

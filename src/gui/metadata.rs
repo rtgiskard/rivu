@@ -78,6 +78,7 @@ pub(in crate::gui) enum ManualAction {
     History {
         track_id: i64,
         multi: bool,
+        structure_revision: u64,
     },
     Clear,
     Discard {
@@ -114,6 +115,9 @@ impl GuiApp {
             ManualAction::Library(commit) => self.library_commit_valid(commit),
             ManualAction::Playlist(commit) => self.entry_commit_valid(commit),
             ManualAction::Queue(commit) => self.queue_commit_valid(commit),
+            ManualAction::History {
+                structure_revision, ..
+            } => *structure_revision == self.state.library.structure_revision,
             ManualAction::Discard { editor, .. } => self.metadata.editor_identity() == *editor,
             _ => true,
         }
@@ -124,7 +128,9 @@ impl GuiApp {
             ManualAction::Library(commit) => self.library_commit_target(commit),
             ManualAction::Playlist(commit) => Some(commit.target.track_id),
             ManualAction::Queue(commit) => Some(commit.target.track_id),
-            ManualAction::History { track_id, multi } => {
+            ManualAction::History {
+                track_id, multi, ..
+            } => {
                 if *multi && self.browser.library.selected().contains(track_id) {
                     self.browser
                         .library
@@ -213,9 +219,9 @@ impl GuiApp {
             ManualAction::Library(commit) => self.commit_library_selection(commit, cx),
             ManualAction::Playlist(commit) => self.commit_entry_selection(commit, cx),
             ManualAction::Queue(commit) => self.commit_queue_selection(commit, cx),
-            ManualAction::History { track_id, multi } => {
-                self.commit_history_selection(track_id, multi, cx)
-            }
+            ManualAction::History {
+                track_id, multi, ..
+            } => self.commit_history_selection(track_id, multi, cx),
             ManualAction::Clear => {
                 self.browser.clear_selection();
                 self.clear_metadata_selection(cx);
@@ -527,7 +533,8 @@ mod tests {
                     range,
                     ManualAction::History {
                         track_id: 2,
-                        multi: false
+                        multi: false,
+                        structure_revision: 0,
                     },
                     true
                 )
@@ -541,7 +548,8 @@ mod tests {
                 clean_selection,
                 ManualAction::History {
                     track_id: 7,
-                    multi: false
+                    multi: false,
+                    structure_revision: 0,
                 },
                 false
             ),

@@ -219,8 +219,11 @@ Hiding details or changing its panel tab does not discard the draft. Changing or
 deleting a playlist, or removing one of its entries, does not discard it either.
 If the requested selection's list changes while confirmation is open, the stale
 operation is rejected without discarding the draft; select the target again.
+For a selection from Recent tracks, a library structure change during confirmation
+also rejects the pending action and keeps the draft. Metadata-only updates and
+Recent tracks sorting do not invalidate that target.
 The latest manual selection, clear, discard, window-close, or quit request takes
-precedence over earlier pending navigation in Library, Playlists, and Queue.
+precedence over earlier pending navigation in Library, Playlists, Queue, and Recent tracks.
 Late results cannot replace that request or reopen a cancelled confirmation.
 Range selection keeps the previous selection and details until the complete
 range is ready and any draft confirmation is resolved; a failed range changes
