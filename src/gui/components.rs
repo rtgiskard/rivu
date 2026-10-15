@@ -297,7 +297,7 @@ pub(crate) fn metadata_item(
 }
 
 /// Full-row artwork with a centered preview occupying 70% of the card content.
-pub(crate) fn artwork_preview(image: gpui::Img, aspect_ratio: Option<f32>) -> Div {
+pub(crate) fn artwork_preview(image: impl IntoElement, aspect_ratio: Option<f32>) -> Div {
     super::column()
         .w_full()
         .gap_2()
@@ -309,7 +309,7 @@ pub(crate) fn artwork_preview(image: gpui::Img, aspect_ratio: Option<f32>) -> Di
                     .w(gpui::relative(0.7))
                     .flex_shrink_0()
                     .when_some(aspect_ratio, |view, ratio| view.aspect_ratio(ratio))
-                    .child(image.absolute().size_full()),
+                    .child(div().absolute().size_full().child(image)),
             ),
         )
 }

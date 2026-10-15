@@ -169,7 +169,8 @@ impl GuiApp {
         self.artwork_view.replace(
             self.metadata
                 .track()
-                .and_then(|track| self.artwork_manager.cached(track)),
+                .and_then(|track| self.artwork_manager.cached(track))
+                .filter(|artwork| !artwork.is_placeholder()),
             cx,
         );
         let current = self
@@ -197,7 +198,8 @@ impl GuiApp {
                     .track()
                     .is_some_and(|track| identity.matches(track))
                 {
-                    this.artwork_view.replace(loaded, cx);
+                    this.artwork_view
+                        .replace(loaded.filter(|artwork| !artwork.is_placeholder()), cx);
                     cx.notify();
                 }
                 let current = this

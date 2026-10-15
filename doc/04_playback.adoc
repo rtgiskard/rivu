@@ -222,11 +222,13 @@ and can be changed while running. A session D-Bus is required; unavailable media
 controls are reported in status without preventing playback. If enabling fails,
 disable and re-enable the setting after restoring the session bus.
 
-MPRIS and the GUI metadata panel prefer embedded front-cover artwork, then another
-supported image, then the bundled icon. Local images are cached under the data
-directory's `artwork/` and exposed through `mpris:artUrl` when available. A cold
-lookup initially shows the fallback; background loading updates the selected
-preview and desktop metadata when ready. Cache failures do not prevent playback.
+MPRIS and Track details prefer embedded front-cover artwork, then another
+supported image. Without a cover, MPRIS uses the bundled icon; Track details uses
+the generated path-drawn artwork, including while a cold lookup is pending.
+Actual covers keep their original aspect ratio in the full, static preview.
+Local images are cached under the data directory's `artwork/` and exposed through
+`mpris:artUrl` when available. Background loading updates the selected preview
+and desktop metadata when ready. Cache failures do not prevent playback.
 Use link:01_config.adoc#_artwork_cache_maintenance[Settings artwork maintenance]
 to inspect disk usage and manually clean expired, unprotected cover files.
 

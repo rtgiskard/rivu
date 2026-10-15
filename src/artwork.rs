@@ -29,6 +29,7 @@ const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 struct ArtworkFile {
     uri: String,
     path: Arc<Path>,
+    placeholder: bool,
 }
 
 /// Holds the lookup result that protects a published URI until it is released.
@@ -45,10 +46,7 @@ impl Artwork {
     }
 
     pub(crate) fn is_placeholder(&self) -> bool {
-        self.file()
-            .path
-            .file_name()
-            .is_some_and(|name| name == "default.png")
+        self.file().placeholder
     }
 
     fn file(&self) -> &ArtworkFile {
@@ -193,7 +191,7 @@ impl ArtworkManager {
             .ok()
             .map(|uri| {
                 let image = OnceLock::new();
-                let _ = image.set(Some(artwork_file(uri)));
+                let _ = image.set(Some(artwork_file(uri, true)));
                 Artwork(Arc::new(CachedArtwork {
                     identity: ArtworkIdentity {
                         id: 0,
@@ -434,11 +432,11 @@ impl ArtworkManager {
             .join("cache")
             .join(format!("{hash}.{extension}"));
         let uri = write_image(&path, &visual.data).ok()?;
-        Some(artwork_file(uri))
+        Some(artwork_file(uri, false))
     }
 }
 
-fn artwork_file(uri: String) -> Arc<ArtworkFile> {
+fn artwork_file(uri: String, placeholder: bool) -> Arc<ArtworkFile> {
     let path = url::Url::parse(&uri)
         .expect("artwork file URI")
         .to_file_path()
@@ -446,6 +444,7 @@ fn artwork_file(uri: String) -> Arc<ArtworkFile> {
     Arc::new(ArtworkFile {
         uri,
         path: Arc::from(path),
+        placeholder,
     })
 }
 
@@ -576,7 +575,10 @@ mod tests {
         tagged_wav(&source);
         let manager = ArtworkManager::new(directory.path());
         let mut selected = track(source);
+        assert!(manager.cached(&selected).unwrap().is_placeholder());
         let first = manager.load(&selected).unwrap();
+        // Matching the bundled bytes does not turn an embedded cover into a fallback.
+        assert!(!first.is_placeholder());
         let path = file_path(first.uri());
         assert_eq!(fs::read(&path).unwrap(), DEFAULT_IMAGE);
         assert!(first.uri().contains("%23"));
@@ -592,6 +594,7 @@ mod tests {
             result_uri(manager.load(&selected)),
             result_uri(manager.default.clone())
         );
+        assert!(manager.cached(&selected).unwrap().is_placeholder());
     }
 
     #[test]

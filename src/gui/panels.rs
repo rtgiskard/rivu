@@ -2213,8 +2213,14 @@ impl GuiApp {
                             .child(metadata_row(self.panel_field(Field::Title, "Title"), self.panel_field(Field::Artist, "Artist")))
                             .child(metadata_row(self.panel_field(Field::Album, "Album"), metadata_item(disc.0, disc.1, label_widths[1])))
                             .child(metadata_rows(tags, label_widths).gap_2())
-                            .when_some(self.artwork_view.image(cx), |tags, image| {
-                                tags.child(artwork_preview(image, self.artwork_view.aspect_ratio(cx)))
+                            .when(track.is_some(), |tags| {
+                                tags.child(match self.artwork_view.image(cx) {
+                                    Some(image) => artwork_preview(image.size_full(), self.artwork_view.aspect_ratio(cx)),
+                                    None => artwork_preview(
+                                        self.default_album.clone().cached(gpui::StyleRefinement::default().size_full()),
+                                        Some(1.0),
+                                    ),
+                                })
                             }),
                     )),
             );
