@@ -76,7 +76,7 @@ const ACCENT: u32 = 0x7aa2f7;
 const HIGHLIGHT: u32 = 0x292e42;
 const ERROR: u32 = 0xf7768e;
 const ERROR_BG: u32 = 0x3b2330;
-const UI_INSET: f32 = 10.0;
+const UI_INSET: f32 = 8.0;
 const SPLIT_GUTTER: f32 = 4.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]

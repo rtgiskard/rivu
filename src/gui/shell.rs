@@ -359,8 +359,9 @@ impl Render for GuiApp {
             .error
             .clone()
             .or_else(|| self.state.system.last_error.clone());
+        let footer_height = window.rem_size() * 2.25 + px(UI_INSET);
         let mut footer = row()
-            .h(rems(3.0))
+            .h(footer_height)
             .flex_shrink_0()
             .px(gpui::px(UI_INSET))
             .pt_1()
@@ -457,13 +458,12 @@ impl Render for GuiApp {
                     .id("app-menu-popup")
                     .occlude()
                     .absolute()
-                    .bottom(rems(3.0))
+                    .bottom(footer_height)
                     .right(gpui::px(UI_INSET))
                     .w(rems(220. / 16.))
                     .max_w((window.viewport_size().width - px(UI_INSET * 2.)).max(px(0.)))
                     .max_h(
-                        (window.viewport_size().height - window.rem_size() * 3. - px(UI_INSET))
-                            .max(px(0.)),
+                        (window.viewport_size().height - footer_height - px(UI_INSET)).max(px(0.)),
                     )
                     .overflow_y_scroll()
                     .p_1()
@@ -598,7 +598,7 @@ impl Render for GuiApp {
                         cx.notify();
                     }))
                     .absolute()
-                    .bottom(rems(3.0))
+                    .bottom(footer_height)
                     .right(gpui::px(UI_INSET))
                     .max_w_full()
                     .p(gpui::px(UI_INSET))
