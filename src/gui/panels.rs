@@ -22,8 +22,12 @@ use gpui::{
     AnyElement, Context, Div, SharedString, Window, div, prelude::*, px, rgb, uniform_list,
 };
 
+fn compact_icon_button(control: gpui::Stateful<Div>) -> gpui::Stateful<Div> {
+    quiet_icon_button(control).w(gpui::rems(1.4))
+}
+
 // Out-of-flow actions leave the full text width available until the row is hovered.
-fn hover_actions(group: &'static str) -> Div {
+pub(super) fn hover_actions(group: &'static str) -> Div {
     row()
         .absolute()
         .right_0()
@@ -513,7 +517,7 @@ impl GuiApp {
         favorite: bool,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<Div> {
-        super::components::quiet_icon_button(icon_button(
+        compact_icon_button(icon_button(
             id,
             if favorite { "󰓎" } else { "󰓐" },
             if favorite {
@@ -916,7 +920,7 @@ impl GuiApp {
                                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
                                             cx.stop_propagation();
                                         })
-                                        .child(quiet_icon_button(icon_button(
+                                        .child(compact_icon_button(icon_button(
                                             ("queue-entry-play", id),
                                             "󰐊",
                                             "Play this queue entry",
@@ -936,7 +940,7 @@ impl GuiApp {
                                             favorite,
                                             cx,
                                         ))
-                                        .child(quiet_icon_button(icon_button(
+                                        .child(compact_icon_button(icon_button(
                                             ("queue-entry-remove", id),
                                             "",
                                             "Remove from queue",
@@ -952,7 +956,7 @@ impl GuiApp {
                                             },
                                         )))
                                         .child(disabled_control(
-                                            quiet_icon_button(icon_button(
+                                            compact_icon_button(icon_button(
                                                 ("queue-entry-up", id),
                                                 "",
                                                 "Move this entry up",
@@ -973,7 +977,7 @@ impl GuiApp {
                                             index == 0,
                                         ))
                                         .child(disabled_control(
-                                            quiet_icon_button(icon_button(
+                                            compact_icon_button(icon_button(
                                                 ("queue-entry-down", id),
                                                 "",
                                                 "Move this entry down",
@@ -1421,7 +1425,7 @@ impl GuiApp {
                             format!("{} tracks", p.entry_count),
                         ))
                         .child(
-                            quiet_icon_button(icon_button(
+                            compact_icon_button(icon_button(
                                 ("playlist-row-play", id as u64),
                                 "󰐊",
                                 "Play playlist",
@@ -1453,7 +1457,7 @@ impl GuiApp {
                             }),
                         )
                         .child(
-                            quiet_icon_button(icon_button(
+                            compact_icon_button(icon_button(
                                 ("playlist-row-menu", id as u64),
                                 "󰇙",
                                 "Playlist actions",
@@ -1584,7 +1588,7 @@ impl GuiApp {
                             .child(
                                 hover_actions("playlist-track-row")
                                     .child(
-                                        quiet_icon_button(icon_button(
+                                        compact_icon_button(icon_button(
                                             ("playlist-entry-play", id as u64),
                                             "󰐊",
                                             "Play this track",
@@ -1609,7 +1613,7 @@ impl GuiApp {
                                         cx,
                                     ))
                                     .child(
-                                        quiet_icon_button(icon_button(
+                                        compact_icon_button(icon_button(
                                             ("playlist-entry-remove", id as u64),
                                             "",
                                             "Remove from playlist",
@@ -2311,8 +2315,7 @@ impl GuiApp {
                         HistorySort::Recent,
                         cx,
                     )),
-            )
-            .child(div().w(gpui::rems(2.)).flex_shrink_0());
+            );
         let scroll = self.scroll_views.list(("history", panel_id));
         panel_surface(("history-panel", panel_id))
             .child(panel_header(
@@ -2347,6 +2350,7 @@ impl GuiApp {
                                         )
                                         .gap_0()
                                         .group("history-track-row")
+                                        .relative()
                                         .child(
                                             caption((index + 1).to_string())
                                                 .w(gpui::relative(0.08))
@@ -2377,12 +2381,14 @@ impl GuiApp {
                                                 .min_w_0()
                                                 .truncate(),
                                         )
-                                        .child(this.track_favorite_toggle(
-                                            ("history-entry-favorite", id as u64),
-                                            "history-track-row",
-                                            id,
-                                            favorite,
-                                            cx,
+                                        .child(hover_actions("history-track-row").child(
+                                            this.track_favorite_toggle(
+                                                ("history-entry-favorite", id as u64),
+                                                "history-track-row",
+                                                id,
+                                                favorite,
+                                                cx,
+                                            ),
                                         ))
                                         .on_click(cx.listener(
                                             move |this, event: &gpui::ClickEvent, window, cx| {

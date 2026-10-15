@@ -13,7 +13,7 @@ use crate::{
 };
 
 use super::{
-    BORDER, HIGHLIGHT, TEXT,
+    BORDER, TEXT,
     artwork::{Artwork, ArtworkLoader, ArtworkView},
     caption, column,
     components::{LIST_ROW_REMS, quiet_icon_button, track_list_row},
@@ -21,6 +21,37 @@ use super::{
     input::{Input, InputEvent},
     paged, panel_surface, panel_toolbar, row,
 };
+
+fn card_icon_button(
+    id: impl Into<ElementId>,
+    icon: &'static str,
+    hint: &'static str,
+    cx: &mut Context<AlbumBrowser>,
+    action: impl Fn(&mut AlbumBrowser, &mut Window, &mut Context<AlbumBrowser>) + 'static,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .w(rems(1.4))
+        .h(rems(2.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .flex_shrink_0()
+        .font_family(super::fonts::SYMBOLS_FAMILY)
+        .text_size(rems(1.))
+        .text_color(rgb(super::MUTED))
+        .cursor_pointer()
+        .hover(|style| style.text_color(rgb(TEXT)))
+        .child(icon)
+        .on_click(cx.listener(move |this, _, window, cx| {
+            action(this, window, cx);
+            cx.stop_propagation();
+        }))
+        .tooltip(move |_, cx| {
+            cx.new(|_| super::ButtonTooltip { text: hint.into() })
+                .into()
+        })
+}
 
 const ALBUM_PAGE: usize = 24;
 
@@ -466,23 +497,20 @@ impl AlbumBrowser {
         let image = self.covers.get(&index).and_then(|cover| cover.image(cx));
         let directory = key.directory.to_string_lossy().into_owned();
         let title = album_title(&key);
-        let actions = panel_toolbar()
+        let actions = row()
             .id(("album-actions", index))
             .absolute()
             .right_0()
             .bottom_0()
-            .gap_1()
-            .p_1()
-            .rounded_md()
-            .bg(rgb(HIGHLIGHT))
+            .gap_0()
             .invisible()
             .group_hover("album-card", |style| style.visible())
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(|_, _, cx| cx.stop_propagation())
-            .child(icon_button(
+            .child(card_icon_button(
                 ("play-album", index),
                 "",
-                "Play album",
+                "Replace current queue and play album",
                 cx,
                 move |this, _, cx| {
                     this.send(
@@ -493,7 +521,7 @@ impl AlbumBrowser {
                     )
                 },
             ))
-            .child(icon_button(
+            .child(card_icon_button(
                 ("enqueue-album", index),
                 "󰐕",
                 "Add album to queue",
@@ -510,6 +538,7 @@ impl AlbumBrowser {
         column()
             .id(("album-card", index))
             .group("album-card")
+            .relative()
             .flex_1()
             .min_w_0()
             .h_full()
@@ -536,8 +565,7 @@ impl AlbumBrowser {
                             view.child(image.absolute().size_full().object_fit(ObjectFit::Contain))
                         }
                         None => view.child(self.default_album.clone()),
-                    })
-                    .child(actions),
+                    }),
             )
             .child(
                 div()
@@ -572,6 +600,7 @@ impl AlbumBrowser {
                     .h(rems(1.25))
                     .flex_shrink_0(),
             )
+            .child(actions)
             .into_any_element()
     }
 }
@@ -629,7 +658,7 @@ impl Render for AlbumBrowser {
                 .child(icon_button(
                     "album-play-all",
                     "",
-                    "Play album",
+                    "Replace current queue and play album",
                     cx,
                     move |this, _, cx| {
                         this.send(
@@ -748,7 +777,7 @@ impl Render for AlbumBrowser {
                                                     this.send(Command::Play { track_id: id }, cx)
                                                 },
                                             ))
-                                            .size(rems(1.)),
+                                            .w(rems(1.4)),
                                         )
                                         .child(
                                             quiet_icon_button(icon_button(
@@ -765,7 +794,7 @@ impl Render for AlbumBrowser {
                                                     )
                                                 },
                                             ))
-                                            .size(rems(1.)),
+                                            .w(rems(1.4)),
                                         ),
                                 )
                                 .into_any_element()

@@ -639,7 +639,7 @@ impl GuiApp {
                                             .group_hover("library-track-row", |style| style.visible())
                                             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                             .on_click(|_, _, cx| cx.stop_propagation())
-                                            .child(scan.min_h_0().size(gpui::rems(1.5))),
+                                            .child(scan.min_h_0().h(gpui::rems(1.5)).w(gpui::rems(1.4))),
                                     )
                                 });
                             let row_view = super::components::lazy_row_tooltip(
@@ -675,16 +675,13 @@ impl GuiApp {
                                     },
                                     |view, (track_id, favorite)| {
                                         view.child(
-                                            this.track_favorite_toggle(
+                                            super::panels::hover_actions("library-track-row").child(this.track_favorite_toggle(
                                                 gpui::ElementId::named_usize("library-tree-favorite", index),
                                                 "library-track-row",
                                                 track_id,
                                                 favorite,
                                                 cx,
-                                            )
-                                            .flex_shrink_0()
-                                            .min_h_0()
-                                            .size(gpui::rems(1.5)),
+                                            )),
                                         )
                                     },
                                 ),
