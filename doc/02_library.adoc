@@ -354,7 +354,8 @@ page controls. Clicking once does not open the album; its title is plain text.
 Hover an album card to reveal `Play album` and `Add to queue` over its cover.
 `Play album` replaces the queue with the complete album and starts its first
 track. `Add to queue` appends the complete album without changing current playback.
-These buttons do not open album details. Track rows also
+These buttons do not open album details. Double-click a track row to play that
+track individually; a single click does not start playback. Track rows also
 offer individual playback and queue actions. Album actions include tracks beyond
 the currently loaded rows.
 

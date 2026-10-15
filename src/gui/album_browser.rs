@@ -715,6 +715,11 @@ impl Render for AlbumBrowser {
                                     false,
                                 )
                                 .group("album-track-row")
+                                .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                                    if event.click_count() == 2 {
+                                        this.send(Command::Play { track_id: id }, cx);
+                                    }
+                                }))
                                 .when(track.missing, |row| row.child(caption("Missing")))
                                 .when_some(marker, |row, marker| row.child(caption(marker)))
                                 .child(
@@ -725,9 +730,14 @@ impl Render for AlbumBrowser {
                                 )
                                 .child(
                                     row()
+                                        .id(("album-track-actions", id as u64))
                                         .gap_0()
                                         .invisible()
                                         .group_hover("album-track-row", |style| style.visible())
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        })
+                                        .on_click(|_, _, cx| cx.stop_propagation())
                                         .child(quiet_icon_button(icon_button(
                                             ("album-track-play", id as u64),
                                             "",
