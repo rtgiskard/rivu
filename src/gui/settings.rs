@@ -2339,27 +2339,27 @@ impl Settings {
                 form_field(settings.tr("settings-style"), style),
             ))
             .child(settings_group(
-                settings.tr(if settings.artwork_panel.is_some() {
-                    "settings-animation"
-                } else {
-                    "settings-new-instance-defaults"
-                }),
+                settings.tr("settings-animation"),
                 column()
                     .gap_2()
-                    .child(form_field(settings.tr("settings-mode"), mode))
                     .child(two_column(
-                        div().child(disabled_control(
+                        form_field(settings.tr("settings-mode"), mode).min_w(rems(180. / 16.)),
+                        div().min_w(rems(180. / 16.)).child(disabled_control(
                             form_field(settings.tr("settings-direction"), direction)
                                 .id("settings-artwork-direction-field"),
                             !rotating,
                         )),
-                        settings.field_state(Field::AlbumArtworkPeriod, rotating, cx),
                     ))
-                    .when(settings.artwork_panel.is_none(), |column| {
-                        column
-                            .child(caption(settings.tr("settings-artwork-motion-help")))
-                            .child(settings.field_state(Field::AlbumArtworkFps, true, cx))
-                    }),
+                    .child(two_column(
+                        settings.field_state(Field::AlbumArtworkPeriod, rotating, cx),
+                        column().when(settings.artwork_panel.is_none(), |column| {
+                            column
+                                .min_w(rems(180. / 16.))
+                                .gap_2()
+                                .child(settings.field_state(Field::AlbumArtworkFps, true, cx))
+                                .child(caption(settings.tr("settings-artwork-motion-help")))
+                        }),
+                    )),
             ))
     }
 
