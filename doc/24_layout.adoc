@@ -23,6 +23,12 @@ at larger interface scales.
 They apply only when creating a default layout: loading a saved tree retains
 its boundaries, including omitted or empty arrays that mean equal division.
 
+Each Album artwork panel owns its style, rotation mode, period, and direction,
+saved with the layout and retained by docking and layout duplication. New panels
+and saved panels missing options initialize from `interface.album_artwork` defaults.
+Changing defaults does not overwrite initialized panels. Artwork loading and
+rotation scheduling remain shared; frame rate belongs to application configuration.
+
 Hidden windows and inactive tabs still reconcile core state and query-owner keys.
 A query completion synchronizes the GUI snapshot before checking identity,
 generation, and the query-owned dependency stamp. Visibility gates rendering,

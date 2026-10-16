@@ -751,7 +751,12 @@ impl Render for GuiApp {
                             },
                         ));
                     }
-                    if is_album_artwork {
+                    if let Some(options) = self
+                        .layouts
+                        .current()
+                        .album_artwork_options(state.panel_id)
+                        .filter(|_| is_album_artwork)
+                    {
                         menu = menu
                             .child(menu_item(
                                 "album-artwork-style-menu",
@@ -761,7 +766,7 @@ impl Render for GuiApp {
                                         "style",
                                         settings::album_artwork_style_label(
                                             &self.i18n,
-                                            self.state.system.config.album_artwork_style,
+                                            options.style,
                                         )
                                         .into(),
                                     )],
@@ -780,28 +785,62 @@ impl Render for GuiApp {
                                     "album-artwork-rotation",
                                     self.tr("shell-artwork-rotation"),
                                     cx,
-                                    |this, _, cx| {
+                                    move |this, _, cx| {
                                         this.panel_menu = None;
-                                        if let Err(error) = this.handle.update_gui_config(
-                                            crate::core::GuiConfigChange::ToggleAlbumArtworkRotation,
-                                        ) {
-                                            this.error = Some(format!("{error:#}"));
+                                        if let Some(mut options) = this
+                                            .layouts
+                                            .current()
+                                            .album_artwork_options(state.panel_id)
+                                        {
+                                            options.mode = match options.mode {
+                                                crate::config::AlbumArtworkMode::Static => {
+                                                    crate::config::AlbumArtworkMode::Rotating
+                                                }
+                                                crate::config::AlbumArtworkMode::Rotating => {
+                                                    crate::config::AlbumArtworkMode::Static
+                                                }
+                                            };
+                                            this.layouts
+                                                .current_mut()
+                                                .set_album_artwork_options(state.panel_id, options);
+                                            this.persist_layout(cx);
                                         }
                                         cx.notify();
                                     },
                                 )
-                                .child(
-                                    div().ml_auto().child(self.tr(
-                                        if self.state.system.config.album_artwork_mode
-                                            == crate::config::AlbumArtworkMode::Rotating
+                                .child(div().ml_auto().child(
+                                    self.tr(
+                                        if options.mode == crate::config::AlbumArtworkMode::Rotating
                                         {
                                             "shell-on"
                                         } else {
                                             "shell-off"
                                         },
-                                    )),
-                                ),
+                                    ),
+                                )),
                             )
+                            .child(menu_item(
+                                "album-artwork-settings",
+                                self.tr("shell-artwork-settings"),
+                                cx,
+                                move |this, window, cx| {
+                                    this.panel_menu = None;
+                                    if let Some(options) =
+                                        this.layouts.current().album_artwork_options(state.panel_id)
+                                    {
+                                        this.settings.update(cx, |settings, cx| {
+                                            settings.open_artwork(
+                                                state.panel_id,
+                                                options,
+                                                window,
+                                                cx,
+                                            )
+                                        });
+                                        this.settings_open = true;
+                                        cx.notify();
+                                    }
+                                },
+                            ))
                             .child(components::menu_separator());
                     }
                     if is_audio_visualizer
@@ -1111,7 +1150,11 @@ impl Render for GuiApp {
                         .child(components::menu_title(self.tr("shell-artwork-style")))
                         .child(components::menu_separator());
                     for style in settings::ALBUM_ARTWORK_STYLES {
-                        let selected = self.state.system.config.album_artwork_style == style;
+                        let selected = self
+                            .layouts
+                            .current()
+                            .album_artwork_options(state.panel_id)
+                            .is_some_and(|options| options.style == style);
                         let label = self.tr(settings::album_artwork_style_id(style));
                         menu = menu.child(
                             menu_item(
@@ -1120,12 +1163,18 @@ impl Render for GuiApp {
                                 cx,
                                 move |this, _, cx| {
                                     this.panel_menu = None;
-                                    if let Err(error) = this.handle.update_gui_config(
-                                        crate::core::GuiConfigChange::AlbumArtworkStyle(style),
-                                    ) {
-                                        this.error = Some(format!("{error:#}"));
+                                    if let Some(mut options) =
+                                        this.layouts.current().album_artwork_options(state.panel_id)
+                                    {
+                                        options.style = style;
+                                        if this
+                                            .layouts
+                                            .current_mut()
+                                            .set_album_artwork_options(state.panel_id, options)
+                                        {
+                                            this.persist_layout(cx);
+                                        }
                                     }
-                                    this.refresh(cx);
                                     cx.notify();
                                 },
                             )

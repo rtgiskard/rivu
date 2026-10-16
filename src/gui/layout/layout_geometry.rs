@@ -336,6 +336,7 @@ mod tests {
                     kind: "library".into(),
                     show_tab_bar: true,
                     audio_visualizer: None,
+                    album_artwork: None,
                 })
                 .collect(),
         }

@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -10,7 +11,9 @@ use gpui::{
 
 use crate::{
     artwork::{Artwork as LoadedArtwork, ArtworkIdentity, ArtworkManager},
-    config::{AlbumArtworkDirection, AlbumArtworkMode, AlbumArtworkStyle, Config},
+    config::{
+        AlbumArtworkDirection, AlbumArtworkMode, AlbumArtworkOptions, AlbumArtworkStyle, Config,
+    },
     model::{PlaybackStatus, Track},
 };
 
@@ -73,11 +76,11 @@ struct RotationSettings {
 }
 
 impl RotationSettings {
-    fn from_config(config: &Config) -> Self {
+    fn from_options(options: AlbumArtworkOptions) -> Self {
         Self {
-            mode: config.album_artwork_mode,
-            period_seconds: config.album_artwork_period_seconds,
-            direction: config.album_artwork_direction,
+            mode: options.mode,
+            period_seconds: options.period_seconds,
+            direction: options.direction,
         }
     }
 }
@@ -145,8 +148,15 @@ impl Rotation {
     }
 }
 
-/// All panel instances share one source owner, rotation state, frame callback
-/// and cancellable deadline. Source type and style never select another clock.
+struct Instance {
+    options: AlbumArtworkOptions,
+    rotation: Rotation,
+    retained: bool,
+    visible: bool,
+}
+
+/// Instances share one source owner, frame callback and cancellable deadline.
+/// Only rotation state and presentation options belong to individual panels.
 pub(super) struct AlbumArtwork {
     manager: Arc<ArtworkManager>,
     loader: ArtworkLoader,
@@ -155,9 +165,8 @@ pub(super) struct AlbumArtwork {
     track: Option<Track>,
     status: PlaybackStatus,
     visible: bool,
-    style: AlbumArtworkStyle,
+    instances: HashMap<u64, Instance>,
     decorations: [Arc<Image>; 6],
-    rotation: Rotation,
     pacing: FramePacing,
     frame_pending: bool,
     frame_generation: u64,
@@ -178,7 +187,7 @@ impl AlbumArtwork {
             track: None,
             status: PlaybackStatus::Stopped,
             visible: false,
-            style: AlbumArtworkStyle::Plain,
+            instances: HashMap::new(),
             decorations: [
                 include_bytes!("../../assets/album_vinyl.svg").as_slice(),
                 include_bytes!("../../assets/album_glass.svg").as_slice(),
@@ -188,7 +197,6 @@ impl AlbumArtwork {
                 include_bytes!("../../assets/album_duotone.svg").as_slice(),
             ]
             .map(|bytes| Arc::new(Image::from_bytes(ImageFormat::Svg, bytes.to_vec()))),
-            rotation: Rotation::new(),
             pacing: FramePacing::new(),
             frame_pending: false,
             frame_generation: 0,
@@ -201,7 +209,8 @@ impl AlbumArtwork {
         track: Option<&Track>,
         status: PlaybackStatus,
         config: &Config,
-        visible: bool,
+        root: Option<&super::layout::Node>,
+        window_visible: bool,
         cx: &mut Context<Self>,
     ) {
         let switched = match (&self.track, track) {
@@ -211,14 +220,69 @@ impl AlbumArtwork {
             (None, None) => false,
             _ => true,
         };
-        let settings = RotationSettings::from_config(config);
         let stopped = status == PlaybackStatus::Stopped && self.status != status;
-        let changed = switched
-            || self.status != status
-            || self.visible != visible
-            || self.style != config.album_artwork_style
-            || self.pacing.fps != config.album_artwork_fps
-            || self.rotation.settings != settings;
+        let mut changed = switched || self.status != status;
+        for instance in self.instances.values_mut() {
+            instance.retained = false;
+        }
+        let now = Instant::now();
+        fn reconcile(
+            node: &super::layout::Node,
+            instances: &mut HashMap<u64, Instance>,
+            now: Instant,
+            playing: bool,
+            visible: bool,
+            reset: bool,
+            changed: &mut bool,
+        ) {
+            match node {
+                super::layout::Node::Split { children, .. } => {
+                    for child in children {
+                        reconcile(child, instances, now, playing, visible, reset, changed);
+                    }
+                }
+                super::layout::Node::Tabs { panels, active, .. } => {
+                    for panel in panels {
+                        let Some(options) = panel.album_artwork else {
+                            continue;
+                        };
+                        let instance = instances.entry(panel.id).or_insert_with(|| {
+                            *changed = true;
+                            Instance {
+                                options,
+                                rotation: Rotation::new(),
+                                retained: true,
+                                visible: false,
+                            }
+                        });
+                        instance.retained = true;
+                        instance.visible = visible && panel.id == *active;
+                        *changed |= instance.options != options;
+                        instance.options = options;
+                        *changed |= instance.rotation.sync(
+                            now,
+                            RotationSettings::from_options(options),
+                            playing && instance.visible,
+                            reset,
+                        );
+                    }
+                }
+            }
+        }
+        if let Some(root) = root {
+            reconcile(
+                root,
+                &mut self.instances,
+                now,
+                status == PlaybackStatus::Playing,
+                window_visible,
+                switched || stopped,
+                &mut changed,
+            );
+        }
+        self.instances.retain(|_, instance| instance.retained);
+        let visible = self.instances.values().any(|instance| instance.visible);
+        changed |= self.visible != visible || self.pacing.fps != config.album_artwork_fps;
         if switched {
             self.track = track.cloned();
         }
@@ -229,24 +293,12 @@ impl AlbumArtwork {
         }
         self.status = status;
         self.visible = visible;
-        self.style = config.album_artwork_style;
-        if self.pacing.set_fps(config.album_artwork_fps) {
+        if self.pacing.set_fps(config.album_artwork_fps) || changed {
             self.cancel_frame();
         }
-        self.sync_rotation(settings, switched || stopped);
         self.prepare_artwork(cx);
         if changed {
             cx.notify();
-        }
-    }
-
-    fn sync_rotation(&mut self, settings: RotationSettings, reset: bool) {
-        let eligible = self.visible && self.status == PlaybackStatus::Playing;
-        if self
-            .rotation
-            .sync(Instant::now(), settings, eligible, reset)
-        {
-            self.cancel_frame();
         }
     }
 
@@ -262,7 +314,6 @@ impl AlbumArtwork {
     fn replace_artwork(&mut self, artwork: Option<LoadedArtwork>, cx: &mut Context<Self>) {
         let artwork = artwork.filter(|artwork| !artwork.is_placeholder());
         let changed = self.view.replace(artwork, cx);
-        self.sync_rotation(self.rotation.settings, false);
         if changed {
             cx.notify();
         }
@@ -320,7 +371,7 @@ impl AlbumArtwork {
     }
 
     fn request_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.rotation.running || self.frame_pending || self.frame_timer.is_some() {
+        if !self.running() || self.frame_pending || self.frame_timer.is_some() {
             return;
         }
         let now = Instant::now();
@@ -331,7 +382,7 @@ impl AlbumArtwork {
             self.frame_timer = Some(cx.spawn_in(window, async move |this, cx| {
                 timer.await;
                 let _ = this.update_in(cx, |this, window, cx| {
-                    if generation == this.frame_generation && this.rotation.running {
+                    if generation == this.frame_generation && this.running() {
                         this.frame_timer = None;
                         this.request_frame(window, cx);
                     }
@@ -344,11 +395,14 @@ impl AlbumArtwork {
         let view = cx.weak_entity();
         window.on_next_frame(move |_, cx| {
             let _ = view.update(cx, |this, cx| {
-                if generation != this.frame_generation || !this.rotation.running {
+                if generation != this.frame_generation || !this.running() {
                     return;
                 }
                 this.frame_pending = false;
-                this.rotation.advance(Instant::now());
+                let now = Instant::now();
+                for instance in this.instances.values_mut() {
+                    instance.rotation.advance(now);
+                }
                 // Rendering requests the next callback (or one capped timer).
                 // fps=0 therefore follows display callbacks without a timer.
                 cx.notify();
@@ -361,10 +415,15 @@ impl AlbumArtwork {
         self.visible = false;
         self.track = None;
         let _ = self.loader.prepare(None);
-        self.rotation.running = false;
-        self.rotation.last_tick = None;
+        self.instances.clear();
         self.cancel_frame();
         self.view.release_all_images(window, cx);
+    }
+
+    fn running(&self) -> bool {
+        self.instances
+            .values()
+            .any(|instance| instance.rotation.running)
     }
 }
 
@@ -408,13 +467,21 @@ fn artwork_image_ratio(style: AlbumArtworkStyle) -> f32 {
     }
 }
 
-impl Render for AlbumArtwork {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.sync_rotation(self.rotation.settings, false);
+impl AlbumArtwork {
+    fn render_panel(
+        &mut self,
+        id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         self.request_frame(window, cx);
         let image = self.view.image(cx);
         let default_album = self.default_album.clone();
-        let style = self.style;
+        let instance = self
+            .instances
+            .get(&id)
+            .expect("artwork panel initialized before render");
+        let style = instance.options.style;
         let decoration = match style {
             AlbumArtworkStyle::Plain => None,
             AlbumArtworkStyle::Vinyl => Some(self.decorations[0].clone()),
@@ -424,7 +491,7 @@ impl Render for AlbumArtwork {
             AlbumArtworkStyle::Card => Some(self.decorations[4].clone()),
             AlbumArtworkStyle::Duotone => Some(self.decorations[5].clone()),
         };
-        let angle = self.rotation.angle as f32;
+        let angle = instance.rotation.angle as f32;
         canvas(
             move |bounds, window, cx| {
                 let scale = window.scale_factor();
@@ -516,6 +583,31 @@ impl Render for AlbumArtwork {
             |_, mut element, window, cx| element.paint(window, cx),
         )
         .size_full()
+    }
+}
+
+pub(super) struct AlbumArtworkPanel {
+    id: u64,
+    owner: Entity<AlbumArtwork>,
+    _subscription: gpui::Subscription,
+}
+
+impl AlbumArtworkPanel {
+    pub(super) fn new(id: u64, owner: Entity<AlbumArtwork>, cx: &mut Context<Self>) -> Self {
+        let subscription = cx.observe(&owner, |_, _, cx| cx.notify());
+        Self {
+            id,
+            owner,
+            _subscription: subscription,
+        }
+    }
+}
+
+impl Render for AlbumArtworkPanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.owner.update(cx, |owner, cx| {
+            owner.render_panel(self.id, window, cx).into_any_element()
+        })
     }
 }
 

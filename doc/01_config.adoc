@@ -225,11 +225,11 @@ instances, while effect parameters are shared by all instances. See
 <<_audio_visualizer,Audio Visualizer>> for instance settings and style-specific
 effects. Inactive Spectrum style-dependent settings retain their values.
 
-Interface → Album artwork edits style, mode, seconds per circle, direction,
-and animation frame rate for every Album artwork panel. These are shared
-application settings, not per-layout instance options; Apply and Discard follow
-the same draft rules as the other global settings. Static mode retains rotation
-parameters; choose Rotating to edit them.
+Interface → Album artwork edits the defaults for new panels: style, mode,
+seconds per circle, and direction. Animation frame rate remains shared.
+Apply and Discard follow the same draft rules as the other global settings.
+Changing defaults does not change existing panels. Use a panel's right-click
+Artwork settings entry to edit that instance. Static mode retains rotation parameters.
 
 Font: type to search installed families, or use the arrow to browse them and
 `serif`, `sans-serif`, and `monospace`. Enter or a click selects a choice; Space
@@ -325,8 +325,12 @@ fps = 0
 ----
 
 `style` accepts `plain` (default), `vinyl`, `glass`, `halo`, `metal`, `card`, or
-`duotone`. Style and motion are independent: all seven styles support static and
-rotating modes. Changing style preserves the current rotation angle. Metal adds
+`duotone` and supplies the initial style for new panels. Each panel saves style,
+mode, period, and direction in the layout. Its right-click Style and Rotation
+actions affect only that panel; Artwork settings edits all four instance options.
+Saved panels missing options initialize from the current defaults. All seven styles
+support static and rotating
+modes. Changing style preserves the current rotation angle. Metal adds
 a fixed brushed radial sheen over a circular cover. Card preserves the full
 square image inside a rounded frame and shadow that rotate together, with room
 for the corners at every angle. Duotone adds a fixed blue/purple edge glow behind
@@ -339,7 +343,8 @@ follows display callbacks without timer throttling; a positive value caps
 animation requests per second. Lower caps reduce rendering work and resource
 use at the cost of less smooth motion; zero can render more frequently on
 high-refresh displays. Changing the cap preserves the angle. All Album artwork
-panels share these settings; the analysis rate is independent.
+panels share only frame rate; the analysis rate is independent. Mode, period, and
+direction in this configuration supply defaults for new panels, not live overrides.
 Rotation follows playback rather than audio energy. Pausing or hiding the panel
 preserves its angle; resuming does not catch up on suspended time.
 Stopping, changing the current track, or selecting static mode resets the cover

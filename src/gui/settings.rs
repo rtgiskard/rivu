@@ -9,9 +9,9 @@ use super::{
 use crate::{
     artwork::{ArtworkCacheReport, ArtworkManager},
     config::{
-        AlbumArtworkDirection, AlbumArtworkMode, AlbumArtworkStyle, AnalysisWindow,
-        AudioVisualizerOptions, AudioVisualizerStyle, Config, LogLevel, RgbColor, SpectrumStyle,
-        VisualizationPalette,
+        AlbumArtworkDirection, AlbumArtworkMode, AlbumArtworkOptions, AlbumArtworkStyle,
+        AnalysisWindow, AudioVisualizerOptions, AudioVisualizerStyle, Config, LogLevel, RgbColor,
+        SpectrumStyle, VisualizationPalette,
     },
     core::CoreHandle,
     i18n::Localizer,
@@ -427,6 +427,11 @@ pub(super) enum SettingsEvent {
         options: AudioVisualizerOptions,
         session: u64,
     },
+    ApplyArtwork {
+        panel_id: u64,
+        options: AlbumArtworkOptions,
+        session: u64,
+    },
 }
 
 impl EventEmitter<SettingsEvent> for Settings {}
@@ -467,6 +472,7 @@ pub(super) struct Settings {
     visual_page: VisualPage,
     interface_page: InterfacePage,
     visualizer_panel: Option<u64>,
+    artwork_panel: Option<u64>,
 }
 
 impl Focusable for Settings {
@@ -540,6 +546,7 @@ impl Settings {
             visual_page: VisualPage::Common,
             interface_page: InterfacePage::Basic,
             visualizer_panel: None,
+            artwork_panel: None,
         }
     }
 
@@ -586,6 +593,15 @@ impl Settings {
         self.applying = false;
         self.feedback = Some(result);
         cx.notify();
+    }
+
+    pub(super) fn complete_artwork_apply(
+        &mut self,
+        session: u64,
+        result: std::result::Result<(), String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.complete_visualizer_apply(session, result, cx);
     }
 
     fn cancel(&mut self, cx: &mut Context<Self>) {
@@ -849,6 +865,7 @@ impl Settings {
     fn reset(&mut self, config: &Config, cx: &mut App) {
         self.session = self.session.wrapping_add(1);
         self.visualizer_panel = None;
+        self.artwork_panel = None;
         self.draft = config.clone();
         self.applying = false;
         self.feedback = None;
@@ -1318,8 +1335,60 @@ impl Settings {
         cx.notify();
     }
 
+    pub(super) fn open_artwork(
+        &mut self,
+        panel_id: u64,
+        options: AlbumArtworkOptions,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open(window, cx);
+        self.artwork_panel = Some(panel_id);
+        self.page = SettingsPage::Interface;
+        self.interface_page = InterfacePage::AlbumArtwork;
+        self.draft.album_artwork_style = options.style;
+        self.draft.album_artwork_mode = options.mode;
+        self.draft.album_artwork_direction = options.direction;
+        self.draft.album_artwork_period_seconds = options.period_seconds;
+        self.fill(cx);
+        cx.notify();
+    }
+
     fn apply_settings(&mut self, cx: &mut Context<Self>) {
         if self.applying {
+            return;
+        }
+        if let Some(panel_id) = self.artwork_panel {
+            let period = self.value(Field::AlbumArtworkPeriod, cx).parse::<f32>();
+            let Ok(period_seconds) = period else {
+                self.feedback = Some(Err(self
+                    .i18n
+                    .text("settings-artwork-period-hint")
+                    .to_owned()));
+                cx.notify();
+                return;
+            };
+            if !period_seconds.is_finite() || period_seconds <= 0.0 {
+                self.feedback = Some(Err(self
+                    .i18n
+                    .text("settings-artwork-period-hint")
+                    .to_owned()));
+                cx.notify();
+                return;
+            }
+            self.applying = true;
+            self.feedback = None;
+            cx.emit(SettingsEvent::ApplyArtwork {
+                panel_id,
+                options: AlbumArtworkOptions {
+                    style: self.draft.album_artwork_style,
+                    mode: self.draft.album_artwork_mode,
+                    direction: self.draft.album_artwork_direction,
+                    period_seconds,
+                },
+                session: self.session,
+            });
+            cx.notify();
             return;
         }
         if let Some(panel_id) = self.visualizer_panel {
@@ -2261,13 +2330,20 @@ impl Settings {
         let rotating = draft.album_artwork_mode == AlbumArtworkMode::Rotating;
         column()
             .gap_3()
-            .child(caption(settings.tr("settings-artwork-motion-help")))
             .child(settings_group(
-                settings.tr("settings-appearance"),
+                settings.tr(if settings.artwork_panel.is_some() {
+                    "settings-this-instance"
+                } else {
+                    "settings-new-instance-defaults"
+                }),
                 form_field(settings.tr("settings-style"), style),
             ))
             .child(settings_group(
-                settings.tr("settings-animation"),
+                settings.tr(if settings.artwork_panel.is_some() {
+                    "settings-animation"
+                } else {
+                    "settings-new-instance-defaults"
+                }),
                 column()
                     .gap_2()
                     .child(form_field(settings.tr("settings-mode"), mode))
@@ -2279,7 +2355,11 @@ impl Settings {
                         )),
                         settings.field_state(Field::AlbumArtworkPeriod, rotating, cx),
                     ))
-                    .child(settings.field_state(Field::AlbumArtworkFps, rotating, cx)),
+                    .when(settings.artwork_panel.is_none(), |column| {
+                        column
+                            .child(caption(settings.tr("settings-artwork-motion-help")))
+                            .child(settings.field_state(Field::AlbumArtworkFps, true, cx))
+                    }),
             ))
     }
 
@@ -2810,7 +2890,7 @@ impl Settings {
         let scroll = self.scrolls.entry(page_id).or_default().clone();
         self.active_scroll = Some(scroll.clone());
         let mut body = row().flex_1().min_h_0().items_start();
-        if self.visualizer_panel.is_none() {
+        if self.visualizer_panel.is_none() && self.artwork_panel.is_none() {
             body = body.child(
                 self.sidebar(cx)
                     .id("settings-sidebar")

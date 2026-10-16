@@ -136,7 +136,21 @@ const PANELS: &[PanelSpec] = &[
     PanelSpec {
         kind: "album_artwork",
         title_id: "shell-panel-album-artwork",
-        render: |app, _, _, _| app.album_artwork.clone().into_any_element(),
+        render: |app, panel, _, cx| {
+            app.artwork_panels
+                .entry(panel.id)
+                .or_insert_with(|| {
+                    cx.new(|cx| {
+                        album_artwork::AlbumArtworkPanel::new(
+                            panel.id,
+                            app.album_artwork.clone(),
+                            cx,
+                        )
+                    })
+                })
+                .clone()
+                .into_any_element()
+        },
     },
     PanelSpec {
         kind: "spectrum",
@@ -458,6 +472,7 @@ pub(super) struct GuiApp {
     artwork_view: artwork::ArtworkView,
     default_album: Entity<artwork::Artwork>,
     album_artwork: Entity<album_artwork::AlbumArtwork>,
+    artwork_panels: HashMap<u64, Entity<album_artwork::AlbumArtworkPanel>>,
     album_browsers: HashMap<u64, Entity<album_browser::AlbumBrowser>>,
     playlist_editor: Option<playlist_editor::PlaylistEditor>,
     playlist_action: Option<panels::PlaylistAction>,
@@ -715,6 +730,9 @@ impl GuiApp {
             .initialize_audio_visualizers(AudioVisualizerOptions::from(
                 state.system.config.as_ref(),
             ))
+            | layouts.current_mut().initialize_album_artworks(
+                crate::config::AlbumArtworkOptions::from(state.system.config.as_ref()),
+            )
             && let Err(save_error) = layouts.save(&layout_path)
         {
             error = Some(i18n.format(
@@ -794,6 +812,40 @@ impl GuiApp {
                     };
                     settings.update(cx, |settings, cx| {
                         settings.complete_visualizer_apply(*session, result, cx)
+                    });
+                    this.sync_analysis(cx);
+                    cx.notify();
+                }
+                settings::SettingsEvent::ApplyArtwork {
+                    panel_id,
+                    options,
+                    session,
+                } => {
+                    let previous = this.layouts.current().album_artwork_options(*panel_id);
+                    let result = if this
+                        .layouts
+                        .current_mut()
+                        .set_album_artwork_options(*panel_id, *options)
+                    {
+                        match this.layouts.save(&this.layout_path) {
+                            Ok(()) => Ok(()),
+                            Err(error) => {
+                                if let Some(previous) = previous {
+                                    this.layouts
+                                        .current_mut()
+                                        .set_album_artwork_options(*panel_id, previous);
+                                }
+                                Err(this.i18n.format(
+                                    "shell-save-layout-error",
+                                    &[("error", format!("{error:#}").into())],
+                                ))
+                            }
+                        }
+                    } else {
+                        Err(this.i18n.text("shell-artwork-gone").to_owned())
+                    };
+                    settings.update(cx, |settings, cx| {
+                        settings.complete_artwork_apply(*session, result, cx)
                     });
                     this.sync_analysis(cx);
                     cx.notify();
@@ -974,6 +1026,7 @@ impl GuiApp {
                     artwork_images.clone(),
                 )
             }),
+            artwork_panels: HashMap::new(),
             default_album,
             album_browsers: HashMap::new(),
             artwork_manager,
@@ -1569,28 +1622,15 @@ impl GuiApp {
 
     fn sync_album_artwork(&mut self, cx: &mut Context<Self>) {
         self.sync_album_browser(cx);
-        fn active_artwork(node: &Node) -> bool {
-            match node {
-                Node::Tabs { panels, active, .. } => panels
-                    .iter()
-                    .any(|panel| panel.id == *active && panel.kind == "album_artwork"),
-                Node::Split { children, .. } => children.iter().any(active_artwork),
-            }
-        }
-        let visible = self.window_visible
-            && !self.state.system.shutting_down
-            && self
-                .layouts
-                .current()
-                .root
-                .as_ref()
-                .is_some_and(active_artwork);
+        self.artwork_panels
+            .retain(|id, _| self.layouts.current().album_artwork_options(*id).is_some());
         self.album_artwork.update(cx, |artwork, cx| {
             artwork.sync(
                 self.state.current_track(),
                 self.state.playback.status,
                 &self.state.system.config,
-                visible,
+                self.layouts.current().root.as_ref(),
+                self.window_visible && !self.state.system.shutting_down,
                 cx,
             );
         });
@@ -1758,6 +1798,9 @@ impl GuiApp {
             .initialize_audio_visualizers(AudioVisualizerOptions::from(
                 self.state.system.config.as_ref(),
             ));
+        self.layouts.current_mut().initialize_album_artworks(
+            crate::config::AlbumArtworkOptions::from(self.state.system.config.as_ref()),
+        );
         self.interaction
             .retain_layout(self.layouts.current().root.as_ref());
         if let Err(error) = self.layouts.save(&self.layout_path) {

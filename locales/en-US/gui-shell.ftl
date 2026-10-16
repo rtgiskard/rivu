@@ -33,6 +33,7 @@ shell-show-tab-bar = Show tab bar
 shell-track-information = Track information
 shell-artwork-style = Artwork style
 shell-artwork-rotation = Rotation
+shell-artwork-settings = Artwork settings…
 shell-visualizer-style = Visualizer style
 shell-clear-stops-playback = This also stops playback.
 shell-cancel = Cancel

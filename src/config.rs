@@ -44,6 +44,26 @@ pub enum AlbumArtworkDirection {
     Counterclockwise,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AlbumArtworkOptions {
+    pub style: AlbumArtworkStyle,
+    pub mode: AlbumArtworkMode,
+    pub direction: AlbumArtworkDirection,
+    pub period_seconds: f32,
+}
+
+impl From<&Config> for AlbumArtworkOptions {
+    fn from(config: &Config) -> Self {
+        Self {
+            style: config.album_artwork_style,
+            mode: config.album_artwork_mode,
+            direction: config.album_artwork_direction,
+            period_seconds: config.album_artwork_period_seconds,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VisualizationPalette {
     #[serde(rename = "tokyo_night")]
@@ -327,7 +347,7 @@ pub struct Config {
     pub waveform_peak_gamma: f32,
     pub album_artwork_style: AlbumArtworkStyle,
     pub album_artwork_mode: AlbumArtworkMode,
-    /// Positive finite seconds per full rotation, shared by all artwork panels.
+    /// Positive finite seconds per full rotation, used for new artwork panels.
     pub album_artwork_period_seconds: f32,
     pub album_artwork_direction: AlbumArtworkDirection,
     /// Animation request cap (0 follows display callbacks), at most 240 FPS.
