@@ -805,16 +805,7 @@ impl Settings {
                     .p(rems(7. / 16.))
                     .overflow_hidden()
                     .child(self.value(field, cx)),
-            )
-            .tooltip({
-                let reason = reason.clone();
-                move |_, cx| {
-                    cx.new(|_| ButtonTooltip {
-                        text: reason.clone(),
-                    })
-                    .into()
-                }
-            });
+            );
         column()
             .min_w(rems(180. / 16.))
             .child(field.form(self, control).opacity(0.45))
@@ -1345,18 +1336,33 @@ impl Settings {
         let config = match self.parse(cx) {
             Ok(config) => config,
             Err(error) => {
-                let recovery = if self.draft.spectrum_style == SpectrumStyle::Solid
-                    || !self.draft.spectrum_peaks
-                {
-                    self.tr("settings-inactive-values-recovery")
-                } else {
-                    SharedString::default()
-                };
+                let mut recovery = String::new();
+                for (inactive, key) in [
+                    (
+                        self.draft.spectrum_style == SpectrumStyle::Solid,
+                        "settings-spectrum-style-recovery",
+                    ),
+                    (
+                        !self.draft.spectrum_peaks,
+                        "settings-spectrum-peaks-recovery",
+                    ),
+                    (
+                        self.draft.album_artwork_mode == AlbumArtworkMode::Static,
+                        "settings-artwork-recovery",
+                    ),
+                ] {
+                    if inactive {
+                        if !recovery.is_empty() {
+                            recovery.push(' ');
+                        }
+                        recovery.push_str(self.i18n.text(key));
+                    }
+                }
                 self.feedback = Some(Err(self.i18n.format(
                     "settings-invalid",
                     &[
                         ("error", format!("{error:#}").into()),
-                        ("recovery", recovery.as_ref().into()),
+                        ("recovery", recovery.as_str().into()),
                     ],
                 )));
                 cx.notify();
@@ -1982,9 +1988,7 @@ impl Settings {
                     tray,
                     cx,
                     |draft| draft.tray_enabled = !draft.tray_enabled,
-                ))
-                .id("settings-interface-help")
-                .tooltip(settings_tooltip(self.tr("settings-tray-restart-help"))),
+                )),
         )
     }
 
@@ -2269,14 +2273,11 @@ impl Settings {
                     .gap_2()
                     .child(form_field(settings.tr("settings-mode"), mode))
                     .child(two_column(
-                        div().child(
-                            disabled_control(
-                                form_field(settings.tr("settings-direction"), direction)
-                                    .id("settings-artwork-direction-field"),
-                                !rotating,
-                            )
-                            .tooltip(settings_tooltip(reason.clone())),
-                        ),
+                        div().child(disabled_control(
+                            form_field(settings.tr("settings-direction"), direction)
+                                .id("settings-artwork-direction-field"),
+                            !rotating,
+                        )),
                         settings.field_state(
                             Field::AlbumArtworkPeriod,
                             rotating,
@@ -2420,8 +2421,6 @@ impl Settings {
                                 cx,
                                 |draft| draft.still_mode = !draft.still_mode,
                             ))
-                            .id("settings-rendering-help")
-                            .tooltip(settings_tooltip(settings.tr("settings-rendering-help")))
                             .child(visual_switch(
                                 &self.i18n,
                                 "visual-cache",
@@ -2766,16 +2765,10 @@ impl Settings {
                     ));
                 content.child(settings_group(
                     settings.tr("settings-colors"),
-                    column()
-                        .gap_2()
-                        .child(settings.pair(
-                            Field::AudioVisualizerPrimaryColor,
-                            Field::AudioVisualizerSecondaryColor,
-                        ))
-                        .id("settings-visualizer-colors-help")
-                        .tooltip(settings_tooltip(
-                            settings.tr("settings-visualizer-colors-help"),
-                        )),
+                    column().gap_2().child(settings.pair(
+                        Field::AudioVisualizerPrimaryColor,
+                        Field::AudioVisualizerSecondaryColor,
+                    )),
                 ))
             }
             VisualPage::Waveform => column()
