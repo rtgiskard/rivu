@@ -77,8 +77,9 @@ query batch tuning stays in the configuration file, not desktop settings. Queue 
 link:04_playback.adoc#_queue[Playback]; query and batch contracts in
 link:02_library.adoc#_paged_views[Library].
 
-In the desktop Queue, Playlists (catalog and tracks), Library, and Recent tracks,
-drag the right-hand scrollbar to browse long lists, or click its track to jump.
+In the desktop Queue, Playlists (catalog and tracks), Library, Recent tracks, and
+Albums (cover grid and tracks), drag the right-hand scrollbar to browse long
+lists, or click its track to jump.
 Dragging continues outside the scrollbar until you release the mouse button.
 Lists that fit in the viewport have no scrollbar thumb; mouse-wheel scrolling
 remains available when content overflows.

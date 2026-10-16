@@ -16,7 +16,7 @@ use super::{
     BORDER, TEXT,
     artwork::{Artwork, ArtworkLoader, ArtworkView},
     caption, column,
-    components::{LIST_ROW_REMS, quiet_icon_button, track_list_row},
+    components::{LIST_ROW_REMS, quiet_icon_button, scrollable_list, track_list_row},
     format_time, icon_button,
     input::{Input, InputEvent},
     paged, panel_surface, panel_toolbar, row,
@@ -755,112 +755,123 @@ impl Render for AlbumBrowser {
                     .child(caption(self.tr("gl-album-no-tracks")))
                     .into_any_element()
             } else {
-                uniform_list(
-                    "album-tracks",
-                    self.tracks.len(),
-                    cx.processor(|this, range: Range<usize>, _, cx| {
-                        range
-                            .map(|index| {
-                                let Some(track) = this.tracks.get(index) else {
-                                    return this
-                                        .loading_row(index, cx)
-                                        .h(rems(LIST_ROW_REMS))
-                                        .w_full()
-                                        .p_2()
-                                        .into_any_element();
-                                };
-                                let id = track.id;
-                                let marker =
-                                    track_marker(this.current_track, this.playback_status, id);
-                                track_list_row(
-                                    ("album-track", id as u64),
-                                    ("album-track-text", id as u64),
-                                    track.title.clone(),
-                                    track.artist.clone(),
-                                    index,
-                                    marker.is_some()
-                                        && this.playback_status == PlaybackStatus::Playing,
-                                    false,
-                                )
-                                .group("album-track-row")
-                                .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                                    if event.click_count() == 2 {
-                                        this.send(Command::Play { track_id: id }, cx);
-                                    }
-                                }))
-                                .when(track.missing, |row| {
-                                    row.child(caption(this.tr("gl-missing")))
-                                })
-                                .when_some(marker, |row, marker| {
-                                    row.child(caption(this.tr(marker)))
-                                })
-                                .child(
-                                    caption(track.duration.map_or_else(|| "—".into(), format_time))
+                scrollable_list(
+                    "album-tracks-scrollbar",
+                    uniform_list(
+                        "album-tracks",
+                        self.tracks.len(),
+                        cx.processor(|this, range: Range<usize>, _, cx| {
+                            range
+                                .map(|index| {
+                                    let Some(track) = this.tracks.get(index) else {
+                                        return this
+                                            .loading_row(index, cx)
+                                            .h(rems(LIST_ROW_REMS))
+                                            .w_full()
+                                            .p_2()
+                                            .into_any_element();
+                                    };
+                                    let id = track.id;
+                                    let marker =
+                                        track_marker(this.current_track, this.playback_status, id);
+                                    track_list_row(
+                                        ("album-track", id as u64),
+                                        ("album-track-text", id as u64),
+                                        track.title.clone(),
+                                        track.artist.clone(),
+                                        index,
+                                        marker.is_some()
+                                            && this.playback_status == PlaybackStatus::Playing,
+                                        false,
+                                    )
+                                    .group("album-track-row")
+                                    .on_click(cx.listener(
+                                        move |this, event: &ClickEvent, _, cx| {
+                                            if event.click_count() == 2 {
+                                                this.send(Command::Play { track_id: id }, cx);
+                                            }
+                                        },
+                                    ))
+                                    .when(track.missing, |row| {
+                                        row.child(caption(this.tr("gl-missing")))
+                                    })
+                                    .when_some(marker, |row, marker| {
+                                        row.child(caption(this.tr(marker)))
+                                    })
+                                    .child(
+                                        caption(
+                                            track.duration.map_or_else(|| "—".into(), format_time),
+                                        )
                                         .w(rems(4.))
                                         .flex_shrink_0()
                                         .text_right(),
-                                )
-                                .child(
-                                    row()
-                                        .id(("album-track-actions", id as u64))
-                                        .gap_0()
-                                        .invisible()
-                                        .group_hover("album-track-row", |style| style.visible())
-                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                            cx.stop_propagation()
-                                        })
-                                        .on_click(|_, _, cx| cx.stop_propagation())
-                                        .child(
-                                            quiet_icon_button(icon_button(
-                                                ("album-track-play", id as u64),
-                                                "",
-                                                this.tr("gl-play-track"),
-                                                cx,
-                                                move |this, _, cx| {
-                                                    this.send(Command::Play { track_id: id }, cx)
-                                                },
-                                            ))
-                                            .w(rems(1.4)),
-                                        )
-                                        .child(
-                                            quiet_icon_button(icon_button(
-                                                ("album-track-add", id as u64),
-                                                "󰐕",
-                                                this.tr("gl-enqueue-track"),
-                                                cx,
-                                                move |this, _, cx| {
-                                                    this.send(
-                                                        Command::Enqueue {
-                                                            track_ids: vec![id],
-                                                        },
-                                                        cx,
-                                                    )
-                                                },
-                                            ))
-                                            .w(rems(1.4)),
-                                        ),
-                                )
-                                .into_any_element()
-                            })
-                            .collect::<Vec<_>>()
-                    }),
-                )
-                .track_scroll(&self.track_scroll)
-                .with_decoration(paged::viewport_demand(move |range, _, cx| {
-                    let owner = track_demand_owner.clone();
-                    cx.defer(move |cx| {
-                        let _ = owner.update(cx, |this, cx| {
-                            if generation == this.generation
-                                && this.selected.is_some()
-                                && this.visible
-                            {
-                                let _ = this.tracks.demand(range, this.page_size);
-                                this.request_next(false, cx);
-                            }
+                                    )
+                                    .child(
+                                        row()
+                                            .id(("album-track-actions", id as u64))
+                                            .gap_0()
+                                            .invisible()
+                                            .group_hover("album-track-row", |style| style.visible())
+                                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                                cx.stop_propagation()
+                                            })
+                                            .on_click(|_, _, cx| cx.stop_propagation())
+                                            .child(
+                                                quiet_icon_button(icon_button(
+                                                    ("album-track-play", id as u64),
+                                                    "",
+                                                    this.tr("gl-play-track"),
+                                                    cx,
+                                                    move |this, _, cx| {
+                                                        this.send(
+                                                            Command::Play { track_id: id },
+                                                            cx,
+                                                        )
+                                                    },
+                                                ))
+                                                .w(rems(1.4)),
+                                            )
+                                            .child(
+                                                quiet_icon_button(icon_button(
+                                                    ("album-track-add", id as u64),
+                                                    "󰐕",
+                                                    this.tr("gl-enqueue-track"),
+                                                    cx,
+                                                    move |this, _, cx| {
+                                                        this.send(
+                                                            Command::Enqueue {
+                                                                track_ids: vec![id],
+                                                            },
+                                                            cx,
+                                                        )
+                                                    },
+                                                ))
+                                                .w(rems(1.4)),
+                                            ),
+                                    )
+                                    .into_any_element()
+                                })
+                                .collect::<Vec<_>>()
+                        }),
+                    )
+                    .track_scroll(&self.track_scroll)
+                    .with_decoration(paged::viewport_demand(move |range, _, cx| {
+                        let owner = track_demand_owner.clone();
+                        cx.defer(move |cx| {
+                            let _ = owner.update(cx, |this, cx| {
+                                if generation == this.generation
+                                    && this.selected.is_some()
+                                    && this.visible
+                                {
+                                    let _ = this.tracks.demand(range, this.page_size);
+                                    this.request_next(false, cx);
+                                }
+                            });
                         });
-                    });
-                }))
-                .size_full()
+                    }))
+                    .size_full(),
+                    &self.track_scroll,
+                )
                 .into_any_element()
             }
         } else if self.albums.is_empty() {
@@ -876,70 +887,74 @@ impl Render for AlbumBrowser {
             let generation = self.generation;
             let demand_owner = cx.weak_entity();
             let measure_owner = cx.weak_entity();
-            div()
-                .relative()
-                .size_full()
-                .child(
-                    canvas(
-                        |_, _, _| (),
-                        move |bounds, _, window, cx| {
-                            let columns = ((bounds.size.width / window.rem_size()) / 12.)
-                                .floor()
-                                .max(1.) as usize;
-                            let owner = measure_owner.clone();
+            scrollable_list(
+                "album-grid-scrollbar",
+                div()
+                    .relative()
+                    .size_full()
+                    .child(
+                        canvas(
+                            |_, _, _| (),
+                            move |bounds, _, window, cx| {
+                                let columns = ((bounds.size.width / window.rem_size()) / 12.)
+                                    .floor()
+                                    .max(1.) as usize;
+                                let owner = measure_owner.clone();
+                                cx.defer(move |cx| {
+                                    let _ = owner.update(cx, |this, cx| {
+                                        if this.columns != columns {
+                                            this.capture_grid_anchor();
+                                            this.columns = columns;
+                                            this.restore_grid_anchor();
+                                            cx.notify();
+                                        }
+                                    });
+                                });
+                            },
+                        )
+                        .absolute()
+                        .size_full(),
+                    )
+                    .child(
+                        uniform_list(
+                            "album-grid",
+                            self.albums.len().div_ceil(columns),
+                            cx.processor(move |this, range: Range<usize>, _, cx| {
+                                range
+                                    .map(|grid_row| {
+                                        let start = grid_row * columns;
+                                        let end = (start + columns).min(this.albums.len());
+                                        let mut cards = div()
+                                            .grid()
+                                            .grid_cols(columns as u16)
+                                            .gap_2()
+                                            .w_full()
+                                            .h(rems(14.))
+                                            .pb_2();
+                                        for index in start..end {
+                                            cards = cards.child(this.card(index, cx));
+                                        }
+                                        cards
+                                    })
+                                    .collect::<Vec<_>>()
+                            }),
+                        )
+                        .track_scroll(&self.grid_scroll)
+                        .with_decoration(paged::viewport_demand(move |range, _, cx| {
+                            let owner = demand_owner.clone();
                             cx.defer(move |cx| {
                                 let _ = owner.update(cx, |this, cx| {
-                                    if this.columns != columns {
-                                        this.capture_grid_anchor();
-                                        this.columns = columns;
-                                        this.restore_grid_anchor();
-                                        cx.notify();
+                                    if generation == this.generation && columns == this.columns {
+                                        this.cover_demand(range, cx);
                                     }
                                 });
                             });
-                        },
-                    )
-                    .absolute()
-                    .size_full(),
-                )
-                .child(
-                    uniform_list(
-                        "album-grid",
-                        self.albums.len().div_ceil(columns),
-                        cx.processor(move |this, range: Range<usize>, _, cx| {
-                            range
-                                .map(|grid_row| {
-                                    let start = grid_row * columns;
-                                    let end = (start + columns).min(this.albums.len());
-                                    let mut cards = div()
-                                        .grid()
-                                        .grid_cols(columns as u16)
-                                        .gap_2()
-                                        .w_full()
-                                        .h(rems(14.))
-                                        .pb_2();
-                                    for index in start..end {
-                                        cards = cards.child(this.card(index, cx));
-                                    }
-                                    cards
-                                })
-                                .collect::<Vec<_>>()
-                        }),
-                    )
-                    .track_scroll(&self.grid_scroll)
-                    .with_decoration(paged::viewport_demand(move |range, _, cx| {
-                        let owner = demand_owner.clone();
-                        cx.defer(move |cx| {
-                            let _ = owner.update(cx, |this, cx| {
-                                if generation == this.generation && columns == this.columns {
-                                    this.cover_demand(range, cx);
-                                }
-                            });
-                        });
-                    }))
-                    .size_full(),
-                )
-                .into_any_element()
+                        }))
+                        .size_full(),
+                    ),
+                &self.grid_scroll,
+            )
+            .into_any_element()
         };
         panel_surface("albums-browser")
             .p_2()
