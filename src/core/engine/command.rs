@@ -46,7 +46,11 @@ impl Core {
             Command::CancelRelocation { id } => self.cancel_relocation(id)?,
             Command::KeepTrackIndependent { track_id } => {
                 if self.store.keep_independent(track_id)? {
-                    self.state.library.revision = self.state.library.revision.wrapping_add(1);
+                    self.state.library.duplicate_members_revision = self
+                        .state
+                        .library
+                        .duplicate_members_revision
+                        .wrapping_add(1);
                 }
             }
             Command::Play { track_id } => {
@@ -167,8 +171,8 @@ impl Core {
                 self.create_playlist_with_tracks(name, track_ids)?;
             }
             Command::CreatePlaylistFromQueue { name } => {
-                self.store.create_playlist_from_queue(&name)?;
-                self.reload_playlists()?;
+                let (id, has_members) = self.store.create_playlist_from_queue(&name)?;
+                self.playlist_created(id, has_members)?;
             }
             Command::RenamePlaylist { playlist_id, name } => {
                 self.rename_playlist(playlist_id, name)?;
@@ -187,7 +191,7 @@ impl Core {
                     .store
                     .add_playlist_sources(playlist_id, &directories, &track_ids)?
                 {
-                    self.reload_playlists()?;
+                    self.playlist_members_changed(playlist_id)?;
                 }
             }
             Command::RemovePlaylistEntry { entry_id } => self.remove_playlist_entry(entry_id)?,
@@ -237,13 +241,21 @@ impl Core {
                 album,
                 decoder_hint,
             } => {
-                if self.store.edit_track(
+                let impact = self.store.edit_track(
                     track_id,
                     title.as_deref(),
                     artist.as_deref(),
                     album.as_deref(),
                     decoder_hint,
-                )? {
+                )?;
+                if impact.member_facts {
+                    self.state.library.duplicate_members_revision = self
+                        .state
+                        .library
+                        .duplicate_members_revision
+                        .wrapping_add(1);
+                }
+                if impact.library {
                     self.state.library.revision = self.state.library.revision.wrapping_add(1);
                     (|| -> Result<()> {
                         self.refresh_affected_queue_tracks(&[track_id])?;
@@ -278,13 +290,19 @@ impl Core {
                     self.stop()?;
                 }
                 // Keep the selection on failure; only a committed cascade clears it.
-                self.store.remove_prepared_tracks(removal)?;
-                let catalog = self.reload_catalog(true);
+                let impact = self.store.remove_prepared_tracks(removal)?;
+                self.invalidate_playlist_members(&impact.playlists);
+                let catalog = self.apply_scan_impacts(crate::store::ScanImpacts {
+                    changed: true,
+                    library: true,
+                    structure: true,
+                    duplicate_groups: impact.duplicate_groups,
+                    duplicate_members: false,
+                });
                 let queue = self
                     .reload_queue()
                     .and_then(|()| self.refresh_queue_tracks());
-                catalog.and(queue)
-                    .context("Track deletion committed, but refreshing views failed; some projections may be stale")?;
+                catalog.and(queue).context("Track deletion committed, but refreshing views failed; some projections may be stale")?;
             }
             Command::SetFavorite {
                 track_ids,
@@ -322,13 +340,20 @@ impl Core {
                     self.stop()?;
                 }
                 // A stopped decoder does not imply the database deletion succeeded.
-                if self.store.remove_missing_tracks()? {
-                    let catalog = self.reload_catalog(true);
+                let impact = self.store.remove_missing_tracks()?;
+                if impact.removed != 0 {
+                    self.invalidate_playlist_members(&impact.playlists);
+                    let catalog = self.apply_scan_impacts(crate::store::ScanImpacts {
+                        changed: true,
+                        library: true,
+                        structure: true,
+                        duplicate_groups: impact.duplicate_groups,
+                        duplicate_members: false,
+                    });
                     let queue = self
                         .reload_queue()
                         .and_then(|()| self.refresh_queue_tracks());
-                    catalog.and(queue)
-                        .context("Track deletion committed, but refreshing views failed; some projections may be stale")?;
+                    catalog.and(queue).context("Track deletion committed, but refreshing views failed; some projections may be stale")?;
                 }
             }
             Command::Device { name } => {

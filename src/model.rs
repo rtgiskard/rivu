@@ -269,18 +269,22 @@ pub struct LibrarySnapshot {
     pub track_total: usize,
     #[serde(default)]
     pub playlist_total: usize,
-    /// Changes whenever any persisted track data changes.
+    /// Changes whenever the effective Track projection changes.
     #[serde(default)]
     pub revision: u64,
     /// Changes only when the library tree or visible row ordering may change.
     #[serde(default)]
     pub structure_revision: u64,
-    /// Catalog and membership epoch; pure entry reorders leave it unchanged.
+    /// Playlist summaries: identity, name, or member count. Not a content epoch.
     #[serde(default)]
     pub playlist_revision: u64,
-    /// Reorder tokens for playlists changed since the last catalog epoch.
+    /// Content/lifetime tokens for every extant playlist; absence means deletion.
     #[serde(default)]
     pub playlist_entry_revisions: Arc<BTreeMap<i64, u64>>,
+    #[serde(default)]
+    pub duplicate_groups_revision: u64,
+    #[serde(default)]
+    pub duplicate_members_revision: u64,
     #[serde(default)]
     pub history: Arc<Vec<HistoryEntry>>,
 }
@@ -405,6 +409,8 @@ impl Default for LibrarySnapshot {
             structure_revision: 0,
             playlist_revision: 0,
             playlist_entry_revisions: Arc::default(),
+            duplicate_groups_revision: 0,
+            duplicate_members_revision: 0,
             history: Arc::new(Vec::new()),
         }
     }
@@ -495,7 +501,7 @@ pub enum LibraryLocateResult {
     OutsideRoot,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Query {
     Albums {
@@ -619,6 +625,227 @@ pub enum Query {
     RelocationTask {
         id: u64,
     },
+    DuplicateMemberSelection {
+        fingerprint: String,
+        track_ids: Vec<i64>,
+    },
+}
+
+/// Selected equality tokens, owned by the query rather than its consumers.
+/// Unselected domains are zeroed, so scheduling and acceptance share one contract.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct QueryStamp(crate::response::QueryRevisions);
+
+impl QueryStamp {
+    pub fn revisions(self) -> crate::response::QueryRevisions {
+        self.0
+    }
+}
+
+/// Borrowed projection identity: demand never allocates or changes the data key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueryIdentity<'a> {
+    Albums(&'a Option<String>, AlbumSort),
+    AlbumTracks(&'a AlbumKey),
+    LibraryPage(&'a Option<String>, Option<bool>, Option<bool>, LibrarySort),
+    TrackPage(&'a Option<String>, Option<bool>, Option<bool>),
+    DirectoryPage(
+        &'a std::path::Path,
+        &'a Option<String>,
+        Option<bool>,
+        Option<bool>,
+    ),
+    PlaylistSummaries,
+    PlaylistEntries(i64),
+    PlaylistEntryLocations(i64, &'a [i64]),
+    Track(i64),
+    LibraryStats,
+    TrackBatch(&'a Option<String>, Option<bool>, Option<bool>),
+    PlaylistSummaryBatch,
+    PlaylistEntryBatch(i64),
+    LibraryRootPage(
+        &'a std::path::Path,
+        &'a Option<String>,
+        Option<bool>,
+        Option<bool>,
+        LibrarySort,
+    ),
+    LibraryLocate(
+        i64,
+        &'a std::path::Path,
+        bool,
+        &'a Option<String>,
+        Option<bool>,
+        Option<bool>,
+        LibrarySort,
+    ),
+    LibraryRootCounts(&'a [PathBuf]),
+    ScanTask(u64),
+    QueuePage,
+    QueueBatch,
+    QueueEntries(&'a [u64]),
+    PlaylistEntry(i64),
+    DuplicateGroups,
+    DuplicateMembers(&'a str),
+    RelocationTask(u64),
+    DuplicateMemberSelection(&'a str, &'a [i64]),
+}
+
+impl Query {
+    pub fn stamp(&self, revisions: crate::response::QueryRevisions) -> QueryStamp {
+        use crate::response::QueryRevisions;
+        let mut stamp = QueryRevisions::default();
+        match self {
+            Self::LibraryPage { .. }
+            | Self::TrackPage { .. }
+            | Self::Track { .. }
+            | Self::TrackBatch { .. }
+            | Self::LibraryStats => stamp.library = revisions.library,
+            Self::Albums { .. }
+            | Self::AlbumTracks { .. }
+            | Self::DirectoryPage { .. }
+            | Self::LibraryRootPage { .. }
+            | Self::LibraryLocate { .. } => {
+                stamp.library = revisions.library;
+                stamp.structure = revisions.structure;
+            }
+            Self::LibraryRootCounts { .. } => stamp.structure = revisions.structure,
+            Self::PlaylistSummaries { .. } | Self::PlaylistSummaryBatch { .. } => {
+                stamp.playlist = revisions.playlist;
+            }
+            Self::PlaylistEntries { playlist_id, .. }
+            | Self::PlaylistEntryBatch { playlist_id, .. } => {
+                stamp.library = revisions.library;
+                stamp.playlist_entries = revisions
+                    .playlist_entries
+                    .filter(|scope| scope.playlist_id == *playlist_id);
+            }
+            Self::PlaylistEntryLocations { playlist_id, .. } => {
+                stamp.playlist_entries = revisions
+                    .playlist_entries
+                    .filter(|scope| scope.playlist_id == *playlist_id);
+            }
+            Self::PlaylistEntry { .. } => stamp.playlist_entries = revisions.playlist_entries,
+            Self::QueuePage { .. } | Self::QueueBatch { .. } | Self::QueueEntries { .. } => {
+                stamp.queue = revisions.queue;
+            }
+            Self::DuplicateGroups { .. } => stamp.duplicate_groups = revisions.duplicate_groups,
+            Self::DuplicateMembers { .. } | Self::DuplicateMemberSelection { .. } => {
+                stamp.library = revisions.library;
+                stamp.duplicate_members = revisions.duplicate_members;
+                stamp.queue = revisions.queue;
+            }
+            Self::ScanTask { .. } | Self::RelocationTask { .. } => {}
+        }
+        QueryStamp(stamp)
+    }
+
+    /// Offsets, cursors, page sizes and expected baselines are demand, not identity.
+    pub fn identity(&self) -> QueryIdentity<'_> {
+        match self {
+            Self::Albums { query, sort, .. } => QueryIdentity::Albums(query, *sort),
+            Self::AlbumTracks { key, .. } => QueryIdentity::AlbumTracks(key),
+            Self::LibraryPage {
+                query,
+                favorite,
+                missing,
+                sort,
+                ..
+            } => QueryIdentity::LibraryPage(query, *favorite, *missing, *sort),
+            Self::TrackPage {
+                query,
+                favorite,
+                missing,
+                ..
+            } => QueryIdentity::TrackPage(query, *favorite, *missing),
+            Self::DirectoryPage {
+                path,
+                query,
+                favorite,
+                missing,
+                ..
+            } => QueryIdentity::DirectoryPage(path, query, *favorite, *missing),
+            Self::PlaylistSummaries { .. } => QueryIdentity::PlaylistSummaries,
+            Self::PlaylistEntries { playlist_id, .. } => {
+                QueryIdentity::PlaylistEntries(*playlist_id)
+            }
+            Self::PlaylistEntryLocations {
+                playlist_id,
+                entry_ids,
+            } => QueryIdentity::PlaylistEntryLocations(*playlist_id, entry_ids),
+            Self::Track { track_id } => QueryIdentity::Track(*track_id),
+            Self::LibraryStats => QueryIdentity::LibraryStats,
+            Self::TrackBatch {
+                query,
+                favorite,
+                missing,
+                ..
+            } => QueryIdentity::TrackBatch(query, *favorite, *missing),
+            Self::PlaylistSummaryBatch { .. } => QueryIdentity::PlaylistSummaryBatch,
+            Self::PlaylistEntryBatch { playlist_id, .. } => {
+                QueryIdentity::PlaylistEntryBatch(*playlist_id)
+            }
+            Self::LibraryRootPage {
+                path,
+                query,
+                favorite,
+                missing,
+                sort,
+                ..
+            } => QueryIdentity::LibraryRootPage(path, query, *favorite, *missing, *sort),
+            Self::LibraryLocate {
+                track_id,
+                path,
+                tree,
+                query,
+                favorite,
+                missing,
+                sort,
+            } => QueryIdentity::LibraryLocate(
+                *track_id, path, *tree, query, *favorite, *missing, *sort,
+            ),
+            Self::LibraryRootCounts { roots } => QueryIdentity::LibraryRootCounts(roots),
+            Self::ScanTask { id } => QueryIdentity::ScanTask(*id),
+            Self::QueuePage { .. } => QueryIdentity::QueuePage,
+            Self::QueueBatch { .. } => QueryIdentity::QueueBatch,
+            Self::QueueEntries { queue_ids } => QueryIdentity::QueueEntries(queue_ids),
+            Self::PlaylistEntry { entry_id } => QueryIdentity::PlaylistEntry(*entry_id),
+            Self::DuplicateGroups { .. } => QueryIdentity::DuplicateGroups,
+            Self::DuplicateMembers { fingerprint, .. } => {
+                QueryIdentity::DuplicateMembers(fingerprint)
+            }
+            Self::RelocationTask { id } => QueryIdentity::RelocationTask(*id),
+            Self::DuplicateMemberSelection {
+                fingerprint,
+                track_ids,
+            } => QueryIdentity::DuplicateMemberSelection(fingerprint, track_ids),
+        }
+    }
+}
+
+impl LibrarySnapshot {
+    pub fn query_revisions(
+        &self,
+        queue_revision: u64,
+        playlist_id: Option<i64>,
+    ) -> crate::response::QueryRevisions {
+        crate::response::QueryRevisions {
+            library: self.revision,
+            structure: self.structure_revision,
+            playlist: self.playlist_revision,
+            queue: queue_revision,
+            duplicate_groups: self.duplicate_groups_revision,
+            duplicate_members: self.duplicate_members_revision,
+            playlist_entries: playlist_id.and_then(|id| {
+                self.playlist_entry_revisions.get(&id).map(|revision| {
+                    crate::response::PlaylistEntryRevision {
+                        playlist_id: id,
+                        revision: *revision,
+                    }
+                })
+            }),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

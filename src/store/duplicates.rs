@@ -202,6 +202,52 @@ impl Store {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(Page { total, rows })
     }
+    /// Bounded selected identities are facts, not a scan of uncached group pages.
+    pub fn duplicate_member_selection(
+        &self,
+        fingerprint: &str,
+        track_ids: &[i64],
+    ) -> Result<Page<DuplicateMember>> {
+        anyhow::ensure!(
+            track_ids.len() <= crate::model::MAX_QUERY_ROWS,
+            "Duplicate selection exceeds query limit"
+        );
+        let fingerprint = blake3::Hash::from_hex(fingerprint)
+            .context("Invalid duplicate group BLAKE3 fingerprint")?;
+        let mut query = self.conn.prepare(&format!(
+            "SELECT {TRACK_COLUMNS},file_size,modified_ns,
+                    (title_override IS NOT NULL OR artist_override IS NOT NULL
+                     OR album_override IS NOT NULL OR decoder_hint<>0),
+                    (SELECT COUNT(*) FROM playlist_entries WHERE track_id=tracks.id),
+                    (SELECT COUNT(*) FROM queue_entries WHERE track_id=tracks.id),
+                    relocation_independent
+             FROM tracks WHERE id IN (SELECT value FROM json_each(?2))
+             AND cue_sheet IS NULL AND fingerprint=?1 ORDER BY missing DESC,id"
+        ))?;
+        let rows = query
+            .query_map(
+                params![
+                    fingerprint.as_bytes().as_slice(),
+                    serde_json::to_string(track_ids)?
+                ],
+                |row| {
+                    Ok(DuplicateMember {
+                        track: track_from_row(row)?,
+                        file_size: row.get::<_, i64>(25)? as u64,
+                        modified_ns: row.get(26)?,
+                        has_overrides: row.get(27)?,
+                        playlist_references: row.get::<_, i64>(28)? as usize,
+                        queue_references: row.get::<_, i64>(29)? as usize,
+                        independent: row.get(30)?,
+                    })
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(Page {
+            total: rows.len(),
+            rows,
+        })
+    }
 
     pub fn keep_independent(&self, track_id: i64) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
@@ -519,6 +565,43 @@ mod tests {
         store.conn.execute_batch("DROP TRIGGER reject_relocation")?;
         store.commit_relocation(&prepared)?;
         assert!(store.track(2)?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn selected_member_facts_are_bounded_deduplicated_and_current() -> Result<()> {
+        let store = fixture()?;
+        let fingerprint = blake3::hash(b"same audio").to_hex().to_string();
+        let selected = store.duplicate_member_selection(&fingerprint, &[2, 1, 2, 999])?;
+        assert_eq!(
+            selected
+                .rows
+                .iter()
+                .map(|member| member.track.id)
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert_eq!(selected.total, 2);
+        store.enqueue_tracks(&[2])?;
+        store.create_playlist_with_tracks("target refs", &[2])?;
+        let selected = store.duplicate_member_selection(&fingerprint, &[2])?;
+        assert_eq!(selected.rows[0].queue_references, 1);
+        assert_eq!(selected.rows[0].playlist_references, 1);
+        assert!(store.prepare_relocation(1, 2).is_err());
+        assert!(
+            store
+                .duplicate_member_selection(
+                    &fingerprint,
+                    &vec![1; crate::model::MAX_QUERY_ROWS + 1]
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .duplicate_member_selection(blake3::hash(b"different").to_hex().as_ref(), &[1, 2])?
+                .rows
+                .is_empty()
+        );
         Ok(())
     }
 

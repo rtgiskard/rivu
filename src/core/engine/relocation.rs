@@ -238,7 +238,13 @@ impl Core {
                 Ok(()) => {
                     task.status.phase = RelocationPhase::Completed;
                     // The transaction is committed even if projection refresh fails.
-                    if let Err(error) = self.reload(true) {
+                    if let Err(error) = self.apply_scan_impacts(crate::store::ScanImpacts {
+                        changed: true,
+                        library: true,
+                        structure: true,
+                        duplicate_groups: true,
+                        duplicate_members: true,
+                    }) {
                         task.status.error = Some(format!(
                             "Relocation committed; refreshing views failed; some projections may be stale: {error:#}"
                         ));

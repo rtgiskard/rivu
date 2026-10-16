@@ -62,7 +62,7 @@ impl StateRevisions {
     }
 }
 
-/// A playlist's reorder token, scoped to its identity and the catalog epoch.
+/// A playlist's content/lifetime token, independent of the summary catalog.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlaylistEntryRevision {
     pub playlist_id: i64,
@@ -77,6 +77,8 @@ pub struct QueryRevisions {
     pub playlist: u64,
     pub queue: u64,
     pub playlist_entries: Option<PlaylistEntryRevision>,
+    pub duplicate_groups: u64,
+    pub duplicate_members: u64,
 }
 
 #[expect(

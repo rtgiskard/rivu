@@ -3,7 +3,7 @@ use super::rows::{
     LIBRARY_ROW_COLUMNS, LIBRARY_ROW_COLUMNS_QUALIFIED, TRACK_COLUMNS, library_row_at,
     library_row_from_row, track_from_row,
 };
-use super::{Store, batch_limit, changed};
+use super::{Store, batch_limit};
 use crate::model::{Batch, DecoderHint, HistoryEntry, Page, Track};
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -43,6 +43,19 @@ fn library_order(sort: crate::model::LibrarySort) -> &'static str {
 pub(crate) struct PreparedTrackRemoval<'a> {
     ids: &'a [i64],
     encoded: String,
+}
+
+/// Only committed deletion effects leave the transaction; no projection reads follow it.
+pub struct TrackRemovalImpact {
+    pub removed: usize,
+    pub playlists: Vec<i64>,
+    pub duplicate_groups: bool,
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TrackEditImpact {
+    pub changed: bool,
+    pub library: bool,
+    pub member_facts: bool,
 }
 
 /// Captured before loading audio; bitrate persistence must still match this source.
@@ -741,19 +754,28 @@ impl Store {
         artist: Option<&str>,
         album: Option<&str>,
         decoder_hint: Option<DecoderHint>,
-    ) -> Result<bool> {
+    ) -> Result<TrackEditImpact> {
         let tx = self.conn.unchecked_transaction()?;
-        let exists: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM tracks WHERE id=?1)",
-            [id],
-            |row| row.get(0),
-        )?;
-        changed(usize::from(exists), "track", id)?;
         let decoder_hint = decoder_hint.map(|hint| match hint {
             DecoderHint::Auto => 0,
             DecoderHint::Native => 1,
             DecoderHint::Ffmpeg => 2,
         });
+        let mut impact = tx.query_row(
+            "SELECT
+                ((?1 IS NOT NULL AND ?1 IS NOT COALESCE(title_override,raw_title))
+                 OR (?2 IS NOT NULL AND ?2 IS NOT COALESCE(artist_override,raw_artist))
+                 OR (?3 IS NOT NULL AND ?3 IS NOT COALESCE(album_override,raw_album))
+                 OR (?4 IS NOT NULL AND ?4 IS NOT decoder_hint)),
+                ((title_override IS NOT NULL OR artist_override IS NOT NULL
+                  OR album_override IS NOT NULL OR decoder_hint<>0)
+                 IS NOT
+                 (COALESCE(?1,title_override) IS NOT NULL OR COALESCE(?2,artist_override) IS NOT NULL
+                  OR COALESCE(?3,album_override) IS NOT NULL OR COALESCE(?4,decoder_hint)<>0))
+             FROM tracks WHERE id=?5",
+            params![title, artist, album, decoder_hint, id],
+            |row| Ok(TrackEditImpact { library: row.get(0)?, member_facts: row.get(1)?, ..Default::default() }),
+        ).optional()?.with_context(|| format!("track {id} does not exist"))?;
         let updated = tx.execute(
             "UPDATE tracks SET title_override=COALESCE(?1,title_override),
              artist_override=COALESCE(?2,artist_override),
@@ -766,10 +788,11 @@ impl Store {
             params![title, artist, album, decoder_hint, id],
         )?;
         tx.commit()?;
-        if updated != 0 {
+        impact.changed = updated != 0;
+        if impact.library {
             self.track_cache.borrow_mut().entries.remove(&id);
         }
-        Ok(updated != 0)
+        Ok(impact)
     }
     pub fn remove_tracks(&self, ids: &[i64]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
@@ -779,18 +802,30 @@ impl Store {
         Ok(())
     }
 
-    pub(crate) fn remove_prepared_tracks(&self, removal: PreparedTrackRemoval<'_>) -> Result<()> {
+    pub(crate) fn remove_prepared_tracks(
+        &self,
+        removal: PreparedTrackRemoval<'_>,
+    ) -> Result<TrackRemovalImpact> {
         let tx = self.conn.unchecked_transaction()?;
-        self.remove_track_rows(&tx, removal)?;
+        let removed = removal.ids.len();
+        let duplicate_groups = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tracks WHERE id IN (SELECT value FROM json_each(?1)) AND cue_sheet IS NULL AND fingerprint IS NOT NULL)",
+            [&removal.encoded], |row| row.get(0),
+        )?;
+        let playlists = self.remove_track_rows(&tx, removal)?;
         tx.commit()?;
-        Ok(())
+        Ok(TrackRemovalImpact {
+            removed,
+            playlists,
+            duplicate_groups,
+        })
     }
 
     fn remove_track_rows(
         &self,
         tx: &Transaction<'_>,
         removal: PreparedTrackRemoval<'_>,
-    ) -> Result<()> {
+    ) -> Result<Vec<i64>> {
         for id in removal.ids {
             self.track_cache.borrow_mut().entries.remove(id);
         }
@@ -813,14 +848,16 @@ impl Store {
             [&ids],
         )?;
         close_gaps(tx, &queue_positions, PositionScope::Queue)?;
+        let mut playlists = Vec::with_capacity(playlist_positions.len());
         for (playlist_id, positions) in playlist_positions {
             close_gaps(tx, &positions, PositionScope::Playlist(playlist_id))?;
+            playlists.push(playlist_id);
         }
         super::queue::invalidate_structure(tx, !queue_positions.is_empty())?;
-        Ok(())
+        Ok(playlists)
     }
 
-    pub fn remove_missing_tracks(&self) -> Result<bool> {
+    pub fn remove_missing_tracks(&self) -> Result<TrackRemovalImpact> {
         self.track_cache.borrow_mut().entries.clear();
         let tx = self.conn.unchecked_transaction()?;
         let queue_positions = tx
@@ -832,18 +869,28 @@ impl Store {
             "SELECT playlist_id,position FROM playlist_entries WHERE track_id IN (SELECT id FROM tracks WHERE missing=1) ORDER BY playlist_id,position",
             [],
         )?;
+        let duplicate_groups = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tracks WHERE missing=1 AND cue_sheet IS NULL AND fingerprint IS NOT NULL)",
+            [], |row| row.get(0),
+        )?;
         tx.execute(
             "DELETE FROM playlist_entries WHERE track_id IN (SELECT id FROM tracks WHERE missing=1)",
             [],
         )?;
         let removed = tx.execute("DELETE FROM tracks WHERE missing=1", [])?;
         close_gaps(&tx, &queue_positions, PositionScope::Queue)?;
+        let mut playlists = Vec::with_capacity(playlist_positions.len());
         for (playlist_id, positions) in playlist_positions {
             close_gaps(&tx, &positions, PositionScope::Playlist(playlist_id))?;
+            playlists.push(playlist_id);
         }
         super::queue::invalidate_structure(&tx, !queue_positions.is_empty())?;
         tx.commit()?;
-        Ok(removed != 0)
+        Ok(TrackRemovalImpact {
+            removed,
+            playlists,
+            duplicate_groups,
+        })
     }
     pub fn mark_played(&self, track: i64, at: i64) -> Result<super::TrackStats> {
         let stats = self
@@ -1060,7 +1107,7 @@ mod request_tests {
             [],
         )?;
         let original = store.track(1)?.unwrap();
-        assert!(!store.edit_track(1, None, None, None, None)?);
+        assert!(!store.edit_track(1, None, None, None, None)?.changed);
         assert_eq!(store.track(1)?.unwrap(), original);
         assert!(store.edit_track(999, None, None, None, None).is_err());
         assert!(
@@ -1068,20 +1115,67 @@ mod request_tests {
                 .edit_track(999, Some("Title"), None, None, None)
                 .is_err()
         );
-        assert!(store.edit_track(1, Some(""), Some("Override"), None, None)?);
+        assert!(
+            store
+                .edit_track(1, Some(""), Some("Override"), None, None)?
+                .changed
+        );
         let edited = store.track(1)?.unwrap();
         assert_eq!(
             (&*edited.title, &*edited.artist, &*edited.album),
             ("", "Override", "Album")
         );
-        assert!(!store.edit_track(1, Some(""), Some("Override"), None, None)?);
+        assert!(
+            !store
+                .edit_track(1, Some(""), Some("Override"), None, None)?
+                .changed
+        );
         assert_eq!(store.track(1)?.unwrap(), edited);
-        assert!(store.edit_track(1, None, None, Some("New album"), None)?);
+        assert!(
+            store
+                .edit_track(1, None, None, Some("New album"), None)?
+                .changed
+        );
         let edited = store.track(1)?.unwrap();
         assert_eq!(
             (&*edited.title, &*edited.artist, &*edited.album),
             ("", "Override", "New album")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn effective_noop_override_changes_member_facts_without_display_invalidation() -> Result<()> {
+        let store = Store::open(Path::new(":memory:"))?;
+        store.conn.execute(
+            "INSERT INTO tracks(id,path,raw_title,raw_album) VALUES(1,'one','Title','Album')",
+            [],
+        )?;
+        store.enqueue_tracks(&[1])?;
+        let track = store.track(1)?.unwrap();
+        let queue = store.queue_state()?;
+        assert_eq!(
+            store.edit_track(1, Some("Title"), None, None, None)?,
+            TrackEditImpact {
+                changed: true,
+                member_facts: true,
+                library: false,
+            }
+        );
+        assert_eq!(store.track(1)?.unwrap(), track);
+        assert_eq!(store.queue_state()?, queue);
+        assert_eq!(
+            store.edit_track(1, Some("Title"), None, None, None)?,
+            TrackEditImpact::default()
+        );
+        assert_eq!(
+            store.edit_track(1, None, None, Some("Album"), None)?,
+            TrackEditImpact {
+                changed: true,
+                ..Default::default()
+            }
+        );
+        assert_eq!(store.queue_state()?, queue);
         Ok(())
     }
 

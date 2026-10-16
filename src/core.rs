@@ -7,8 +7,8 @@ use crate::{
     model::*,
     projection::{GuiSnapshot, MprisSnapshot, TraySnapshot},
     response::{
-        Ack, PlaybackSnapshot, PlaylistEntryRevision, QueryError, QueryResponse, QueryRevisions,
-        StateResponse, StateRevisions, StateSections, ViewResponse,
+        Ack, PlaybackSnapshot, QueryError, QueryResponse, QueryRevisions, StateResponse,
+        StateRevisions, StateSections, ViewResponse,
     },
     store::Store,
 };
@@ -53,9 +53,7 @@ pub(crate) enum Navigation {
 pub(crate) enum GuiConfigChange {
     ToggleStillMode,
     ToggleWaveformSeek,
-    ToggleAlbumArtworkRotation,
     ToggleLibraryColumn(LibraryColumn),
-    AlbumArtworkStyle(crate::config::AlbumArtworkStyle),
     AddLibraryRoot(std::path::PathBuf),
     RemoveLibraryRoot(std::path::PathBuf),
     Settings(Config),
@@ -73,6 +71,7 @@ pub(crate) struct CoreState {
     pub(crate) playback: PlaybackState,
     pub(crate) system: SystemState,
     pub(crate) revisions: StateRevisions,
+    pub(crate) playlist_content_sequence: u64,
 }
 
 impl CoreState {
@@ -80,28 +79,12 @@ impl CoreState {
         self.current_track.as_deref()
     }
     pub(crate) fn query_revisions(&self) -> QueryRevisions {
-        QueryRevisions {
-            library: self.library.revision,
-            structure: self.library.structure_revision,
-            playlist: self.library.playlist_revision,
-            queue: self.queue.revision,
-            playlist_entries: None,
-        }
+        self.library.query_revisions(self.queue.revision, None)
     }
 
     pub(crate) fn playlist_query_revisions(&self, playlist_id: i64) -> QueryRevisions {
-        QueryRevisions {
-            playlist_entries: Some(PlaylistEntryRevision {
-                playlist_id,
-                revision: self
-                    .library
-                    .playlist_entry_revisions
-                    .get(&playlist_id)
-                    .copied()
-                    .unwrap_or(self.library.playlist_revision),
-            }),
-            ..self.query_revisions()
-        }
+        self.library
+            .query_revisions(self.queue.revision, Some(playlist_id))
     }
 
     /// Queue state is constant-size; Arc identity avoids traversing history/config.
@@ -120,6 +103,10 @@ impl CoreState {
             library: self.library.revision != previous.library.revision
                 || self.library.structure_revision != previous.library.structure_revision
                 || self.library.playlist_revision != previous.library.playlist_revision
+                || self.library.duplicate_groups_revision
+                    != previous.library.duplicate_groups_revision
+                || self.library.duplicate_members_revision
+                    != previous.library.duplicate_members_revision
                 || !Arc::ptr_eq(
                     &self.library.playlist_entry_revisions,
                     &previous.library.playlist_entry_revisions,
@@ -700,6 +687,15 @@ impl Core {
     fn load_initial_state(&mut self) -> Result<()> {
         self.state.library.track_total = self.store.track_count()?;
         self.state.library.playlist_total = self.store.playlist_summary_page(0, 0)?.total;
+        for id in self.store.playlist_ids()? {
+            self.state.playlist_content_sequence = self
+                .state
+                .playlist_content_sequence
+                .checked_add(1)
+                .expect("Playlist content revision exhausted");
+            Arc::make_mut(&mut self.state.library.playlist_entry_revisions)
+                .insert(id, self.state.playlist_content_sequence);
+        }
         self.state.library.history = Arc::new(self.store.history(MAX_QUERY_ROWS)?);
         self.state.system.devices = Arc::new(audio::devices().unwrap_or_default());
         self.state.system.ffmpeg_status = if self.state.system.config.ffmpeg_enabled {
@@ -965,14 +961,33 @@ mod tests {
             let (directory, mut core) = fixture_with_database(Some(10.0), true);
             if missing {
                 let path = core.track(2).unwrap().path;
-                core.store
+                let impacts = core
+                    .store
                     .apply_scan(&ScanResult {
                         roots: vec![path],
                         ..ScanResult::default()
                     })
                     .unwrap();
-                core.reload(true).unwrap();
+                core.apply_scan_impacts(impacts).unwrap();
             }
+            core.command(Command::CreatePlaylistWithTracks {
+                name: "Affected".into(),
+                track_ids: vec![2, 3],
+            })
+            .unwrap();
+            core.command(Command::CreatePlaylistWithTracks {
+                name: "Also affected".into(),
+                track_ids: vec![2, 4],
+            })
+            .unwrap();
+            core.command(Command::CreatePlaylistWithTracks {
+                name: "Unchanged".into(),
+                track_ids: vec![1, 3],
+            })
+            .unwrap();
+            let affected = core.state.playlist_query_revisions(1);
+            let also_affected = core.state.playlist_query_revisions(2);
+            let unchanged = core.state.playlist_query_revisions(3);
             // The injected change targets a surviving row, not a deletion-cache entry.
             core.store.set_track_cache_page_size(0);
             core.state.queue.current_id = Some(1);
@@ -1001,6 +1016,21 @@ mod tests {
             assert_eq!(committed.structure, before.structure + 1);
             assert_eq!(committed.playlist, before.playlist + 1);
             assert!(committed.queue > before.queue);
+            assert_ne!(
+                core.state.playlist_query_revisions(1).playlist_entries,
+                affected.playlist_entries
+            );
+            assert_ne!(
+                core.state.playlist_query_revisions(2).playlist_entries,
+                also_affected.playlist_entries
+            );
+            assert_eq!(
+                core.state.playlist_query_revisions(3).playlist_entries,
+                unchanged.playlist_entries
+            );
+            assert_eq!(core.store.playlist_track_ids(1, 10).unwrap(), [3]);
+            assert_eq!(core.store.playlist_track_ids(2, 10).unwrap(), [4]);
+            assert_eq!(core.store.playlist_track_ids(3, 10).unwrap(), [1, 3]);
             assert_eq!(core.state.library.track_total, 3);
             assert_eq!(core.queue_ids, [1, 4, 5]);
             assert!(Arc::ptr_eq(
@@ -1021,8 +1051,12 @@ mod tests {
         core.state.current_track = Some(Arc::new(track));
         core.save(false).unwrap();
         let current = Arc::clone(core.state.current_track.as_ref().unwrap());
-        let floor = core.state.library.playlist_revision + 8;
-        Arc::make_mut(&mut core.state.library.playlist_entry_revisions).insert(99, floor);
+        core.command(Command::CreatePlaylistWithTracks {
+            name: "Retained".into(),
+            track_ids: vec![1, 2],
+        })
+        .unwrap();
+        let scopes = Arc::clone(&core.state.library.playlist_entry_revisions);
         let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
         connection
             .execute_batch(
@@ -1057,9 +1091,12 @@ mod tests {
         assert!(missing);
         let committed = core.state.query_revisions();
         assert_eq!(committed.library, before.library + 1);
-        assert_eq!(committed.structure, before.structure + 1);
-        assert_eq!(committed.playlist, floor + 1);
-        assert!(core.state.library.playlist_entry_revisions.is_empty());
+        assert_eq!(committed.structure, before.structure);
+        assert_eq!(committed.playlist, before.playlist);
+        assert!(Arc::ptr_eq(
+            &core.state.library.playlist_entry_revisions,
+            &scopes
+        ));
         assert!(committed.queue > before.queue);
         assert!(Arc::ptr_eq(
             core.state.current_track.as_ref().unwrap(),
@@ -1068,52 +1105,97 @@ mod tests {
     }
 
     #[test]
-    fn catalog_count_failure_still_invalidates_all_domains_and_refreshes_queue() {
+    fn scan_count_failure_preserves_playlist_domains_and_still_refreshes_queue() {
         let (directory, mut core) = fixture_with_database(Some(10.0), true);
+        core.command(Command::CreatePlaylist {
+            name: "Retained".into(),
+        })
+        .unwrap();
         let history = Arc::clone(&core.state.library.history);
+        let scopes = Arc::clone(&core.state.library.playlist_entry_revisions);
         let before = core.state.query_revisions();
-        let floor = before.playlist + 9;
-        Arc::make_mut(&mut core.state.library.playlist_entry_revisions).insert(99, floor);
-        core.store.create_playlist("Committed playlist").unwrap();
+        let media = core
+            .store
+            .stored_scan_files(&[directory.path().to_path_buf()])
+            .unwrap()[0]
+            .media
+            .clone()
+            .unwrap();
+        let impacts = core
+            .store
+            .apply_scan(&ScanResult {
+                records: vec![ScanRecord {
+                    path: directory.path().join("committed.wav"),
+                    cue: None,
+                    size: 1,
+                    modified_ns: 1,
+                    fingerprint: Some(blake3::hash(b"committed fingerprint").to_hex().to_string()),
+                    media,
+                }],
+                ..ScanResult::default()
+            })
+            .unwrap();
+        assert!(impacts.library && impacts.structure);
+        // Commit a queued display change too, so observing its DB token proves
+        // that queue refresh is still attempted after the count read fails.
         core.store
-            .edit_track(1, Some("Committed title"), None, None, None)
+            .edit_track(1, Some("Committed queued title"), None, None, None)
             .unwrap();
         let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
-        // Remove the first count's source after the writes, using a separate fixture connection.
+        // Remove the count's source after the insertion commits.
         connection
             .execute_batch("PRAGMA foreign_keys=OFF; DROP TABLE tracks;")
             .unwrap();
-        let error = core.reload(true).unwrap_err();
+        let error = core.apply_scan_impacts(impacts).unwrap_err();
         assert!(format!("{error:#}").contains("no such table: tracks"));
         let after = core.state.query_revisions();
-        assert_eq!(after.library, before.library + 1);
-        assert_eq!(after.structure, before.structure + 1);
-        assert_eq!(after.playlist, floor + 1);
-        assert!(core.state.library.playlist_entry_revisions.is_empty());
+        assert_ne!(after.library, before.library);
+        assert_ne!(after.structure, before.structure);
+        assert_eq!(
+            after.duplicate_groups != before.duplicate_groups,
+            impacts.duplicate_groups
+        );
+        assert_eq!(
+            after.duplicate_members != before.duplicate_members,
+            impacts.duplicate_members
+        );
+        assert_eq!(after.playlist, before.playlist);
+        assert!(Arc::ptr_eq(
+            &core.state.library.playlist_entry_revisions,
+            &scopes
+        ));
         assert_eq!(core.state.library.track_total, 4);
         assert_eq!(core.state.library.playlist_total, 1);
         assert!(Arc::ptr_eq(&core.state.library.history, &history));
-        assert!(after.queue > before.queue);
+        assert_ne!(after.queue, before.queue);
         assert_eq!(core.state.queue, core.store.queue_state().unwrap());
     }
 
     #[test]
-    fn playlist_count_failure_resets_scoped_epoch_before_read() {
+    fn playlist_creation_count_failure_keeps_the_committed_lifetime_registered() {
         let (directory, mut core) = fixture_with_database(Some(10.0), true);
         let before = core.state.query_revisions();
-        let floor = before.playlist + 7;
-        Arc::make_mut(&mut core.state.library.playlist_entry_revisions).insert(99, floor);
-        core.store.create_playlist("Committed playlist").unwrap();
+        let playlist_id = core.store.create_playlist("Committed playlist").unwrap();
         let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
         connection
             .execute_batch("PRAGMA foreign_keys=OFF; DROP TABLE playlists;")
             .unwrap();
-        let error = core.reload_playlists().unwrap_err();
+        let error = core.playlist_created(playlist_id, false).unwrap_err();
         assert!(error.to_string().contains("Playlist change committed"));
-        assert_eq!(core.state.library.playlist_revision, floor + 1);
-        assert!(core.state.library.playlist_entry_revisions.is_empty());
+        assert_ne!(core.state.library.playlist_revision, before.playlist);
+        assert!(
+            core.state
+                .library
+                .playlist_entry_revisions
+                .contains_key(&playlist_id)
+        );
+        assert_eq!(core.state.library.playlist_entry_revisions.len(), 1);
         assert_eq!(core.state.library.playlist_total, 0);
         assert_eq!(core.state.library.revision, before.library);
+        assert_eq!(
+            core.state.library.duplicate_members_revision,
+            before.duplicate_members
+        );
         assert_eq!(core.state.queue.revision, before.queue);
     }
 
@@ -1204,12 +1286,14 @@ mod tests {
                 }
             })
             .collect();
-        core.store
+        let impacts = core
+            .store
             .apply_scan(&ScanResult {
                 records,
                 ..ScanResult::default()
             })
             .unwrap();
+        core.apply_scan_impacts(impacts).unwrap();
         let known = core
             .store
             .stored_scan_files(&[directory.path().to_path_buf()])
@@ -1225,13 +1309,14 @@ mod tests {
             .unwrap()
             .track_id;
         std::fs::remove_file(&paths[0]).unwrap();
-        core.store
+        let impacts = core
+            .store
             .apply_scan(&ScanResult {
                 roots: vec![paths[0].clone()],
                 ..ScanResult::default()
             })
             .unwrap();
-        core.reload(true).unwrap();
+        core.apply_scan_impacts(impacts).unwrap();
         assert!(core.track(source).unwrap().missing);
         (directory, core, source, target)
     }
@@ -1432,7 +1517,8 @@ mod tests {
                 .find(|file| file.track_id == changed_id)
                 .unwrap();
             let changed_path = known.path.clone();
-            core.store
+            let impacts = core
+                .store
                 .apply_scan(&ScanResult {
                     records: vec![ScanRecord {
                         path: known.path,
@@ -1449,13 +1535,16 @@ mod tests {
                     ..ScanResult::default()
                 })
                 .unwrap();
+            core.apply_scan_impacts(impacts).unwrap();
             if change_source {
-                core.store
+                let impacts = core
+                    .store
                     .apply_scan(&ScanResult {
                         roots: vec![changed_path],
                         ..ScanResult::default()
                     })
                     .unwrap();
+                core.apply_scan_impacts(impacts).unwrap();
             }
             core.relocation_event(event);
             assert_eq!(
@@ -2129,8 +2218,9 @@ mod tests {
         core.refresh_queue_tracks().unwrap();
         core.command(Command::CreatePlaylist { name: "Mix".into() })
             .unwrap();
-        // Creating an override is persistent intent even when its display value matches.
+        // Creating an equal-value override changes member facts, not display payload.
         let before = core.state.query_revisions();
+        let before_current = Arc::clone(core.state.current_track.as_ref().unwrap());
         core.command(Command::EditTrack {
             track_id: 1,
             title: Some("Track 1".into()),
@@ -2139,8 +2229,19 @@ mod tests {
             decoder_hint: None,
         })
         .unwrap();
-        assert_ne!(core.state.library.revision, before.library);
-        assert_eq!(core.state.queue.revision, before.queue);
+        let created = core.state.query_revisions();
+        assert_ne!(created.duplicate_members, before.duplicate_members);
+        assert_eq!(
+            QueryRevisions {
+                duplicate_members: before.duplicate_members,
+                ..created
+            },
+            before
+        );
+        assert!(Arc::ptr_eq(
+            core.state.current_track.as_ref().unwrap(),
+            &before_current
+        ));
         core.publish();
         let revisions = core.state.query_revisions();
         let sections = core.state.revisions;
@@ -2299,7 +2400,7 @@ mod tests {
                 .collect(),
             ..ScanResult::default()
         };
-        core.store.apply_scan(&result).unwrap();
+        let impacts = core.store.apply_scan(&result).unwrap();
         let ids: Vec<_> = core
             .store
             .stored_scan_files(&[directory.path().to_path_buf()])
@@ -2328,7 +2429,7 @@ mod tests {
             .map(|entry| entry.track_id)
             .collect();
         assert_eq!(initial, expected);
-        core.reload_catalog(false).unwrap();
+        core.apply_scan_impacts(impacts).unwrap();
         let refreshed: Vec<_> = core
             .state
             .library
@@ -2374,6 +2475,7 @@ mod tests {
                     name: "empty".into(),
                 },
                 1,
+                false,
             ),
             (
                 Command::CreatePlaylistWithTracks {
@@ -2381,6 +2483,7 @@ mod tests {
                     track_ids: vec![1, 2],
                 },
                 2,
+                true,
             ),
             (
                 Command::RenamePlaylist {
@@ -2388,6 +2491,7 @@ mod tests {
                     name: "renamed".into(),
                 },
                 2,
+                false,
             ),
             (
                 Command::AddPlaylist {
@@ -2395,6 +2499,7 @@ mod tests {
                     track_ids: vec![3],
                 },
                 2,
+                true,
             ),
             (
                 Command::AddPlaylistSources {
@@ -2403,16 +2508,24 @@ mod tests {
                     track_ids: vec![4],
                 },
                 2,
+                true,
             ),
-            (Command::RemovePlaylistEntry { entry_id: 1 }, 2),
-            (Command::DeletePlaylist { playlist_id: 1 }, 1),
-            (Command::DeletePlaylist { playlist_id: 2 }, 0),
+            (Command::RemovePlaylistEntry { entry_id: 1 }, 2, true),
+            (Command::DeletePlaylist { playlist_id: 1 }, 1, false),
+            (Command::DeletePlaylist { playlist_id: 2 }, 0, true),
         ];
-        for (command, total) in operations {
+        for (command, total, members_changed) in operations {
             let before = core.state.query_revisions();
             core.command(command).unwrap();
             core.publish();
             assert_eq!(core.state.library.playlist_total, total);
+            let after = core.state.query_revisions();
+            assert_eq!(after.library, track_revision.library);
+            assert_eq!(after.duplicate_groups, before.duplicate_groups);
+            assert_eq!(
+                after.duplicate_members != before.duplicate_members,
+                members_changed
+            );
             assert_eq!(
                 core.state.query_revisions().structure,
                 track_revision.structure
@@ -2452,6 +2565,12 @@ mod tests {
         let (directory, mut core) = fixture();
         core.store.set_queue_current(Some(1)).unwrap();
         core.refresh_queue_tracks().unwrap();
+        core.command(Command::CreatePlaylistWithTracks {
+            name: "retained".into(),
+            track_ids: vec![2, 3],
+        })
+        .unwrap();
+        let retained = core.state.playlist_query_revisions(1);
         let result = ScanResult {
             roots: vec![directory.path().to_path_buf()],
             records: core
@@ -2499,9 +2618,18 @@ mod tests {
             assert_eq!(after.library, before.library);
             assert_eq!(after.structure, before.structure);
             assert_eq!(after.queue, before.queue);
+            let other = core.query_response(&Query::PlaylistEntryBatch {
+                playlist_id: 1,
+                after: None,
+                limit: 2,
+                expected: Some(retained),
+            });
+            assert!(other.result.is_ok());
+            assert_eq!(other.revisions.playlist_entries, retained.playlist_entries);
             if import {
                 assert_ne!(after.playlist, before.playlist);
-                let playlist = core.store.playlist_summary_page(0, 1).unwrap().rows[0].id;
+                assert_ne!(after.duplicate_members, before.duplicate_members);
+                let playlist = core.store.playlist_summary_page(1, 1).unwrap().rows[0].id;
                 assert_eq!(core.store.playlist_track_ids(playlist, 10).unwrap(), [1]);
             } else {
                 assert_eq!(after, before);
@@ -2733,12 +2861,14 @@ mod tests {
                 }),
                 media: media.clone(),
             };
-            core.store
+            let impacts = core
+                .store
                 .apply_scan(&ScanResult {
                     records: vec![old],
                     ..ScanResult::default()
                 })
                 .unwrap();
+            core.apply_scan_impacts(impacts).unwrap();
             let old_id = core
                 .store
                 .track_id_for_source(&sheet, Some(1))
@@ -3629,8 +3759,16 @@ mod tests {
             serde_json::to_value(core.query_response(&summaries)).unwrap(),
             serde_json::to_value(&catalog).unwrap(),
         );
-        assert!(old_snapshot.library.playlist_entry_revisions.is_empty());
-        assert_eq!(core.state.library.playlist_entry_revisions.len(), 1);
+        assert_eq!(old_snapshot.library.playlist_entry_revisions.len(), 2);
+        assert_eq!(core.state.library.playlist_entry_revisions.len(), 2);
+        assert_ne!(
+            old_snapshot.library.playlist_entry_revisions.get(&1),
+            core.state.library.playlist_entry_revisions.get(&1)
+        );
+        assert_eq!(
+            old_snapshot.library.playlist_entry_revisions.get(&2),
+            core.state.library.playlist_entry_revisions.get(&2)
+        );
         assert_eq!(core.state.query_revisions(), catalog.revisions);
         assert_eq!(
             core.view(&batch(1, continuation, Some(first.revisions)))
@@ -3702,7 +3840,7 @@ mod tests {
     }
 
     #[test]
-    fn playlist_catalog_epochs_and_metadata_reject_old_entry_results() {
+    fn playlist_catalog_changes_preserve_unrelated_content_and_metadata_has_its_own_stamp() {
         let (_directory, mut core) = fixture();
         core.command(Command::CreatePlaylistWithTracks {
             name: "one".into(),
@@ -3730,20 +3868,37 @@ mod tests {
             })
             .unwrap();
             let expected = core.state.playlist_query_revisions(1);
+            let content_changed = matches!(
+                command,
+                Command::AddPlaylist { .. }
+                    | Command::RemovePlaylistEntry { .. }
+                    | Command::DeletePlaylist { .. }
+            );
             core.command(command).unwrap();
             assert_ne!(core.state.library.playlist_revision, expected.playlist);
             assert_eq!(core.state.library.revision, expected.library);
-            assert!(core.state.library.playlist_entry_revisions.is_empty());
+            let current = core.state.playlist_query_revisions(1);
             assert_eq!(
-                core.view(&Query::PlaylistEntryBatch {
-                    playlist_id: 1,
-                    after: None,
-                    limit: 1,
-                    expected: Some(expected),
-                })
-                .unwrap_err(),
-                QueryError::RevisionChanged
+                current.duplicate_members != expected.duplicate_members,
+                content_changed
             );
+            assert_eq!(
+                core.state.library.playlist_entry_revisions.len(),
+                core.store.playlist_ids().unwrap().len()
+            );
+            let query = Query::PlaylistEntryBatch {
+                playlist_id: 1,
+                after: None,
+                limit: 1,
+                expected: Some(expected),
+            };
+            if content_changed {
+                assert_ne!(current.playlist_entries, expected.playlist_entries);
+                assert_eq!(core.view(&query).unwrap_err(), QueryError::RevisionChanged);
+            } else {
+                assert_eq!(current.playlist_entries, expected.playlist_entries);
+                assert!(core.view(&query).is_ok());
+            }
         }
         core.command(Command::AddPlaylist {
             playlist_id: 2,
@@ -3779,6 +3934,140 @@ mod tests {
             matches!(response.result, Ok(ViewResponse::PlaylistEntries(page))
             if page.rows[0].title == "edited")
         );
+    }
+
+    #[test]
+    fn playlist_lifecycles_only_invalidate_member_facts_for_committed_members() {
+        for (command, has_members, empty_queue) in [
+            (
+                Command::CreatePlaylist {
+                    name: "empty".into(),
+                },
+                false,
+                false,
+            ),
+            (
+                Command::CreatePlaylistWithTracks {
+                    name: "empty tracks".into(),
+                    track_ids: vec![],
+                },
+                false,
+                false,
+            ),
+            (
+                Command::CreatePlaylistWithTracks {
+                    name: "tracks".into(),
+                    track_ids: vec![1, 2, 1],
+                },
+                true,
+                false,
+            ),
+            (
+                Command::CreatePlaylistFromQueue {
+                    name: "queue".into(),
+                },
+                true,
+                false,
+            ),
+            (
+                Command::CreatePlaylistFromQueue {
+                    name: "empty queue".into(),
+                },
+                false,
+                true,
+            ),
+        ] {
+            let (_directory, mut core) = fixture();
+            core.command(Command::CreatePlaylistWithTracks {
+                name: "unaffected".into(),
+                track_ids: vec![3, 4],
+            })
+            .unwrap();
+            if empty_queue {
+                core.command(Command::ClearQueue).unwrap();
+            }
+            let unaffected = core.state.playlist_query_revisions(1);
+            let other_query = Query::PlaylistEntryBatch {
+                playlist_id: 1,
+                after: None,
+                limit: 2,
+                expected: Some(unaffected),
+            };
+            let members_query = Query::DuplicateMembers {
+                fingerprint: blake3::hash(b"lifecycle facts").to_hex().to_string(),
+                offset: 0,
+                limit: 10,
+            };
+            for invalid in [
+                Command::CreatePlaylistWithTracks {
+                    name: "invalid track".into(),
+                    track_ids: vec![1, i64::MAX],
+                },
+                Command::DeletePlaylist {
+                    playlist_id: i64::MAX,
+                },
+                Command::RenamePlaylist {
+                    playlist_id: i64::MAX,
+                    name: "invalid".into(),
+                },
+            ] {
+                assert!(core.command(invalid).is_err());
+                assert_eq!(core.state.playlist_query_revisions(1), unaffected);
+                assert_eq!(core.state.library.playlist_total, 1);
+                assert!(core.view(&other_query).is_ok());
+            }
+            let playlist_query = Query::PlaylistEntries {
+                playlist_id: 2,
+                offset: 0,
+                limit: 10,
+            };
+            let members_before = core.query_response(&members_query);
+            assert!(members_before.result.is_ok());
+            let before = members_before.revisions;
+            core.command(command).unwrap();
+            let created = core.query_response(&playlist_query);
+            let Ok(ViewResponse::PlaylistEntries(page)) = created.result else {
+                panic!("expected committed playlist");
+            };
+            assert_eq!(page.total != 0, has_members);
+            assert!(created.revisions.playlist_entries.is_some());
+            assert_eq!(core.state.library.playlist_total, 2);
+            for deleting in [false, true] {
+                let previous = if deleting {
+                    core.command(Command::DeletePlaylist { playlist_id: 2 })
+                        .unwrap();
+                    created.revisions
+                } else {
+                    before
+                };
+                let members_after = core.query_response(&members_query);
+                assert!(members_after.result.is_ok());
+                let after = members_after.revisions;
+                assert_eq!(after.library, previous.library);
+                assert_eq!(after.structure, previous.structure);
+                assert_eq!(after.queue, previous.queue);
+                assert_eq!(after.duplicate_groups, previous.duplicate_groups);
+                assert_ne!(after.playlist, previous.playlist);
+                assert_eq!(
+                    after.duplicate_members != previous.duplicate_members,
+                    has_members
+                );
+                assert_eq!(
+                    members_query.stamp(after) != members_query.stamp(previous),
+                    has_members
+                );
+                let other = core.query_response(&other_query);
+                assert!(other.result.is_ok());
+                assert_eq!(
+                    other.revisions.playlist_entries,
+                    unaffected.playlist_entries
+                );
+            }
+            let deleted = core.query_response(&playlist_query);
+            assert!(deleted.result.is_err());
+            assert!(deleted.revisions.playlist_entries.is_none());
+            assert_eq!(core.state.library.playlist_total, 1);
+        }
     }
 
     #[test]
@@ -3833,6 +4122,7 @@ mod tests {
         })
         .unwrap();
         let expected = core.state.query_revisions();
+        let entry_expected = core.state.playlist_query_revisions(1);
         let queries = [
             Query::TrackBatch {
                 query: None,
@@ -3851,7 +4141,7 @@ mod tests {
                 playlist_id: 1,
                 after: None,
                 limit: 0,
-                expected: Some(expected),
+                expected: Some(entry_expected),
             },
         ];
         for query in &queries {
@@ -3862,15 +4152,16 @@ mod tests {
             name: "renamed".into(),
         })
         .unwrap();
-        // Track traversal ignores playlist-only changes; its invalid limit is
-        // still a normal request error. Both playlist lanes reject stale data.
-        assert!(matches!(
-            core.view(&queries[0]),
-            Err(QueryError::Message(_))
-        ));
-        for query in &queries[1..] {
-            assert_eq!(core.view(query).unwrap_err(), QueryError::RevisionChanged);
+        // A stale relevant dependency wins over the invalid limit. Rename changes
+        // only summaries; track and entry rows still report the invalid request.
+        assert_eq!(
+            core.view(&queries[1]).unwrap_err(),
+            QueryError::RevisionChanged
+        );
+        for query in [&queries[0], &queries[2]] {
+            assert!(matches!(core.view(query), Err(QueryError::Message(_))));
         }
+        let renamed = core.state.query_revisions();
         core.command(Command::SetFavorite {
             track_ids: vec![1],
             favorite: true,
@@ -3879,6 +4170,30 @@ mod tests {
         for query in &queries {
             assert_eq!(core.view(query).unwrap_err(), QueryError::RevisionChanged);
         }
+        // With a current catalog baseline, stale L alone is irrelevant to summaries.
+        assert!(matches!(
+            core.view(&Query::PlaylistSummaryBatch {
+                after: None,
+                limit: 0,
+                expected: Some(renamed),
+            }),
+            Err(QueryError::Message(_))
+        ));
+        let entry_expected = core.state.playlist_query_revisions(1);
+        let entry_id = core.store.playlist_entries_page(1, 0, 1).unwrap().rows[0].id;
+        core.command(Command::MovePlaylistEntry { entry_id, index: 1 })
+            .unwrap();
+        // Entry content staleness also takes priority independently of metadata.
+        assert_eq!(
+            core.view(&Query::PlaylistEntryBatch {
+                playlist_id: 1,
+                after: None,
+                limit: 0,
+                expected: Some(entry_expected),
+            })
+            .unwrap_err(),
+            QueryError::RevisionChanged
+        );
     }
 
     fn settle_scan(core: &mut Core) -> bool {
@@ -3939,6 +4254,99 @@ mod tests {
         assert_eq!(before, after);
         assert_ne!(core.active_scan.as_ref().unwrap().status.id, id);
         assert!(settle_scan(&mut core));
+    }
+
+    #[test]
+    fn verification_only_scan_invalidates_member_facts_not_display_or_playlist_pages() {
+        let (_directory, mut core) = fixture();
+        let known = core
+            .store
+            .known_source(&core.track(1).unwrap().path)
+            .unwrap()
+            .unwrap();
+        let mut record = ScanRecord {
+            path: known.path,
+            cue: known.cue,
+            size: known.size,
+            modified_ns: known.modified_ns,
+            fingerprint: Some(blake3::hash(b"same encoded audio").to_hex().to_string()),
+            media: known.media.unwrap(),
+        };
+        let impacts = core
+            .store
+            .apply_scan(&ScanResult {
+                records: vec![record.clone()],
+                ..Default::default()
+            })
+            .unwrap();
+        core.apply_scan_impacts(impacts).unwrap();
+        core.command(Command::CreatePlaylistWithTracks {
+            name: "Retained".into(),
+            track_ids: vec![1, 2],
+        })
+        .unwrap();
+        let track = core.track(1).unwrap();
+        let history = Arc::clone(&core.state.library.history);
+        let scopes = Arc::clone(&core.state.library.playlist_entry_revisions);
+        let before = core.state.query_revisions();
+        record.modified_ns += 1;
+        let fingerprint = record.fingerprint.clone().unwrap();
+        assert!(
+            core.finish_scan(ScanFinished {
+                id: 1,
+                result: Ok(ScanResult {
+                    records: vec![record],
+                    ..Default::default()
+                }),
+                import: None,
+                progress: ScanProgress {
+                    phase: ScanPhase::Saving,
+                    processed: 1,
+                    total: Some(1),
+                    errors: 0,
+                    path: None
+                },
+            })
+            .unwrap()
+        );
+        let after = core.state.query_revisions();
+        assert_eq!(
+            (
+                after.library,
+                after.structure,
+                after.playlist,
+                after.queue,
+                after.duplicate_groups
+            ),
+            (
+                before.library,
+                before.structure,
+                before.playlist,
+                before.queue,
+                before.duplicate_groups
+            )
+        );
+        assert_ne!(after.duplicate_members, before.duplicate_members);
+        assert_eq!(core.track(1).unwrap(), track);
+        assert!(Arc::ptr_eq(&history, &core.state.library.history));
+        assert!(Arc::ptr_eq(
+            &scopes,
+            &core.state.library.playlist_entry_revisions
+        ));
+        let query = Query::DuplicateMembers {
+            fingerprint,
+            offset: 0,
+            limit: 10,
+        };
+        assert_ne!(query.stamp(after), query.stamp(before));
+        let QueryResponse {
+            result: Ok(ViewResponse::DuplicateMembers(members)),
+            ..
+        } = core.query_response(&query)
+        else {
+            panic!("expected current member facts");
+        };
+        assert_eq!(members.rows[0].modified_ns, known.modified_ns + 1);
     }
 
     #[test]
@@ -4559,7 +4967,8 @@ mod tests {
             .unwrap();
         media.bitrate_bps = Some(128_000);
         media.bitrate_exact = false;
-        core.store
+        let impacts = core
+            .store
             .apply_scan(&ScanResult {
                 records: vec![ScanRecord {
                     path: track.path,
@@ -4577,6 +4986,7 @@ mod tests {
                 ..ScanResult::default()
             })
             .unwrap();
+        core.apply_scan_impacts(impacts).unwrap();
         core.store.clear_queue().unwrap();
         core.reload_queue().unwrap();
         core.enqueue(&[1]).unwrap();
@@ -4808,12 +5218,17 @@ mod tests {
         );
     }
     #[test]
-    fn reload_refreshes_current_track_activity_and_probe_metadata() {
+    fn committed_impacts_refresh_current_track_activity_and_probe_metadata() {
         let (directory, mut core) = fixture();
         core.store.set_queue_current(Some(1)).unwrap();
         core.refresh_queue_tracks().unwrap();
         core.store.mark_played(1, 7).unwrap();
-        core.reload(false).unwrap();
+        core.apply_scan_impacts(crate::store::ScanImpacts {
+            changed: true,
+            library: true,
+            ..Default::default()
+        })
+        .unwrap();
         assert_eq!(core.state.current_track().unwrap().last_played, Some(7));
 
         let known = core
@@ -4826,7 +5241,8 @@ mod tests {
         let mut media = known.media.unwrap();
         media.codec = "updated-codec".into();
         media.sample_rate = 96_000;
-        core.store
+        let impacts = core
+            .store
             .apply_scan(&ScanResult {
                 roots: vec![directory.path().to_path_buf()],
                 suppressed_sources: Vec::new(),
@@ -4845,7 +5261,7 @@ mod tests {
                 errors: Vec::new(),
             })
             .unwrap();
-        core.reload(true).unwrap();
+        core.apply_scan_impacts(impacts).unwrap();
         let current = core.state.current_track().unwrap();
         assert_eq!(current.codec, "updated-codec");
         assert_eq!(current.sample_rate, 96_000);
@@ -5195,13 +5611,15 @@ mod tests {
         std::fs::write(&kept_path, b"Do not delete").unwrap();
         let playlist_id = core.store.create_playlist("Mixed availability").unwrap();
         core.store.add_playlist(playlist_id, &[1, 2]).unwrap();
-        core.store
+        core.playlist_created(playlist_id, true).unwrap();
+        let impacts = core
+            .store
             .apply_scan(&ScanResult {
                 roots: vec![core.track(2).unwrap().path.clone()],
                 ..ScanResult::default()
             })
             .unwrap();
-        core.reload(true).unwrap();
+        core.apply_scan_impacts(impacts).unwrap();
         playing(&mut core, 2);
         core.played = vec![1, 2, 3];
         core.played_cursor = 2;
@@ -5252,8 +5670,8 @@ mod tests {
         .unwrap();
         let probed_title = scanned.records[0].media.title.clone();
         scanned.records[0].media.title = "Cached metadata".into();
-        core.store.apply_scan(&scanned).unwrap();
-        core.reload(true).unwrap();
+        let impacts = core.store.apply_scan(&scanned).unwrap();
+        core.apply_scan_impacts(impacts).unwrap();
         for (force, expected) in [(false, "Cached metadata"), (true, probed_title.as_str())] {
             core.command(Command::Scan {
                 paths: vec![path.clone()],
@@ -5613,13 +6031,15 @@ mod tests {
                 },
             })
             .collect();
-        core.store
+        let impacts = core
+            .store
             .apply_scan(&ScanResult {
                 roots: vec![directory.path().into()],
                 records,
                 ..ScanResult::default()
             })
             .unwrap();
+        core.apply_scan_impacts(impacts).unwrap();
         let key = crate::model::AlbumKey {
             directory: directory.path().into(),
             title: "Large".into(),
@@ -5743,12 +6163,14 @@ mod tests {
                 let (directory, mut core) = fixture_with_database(Some(10.0), true);
                 if missing {
                     let path = core.track(2).unwrap().path;
-                    core.store
+                    let impacts = core
+                        .store
                         .apply_scan(&ScanResult {
                             roots: vec![path],
                             ..ScanResult::default()
                         })
                         .unwrap();
+                    core.apply_scan_impacts(impacts).unwrap();
                 }
                 playing(&mut core, 3);
                 match status {
@@ -5761,6 +6183,7 @@ mod tests {
                     .store
                     .create_playlist_with_tracks("Keep", &[1, 2])
                     .unwrap();
+                core.playlist_created(playlist, true).unwrap();
                 let connection =
                     rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
                 connection
@@ -5837,12 +6260,14 @@ mod tests {
                 let (_directory, mut core) = fixture();
                 if missing {
                     let path = core.track(1).unwrap().path;
-                    core.store
+                    let impacts = core
+                        .store
                         .apply_scan(&ScanResult {
                             roots: vec![path],
                             ..ScanResult::default()
                         })
                         .unwrap();
+                    core.apply_scan_impacts(impacts).unwrap();
                 }
                 playing(&mut core, 3);
                 match status {
@@ -5851,12 +6276,19 @@ mod tests {
                     PlaybackStatus::Playing => {}
                 }
                 let generation = core.generation;
+                let before = core.state.query_revisions();
+                let scopes = Arc::clone(&core.state.library.playlist_entry_revisions);
                 let command = if missing {
                     Command::RemoveMissingTracks
                 } else {
                     Command::RemoveTracks { track_ids: vec![1] }
                 };
                 core.command(command).unwrap();
+                assert_eq!(core.state.query_revisions().playlist, before.playlist);
+                assert!(Arc::ptr_eq(
+                    &core.state.library.playlist_entry_revisions,
+                    &scopes
+                ));
                 assert_eq!(core.state.playback.status, status);
                 assert_eq!(core.generation, generation);
                 assert_eq!(core.state.queue.current_id, Some(3));
@@ -6178,7 +6610,7 @@ mod tests {
         playing(&mut core, 1);
         let playlist_id = core.store.create_playlist("missing").unwrap();
         core.store.add_playlist(playlist_id, &[2]).unwrap();
-        core.reload(true).unwrap();
+        core.playlist_created(playlist_id, true).unwrap();
         let error = core
             .command(Command::PlayPlaylist { playlist_id })
             .unwrap_err();

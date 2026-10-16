@@ -11,6 +11,25 @@ use std::path::{Path, PathBuf};
 // Bump when probing semantics change; fingerprints remain reusable.
 const PROBE_VERSION: i64 = 3;
 
+/// Semantic facts changed by one committed scan transaction.
+///
+/// Callers publish each affected projection once, rather than treating `changed`
+/// as a catalog reload request. Duplicate members also depend on `library` and
+/// `duplicate_groups`; `duplicate_members` covers their extra verification facts.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct ScanImpacts {
+    /// Any persisted track write, including hidden raw metadata and probe state.
+    pub changed: bool,
+    /// Effective full Track values (raw metadata hidden by overrides is excluded).
+    pub library: bool,
+    /// Track insertion or a changed path/CUE identity; missing is not removal.
+    pub structure: bool,
+    /// Ordinary fingerprint membership or present/missing grouping facts.
+    pub duplicate_groups: bool,
+    /// Size/mtime verification facts for fingerprinted ordinary members.
+    pub duplicate_members: bool,
+}
+
 // Keep equality and descendant branches separate so both path indexes can seek.
 // A slash-terminated prefix has the exclusive BINARY upper bound ending in '0'.
 const SCAN_SCOPE_IDS: &str = "
@@ -155,7 +174,7 @@ impl Store {
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?)
     }
-    pub fn apply_scan(&self, result: &ScanResult) -> Result<bool> {
+    pub fn apply_scan(&self, result: &ScanResult) -> Result<ScanImpacts> {
         for r in &result.records {
             if r.path.to_str().is_none() {
                 bail!("scan path is not UTF-8: {}", r.path.display());
@@ -491,6 +510,50 @@ impl Store {
              )",
             [i64::MIN],
         )?;
+        // Compare against the final staged values, including playback enrichment,
+        // while the old rows and their overrides are still available. These flags
+        // describe changed dependencies, not hashes of materialized query results.
+        let mut impacts = tx.query_row(
+            "SELECT
+                COALESCE(MAX(t.id IS NULL OR t.path IS NOT s.path
+                    OR t.fingerprint IS NOT s.fingerprint
+                    OR COALESCE(t.title_override,t.raw_title) IS NOT COALESCE(t.title_override,s.raw_title)
+                    OR COALESCE(t.artist_override,t.raw_artist) IS NOT COALESCE(t.artist_override,s.raw_artist)
+                    OR COALESCE(t.album_override,t.raw_album) IS NOT COALESCE(t.album_override,s.raw_album)
+                    OR t.duration IS NOT s.duration OR t.codec IS NOT s.codec
+                    OR t.channels IS NOT s.channels OR t.sample_rate IS NOT s.sample_rate
+                    OR t.cue_sheet IS NOT s.cue_sheet OR t.cue_number IS NOT s.cue_number
+                    OR t.cue_start_frame IS NOT s.cue_start_frame
+                    OR t.cue_end_frame IS NOT s.cue_end_frame OR t.missing IS NOT 0
+                    OR t.bitrate_bps IS NOT s.bitrate_bps OR t.bitrate_exact IS NOT s.bitrate_exact
+                    OR t.track_number IS NOT s.track_number OR t.disc_number IS NOT s.disc_number
+                    OR t.bits_per_sample IS NOT s.bits_per_sample
+                    OR t.release_date IS NOT s.release_date),0),
+                COALESCE(MAX(t.id IS NULL OR t.path IS NOT s.path
+                    OR t.cue_sheet IS NOT s.cue_sheet OR t.cue_number IS NOT s.cue_number),0),
+                COALESCE(MAX(
+                    ((t.cue_sheet IS NULL AND t.fingerprint IS NOT NULL)
+                        OR (s.cue_sheet IS NULL AND s.fingerprint IS NOT NULL))
+                    AND (t.id IS NULL OR t.fingerprint IS NOT s.fingerprint
+                        OR (t.cue_sheet IS NULL)<>(s.cue_sheet IS NULL)
+                        OR t.missing IS NOT 0)),0),
+                COALESCE(MAX(
+                    ((t.cue_sheet IS NULL AND t.fingerprint IS NOT NULL)
+                        OR (s.cue_sheet IS NULL AND s.fingerprint IS NOT NULL))
+                    AND (t.id IS NULL OR t.file_size IS NOT s.file_size
+                        OR t.modified_ns IS NOT s.modified_ns)),0)
+             FROM temp.scan_stage AS s LEFT JOIN tracks AS t ON t.id=s.resolved_id",
+            [],
+            |row| {
+                Ok(ScanImpacts {
+                    library: row.get(0)?,
+                    structure: row.get(1)?,
+                    duplicate_groups: row.get(2)?,
+                    duplicate_members: row.get(3)?,
+                    ..ScanImpacts::default()
+                })
+            },
+        )?;
         let mut changed_tracks = tx.execute(
             "UPDATE tracks SET
                 path=s.path,fingerprint=s.fingerprint,file_size=s.file_size,modified_ns=s.modified_ns,
@@ -547,21 +610,27 @@ impl Store {
                     || absent_ordinary.contains(&o.id))
                 && !unconfirmed(o)
             {
-                changed_tracks += mark_missing.execute([o.id])?;
+                let changed = mark_missing.execute([o.id])?;
+                changed_tracks += changed;
+                if changed != 0 {
+                    impacts.library = true;
+                    impacts.duplicate_groups |= o.cue.is_none() && o.hash.is_some();
+                }
             }
         }
         drop(mark_missing);
         tx.commit()?;
-        if changed_tracks != 0 {
+        impacts.changed = changed_tracks != 0;
+        if impacts.library {
             self.track_cache.borrow_mut().entries.clear();
         }
-        Ok(changed_tracks != 0)
+        Ok(impacts)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PROBE_VERSION, Store};
+    use super::{PROBE_VERSION, ScanImpacts, Store};
     use crate::library::{ScanRecord, ScanResult};
     use crate::model::{CueSegment, MediaInfo};
     use std::path::Path;
@@ -598,10 +667,104 @@ mod tests {
             records: vec![record],
             ..ScanResult::default()
         };
-        assert!(store.apply_scan(&scan).unwrap());
+        assert!(store.apply_scan(&scan).unwrap().changed);
         store.enqueue_sources(&["/music".into()], &[]).unwrap();
         let id = store.queue_page(0, 10).unwrap().rows[0].track_id;
         (store, scan, id)
+    }
+
+    #[test]
+    fn inserts_report_identity_and_only_applicable_duplicate_impacts() {
+        for (cue, fingerprint) in [(false, true), (false, false), (true, true)] {
+            let store = Store::open(Path::new(":memory:")).unwrap();
+            let mut record = record();
+            if cue {
+                record.cue = Some(CueSegment {
+                    sheet: "/music/album.cue".into(),
+                    number: 1,
+                    start_frame: 0,
+                    end_frame: Some(4500),
+                });
+            }
+            if !fingerprint {
+                record.fingerprint = None;
+            }
+            let scan = ScanResult {
+                roots: vec!["/music".into()],
+                records: vec![record],
+                ..ScanResult::default()
+            };
+            assert_eq!(
+                store.apply_scan(&scan).unwrap(),
+                ScanImpacts {
+                    changed: true,
+                    library: true,
+                    structure: true,
+                    duplicate_groups: !cue && fingerprint,
+                    duplicate_members: !cue && fingerprint,
+                }
+            );
+            assert_eq!(store.apply_scan(&scan).unwrap(), ScanImpacts::default());
+        }
+    }
+
+    #[test]
+    fn verification_only_rescans_change_members_without_evicting_tracks() {
+        let (store, mut scan, id) = queued(record());
+        let track = store.track(id).unwrap().unwrap();
+        let page = store.queue_page(0, 10).unwrap();
+        let state = store.queue_state().unwrap();
+        for mtime_only in [true, false] {
+            if mtime_only {
+                scan.records[0].modified_ns += 1;
+            } else {
+                scan.records[0].size += 1;
+            }
+            assert_eq!(
+                store.apply_scan(&scan).unwrap(),
+                ScanImpacts {
+                    changed: true,
+                    duplicate_members: true,
+                    ..ScanImpacts::default()
+                }
+            );
+            assert!(store.track_cache.borrow().entries.contains_key(&id));
+            assert_eq!(store.track(id).unwrap().unwrap(), track);
+            assert_eq!(store.queue_state().unwrap(), state);
+            assert_eq!(store.queue_page(0, 10).unwrap(), page);
+            let member = store
+                .duplicate_members_page(scan.records[0].fingerprint.as_deref().unwrap(), 0, 10)
+                .unwrap()
+                .rows
+                .remove(0);
+            assert_eq!(member.file_size, scan.records[0].size);
+            assert_eq!(member.modified_ns, scan.records[0].modified_ns);
+            assert_eq!(store.apply_scan(&scan).unwrap(), ScanImpacts::default());
+        }
+    }
+
+    #[test]
+    fn ordinary_fingerprint_changes_affect_grouping_but_not_structure() {
+        let (store, mut scan, id) = queued(record());
+        for fingerprint in [
+            None,
+            Some(blake3::hash(b"replacement").to_hex().to_string()),
+        ] {
+            scan.records[0].fingerprint = fingerprint;
+            assert_eq!(
+                store.apply_scan(&scan).unwrap(),
+                ScanImpacts {
+                    changed: true,
+                    library: true,
+                    duplicate_groups: true,
+                    ..ScanImpacts::default()
+                }
+            );
+            assert_eq!(
+                store.track(id).unwrap().unwrap().fingerprint,
+                scan.records[0].fingerprint
+            );
+        }
     }
 
     #[test]
@@ -618,7 +781,7 @@ mod tests {
         let state = store.queue_state().unwrap();
         let track = store.track(id).unwrap().unwrap();
         for _ in 0..2 {
-            assert!(!store.apply_scan(&scan).unwrap());
+            assert_eq!(store.apply_scan(&scan).unwrap(), ScanImpacts::default());
             assert_eq!(store.queue_state().unwrap(), state);
             assert_eq!(store.queue_page(0, 10).unwrap(), page);
             assert_eq!(store.track(id).unwrap().unwrap(), track);
@@ -634,7 +797,14 @@ mod tests {
         scan.records[0].media.artist = "Changed artist".into();
         scan.records[0].media.album = "Changed album".into();
         scan.records[0].media.codec = "flac".into();
-        store.apply_scan(&scan).unwrap();
+        assert_eq!(
+            store.apply_scan(&scan).unwrap(),
+            ScanImpacts {
+                changed: true,
+                library: true,
+                ..ScanImpacts::default()
+            }
+        );
         assert!(store.queue_state().unwrap().revision > state.revision);
         let after = store.queue_page(0, 10).unwrap().rows.remove(0);
         assert_eq!(
@@ -646,7 +816,7 @@ mod tests {
         assert_eq!(after.track.album, "Changed album");
         assert_eq!(after.track.codec, "flac");
         let state = store.queue_state().unwrap();
-        store.apply_scan(&scan).unwrap();
+        assert_eq!(store.apply_scan(&scan).unwrap(), ScanImpacts::default());
         assert_eq!(store.queue_state().unwrap(), state);
         assert_eq!(store.queue_page(0, 10).unwrap().rows[0], after);
     }
@@ -665,10 +835,18 @@ mod tests {
             .unwrap();
         let page = store.queue_page(0, 10).unwrap();
         let state = store.queue_state().unwrap();
+        store.track(id).unwrap();
         scan.records[0].media.title = "New raw title".into();
         scan.records[0].media.artist = "New raw artist".into();
         scan.records[0].media.album = "New raw album".into();
-        store.apply_scan(&scan).unwrap();
+        assert_eq!(
+            store.apply_scan(&scan).unwrap(),
+            ScanImpacts {
+                changed: true,
+                ..ScanImpacts::default()
+            }
+        );
+        assert!(store.track_cache.borrow().entries.contains_key(&id));
         assert_eq!(store.queue_state().unwrap(), state);
         assert_eq!(store.queue_page(0, 10).unwrap(), page);
         let known = store.stored_scan_files(&scan.roots).unwrap();
@@ -747,21 +925,27 @@ mod tests {
             roots: scan.roots.clone(),
             ..ScanResult::default()
         };
-        store.apply_scan(&missing).unwrap();
+        let expected = ScanImpacts {
+            changed: true,
+            library: true,
+            duplicate_groups: true,
+            ..ScanImpacts::default()
+        };
+        assert_eq!(store.apply_scan(&missing).unwrap(), expected);
         let state = store.queue_state().unwrap();
         assert!(state.revision > initial.revision);
         let row = store.queue_page(0, 10).unwrap().rows.remove(0);
         assert_eq!(row.id, page.rows[0].id);
         assert_eq!(row.track_id, id);
         assert!(row.track.missing);
-        store.apply_scan(&missing).unwrap();
+        assert_eq!(store.apply_scan(&missing).unwrap(), ScanImpacts::default());
         assert_eq!(store.queue_state().unwrap(), state);
         assert_eq!(store.queue_page(0, 10).unwrap().rows[0], row);
-        store.apply_scan(&scan).unwrap();
+        assert_eq!(store.apply_scan(&scan).unwrap(), expected);
         let recovered = store.queue_state().unwrap();
         assert!(recovered.revision > state.revision);
         assert_eq!(store.queue_page(0, 10).unwrap(), page);
-        store.apply_scan(&scan).unwrap();
+        assert_eq!(store.apply_scan(&scan).unwrap(), ScanImpacts::default());
         assert_eq!(store.queue_state().unwrap(), recovered);
         assert_eq!(store.queue_page(0, 10).unwrap(), page);
     }
@@ -818,7 +1002,15 @@ mod tests {
         let cue = record.cue.as_mut().unwrap();
         cue.start_frame = 75;
         cue.end_frame = None;
-        store.apply_scan(&scan).unwrap();
+        assert_eq!(
+            store.apply_scan(&scan).unwrap(),
+            ScanImpacts {
+                changed: true,
+                library: true,
+                structure: true,
+                ..ScanImpacts::default()
+            }
+        );
         assert_eq!(store.queue_state().unwrap(), state);
         assert_eq!(store.queue_page(0, 10).unwrap(), page);
         let track = store.track(id).unwrap().unwrap();
@@ -847,7 +1039,14 @@ mod tests {
                 .media
                 .is_none()
         );
-        store.apply_scan(&scan).unwrap();
+        assert_eq!(
+            store.apply_scan(&scan).unwrap(),
+            ScanImpacts {
+                changed: true,
+                ..ScanImpacts::default()
+            }
+        );
+        assert!(store.track_cache.borrow().entries.contains_key(&id));
         assert!(
             store.stored_scan_files(&scan.roots).unwrap()[0]
                 .media
@@ -911,6 +1110,7 @@ mod tests {
                     ..ScanResult::default()
                 })
                 .unwrap()
+                .changed
         );
         let known = store.known_source(&path).unwrap().unwrap();
         assert!(known.cue.is_none());
@@ -960,23 +1160,31 @@ mod tests {
             records: vec![original.clone()],
             ..ScanResult::default()
         };
-        assert!(store.apply_scan(&scan).unwrap());
+        assert_eq!(
+            store.apply_scan(&scan).unwrap(),
+            ScanImpacts {
+                changed: true,
+                library: true,
+                structure: true,
+                ..ScanImpacts::default()
+            }
+        );
         assert_eq!(
             store.track_id_for_source(&original.path, None).unwrap(),
             Some(id)
         );
         assert!(store.track(id).unwrap().unwrap().favorite);
         assert!(!store.track(unrelated_id).unwrap().unwrap().missing);
-        assert!(!store.apply_scan(&scan).unwrap());
+        assert!(!store.apply_scan(&scan).unwrap().changed);
         let absent = ScanResult {
             roots: vec![requested],
             ..ScanResult::default()
         };
-        assert!(store.apply_scan(&absent).unwrap());
+        assert!(store.apply_scan(&absent).unwrap().changed);
         assert!(store.track(id).unwrap().unwrap().missing);
         assert!(!store.track(unrelated_id).unwrap().unwrap().missing);
-        assert!(!store.apply_scan(&absent).unwrap());
-        assert!(store.apply_scan(&scan).unwrap());
+        assert!(!store.apply_scan(&absent).unwrap().changed);
+        assert!(store.apply_scan(&scan).unwrap().changed);
         assert!(!store.track(id).unwrap().unwrap().missing);
     }
 
@@ -1006,7 +1214,7 @@ mod tests {
             uncertainties: vec![crate::library::ScanUncertainty::File(original.path.clone())],
             ..ScanResult::default()
         };
-        assert!(store.apply_scan(&scan).unwrap());
+        assert!(store.apply_scan(&scan).unwrap().changed);
         assert_eq!(store.track(id).unwrap().unwrap(), before);
         let new_id = store
             .track_id_for_source(&replacement.path, None)
@@ -1101,7 +1309,7 @@ mod tests {
             let groups = store.duplicate_groups_page(0, 10).unwrap();
             assert_eq!(groups.rows[0].missing_members, 1);
             assert_eq!(groups.rows[0].present_members, 2);
-            assert!(!store.apply_scan(&scan).unwrap());
+            assert!(!store.apply_scan(&scan).unwrap().changed);
             assert_eq!(store.track(id).unwrap().unwrap(), retained);
         }
     }

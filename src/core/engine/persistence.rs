@@ -19,15 +19,7 @@ impl Core {
             GuiConfigChange::ToggleWaveformSeek => {
                 config.waveform_seek_enabled = !config.waveform_seek_enabled
             }
-            GuiConfigChange::ToggleAlbumArtworkRotation => {
-                use crate::config::AlbumArtworkMode;
-                config.album_artwork_mode = match config.album_artwork_mode {
-                    AlbumArtworkMode::Static => AlbumArtworkMode::Rotating,
-                    AlbumArtworkMode::Rotating => AlbumArtworkMode::Static,
-                };
-            }
             GuiConfigChange::ToggleLibraryColumn(column) => config.library_columns.toggle(column),
-            GuiConfigChange::AlbumArtworkStyle(style) => config.album_artwork_style = style,
             GuiConfigChange::AddLibraryRoot(path) => {
                 let path = library::logical_path(&path)?;
                 if config.library_roots.contains(&path) {
@@ -163,71 +155,51 @@ impl Core {
         entry.play_count = track.play_count;
     }
 
-    pub(in crate::core) fn reload_playlists(&mut self) -> Result<()> {
-        self.invalidate_playlists();
-        self.state.library.playlist_total = self
-            .store
-            .playlist_summary_page(0, 0)
-            .context("Playlist change committed, but refreshing playlists failed; previous projection retained")?
-            .total;
-        Ok(())
-    }
-
-    fn invalidate_playlists(&mut self) {
-        // The catalog epoch is also the floor for scalar entry tokens. Advancing
-        // past every scoped token prevents an old command becoming valid after reset.
-        self.state.library.playlist_revision = self
-            .state
-            .library
-            .playlist_entry_revisions
-            .values()
-            .copied()
-            .max()
-            .unwrap_or(self.state.library.playlist_revision)
-            .max(self.state.library.playlist_revision)
-            .wrapping_add(1);
-        // Retention is bounded by playlists reordered within this catalog epoch.
-        if !self.state.library.playlist_entry_revisions.is_empty() {
-            self.state.library.playlist_entry_revisions = Arc::default();
+    /// Announce committed producer facts before any fallible cached projection read.
+    pub(in crate::core) fn apply_scan_impacts(
+        &mut self,
+        impacts: crate::store::ScanImpacts,
+    ) -> Result<()> {
+        if impacts.library {
+            self.state.library.revision = self.state.library.revision.wrapping_add(1);
         }
-    }
-
-    pub(in crate::core) fn reload_catalog(&mut self, structure_changed: bool) -> Result<()> {
-        // Announce every committed domain before reading any fallible projection.
-        self.state.library.revision = self.state.library.revision.wrapping_add(1);
-        if structure_changed {
+        if impacts.structure {
             self.state.library.structure_revision =
                 self.state.library.structure_revision.wrapping_add(1);
         }
-        self.invalidate_playlists();
-        let library = self
-            .store
-            .track_count()
-            .map(|total| {
-                self.state.library.track_total = total;
-            })
-            .context("Refreshing library count failed; previous count retained");
-        let playlists = self
-            .store
-            .playlist_summary_page(0, 0)
-            .map(|page| {
-                self.state.library.playlist_total = page.total;
-            })
-            .context("Refreshing playlist count failed; previous count retained");
-        let history = self
-            .store
-            .history(MAX_QUERY_ROWS)
-            .map(|history| {
-                self.state.library.history = Arc::new(history);
-            })
-            .context("Refreshing history failed; previous history retained");
-        library.and(playlists).and(history)
-    }
-
-    pub(in crate::core) fn reload(&mut self, structure_changed: bool) -> Result<()> {
-        let catalog = self.reload_catalog(structure_changed);
-        // A failed catalog projection cannot hide a committed queue revision.
-        let queue = self.refresh_queue_tracks();
-        catalog.and(queue)
+        if impacts.duplicate_groups {
+            self.state.library.duplicate_groups_revision =
+                self.state.library.duplicate_groups_revision.wrapping_add(1);
+        }
+        if impacts.duplicate_members {
+            self.state.library.duplicate_members_revision = self
+                .state
+                .library
+                .duplicate_members_revision
+                .wrapping_add(1);
+        }
+        let library = if impacts.structure {
+            self.store
+                .track_count()
+                .map(|total| self.state.library.track_total = total)
+                .context("Refreshing library count failed; previous count retained")
+        } else {
+            Ok(())
+        };
+        let history = if impacts.library {
+            self.store
+                .history(MAX_QUERY_ROWS)
+                .map(|history| self.state.library.history = Arc::new(history))
+                .context("Refreshing history failed; previous history retained")
+        } else {
+            Ok(())
+        };
+        // A failed projection read cannot hide another committed domain.
+        let queue = if impacts.library {
+            self.refresh_queue_tracks()
+        } else {
+            Ok(())
+        };
+        library.and(history).and(queue)
     }
 }

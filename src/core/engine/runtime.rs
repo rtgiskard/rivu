@@ -243,38 +243,24 @@ impl Core {
             }
             _ => self.state.query_revisions(),
         };
-        if let Query::QueueBatch {
-            expected: Some(expected),
-            ..
-        } = query
-            && expected.queue != current.queue
-        {
-            return Err(QueryError::RevisionChanged);
-        }
-        let (expected, playlist) = match query {
-            Query::TrackBatch { expected, .. } => (*expected, false),
-            Query::PlaylistSummaryBatch { expected, .. }
-            | Query::PlaylistEntryBatch { expected, .. } => (*expected, true),
-            _ => (None, false),
+        let expected = match query {
+            Query::TrackBatch { expected, .. }
+            | Query::PlaylistSummaryBatch { expected, .. }
+            | Query::PlaylistEntryBatch { expected, .. }
+            | Query::QueueBatch { expected, .. } => *expected,
+            _ => None,
         };
-        if let Some(expected) = expected
-            && (expected.library != current.library
-                || (playlist && expected.playlist != current.playlist))
-        {
-            return Err(QueryError::RevisionChanged);
-        }
-        if let Query::PlaylistEntryBatch {
-            after,
-            expected: Some(expected),
-            ..
-        } = query
-            && match expected.playlist_entries {
-                Some(revision) => Some(revision) != current.playlist_entries,
-                // A catalog baseline may start an entry traversal, never continue it.
-                None => after.is_some(),
+        if let Some(mut expected) = expected {
+            if let Query::PlaylistEntryBatch { after, .. } = query
+                && expected.playlist_entries.is_none()
+                && after.is_none()
+            {
+                // A non-scoped baseline can begin, never continue, a traversal.
+                expected.playlist_entries = current.playlist_entries;
             }
-        {
-            return Err(QueryError::RevisionChanged);
+            if query.stamp(expected) != query.stamp(current) {
+                return Err(QueryError::RevisionChanged);
+            }
         }
         Ok(match query {
             Query::Albums {
@@ -304,6 +290,13 @@ impl Core {
                 *offset,
                 (*limit).min(MAX_QUERY_ROWS),
             )?),
+            Query::DuplicateMemberSelection {
+                fingerprint,
+                track_ids,
+            } => ViewResponse::DuplicateMembers(
+                self.store
+                    .duplicate_member_selection(fingerprint, track_ids)?,
+            ),
             Query::RelocationTask { id } => ViewResponse::RelocationTask(
                 self.active_relocation
                     .as_ref()

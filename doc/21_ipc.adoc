@@ -219,7 +219,7 @@ The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
 Bodies use Postcard serialization without COBS framing. The current protocol
-version is `23`; clients and servers must use matching wire schemas. The four-byte
+version is `24`; clients and servers must use matching wire schemas. The four-byte
 frame length remains little-endian; body integers follow Postcard's encoding.
 Configuration state and Configure commands include the presentation language
 (`ui_language`: `auto`, `en-US`, or `zh-CN`). Language selection does not translate
@@ -368,23 +368,34 @@ Reapplying identical metadata or favorites, including a forced scan that keeps
 the same displayed values, does not advance the queue content revision.
 Raw title, artist, or album changes hidden by overrides also leave queue content
 valid when their effective display values are unchanged.
-Unchanged scans preserve library, structure and playlist query revisions, while
-scan status and requested playlist imports still complete. Empty or existing-only
-playlist additions and same-position moves preserve playlist query validity;
-missing identities still fail validation.
+Scans reduce committed changes into effective-track, structure, duplicate-group,
+and duplicate-member verification impacts. A size/mtime-only change to a
+fingerprinted ordinary file advances member facts, not library, structure, or
+playlist tokens. Raw metadata hidden by overrides and probe bookkeeping do not
+invalidate effective-track pages. Scan status and requested playlist imports
+still complete. Empty or existing-only playlist additions and same-position
+moves preserve playlist query validity; missing identities still fail validation.
+An explicit override equal to the displayed raw value can still change override
+presence, which advances duplicate member facts without invalidating display rows.
+Reapplying that stored override is a true no-op. This distinction preserves user
+override ownership without treating bookkeeping as changed metadata.
+Playlist creation and deletion advance duplicate member facts only when the created
+or deleted collection has members. Empty collection lifecycles, rename, and reorder
+do not advance those facts. Lifecycle publication uses the committed write's effect
+or validated creation input, without an additional membership count read.
 
-The Library section carries the catalog/membership epoch `playlist_revision` and
-`playlist_entry_revisions`, a playlist-ID-keyed map of reorder equality tokens.
-An actual entry move advances only its owning playlist's token: catalog summaries,
-other playlists, and library-content/structure tokens remain valid. It does not
-read catalog totals. Repeated moves reuse the same map key. Catalog/membership
-changes advance the epoch and clear scoped tokens, so the map contains at most
-the extant playlists reordered since that epoch. An absent key uses the catalog
-epoch as its entry token. Catalog changes advance the epoch past all scoped tokens
-before clearing the map, so a previously issued scalar mutation token cannot
-become valid again after a membership change. Consumers still compare both tokens.
-Every reorder still advances the Library state-section token so external clients and coalesced watches
-receive the affected playlist identity, not just a GUI-local command hint.
+The Library section carries the summary catalog token `playlist_revision` and
+`playlist_entry_revisions`, a playlist-ID-keyed map containing exactly the extant
+playlists. Each value is a content/lifetime equality token issued independently
+of the catalog. Creation registers a fresh token; deletion removes it. A missing
+key means the playlist is unavailable, never a fallback to the catalog token.
+Actual membership changes and reorders advance only the owning content token;
+membership also changes summary counts. Rename changes only the summary token.
+The issuer survives deletion, so an old scalar mutation token cannot become valid
+again after another collection is created. Retention is bounded by extant
+playlists, with no per-track version table or mutation event log.
+Every scoped change advances the Library state-section token, so coalesced
+watches receive current scoped validity, not just a GUI-local command hint.
 
 Playback-statistics writes return count and activity time directly to the Core.
 The bounded track cache and current/recent snapshots receive these scalar changes
@@ -398,17 +409,28 @@ next request; disconnect or server shutdown terminates the wait.
 == Query results and pagination
 
 Query responses contain the requested projection and its data revisions, not a
-full client state or queue snapshot. Rows and query revisions come from the same
-core dispatch. Library-content, directory-structure, playlist-catalog, per-playlist
-entry-order, and queue-content revisions are separate from the four state-section
-tokens. Entry page/batch, scoped `PlaylistEntryLocations` responses (including empty
-results), and successful single-entry location responses attach
-`revisions.playlist_entries = {playlist_id, revision}`; other queries and missing
-single-entry lookups attach no entry token. Consumers compare entry identity/token
-plus library-content and catalog epoch before accepting late entry results. A missing
-single-entry lookup also requires its captured target and revision baseline to remain
-current. Command acknowledgements contain success or an error and the core's
-publication revision, not replacement state.
+full client state or queue snapshot. Rows and revisions are captured in the same
+core dispatch. Publication sequence, four state-section tokens, query-data
+tokens, and consumer request generations have distinct responsibilities.
+
+`Query::stamp` is the sole query dependency contract for scheduling, projection
+identity, result acceptance, and batch validation. Effective-track queries use
+library content; directory/album/location projections also use structure.
+Root counts use structure only. Playlist summaries use the summary catalog only;
+full entry rows use library content plus their scoped content/lifetime token;
+compact entry locations use only their scoped token. Queue queries use queue
+content. Duplicate groups use `duplicate_groups`; members use library,
+`duplicate_members`, and queue content. Playlist reference changes advance member
+facts, while playlist names and order do not.
+
+Entry pages/batches and scoped `PlaylistEntryLocations` (including empty results)
+attach `revisions.playlist_entries = {playlist_id, revision}` when the collection
+exists. Missing scoped collections attach no token and fail the query. Successful
+standalone single-entry lookups attach the discovered scope; missing lookups have
+none, so selection relocation uses the explicitly scoped locations query.
+Consumer generations independently reject abandoned identity/intent submissions;
+fresh data cannot authorize an obsolete operation. Acknowledgements carry success
+or error plus publication revision, never replacement state.
 
 Playlist entry page and batch rows include `favorite`, the current library
 track's boolean favorite state. Favorite changes invalidate library-content
@@ -460,10 +482,10 @@ without changing membership or positions. Duplicate selected IDs are applied
 once. Empty selections still validate the playlist, revision, and move target;
 valid empty selections and other no-ops do not advance revisions. Mutations are
 SQL transactions retaining only selected identities and positions, not complete
-playlist metadata or an all-entry vector. Actual group moves advance only their playlist's
-scoped token; group removal advances the membership epoch. The existing
-single-entry commands retain their distinct CLI contracts. Bulk favorites use
-the atomic `SetFavorite {track_ids, favorite}` or `ToggleFavorite {track_ids}`
+playlist metadata or an all-entry vector. Actual group moves advance only their
+playlist's scoped token; removal advances that token and summary counts, without
+invalidating other collections. Existing single-entry commands retain their CLI
+contracts. Bulk favorites use the atomic `SetFavorite {track_ids, favorite}` or `ToggleFavorite {track_ids}`
 commands. Toggle reads and reverses each track's current favorite state in one
 transaction; repeated track IDs toggle once, and any unknown ID rejects the
 whole request without changes.
@@ -521,6 +543,16 @@ playback. Empty or stale keys fail without replacing the queue. Both commands
 resolve all current members in the backend independently of page limits; clients
 must not collect paged track IDs to perform album actions.
 
+`DuplicateGroups` pages ordinary-file groups by cached fingerprint and reports
+present/missing counts. `DuplicateMembers {fingerprint, offset, limit}` returns
+full track, size/mtime verification, override/independent, and playlist/queue
+reference facts. `DuplicateMemberSelection {fingerprint, track_ids}` resolves at
+most 256 selected member IDs to the same facts, omitting deleted, foreign-group,
+and CUE identities and deduplicating repeats. This bounded lookup validates
+off-page choices without scanning a group or treating cache eviction as deletion.
+Fresh cached fingerprints are not a substitute for relocation's final source
+and target identity/content verification.
+
 `LibraryRootPage` returns the same display projection and filtered total as
 `LibraryPage`, scoped recursively to one root. It preserves the library's search,
 favorite/missing filters, and sort order. Root paths use the existing lexical
@@ -539,26 +571,23 @@ Library-content-only changes do not invalidate these unfiltered root totals.
 These requests run on the same core owner and revision boundary as other queries;
 frontends must not query storage from rendering.
 
-To traverse consistently, the caller captures the first batch's query revisions
-and supplies them as `expected` on later requests. Track batches check library
-content; playlist-summary batches check library content and the catalog epoch.
-Playlist-entry batches additionally check their playlist-specific entry token;
-reordering a different playlist does not interrupt traversal. A catalog baseline
-without an entry token may start an entry traversal (`after = None`), but cannot
-continue one. The CLI retains its catalog baseline while capturing each
-playlist's entry baseline separately. A mismatch returns the typed
-`QueryError::RevisionChanged`; clients must match that variant, not parse
-diagnostic text. Other query failures return `QueryError::Message`. Without
-`expected`, the server does not enforce traversal consistency. This uses bounded
-results and explicit restart rather than retaining a database snapshot for an
-arbitrarily slow client.
+To traverse consistently, capture the first batch's query revisions and supply
+them as `expected` on later requests. The same query-owned stamp validates
+track batches (library), playlist-summary batches (catalog only), queue batches
+(queue only), and playlist-entry batches (library plus scoped content/lifetime).
+Renaming or changing another playlist cannot interrupt an entry traversal. A
+catalog baseline without an entry token may start an entry traversal
+(`after = None`) with unchanged library content, but cannot continue one. The CLI
+retains its summary baseline while capturing each playlist's entry baseline
+separately. A mismatch returns typed `QueryError::RevisionChanged`; clients match
+the variant, not diagnostic text. Other failures return `QueryError::Message`.
+Without `expected`, the server does not reserve consistency between requests.
+This uses bounded results and explicit restart, not a database snapshot retained
+for an arbitrarily slow client.
 
-Playlist-only edits leave library-content and directory-structure revisions
-unchanged, so an existing track traversal remains valid. Catalog/membership edits
-advance the playlist epoch; pure reorders advance only the affected entry token.
-Importing a playlist can still invalidate track queries because its scan updates
-the library before the playlist is created. If playlist creation fails after a
-successful scan, the committed library changes remain visible.
+Playlist-only edits leave library and structure tokens unchanged. Imports can
+still invalidate track queries when their scan changes effective library facts.
+If creation fails after a successful scan, those committed changes remain visible.
 
 == Request failures and completion
 

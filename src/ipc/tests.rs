@@ -82,20 +82,28 @@ fn scan_task_query_and_cancel_wire_round_trip_preserve_id() {
 
 #[test]
 fn playlist_group_requests_and_locations_round_trip_stable_identities() {
-    let query = Query::PlaylistEntryLocations {
-        playlist_id: 10,
-        entry_ids: vec![42, i64::MAX, 42],
-    };
-    let expected = serde_json::to_value(&query).unwrap();
     let mut encoded = Vec::new();
-    encode_request_frame_into(&WireRequest::Query(WireQuery::from(query)), &mut encoded).unwrap();
-    let WireRequest::Query(wire) = decode_request_frame(&encoded[4..]).unwrap() else {
-        panic!("expected query");
-    };
-    assert_eq!(
-        serde_json::to_value(Query::try_from(wire).unwrap()).unwrap(),
-        expected
-    );
+    for query in [
+        Query::PlaylistEntryLocations {
+            playlist_id: 10,
+            entry_ids: vec![42, i64::MAX, 42],
+        },
+        Query::DuplicateMemberSelection {
+            fingerprint: blake3::hash(b"selected facts").to_hex().to_string(),
+            track_ids: vec![42, i64::MAX, 42],
+        },
+    ] {
+        let expected = serde_json::to_value(&query).unwrap();
+        encode_request_frame_into(&WireRequest::Query(WireQuery::from(query)), &mut encoded)
+            .unwrap();
+        let WireRequest::Query(wire) = decode_request_frame(&encoded[4..]).unwrap() else {
+            panic!("expected query");
+        };
+        assert_eq!(
+            serde_json::to_value(Query::try_from(wire).unwrap()).unwrap(),
+            expected
+        );
+    }
     for command in [
         Command::RemovePlaylistEntries {
             playlist_id: 10,
@@ -139,6 +147,8 @@ fn playlist_group_requests_and_locations_round_trip_stable_identities() {
                 playlist_id: 10,
                 revision: 9,
             }),
+            duplicate_groups: 10,
+            duplicate_members: 11,
         },
         result: Ok(crate::response::ViewResponse::PlaylistEntryLocations(vec![
             crate::model::PlaylistEntryLocation {
@@ -373,6 +383,8 @@ fn library_root_responses_wire_round_trip_preserves_projection_and_revisions() {
                 playlist: 7,
                 queue: 8,
                 playlist_entries: None,
+                duplicate_groups: 9,
+                duplicate_members: 10,
             },
             result: Ok(result),
         };
@@ -503,7 +515,7 @@ fn library_root_queries_run_through_real_owner_and_ipc_session() {
 }
 
 #[test]
-fn playlist_reorder_scoped_revisions_cross_ipc_without_catalog_invalidation() {
+fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
     use crate::{
         config::Config,
         core::Runtime,
@@ -516,7 +528,7 @@ fn playlist_reorder_scoped_revisions_cross_ipc_without_catalog_invalidation() {
     let connection = rusqlite::Connection::open(&database).unwrap();
     connection
         .execute_batch(
-            "INSERT INTO tracks(id,path,raw_title) VALUES (1,'one.wav','One'),(2,'two.wav','Two');
+            "INSERT INTO tracks(id,path,raw_title) VALUES (1,'one.wav','One'),(2,'two.wav','Two'),(3,'three.wav','Three');
          INSERT INTO playlists(id,name) VALUES (10,'one'),(20,'two');
          INSERT INTO playlist_entries(id,playlist_id,track_id,position)
          VALUES (101,10,1,0),(102,10,2,1),(201,20,1,0),(202,20,2,1);",
@@ -549,11 +561,49 @@ fn playlist_reorder_scoped_revisions_cross_ipc_without_catalog_invalidation() {
     };
     let first = session.query(&batch(10, Some(catalog.revisions))).unwrap();
     let other = session.query(&batch(20, Some(catalog.revisions))).unwrap();
+    let ViewResponse::PlaylistEntryBatch(first_page) = first.result.as_ref().unwrap() else {
+        panic!("expected first playlist batch")
+    };
+    let first_cursor = first_page.next.unwrap();
+    let ViewResponse::PlaylistEntryBatch(other_page) = other.result.as_ref().unwrap() else {
+        panic!("expected other playlist batch")
+    };
+    let other_cursor = other_page.next.unwrap();
+    assert_eq!(first_page.rows[0].id, 101);
+    assert_eq!(other_page.rows[0].id, 201);
     let sections = StateSections {
         library: true,
         ..StateSections::default()
     };
     let before = session.get_state(sections).unwrap();
+    let initial = before.library.as_ref().unwrap();
+    assert_eq!(initial.playlist_entry_revisions.len(), 2);
+    assert_eq!(
+        initial.playlist_entry_revisions.get(&10),
+        Some(&first.revisions.playlist_entries.unwrap().revision)
+    );
+    assert_eq!(
+        initial.playlist_entry_revisions.get(&20),
+        Some(&other.revisions.playlist_entries.unwrap().revision)
+    );
+    assert_ne!(
+        first.revisions.playlist_entries.unwrap().revision,
+        other.revisions.playlist_entries.unwrap().revision
+    );
+    // A catalog baseline can start a traversal, never continue one without E.
+    assert_eq!(
+        session
+            .query(&Query::PlaylistEntryBatch {
+                playlist_id: 10,
+                after: Some(first_cursor),
+                limit: 1,
+                expected: Some(catalog.revisions),
+            })
+            .unwrap()
+            .result
+            .unwrap_err(),
+        QueryError::RevisionChanged
+    );
     assert!(
         session
             .request_ack(&Command::MovePlaylistEntries {
@@ -570,20 +620,23 @@ fn playlist_reorder_scoped_revisions_cross_ipc_without_catalog_invalidation() {
     let library = after.library.unwrap();
     assert_eq!(library.playlist_revision, catalog.revisions.playlist);
     assert_eq!(library.revision, catalog.revisions.library);
-    let moved_token = first
-        .revisions
-        .playlist_entries
-        .unwrap()
-        .revision
-        .wrapping_add(1);
-    assert_eq!(
-        library.playlist_entry_revisions.get(&10),
-        Some(&moved_token)
+    let moved_token = *library.playlist_entry_revisions.get(&10).unwrap();
+    assert_ne!(
+        moved_token,
+        first.revisions.playlist_entries.unwrap().revision
     );
-    assert_eq!(library.playlist_entry_revisions.len(), 1);
+    assert_eq!(library.playlist_entry_revisions.len(), 2);
+    assert_eq!(
+        library.playlist_entry_revisions.get(&20),
+        Some(&other.revisions.playlist_entries.unwrap().revision)
+    );
+    assert_eq!(
+        library.duplicate_members_revision,
+        initial.duplicate_members_revision
+    );
     assert_eq!(
         serde_json::to_value(session.query(&summaries).unwrap()).unwrap(),
-        serde_json::to_value(catalog).unwrap()
+        serde_json::to_value(&catalog).unwrap()
     );
     assert_eq!(
         session
@@ -657,7 +710,7 @@ fn playlist_reorder_scoped_revisions_cross_ipc_without_catalog_invalidation() {
         removed.revisions.playlist_entries,
         selected.revisions.playlist_entries
     );
-    let expected = selected.revisions;
+    let expected = removed.revisions;
     assert!(
         session
             .request_ack(&Command::RenamePlaylist {
@@ -669,14 +722,295 @@ fn playlist_reorder_scoped_revisions_cross_ipc_without_catalog_invalidation() {
     );
     let library = session.get_state(sections).unwrap().library.unwrap();
     assert_ne!(library.playlist_revision, expected.playlist);
-    assert!(library.playlist_entry_revisions.is_empty());
     assert_eq!(
+        library.duplicate_members_revision,
+        expected.duplicate_members
+    );
+    assert_eq!(library.playlist_entry_revisions.len(), 2);
+    assert_eq!(
+        library.playlist_entry_revisions.get(&10),
+        Some(&expected.playlist_entries.unwrap().revision)
+    );
+    assert!(
         session
             .query(&batch(10, Some(expected)))
             .unwrap()
             .result
+            .is_ok()
+    );
+    // Renames and membership changes elsewhere preserve a real continuation.
+    assert!(
+        session
+            .request_ack(&Command::RenamePlaylist {
+                playlist_id: 20,
+                name: "other renamed".into(),
+            })
+            .unwrap()
+            .ok
+    );
+    assert!(
+        session
+            .request_ack(&Command::AddPlaylist {
+                playlist_id: 10,
+                track_ids: vec![3],
+            })
+            .unwrap()
+            .ok
+    );
+    let member_change = session.query(&batch(10, None)).unwrap();
+    assert_ne!(
+        member_change.revisions.playlist_entries,
+        expected.playlist_entries
+    );
+    assert_ne!(member_change.revisions.playlist, expected.playlist);
+    assert_eq!(member_change.revisions.library, expected.library);
+    assert!(member_change.result.is_ok());
+    assert!(
+        !session
+            .request_ack(&Command::RemovePlaylistEntries {
+                playlist_id: 10,
+                entry_ids: vec![],
+                expected_revision: expected.playlist_entries.unwrap().revision,
+            })
+            .unwrap()
+            .ok
+    );
+    let continuation = session
+        .query(&Query::PlaylistEntryBatch {
+            playlist_id: 20,
+            after: Some(other_cursor),
+            limit: 1,
+            expected: Some(other.revisions),
+        })
+        .unwrap();
+    assert!(matches!(continuation.result,
+        Ok(ViewResponse::PlaylistEntryBatch(page)) if page.rows.len() == 1
+            && page.rows[0].id == 202 && page.next.is_none()));
+    assert_eq!(
+        continuation.revisions.playlist_entries,
+        other.revisions.playlist_entries
+    );
+    assert_ne!(continuation.revisions.playlist, other.revisions.playlist);
+    assert_ne!(
+        continuation.revisions.duplicate_members,
+        other.revisions.duplicate_members
+    );
+    assert_eq!(
+        continuation.revisions.duplicate_groups,
+        other.revisions.duplicate_groups
+    );
+    // P is irrelevant even when an unscoped baseline starts after catalog changes.
+    assert!(
+        session
+            .query(&batch(20, Some(catalog.revisions)))
+            .unwrap()
+            .result
+            .is_ok()
+    );
+    let mut stale_library = catalog.revisions;
+    stale_library.library = stale_library.library.wrapping_add(1);
+    assert_eq!(
+        session
+            .query(&batch(20, Some(stale_library)))
+            .unwrap()
+            .result
             .unwrap_err(),
         QueryError::RevisionChanged
+    );
+    // The current scalar token stays usable across every catalog-only change.
+    assert!(
+        session
+            .request_ack(&Command::MovePlaylistEntries {
+                playlist_id: 20,
+                entry_ids: vec![201],
+                before_entry_id: None,
+                expected_revision: other.revisions.playlist_entries.unwrap().revision,
+            })
+            .unwrap()
+            .ok
+    );
+    let current = session.query(&batch(20, None)).unwrap();
+    assert_ne!(
+        current.revisions.playlist_entries,
+        other.revisions.playlist_entries
+    );
+    assert_eq!(
+        session
+            .query(&Query::PlaylistEntryBatch {
+                playlist_id: 20,
+                after: Some(other_cursor),
+                limit: 1,
+                expected: Some(other.revisions),
+            })
+            .unwrap()
+            .result
+            .unwrap_err(),
+        QueryError::RevisionChanged
+    );
+    assert!(
+        !session
+            .request_ack(&Command::RemovePlaylistEntries {
+                playlist_id: 20,
+                entry_ids: vec![201],
+                expected_revision: other.revisions.playlist_entries.unwrap().revision,
+            })
+            .unwrap()
+            .ok
+    );
+    let before_noop = session.get_state(sections).unwrap().library.unwrap();
+    assert!(
+        session
+            .request_ack(&Command::AddPlaylist {
+                playlist_id: 20,
+                track_ids: vec![1],
+            })
+            .unwrap()
+            .ok
+    );
+    assert!(
+        session
+            .request_ack(&Command::MovePlaylistEntries {
+                playlist_id: 20,
+                entry_ids: vec![201],
+                before_entry_id: None,
+                expected_revision: current.revisions.playlist_entries.unwrap().revision,
+            })
+            .unwrap()
+            .ok
+    );
+    let after_noop = session.get_state(sections).unwrap().library.unwrap();
+    assert_eq!(
+        before_noop.playlist_entry_revisions,
+        after_noop.playlist_entry_revisions
+    );
+    assert_eq!(before_noop.playlist_revision, after_noop.playlist_revision);
+    assert_eq!(
+        before_noop.duplicate_members_revision,
+        after_noop.duplicate_members_revision
+    );
+    // Deletion removes the lifetime, rather than falling back to the catalog token.
+    assert!(
+        session
+            .request_ack(&Command::DeletePlaylist { playlist_id: 20 })
+            .unwrap()
+            .ok
+    );
+    let deleted = session.get_state(sections).unwrap().library.unwrap();
+    assert_eq!(deleted.playlist_entry_revisions.len(), 1);
+    assert!(!deleted.playlist_entry_revisions.contains_key(&20));
+    assert_eq!(
+        deleted.playlist_entry_revisions.get(&10),
+        before_noop.playlist_entry_revisions.get(&10)
+    );
+    assert_eq!(
+        session
+            .query(&batch(20, Some(current.revisions)))
+            .unwrap()
+            .result
+            .unwrap_err(),
+        QueryError::RevisionChanged
+    );
+    let missing = session.query(&batch(20, None)).unwrap();
+    assert!(missing.result.is_err());
+    assert!(missing.revisions.playlist_entries.is_none());
+    for playlist_id in [20, i64::MAX] {
+        assert!(
+            !session
+                .request_ack(&Command::RemovePlaylistEntries {
+                    playlist_id,
+                    entry_ids: vec![],
+                    expected_revision: current.revisions.playlist_entries.unwrap().revision,
+                })
+                .unwrap()
+                .ok
+        );
+        assert!(
+            !session
+                .request_ack(&Command::MovePlaylistEntries {
+                    playlist_id,
+                    entry_ids: vec![],
+                    before_entry_id: None,
+                    expected_revision: current.revisions.playlist_entries.unwrap().revision,
+                })
+                .unwrap()
+                .ok
+        );
+    }
+    assert!(
+        session
+            .request_ack(&Command::CreatePlaylist {
+                name: "replacement".into()
+            })
+            .unwrap()
+            .ok
+    );
+    let recreated = session.get_state(sections).unwrap().library.unwrap();
+    assert_eq!(recreated.playlist_entry_revisions.len(), 2);
+    assert_eq!(
+        recreated.playlist_entry_revisions.get(&10),
+        deleted.playlist_entry_revisions.get(&10)
+    );
+    let (&new_id, &new_revision) = recreated
+        .playlist_entry_revisions
+        .iter()
+        .find(|(id, _)| **id != 10)
+        .unwrap();
+    assert_ne!(
+        new_revision,
+        current.revisions.playlist_entries.unwrap().revision
+    );
+    assert_ne!(
+        new_revision,
+        first.revisions.playlist_entries.unwrap().revision
+    );
+    assert!(
+        !session
+            .request_ack(&Command::RemovePlaylistEntries {
+                playlist_id: new_id,
+                entry_ids: vec![],
+                expected_revision: current.revisions.playlist_entries.unwrap().revision,
+            })
+            .unwrap()
+            .ok
+    );
+    assert!(
+        session
+            .request_ack(&Command::RemovePlaylistEntries {
+                playlist_id: new_id,
+                entry_ids: vec![],
+                expected_revision: new_revision,
+            })
+            .unwrap()
+            .ok
+    );
+    assert!(
+        session
+            .request_ack(&Command::AddPlaylist {
+                playlist_id: new_id,
+                track_ids: vec![1],
+            })
+            .unwrap()
+            .ok
+    );
+    let populated = session.query(&batch(new_id, None)).unwrap();
+    let ViewResponse::PlaylistEntryBatch(page) = populated.result.unwrap() else {
+        panic!("expected populated playlist batch")
+    };
+    assert!(
+        session
+            .request_ack(&Command::RemovePlaylistEntry {
+                entry_id: page.rows[0].id,
+            })
+            .unwrap()
+            .ok
+    );
+    let emptied = session.query(&batch(new_id, None)).unwrap();
+    assert_ne!(
+        emptied.revisions.playlist_entries,
+        populated.revisions.playlist_entries
+    );
+    assert!(
+        matches!(emptied.result, Ok(ViewResponse::PlaylistEntryBatch(page)) if page.rows.is_empty())
     );
     drop(session);
     drop(server);
@@ -968,9 +1302,9 @@ fn request_encoding_rejects_oversized_body_before_completion() {
 fn postcard_frame_headers_and_bodies_preserve_wire_contract() {
     let mut encoded = Vec::new();
     encode_request_frame_into(&WireRequest::Hello(StateSections::ALL), &mut encoded).unwrap();
-    assert_eq!(encoded, [6, 0, 0, 0, 23, 0, 1, 1, 1, 1]);
+    assert_eq!(encoded, [6, 0, 0, 0, 24, 0, 1, 1, 1, 1]);
     encode_response_frame_into(&WireResponse::Error("x".into()), &mut encoded).unwrap();
-    assert_eq!(encoded, [4, 0, 0, 0, 23, 255, 1, b'x']);
+    assert_eq!(encoded, [4, 0, 0, 0, 24, 255, 1, b'x']);
 }
 
 #[tokio::test]

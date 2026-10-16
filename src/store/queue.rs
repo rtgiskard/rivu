@@ -397,13 +397,21 @@ mod tests {
         let store = fixture()?;
         store.enqueue_tracks(&[1, 1, 2])?;
         let mut revision = store.queue_state()?.revision;
-        assert!(store.edit_track(1, Some("Title"), None, None, None)?);
+        assert!(
+            store
+                .edit_track(1, Some("Title"), None, None, None)?
+                .changed
+        );
         revision = assert_invalidated(&store, revision)?;
         assert!(store.set_favorite(&[1], true)?);
         revision = assert_invalidated(&store, revision)?;
         store.increment_play_count(1)?;
         revision = assert_invalidated(&store, revision)?;
-        assert!(!store.edit_track(1, Some("Title"), None, None, None)?);
+        assert!(
+            !store
+                .edit_track(1, Some("Title"), None, None, None)?
+                .changed
+        );
         assert!(!store.set_favorite(&[1], true)?);
         store.edit_track(4, Some("Unqueued"), None, None, None)?;
         store.set_favorite(&[4], true)?;

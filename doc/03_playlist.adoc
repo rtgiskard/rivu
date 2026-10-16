@@ -74,8 +74,10 @@ track to move the selected group in its original playlist order; dragging an
 unselected track moves only that entry. Dropping on a row inserts before that
 entry; dropping below the rows appends. Dropping on a selected target does nothing.
 This saves playlist order without changing the queue. Drags carry stable entry
-identities and playlist revisions, and are rejected after the playlist changes
-or the selection switches, including switching away and back.
+identities and a playlist content/lifetime revision, and are rejected after that
+playlist's membership or order changes, after deletion, or after the selection
+switches, including switching away and back. Renaming either playlist or editing
+another playlist does not invalidate the content revision.
 
 To save selected queue tracks under a chosen name, use the Queue panel menu's
 Add to playlist → New playlist… action. It opens its own
@@ -123,8 +125,43 @@ boundary does not start another navigation load.
 Moving entries refreshes only that playlist's entries and selected locations;
 the unchanged playlist catalog and library views stay loaded. This also applies
 to moves submitted by another client. Renaming, creating, deleting, or changing
-membership still refreshes playlist catalogs, and track metadata edits refresh
-displayed entry metadata.
+membership refreshes playlist catalogs without invalidating the content or
+selected locations of unrelated playlists. Renaming a playlist also preserves
+its own content revision. Track metadata edits refresh displayed entry metadata
+without relocating unchanged entry identities.
+
+=== Playlist query validity
+
+Playlist summaries depend only on the catalog revision: playlist identity, name,
+and entry count. Each existing playlist, including an empty playlist, also has
+its own content/lifetime token. Creation issues a fresh token, committed membership
+or order changes replace it, and deletion removes it. The token map contains only
+existing playlists; a missing playlist never borrows the catalog revision. Tokens
+are issued from a monotonic sequence, so an old scalar mutation token cannot
+become valid for a later playlist lifetime. Reordering alone does not change the
+catalog; renaming alone does not change any playlist content token. Adding only
+existing tracks, removing an empty selection, and moving an already positioned
+group leave both content and catalog revisions unchanged.
+
+Entry metadata pages and batches depend on the library revision and that
+playlist's content/lifetime token, not the catalog revision. Compact occurrence
+locations depend only on the content/lifetime token: title or favorite edits do
+not change occurrence identity, position, or total. The query-owned stamp is the
+shared validity contract for request scheduling, result acceptance, and batch
+continuation; a separate request generation rejects superseded work even when
+its data remains valid.
+
+A batch continuation must retain the matching scoped token from its first page.
+An unscoped baseline may start a playlist traversal only without a cursor and
+with the same library revision; catalog changes do not prevent that first read.
+Membership or order changes in the traversed playlist invalidate continuation,
+while rename, creation, deletion, or membership changes elsewhere do not.
+Revision-checked group mutations reject a missing playlist or stale token before
+changing entries, including an empty selection. Committed lifecycle and content
+tokens advance before the fallible summary refresh, so a refresh error cannot
+make an obsolete mutation valid again. Playlist reference changes also invalidate
+duplicate-member reference counts; creation and deletion conservatively do so
+even for empty playlists, without an extra membership read.
 
 == Import and export
 

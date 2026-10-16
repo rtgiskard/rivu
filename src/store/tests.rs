@@ -430,7 +430,12 @@ fn playback_precision_upgrade_is_source_conditional_and_idempotent() {
     // Ordinary and forced probes can both arrive after the playback result.
     for bitrate in [Some(96_000), None] {
         record.media.bitrate_bps = bitrate;
-        assert!(!store.apply_scan(&scan(vec![record.clone()])).unwrap());
+        assert!(
+            !store
+                .apply_scan(&scan(vec![record.clone()]))
+                .unwrap()
+                .changed
+        );
         assert_eq!(store.track(track.id).unwrap().unwrap(), exact);
         assert_eq!(store.queue_state().unwrap(), revision);
     }
@@ -440,13 +445,18 @@ fn playback_precision_upgrade_is_source_conditional_and_idempotent() {
     record.fingerprint = Some(blake3::hash(b"replacement").to_hex().to_string());
     record.modified_ns += 1;
     record.media.bitrate_bps = Some(64_000);
-    assert!(store.apply_scan(&scan(vec![record.clone()])).unwrap());
+    assert!(
+        store
+            .apply_scan(&scan(vec![record.clone()]))
+            .unwrap()
+            .changed
+    );
     let replacement = store.track(track.id).unwrap().unwrap();
     assert_eq!(replacement.bitrate_bps, Some(64_000));
     assert!(!replacement.bitrate_exact);
     assert!(!store.upgrade_bitrate(&source, 128_000, true).unwrap());
     record.media.bitrate_exact = true;
-    assert!(store.apply_scan(&scan(vec![record])).unwrap());
+    assert!(store.apply_scan(&scan(vec![record])).unwrap().changed);
     assert!(store.track(track.id).unwrap().unwrap().bitrate_exact);
 }
 
@@ -461,7 +471,12 @@ fn playback_precision_fill_and_cue_guard_preserve_source_identity() {
     assert!(store.upgrade_bitrate(&source, 128_000, false).unwrap());
     assert!(!store.upgrade_bitrate(&source, 192_000, false).unwrap());
     assert!(store.upgrade_bitrate(&source, 192_000, true).unwrap());
-    assert!(!store.apply_scan(&scan(vec![record.clone()])).unwrap());
+    assert!(
+        !store
+            .apply_scan(&scan(vec![record.clone()]))
+            .unwrap()
+            .changed
+    );
     record.modified_ns += 1;
     store.apply_scan(&scan(vec![record])).unwrap();
     assert_eq!(store.track(track.id).unwrap().unwrap().bitrate_bps, None);
@@ -533,6 +548,7 @@ fn decoder_hint_persists_without_overwriting_track_state() {
         !store
             .edit_track(native, None, None, None, Some(DecoderHint::Native))
             .unwrap()
+            .changed
     );
     assert_eq!(store.track(native).unwrap().unwrap(), expected[0]);
     assert!(
@@ -2947,7 +2963,8 @@ fn persistent_queue_accepts_entire_large_library_pages_restarts_and_saves_playli
     let current = last.rows[63].id;
     store.set_queue_current(Some(current)).unwrap();
     assert_eq!(store.queue_state().unwrap().revision, state.revision);
-    let playlist = store.create_playlist_from_queue("All").unwrap();
+    let (playlist, has_members) = store.create_playlist_from_queue("All").unwrap();
+    assert!(has_members);
     assert_eq!(
         store
             .playlist_entries_page(playlist, 199_999, 1)
@@ -3088,7 +3105,8 @@ fn queue_dedup_uses_first_position_not_allocation_order_and_track_deletes_remove
     store.reorder_queue(&[ids[2], ids[1], ids[0]]).unwrap();
     store.deduplicate_queue().unwrap();
     assert_eq!(store.queue_ids().unwrap(), [ids[2], ids[1]]);
-    let playlist = store.create_playlist_from_queue("First order").unwrap();
+    let (playlist, has_members) = store.create_playlist_from_queue("First order").unwrap();
+    assert!(has_members);
     assert_eq!(store.playlist_track_ids(playlist, 2).unwrap(), [1, 2]);
     store.set_queue_current(Some(ids[2])).unwrap();
     let before = store.queue_state().unwrap();

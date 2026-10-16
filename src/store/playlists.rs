@@ -11,6 +11,13 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use std::path::PathBuf;
 
 impl Store {
+    pub fn playlist_ids(&self) -> Result<Vec<i64>> {
+        let mut statement = self.conn.prepare("SELECT id FROM playlists ORDER BY id")?;
+        Ok(statement
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn playlist_entry(&self, entry_id: i64) -> Result<Option<PlaylistEntryLocation>> {
         // Positions are contiguous. The covering playlist_order index supplies the last
         // position without counting or projecting the entire playlist.
@@ -359,14 +366,15 @@ impl Store {
         tx.commit()?;
         Ok(id)
     }
-    pub fn create_playlist_from_queue(&self, name: &str) -> Result<i64> {
+    /// Returns the new identity and whether the committed playlist has members.
+    pub fn create_playlist_from_queue(&self, name: &str) -> Result<(i64, bool)> {
         Self::validate_playlist_name(name)?;
         let tx = self.conn.unchecked_transaction()?;
         tx.execute("INSERT INTO playlists(name) VALUES(?1)", [name])?;
         let id = tx.last_insert_rowid();
-        tx.execute("WITH first AS (SELECT track_id,MIN(position) AS position FROM queue_entries GROUP BY track_id) INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT ?1,track_id,row_number() OVER (ORDER BY position,track_id)-1 FROM first ORDER BY position,track_id", [id])?;
+        let inserted = tx.execute("WITH first AS (SELECT track_id,MIN(position) AS position FROM queue_entries GROUP BY track_id) INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT ?1,track_id,row_number() OVER (ORDER BY position,track_id)-1 FROM first ORDER BY position,track_id", [id])?;
         tx.commit()?;
-        Ok(id)
+        Ok((id, inserted != 0))
     }
     pub fn rename_playlist(&self, id: i64, name: &str) -> Result<bool> {
         Self::validate_playlist_name(name)?;
@@ -379,13 +387,17 @@ impl Store {
         tx.commit()?;
         Ok(updated != 0)
     }
-    pub fn delete_playlist(&self, id: i64) -> Result<()> {
+    /// Returns whether the committed deletion removed any playlist members.
+    pub fn delete_playlist(&self, id: i64) -> Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        let removed = tx.execute("DELETE FROM playlist_entries WHERE playlist_id=?", [id])?;
         changed(
-            self.conn
-                .execute("DELETE FROM playlists WHERE id=?", [id])?,
+            tx.execute("DELETE FROM playlists WHERE id=?", [id])?,
             "playlist",
             id,
-        )
+        )?;
+        tx.commit()?;
+        Ok(removed != 0)
     }
     pub fn add_playlist(&self, id: i64, tracks: &[i64]) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
@@ -394,7 +406,8 @@ impl Store {
         tx.commit()?;
         Ok(inserted != 0)
     }
-    pub fn remove_playlist_entry(&self, id: i64) -> Result<()> {
+    /// Returns the owning playlist only after the entry removal commits.
+    pub fn remove_playlist_entry(&self, id: i64) -> Result<i64> {
         let tx = self.conn.unchecked_transaction()?;
         let (pid, p): (i64, i64) = tx
             .query_row(
@@ -407,7 +420,7 @@ impl Store {
         tx.execute("DELETE FROM playlist_entries WHERE id=?", [id])?;
         close_gaps(&tx, &[p], PositionScope::Playlist(pid))?;
         tx.commit()?;
-        Ok(())
+        Ok(pid)
     }
     /// Returns the owning playlist only after an actual committed reorder.
     pub fn move_playlist_entry(&self, id: i64, index: usize) -> Result<Option<i64>> {
@@ -571,6 +584,7 @@ mod deletion_tests {
              INSERT INTO playlist_entries(id,playlist_id,track_id,position) VALUES
                 (100,10,1,0),(101,10,2,1),(102,10,3,2),(200,20,1,0);",
         )?;
+        assert_eq!(store.playlist_ids()?, vec![10, 20]);
         let expected = PlaylistEntryLocation {
             id: 102,
             playlist_id: 10,
@@ -587,7 +601,7 @@ mod deletion_tests {
                 ..expected
             })
         );
-        store.remove_playlist_entry(100)?;
+        assert_eq!(store.remove_playlist_entry(100)?, 10);
         assert_eq!(
             store.playlist_entry(102)?,
             Some(PlaylistEntryLocation {
@@ -597,11 +611,25 @@ mod deletion_tests {
             })
         );
         assert_eq!(store.playlist_entry(200)?.unwrap().total, 1);
-        store.remove_playlist_entry(102)?;
+        assert_eq!(store.remove_playlist_entry(102)?, 10);
         assert_eq!(store.playlist_entry(102)?, None);
         assert_eq!(store.playlist_entry(999)?, None);
-        store.delete_playlist(20)?;
+        store.conn.execute_batch(
+            "CREATE TRIGGER reject_playlist_delete BEFORE DELETE ON playlists
+             WHEN OLD.id=20 BEGIN SELECT RAISE(ABORT,'blocked playlist deletion'); END;",
+        )?;
+        assert!(store.delete_playlist(20).is_err());
+        assert_eq!(store.playlist_entry(200)?.unwrap().total, 1);
+        store
+            .conn
+            .execute_batch("DROP TRIGGER reject_playlist_delete")?;
+        assert!(store.delete_playlist(20)?);
         assert_eq!(store.playlist_entry(200)?, None);
+        assert_eq!(store.playlist_ids()?, vec![10]);
+        let empty = store.create_playlist("empty")?;
+        assert!(!store.delete_playlist(empty)?);
+        assert!(store.delete_playlist(20).is_err());
+        assert_eq!(store.playlist_ids()?, vec![10]);
         Ok(())
     }
 
@@ -617,7 +645,7 @@ mod deletion_tests {
              INSERT INTO queue_entries(id,track_id,position) VALUES (300,2,0);
              UPDATE queue_meta SET current_id=300 WHERE singleton=1;",
         )?;
-        store.remove_playlist_entry(101)?;
+        assert_eq!(store.remove_playlist_entry(101)?, 10);
         assert!(store.remove_playlist_entry(999).is_err());
         let entries = store.conn.prepare(
             "SELECT id,playlist_id,track_id,position FROM playlist_entries ORDER BY playlist_id,position",
@@ -686,7 +714,7 @@ mod request_tests {
         for name in ["  Mix \u{2003} ", "混音", "Mix\u{200b}"] {
             let plain = store.create_playlist(name)?;
             let with_tracks = store.create_playlist_with_tracks(name, &[1])?;
-            let from_queue = store.create_playlist_from_queue(name)?;
+            let (from_queue, _) = store.create_playlist_from_queue(name)?;
             assert!(store.rename_playlist(original, name)?);
             let summaries = store.playlist_summary_page(0, 100)?.rows;
             for id in [plain, with_tracks, from_queue, original] {

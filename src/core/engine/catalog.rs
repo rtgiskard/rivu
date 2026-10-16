@@ -358,13 +358,13 @@ impl Core {
         let result = scan.result?;
         let successful = result.errors().is_empty();
         let saved = self.store.apply_scan(&result);
-        let changed = if scan.import.is_some() {
+        let impacts = if scan.import.is_some() {
             saved.context("Failed to save scan; playlist not created")
         } else {
             saved.context("Failed to save scan")
         }?;
-        if changed {
-            let refreshed = self.reload(true);
+        if impacts.changed {
+            let refreshed = self.apply_scan_impacts(impacts);
             if scan.import.is_some() {
                 refreshed
                     .context("Scan saved, but library refresh failed before playlist creation; some projections may be stale")?;
@@ -375,7 +375,7 @@ impl Core {
             }
         }
         if let Some((name, items)) = scan.import {
-            (|| -> Result<()> {
+            let id = (|| -> Result<i64> {
                 let accessible: HashSet<_> = result
                     .records
                     .iter()
@@ -398,11 +398,10 @@ impl Core {
                 if ids.is_empty() {
                     bail!("Playlist contains no supported, accessible audio tracks");
                 }
-                self.store.create_playlist_with_tracks(&name, &ids)?;
-                Ok(())
+                self.store.create_playlist_with_tracks(&name, &ids)
             })()
             .context("Scan saved, but playlist creation failed")?;
-            self.reload_playlists()
+            self.playlist_created(id, true)
                 .context("Scan saved and playlist created, but playlist refresh failed")?;
         }
         Ok(successful)
