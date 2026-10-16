@@ -16,8 +16,8 @@ Use a list's Search button, or Ctrl+F with that list focused, to open its search
 field. Each list keeps its own search condition. A nonempty search stays visible;
 clear it to restore the complete list. Esc clears the search first and folds an
 empty field on the next press, after dismissing any active popup or composition.
-While the search field is open, counts to its right show matches and the unfiltered
-total; counts are hidden when it is folded. No matches is distinct from an empty
+While the search field is open, counts inside its right edge show matches and the
+unfiltered total; counts are hidden when it is folded. No matches is distinct from an empty
 collection. Searching changes the view, not the saved contents or playback order.
 
 Library retains its combined text, favorite, and missing-file filters. Albums

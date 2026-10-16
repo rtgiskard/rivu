@@ -57,6 +57,7 @@ pub struct Input {
     content: SharedString,
     placeholder: SharedString,
     trailing_space: Pixels,
+    trailing_text: Option<SharedString>,
     scroll_offset: Pixels,
     selected_range: Range<usize>,
     selection_reversed: bool,
@@ -83,6 +84,7 @@ impl Input {
             content,
             placeholder: placeholder.into(),
             trailing_space: px(7.),
+            trailing_text: None,
             scroll_offset: px(0.),
             selected_range: end..end,
             selection_reversed: false,
@@ -97,6 +99,13 @@ impl Input {
     pub(super) fn with_trailing_space(mut self, space: Pixels) -> Self {
         self.trailing_space = space;
         self
+    }
+
+    pub(super) fn set_trailing_text(&mut self, text: SharedString, cx: &mut Context<Self>) {
+        if self.trailing_text.as_ref() != Some(&text) {
+            self.trailing_text = Some(text);
+            cx.notify();
+        }
     }
 
     /// Installs the key bindings used by every [`Input`] instance.
@@ -833,12 +842,26 @@ impl Render for Input {
             .child(
                 div()
                     .h(px(34.) * scale)
-                    .w_full()
+                    .flex_1()
+                    .min_w_0()
                     .overflow_hidden()
                     .p(px(7.) * scale)
                     .pr(self.trailing_space * scale)
                     .child(InputElement { input: cx.entity() }),
             )
+            .when_some(self.trailing_text.clone(), |view, text| {
+                view.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .flex_shrink_0()
+                        .pr(px(7.) * scale)
+                        .text_size(px(12.) * scale)
+                        .text_color(rgb(MUTED))
+                        .whitespace_nowrap()
+                        .child(text),
+                )
+            })
     }
 }
 

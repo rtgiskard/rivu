@@ -1,6 +1,6 @@
 //! Shared interaction state for optional list-local search.
 
-use super::{Input, InputEvent, Localizer, MUTED, caption, icon_button, row};
+use super::{Input, InputEvent, Localizer, icon_button, row};
 use gpui::{prelude::*, *};
 use std::sync::Arc;
 
@@ -169,13 +169,6 @@ impl Render for ListSearch {
                 |this, window, cx| this.toggle(window, cx),
             ));
         if visible {
-            control = control.child(
-                gpui::div()
-                    .w(gpui::rems(12.))
-                    .flex_shrink(1.)
-                    .min_w_0()
-                    .child(self.input.clone()),
-            );
             let count = match self.counts {
                 Some((matched, total)) => self.i18n.format(
                     "search-count",
@@ -183,11 +176,15 @@ impl Render for ListSearch {
                 ),
                 None => "—".to_owned(),
             };
+            self.input.update(cx, |input, cx| {
+                input.set_trailing_text(count.into(), cx);
+            });
             control = control.child(
-                caption(count)
-                    .text_color(rgb(MUTED))
-                    .flex_shrink_0()
-                    .whitespace_nowrap(),
+                gpui::div()
+                    .w(gpui::rems(12.))
+                    .flex_shrink(1.)
+                    .min_w_0()
+                    .child(self.input.clone()),
             );
         }
         control
