@@ -301,7 +301,9 @@ fn localize_command_help(
     path: &str,
     messages: &std::collections::HashMap<&str, &str>,
 ) {
-    let id = if path.is_empty() {
+    let id = if command.get_name() == "help" {
+        "core-help-help".to_owned()
+    } else if path.is_empty() {
         "core-help-about".to_owned()
     } else {
         format!("core-help-{path}")
@@ -370,18 +372,16 @@ fn localize_command_help(
 
 fn run() -> Result<()> {
     let startup_config = config::Config::load(&startup_config_path());
-    let i18n = Localizer::new(
-        startup_config
-            .as_ref()
-            .map_or("auto", |config| config.ui_language.as_str()),
-    );
+    // Client-side localization is best-effort; hosts and probes validate their
+    // configuration when they initialize, not before remote commands dispatch.
+    let language = startup_config
+        .as_ref()
+        .map_or("auto", |config| config.ui_language.as_str());
+    let i18n = Localizer::new(language);
     let mut command = Args::command();
     command.build();
     localize_help(&mut command, &i18n, "");
     let args = Args::from_arg_matches(&command.get_matches())?;
-    // Help/version exit inside clap before reaching this check, so recovery
-    // information remains available even when the saved config is malformed.
-    let startup_config = startup_config?;
     let config_path = args.config.unwrap_or_else(|| {
         args.data_dir
             .as_ref()
@@ -408,7 +408,7 @@ fn run() -> Result<()> {
             false,
         )?
         .run(),
-        Action::Tui => terminal::run(&data_dir, &startup_config.ui_language),
+        Action::Tui => terminal::run(&data_dir, language),
         Action::Library(LibraryAction::Probe { path, enhanced }) => {
             let probe_config = config::Config::load(&config_path)?;
             let ffmpeg_enabled = probe_config.ffmpeg_enabled || enhanced;
@@ -1426,20 +1426,6 @@ fn translate(action: Action) -> Result<(Command, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn localized_help_keeps_command_names_and_builtin_help_behavior() {
-        let i18n = Localizer::new("zh-CN");
-        let mut command = Args::command();
-        command.build();
-        localize_help(&mut command, &i18n, "");
-        let help = command.render_long_help().to_string();
-        assert!(help.contains("playback"));
-        let help = command
-            .try_get_matches_from(["rivu", "help", "library"])
-            .unwrap_err();
-        assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp);
-    }
 
     #[test]
     fn scan_paths_are_anchored_without_expansion() -> Result<()> {

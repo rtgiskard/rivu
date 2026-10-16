@@ -1,7 +1,7 @@
 //! Window ownership and release of visual subscriptions and analysis demand.
 
 use super::GuiApp;
-use crate::{app::AppHandle, artwork::ArtworkManager, core::CoreHandle};
+use crate::{app::AppHandle, artwork::ArtworkManager, core::CoreHandle, i18n::Localizer};
 use anyhow::Result;
 use gpui::*;
 use std::{
@@ -16,6 +16,7 @@ pub(crate) struct UiSession {
     app: AppHandle,
     layout_path: PathBuf,
     artwork_manager: Arc<ArtworkManager>,
+    i18n: Arc<Localizer>,
     self_weak: Weak<RefCell<UiSession>>,
     window: Option<WindowHandle<GuiApp>>,
 }
@@ -26,6 +27,7 @@ impl UiSession {
         app: AppHandle,
         layout_path: PathBuf,
         artwork_manager: Arc<ArtworkManager>,
+        i18n: Arc<Localizer>,
     ) -> Rc<RefCell<Self>> {
         Rc::new_cyclic(|self_weak| {
             RefCell::new(Self {
@@ -33,6 +35,7 @@ impl UiSession {
                 app,
                 layout_path,
                 artwork_manager,
+                i18n,
                 self_weak: self_weak.clone(),
                 window: None,
             })
@@ -76,6 +79,7 @@ impl UiSession {
         let handle = self.handle.clone();
         let layout_path = self.layout_path.clone();
         let artwork_manager = Arc::clone(&self.artwork_manager);
+        let i18n = Arc::clone(&self.i18n);
         let session = self.self_weak.clone();
         let window = cx.open_window(
             WindowOptions {
@@ -90,8 +94,15 @@ impl UiSession {
             },
             move |window, cx| {
                 cx.new(|cx| {
-                    let view =
-                        GuiApp::new(handle, layout_path, artwork_manager, session, window, cx);
+                    let view = GuiApp::new(
+                        handle,
+                        layout_path,
+                        artwork_manager,
+                        session,
+                        i18n,
+                        window,
+                        cx,
+                    );
                     view.install_close_guard(window, cx);
                     view
                 })

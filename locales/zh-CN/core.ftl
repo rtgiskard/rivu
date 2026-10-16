@@ -37,7 +37,7 @@ core-ffmpeg = FFmpeg 扩展音频解码：{ $status }
 core-scan-progress = 扫描：{ $phase } · { $processed }/{ $total } · { $errors } 个错误
 core-probe = { $path }
       标题：{ $title }
-      艺术家：{ $artist }
+      艺人：{ $artist }
       专辑：{ $album }
       编码：{ $codec }
       声道：{ $channels }
@@ -67,13 +67,13 @@ core-help-playback-volume = 设置音量百分比，范围 0..100。
 core-help-playback-devices = 列出输出设备，不启动实例。
 core-help-playback-device = 按完整名称选择输出设备，或使用默认设备。
 core-help-library-scan = 导入音频文件、CUE 文件或目录，不中断播放。
-core-help-library-list = 列出曲库，可按文本筛选。
-core-help-library-edit = 编辑曲库元数据，不修改媒体文件。
-core-help-library-remove = 移除曲库记录，不删除媒体文件。
+core-help-library-list = 列出音乐库，可按文本筛选。
+core-help-library-edit = 编辑音乐库元数据，不修改媒体文件。
+core-help-library-remove = 移除音乐库记录，不删除媒体文件。
 core-help-library-favorite = 收藏或取消收藏，不修改媒体文件。
 core-help-library-clean-missing = 清理缺失记录及其引用，不删除媒体文件。
-core-help-library-status = 显示播放和曲库状态。
-core-help-library-stats = 显示曲库规模和累计播放次数。
+core-help-library-status = 显示播放和音乐库状态。
+core-help-library-stats = 显示音乐库规模和累计播放次数。
 core-help-library-history = 显示最近播放的曲目，每首仅列一次。
 core-help-library-probe = 读取元数据并检查解码支持，不启动实例。
 core-help-library-optimize = 回收数据库空间并更新查询统计；请先停止播放和扫描。

@@ -84,7 +84,6 @@ shell-layout-name = Layout name
 shell-title = Title
 shell-artist = Artist
 shell-album = Album
-shell-queue-name = Queue { $date }
 shell-import-playlist = Import M3U playlist
 shell-import = Import
 shell-export-playlist = Export M3U playlist

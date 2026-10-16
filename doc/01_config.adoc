@@ -88,9 +88,17 @@ Explicit configuration values are `auto`, `en-US`, or `zh-CN` (case-insensitive;
 underscores are accepted and normalized to hyphens); other values are errors.
 Language changes take effect when the corresponding GUI, TUI, CLI, or tray host
 restarts; restarting a command-line client does not change a running desktop host.
+Closing and reopening a desktop window keeps the host's startup language; quit
+and restart Rivu to apply a saved language change. CLI clients that only control
+or query an existing instance use automatic language selection if their local
+configuration cannot be loaded. Starting a host or probing media still requires
+a valid configuration.
 Missing translations fall back to English. Configuration keys, command names,
 machine-readable output, paths, and user metadata are not translated. Diagnostic
 details may remain in English.
+Saving the queue suggests an editable `Queue_YYYYMMDD_HHMMSS` playlist name.
+Generated names do not pass through translation or contain presentation-only
+bidirectional isolation characters.
 
 `playback.media_read_buffer_mb` defaults to `2`; accepted sizes are `1`, `2`, `4`, `8`,
 and `16` MiB.

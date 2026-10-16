@@ -269,7 +269,7 @@ impl App {
         let socket_owner = ipc::SocketOwner::acquire(&data_dir)?;
         let signals = Signals::new([SIGINT, SIGTERM]).context("Registering shutdown signals")?;
         let config = Config::load(&config_path)?;
-        let i18n = crate::i18n::Localizer::new(&config.ui_language);
+        let i18n = Arc::new(crate::i18n::Localizer::new(&config.ui_language));
         let session = logging::Session::start(&data_dir, &config)?;
         let runtime =
             Runtime::start_with_logging(&data_dir, &config_path, config, session.control())?;
@@ -307,6 +307,7 @@ impl App {
                     app.handle.clone(),
                     data_dir.join("layout.json"),
                     Arc::clone(&app.artwork),
+                    Arc::clone(&i18n),
                 ),
                 window_closed: None,
                 app_quit: None,

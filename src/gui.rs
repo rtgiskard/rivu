@@ -643,11 +643,11 @@ impl GuiApp {
         layout_path: PathBuf,
         artwork_manager: Arc<crate::artwork::ArtworkManager>,
         session: Weak<RefCell<UiSession>>,
+        i18n: Arc<Localizer>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let state = handle.gui_snapshot();
-        let i18n = Arc::new(Localizer::new(&state.system.config.ui_language));
         let localized_text = i18n
             .fixed_texts()
             .map(|(id, text)| (id.to_owned(), SharedString::from(text.to_owned())))
@@ -994,16 +994,7 @@ impl GuiApp {
         }
         self.begin_playlist_name(
             playlist_editor::PlaylistNameAction::SaveQueue,
-            self.i18n.format(
-                "shell-queue-name",
-                &[(
-                    "date",
-                    chrono::Local::now()
-                        .format("%Y-%m-%d %H-%M-%S")
-                        .to_string()
-                        .into(),
-                )],
-            ),
+            format!("Queue_{}", chrono::Local::now().format("%Y%m%d_%H%M%S")),
             window,
             cx,
         );

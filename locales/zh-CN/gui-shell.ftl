@@ -84,7 +84,6 @@ shell-layout-name = 布局名称
 shell-title = 标题
 shell-artist = 艺人
 shell-album = 专辑
-shell-queue-name = 队列 { $date }
 shell-import-playlist = 导入 M3U 播放列表
 shell-import = 导入
 shell-export-playlist = 导出 M3U 播放列表
