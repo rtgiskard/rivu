@@ -618,7 +618,7 @@ pub(crate) fn track_list_row(
                     view.font_family(super::fonts::SYMBOLS_FAMILY)
                 })
                 .child(if playing {
-                    "󰐊".to_owned()
+                    "".to_owned()
                 } else {
                     (index + 1).to_string()
                 }),

@@ -423,7 +423,7 @@ impl GuiApp {
                     if self.state.playback.status == PlaybackStatus::Playing {
                         "󰏤"
                     } else {
-                        "󰐊"
+                        ""
                     },
                     if self.state.playback.status == PlaybackStatus::Playing {
                         self.tr("gl-pause")
@@ -1282,7 +1282,7 @@ impl GuiApp {
                                     })
                                     .child(compact_icon_button(icon_button(
                                         ("queue-entry-play", id),
-                                        "󰐊",
+                                        "",
                                         this.tr("gl-play-queue-entry"),
                                         cx,
                                         move |this, _, cx| {
@@ -1737,7 +1737,7 @@ impl GuiApp {
                             ))
                             .child(danger_control(icon_button(
                                 "playlist-action-confirm",
-                                if deleting { "󰆴" } else { "󰐊" },
+                                if deleting { "󰆴" } else { "" },
                                 if deleting {
                                     self.tr("gl-delete-playlist")
                                 } else {
@@ -1998,7 +1998,7 @@ impl GuiApp {
                         .child(
                             compact_icon_button(icon_button(
                                 ("playlist-row-play", id as u64),
-                                "󰐊",
+                                "",
                                 this.tr("gl-play-playlist"),
                                 cx,
                                 move |this, window, cx| {
@@ -2242,7 +2242,7 @@ impl GuiApp {
                                 .child(
                                     compact_icon_button(icon_button(
                                         ("playlist-entry-play", id as u64),
-                                        "󰐊",
+                                        "",
                                         this.tr("gl-play-track"),
                                         cx,
                                         move |this, _, cx| {

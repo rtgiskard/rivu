@@ -1095,7 +1095,7 @@ impl GuiApp {
                         )))
                         .child(icon_button(
                             "review-back",
-                            "󰁍",
+                            "",
                             self.tr("gl-back-selection"),
                             cx,
                             |this, _, cx| {
