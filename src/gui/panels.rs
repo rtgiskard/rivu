@@ -32,7 +32,7 @@ pub(super) struct HistoryColumnWidths {
     widths: [gpui::Pixels; 3],
 }
 
-fn compact_icon_button(control: gpui::Stateful<Div>) -> gpui::Stateful<Div> {
+pub(super) fn compact_icon_button(control: gpui::Stateful<Div>) -> gpui::Stateful<Div> {
     quiet_icon_button(control).w(gpui::rems(1.4))
 }
 

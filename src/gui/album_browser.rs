@@ -14,10 +14,12 @@ use super::{
     HIGHLIGHT, TEXT,
     artwork::{Artwork, ArtworkImages, ArtworkLoader, ArtworkView},
     caption, column,
-    components::{LIST_ROW_REMS, quiet_icon_button, scrollable_list, track_list_row},
+    components::{LIST_ROW_REMS, scrollable_list, track_list_row},
     format_time, icon_button,
     list_interaction::{ContentDrag, ContentMenuRequest, TrackSource},
-    paged, panel_surface, panel_toolbar, row,
+    paged, panel_surface, panel_toolbar,
+    panels::compact_icon_button,
+    row,
     search::{ListSearch, SearchEvent},
 };
 
@@ -1106,13 +1108,20 @@ impl Render for AlbumBrowser {
                                         ("album-track", id as u64),
                                         ("album-track-text", id as u64),
                                         track.title.clone(),
-                                        track.artist.clone(),
+                                        if track.artist.trim().is_empty() {
+                                            "-".to_owned()
+                                        } else {
+                                            track.artist.clone()
+                                        },
                                         index,
                                         marker.is_some()
                                             && this.playback_status == PlaybackStatus::Playing,
                                         false,
                                     )
                                     .group("album-track-row")
+                                    .line_height(rems(1.125))
+                                    .relative()
+                                    .gap_0()
                                     .on_click(cx.listener(
                                         move |this, event: &ClickEvent, _, cx| {
                                             if event.click_count() == 2 {
@@ -1155,47 +1164,35 @@ impl Render for AlbumBrowser {
                                         .text_right(),
                                     )
                                     .child(
-                                        row()
+                                        super::panels::hover_actions("album-track-row", false)
                                             .id(("album-track-actions", id as u64))
-                                            .gap_0()
-                                            .invisible()
-                                            .group_hover("album-track-row", |style| style.visible())
                                             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                                 cx.stop_propagation()
                                             })
                                             .on_click(|_, _, cx| cx.stop_propagation())
-                                            .child(
-                                                quiet_icon_button(icon_button(
-                                                    ("album-track-play", id as u64),
-                                                    "",
-                                                    this.tr("gl-play-track"),
-                                                    cx,
-                                                    move |this, _, cx| {
-                                                        this.send(
-                                                            Command::Play { track_id: id },
-                                                            cx,
-                                                        )
-                                                    },
-                                                ))
-                                                .w(rems(1.4)),
-                                            )
-                                            .child(
-                                                quiet_icon_button(icon_button(
-                                                    ("album-track-add", id as u64),
-                                                    "󰐕",
-                                                    this.tr("gl-enqueue-track"),
-                                                    cx,
-                                                    move |this, _, cx| {
-                                                        this.send(
-                                                            Command::Enqueue {
-                                                                track_ids: vec![id],
-                                                            },
-                                                            cx,
-                                                        )
-                                                    },
-                                                ))
-                                                .w(rems(1.4)),
-                                            ),
+                                            .child(compact_icon_button(icon_button(
+                                                ("album-track-play", id as u64),
+                                                "",
+                                                this.tr("gl-play-track"),
+                                                cx,
+                                                move |this, _, cx| {
+                                                    this.send(Command::Play { track_id: id }, cx)
+                                                },
+                                            )))
+                                            .child(compact_icon_button(icon_button(
+                                                ("album-track-add", id as u64),
+                                                "󰐕",
+                                                this.tr("gl-enqueue-track"),
+                                                cx,
+                                                move |this, _, cx| {
+                                                    this.send(
+                                                        Command::Enqueue {
+                                                            track_ids: vec![id],
+                                                        },
+                                                        cx,
+                                                    )
+                                                },
+                                            ))),
                                     )
                                     .into_any_element()
                                 })
