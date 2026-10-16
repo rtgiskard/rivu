@@ -649,6 +649,7 @@ fn scan_file(
     cancellation: &ScanCancellation,
 ) -> Result<ScanRecord> {
     cancellation.check()?;
+    path.to_str().context("Audio source path is not UTF-8")?;
     let metadata =
         fs::metadata(path).with_context(|| format!("read metadata for {}", path.display()))?;
     cancellation.check()?;

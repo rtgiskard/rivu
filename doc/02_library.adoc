@@ -61,6 +61,8 @@ that sheet, not just its readable sources. Successfully read tracks are still sa
 CUE sheet identities must be UTF-8 paths; an unrepresentable sheet is reported
 as a local CUE error without suppressing its readable source audio or preventing
 other valid tracks from being saved.
+Audio source identities must also be UTF-8 paths. Unrepresentable audio paths
+are per-file errors, including during forced scans; valid tracks are still saved.
 A requested path whose initial metadata lookup reports `NotFound` is confirmed
 absent and can mark its tracks missing; a path disappearing during traversal or
 reading is uncertain until a later scan establishes absence. An explicit nested

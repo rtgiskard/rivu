@@ -542,6 +542,33 @@ fn non_utf8_cue_name_does_not_prevent_valid_audio_from_being_saved() -> Result<(
 }
 
 #[test]
+#[cfg(unix)]
+fn forced_scan_isolates_non_utf8_audio_and_persists_valid_tracks() -> Result<()> {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().to_path_buf();
+    let good = root.join("good.wav");
+    let bad = root.join(OsStr::from_bytes(b"bad-\xff.wav"));
+    wav(&good, 75)?;
+    wav(&bad, 75)?;
+    let store = crate::store::Store::open(Path::new(":memory:"))?;
+    // Force supplies no known-source snapshots, bypassing Store's path check.
+    let forced = scan_paths(std::slice::from_ref(&root), &[], false)?;
+    assert_eq!(forced.errors.len(), 1);
+    assert!(forced.errors[0].contains("not UTF-8"));
+    assert_eq!(forced.uncertainties, [ScanUncertainty::File(bad)]);
+    assert_eq!(forced.records.len(), 1);
+    assert_eq!(forced.records[0].path, good);
+    store.apply_scan(&forced)?;
+    assert_eq!(store.track_count()?, 1);
+    let id = store.track_id_for_source(&good, None)?.unwrap();
+    assert!(!store.track(id)?.unwrap().missing);
+    Ok(())
+}
+
+#[test]
 fn failed_cue_source_not_found_keeps_segments_until_the_sheet_is_deleted() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let audio = directory.path().join("audio.wav");
