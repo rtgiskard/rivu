@@ -1,11 +1,160 @@
 use super::Store;
 use crate::model::{
-    AlbumSort, CueSegment, DecoderHint, MediaInfo, PlaylistEntryCursor, PlaylistEntryRow, Track,
+    AlbumSort, CueSegment, DecoderHint, MediaInfo, PlaylistEntryRow, QueryStamp, Track,
 };
 use rusqlite::{Connection, params};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+struct SqlVmSteps<'connection> {
+    connection: &'connection Connection,
+    steps: Box<std::cell::Cell<u64>>,
+}
+
+impl<'connection> SqlVmSteps<'connection> {
+    fn new(connection: &'connection Connection) -> Self {
+        let mut counter = Self {
+            connection,
+            steps: Box::new(std::cell::Cell::new(0)),
+        };
+        // This fixture owns the connection and has no other progress handler.
+        // The boxed counter stays at a stable address until Drop unregisters it.
+        unsafe {
+            rusqlite::ffi::sqlite3_progress_handler(
+                connection.handle(),
+                1,
+                Some(Self::increment),
+                std::ptr::from_mut(counter.steps.as_mut()).cast(),
+            );
+        }
+        counter
+    }
+
+    unsafe extern "C" fn increment(context: *mut std::ffi::c_void) -> std::ffi::c_int {
+        // SQLite calls synchronously on this connection's thread while the
+        // owning guard and its boxed Cell are alive. Never unwind through C.
+        let steps = unsafe { &*context.cast::<std::cell::Cell<u64>>() };
+        steps.set(steps.get().saturating_add(1));
+        0
+    }
+
+    fn take(&self) -> u64 {
+        self.steps.replace(0)
+    }
+}
+
+impl Drop for SqlVmSteps<'_> {
+    fn drop(&mut self) {
+        // Detach before releasing the callback's boxed context, also on panic.
+        unsafe {
+            rusqlite::ffi::sqlite3_progress_handler(
+                self.connection.handle(),
+                0,
+                None,
+                std::ptr::null_mut(),
+            );
+        }
+    }
+}
+
+fn filtered_traversal_steps(total: usize) -> (u64, u64) {
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    store
+        .conn
+        .execute(
+            "WITH RECURSIVE ids(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM ids WHERE id<?1)
+         INSERT INTO tracks(id,path,raw_title) SELECT id,'track-'||id,
+             CASE WHEN id%7=0 THEN 'needle' ELSE 'other' END FROM ids",
+            [total as i64],
+        )
+        .unwrap();
+    // Every track occurs twice in the queue; matches are sparse in both lists.
+    store
+        .conn
+        .execute_batch(
+            "INSERT INTO queue_entries(track_id,position)
+             SELECT id,2*(id-1) FROM tracks UNION ALL SELECT id,2*(id-1)+1 FROM tracks;
+         INSERT INTO playlists(id,name) VALUES(1,'sparse');
+         INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT 1,id,id-1 FROM tracks;",
+        )
+        .unwrap();
+    let stamp = QueryStamp::default();
+    let mut queue_after = None;
+    let mut queue_count = 0;
+    // Count every SQL statement in the real batch methods, including any
+    // future prefix COUNT regression, but exclude fixture setup and random pages.
+    let counter = SqlVmSteps::new(&store.conn);
+    loop {
+        let batch = store
+            .queue_batch(Some("needle"), queue_after, 17, stamp)
+            .unwrap();
+        for row in &batch.rows {
+            assert_eq!(row.offset, queue_count);
+            assert_eq!(row.track_id % 7, 0);
+            assert_eq!(
+                row.position,
+                2 * (row.track_id as usize - 1) + queue_count % 2
+            );
+            queue_count += 1;
+        }
+        queue_after = batch.next;
+        if let Some(next) = queue_after {
+            assert_eq!(next.offset, queue_count);
+            assert_eq!(next.cursor.id, batch.rows.last().unwrap().id);
+        } else {
+            break;
+        }
+    }
+    assert_eq!(queue_count, 2 * (total / 7));
+    let queue_steps = counter.take();
+    let mut entry_after = None;
+    let mut entry_count = 0;
+    loop {
+        let batch = store
+            .playlist_entry_batch(1, Some("needle"), entry_after, 17, stamp)
+            .unwrap();
+        for row in &batch.rows {
+            assert_eq!(row.offset, entry_count);
+            assert_eq!(row.position, (entry_count + 1) * 7 - 1);
+            entry_count += 1;
+        }
+        entry_after = batch.next;
+        if let Some(next) = entry_after {
+            assert_eq!(next.offset, entry_count);
+            assert_eq!(next.cursor.id, batch.rows.last().unwrap().id);
+        } else {
+            break;
+        }
+    }
+    assert_eq!(entry_count, total / 7);
+    let entry_steps = counter.take();
+    drop(counter);
+    // Random jumps retain their independent count/OFFSET contract.
+    let jump = (total / 7) / 2;
+    let queue_page = store.queue_page(Some("needle"), jump, 1).unwrap();
+    assert_eq!(queue_page.total, queue_count);
+    assert_eq!(queue_page.rows[0].offset, jump);
+    assert_eq!(queue_page.rows[0].track_id as usize, (jump / 2 + 1) * 7);
+    let entry_page = store
+        .playlist_entries_page(1, Some("needle"), jump, 1)
+        .unwrap();
+    assert_eq!(entry_page.total, entry_count);
+    assert_eq!(entry_page.rows[0].offset, jump);
+    assert_eq!(entry_page.rows[0].position, (jump + 1) * 7 - 1);
+    (queue_steps, entry_steps)
+}
+
+#[test]
+fn filtered_continuation_sql_vm_steps_scale_linearly() {
+    let small = filtered_traversal_steps(4096);
+    let large = filtered_traversal_steps(8192);
+    eprintln!("filtered traversal VM steps (queue, playlist): 4096={small:?}, 8192={large:?}");
+    assert!(small.0 > 0 && small.1 > 0);
+    // Doubling the sequence must not approach the fourfold prefix-rescan cost.
+    assert!(large.0 < small.0 * 3, "queue: {small:?} -> {large:?}");
+    assert!(large.1 < small.1 * 3, "playlist: {small:?} -> {large:?}");
+}
 
 fn all_tracks(store: &Store) -> Vec<Track> {
     let mut tracks = Vec::new();
@@ -26,7 +175,13 @@ fn playlist_entries(store: &Store, playlist_id: i64) -> Vec<PlaylistEntryRow> {
     let mut after = None;
     loop {
         let batch = store
-            .playlist_entry_batch(playlist_id, None, after, crate::model::MAX_QUERY_ROWS)
+            .playlist_entry_batch(
+                playlist_id,
+                None,
+                after,
+                crate::model::MAX_QUERY_ROWS,
+                QueryStamp::default(),
+            )
             .unwrap();
         after = batch.next;
         entries.extend(batch.rows);
@@ -172,10 +327,12 @@ fn filtered_occurrence_pages_keep_ids_positions_and_match_offsets() {
     let mut queue_after = None;
     let mut queue_batches = Vec::new();
     for _ in 0..3 {
-        let queue = store.queue_batch(Some("needle"), queue_after, 2).unwrap();
+        let queue = store
+            .queue_batch(Some("needle"), queue_after, 2, QueryStamp::default())
+            .unwrap();
         queue_after = queue.next;
         if let Some(cursor) = queue_after {
-            assert_eq!(cursor.position, queue.rows.last().unwrap().position);
+            assert_eq!(cursor.cursor.position, queue.rows.last().unwrap().position);
         }
         queue_batches.extend(queue.rows);
     }
@@ -184,12 +341,18 @@ fn filtered_occurrence_pages_keep_ids_positions_and_match_offsets() {
     let mut entry_batches = Vec::new();
     for _ in 0..2 {
         let entries = store
-            .playlist_entry_batch(playlist, Some("needle"), entry_after, 2)
+            .playlist_entry_batch(
+                playlist,
+                Some("needle"),
+                entry_after,
+                2,
+                QueryStamp::default(),
+            )
             .unwrap();
         entry_after = entries.next;
         if let Some(cursor) = entry_after {
             assert_eq!(
-                cursor.position as usize,
+                cursor.cursor.position as usize,
                 entries.rows.last().unwrap().position
             );
         }
@@ -3329,17 +3492,21 @@ fn batches_traverse_stably_validate_bounds_and_break_tied_positions() {
             [first],
         )
         .unwrap();
-    let entries = store.playlist_entry_batch(first, None, None, 2).unwrap();
+    let entries = store
+        .playlist_entry_batch(first, None, None, 2, QueryStamp::default())
+        .unwrap();
     assert_eq!(
         entries.rows.iter().map(|row| row.id).collect::<Vec<_>>(),
         [1, 2]
     );
+    let continuation = entries.next.unwrap();
     assert_eq!(
-        entries.next,
-        Some(PlaylistEntryCursor { position: 0, id: 2 })
+        (continuation.cursor.position, continuation.cursor.id),
+        (0, 2)
     );
+    assert_eq!(continuation.offset, 2);
     let tail_entries = store
-        .playlist_entry_batch(first, None, entries.next, 2)
+        .playlist_entry_batch(first, None, entries.next, 2, QueryStamp::default())
         .unwrap();
     assert_eq!(
         tail_entries
@@ -3350,7 +3517,11 @@ fn batches_traverse_stably_validate_bounds_and_break_tied_positions() {
         [3, 4]
     );
     assert!(tail_entries.next.is_none());
-    assert!(store.playlist_entry_batch(999, None, None, 1).is_err());
+    assert!(
+        store
+            .playlist_entry_batch(999, None, None, 1, QueryStamp::default())
+            .is_err()
+    );
 }
 
 #[test]
@@ -3377,8 +3548,12 @@ fn persistent_queue_accepts_entire_large_library_pages_restarts_and_saves_playli
             .rows
             .is_empty()
     );
-    let first = store.queue_batch(None, None, 256).unwrap();
-    let second = store.queue_batch(None, first.next, 256).unwrap();
+    let first = store
+        .queue_batch(None, None, 256, QueryStamp::default())
+        .unwrap();
+    let second = store
+        .queue_batch(None, first.next, 256, QueryStamp::default())
+        .unwrap();
     assert_eq!(second.rows[0].position, 256);
     let current = last.rows[63].id;
     store.set_queue_current(Some(current)).unwrap();

@@ -7130,6 +7130,226 @@ mod tests {
     }
 
     #[test]
+    fn filtered_queue_continuations_bind_rank_query_and_revision_without_expected() {
+        let (_directory, mut core) = fixture();
+        for track_id in [1, 2, 4] {
+            core.command(Command::EditTrack {
+                track_id,
+                title: Some("needle".into()),
+                artist: None,
+                album: None,
+                decoder_hint: None,
+            })
+            .unwrap();
+        }
+        let batch = |filter: Option<&str>, after| Query::QueueBatch {
+            query: filter.map(str::to_owned),
+            after,
+            limit: 1,
+            expected: None,
+        };
+        let mut after = None;
+        let mut first = None;
+        let mut rows = Vec::new();
+        loop {
+            let ViewResponse::QueueBatch(page) = core.view(&batch(Some("needle"), after)).unwrap()
+            else {
+                panic!("expected queue batch")
+            };
+            assert_eq!(page.rows[0].offset, rows.len());
+            after = page.next;
+            if first.is_none() {
+                first = after;
+            }
+            rows.extend(page.rows);
+            if after.is_none() {
+                break;
+            }
+            assert_eq!(after.unwrap().offset, rows.len());
+        }
+        assert_eq!(
+            rows.iter().map(|row| row.position).collect::<Vec<_>>(),
+            [0, 1, 2, 4]
+        );
+        assert_eq!(rows[1].track_id, rows[2].track_id);
+        assert_ne!(rows[1].id, rows[2].id);
+        let ViewResponse::QueuePage(jump) = core
+            .view(&Query::QueuePage {
+                query: Some("needle".into()),
+                offset: 2,
+                limit: 1,
+            })
+            .unwrap()
+        else {
+            panic!("expected queue page")
+        };
+        assert_eq!(jump.total, 4);
+        assert_eq!(jump.rows, rows[2..3]);
+        for filter in [Some("track"), None] {
+            assert_eq!(
+                core.view(&batch(filter, first)).unwrap_err(),
+                QueryError::RevisionChanged
+            );
+        }
+        // Playback selection alone preserves the matching continuation.
+        core.state.queue.current_id = Some(rows[2].id);
+        core.save(false).unwrap();
+        assert!(core.view(&batch(Some("NEEDLE"), first)).is_ok());
+        let mut overflow = first.unwrap();
+        overflow.offset = usize::MAX;
+        assert!(matches!(
+            core.view(&batch(Some("needle"), Some(overflow))),
+            Err(QueryError::Message(_))
+        ));
+        core.enqueue(&[2]).unwrap();
+        assert_eq!(
+            core.view(&batch(Some("needle"), first)).unwrap_err(),
+            QueryError::RevisionChanged
+        );
+        let ViewResponse::QueueBatch(fresh) = core.view(&batch(Some("needle"), None)).unwrap()
+        else {
+            panic!("expected queue batch")
+        };
+        core.command(Command::EditTrack {
+            track_id: 2,
+            title: Some("not matched".into()),
+            artist: None,
+            album: None,
+            decoder_hint: None,
+        })
+        .unwrap();
+        assert_eq!(
+            core.view(&batch(Some("needle"), fresh.next)).unwrap_err(),
+            QueryError::RevisionChanged
+        );
+        let ViewResponse::QueueBatch(restarted) = core.view(&batch(Some("needle"), None)).unwrap()
+        else {
+            panic!("expected queue batch")
+        };
+        assert_eq!(restarted.rows[0].offset, 0);
+    }
+
+    #[test]
+    fn filtered_playlist_continuations_reject_foreign_query_metadata_and_order() {
+        let (_directory, mut core) = fixture();
+        for track_id in [1, 3, 4] {
+            core.command(Command::EditTrack {
+                track_id,
+                title: Some("needle".into()),
+                artist: None,
+                album: None,
+                decoder_hint: None,
+            })
+            .unwrap();
+        }
+        for name in ["first", "second"] {
+            core.command(Command::CreatePlaylistWithTracks {
+                name: name.into(),
+                track_ids: vec![1, 2, 3, 4],
+            })
+            .unwrap();
+        }
+        let batch = |playlist_id, filter: Option<&str>, after| Query::PlaylistEntryBatch {
+            playlist_id,
+            query: filter.map(str::to_owned),
+            after,
+            limit: 1,
+            expected: None,
+        };
+        let mut after = None;
+        let mut first = None;
+        let mut rows = Vec::new();
+        loop {
+            let ViewResponse::PlaylistEntryBatch(page) =
+                core.view(&batch(1, Some("needle"), after)).unwrap()
+            else {
+                panic!("expected playlist batch")
+            };
+            assert_eq!(page.rows[0].offset, rows.len());
+            after = page.next;
+            if first.is_none() {
+                first = after;
+            }
+            rows.extend(page.rows);
+            if after.is_none() {
+                break;
+            }
+            assert_eq!(after.unwrap().offset, rows.len());
+        }
+        assert_eq!(
+            rows.iter().map(|row| row.position).collect::<Vec<_>>(),
+            [0, 2, 3]
+        );
+        for query in [
+            batch(2, Some("needle"), first),
+            batch(1, Some("track"), first),
+            batch(1, None, first),
+        ] {
+            assert_eq!(core.view(&query).unwrap_err(), QueryError::RevisionChanged);
+        }
+        let other = core
+            .store
+            .playlist_entries_page(2, None, 0, 1)
+            .unwrap()
+            .rows[0]
+            .id;
+        core.command(Command::MovePlaylistEntry {
+            entry_id: other,
+            index: 3,
+        })
+        .unwrap();
+        assert!(core.view(&batch(1, Some("needle"), first)).is_ok());
+        core.command(Command::MovePlaylistEntry {
+            entry_id: rows[0].id,
+            index: 3,
+        })
+        .unwrap();
+        assert_eq!(
+            core.view(&batch(1, Some("needle"), first)).unwrap_err(),
+            QueryError::RevisionChanged
+        );
+        let ViewResponse::PlaylistEntryBatch(fresh) =
+            core.view(&batch(1, Some("needle"), None)).unwrap()
+        else {
+            panic!("expected playlist batch")
+        };
+        assert_eq!(
+            (
+                fresh.rows[0].track_id,
+                fresh.rows[0].position,
+                fresh.rows[0].offset
+            ),
+            (3, 1, 0)
+        );
+        core.command(Command::EditTrack {
+            track_id: 3,
+            title: Some("not matched".into()),
+            artist: None,
+            album: None,
+            decoder_hint: None,
+        })
+        .unwrap();
+        assert_eq!(
+            core.view(&batch(1, Some("needle"), fresh.next))
+                .unwrap_err(),
+            QueryError::RevisionChanged
+        );
+        let ViewResponse::PlaylistEntryBatch(restarted) =
+            core.view(&batch(1, Some("needle"), None)).unwrap()
+        else {
+            panic!("expected playlist batch")
+        };
+        assert_eq!(
+            (
+                restarted.rows[0].track_id,
+                restarted.rows[0].position,
+                restarted.rows[0].offset
+            ),
+            (4, 2, 0)
+        );
+    }
+
+    #[test]
     fn configure_failed_save_keeps_desired_settings_and_does_not_deliver_audio() {
         let (_directory, mut core) = fixture();
         let audio = recording_audio(&mut core);

@@ -3,8 +3,8 @@ use super::rows::{TRACK_COLUMNS, track_from_row};
 use super::tracks::{SOURCE_FILTER, search_filter, search_query, validate_encoded_track_ids};
 use super::{Store, batch_limit, changed};
 use crate::model::{
-    Batch, Page, PlaylistEntryCursor, PlaylistEntryLocation, PlaylistEntryRow, PlaylistSummary,
-    Track,
+    Batch, BatchContinuation, Page, PlaylistEntryCursor, PlaylistEntryLocation, PlaylistEntryRow,
+    PlaylistSummary, QueryStamp, Track,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use rusqlite::{OptionalExtension, Transaction, params};
@@ -208,11 +208,16 @@ impl Store {
         &self,
         playlist_id: i64,
         query: Option<&str>,
-        after: Option<PlaylistEntryCursor>,
+        after: Option<BatchContinuation<PlaylistEntryCursor>>,
         limit: usize,
-    ) -> Result<Batch<PlaylistEntryRow, PlaylistEntryCursor>> {
+        revisions: QueryStamp,
+    ) -> Result<Batch<PlaylistEntryRow, BatchContinuation<PlaylistEntryCursor>>> {
         let limit = batch_limit(limit)?;
         let query = search_query(query);
+        let scope = revisions.continuation_scope(query.as_deref(), Some(playlist_id));
+        if after.is_some_and(|after| after.scope != scope) {
+            return Err(crate::response::QueryError::RevisionChanged.into());
+        }
         let exists = self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM playlists WHERE id=?1)",
             [playlist_id],
@@ -222,14 +227,9 @@ impl Store {
             bail!("Playlist not found");
         }
         let filter = search_filter("t", "?2");
-        let (position, id) = after.map_or((-1, 0), |cursor| (cursor.position, cursor.id));
-        // A continuation cursor is always an original occurrence position/id pair.
-        // Count preceding matches once, never substitute a filtered index as cursor.
-        let start: usize = if query.is_some() && after.is_some() {
-            self.conn.query_row(&format!("SELECT COUNT(*) FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id WHERE e.playlist_id=?1 AND {filter} AND (e.position,e.id)<=(?3,?4)"), params![playlist_id, query, position, id], |row| Ok(row.get::<_, i64>(0)? as usize))?
-        } else {
-            0
-        };
+        let (position, id) =
+            after.map_or((-1, 0), |after| (after.cursor.position, after.cursor.id));
+        let start = after.map_or(0, |after| after.offset);
         let mut stmt = self.conn.prepare(&format!(
             "SELECT e.position,e.id,e.track_id,COALESCE(t.title_override,t.raw_title),COALESCE(t.artist_override,t.raw_artist),COALESCE(t.album_override,t.raw_album),COALESCE(t.missing,1),t.favorite FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id WHERE e.playlist_id=?1 AND {filter} AND (e.position,e.id)>(?3,?4) ORDER BY e.position,e.id LIMIT ?5"
         ))?;
@@ -251,7 +251,9 @@ impl Store {
                 track_id: row.get(2)?,
                 position: cursor.position as usize,
                 offset: if query.is_some() {
-                    start + rows.len()
+                    start
+                        .checked_add(rows.len())
+                        .context("Playlist matching offset overflow")?
                 } else {
                     cursor.position as usize
                 },
@@ -261,7 +263,13 @@ impl Store {
                 missing: row.get::<_, i64>(6)? != 0,
                 favorite: row.get(7)?,
             });
-            last_cursor = Some(cursor);
+            last_cursor = Some(BatchContinuation {
+                cursor,
+                offset: start
+                    .checked_add(rows.len())
+                    .context("Playlist matching offset overflow")?,
+                scope,
+            });
         }
         let next = has_more.then_some(last_cursor).flatten();
         Ok(Batch { rows, next })

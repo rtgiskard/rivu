@@ -136,6 +136,16 @@ pub struct Batch<T, C> {
     pub next: Option<C>,
 }
 
+/// Sequential occurrence traversal: the keyset stays separate from matching rank.
+/// `scope` binds both fields to the query, collection and selected data revisions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchContinuation<C> {
+    pub cursor: C,
+    /// Matching offset of the next row, not a queue or playlist position.
+    pub offset: usize,
+    pub scope: [u8; 32],
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlaylistEntryCursor {
     pub position: i64,
@@ -666,7 +676,7 @@ pub enum Query {
     PlaylistEntryBatch {
         playlist_id: i64,
         query: Option<String>,
-        after: Option<PlaylistEntryCursor>,
+        after: Option<BatchContinuation<PlaylistEntryCursor>>,
         limit: usize,
         expected: Option<crate::response::QueryRevisions>,
     },
@@ -701,7 +711,7 @@ pub enum Query {
     },
     QueueBatch {
         query: Option<String>,
-        after: Option<QueueCursor>,
+        after: Option<BatchContinuation<QueueCursor>>,
         limit: usize,
         expected: Option<crate::response::QueryRevisions>,
     },
@@ -738,6 +748,28 @@ pub struct QueryStamp(crate::response::QueryRevisions);
 impl QueryStamp {
     pub fn revisions(self) -> crate::response::QueryRevisions {
         self.0
+    }
+
+    pub(crate) fn continuation_scope(
+        self,
+        query: Option<&str>,
+        playlist_id: Option<i64>,
+    ) -> [u8; 32] {
+        let mut hash = blake3::Hasher::new();
+        hash.update(b"rivu occurrence continuation v1");
+        hash.update(&[u8::from(playlist_id.is_some())]);
+        hash.update(&playlist_id.unwrap_or_default().to_le_bytes());
+        // Callers supply the same normalized search text used by SQL.
+        hash.update(query.unwrap_or_default().as_bytes());
+        hash.update(&self.0.library.to_le_bytes());
+        hash.update(&self.0.queue.to_le_bytes());
+        for scope in [self.0.playlist_entries, self.0.playlist_metadata] {
+            hash.update(&[u8::from(scope.is_some())]);
+            let scope = scope.unwrap_or_default();
+            hash.update(&scope.playlist_id.to_le_bytes());
+            hash.update(&scope.revision.to_le_bytes());
+        }
+        *hash.finalize().as_bytes()
     }
 }
 
@@ -1276,16 +1308,24 @@ mod tests {
                     *limit = 20;
                 }
                 Query::PlaylistEntryBatch { after, limit, .. } => {
-                    *after = Some(PlaylistEntryCursor {
-                        position: 100,
-                        id: 200,
+                    *after = Some(BatchContinuation {
+                        cursor: PlaylistEntryCursor {
+                            position: 100,
+                            id: 200,
+                        },
+                        offset: 50,
+                        scope: [0; 32],
                     });
                     *limit = 20;
                 }
                 Query::QueueBatch { after, limit, .. } => {
-                    *after = Some(QueueCursor {
-                        position: 100,
-                        id: 200,
+                    *after = Some(BatchContinuation {
+                        cursor: QueueCursor {
+                            position: 100,
+                            id: 200,
+                        },
+                        offset: 50,
+                        scope: [0; 32],
                     });
                     *limit = 20;
                 }

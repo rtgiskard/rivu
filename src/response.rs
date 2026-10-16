@@ -1,6 +1,6 @@
 use crate::model::{
-    Batch, ClientSnapshot, DirectoryRow, LibraryRootCount, LibraryRow, LibrarySnapshot,
-    LibraryStats, Page, PlaybackState, PlaylistEntryCursor, PlaylistEntryLocation,
+    Batch, BatchContinuation, ClientSnapshot, DirectoryRow, LibraryRootCount, LibraryRow,
+    LibrarySnapshot, LibraryStats, Page, PlaybackState, PlaylistEntryCursor, PlaylistEntryLocation,
     PlaylistEntryRow, PlaylistSummary, QueueCursor, QueueRow, QueueState, SystemState, Track,
 };
 use serde::{Deserialize, Serialize};
@@ -106,12 +106,12 @@ pub enum ViewResponse {
     LibraryStats(LibraryStats),
     TrackBatch(Batch<Track, i64>),
     PlaylistSummaryBatch(Batch<PlaylistSummary, i64>),
-    PlaylistEntryBatch(Batch<PlaylistEntryRow, PlaylistEntryCursor>),
+    PlaylistEntryBatch(Batch<PlaylistEntryRow, BatchContinuation<PlaylistEntryCursor>>),
     LibraryRootCounts(Vec<LibraryRootCount>),
     LibraryLocate(crate::model::LibraryLocateResult),
     ScanTask(crate::model::ScanTaskStatus),
     QueuePage(Page<QueueRow>),
-    QueueBatch(Batch<QueueRow, QueueCursor>),
+    QueueBatch(Batch<QueueRow, BatchContinuation<QueueCursor>>),
     QueueEntries(Vec<QueueRow>),
     PlaylistEntry(Option<PlaylistEntryLocation>),
     DuplicateGroups(Page<crate::store::DuplicateGroup>),
@@ -128,7 +128,10 @@ pub enum QueryError {
 
 impl From<anyhow::Error> for QueryError {
     fn from(error: anyhow::Error) -> Self {
-        Self::Message(format!("{error:#}"))
+        match error.downcast::<Self>() {
+            Ok(error) => error,
+            Err(error) => Self::Message(format!("{error:#}")),
+        }
     }
 }
 

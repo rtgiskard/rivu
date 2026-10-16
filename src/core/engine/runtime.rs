@@ -247,6 +247,7 @@ impl Core {
 
     pub(in crate::core) fn view(&self, query: &Query) -> Result<ViewResponse, QueryError> {
         let current = self.state.query_revisions_for(query);
+        let current_stamp = query.stamp(current);
         let expected = match query {
             Query::TrackBatch { expected, .. }
             | Query::PlaylistSummaryBatch { expected, .. }
@@ -345,6 +346,7 @@ impl Core {
                 query.as_deref(),
                 *after,
                 *limit,
+                current_stamp,
             )?),
             Query::QueueEntries { query, queue_ids } => {
                 ViewResponse::QueueEntries(self.store.queue_entries(query.as_deref(), queue_ids)?)
@@ -507,6 +509,7 @@ impl Core {
                 query.as_deref(),
                 *after,
                 *limit,
+                current_stamp,
             )?),
         })
     }

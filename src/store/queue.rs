@@ -2,7 +2,9 @@ use super::positions::{PositionScope, close_gaps, move_selection};
 use super::rows::{LIBRARY_ROW_COLUMNS_QUALIFIED, library_row_at};
 use super::tracks::{SOURCE_FILTER, search_filter, search_query};
 use super::{Store, batch_limit};
-use crate::model::{Batch, MAX_QUERY_ROWS, Page, QueueCursor, QueueRow, QueueState};
+use crate::model::{
+    Batch, BatchContinuation, MAX_QUERY_ROWS, Page, QueryStamp, QueueCursor, QueueRow, QueueState,
+};
 use anyhow::{Context, Result, ensure};
 use rusqlite::{OptionalExtension, Transaction, params};
 use std::path::PathBuf;
@@ -198,36 +200,52 @@ impl Store {
     pub fn queue_batch(
         &self,
         query: Option<&str>,
-        after: Option<QueueCursor>,
+        after: Option<BatchContinuation<QueueCursor>>,
         limit: usize,
-    ) -> Result<Batch<QueueRow, QueueCursor>> {
+        revisions: QueryStamp,
+    ) -> Result<Batch<QueueRow, BatchContinuation<QueueCursor>>> {
         let limit = batch_limit(limit)?;
         let query = search_query(query);
+        let scope = revisions.continuation_scope(query.as_deref(), None);
+        if after.is_some_and(|after| after.scope != scope) {
+            return Err(crate::response::QueryError::RevisionChanged.into());
+        }
         let filter = search_filter("t", "?4");
         let mut statement = self.conn.prepare(&format!("SELECT q.id,q.track_id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED} FROM queue_entries q JOIN tracks t ON t.id=q.track_id WHERE (q.position,q.id)>(?1,?2) AND {filter} ORDER BY q.position,q.id LIMIT ?3"))?;
         let (position, id) = after.map_or((-1, 0), |cursor| {
-            (cursor.position.min(i64::MAX as usize) as i64, cursor.id)
+            (
+                cursor.cursor.position.min(i64::MAX as usize) as i64,
+                cursor.cursor.id,
+            )
         });
         let id = i64::try_from(id).context("Queue cursor ID exceeds database range")?;
-        let start: usize = if query.is_some() && after.is_some() {
-            self.conn.query_row(&format!("SELECT COUNT(*) FROM queue_entries q JOIN tracks t ON t.id=q.track_id WHERE (q.position,q.id)<=(?1,?2) AND {}", search_filter("t", "?3")), params![position, id, query], |row| integer(row, 0))?
-        } else {
-            0
-        };
+        let start = after.map_or(0, |cursor| cursor.offset);
         let mut rows = statement
             .query_map(params![position, id, limit + 1, query], queue_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         if query.is_some() {
             for (index, row) in rows.iter_mut().enumerate() {
-                row.offset = start + index;
+                row.offset = start
+                    .checked_add(index)
+                    .context("Queue matching offset overflow")?;
             }
         }
         let next = if rows.len() > limit as usize {
             rows.pop();
-            rows.last().map(|row| QueueCursor {
-                position: row.position,
-                id: row.id,
-            })
+            rows.last()
+                .map(|row| {
+                    Ok::<_, anyhow::Error>(BatchContinuation {
+                        cursor: QueueCursor {
+                            position: row.position,
+                            id: row.id,
+                        },
+                        offset: start
+                            .checked_add(rows.len())
+                            .context("Queue matching offset overflow")?,
+                        scope,
+                    })
+                })
+                .transpose()?
         } else {
             None
         };

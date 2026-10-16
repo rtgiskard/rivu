@@ -96,6 +96,19 @@ than skipping an OFFSET prefix. Unfiltered playlist entry totals use the indexed
 maximum position; this relies on the Store-owned contiguous-order invariant.
 Filtered pages count and skip matching rows in the database before projecting the
 requested page; title, artist, album, and file-name filters require track metadata.
+Sequential filtered queue and playlist batches instead carry the next matching
+offset alongside the original occurrence keyset and a fixed-size scope digest.
+The scope binds normalized search text, queue/playlist identity and the current
+query-owned revision stamp. Core supplies that stamp in its serialized dispatch;
+Store rejects mismatched scopes before reading rows, including continuations
+submitted without `expected`. Each batch seeks after the original position/id
+and advances rank by returned row count; it never recounts the matching prefix.
+One extra matching row decides whether to return a continuation. A lookahead can
+read the intervening nonmatching gap again on the next batch, but a stable full
+traversal visits each searched interval at most twice rather than recounting all
+preceding prefixes. Each batch also pays an indexed keyset seek. No full-list
+cache, per-client map or retained SQLite snapshot is introduced. Random-access
+filtered pages keep their independent exact count/OFFSET path.
 
 Playlist export reads full tracks in playlist order with bounded keyset batches,
 without entry-summary projection, per-track queries, or the interactive track
@@ -221,7 +234,7 @@ The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
 Bodies use Postcard serialization without COBS framing. The current protocol
-version is `26`; clients and servers must use matching wire schemas. The four-byte
+version is `27`; clients and servers must use matching wire schemas. The four-byte
 frame length remains little-endian; body integers follow Postcard's encoding.
 Configuration state and Configure commands include the presentation language
 (`ui_language`: `auto`, `en-US`, or `zh-CN`). Language selection does not translate
@@ -229,6 +242,8 @@ wire identifiers or machine-readable data. Restart older clients and hosts toget
 after upgrading; incompatible versions are rejected before decoding the body.
 Version 23 adds exact Library now-playing location queries and responses; the
 Postcard enum schema is incompatible with earlier versions.
+Version 27 replaces queue/playlist batch `after` and `next` with scoped matching-rank
+continuations; old position/id-only batch requests and responses are incompatible.
 
 Request frame content is limited to 4 MiB
 and response frame content to 16 MiB, including the version and message type but
@@ -454,11 +469,15 @@ do not reserve a snapshot across requests. Cursor batches avoid the total-count
 query and return a continuation only when more rows exist. They require a limit
 from 1 through 256 and reject zero or larger values.
 
-`QueuePage {offset, limit}` returns `Page<QueueRow>` in queue order. Each row is
-`{id, track_id, position, track}` with absolute zero-based position and `LibraryRow`
-display metadata. `QueueBatch {after, limit, expected}` uses a `{position,id}`
-cursor and validates only `expected.queue`; playback-only selection changes do not
-interrupt traversal. `QueueEntries {queue_ids}` resolves at most 256 occurrence IDs,
+`QueuePage {query, offset, limit}` returns `Page<QueueRow>` in queue order. Each row
+is `{id, track_id, position, offset, track}`: `position` identifies its original
+zero-based occurrence order, while `offset` is its rank among query matches.
+`QueueBatch {query, after, limit, expected}` uses a
+`{cursor: {position,id}, offset, scope}` continuation. Its `offset` is the next
+matching rank, never the SQL keyset position. Queue content validates unfiltered
+batches; filtered batches additionally use library content per `Query::stamp`.
+Playback-only selection changes do not interrupt traversal.
+`QueueEntries {query, queue_ids}` resolves at most 256 occurrence IDs,
 omits removed IDs, deduplicates repeated IDs, and returns rows in queue order.
 The query response's `revisions.queue` is captured with the rows; clients discard
 late results if the active queue-content revision no longer matches.
@@ -599,16 +618,24 @@ frontends must not query storage from rendering.
 To traverse consistently, capture the first batch's query revisions and supply
 them as `expected` on later requests. The same query-owned stamp validates
 track batches (library), playlist-summary batches (catalog only), queue batches
-(queue only), and playlist-entry batches (library plus scoped content/lifetime).
+(queue, plus library while filtered), and playlist-entry batches (scoped metadata
+plus scoped content/lifetime, with the library fallback described above).
+Queue and playlist-entry batches return `BatchContinuation` values. Pass the
+complete previous `next` unchanged as `after`; do not construct one from a page's
+filtered rank or substitute rank for its original position/id. A continuation's
+scope is checked against the current normalized query, collection and selected
+revisions even when `expected` is omitted. Stale or foreign continuations return
+typed `QueryError::RevisionChanged`; restart with `after = None` and discard
+partial traversal state. Changing only the batch limit does not change scope.
 Renaming or changing another playlist cannot interrupt an entry traversal. A
 catalog baseline without an entry token may start an entry traversal
 (`after = None`) with unchanged library content, but cannot continue one. The CLI
 retains its summary baseline while capturing each playlist's entry baseline
-separately. A mismatch returns typed `QueryError::RevisionChanged`; clients match
-the variant, not diagnostic text. Other failures return `QueryError::Message`.
-Without `expected`, the server does not reserve consistency between requests.
-This uses bounded results and explicit restart, not a database snapshot retained
-for an arbitrarily slow client.
+separately. Clients match the error variant, not diagnostic text. Other failures
+return `QueryError::Message`. Without `expected`, track and summary batches do
+not reserve consistency between requests; occurrence continuations still enforce
+their embedded scope. All use bounded results and explicit restart, not a database
+snapshot retained for an arbitrarily slow client.
 
 Playlist-only edits leave library and structure tokens unchanged. Imports can
 still invalidate track queries when their scan changes effective library facts.

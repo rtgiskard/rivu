@@ -2239,15 +2239,33 @@ fn queue_queries_and_full_queue_playlist_commands_round_trip() {
         },
         Query::QueueBatch {
             query: None,
-            after: Some(QueueCursor {
-                position: 255,
-                id: 1000,
+            after: Some(crate::model::BatchContinuation {
+                cursor: QueueCursor {
+                    position: 255,
+                    id: 1000,
+                },
+                offset: 128,
+                scope: [42; 32],
             }),
             limit: 256,
             expected: Some(crate::response::QueryRevisions {
                 queue: 42,
                 ..Default::default()
             }),
+        },
+        Query::PlaylistEntryBatch {
+            query: Some("needle".into()),
+            playlist_id: 10,
+            after: Some(crate::model::BatchContinuation {
+                cursor: crate::model::PlaylistEntryCursor {
+                    position: 1023,
+                    id: 5000,
+                },
+                offset: 256,
+                scope: [17; 32],
+            }),
+            limit: 64,
+            expected: None,
         },
         Query::QueueEntries {
             query: None,
@@ -2278,6 +2296,167 @@ fn queue_queries_and_full_queue_playlist_commands_round_trip() {
         serde_json::to_value(Command::try_from(decoded).unwrap()).unwrap(),
         expected
     );
+}
+
+#[test]
+fn filtered_occurrence_continuations_round_trip_and_reject_stale_ipc_scopes() {
+    use crate::response::{QueryError, ViewResponse};
+    let directory = socket_test_directory();
+    let database = directory.path().join("library.db");
+    drop(crate::store::Store::open(&database).unwrap());
+    let connection = rusqlite::Connection::open(database).unwrap();
+    connection.execute_batch(
+        "INSERT INTO tracks(id,path,raw_title) VALUES
+             (1,'one.wav','other'),(2,'two.wav','needle'),(3,'three.wav','other'),
+             (4,'four.wav','other'),(5,'five.wav','needle'),(6,'six.wav','other'),(7,'seven.wav','needle');
+         INSERT INTO queue_entries(track_id,position) VALUES (1,0),(2,1),(2,2),(3,3),(4,4),(5,5),(6,6),(7,7);
+         INSERT INTO playlists(id,name) VALUES(10,'first'),(20,'second');
+         INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT 10,id,id-1 FROM tracks;
+         INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT 20,id,id-1 FROM tracks;",
+    ).unwrap();
+    drop(connection);
+    let config_path = directory.path().join("config.toml");
+    crate::config::Config {
+        media_read_buffer_mb: 1,
+        ffmpeg_enabled: false,
+        ..Default::default()
+    }
+    .save(&config_path)
+    .unwrap();
+    let owner = SocketOwner::acquire(directory.path()).unwrap();
+    let mut runtime = crate::core::Runtime::start(directory.path(), &config_path).unwrap();
+    let app = AppHandle::new(&runtime, false);
+    let server = Server::start(&owner, runtime.handle.clone(), app.clone()).unwrap();
+    let mut session = client_session(directory.path()).unwrap();
+    let queue_query = |query: &str, after| Query::QueueBatch {
+        query: Some(query.into()),
+        after,
+        limit: 1,
+        expected: None,
+    };
+    let entry_query = |playlist_id, query: &str, after| Query::PlaylistEntryBatch {
+        playlist_id,
+        query: Some(query.into()),
+        after,
+        limit: 1,
+        expected: None,
+    };
+    let mut after = None;
+    let mut first_queue = None;
+    let mut positions = Vec::new();
+    loop {
+        let ViewResponse::QueueBatch(batch) = session
+            .query(&queue_query("needle", after))
+            .unwrap()
+            .result
+            .unwrap()
+        else {
+            panic!("expected queue batch")
+        };
+        assert_eq!(batch.rows[0].offset, positions.len());
+        positions.push(batch.rows[0].position);
+        after = batch.next;
+        if first_queue.is_none() {
+            first_queue = after;
+        }
+        if after.is_none() {
+            break;
+        }
+        assert_eq!(after.unwrap().offset, positions.len());
+    }
+    assert_eq!(positions, [1, 2, 5, 7]);
+    assert_eq!(
+        session
+            .query(&queue_query("other", first_queue))
+            .unwrap()
+            .result
+            .unwrap_err(),
+        QueryError::RevisionChanged
+    );
+    let mut after = None;
+    let mut first_entry = None;
+    let mut positions = Vec::new();
+    loop {
+        let ViewResponse::PlaylistEntryBatch(batch) = session
+            .query(&entry_query(10, "needle", after))
+            .unwrap()
+            .result
+            .unwrap()
+        else {
+            panic!("expected playlist batch")
+        };
+        assert_eq!(batch.rows[0].offset, positions.len());
+        positions.push(batch.rows[0].position);
+        after = batch.next;
+        if first_entry.is_none() {
+            first_entry = after;
+        }
+        if after.is_none() {
+            break;
+        }
+        assert_eq!(after.unwrap().offset, positions.len());
+    }
+    assert_eq!(positions, [1, 4, 6]);
+    assert_eq!(
+        session
+            .query(&entry_query(20, "needle", first_entry))
+            .unwrap()
+            .result
+            .unwrap_err(),
+        QueryError::RevisionChanged
+    );
+    assert_eq!(
+        session
+            .query(&entry_query(10, "other", first_entry))
+            .unwrap()
+            .result
+            .unwrap_err(),
+        QueryError::RevisionChanged
+    );
+    assert!(
+        session
+            .request_ack(&Command::EditTrack {
+                track_id: 2,
+                title: Some("other".into()),
+                artist: None,
+                album: None,
+                decoder_hint: None,
+            })
+            .unwrap()
+            .ok
+    );
+    assert_eq!(
+        session
+            .query(&queue_query("needle", first_queue))
+            .unwrap()
+            .result
+            .unwrap_err(),
+        QueryError::RevisionChanged
+    );
+    assert_eq!(
+        session
+            .query(&entry_query(10, "needle", first_entry))
+            .unwrap()
+            .result
+            .unwrap_err(),
+        QueryError::RevisionChanged
+    );
+    let ViewResponse::PlaylistEntryBatch(restarted) = session
+        .query(&entry_query(10, "needle", None))
+        .unwrap()
+        .result
+        .unwrap()
+    else {
+        panic!("expected restarted playlist batch")
+    };
+    assert_eq!(
+        (restarted.rows[0].position, restarted.rows[0].offset),
+        (4, 0)
+    );
+    drop(session);
+    drop(server);
+    app.request_shutdown().unwrap();
+    runtime.join().unwrap();
 }
 
 #[test]
