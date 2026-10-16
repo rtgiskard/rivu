@@ -20,6 +20,168 @@ pub(super) struct PanelMenu {
     pub(super) page: PanelMenuPage,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum KeyboardSurface {
+    Menu(u8, u8),
+    Dialog(u8),
+    Settings,
+}
+
+impl GuiApp {
+    pub(super) fn menu_surface(&self, surface: gpui::Stateful<Div>) -> gpui::Stateful<Div> {
+        if matches!(
+            self.current_keyboard_surface(),
+            Some(KeyboardSurface::Menu(..))
+        ) {
+            self.keyboard_scope.menu_surface(surface)
+        } else {
+            surface
+        }
+    }
+
+    pub(super) fn dialog_surface(&self, surface: gpui::Stateful<Div>) -> gpui::Stateful<Div> {
+        if self.manual_confirmation_open() {
+            surface
+        } else {
+            self.keyboard_scope.surface(surface)
+        }
+    }
+
+    pub(super) fn open_keyboard_panel_menu(
+        &mut self,
+        panel_id: u64,
+        tab_bar_visible: bool,
+        anchor: Measured,
+        cx: &mut Context<Self>,
+    ) {
+        let position = self
+            .interaction
+            .measurements()
+            .get(&anchor)
+            .map(|bounds| bounds.bottom_left());
+        let Some(position) = position else {
+            return;
+        };
+        self.panel_menu = Some(PanelMenu {
+            panel_id,
+            tab_bar_visible,
+            position,
+            page: PanelMenuPage::Main,
+        });
+        cx.notify();
+    }
+
+    fn current_keyboard_surface(&self) -> Option<KeyboardSurface> {
+        if self.manual_confirmation_open() {
+            return Some(KeyboardSurface::Dialog(0));
+        }
+        if self.settings_open {
+            return Some(KeyboardSurface::Settings);
+        }
+        if self.about_open {
+            return Some(KeyboardSurface::Dialog(1));
+        }
+        if self.duplicate_review.open {
+            return Some(KeyboardSurface::Dialog(2));
+        }
+        if self.playlist_editor.is_some() {
+            return Some(KeyboardSurface::Dialog(3));
+        }
+        if let Some(action) = &self.playlist_action {
+            return Some(if matches!(action, panels::PlaylistAction::Menu(..)) {
+                KeyboardSurface::Menu(0, 0)
+            } else {
+                KeyboardSurface::Dialog(4)
+            });
+        }
+        if self.layouts_open {
+            return Some(KeyboardSurface::Dialog(if self.layout_action.is_some() {
+                6
+            } else {
+                5
+            }));
+        }
+        if let Some(menu) = &self.content_menu {
+            return Some(KeyboardSurface::Menu(1, menu.keyboard_page()));
+        }
+        if self.library_root_menu.is_some() {
+            return Some(KeyboardSurface::Menu(2, 0));
+        }
+        if let Some(menu) = &self.panel_menu {
+            return Some(KeyboardSurface::Menu(3, menu.page as u8));
+        }
+        if self.app_menu_open {
+            return Some(KeyboardSurface::Menu(4, 0));
+        }
+        if self.catalog_open {
+            return Some(KeyboardSurface::Menu(5, 0));
+        }
+        None
+    }
+
+    fn synchronize_keyboard_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let surface = self.current_keyboard_surface();
+        if surface == self.keyboard_surface {
+            return;
+        }
+        if self.keyboard_surface.is_none() && surface.is_some() && self.keyboard_restore.is_none() {
+            self.keyboard_restore = window.focused(cx);
+        }
+        self.keyboard_surface = surface;
+        if let Some(surface) = surface {
+            if surface != KeyboardSurface::Settings {
+                let scope = self.keyboard_scope.clone();
+                let entity = cx.weak_entity();
+                window.on_next_frame(move |window, cx| {
+                    let _ = entity.update(cx, |this, cx| {
+                        if this.keyboard_surface == Some(surface)
+                            && (matches!(surface, KeyboardSurface::Menu(..))
+                                || scope.handle().is_focused(window)
+                                || !scope.handle().contains_focused(window, cx))
+                        {
+                            scope.handle().focus(window, cx);
+                            scope.advance(false, window, cx);
+                        }
+                    });
+                });
+            }
+        } else if let Some(origin) = self.keyboard_restore.take() {
+            // A removed trigger's handle is no longer in the dispatch tree; fall back to the layout.
+            if self.layout_focus.contains(&origin, window) {
+                origin.focus(window, cx);
+            } else {
+                self.focus_layout(window, cx);
+            }
+        }
+    }
+
+    fn menu_key(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        match key {
+            "down" | "up" => self.keyboard_scope.advance(key == "up", window, cx),
+            "escape" | "left" => {
+                if self.content_menu.is_some() {
+                    self.back_content_menu(cx);
+                } else if let Some(menu) = &mut self.panel_menu {
+                    if matches!(menu.page, PanelMenuPage::Main) {
+                        self.panel_menu = None;
+                    } else {
+                        menu.page = PanelMenuPage::Main;
+                    }
+                } else if self.library_root_menu.is_some() {
+                    self.library_root_menu = None;
+                } else if self.playlist_action.is_some() {
+                    self.playlist_action = None;
+                } else {
+                    self.app_menu_open = false;
+                    self.catalog_open = false;
+                }
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+}
+
 impl Render for GuiApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_loading_text(cx);
@@ -30,6 +192,7 @@ impl Render for GuiApp {
             self.request_frame(window, cx);
         }
         self.synchronize_interaction(window, cx);
+        self.synchronize_keyboard_focus(window, cx);
         if self.interaction.docking().is_some()
             && (!cx.has_active_drag() || self.panel_docking_blocked())
         {
@@ -69,12 +232,8 @@ impl Render for GuiApp {
             .font(self.ui_font.clone())
             .track_focus(&self.layout_focus)
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                if this.manual_confirmation_open() {
-                    if event.keystroke.key == "escape" {
-                        this.cancel_manual_action(cx);
-                    }
-                    cx.stop_propagation();
-                    return;
+                if this.current_keyboard_surface().is_none() {
+                    this.keyboard_restore = window.focused(cx);
                 }
                 if event.keystroke.key == "escape"
                     && (this.interaction.docking().is_some()
@@ -102,6 +261,27 @@ impl Render for GuiApp {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = event.keystroke.key.as_str();
                 if key == "escape" && this.dismiss_input_composition(window, cx) {
+                    cx.stop_propagation();
+                    return;
+                }
+                if matches!(this.keyboard_surface, Some(KeyboardSurface::Menu(..))) {
+                    this.menu_key(key, window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                if this.manual_confirmation_open() {
+                    if key == "escape" {
+                        this.cancel_manual_action(cx);
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
+                if components::tab_key(event) {
+                    if event.keystroke.modifiers.shift {
+                        window.focus_prev(cx);
+                    } else {
+                        window.focus_next(cx);
+                    }
                     cx.stop_propagation();
                     return;
                 }
@@ -154,35 +334,6 @@ impl Render for GuiApp {
                     }
                     return;
                 }
-                if this.content_menu.is_some() {
-                    if key == "escape" {
-                        this.content_menu = None;
-                        cx.notify();
-                    }
-                    cx.stop_propagation();
-                    return;
-                }
-                if this.library_root_menu.is_some() {
-                    if key == "escape" {
-                        this.library_root_menu = None;
-                        cx.notify();
-                    }
-                    cx.stop_propagation();
-                    return;
-                }
-                if this.app_menu_open || this.panel_menu.is_some() || this.catalog_open {
-                    if key == "escape" {
-                        this.app_menu_open = false;
-                        if this.panel_menu.is_some() {
-                            this.panel_menu = None;
-                        } else {
-                            this.catalog_open = false;
-                        }
-                        cx.notify();
-                    }
-                    cx.stop_propagation();
-                    return;
-                }
                 let modifiers = event.keystroke.modifiers;
                 if key == "f"
                     && (modifiers.control || modifiers.platform)
@@ -206,6 +357,10 @@ impl Render for GuiApp {
                         this.focus_layout(window, cx);
                         cx.stop_propagation();
                     }
+                    return;
+                }
+                if !this.layout_focus.is_focused(window) {
+                    // Native controls own Enter/Space; do not also run playback shortcuts.
                     return;
                 }
                 let modifiers = event.keystroke.modifiers;
@@ -303,7 +458,10 @@ impl Render for GuiApp {
                 }
                 cx.stop_propagation();
             }))
-            .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _, _| {
+            .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                if this.current_keyboard_surface().is_none() {
+                    this.keyboard_restore = window.focused(cx);
+                }
                 let modal = this.manual_confirmation_open()
                     || this.settings_open
                     || this.about_open
@@ -316,6 +474,14 @@ impl Render for GuiApp {
                     || this.catalog_open;
                 this.scroll_views.click(event.position, modal);
             }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    if this.current_keyboard_surface().is_none() {
+                        this.keyboard_restore = window.focused(cx);
+                    }
+                }),
+            )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 this.synchronize_interaction(window, cx);
                 this.drag_position(event.position, event.modifiers.alt, cx);
@@ -508,17 +674,11 @@ impl Render for GuiApp {
                 },
             ));
         if self.app_menu_open {
-            let about = menu_item(
-                "app-about",
-                self.tr("shell-about"),
-                cx,
-                |this, window, cx| {
-                    this.app_menu_open = false;
-                    this.about_open = true;
-                    this.about_focus.focus(window, cx);
-                    cx.notify();
-                },
-            );
+            let about = menu_item("app-about", self.tr("shell-about"), cx, |this, _, cx| {
+                this.app_menu_open = false;
+                this.about_open = true;
+                cx.notify();
+            });
             app = app.child(
                 components::floating_surface()
                     .flex()
@@ -526,6 +686,7 @@ impl Render for GuiApp {
                     .min_w_0()
                     .min_h_0()
                     .id("app-menu-popup")
+                    .map(|surface| self.menu_surface(surface))
                     .occlude()
                     .absolute()
                     .bottom(footer_height)
@@ -664,6 +825,7 @@ impl Render for GuiApp {
                     .min_w_0()
                     .min_h_0()
                     .id("panel-catalog")
+                    .map(|surface| self.menu_surface(surface))
                     .occlude()
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.catalog_open = false;
@@ -702,6 +864,7 @@ impl Render for GuiApp {
             let is_audio_visualizer = panel_kind == Some("audio_visualizer");
             let is_album_artwork = panel_kind == Some("album_artwork");
             let mut menu = context_menu_container("panel-context-menu")
+                .map(|surface| self.menu_surface(surface))
                 .max_w((window.viewport_size().width - px(UI_INSET * 2.)).max(px(0.)))
                 .max_h((window.viewport_size().height - px(UI_INSET * 2.)).max(px(0.)))
                 .overflow_y_scroll()
@@ -1257,6 +1420,7 @@ impl Render for GuiApp {
 
         if let Some((root, position)) = self.library_root_menu.clone() {
             let menu = context_menu_container("library-root-menu")
+                .map(|surface| self.menu_surface(surface))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                     this.library_root_menu = None;
                     cx.stop_propagation();
@@ -1319,7 +1483,7 @@ impl Render for GuiApp {
             app = app.child(
                 div()
                     .id("about-modal")
-                    .track_focus(&self.about_focus)
+                    .map(|surface| self.dialog_surface(surface))
                     .occlude()
                     .absolute()
                     .size_full()

@@ -275,6 +275,7 @@ impl GuiApp {
         Some(
             div()
                 .id("metadata-confirmation-modal")
+                .map(|surface| self.keyboard_scope.surface(surface))
                 .occlude()
                 .absolute()
                 .size_full()

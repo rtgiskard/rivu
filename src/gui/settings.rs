@@ -1,7 +1,7 @@
 use super::{
     BORDER, ButtonTooltip, DropdownItem, DropdownState, ERROR, POPOVER_MAX_REMS, StatusKind,
     UI_INSET, active_control, button, caption, column,
-    components::{DROPDOWN_ROW_REMS, disabled_control},
+    components::{DROPDOWN_ROW_REMS, FocusScope, activate_control, disabled_control},
     copyable_message, dropdown_container, dropdown_row, dropdown_trigger, form_field, icon_button,
     input::{Input, InputEvent},
     row, section_group, status_message, toggle_button, two_column,
@@ -247,12 +247,10 @@ fn dropdown_button(
     cx: &mut Context<Settings>,
     action: impl Fn(&mut Settings, &mut Window, &mut Context<Settings>) + 'static,
 ) -> Stateful<Div> {
-    dropdown_trigger(id, label).on_click(cx.listener(move |this, _, window, cx| {
+    activate_control(dropdown_trigger(id, label), cx, move |this, window, cx| {
         action(this, window, cx);
-        this.focus.focus(window, cx);
         cx.notify();
-        cx.stop_propagation();
-    }))
+    })
 }
 fn visual_switch(
     i18n: &Localizer,
@@ -461,7 +459,7 @@ pub(super) struct Settings {
     ffmpeg_status: String,
     mpris_status: String,
     ui_scale: f32,
-    focus: FocusHandle,
+    scope: FocusScope,
     active: bool,
     measured: Rc<RefCell<HashMap<Measured, Bounds<Pixels>>>>,
     scrolls: HashMap<&'static str, Rc<ScrollHandle>>,
@@ -487,7 +485,7 @@ pub(super) struct Settings {
 
 impl Focusable for Settings {
     fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus.clone()
+        self.scope.handle().clone()
     }
 }
 
@@ -535,7 +533,7 @@ impl Settings {
             ffmpeg_status,
             mpris_status,
             ui_scale,
-            focus: cx.focus_handle(),
+            scope: FocusScope::new(cx),
             active: false,
             measured: Rc::new(RefCell::new(HashMap::new())),
             scrolls: HashMap::new(),
@@ -1338,6 +1336,9 @@ impl Settings {
                     return;
                 }
                 let key = event.keystroke.key.as_str();
+                if this.inputs[&Field::Font].read(cx).is_composing() {
+                    return;
+                }
                 let open =
                     this.dropdown.is_open() && this.dropdown_anchor == Measured::SettingsFont;
                 if !open {
@@ -1395,7 +1396,7 @@ impl Settings {
         self.dropdown.close();
         self.reset(&config, cx);
         self.active = true;
-        self.focus.focus(window, cx);
+        self.scope.focus(window, cx);
         cx.notify();
     }
 
@@ -3157,13 +3158,26 @@ impl Settings {
 impl Render for Settings {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let panel = self.panel(window, cx);
-        div()
-            .id("settings-modal")
-            .track_focus(&self.focus)
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                let key = event.keystroke.key.as_str();
-                if this.dropdown.is_open() {
+        self.scope.surface(
+            div()
+                .id("settings-modal")
+                .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    if !this.dropdown.is_open() {
+                        return;
+                    }
+                    let key = event.keystroke.key.as_str();
+                    if key == "tab" {
+                        this.dropdown.close();
+                        cx.notify();
+                        return;
+                    }
                     if this.settings_font_input_focused(window, cx) {
+                        return;
+                    }
+                    if !matches!(
+                        key,
+                        "up" | "down" | "pageup" | "pagedown" | "enter" | "space" | "escape"
+                    ) {
                         return;
                     }
                     if key == "escape" {
@@ -3172,66 +3186,73 @@ impl Render for Settings {
                     } else {
                         this.settings_dropdown_key(key, window, cx);
                     }
+                    // Do not leave a native pending keyboard click on the trigger:
+                    // key-up would otherwise reopen the dropdown after selection.
+                    window.prevent_default();
                     cx.stop_propagation();
-                    return;
-                }
-                let modifiers = event.keystroke.modifiers;
-                if matches!(key, "pageup" | "pagedown")
-                    && !modifiers.control
-                    && !modifiers.platform
-                    && !modifiers.alt
-                    && !modifiers.shift
-                    && !modifiers.function
-                    && this.focus.is_focused(window)
-                {
-                    if let Some(scroll) = &this.active_scroll {
-                        let mut offset = scroll.offset();
-                        let step = scroll.bounds().size.height.max(px(0.));
-                        offset.y = (if key == "pagedown" {
-                            offset.y - step
-                        } else {
-                            offset.y + step
-                        })
-                        .max(-scroll.max_offset().y.max(px(0.)))
-                        .min(px(0.));
-                        scroll.set_offset(offset);
-                        cx.notify();
+                }))
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    let key = event.keystroke.key.as_str();
+                    let modifiers = event.keystroke.modifiers;
+                    if matches!(key, "pageup" | "pagedown")
+                        && !modifiers.control
+                        && !modifiers.platform
+                        && !modifiers.alt
+                        && !modifiers.shift
+                        && !modifiers.function
+                        && this.scope.handle().contains_focused(window, cx)
+                    {
+                        if let Some(scroll) = &this.active_scroll {
+                            let mut offset = scroll.offset();
+                            let step = scroll.bounds().size.height.max(px(0.));
+                            offset.y = (if key == "pagedown" {
+                                offset.y - step
+                            } else {
+                                offset.y + step
+                            })
+                            .max(-scroll.max_offset().y.max(px(0.)))
+                            .min(px(0.));
+                            scroll.set_offset(offset);
+                            cx.notify();
+                        }
+                        cx.stop_propagation();
+                    } else if key == "escape" {
+                        this.cancel(cx);
+                        cx.stop_propagation();
                     }
-                    cx.stop_propagation();
-                } else if key == "escape" {
-                    this.cancel(cx);
-                    cx.stop_propagation();
-                }
-            }))
-            .occlude()
-            .absolute()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgb(0x000000).alpha(0.58))
-            .child(
-                column()
-                    .max_w(rems(860. / 16.))
-                    .w(relative(0.9))
-                    .h((window.viewport_size().height - px(32.))
-                        .max(px(0.))
-                        .min(window.rem_size() * (640. / 16.)))
-                    .gap_0()
-                    .overflow_hidden()
-                    .bg(rgb(super::PANEL))
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .rounded_md()
-                    .child(
-                        row()
-                            .h(rems(2.5))
-                            .flex_shrink_0()
-                            .px(gpui::px(UI_INSET))
-                            .child(div().flex_1().text_lg().child(self.tr("settings-settings"))),
-                    )
-                    .child(panel),
-            )
+                }))
+                .occlude()
+                .absolute()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(rgb(0x000000).alpha(0.58))
+                .child(
+                    column()
+                        .max_w(rems(860. / 16.))
+                        .w(relative(0.9))
+                        .h((window.viewport_size().height - px(32.))
+                            .max(px(0.))
+                            .min(window.rem_size() * (640. / 16.)))
+                        .gap_0()
+                        .overflow_hidden()
+                        .bg(rgb(super::PANEL))
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .rounded_md()
+                        .child(
+                            row()
+                                .h(rems(2.5))
+                                .flex_shrink_0()
+                                .px(gpui::px(UI_INSET))
+                                .child(
+                                    div().flex_1().text_lg().child(self.tr("settings-settings")),
+                                ),
+                        )
+                        .child(panel),
+                ),
+        )
     }
 }
 

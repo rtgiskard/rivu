@@ -90,6 +90,26 @@ remains available when content overflows.
 The list's upper and lower edges indicate more content beyond the viewport;
 the corresponding fade clears when that end is reached.
 
+*Desktop keyboard navigation:*
+
+Use `Tab` and `Shift+Tab` to move between controls; the focused control has an
+accent highlight. `Enter` or `Space` activates a focused button or switch.
+Panel tabs are also tab stops: activate a tab with `Enter`/`Space`, or press
+`Shift+F10` (the Menu key also works) to open its panel menu.
+Open menus use `Up` and `Down` to move between available actions (wrapping at
+the ends), and `Enter` to choose one. `Escape` or `Left` returns from a submenu;
+at the top level it closes the menu without triggering a playback shortcut.
+
+Dialogs keep `Tab` traversal inside their controls. In Settings, tab to a page
+button and press `Enter` to change pages, then tab through its fields and the
+Apply/Discard actions. Dropdown triggers also open with `Enter` or `Space`;
+`Up`/`Down` choose a candidate, `Enter` accepts, and `Escape` closes the list.
+Text editing and input-method composition retain their own keys; cancelling
+preedit does not also dismiss the containing dialog. Closing a dialog restores
+the invoking control when it is still present, otherwise the layout receives
+focus. Playback shortcuts apply to the layout, not to focused editors or buttons.
+
+
 `interface.language` selects the presentation language: `auto` (default), `en-US`,
 or `zh-CN`. Translations are embedded; no language pack installation is needed.
 `auto` uses the first nonempty `LC_ALL`, `LC_MESSAGES`, or `LANG` value, ignoring

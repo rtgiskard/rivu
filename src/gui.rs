@@ -510,9 +510,11 @@ pub(super) struct GuiApp {
     metadata_needs_refresh: bool,
     manual_intents: metadata::ManualIntents,
     duplicate_review: duplicates::DuplicateReview,
-    duplicate_focus: FocusHandle,
     metadata_decoder_hint: crate::model::DecoderHint,
     layout_focus: FocusHandle,
+    keyboard_scope: components::FocusScope,
+    keyboard_surface: Option<shell::KeyboardSurface>,
+    keyboard_restore: Option<FocusHandle>,
     scroll_views: scrolling::ScrollViews,
 
     interaction: LayoutInteraction,
@@ -533,7 +535,6 @@ pub(super) struct GuiApp {
     catalog_open: bool,
     settings_open: bool,
     about_open: bool,
-    about_focus: FocusHandle,
     app_menu_open: bool,
     layouts_open: bool,
     layout_action: Option<layout::layout_manager::Action>,
@@ -1219,9 +1220,11 @@ impl GuiApp {
             metadata_needs_refresh: false,
             manual_intents: metadata::ManualIntents::default(),
             duplicate_review: duplicates::DuplicateReview::default(),
-            duplicate_focus: cx.focus_handle(),
             metadata_decoder_hint: Default::default(),
             layout_focus: cx.focus_handle(),
+            keyboard_scope: components::FocusScope::new(cx),
+            keyboard_surface: None,
+            keyboard_restore: None,
             scroll_views: scrolling::ScrollViews::default(),
             interaction: LayoutInteraction::default(),
             error,
@@ -1247,7 +1250,6 @@ impl GuiApp {
             catalog_open: false,
             settings_open: false,
             about_open: false,
-            about_focus: cx.focus_handle(),
             app_menu_open: false,
             layouts_open: false,
             layout_action: None,
@@ -2351,6 +2353,8 @@ impl GuiApp {
                     tabs = tabs.child(
                         div()
                             .id(("tab", panel_id))
+                            .tab_index(0)
+                            .focus(|style| style.bg(rgb(HIGHLIGHT)).text_color(rgb(ACCENT)))
                             .relative()
                             .flex()
                             .h_full()
@@ -2363,12 +2367,25 @@ impl GuiApp {
                             .when(!self.layouts.current().locked, |view| view.cursor_move())
                             .bg(rgb(if active == panel_id { HIGHLIGHT } else { PANEL }))
                             .text_color(rgb(if active == panel_id { TEXT } else { SECONDARY }))
-                            .on_click(cx.listener(move |this, _, window, cx| {
+                            .on_click(cx.listener(move |this, event, window, cx| {
                                 this.layouts.current_mut().activate(panel_id);
                                 this.search_panel = Some(panel_id);
-                                this.focus_layout(window, cx);
+                                if matches!(event, gpui::ClickEvent::Mouse(_)) {
+                                    this.focus_layout(window, cx);
+                                }
                                 this.interaction.set_target_group(Some(node_id));
                                 this.persist_layout(cx);
+                            }))
+                            .on_key_down(cx.listener(move |this, event, _, cx| {
+                                if components::context_menu_key(event) {
+                                    this.open_keyboard_panel_menu(
+                                        panel_id,
+                                        tab_bar_visible,
+                                        Measured::Tab(panel_id),
+                                        cx,
+                                    );
+                                    cx.stop_propagation();
+                                }
                             }))
                             .on_mouse_down(
                                 MouseButton::Right,
@@ -2468,6 +2485,17 @@ impl GuiApp {
                     .child(content);
                 let mut panel = column()
                     .id(("group", node_id))
+                    .on_key_down(cx.listener(move |this, event, window, cx| {
+                        if components::context_menu_key(event) && !this.input_focused(window, cx) {
+                            this.open_keyboard_panel_menu(
+                                active,
+                                show_tab_bar,
+                                Measured::Node(node_id),
+                                cx,
+                            );
+                            cx.stop_propagation();
+                        }
+                    }))
                     .relative()
                     .size_full()
                     .gap_0()

@@ -305,6 +305,7 @@ impl GuiApp {
         }
         div()
             .id("layouts-modal")
+            .map(|surface| self.dialog_surface(surface))
             .occlude()
             .absolute()
             .size_full()

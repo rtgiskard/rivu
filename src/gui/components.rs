@@ -1,4 +1,6 @@
 mod dropdown;
+#[cfg(test)]
+mod keyboard_tests;
 mod scrollbar;
 
 use super::{ACCENT, BORDER, CONTROL, GuiApp, HIGHLIGHT, MUTED, PANEL, SECONDARY, TEXT, UI_INSET};
@@ -15,6 +17,125 @@ const ROW_HOVER: u32 = 0x202330;
 const ROW_SELECTED: u32 = 0x2b3752;
 const ROW_SELECTED_HOVER: u32 = 0x34415e;
 pub(crate) use dropdown::{DropdownItem, DropdownState};
+
+/// Native tab order bounded to a transient menu or dialog.
+#[derive(Clone)]
+pub(crate) struct FocusScope {
+    start: gpui::FocusHandle,
+    end: gpui::FocusHandle,
+}
+
+impl FocusScope {
+    pub(crate) fn new(cx: &mut gpui::App) -> Self {
+        Self {
+            start: cx.focus_handle(),
+            end: cx.focus_handle().tab_index(isize::MAX),
+        }
+    }
+
+    pub(crate) fn handle(&self) -> &gpui::FocusHandle {
+        &self.start
+    }
+
+    pub(crate) fn surface(&self, surface: Stateful<Div>) -> Stateful<Div> {
+        let scope = self.clone();
+        surface
+            .tab_group()
+            .tab_index(0)
+            .tab_stop(false)
+            .track_focus(&self.start)
+            .child(
+                div()
+                    .id("focus-scope-end")
+                    .absolute()
+                    .w_0()
+                    .h_0()
+                    .tab_index(isize::MAX)
+                    .tab_stop(false)
+                    .track_focus(&self.end),
+            )
+            .on_key_down(move |event, window, cx| {
+                if tab_key(event) {
+                    scope.advance(event.keystroke.modifiers.shift, window, cx);
+                    cx.stop_propagation();
+                }
+            })
+    }
+
+    pub(crate) fn menu_surface(&self, surface: Stateful<Div>) -> Stateful<Div> {
+        let scope = self.clone();
+        self.surface(surface).on_key_down(move |event, window, cx| {
+            if matches!(event.keystroke.key.as_str(), "up" | "down")
+                && !event.keystroke.modifiers.modified()
+            {
+                scope.advance(event.keystroke.key == "up", window, cx);
+                cx.stop_propagation();
+            }
+        })
+    }
+
+    pub(crate) fn focus(&self, window: &mut Window, cx: &mut gpui::App) {
+        self.start.focus(window, cx);
+        let scope = self.clone();
+        window.on_next_frame(move |window, cx| {
+            // Do not steal focus if the user already chose an editor or closed the surface.
+            if scope.start.is_focused(window) {
+                scope.advance(false, window, cx);
+            }
+        });
+    }
+
+    pub(crate) fn advance(&self, backwards: bool, window: &mut Window, cx: &mut gpui::App) {
+        if backwards {
+            window.focus_prev(cx);
+        } else {
+            window.focus_next(cx);
+        }
+        if !self.start.contains_focused(window, cx) {
+            if backwards {
+                self.end.focus(window, cx);
+                window.focus_prev(cx);
+            } else {
+                self.start.focus(window, cx);
+                window.focus_next(cx);
+            }
+            if !self.start.contains_focused(window, cx) {
+                self.start.focus(window, cx);
+            }
+        }
+    }
+}
+
+pub(crate) fn tab_key(event: &gpui::KeyDownEvent) -> bool {
+    let modifiers = event.keystroke.modifiers;
+    event.keystroke.key == "tab"
+        && !modifiers.control
+        && !modifiers.platform
+        && !modifiers.alt
+        && !modifiers.function
+}
+
+pub(crate) fn context_menu_key(event: &gpui::KeyDownEvent) -> bool {
+    let modifiers = event.keystroke.modifiers;
+    !modifiers.control
+        && !modifiers.platform
+        && !modifiers.alt
+        && !modifiers.function
+        && ((event.keystroke.key == "f10" && modifiers.shift)
+            || (event.keystroke.key == "menu" && !modifiers.shift))
+}
+
+/// Keep native keyboard clicks and pointer clicks on the exact same action path.
+pub(crate) fn activate_control<T: 'static>(
+    control: Stateful<Div>,
+    cx: &mut Context<T>,
+    action: impl Fn(&mut T, &mut Window, &mut Context<T>) + 'static,
+) -> Stateful<Div> {
+    control.on_click(cx.listener(move |this, _, window, cx| {
+        action(this, window, cx);
+        cx.stop_propagation();
+    }))
+}
 
 pub(crate) fn row_background(selected: bool, hovered: bool) -> gpui::Rgba {
     rgb(match (selected, hovered) {
@@ -180,6 +301,8 @@ pub(crate) fn active_control(control: Stateful<Div>, active: bool) -> Stateful<D
 fn control_surface(id: impl Into<ElementId>) -> Stateful<Div> {
     div()
         .id(id)
+        .tab_index(0)
+        .focus(|style| style.border_color(rgb(ACCENT)).bg(rgb(HIGHLIGHT)))
         .flex()
         .items_center()
         .min_w_0()
@@ -211,10 +334,7 @@ pub(crate) fn button<T: 'static>(
     cx: &mut Context<T>,
     action: impl Fn(&mut T, &mut Window, &mut Context<T>) + 'static,
 ) -> Stateful<Div> {
-    button_style(id, label).on_click(cx.listener(move |this, _, window, cx| {
-        action(this, window, cx);
-        cx.stop_propagation();
-    }))
+    activate_control(button_style(id, label), cx, action)
 }
 
 /// Sortable list header control with shared active-direction styling.
@@ -229,6 +349,8 @@ pub(crate) fn sortable_header(
 ) -> Stateful<Div> {
     let mut control = div()
         .id(id)
+        .tab_index(0)
+        .focus(|style| style.bg(rgb(HIGHLIGHT)).text_color(rgb(ACCENT)))
         .flex()
         .items_center()
         .gap_1()
@@ -291,7 +413,31 @@ pub(crate) fn quiet_icon_button(control: Stateful<Div>) -> Stateful<Div> {
 
 /// Shared unavailable-action appearance; the action owner retains its guard.
 pub(crate) fn disabled_control(control: Stateful<Div>, disabled: bool) -> Stateful<Div> {
-    control.when(disabled, |view| view.opacity(0.4).cursor_default())
+    control.when(disabled, |view| {
+        view.opacity(0.4)
+            .cursor_default()
+            .tab_stop(false)
+            .capture_key_down(|event, window, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }
+            })
+            .capture_key_up(|event, window, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }
+            })
+            .capture_any_mouse_down(|_, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+            })
+            .capture_any_mouse_up(|_, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+            })
+    })
 }
 
 /// Destructive text remains visible on hover; keep the shared focus treatment.
@@ -378,10 +524,7 @@ pub(crate) fn menu_item(
     cx: &mut Context<GuiApp>,
     action: impl Fn(&mut GuiApp, &mut Window, &mut Context<GuiApp>) + 'static,
 ) -> Stateful<Div> {
-    menu_item_style(id, label).on_click(cx.listener(move |this, _, window, cx| {
-        action(this, window, cx);
-        cx.stop_propagation();
-    }))
+    activate_control(menu_item_style(id, label), cx, action)
 }
 
 pub(crate) fn menu_separator() -> Div {
@@ -479,6 +622,8 @@ pub(crate) fn context_menu_container(id: impl Into<ElementId>) -> Stateful<Div> 
 pub(crate) fn menu_item_style(id: impl Into<ElementId>, label: impl IntoElement) -> Stateful<Div> {
     div()
         .id(id)
+        .tab_index(0)
+        .focus(|style| style.bg(rgb(HIGHLIGHT)).text_color(rgb(ACCENT)))
         .w_full()
         .min_h(gpui::rems(2.0))
         .px(gpui::px(UI_INSET))

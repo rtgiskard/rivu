@@ -1546,6 +1546,7 @@ impl GuiApp {
             let rename = target.clone();
             let delete = target.clone();
             let menu = super::context_menu_container("playlist-row-menu")
+                .map(|surface| self.menu_surface(surface))
                 .max_w((window.viewport_size().width - px(UI_INSET * 2.)).max(px(0.)))
                 .max_h((window.viewport_size().height - px(UI_INSET * 2.)).max(px(0.)))
                 .overflow_y_scroll()
@@ -1663,6 +1664,7 @@ impl GuiApp {
         };
         div()
             .id("playlist-action-modal")
+            .map(|surface| self.dialog_surface(surface))
             .occlude()
             .absolute()
             .size_full()

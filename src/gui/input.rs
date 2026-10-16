@@ -80,7 +80,7 @@ impl Input {
         let content = value.into();
         let end = content.len();
         Self {
-            focus_handle: cx.focus_handle(),
+            focus_handle: cx.focus_handle().tab_stop(true),
             enabled: true,
             content,
             placeholder: placeholder.into(),
@@ -145,6 +145,7 @@ impl Input {
             return;
         }
         self.enabled = enabled;
+        self.focus_handle = self.focus_handle.clone().tab_stop(enabled);
         self.is_selecting = false;
         self.marked_range = None;
         cx.notify();
@@ -153,6 +154,10 @@ impl Input {
     /// Returns whether this input currently owns window focus.
     pub fn is_focused(&self, window: &Window) -> bool {
         self.focus_handle.is_focused(window)
+    }
+
+    pub(super) fn is_composing(&self) -> bool {
+        self.marked_range.is_some()
     }
 
     pub(super) fn focus_and_select_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -817,6 +822,7 @@ impl Render for Input {
             .flex()
             .key_context("Input")
             .track_focus(&self.focus_handle(cx))
+            .tab_index(0)
             .cursor(if self.enabled {
                 CursorStyle::IBeam
             } else {
@@ -835,6 +841,11 @@ impl Render for Input {
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::submit))
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" && this.dismiss_composition(cx) {
+                    cx.stop_propagation();
+                }
+            }))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -882,7 +893,80 @@ impl Focusable for Input {
 }
 #[cfg(test)]
 mod tests {
+    use gpui::InputEvent;
+
     use super::*;
+
+    struct InputDialog {
+        input: gpui::Entity<Input>,
+        escapes: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+
+    impl Render for InputDialog {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let escapes = self.escapes.clone();
+            div()
+                .size_full()
+                .child(self.input.clone())
+                .on_key_down(move |event, _, _| {
+                    if event.keystroke.key == "escape" {
+                        escapes.set(escapes.get() + 1);
+                    }
+                })
+        }
+    }
+
+    #[test]
+    fn escape_cancels_ime_preedit_without_dismissing_parent_dialog() {
+        let mut cx = gpui::TestAppContext::single();
+        let input = cx.update(|cx| cx.new(|cx| Input::new("kept", "", cx)));
+        let escapes = std::rc::Rc::new(std::cell::Cell::new(0));
+        let window = cx.add_window({
+            let input = input.clone();
+            let escapes = escapes.clone();
+            move |_, _| InputDialog { input, escapes }
+        });
+        let handle = window.into();
+        cx.update_window(handle, |_, window, cx| {
+            input.update(cx, |this, cx| {
+                this.focus_handle.focus(window, cx);
+                this.replace_and_mark_text_in_range(None, "中", Some(1..1), window, cx);
+            });
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.dispatch_event(
+                gpui::KeyDownEvent {
+                    keystroke: gpui::Keystroke::parse("escape").unwrap(),
+                    is_held: false,
+                    prefer_character_input: false,
+                }
+                .to_platform_input(),
+                cx,
+            );
+        })
+        .unwrap();
+        assert_eq!(escapes.get(), 0);
+        cx.update(|cx| {
+            assert_eq!(input.read(cx).content.as_ref(), "kept");
+            assert!(!input.read(cx).is_composing());
+        });
+        cx.update_window(handle, |_, window, cx| {
+            window.draw(cx).clear(cx);
+            window.dispatch_event(
+                gpui::KeyDownEvent {
+                    keystroke: gpui::Keystroke::parse("escape").unwrap(),
+                    is_held: false,
+                    prefer_character_input: false,
+                }
+                .to_platform_input(),
+                cx,
+            );
+        })
+        .unwrap();
+        assert_eq!(escapes.get(), 1);
+    }
 
     #[test]
     fn caret_scrolls_to_both_edges_without_moving_a_visible_caret() {

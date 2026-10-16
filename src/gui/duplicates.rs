@@ -187,7 +187,6 @@ impl GuiApp {
         self.duplicate_review.fingerprint = None;
         self.duplicate_review.members_dirty = false;
         self.duplicate_review.feedback = None;
-        self.duplicate_focus.focus(window, cx);
         self.request_duplicate_groups(0, cx);
         cx.notify();
     }
@@ -1158,7 +1157,7 @@ impl GuiApp {
         }
         div()
             .id("duplicate-review-modal")
-            .track_focus(&self.duplicate_focus)
+            .map(|surface| self.dialog_surface(surface))
             .occlude()
             .absolute()
             .size_full()

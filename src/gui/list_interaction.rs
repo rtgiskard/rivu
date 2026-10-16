@@ -77,6 +77,14 @@ pub(super) struct ContentMenu {
     pub(super) playlists: bool,
 }
 
+impl ContentMenu {
+    pub(super) fn keyboard_page(&self) -> u8 {
+        u8::from(self.loading)
+            | (u8::from(self.playlists) << 1)
+            | (u8::from(self.confirm_remove) << 2)
+    }
+}
+
 #[derive(Clone, Copy)]
 enum ContentAction {
     Play,
@@ -437,6 +445,18 @@ impl GuiApp {
         cx.notify();
     }
 
+    pub(super) fn back_content_menu(&mut self, cx: &mut Context<Self>) {
+        if let Some(menu) = &mut self.content_menu {
+            if menu.playlists || menu.confirm_remove {
+                menu.playlists = false;
+                menu.confirm_remove = false;
+            } else {
+                self.content_menu = None;
+            }
+        }
+        cx.notify();
+    }
+
     pub(super) fn content_menu_overlay(
         &self,
         window: &Window,
@@ -446,6 +466,7 @@ impl GuiApp {
             return div().into_any_element();
         };
         let mut menu = context_menu_container("content-menu")
+            .map(|surface| self.menu_surface(surface))
             .max_w((window.viewport_size().width - px(UI_INSET * 2.)).max(px(0.)))
             .max_h((window.viewport_size().height - px(UI_INSET * 2.)).max(px(0.)))
             .overflow_y_scroll()

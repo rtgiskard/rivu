@@ -174,6 +174,7 @@ impl GuiApp {
         }
         div()
             .id("playlist-name-modal")
+            .map(|surface| self.dialog_surface(surface))
             .occlude()
             .absolute()
             .size_full()
