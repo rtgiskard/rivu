@@ -373,22 +373,23 @@ impl Store {
             }
             byidentity.insert(key, record.id);
         }
-        // Ordinary moves require uniqueness on both sides. Resolve exact paths
-        // first; never let scan order choose one of several newly found copies.
-        let mut new_ordinary: HashMap<&str, Option<&Path>> = HashMap::new();
+        // Moves require uniqueness on both sides. Resolve exact identities first;
+        // never let scan order choose one of several newly found copies.
+        let mut new_destinations: HashMap<RelocationKey<'_>, Option<TrackIdentity<'_>>> =
+            HashMap::new();
         for record in &result.records {
-            if record.cue.is_none()
-                && !byidentity.contains_key(&identity(&record.path, None))
+            let destination = identity(&record.path, record.cue.as_ref());
+            if !byidentity.contains_key(&destination)
                 && let Some(hash) = record.fingerprint.as_deref()
             {
-                new_ordinary
-                    .entry(hash)
-                    .and_modify(|path| {
-                        if *path != Some(record.path.as_path()) {
-                            *path = None;
+                new_destinations
+                    .entry(relocation_key(hash, record.cue.as_ref()))
+                    .and_modify(|candidate| {
+                        if candidate.as_ref() != Some(&destination) {
+                            *candidate = None;
                         }
                     })
-                    .or_insert(Some(record.path.as_path()));
+                    .or_insert(Some(destination));
             }
         }
         let mut seen = HashSet::new();
@@ -431,13 +432,14 @@ impl Store {
             let key = identity(&r.path, r.cue.as_ref());
             let id = byidentity.get(&key).copied().or_else(|| {
                 r.fingerprint.as_deref().and_then(|hash| {
-                    if r.cue.is_none() && !new_ordinary.get(hash).is_some_and(Option::is_some) {
+                    let relocation = relocation_key(hash, r.cue.as_ref());
+                    if !new_destinations
+                        .get(&relocation)
+                        .is_some_and(Option::is_some)
+                    {
                         return None;
                     }
-                    let candidate = candidates_by_key
-                        .get(&relocation_key(hash, r.cue.as_ref()))
-                        .copied()
-                        .flatten()?;
+                    let candidate = candidates_by_key.get(&relocation).copied().flatten()?;
                     (!seen.contains(&candidate.id)).then_some(candidate.id)
                 })
             });

@@ -1895,21 +1895,110 @@ fn cue_relocation_requires_absent_sheet_not_absent_shared_source() {
 }
 
 #[test]
-fn ambiguous_cue_relocation_does_not_steal_an_existing_id() {
-    let store = Store::open(Path::new(":memory:")).unwrap();
-    store
-        .apply_scan(&scan(vec![
-            segment("/music/old-a.cue", 1, 0, Some(4500)),
-            segment("/music/old-b.cue", 1, 0, Some(4500)),
-        ]))
-        .unwrap();
-    let ids: Vec<_> = all_tracks(&store).iter().map(|t| t.id).collect();
-    store
-        .apply_scan(&scan(vec![segment("/music/new.cue", 1, 0, Some(4500))]))
-        .unwrap();
-    let tracks = all_tracks(&store);
-    assert_eq!(tracks.len(), 3);
-    assert!(!ids.contains(&tracks[2].id));
+fn ambiguous_cue_relocation_preserves_ids_and_user_data_on_both_sides() {
+    let directory = tempfile::tempdir().unwrap();
+    for (old_count, new_count) in [(2, 1), (1, 2), (2, 2)] {
+        for reverse in [false, true] {
+            let store = Store::open(Path::new(":memory:")).unwrap();
+            let make = |prefix: &str, index| {
+                segment(
+                    directory
+                        .path()
+                        .join(format!("{prefix}-{index}.cue"))
+                        .to_str()
+                        .unwrap(),
+                    1,
+                    0,
+                    Some(4500),
+                )
+            };
+            let mut result = scan((0..old_count).map(|index| make("old", index)).collect());
+            result.roots = vec![directory.path().to_path_buf()];
+            store.apply_scan(&result).unwrap();
+            let old_ids: Vec<_> = all_tracks(&store).iter().map(|track| track.id).collect();
+            store.set_favorite(&old_ids, true).unwrap();
+            for id in &old_ids {
+                store
+                    .edit_track(*id, Some("Owned title"), None, None, None)
+                    .unwrap();
+            }
+            let playlist = store.create_playlist("Owned references").unwrap();
+            store.add_playlist(playlist, &old_ids).unwrap();
+            result.records = (0..new_count).map(|index| make("new", index)).collect();
+            if reverse {
+                result.records.reverse();
+            }
+            store.apply_scan(&result).unwrap();
+            let tracks = all_tracks(&store);
+            assert_eq!(tracks.len(), old_count + new_count);
+            for id in &old_ids {
+                let old = store.track(*id).unwrap().unwrap();
+                assert!(old.missing && old.favorite);
+                assert_eq!(old.title, "Owned title");
+            }
+            for new in tracks.iter().filter(|track| !old_ids.contains(&track.id)) {
+                assert!(!new.missing && !new.favorite);
+                assert_eq!(new.title, "Track 1");
+            }
+            assert_eq!(
+                playlist_entries(&store, playlist)
+                    .iter()
+                    .map(|entry| entry.track_id)
+                    .collect::<Vec<_>>(),
+                old_ids
+            );
+        }
+    }
+}
+
+#[test]
+fn exact_cue_identities_do_not_count_as_new_relocation_destinations() {
+    let directory = tempfile::tempdir().unwrap();
+    for reverse in [false, true] {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let make = |name: &str| {
+            segment(
+                directory.path().join(name).to_str().unwrap(),
+                1,
+                0,
+                Some(4500),
+            )
+        };
+        let old = make("old.cue");
+        let exact = make("existing.cue");
+        let mut result = scan(vec![old.clone(), exact.clone()]);
+        result.roots = vec![directory.path().to_path_buf()];
+        store.apply_scan(&result).unwrap();
+        let old_id = store
+            .track_id_for_source(&old.cue.as_ref().unwrap().sheet, Some(1))
+            .unwrap()
+            .unwrap();
+        let exact_id = store
+            .track_id_for_source(&exact.cue.as_ref().unwrap().sheet, Some(1))
+            .unwrap()
+            .unwrap();
+        store
+            .edit_track(old_id, Some("Migrated title"), None, None, None)
+            .unwrap();
+        store
+            .edit_track(exact_id, Some("Exact title"), None, None, None)
+            .unwrap();
+        let destination = make("new.cue");
+        result.records = vec![destination.clone(), exact.clone()];
+        if reverse {
+            result.records.reverse();
+        }
+        store.apply_scan(&result).unwrap();
+        assert_eq!(all_tracks(&store).len(), 2);
+        let migrated = store.track(old_id).unwrap().unwrap();
+        assert_eq!(migrated.cue, destination.cue);
+        assert_eq!(migrated.title, "Migrated title");
+        assert!(!migrated.missing);
+        let preserved = store.track(exact_id).unwrap().unwrap();
+        assert_eq!(preserved.cue, exact.cue);
+        assert_eq!(preserved.title, "Exact title");
+        assert!(!preserved.missing);
+    }
 }
 
 #[test]

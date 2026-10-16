@@ -108,10 +108,14 @@ rivu library scan ~/Music --force --wait
 
 == Same files and relocation
 
-Ordinary-file automatic relocation requires a unique missing old identity and a
-unique new destination with matching content. Exact paths take precedence.
-Ambiguous copies retain separate IDs and the missing identity's user state;
-scan order never chooses a destination. CUE matching is unchanged.
+Automatic relocation requires a unique missing old identity and a unique new
+destination with matching content. Exact identities take precedence and do not
+count as new destinations. Ordinary files match by fingerprint; CUE segments
+match by source fingerprint, track number, and exact start/end boundaries, and
+require the old sheet to be absent. Ambiguous copies on either side retain
+separate IDs and the missing identity's user state and playlist references;
+scan order never chooses a destination. Ambiguity is per CUE segment key, so it
+does not prevent other uniquely matched segments from relocating.
 
 Use Settings → Library → `Same files / Relocation candidates` to
 inspect paged ordinary-file groups. Closing the review returns to Settings
