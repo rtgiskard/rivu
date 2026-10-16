@@ -176,7 +176,12 @@ impl Field {
         match self {
             Self::Roots => settings.tr("settings-library-roots-hint"),
             Self::AlbumArtworkPeriod => settings.tr("settings-artwork-period-hint"),
-            Self::AlbumArtworkFps => settings.tr("settings-animation-fps-hint"),
+            Self::AlbumArtworkFps => format!(
+                "{} {}",
+                settings.tr("settings-animation-fps-hint"),
+                settings.tr("settings-artwork-motion-help")
+            )
+            .into(),
             Self::ScanMaxDepth => settings.tr("settings-scan-depth-hint"),
             Self::Volume => "0–100.".into(),
             Self::PlayCountThreshold => settings.tr("settings-play-count-threshold-hint"),
@@ -1974,8 +1979,18 @@ impl Settings {
             self.tr("settings-appearance-layout"),
             column()
                 .gap_2()
-                .child(form_field(self.tr("settings-language"), language))
-                .child(caption(self.tr("settings-language-restart")))
+                .child(
+                    column()
+                        .gap_1()
+                        .child(
+                            row()
+                                .flex_wrap()
+                                .gap_2()
+                                .child(caption(self.tr("settings-language")))
+                                .child(caption(self.tr("settings-language-restart"))),
+                        )
+                        .child(language),
+                )
                 .child(two_column(
                     self.font_control(cx).min_w(rems(180. / 16.)),
                     self.field(Field::Scale).min_w(rems(180. / 16.)),
@@ -2090,7 +2105,6 @@ impl Settings {
             self.tr("settings-logging"),
             column()
                 .gap_2()
-                .child(caption(self.tr("settings-logging-scope")))
                 .child(
                     row()
                         .items_start()
@@ -2118,7 +2132,9 @@ impl Settings {
                     draft.log_to_file,
                     cx,
                     |draft| draft.log_to_file = !draft.log_to_file,
-                ))),
+                )))
+                .id("settings-logging-scope-help")
+                .tooltip(settings_tooltip(self.tr("settings-logging-scope"))),
         )
     }
 
@@ -2308,7 +2324,6 @@ impl Settings {
                                 .min_w(rems(180. / 16.))
                                 .gap_2()
                                 .child(settings.field_state(Field::AlbumArtworkFps, true, cx))
-                                .child(caption(settings.tr("settings-artwork-motion-help")))
                         }),
                     )),
             ))
