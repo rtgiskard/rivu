@@ -122,6 +122,17 @@ impl PlatformAtlas for WgpuAtlas {
     fn remove(&self, key: &AtlasKey) {
         self.0.lock().remove(key);
     }
+
+    fn finish_frame(&self, scene: &gpui::Scene) {
+        // Each renderer owns its atlas. Dropped pages remain alive in submitted
+        // wgpu commands; later uploads and submissions are ordered on the queue.
+        self.0.lock().finish_frame(scene);
+    }
+
+    #[cfg(any(test, feature = "test-support", feature = "bench-support"))]
+    fn contains(&self, key: &AtlasKey) -> bool {
+        self.0.lock().contains(key)
+    }
 }
 
 impl AtlasBackend for WgpuAtlasTextures {
@@ -543,6 +554,181 @@ mod tests {
 
         assert_eq!(second_tile.texture_id, first_tile.texture_id);
         assert_ne!(second_generation, first_generation);
+        Ok(())
+    }
+
+    #[test]
+    fn glyph_reclamation_preserves_replayed_pixels_and_unreferenced_images() -> anyhow::Result<()> {
+        use gpui::{
+            ContentMask, Corners, FontId, GlyphId, MonochromeSprite, PlatformHeadlessRenderer,
+            PolychromeSprite, RenderGlyphParams, ScaledPixels, Scene, SubpixelSprite,
+            TransformationMatrix, px,
+        };
+
+        fn glyph(id: u32, kind: AtlasTextureKind) -> AtlasKey {
+            RenderGlyphParams {
+                font_id: FontId(0),
+                glyph_id: GlyphId(id),
+                font_size: px(16.),
+                subpixel_variant: Point::default(),
+                scale_factor: 1.,
+                is_emoji: kind == AtlasTextureKind::Polychrome,
+                subpixel_rendering: kind == AtlasTextureKind::Subpixel,
+                dilation: 0,
+            }
+            .into()
+        }
+
+        fn insert(atlas: &dyn PlatformAtlas, key: AtlasKey, edge: i32, pixel: &[u8]) -> AtlasTile {
+            atlas
+                .get_or_insert_with(key, &mut || {
+                    Ok(Some((
+                        Size::new(DevicePixels(edge), DevicePixels(edge)),
+                        Cow::Owned(pixel.repeat((edge * edge) as usize)),
+                    )))
+                })
+                .expect("test atlas allocation succeeds")
+                .expect("builder supplies pixels")
+        }
+
+        let bounds = |x: f32| Bounds {
+            origin: Point {
+                x: ScaledPixels(x),
+                y: ScaledPixels(0.),
+            },
+            size: Size::new(ScaledPixels(32.), ScaledPixels(32.)),
+        };
+        let mono = |tile, x, color| MonochromeSprite {
+            order: 0,
+            pad: 0,
+            bounds: bounds(x),
+            content_mask: ContentMask { bounds: bounds(x) },
+            color,
+            tile,
+            transformation: TransformationMatrix::default(),
+        };
+        let color = |tile, x| PolychromeSprite {
+            order: 0,
+            pad: 0,
+            grayscale: false.into(),
+            opacity: 1.,
+            bounds: bounds(x),
+            content_mask: ContentMask { bounds: bounds(x) },
+            corner_radii: Corners::default(),
+            tile,
+            #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+            transformation: TransformationMatrix::default(),
+        };
+        let assert_pixel = |image: &image::RgbaImage, x, expected: [u8; 4]| {
+            let actual = image.get_pixel(x, 16).0;
+            assert!(
+                actual.iter().zip(expected).all(|(a, e)| a.abs_diff(e) <= 3),
+                "pixel {x}: {actual:?}, expected {expected:?}"
+            );
+        };
+
+        let mut renderer = crate::WgpuHeadlessRenderer::new()?;
+        let atlas = renderer.sprite_atlas();
+        // Historical text occupies pages that the small cached scene no longer
+        // uses. Full-page tiles make placement deterministic across allocators.
+        for id in 0..8193 {
+            insert(
+                atlas.as_ref(),
+                glyph(id, AtlasTextureKind::Monochrome),
+                1,
+                &[255],
+            );
+        }
+        let mono_key = glyph(20_000, AtlasTextureKind::Monochrome);
+        let mono_tile = insert(atlas.as_ref(), mono_key.clone(), 1024, &[255]);
+        let image_key = AtlasKey::Image(RenderImageParams {
+            image_id: ImageId(81),
+            frame_index: 0,
+        });
+        let image_tile = insert(atlas.as_ref(), image_key.clone(), 1024, &[0, 0, 255, 255]);
+        let discarded_color_key = glyph(20_001, AtlasTextureKind::Polychrome);
+        insert(
+            atlas.as_ref(),
+            discarded_color_key.clone(),
+            1024,
+            &[0, 255, 0, 255],
+        );
+        let color_key = glyph(20_002, AtlasTextureKind::Polychrome);
+        let color_tile = insert(atlas.as_ref(), color_key.clone(), 1, &[255, 0, 0, 255]);
+        let neighbor_key = glyph(20_003, AtlasTextureKind::Polychrome);
+        let neighbor = insert(atlas.as_ref(), neighbor_key.clone(), 1, &[0, 255, 0, 255]);
+        assert_eq!(neighbor.texture_id, color_tile.texture_id);
+        let subpixel_key = glyph(20_004, AtlasTextureKind::Subpixel);
+        let subpixel_tile = insert(
+            atlas.as_ref(),
+            subpixel_key.clone(),
+            16,
+            &[255, 255, 255, 255],
+        );
+
+        let mut scene = Scene::default();
+        scene.insert_primitive(mono(mono_tile, 0., gpui::white()));
+        scene.insert_primitive(SubpixelSprite {
+            order: 0,
+            pad: 0,
+            bounds: bounds(32.),
+            content_mask: ContentMask {
+                bounds: bounds(32.),
+            },
+            color: gpui::white(),
+            tile: subpixel_tile,
+            transformation: TransformationMatrix::default(),
+        });
+        scene.insert_primitive(color(color_tile, 64.));
+        scene.finish();
+        let size = Size::new(DevicePixels(96), DevicePixels(32));
+        let baseline = renderer.render_scene_to_image(&scene, size)?;
+        assert_pixel(&baseline, 16, [255, 255, 255, 255]);
+        assert_pixel(&baseline, 48, [255, 255, 255, 255]);
+        assert_pixel(&baseline, 80, [0, 0, 255, 255]);
+
+        let mut spare = Scene::default();
+        for _ in 0..119 {
+            spare.replay(0..scene.len(), &scene);
+            spare.finish();
+            std::mem::swap(&mut scene, &mut spare);
+            spare.clear();
+            atlas.finish_frame(&scene);
+        }
+        assert!(atlas.contains(&glyph(0, AtlasTextureKind::Monochrome)));
+        atlas.finish_frame(&scene);
+        assert!(!atlas.contains(&glyph(0, AtlasTextureKind::Monochrome)));
+        assert!(!atlas.contains(&glyph(8192, AtlasTextureKind::Monochrome)));
+        assert!(!atlas.contains(&discarded_color_key));
+        assert!(atlas.contains(&mono_key));
+        assert!(atlas.contains(&subpixel_key));
+        assert!(atlas.contains(&color_key));
+        assert!(atlas.contains(&neighbor_key));
+        assert!(atlas.contains(&image_key));
+
+        // Reuse a reclaimed page and paint both cached glyphs and a new glyph.
+        // A formerly unreferenced image must also still have its original pixels.
+        let new_tile = insert(
+            atlas.as_ref(),
+            glyph(30_000, AtlasTextureKind::Monochrome),
+            16,
+            &[255],
+        );
+        let mut next = Scene::default();
+        next.replay(0..scene.len(), &scene);
+        next.insert_primitive(mono(new_tile, 96., gpui::red()));
+        next.insert_primitive(color(image_tile, 128.));
+        next.finish();
+        let image = renderer
+            .render_scene_to_image(&next, Size::new(DevicePixels(160), DevicePixels(32)))?;
+        assert_pixel(&image, 16, [255, 255, 255, 255]);
+        assert_pixel(&image, 48, [255, 255, 255, 255]);
+        assert_pixel(&image, 80, [0, 0, 255, 255]);
+        assert_pixel(&image, 112, [255, 0, 0, 255]);
+        assert_pixel(&image, 144, [255, 0, 0, 255]);
+        // The old cached scene remains presentable even after page reuse.
+        let replayed = renderer.render_scene_to_image(&scene, size)?;
+        assert_eq!(replayed.as_raw(), baseline.as_raw());
         Ok(())
     }
 

@@ -1058,6 +1058,7 @@ pub(crate) struct Frame {
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) inspector_hitboxes: FxHashMap<HitboxId, crate::InspectorElementId>,
     pub(crate) tab_stops: TabStopMap,
+    low_demand_frames: u16,
 }
 
 #[derive(Clone, Default)]
@@ -1117,10 +1118,28 @@ impl Frame {
             #[cfg(any(feature = "inspector", debug_assertions))]
             inspector_hitboxes: FxHashMap::default(),
             tab_stops: TabStopMap::default(),
+            low_demand_frames: 0,
         }
     }
 
     pub(crate) fn clear(&mut self) {
+        let demand = self
+            .element_states
+            .len()
+            .max(self.accessed_element_states.len())
+            .max(self.mouse_listeners.len())
+            .max(self.dispatch_tree.len())
+            .max(self.input_handlers.len())
+            .max(self.tooltip_requests.len())
+            .max(self.cursor_styles.len())
+            .max(self.hitboxes.len())
+            .max(self.window_control_hitboxes.len())
+            .max(self.deferred_draws.len());
+        self.low_demand_frames = if demand <= 256 {
+            self.low_demand_frames + 1
+        } else {
+            0
+        };
         self.element_states.clear();
         self.accessed_element_states.clear();
         self.mouse_listeners.clear();
@@ -1145,6 +1164,36 @@ impl Frame {
         {
             self.next_inspector_instance_ids.clear();
             self.inspector_hitboxes.clear();
+        }
+
+        // These buffers no longer contain replay ranges or platform handlers.
+        // Preserve the live frame untouched and shrink only after 120 small uses
+        // of this buffer (240 draws with the normal double-buffered window).
+        if self.low_demand_frames >= 120 {
+            self.low_demand_frames = 0;
+            macro_rules! trim {
+                ($($field:ident),+ $(,)?) => { $(
+                    if self.$field.capacity() > 1024 {
+                        self.$field.shrink_to(256);
+                    }
+                )+ };
+            }
+            trim!(
+                element_states,
+                accessed_element_states,
+                mouse_listeners,
+                input_handlers,
+                tooltip_requests,
+                cursor_styles,
+                hitboxes,
+                window_control_hitboxes,
+                deferred_draws
+            );
+            self.dispatch_tree.trim_capacity();
+            #[cfg(any(test, feature = "test-support"))]
+            trim!(debug_bounds, debug_bounds_records);
+            #[cfg(any(feature = "inspector", debug_assertions))]
+            trim!(next_inspector_instance_ids, inspector_hitboxes);
         }
     }
 
@@ -3513,6 +3562,7 @@ impl Window {
         let previous_window_active = self.rendered_frame.window_active;
         mem::swap(&mut self.rendered_frame, &mut self.next_frame);
         self.next_frame.clear();
+        self.sprite_atlas.finish_frame(&self.rendered_frame.scene);
         let current_focus_path = self.rendered_frame.focus_path();
         let current_window_active = self.rendered_frame.window_active;
         let mut focus_before_listeners = self.focus;

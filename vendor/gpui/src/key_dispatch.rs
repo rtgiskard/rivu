@@ -159,6 +159,28 @@ impl DispatchTree {
         self.view_node_ids.clear();
     }
 
+    pub(crate) fn trim_capacity(&mut self) {
+        debug_assert!(self.nodes.is_empty());
+        if self.nodes.capacity() > 1024 {
+            self.nodes.shrink_to(256);
+        }
+        if self.focusable_node_ids.capacity() > 1024 {
+            self.focusable_node_ids.shrink_to(256);
+        }
+        if self.view_node_ids.capacity() > 1024 {
+            self.view_node_ids.shrink_to(256);
+        }
+        if self.node_stack.capacity() > 256 {
+            self.node_stack.shrink_to(64);
+        }
+        if self.context_stack.capacity() > 256 {
+            self.context_stack.shrink_to(64);
+        }
+        if self.view_stack.capacity() > 256 {
+            self.view_stack.shrink_to(64);
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.nodes.len()
     }

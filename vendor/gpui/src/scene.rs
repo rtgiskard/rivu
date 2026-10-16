@@ -42,6 +42,7 @@ pub struct Scene {
     pub(crate) paint_operations: Vec<PaintOperation>,
     primitive_bounds: BoundsTree<ScaledPixels>,
     layer_stack: Vec<DrawOrder>,
+    low_demand_frames: u16,
     pub shadows: Vec<Shadow>,
     pub quads: Vec<Quad>,
     pub paths: Vec<Path<ScaledPixels>>,
@@ -55,6 +56,13 @@ pub struct Scene {
 #[expect(missing_docs)]
 impl Scene {
     pub fn clear(&mut self) {
+        // Each of the window's two scenes must see 120 small uses before
+        // releasing its high water. Never touch the scene being replayed.
+        self.low_demand_frames = if self.paint_operations.len() <= 1024 {
+            self.low_demand_frames + 1
+        } else {
+            0
+        };
         self.paint_operations.clear();
         self.primitive_bounds.clear();
         self.layer_stack.clear();
@@ -66,6 +74,29 @@ impl Scene {
         self.subpixel_sprites.clear();
         self.polychrome_sprites.clear();
         self.surfaces.clear();
+        if self.low_demand_frames >= 120 {
+            self.low_demand_frames = 0;
+            macro_rules! trim {
+                ($($field:ident),+ $(,)?) => { $(
+                    if self.$field.capacity() > 4096 {
+                        self.$field.shrink_to(1024);
+                    }
+                )+ };
+            }
+            trim!(
+                paint_operations,
+                layer_stack,
+                paths,
+                shadows,
+                quads,
+                underlines,
+                monochrome_sprites,
+                subpixel_sprites,
+                polychrome_sprites,
+                surfaces
+            );
+            self.primitive_bounds.trim_capacity();
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -993,5 +1024,65 @@ impl PathVertex<Pixels> {
             st_position: self.st_position,
             content_mask: self.content_mask.scale(factor),
         }
+    }
+}
+
+#[cfg(test)]
+mod reclamation_tests {
+    use super::*;
+
+    fn quad(color: Hsla) -> Quad {
+        let bounds = Bounds {
+            origin: Point::default(),
+            size: Size::new(ScaledPixels(16.), ScaledPixels(16.)),
+        };
+        Quad {
+            order: 0,
+            border_style: crate::BorderStyle::Solid,
+            bounds,
+            content_mask: ContentMask { bounds },
+            background: color.into(),
+            border_color: color,
+            corner_radii: Corners::default(),
+            border_widths: Edges::default(),
+        }
+    }
+
+    #[test]
+    fn discarded_scene_shrinks_without_invalidating_replay() {
+        let mut current = Scene::default();
+        for _ in 0..5000 {
+            current.insert_primitive(quad(crate::red()));
+        }
+        current.finish();
+        let mut spare = Scene::default();
+        spare.replay(0..current.len(), &current);
+        spare.finish();
+        assert!(current.quads.capacity() > 4096);
+        assert!(spare.quads.capacity() > 4096);
+
+        current.clear();
+        current.insert_primitive(quad(crate::blue()));
+        current.finish();
+        for _ in 0..242 {
+            spare.clear();
+            spare.replay(0..current.len(), &current);
+            spare.finish();
+            std::mem::swap(&mut current, &mut spare);
+            assert_eq!(current.len(), 1);
+            assert_eq!(current.quads[0].background, crate::blue().into());
+            assert_eq!(current.batches().count(), 1);
+        }
+        assert!(current.quads.capacity() <= 1024);
+        assert!(spare.quads.capacity() <= 1024);
+
+        // The same buffers can grow again and still produce every primitive.
+        spare.clear();
+        for _ in 0..5000 {
+            spare.insert_primitive(quad(crate::red()));
+        }
+        spare.finish();
+        assert_eq!(spare.len(), 5000);
+        assert_eq!(spare.quads.len(), 5000);
     }
 }

@@ -61,6 +61,9 @@ pub fn underline_y_offset(line_height: Pixels, ascent: Pixels, descent: Pixels) 
 }
 
 const MAX_REPORTED_MISSING_GLYPHS: usize = 1024;
+// Bounds are recomputable metadata, shared by all windows. Reset only after
+// 32K distinct misses, not on a window's frame boundary or every cache lookup.
+const MAX_RASTER_BOUNDS: usize = 32 * 1024;
 
 /// The spacing behavior required of a fallback font.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -566,6 +569,9 @@ impl TextSystem {
         } else {
             let mut raster_bounds = RwLockUpgradableReadGuard::upgrade(raster_bounds);
             let bounds = self.platform_text_system.glyph_raster_bounds(params)?;
+            if raster_bounds.len() >= MAX_RASTER_BOUNDS {
+                raster_bounds.clear();
+            }
             raster_bounds.insert(params.clone(), bounds);
             Ok(bounds)
         }
@@ -1501,5 +1507,41 @@ mod missing_glyph_tests {
 
     fn missing_glyph(grapheme: &'static str) -> MissingGlyph {
         MissingGlyph::new(grapheme.into(), FallbackFontClass::Proportional)
+    }
+}
+
+#[cfg(test)]
+mod raster_bounds_reclamation_tests {
+    use super::*;
+
+    #[test]
+    fn bounds_budget_recomputes_without_changing_shared_font_identity() -> Result<()> {
+        let text = Arc::new(TextSystem::new(Arc::new(crate::NoopTextSystem)));
+        let first_window = WindowTextSystem::new(text.clone());
+        let second_window = WindowTextSystem::new(text.clone());
+        let font = font("stable shared font");
+        let font_id = first_window.resolve_font(&font);
+        let mut params = RenderGlyphParams {
+            font_id,
+            glyph_id: GlyphId(u32::MAX),
+            font_size: px(16.),
+            subpixel_variant: Point::default(),
+            scale_factor: 1.,
+            is_emoji: false,
+            subpixel_rendering: false,
+            dilation: 0,
+        };
+        let expected = first_window.raster_bounds(&params)?;
+        for glyph_id in 0..MAX_RASTER_BOUNDS as u32 {
+            params.glyph_id = GlyphId(glyph_id);
+            second_window.raster_bounds(&params)?;
+        }
+        params.glyph_id = GlyphId(u32::MAX);
+        assert!(!text.raster_bounds.read().contains_key(&params));
+        assert!(text.raster_bounds.read().len() <= MAX_RASTER_BOUNDS);
+        assert_eq!(first_window.resolve_font(&font), font_id);
+        assert_eq!(second_window.resolve_font(&font), font_id);
+        assert_eq!(first_window.raster_bounds(&params)?, expected);
+        Ok(())
     }
 }

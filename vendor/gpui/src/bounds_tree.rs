@@ -113,6 +113,20 @@ where
         self.search_stack.clear();
     }
 
+    /// Only used after clearing an old scene at a sustained low-demand boundary.
+    pub(crate) fn trim_capacity(&mut self) {
+        debug_assert!(self.nodes.is_empty());
+        if self.nodes.capacity() > 8192 {
+            self.nodes.shrink_to(2048);
+        }
+        if self.insert_path.capacity() > 256 {
+            self.insert_path.shrink_to(64);
+        }
+        if self.search_stack.capacity() > 256 {
+            self.search_stack.shrink_to(64);
+        }
+    }
+
     /// Inserts bounds into the tree and returns its assigned ordering.
     ///
     /// The ordering is one greater than the maximum ordering of any

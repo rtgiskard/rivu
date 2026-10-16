@@ -48,7 +48,7 @@ use crate::{
 use anyhow::bail;
 use anyhow::{Context as _, Result};
 use async_task::Runnable;
-use collections::FxHashMap;
+use collections::{FxHashMap, FxHashSet};
 use futures::channel::oneshot;
 #[cfg(any(test, feature = "test-support", feature = "bench-support"))]
 use image::RgbaImage;
@@ -1749,6 +1749,11 @@ pub trait PlatformAtlas {
     ) -> Result<Option<AtlasTile>>;
     fn remove(&self, key: &AtlasKey);
 
+    /// Called after the previous frame has been discarded. `scene` must contain
+    /// every atlas reference that this window can present or replay next frame.
+    /// Atlases shared by independent renderers must not reclaim from this hook.
+    fn finish_frame(&self, _scene: &Scene) {}
+
     #[cfg(any(test, feature = "test-support", feature = "bench-support"))]
     fn contains(&self, _key: &AtlasKey) -> bool {
         false
@@ -1770,6 +1775,8 @@ pub trait AtlasBackend {
 #[doc(hidden)]
 pub struct AtlasState<Backend> {
     tiles_by_key: FxHashMap<AtlasKey, AtlasTile>,
+    glyph_count: usize,
+    low_glyph_demand_frames: u16,
     pub backend: Backend,
 }
 
@@ -1777,6 +1784,8 @@ impl<Backend> AtlasState<Backend> {
     pub fn new(backend: Backend) -> Self {
         Self {
             tiles_by_key: FxHashMap::default(),
+            glyph_count: 0,
+            low_glyph_demand_frames: 0,
             backend,
         }
     }
@@ -1787,6 +1796,8 @@ impl<Backend> AtlasState<Backend> {
 
     pub fn clear(&mut self, reset_backend: impl FnOnce(&mut Backend)) {
         self.tiles_by_key.clear();
+        self.glyph_count = 0;
+        self.low_glyph_demand_frames = 0;
         reset_backend(&mut self.backend);
     }
 }
@@ -1813,6 +1824,9 @@ impl<Backend: AtlasBackend> AtlasState<Backend> {
                 let tile = self
                     .backend
                     .insert(entry.key().texture_kind(), size, &bytes)?;
+                if matches!(entry.key(), AtlasKey::Glyph(_)) {
+                    self.glyph_count += 1;
+                }
                 entry.insert(tile);
                 Ok(Some(tile))
             }
@@ -1821,7 +1835,72 @@ impl<Backend: AtlasBackend> AtlasState<Backend> {
 
     pub fn remove(&mut self, key: &AtlasKey) {
         if let Some(tile) = self.tiles_by_key.remove(key) {
+            if matches!(key, AtlasKey::Glyph(_)) {
+                self.glyph_count -= 1;
+            }
             self.backend.remove(tile);
+        }
+    }
+
+    /// Retains whole pages referenced by the only replayable scene, rather than
+    /// evicting individual least-recently-used glyphs behind cached paint ranges.
+    /// Images and SVGs have separate ownership and are never evicted here.
+    pub fn finish_frame(&mut self, scene: &Scene) {
+        const GLYPH_HIGH_WATER: usize = 8192;
+        const LOW_DEMAND_FRAMES: u16 = 120;
+
+        let sprite_count = scene.monochrome_sprites.len()
+            + scene.subpixel_sprites.len()
+            + scene.polychrome_sprites.len();
+        if self.glyph_count <= GLYPH_HIGH_WATER || sprite_count > self.glyph_count / 4 {
+            self.low_glyph_demand_frames = 0;
+            return;
+        }
+        self.low_glyph_demand_frames += 1;
+        if self.low_glyph_demand_frames < LOW_DEMAND_FRAMES {
+            return;
+        }
+        self.low_glyph_demand_frames = 0;
+
+        // This scan occurs only after sustained low demand, never on a normal
+        // paint/cache hit. Include color glyphs and textured paths as well.
+        let live_pages: FxHashSet<_> = scene
+            .monochrome_sprites
+            .iter()
+            .map(|sprite| sprite.tile.texture_id)
+            .chain(
+                scene
+                    .subpixel_sprites
+                    .iter()
+                    .map(|sprite| sprite.tile.texture_id),
+            )
+            .chain(
+                scene
+                    .polychrome_sprites
+                    .iter()
+                    .map(|sprite| sprite.tile.texture_id),
+            )
+            .chain(
+                scene
+                    .paths
+                    .iter()
+                    .filter_map(|path| path.texture.map(|tile| tile.texture_id)),
+            )
+            .collect();
+        let backend = &mut self.backend;
+        let glyph_count = &mut self.glyph_count;
+        self.tiles_by_key.retain(|key, tile| {
+            if matches!(key, AtlasKey::Glyph(_)) && !live_pages.contains(&tile.texture_id) {
+                backend.remove(*tile);
+                *glyph_count -= 1;
+                false
+            } else {
+                true
+            }
+        });
+        let retained_capacity = self.tiles_by_key.len().max(GLYPH_HIGH_WATER);
+        if self.tiles_by_key.capacity() > retained_capacity.saturating_mul(4) {
+            self.tiles_by_key.shrink_to(retained_capacity);
         }
     }
 }
@@ -1877,6 +1956,10 @@ impl PlatformAtlas for HeadlessAtlas {
 
     fn remove(&self, key: &AtlasKey) {
         self.0.lock().remove(key);
+    }
+
+    fn finish_frame(&self, scene: &Scene) {
+        self.0.lock().finish_frame(scene);
     }
 
     #[cfg(any(test, feature = "test-support", feature = "bench-support"))]

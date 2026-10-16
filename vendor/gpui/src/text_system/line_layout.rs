@@ -482,6 +482,7 @@ struct FrameCache {
     wrapped_lines_by_hash: FxHashMap<Arc<HashedCacheKey>, Arc<WrappedLineLayout>>,
     used_lines_by_hash: Vec<Arc<HashedCacheKey>>,
     used_wrapped_lines_by_hash: Vec<Arc<HashedCacheKey>>,
+    low_demand_frames: u16,
 }
 
 #[derive(Clone, Default)]
@@ -588,6 +589,21 @@ impl LineLayoutCache {
         let mut curr_frame = self.current_frame.write();
         let mut prev_frame = self.previous_frame.lock();
         std::mem::swap(&mut *prev_frame, &mut *curr_frame);
+        let demand = curr_frame
+            .lines
+            .len()
+            .max(curr_frame.wrapped_lines.len())
+            .max(curr_frame.used_lines.len())
+            .max(curr_frame.used_wrapped_lines.len())
+            .max(curr_frame.lines_by_hash.len())
+            .max(curr_frame.wrapped_lines_by_hash.len())
+            .max(curr_frame.used_lines_by_hash.len())
+            .max(curr_frame.used_wrapped_lines_by_hash.len());
+        curr_frame.low_demand_frames = if demand <= 256 {
+            curr_frame.low_demand_frames + 1
+        } else {
+            0
+        };
         curr_frame.lines.clear();
         curr_frame.wrapped_lines.clear();
         curr_frame.used_lines.clear();
@@ -597,6 +613,28 @@ impl LineLayoutCache {
         curr_frame.wrapped_lines_by_hash.clear();
         curr_frame.used_lines_by_hash.clear();
         curr_frame.used_wrapped_lines_by_hash.clear();
+        // The previous frame still owns all replay indices and Arc layouts.
+        // Trim only the discarded half after 120 small uses of that half.
+        if curr_frame.low_demand_frames >= 120 {
+            curr_frame.low_demand_frames = 0;
+            macro_rules! trim {
+                ($($field:ident),+ $(,)?) => { $(
+                    if curr_frame.$field.capacity() > 1024 {
+                        curr_frame.$field.shrink_to(256);
+                    }
+                )+ };
+            }
+            trim!(
+                lines,
+                wrapped_lines,
+                used_lines,
+                used_wrapped_lines,
+                lines_by_hash,
+                wrapped_lines_by_hash,
+                used_lines_by_hash,
+                used_wrapped_lines_by_hash
+            );
+        }
     }
 
     pub fn layout_wrapped_line<Text>(
@@ -1073,6 +1111,43 @@ impl AsCacheKeyRef for CacheKeyRef<'_> {
 mod tests {
     use super::*;
     use crate::GlyphId;
+
+    #[test]
+    fn layout_replay_survives_discarded_cache_capacity_reclaim() {
+        let cache = LineLayoutCache::new(
+            Arc::new(crate::NoopTextSystem),
+            Arc::new(AtomicUsize::new(0)),
+        );
+        for _ in 0..2 {
+            for index in 0..2500 {
+                cache.layout_line(index.to_string(), px(16.), &[], None);
+            }
+            cache.finish_frame();
+        }
+        assert!(cache.current_frame.read().lines.capacity() > 1024);
+        assert!(cache.previous_frame.lock().lines.capacity() > 1024);
+
+        let start = cache.layout_index();
+        let retained = cache.layout_line("still painted", px(16.), &[], None);
+        let end = cache.layout_index();
+        cache.finish_frame();
+        for _ in 0..244 {
+            cache.reuse_layouts(start.clone()..end.clone());
+            let layout = cache.layout_line("still painted", px(16.), &[], None);
+            assert!(Arc::ptr_eq(&retained, &layout));
+            assert_eq!(layout.len, "still painted".len());
+            assert_eq!(layout.runs[0].glyphs.len(), "still painted".len());
+            cache.finish_frame();
+        }
+        assert!(cache.current_frame.read().lines.capacity() <= 1024);
+        assert!(cache.previous_frame.lock().lines.capacity() <= 1024);
+        assert!(cache.current_frame.read().used_lines.capacity() <= 256);
+        assert!(cache.previous_frame.lock().used_lines.capacity() <= 256);
+
+        let fresh = cache.layout_line("after reclaim", px(16.), &[], None);
+        assert_eq!(fresh.len, "after reclaim".len());
+        assert!(fresh.width > px(0.));
+    }
 
     fn glyph_at(x: f32, index: usize) -> ShapedGlyph {
         ShapedGlyph {

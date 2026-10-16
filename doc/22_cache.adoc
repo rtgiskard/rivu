@@ -100,6 +100,10 @@ GPU work retains its resources; reclamation does not destroy in-flight textures
 or wait for the GPU. Instance storage above its initial capacity shrinks after
 120 successful frames at no more than one-quarter utilization, retaining twice
 the observed peak rounded up to a power of two and never below initial capacity.
+Discarded CPU Frame, Scene, and line-layout buffers reclaim high-water capacity
+after 120 small uses of each buffer (normally 240 draws for double buffering).
+The live frame and replay ranges remain untouched. These policies use existing
+draws, not timers, and do not promise reclamation while drawing is inactive.
 
 After the window is destroyed, the application switches the graphical platform
 to headless mode, releasing the display connection and its shared GPU context.
@@ -286,8 +290,20 @@ parsing, shaping, and glyph rendering still require their own storage.
 
 The backend owns font, shaping, glyph, and atlas caches. It may retain multiple
 faces or fonts considered during fallback, not only those that supplied visible
-glyphs. Rivu adds no font eviction policy, so switching fonts may leave earlier
-data resident. System font-file mappings can share kernel file pages, whereas
-parsed font and glyph data also consume process memory. Font discovery alone
-is not a measure of retained memory, and total process memory includes unrelated
-renderer resources.
+glyphs. Parsed fonts and FontId assignments are not evicted, so switching fonts
+may leave earlier font data resident. Raster-bounds memoization is capped at
+32768 entries and clears on a successful distinct miss at that budget; bounds
+are recomputed without changing font identity.
+
+Glyph atlas reclamation starts above 8192 glyph entries after 120 frames with
+sprite demand at no more than one-quarter of that count. Once the old frame is
+discarded, every texture page referenced by the current replayable Scene is
+protected, including color glyphs and textured Paths. Only glyphs on unprotected
+pages are evicted; image and SVG owners remain responsible for their own tiles.
+Whole-page protection preserves cached paint ranges but can retain unused
+glyphs alongside live ones, so this is a high-water policy, not a hard byte cap.
+
+System font-file mappings can share kernel file pages, whereas parsed font and
+glyph data also consume process memory. Font discovery alone is not a measure
+of retained memory, and total process memory includes unrelated renderer
+resources.
