@@ -120,19 +120,27 @@ fn overlay_font(window: &Window, cx: &gpui::App) -> gpui::Font {
         .clone()
 }
 
+const FLOATING_BACKGROUND: u32 = 0x20212d;
+const FLOATING_BORDER: u32 = 0x34394f;
+
+/// Opaque elevated material for menus, dropdowns, and tooltips only.
+pub(crate) fn floating_surface() -> Div {
+    div()
+        .bg(rgb(FLOATING_BACKGROUND))
+        .border_1()
+        .border_color(rgb(FLOATING_BORDER))
+        .shadow_sm()
+}
+
 /// Compact floating surface shared by action and row tooltips.
 fn tooltip_surface(window: &Window, cx: &gpui::App, max_width_rems: f32) -> Div {
     let available = (window.viewport_size().width - px(UI_INSET * 2.)).max(px(0.));
-    div()
+    floating_surface()
         .min_w_0()
         .max_w((window.rem_size() * max_width_rems).min(available))
         .px(px(UI_INSET))
         .py_1()
         .rounded_md()
-        .bg(rgb(PANEL))
-        .border_1()
-        .border_color(rgb(BORDER))
-        .shadow_sm()
         .font(overlay_font(window, cx))
         .text_sm()
         .text_color(rgb(TEXT))
@@ -450,15 +458,12 @@ pub(crate) fn dropdown_trigger(
 /// Shared shell for application context menus. The caller supplies menu rows
 /// and owns dismissal and action dispatch.
 pub(crate) fn context_menu_container(id: impl Into<ElementId>) -> Stateful<Div> {
-    div()
+    floating_surface()
         .id(id)
         .w(gpui::rems(MENU_WIDTH / 16.))
         .occlude()
         .p_1()
         .gap_0()
-        .bg(rgb(PANEL))
-        .border_1()
-        .border_color(rgb(BORDER))
         .rounded_md()
 }
 
@@ -484,14 +489,11 @@ pub(crate) fn menu_item_style(id: impl Into<ElementId>, label: impl IntoElement)
 
 /// Shared shell for anchored dropdowns.
 pub(crate) fn dropdown_container(id: impl Into<ElementId>, width: gpui::Pixels) -> Stateful<Div> {
-    div()
+    floating_surface()
         .id(id)
         .w(width)
         .gap_0()
         .p_1()
-        .bg(rgb(PANEL))
-        .border_1()
-        .border_color(rgb(BORDER))
         .rounded_sm()
         .occlude()
 }
@@ -578,7 +580,15 @@ pub(crate) fn dropdown_row(
     selected: bool,
     label: impl Into<SharedString>,
 ) -> Stateful<Div> {
-    list_row(id, selected)
+    list_row_surface(id, selected)
+        .when(!selected, |row| row.bg(rgb(PANEL).alpha(0.0)))
+        .hover(move |style| {
+            style.bg(rgb(if selected {
+                ROW_SELECTED_HOVER
+            } else {
+                HIGHLIGHT
+            }))
+        })
         .h(gpui::rems(DROPDOWN_ROW_REMS))
         .child(div().flex_1().min_w_0().truncate().child(label.into()))
 }
@@ -625,8 +635,8 @@ pub(crate) fn caption(text: impl Into<SharedString>) -> Div {
         .child(text.into())
 }
 
-/// Standard selectable row shared by library, queue, playlist, and history.
-pub(crate) fn list_row(id: impl Into<ElementId>, selected: bool) -> Stateful<Div> {
+/// Shared row geometry and idle background; each caller owns its single hover style.
+fn list_row_surface(id: impl Into<ElementId>, selected: bool) -> Stateful<Div> {
     div()
         .id(id)
         .w_full()
@@ -641,7 +651,11 @@ pub(crate) fn list_row(id: impl Into<ElementId>, selected: bool) -> Stateful<Div
         .overflow_hidden()
         .cursor_pointer()
         .bg(row_background(selected, false))
-        .hover(move |style| style.bg(row_background(selected, true)))
+}
+
+/// Standard selectable row shared by library, queue, playlist, and history.
+pub(crate) fn list_row(id: impl Into<ElementId>, selected: bool) -> Stateful<Div> {
+    list_row_surface(id, selected).hover(move |style| style.bg(row_background(selected, true)))
 }
 
 struct TrackTooltip {

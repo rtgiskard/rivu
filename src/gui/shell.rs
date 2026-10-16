@@ -487,7 +487,11 @@ impl Render for GuiApp {
                 },
             );
             app = app.child(
-                column()
+                components::floating_surface()
+                    .flex()
+                    .flex_col()
+                    .min_w_0()
+                    .min_h_0()
                     .id("app-menu-popup")
                     .occlude()
                     .absolute()
@@ -501,9 +505,6 @@ impl Render for GuiApp {
                     .overflow_y_scroll()
                     .p_1()
                     .gap_1()
-                    .bg(rgb(PANEL))
-                    .border_1()
-                    .border_color(rgb(BORDER))
                     .rounded_md()
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.app_menu_open = false;
@@ -624,7 +625,11 @@ impl Render for GuiApp {
                 }
             }
             app = app.child(
-                column()
+                components::floating_surface()
+                    .flex()
+                    .flex_col()
+                    .min_w_0()
+                    .min_h_0()
                     .id("panel-catalog")
                     .occlude()
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
@@ -638,9 +643,6 @@ impl Render for GuiApp {
                     .max_w_full()
                     .p(gpui::px(UI_INSET))
                     .gap_1()
-                    .bg(rgb(PANEL))
-                    .border_1()
-                    .border_color(rgb(BORDER))
                     .child(
                         div()
                             .text_xs()
