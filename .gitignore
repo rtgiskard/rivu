@@ -1,2 +1,4 @@
 /target/
 .cache/
+/vendor/gpui/Cargo.lock
+/vendor/gpui_wgpu/Cargo.lock
