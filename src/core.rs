@@ -711,7 +711,7 @@ struct Core {
 impl Core {
     fn load_initial_state(&mut self) -> Result<()> {
         self.state.library.track_total = self.store.track_count()?;
-        self.state.library.playlist_total = self.store.playlist_summary_page(0, 0)?.total;
+        self.state.library.playlist_total = self.store.playlist_summary_page(None, 0, 0)?.total;
         for id in self.store.playlist_ids()? {
             self.state.playlist_content_sequence = self
                 .state
@@ -2310,7 +2310,7 @@ mod tests {
             let current = core.state.current_track().unwrap();
             assert_eq!((&*current.title, &*current.artist), ("Title", "Artist"));
             assert_eq!(current.decoder_hint, crate::model::DecoderHint::Ffmpeg);
-            let page = core.store.queue_page(0, MAX_QUERY_ROWS).unwrap();
+            let page = core.store.queue_page(None, 0, MAX_QUERY_ROWS).unwrap();
             assert_eq!(
                 (&*page.rows[0].track.title, &*page.rows[0].track.artist),
                 ("Title", "Artist")
@@ -2341,7 +2341,7 @@ mod tests {
                 favorite: true,
             })
             .unwrap();
-            let rows = core.store.queue_page(0, MAX_QUERY_ROWS).unwrap().rows;
+            let rows = core.store.queue_page(None, 0, MAX_QUERY_ROWS).unwrap().rows;
             assert!(rows[1].track.favorite && rows[2].track.favorite && rows[3].track.favorite);
             assert!(!rows[0].track.favorite);
         }
@@ -2469,6 +2469,7 @@ mod tests {
             assert_eq!(core.generation, generation);
             assert!(core.playback.is_some());
             let query = Query::QueueBatch {
+                query: None,
                 after: None,
                 limit: 5,
                 expected: Some(revisions),
@@ -2505,7 +2506,7 @@ mod tests {
         core.update_track_stats(1, stats).unwrap();
         assert_ne!(core.state.queue.revision, revision);
         assert_eq!(
-            core.store.queue_page(0, 1).unwrap().rows[0]
+            core.store.queue_page(None, 0, 1).unwrap().rows[0]
                 .track
                 .play_count,
             1
@@ -2687,6 +2688,7 @@ mod tests {
             );
             assert!(
                 core.view(&Query::PlaylistSummaryBatch {
+                    query: None,
                     after: None,
                     limit: 2,
                     expected: Some(before),
@@ -2755,6 +2757,7 @@ mod tests {
             assert_eq!(after.structure, before.structure);
             assert_eq!(after.queue, before.queue);
             let other = core.query_response(&Query::PlaylistEntryBatch {
+                query: None,
                 playlist_id: 1,
                 after: None,
                 limit: 2,
@@ -2765,7 +2768,7 @@ mod tests {
             if import {
                 assert_ne!(after.playlist, before.playlist);
                 assert_ne!(after.duplicate_members, before.duplicate_members);
-                let playlist = core.store.playlist_summary_page(1, 1).unwrap().rows[0].id;
+                let playlist = core.store.playlist_summary_page(None, 1, 1).unwrap().rows[0].id;
                 assert_eq!(core.store.playlist_track_ids(playlist, 10).unwrap(), [1]);
             } else {
                 assert_eq!(after, before);
@@ -2837,7 +2840,10 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert_eq!(core.store.playlist_summary_page(0, 0).unwrap().total, 0);
+        assert_eq!(
+            core.store.playlist_summary_page(None, 0, 0).unwrap().total,
+            0
+        );
     }
 
     #[test]
@@ -2854,7 +2860,7 @@ mod tests {
             })
             .unwrap();
             assert!(settle_scan(&mut core));
-            let playlists = core.store.playlist_summary_page(0, 10).unwrap();
+            let playlists = core.store.playlist_summary_page(None, 0, 10).unwrap();
             assert_eq!(playlists.total, 1);
             assert_eq!(playlists.rows[0].name, name);
             assert_eq!(playlists.rows[0].entry_count, 1);
@@ -2908,7 +2914,10 @@ mod tests {
                 core.state.library.track_total,
                 if scan_saved { 5 } else { 4 }
             );
-            assert_eq!(core.store.playlist_summary_page(0, 0).unwrap().total, 0);
+            assert_eq!(
+                core.store.playlist_summary_page(None, 0, 0).unwrap().total,
+                0
+            );
         }
     }
 
@@ -2952,7 +2961,9 @@ mod tests {
         assert!(error.to_string().contains("Scan saved"));
         assert!(error.to_string().contains("playlist creation"));
         assert_eq!(
-            core.store.queue_page(0, 1).unwrap().rows[0].track.title,
+            core.store.queue_page(None, 0, 1).unwrap().rows[0]
+                .track
+                .title,
             "Updated by scan"
         );
         assert!(
@@ -3058,7 +3069,7 @@ mod tests {
                 assert!(!result.unwrap());
                 let rows = core
                     .store
-                    .playlist_entries_page(1, 0, MAX_QUERY_ROWS)
+                    .playlist_entries_page(1, None, 0, MAX_QUERY_ROWS)
                     .unwrap()
                     .rows;
                 assert_eq!(rows.iter().map(|row| row.track_id).collect::<Vec<_>>(), [2]);
@@ -3461,7 +3472,11 @@ mod tests {
             })
             .unwrap();
         }
-        let entries = core.store.playlist_entries_page(1, 0, 4).unwrap().rows;
+        let entries = core
+            .store
+            .playlist_entries_page(1, None, 0, 4)
+            .unwrap()
+            .rows;
         let ids: Vec<_> = entries.iter().map(|row| row.id).collect();
         let baseline = core.state.playlist_query_revisions(1);
         let token = baseline.playlist_entries.unwrap().revision;
@@ -3509,11 +3524,19 @@ mod tests {
             assert!(core.command(command).is_err());
             assert_eq!(core.state.playlist_query_revisions(1), baseline);
             assert_eq!(
-                core.store.playlist_entries_page(1, 0, 4).unwrap().rows,
+                core.store
+                    .playlist_entries_page(1, None, 0, 4)
+                    .unwrap()
+                    .rows,
                 entries
             );
         }
-        let other = core.store.playlist_entries_page(2, 0, 1).unwrap().rows[0].id;
+        let other = core
+            .store
+            .playlist_entries_page(2, None, 0, 1)
+            .unwrap()
+            .rows[0]
+            .id;
         core.command(Command::MovePlaylistEntry {
             entry_id: other,
             index: 3,
@@ -3587,8 +3610,14 @@ mod tests {
             track_ids: vec![1, 2],
         })
         .unwrap();
-        let entry = core.store.playlist_entries_page(1, 0, 1).unwrap().rows[0].id;
+        let entry = core
+            .store
+            .playlist_entries_page(1, None, 0, 1)
+            .unwrap()
+            .rows[0]
+            .id;
         let query = Query::PlaylistEntryLocations {
+            query: None,
             playlist_id: 1,
             entry_ids: vec![entry, i64::MAX],
         };
@@ -3598,6 +3627,7 @@ mod tests {
             matches!(before.result, Ok(ViewResponse::PlaylistEntryLocations(rows)) if rows.len() == 1 && rows[0].position == 0)
         );
         let empty = core.query_response(&Query::PlaylistEntryLocations {
+            query: None,
             playlist_id: 1,
             entry_ids: vec![i64::MAX],
         });
@@ -3606,6 +3636,7 @@ mod tests {
             matches!(empty.result, Ok(ViewResponse::PlaylistEntryLocations(rows)) if rows.is_empty())
         );
         let oversized = core.query_response(&Query::PlaylistEntryLocations {
+            query: None,
             playlist_id: 1,
             entry_ids: vec![entry; MAX_QUERY_ROWS + 1],
         });
@@ -3644,9 +3675,15 @@ mod tests {
             track_ids: vec![1, 2],
         })
         .unwrap();
-        let entry_id = core.store.playlist_entries_page(1, 0, 1).unwrap().rows[0].id;
+        let entry_id = core
+            .store
+            .playlist_entries_page(1, None, 0, 1)
+            .unwrap()
+            .rows[0]
+            .id;
         let expected = core.state.playlist_query_revisions(1);
         let query = Query::PlaylistEntryBatch {
+            query: None,
             playlist_id: 1,
             after: None,
             limit: 1,
@@ -3724,6 +3761,7 @@ mod tests {
             let reordered = matches!(command, Command::MovePlaylistEntry { .. });
             let before = core.state.playlist_query_revisions(1);
             let query = Query::PlaylistEntryBatch {
+                query: None,
                 playlist_id: 1,
                 after: None,
                 limit: 1,
@@ -3857,15 +3895,22 @@ mod tests {
         core.publish();
         let before = core.state.revisions;
         let summaries = Query::PlaylistSummaries {
+            query: None,
             offset: 0,
             limit: 2,
         };
         let catalog = core.query_response(&summaries);
-        let first_entry = core.store.playlist_entries_page(1, 0, 1).unwrap().rows[0].id;
+        let first_entry = core
+            .store
+            .playlist_entries_page(1, None, 0, 1)
+            .unwrap()
+            .rows[0]
+            .id;
         let old_lookup = core.query_response(&Query::PlaylistEntry {
             entry_id: first_entry,
         });
         let batch = |playlist_id, after, expected| Query::PlaylistEntryBatch {
+            query: None,
             playlist_id,
             after,
             limit: 1,
@@ -3931,6 +3976,7 @@ mod tests {
         );
         assert!(
             core.view(&Query::PlaylistSummaryBatch {
+                query: None,
                 after: Some(1),
                 limit: 1,
                 expected: Some(catalog.revisions),
@@ -3950,7 +3996,12 @@ mod tests {
         );
 
         let current = core.state.playlist_query_revisions(1);
-        let other_entry = core.store.playlist_entries_page(2, 0, 1).unwrap().rows[0].id;
+        let other_entry = core
+            .store
+            .playlist_entries_page(2, None, 0, 1)
+            .unwrap()
+            .rows[0]
+            .id;
         // Two mutations may coalesce into one snapshot; both scoped tokens survive.
         for index in [2, 1] {
             core.command(Command::MovePlaylistEntry {
@@ -3983,7 +4034,12 @@ mod tests {
             track_ids: vec![1, 2, 3],
         })
         .unwrap();
-        let removed = core.store.playlist_entries_page(1, 0, 1).unwrap().rows[0].id;
+        let removed = core
+            .store
+            .playlist_entries_page(1, None, 0, 1)
+            .unwrap()
+            .rows[0]
+            .id;
         for command in [
             Command::CreatePlaylist { name: "two".into() },
             Command::RenamePlaylist {
@@ -3997,7 +4053,7 @@ mod tests {
             Command::RemovePlaylistEntry { entry_id: removed },
             Command::DeletePlaylist { playlist_id: 1 },
         ] {
-            let page = core.store.playlist_entries_page(1, 0, 1).unwrap();
+            let page = core.store.playlist_entries_page(1, None, 0, 1).unwrap();
             core.command(Command::MovePlaylistEntry {
                 entry_id: page.rows[0].id,
                 index: page.total - 1,
@@ -4023,6 +4079,7 @@ mod tests {
                 core.store.playlist_ids().unwrap().len()
             );
             let query = Query::PlaylistEntryBatch {
+                query: None,
                 playlist_id: 1,
                 after: None,
                 limit: 1,
@@ -4053,6 +4110,7 @@ mod tests {
         assert_ne!(core.state.library.revision, expected.library);
         assert_eq!(
             core.view(&Query::PlaylistEntryBatch {
+                query: None,
                 playlist_id: 2,
                 after: None,
                 limit: 1,
@@ -4062,6 +4120,7 @@ mod tests {
             QueryError::RevisionChanged
         );
         let response = core.query_response(&Query::PlaylistEntries {
+            query: None,
             playlist_id: 2,
             offset: 0,
             limit: 1,
@@ -4085,12 +4144,14 @@ mod tests {
         let track = Query::Track { track_id: 3 };
         let track_stamp = track.stamp(core.query_response(&track).revisions);
         let entries = Query::PlaylistEntries {
+            query: None,
             playlist_id: 2,
             offset: 0,
             limit: 1,
         };
         let baseline = core.query_response(&entries).revisions;
         let batch = Query::PlaylistEntryBatch {
+            query: None,
             playlist_id: 2,
             after: None,
             limit: 1,
@@ -4121,6 +4182,7 @@ mod tests {
             assert_eq!(page.rows[0].track_id, 3);
         }
         let related = Query::PlaylistEntries {
+            query: None,
             playlist_id: 1,
             offset: 0,
             limit: 1,
@@ -4211,6 +4273,7 @@ mod tests {
             }
             let unaffected = core.state.playlist_query_revisions(1);
             let other_query = Query::PlaylistEntryBatch {
+                query: None,
                 playlist_id: 1,
                 after: None,
                 limit: 2,
@@ -4240,6 +4303,7 @@ mod tests {
                 assert!(core.view(&other_query).is_ok());
             }
             let playlist_query = Query::PlaylistEntries {
+                query: None,
                 playlist_id: 2,
                 offset: 0,
                 limit: 10,
@@ -4356,11 +4420,13 @@ mod tests {
                 expected: Some(expected),
             },
             Query::PlaylistSummaryBatch {
+                query: None,
                 after: None,
                 limit: 0,
                 expected: Some(expected),
             },
             Query::PlaylistEntryBatch {
+                query: None,
                 playlist_id: 1,
                 after: None,
                 limit: 0,
@@ -4396,6 +4462,7 @@ mod tests {
         // With a current catalog baseline, stale L alone is irrelevant to summaries.
         assert!(matches!(
             core.view(&Query::PlaylistSummaryBatch {
+                query: None,
                 after: None,
                 limit: 0,
                 expected: Some(renamed),
@@ -4403,12 +4470,18 @@ mod tests {
             Err(QueryError::Message(_))
         ));
         let entry_expected = core.state.playlist_query_revisions(1);
-        let entry_id = core.store.playlist_entries_page(1, 0, 1).unwrap().rows[0].id;
+        let entry_id = core
+            .store
+            .playlist_entries_page(1, None, 0, 1)
+            .unwrap()
+            .rows[0]
+            .id;
         core.command(Command::MovePlaylistEntry { entry_id, index: 1 })
             .unwrap();
         // Entry content staleness also takes priority independently of metadata.
         assert_eq!(
             core.view(&Query::PlaylistEntryBatch {
+                query: None,
                 playlist_id: 1,
                 after: None,
                 limit: 0,
@@ -5056,10 +5129,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_ne!(logical_id, physical_id);
-        let playlist_id = core.store.playlist_summary_page(0, 1).unwrap().rows[0].id;
+        let playlist_id = core.store.playlist_summary_page(None, 0, 1).unwrap().rows[0].id;
         let entries = core
             .store
-            .playlist_entries_page(playlist_id, 0, MAX_QUERY_ROWS)
+            .playlist_entries_page(playlist_id, None, 0, MAX_QUERY_ROWS)
             .unwrap();
         assert_eq!(entries.rows.len(), 1);
         assert_eq!(entries.rows[0].track_id, logical_id);
@@ -5077,7 +5150,7 @@ mod tests {
         assert_eq!(page.total, 1);
         assert!(matches!(&page.rows[0], DirectoryRow::Track(row) if row.id == logical_id));
         core.enqueue(&[logical_id]).unwrap();
-        let entries = core.store.queue_page(0, MAX_QUERY_ROWS).unwrap().rows;
+        let entries = core.store.queue_page(None, 0, MAX_QUERY_ROWS).unwrap().rows;
         let entry = entries.last().unwrap();
         assert_eq!(entry.track_id, logical_id);
         assert_eq!(core.track(entry.track_id).unwrap().path, logical);
@@ -5232,7 +5305,7 @@ mod tests {
         assert!(core.store.track(1).unwrap().unwrap().bitrate_exact);
         assert!(core.state.current_track().unwrap().bitrate_exact);
         assert!(
-            core.store.queue_page(0, 10).unwrap().rows[0]
+            core.store.queue_page(None, 0, 10).unwrap().rows[0]
                 .track
                 .bitrate_exact
         );
@@ -5374,7 +5447,7 @@ mod tests {
                 assert_eq!(state.playback.status, PlaybackStatus::Playing);
                 assert_eq!(state.queue.current_id, Some(queue_id));
                 assert_eq!(state.current_track().unwrap(), &stored);
-                let page = core.store.queue_page(0, 1).unwrap();
+                let page = core.store.queue_page(None, 0, 1).unwrap();
                 assert_eq!(page.rows[0].track.bitrate_bps, stored.bitrate_bps);
                 assert_eq!(page.rows[0].track.bitrate_exact, stored.bitrate_exact);
             }
@@ -5425,7 +5498,7 @@ mod tests {
         assert_eq!(play_count(&core, 1), 1);
         assert_eq!(core.state.current_track().unwrap().play_count, 1);
         assert_eq!(
-            core.store.queue_page(0, 1).unwrap().rows[0]
+            core.store.queue_page(None, 0, 1).unwrap().rows[0]
                 .track
                 .play_count,
             1
@@ -5434,7 +5507,7 @@ mod tests {
         assert_eq!(play_count(&core, 1), 1);
         assert_eq!(core.state.current_track().unwrap().play_count, 1);
         assert_eq!(
-            core.store.queue_page(0, 1).unwrap().rows[0]
+            core.store.queue_page(None, 0, 1).unwrap().rows[0]
                 .track
                 .play_count,
             1
@@ -5812,7 +5885,7 @@ mod tests {
             let history = core.store.history(200).unwrap();
             assert_eq!(history[0].favorite, first);
             assert_eq!(history[0].played_at, played_at);
-            for row in core.store.queue_page(0, MAX_QUERY_ROWS).unwrap().rows {
+            for row in core.store.queue_page(None, 0, MAX_QUERY_ROWS).unwrap().rows {
                 let expected = match row.track_id {
                     1 => first,
                     2 => second,
@@ -5860,7 +5933,7 @@ mod tests {
         assert_eq!(core.queue_ids, [1, 4, 5]);
         assert_eq!(
             core.store
-                .playlist_entries_page(playlist_id, 0, MAX_QUERY_ROWS)
+                .playlist_entries_page(playlist_id, None, 0, MAX_QUERY_ROWS)
                 .unwrap()
                 .rows
                 .iter()
@@ -6056,10 +6129,10 @@ mod tests {
         })
         .unwrap();
         assert!(settle_scan(&mut core));
-        let playlist_id = core.store.playlist_summary_page(0, 1).unwrap().rows[0].id;
+        let playlist_id = core.store.playlist_summary_page(None, 0, 1).unwrap().rows[0].id;
         assert_eq!(
             core.store
-                .playlist_entries_page(playlist_id, 0, MAX_QUERY_ROWS)
+                .playlist_entries_page(playlist_id, None, 0, MAX_QUERY_ROWS)
                 .unwrap()
                 .rows
                 .iter()
@@ -6073,7 +6146,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             core.store
-                .queue_page(5, MAX_QUERY_ROWS)
+                .queue_page(None, 5, MAX_QUERY_ROWS)
                 .unwrap()
                 .rows
                 .iter()
@@ -6138,10 +6211,10 @@ mod tests {
             },
         })
         .unwrap();
-        let playlist_id = core.store.playlist_summary_page(0, 1).unwrap().rows[0].id;
+        let playlist_id = core.store.playlist_summary_page(None, 0, 1).unwrap().rows[0].id;
         let entries = core
             .store
-            .playlist_entries_page(playlist_id, 0, MAX_QUERY_ROWS)
+            .playlist_entries_page(playlist_id, None, 0, MAX_QUERY_ROWS)
             .unwrap()
             .rows;
         let tracks: Vec<_> = entries
@@ -6270,7 +6343,7 @@ mod tests {
         core.command(Command::EnqueueAlbum { key: key.clone() })
             .unwrap();
         assert_eq!(core.queue_ids.len(), MAX_QUERY_ROWS + 8);
-        let first = core.store.album_tracks_page(&key, 0, 1).unwrap().rows[0].id;
+        let first = core.store.album_tracks_page(&key, None, 0, 1).unwrap().rows[0].id;
         write_pcm(&core.track(first).unwrap().path);
         let _commands = recording_audio(&mut core);
         core.command(Command::PlayAlbum { key }).unwrap();
@@ -6294,7 +6367,7 @@ mod tests {
 
     fn queue_entries(core: &Core) -> Vec<(u64, i64)> {
         core.store
-            .queue_page(0, MAX_QUERY_ROWS)
+            .queue_page(None, 0, MAX_QUERY_ROWS)
             .unwrap()
             .rows
             .into_iter()
@@ -6331,7 +6404,10 @@ mod tests {
             .is_err()
         );
         core.publish();
-        assert_eq!(core.store.playlist_summary_page(0, 1).unwrap().total, 0);
+        assert_eq!(
+            core.store.playlist_summary_page(None, 0, 1).unwrap().total,
+            0
+        );
         assert_eq!(core.state.library.playlist_total, 0);
         assert_eq!(core.state.query_revisions(), before);
         core.command(Command::CreatePlaylistWithTracks {
@@ -6339,7 +6415,7 @@ mod tests {
             track_ids: vec![2, 1, 2],
         })
         .unwrap();
-        let playlist = core.store.playlist_summary_page(0, 1).unwrap().rows[0].id;
+        let playlist = core.store.playlist_summary_page(None, 0, 1).unwrap().rows[0].id;
         assert_eq!(core.store.playlist_track_ids(playlist, 10).unwrap(), [2, 1]);
         assert_eq!(core.state.library.playlist_total, 1);
     }
@@ -6366,7 +6442,7 @@ mod tests {
         assert!(core.store.track(1).unwrap().is_none());
         assert!(
             core.store
-                .queue_page(0, MAX_QUERY_ROWS)
+                .queue_page(None, 0, MAX_QUERY_ROWS)
                 .unwrap()
                 .rows
                 .iter()
@@ -6570,6 +6646,7 @@ mod tests {
                 );
                 let ViewResponse::QueuePage(page) = core
                     .view(&Query::QueuePage {
+                        query: None,
                         offset: 0,
                         limit: MAX_QUERY_ROWS,
                     })
@@ -6931,6 +7008,7 @@ mod tests {
         core.state.queue.current_id = Some(3);
         core.save(false).unwrap();
         let query = Query::QueueBatch {
+            query: None,
             after: None,
             limit: 2,
             expected: Some(expected),
@@ -7231,7 +7309,10 @@ mod tests {
             assert!(status.error.is_some());
             assert_eq!(core.state.query_revisions(), before);
             assert_eq!(core.store.track_count().unwrap(), 4);
-            assert_eq!(core.store.playlist_summary_page(0, 0).unwrap().total, 0);
+            assert_eq!(
+                core.store.playlist_summary_page(None, 0, 0).unwrap().total,
+                0
+            );
         }
     }
 
@@ -7265,6 +7346,9 @@ mod tests {
             ScanPhase::Cancelled
         );
         assert_eq!(core.store.track_count().unwrap(), 4);
-        assert_eq!(core.store.playlist_summary_page(0, 0).unwrap().total, 0);
+        assert_eq!(
+            core.store.playlist_summary_page(None, 0, 0).unwrap().total,
+            0
+        );
     }
 }

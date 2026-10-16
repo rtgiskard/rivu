@@ -1,4 +1,5 @@
 use super::rows::{LIBRARY_ROW_COLUMNS, library_row_from_row};
+use super::tracks::{search_filter, search_query};
 use super::{Store, queue::invalidate_structure};
 use crate::model::{AlbumKey, AlbumSort, AlbumSummary, LibraryRow, MAX_QUERY_ROWS, Page};
 use anyhow::{Context, Result, ensure};
@@ -29,7 +30,7 @@ impl Store {
         limit: usize,
     ) -> Result<Page<AlbumSummary>> {
         let groups = format!(
-            "SELECT {DIRECTORY} AS directory,{TITLE} AS title,COUNT(*) AS track_count,CASE COUNT(DISTINCT NULLIF(COALESCE(artist_override,raw_artist),'')) WHEN 0 THEN 'Unknown artist' WHEN 1 THEN MAX(NULLIF(COALESCE(artist_override,raw_artist),'')) ELSE 'Various artists' END AS artist FROM tracks GROUP BY directory,title HAVING ?1 IS NULL OR instr(lower({TITLE}),lower(COALESCE(?1,'')))>0 OR MAX(instr(lower(COALESCE(artist_override,raw_artist)),lower(COALESCE(?1,''))))>0"
+            "SELECT {DIRECTORY} AS directory,{TITLE} AS title,COUNT(*) AS track_count,CASE COUNT(DISTINCT NULLIF(COALESCE(artist_override,raw_artist),'')) WHEN 0 THEN NULL WHEN 1 THEN MAX(NULLIF(COALESCE(artist_override,raw_artist),'')) ELSE 'Various artists' END AS artist FROM tracks GROUP BY directory,title HAVING ?1 IS NULL OR instr(lower({TITLE}),lower(COALESCE(?1,'')))>0 OR MAX(instr(lower(COALESCE(artist_override,raw_artist)),lower(COALESCE(?1,''))))>0"
         );
         let total = self.conn.query_row(
             &format!("SELECT COUNT(*) FROM ({groups})"),
@@ -38,7 +39,7 @@ impl Store {
         )? as usize;
         let order = match sort {
             AlbumSort::Title => "title,directory",
-            AlbumSort::Artist => "artist,title,directory",
+            AlbumSort::Artist => "COALESCE(artist,'Unknown artist'),title,directory",
         };
         let mut statement = self.conn.prepare(&format!("SELECT directory,title,track_count,artist FROM ({groups}) ORDER BY {order} LIMIT ?2 OFFSET ?3"))?;
         let mut representative = self.conn.prepare(&format!(
@@ -67,7 +68,7 @@ impl Store {
                     .context("Album representative disappeared")?,
                 key,
                 track_count: row.get::<_, i64>(2)? as usize,
-                artist: row.get(3)?,
+                artist: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
             });
         }
         Ok(Page {
@@ -79,6 +80,7 @@ impl Store {
     pub fn album_tracks_page(
         &self,
         key: &AlbumKey,
+        query: Option<&str>,
         offset: usize,
         limit: usize,
     ) -> Result<Page<LibraryRow>> {
@@ -86,18 +88,20 @@ impl Store {
             .directory
             .to_str()
             .context("Album directory is not UTF-8")?;
-        let filter = album_filter();
+        let query = search_query(query);
+        let filter = format!("{} AND {}", album_filter(), search_filter("tracks", "?3"));
         let total = self.conn.query_row(
             &format!("SELECT COUNT(*) FROM tracks INDEXED BY tracks_directory WHERE {filter}"),
-            params![directory, key.title],
+            params![directory, key.title, query],
             |row| row.get::<_, i64>(0),
         )? as usize;
-        let mut statement = self.conn.prepare(&format!("SELECT {LIBRARY_ROW_COLUMNS} FROM tracks INDEXED BY tracks_directory WHERE {filter} ORDER BY {ORDER} LIMIT ?3 OFFSET ?4"))?;
+        let mut statement = self.conn.prepare(&format!("SELECT {LIBRARY_ROW_COLUMNS} FROM tracks INDEXED BY tracks_directory WHERE {filter} ORDER BY {ORDER} LIMIT ?4 OFFSET ?5"))?;
         let rows = statement
             .query_map(
                 params![
                     directory,
                     key.title,
+                    query,
                     limit.min(MAX_QUERY_ROWS) as i64,
                     i64::try_from(offset)?
                 ],

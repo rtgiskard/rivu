@@ -176,6 +176,10 @@ pub struct PlaylistSummary {
 pub struct PlaylistEntryRow {
     pub id: i64,
     pub track_id: i64,
+    /// Original occurrence position, never a filtered row index.
+    pub position: usize,
+    /// Zero-based index among the current query's matches.
+    pub offset: usize,
     pub title: String,
     pub artist: String,
     pub album: String,
@@ -190,6 +194,7 @@ pub struct PlaylistEntryLocation {
     pub playlist_id: i64,
     pub track_id: i64,
     pub position: usize,
+    pub offset: usize,
     pub total: usize,
 }
 
@@ -223,6 +228,8 @@ pub struct QueueRow {
     pub id: u64,
     pub track_id: i64,
     pub position: usize,
+    /// Zero-based index among the current query's matches.
+    pub offset: usize,
     pub track: LibraryRow,
 }
 
@@ -595,6 +602,7 @@ pub enum Query {
     },
     AlbumTracks {
         key: AlbumKey,
+        query: Option<String>,
         offset: usize,
         limit: usize,
     },
@@ -622,16 +630,19 @@ pub enum Query {
         limit: usize,
     },
     PlaylistSummaries {
+        query: Option<String>,
         offset: usize,
         limit: usize,
     },
     PlaylistEntries {
         playlist_id: i64,
+        query: Option<String>,
         offset: usize,
         limit: usize,
     },
     PlaylistEntryLocations {
         playlist_id: i64,
+        query: Option<String>,
         entry_ids: Vec<i64>,
     },
     Track {
@@ -647,12 +658,14 @@ pub enum Query {
         expected: Option<crate::response::QueryRevisions>,
     },
     PlaylistSummaryBatch {
+        query: Option<String>,
         after: Option<i64>,
         limit: usize,
         expected: Option<crate::response::QueryRevisions>,
     },
     PlaylistEntryBatch {
         playlist_id: i64,
+        query: Option<String>,
         after: Option<PlaylistEntryCursor>,
         limit: usize,
         expected: Option<crate::response::QueryRevisions>,
@@ -682,15 +695,18 @@ pub enum Query {
         id: u64,
     },
     QueuePage {
+        query: Option<String>,
         offset: usize,
         limit: usize,
     },
     QueueBatch {
+        query: Option<String>,
         after: Option<QueueCursor>,
         limit: usize,
         expected: Option<crate::response::QueryRevisions>,
     },
     QueueEntries {
+        query: Option<String>,
         queue_ids: Vec<u64>,
     },
     PlaylistEntry {
@@ -729,7 +745,7 @@ impl QueryStamp {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QueryIdentity<'a> {
     Albums(&'a Option<String>, AlbumSort),
-    AlbumTracks(&'a AlbumKey),
+    AlbumTracks(&'a AlbumKey, &'a Option<String>),
     LibraryPage(&'a Option<String>, Option<bool>, Option<bool>, LibrarySort),
     TrackPage(&'a Option<String>, Option<bool>, Option<bool>),
     DirectoryPage(
@@ -738,14 +754,14 @@ pub enum QueryIdentity<'a> {
         Option<bool>,
         Option<bool>,
     ),
-    PlaylistSummaries,
-    PlaylistEntries(i64),
-    PlaylistEntryLocations(i64, &'a [i64]),
+    PlaylistSummaries(&'a Option<String>),
+    PlaylistEntries(i64, &'a Option<String>),
+    PlaylistEntryLocations(i64, &'a [i64], &'a Option<String>),
     Track(i64),
     LibraryStats,
     TrackBatch(&'a Option<String>, Option<bool>, Option<bool>),
-    PlaylistSummaryBatch,
-    PlaylistEntryBatch(i64),
+    PlaylistSummaryBatch(&'a Option<String>),
+    PlaylistEntryBatch(i64, &'a Option<String>),
     LibraryRootPage(
         &'a std::path::Path,
         &'a Option<String>,
@@ -764,9 +780,9 @@ pub enum QueryIdentity<'a> {
     ),
     LibraryRootCounts(&'a [PathBuf]),
     ScanTask(u64),
-    QueuePage,
-    QueueBatch,
-    QueueEntries(&'a [u64]),
+    QueuePage(&'a Option<String>),
+    QueueBatch(&'a Option<String>),
+    QueueEntries(&'a [u64], &'a Option<String>),
     PlaylistEntry(i64),
     DuplicateGroups,
     DuplicateMembers(&'a str),
@@ -813,14 +829,29 @@ impl Query {
                     .playlist_entries
                     .filter(|scope| scope.playlist_id == *playlist_id);
             }
-            Self::PlaylistEntryLocations { playlist_id, .. } => {
+            Self::PlaylistEntryLocations {
+                playlist_id, query, ..
+            } => {
                 stamp.playlist_entries = revisions
                     .playlist_entries
                     .filter(|scope| scope.playlist_id == *playlist_id);
+                if query.is_some() {
+                    stamp.playlist_metadata = revisions
+                        .playlist_metadata
+                        .filter(|scope| scope.playlist_id == *playlist_id);
+                    if stamp.playlist_metadata.is_none() {
+                        stamp.library = revisions.library;
+                    }
+                }
             }
             Self::PlaylistEntry { .. } => stamp.playlist_entries = revisions.playlist_entries,
-            Self::QueuePage { .. } | Self::QueueBatch { .. } | Self::QueueEntries { .. } => {
+            Self::QueuePage { query, .. }
+            | Self::QueueBatch { query, .. }
+            | Self::QueueEntries { query, .. } => {
                 stamp.queue = revisions.queue;
+                if query.is_some() {
+                    stamp.library = revisions.library;
+                }
             }
             Self::DuplicateGroups { .. } => stamp.duplicate_groups = revisions.duplicate_groups,
             Self::DuplicateMembers { .. } | Self::DuplicateMemberSelection { .. } => {
@@ -837,7 +868,7 @@ impl Query {
     pub fn identity(&self) -> QueryIdentity<'_> {
         match self {
             Self::Albums { query, sort, .. } => QueryIdentity::Albums(query, *sort),
-            Self::AlbumTracks { key, .. } => QueryIdentity::AlbumTracks(key),
+            Self::AlbumTracks { key, query, .. } => QueryIdentity::AlbumTracks(key, query),
             Self::LibraryPage {
                 query,
                 favorite,
@@ -858,14 +889,15 @@ impl Query {
                 missing,
                 ..
             } => QueryIdentity::DirectoryPage(path, query, *favorite, *missing),
-            Self::PlaylistSummaries { .. } => QueryIdentity::PlaylistSummaries,
-            Self::PlaylistEntries { playlist_id, .. } => {
-                QueryIdentity::PlaylistEntries(*playlist_id)
-            }
+            Self::PlaylistSummaries { query, .. } => QueryIdentity::PlaylistSummaries(query),
+            Self::PlaylistEntries {
+                playlist_id, query, ..
+            } => QueryIdentity::PlaylistEntries(*playlist_id, query),
             Self::PlaylistEntryLocations {
                 playlist_id,
                 entry_ids,
-            } => QueryIdentity::PlaylistEntryLocations(*playlist_id, entry_ids),
+                query,
+            } => QueryIdentity::PlaylistEntryLocations(*playlist_id, entry_ids, query),
             Self::Track { track_id } => QueryIdentity::Track(*track_id),
             Self::LibraryStats => QueryIdentity::LibraryStats,
             Self::TrackBatch {
@@ -874,10 +906,10 @@ impl Query {
                 missing,
                 ..
             } => QueryIdentity::TrackBatch(query, *favorite, *missing),
-            Self::PlaylistSummaryBatch { .. } => QueryIdentity::PlaylistSummaryBatch,
-            Self::PlaylistEntryBatch { playlist_id, .. } => {
-                QueryIdentity::PlaylistEntryBatch(*playlist_id)
-            }
+            Self::PlaylistSummaryBatch { query, .. } => QueryIdentity::PlaylistSummaryBatch(query),
+            Self::PlaylistEntryBatch {
+                playlist_id, query, ..
+            } => QueryIdentity::PlaylistEntryBatch(*playlist_id, query),
             Self::LibraryRootPage {
                 path,
                 query,
@@ -899,9 +931,11 @@ impl Query {
             ),
             Self::LibraryRootCounts { roots } => QueryIdentity::LibraryRootCounts(roots),
             Self::ScanTask { id } => QueryIdentity::ScanTask(*id),
-            Self::QueuePage { .. } => QueryIdentity::QueuePage,
-            Self::QueueBatch { .. } => QueryIdentity::QueueBatch,
-            Self::QueueEntries { queue_ids } => QueryIdentity::QueueEntries(queue_ids),
+            Self::QueuePage { query, .. } => QueryIdentity::QueuePage(query),
+            Self::QueueBatch { query, .. } => QueryIdentity::QueueBatch(query),
+            Self::QueueEntries { queue_ids, query } => {
+                QueryIdentity::QueueEntries(queue_ids, query)
+            }
             Self::PlaylistEntry { entry_id } => QueryIdentity::PlaylistEntry(*entry_id),
             Self::DuplicateGroups { .. } => QueryIdentity::DuplicateGroups,
             Self::DuplicateMembers { fingerprint, .. } => {
@@ -1156,6 +1190,152 @@ pub enum Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn search_projection_identity_changes_with_query_not_page_demand() {
+        for mut query in [
+            Query::AlbumTracks {
+                key: AlbumKey {
+                    directory: "/music".into(),
+                    title: "Album".into(),
+                },
+                query: None,
+                offset: 0,
+                limit: 2,
+            },
+            Query::PlaylistSummaries {
+                query: None,
+                offset: 0,
+                limit: 2,
+            },
+            Query::PlaylistEntries {
+                playlist_id: 1,
+                query: None,
+                offset: 0,
+                limit: 2,
+            },
+            Query::PlaylistEntryLocations {
+                playlist_id: 1,
+                query: None,
+                entry_ids: vec![1],
+            },
+            Query::PlaylistSummaryBatch {
+                query: None,
+                after: None,
+                limit: 2,
+                expected: None,
+            },
+            Query::PlaylistEntryBatch {
+                playlist_id: 1,
+                query: None,
+                after: None,
+                limit: 2,
+                expected: None,
+            },
+            Query::QueuePage {
+                query: None,
+                offset: 0,
+                limit: 2,
+            },
+            Query::QueueBatch {
+                query: None,
+                after: None,
+                limit: 2,
+                expected: None,
+            },
+            Query::QueueEntries {
+                query: None,
+                queue_ids: vec![1],
+            },
+        ] {
+            let unfiltered = query.clone();
+            let (Query::AlbumTracks { query: filter, .. }
+            | Query::PlaylistSummaries { query: filter, .. }
+            | Query::PlaylistEntries { query: filter, .. }
+            | Query::PlaylistEntryLocations { query: filter, .. }
+            | Query::PlaylistSummaryBatch { query: filter, .. }
+            | Query::PlaylistEntryBatch { query: filter, .. }
+            | Query::QueuePage { query: filter, .. }
+            | Query::QueueBatch { query: filter, .. }
+            | Query::QueueEntries { query: filter, .. }) = &mut query
+            else {
+                unreachable!()
+            };
+            *filter = Some("needle".into());
+            assert_ne!(unfiltered.identity(), query.identity());
+            let filtered = query.clone();
+            match &mut query {
+                Query::AlbumTracks { offset, limit, .. }
+                | Query::PlaylistSummaries { offset, limit, .. }
+                | Query::PlaylistEntries { offset, limit, .. }
+                | Query::QueuePage { offset, limit, .. } => {
+                    *offset = 200;
+                    *limit = 20;
+                }
+                Query::PlaylistSummaryBatch { after, limit, .. } => {
+                    *after = Some(100);
+                    *limit = 20;
+                }
+                Query::PlaylistEntryBatch { after, limit, .. } => {
+                    *after = Some(PlaylistEntryCursor {
+                        position: 100,
+                        id: 200,
+                    });
+                    *limit = 20;
+                }
+                Query::QueueBatch { after, limit, .. } => {
+                    *after = Some(QueueCursor {
+                        position: 100,
+                        id: 200,
+                    });
+                    *limit = 20;
+                }
+                _ => {}
+            }
+            assert_eq!(filtered.identity(), query.identity());
+        }
+    }
+
+    #[test]
+    fn filtered_occurrence_lookup_stamps_include_match_metadata() {
+        let before = crate::response::QueryRevisions {
+            library: 1,
+            queue: 1,
+            playlist_entries: Some(crate::response::PlaylistEntryRevision {
+                playlist_id: 1,
+                revision: 1,
+            }),
+            playlist_metadata: Some(crate::response::PlaylistEntryRevision {
+                playlist_id: 1,
+                revision: 1,
+            }),
+            ..Default::default()
+        };
+        let after = crate::response::QueryRevisions {
+            library: 2,
+            playlist_metadata: Some(crate::response::PlaylistEntryRevision {
+                playlist_id: 1,
+                revision: 2,
+            }),
+            ..before
+        };
+        for query in [None, Some("needle".into())] {
+            let queue = Query::QueueEntries {
+                query: query.clone(),
+                queue_ids: vec![1],
+            };
+            let playlist = Query::PlaylistEntryLocations {
+                playlist_id: 1,
+                query: query.clone(),
+                entry_ids: vec![1],
+            };
+            assert_eq!(queue.stamp(before) == queue.stamp(after), query.is_none());
+            assert_eq!(
+                playlist.stamp(before) == playlist.stamp(after),
+                query.is_none()
+            );
+        }
+    }
+
     #[test]
     fn playback_seek_respects_status_and_boundaries() {
         let mut state = PlaybackState {

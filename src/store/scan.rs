@@ -669,7 +669,7 @@ mod tests {
         };
         assert!(store.apply_scan(&scan).unwrap().changed);
         store.enqueue_sources(&["/music".into()], &[]).unwrap();
-        let id = store.queue_page(0, 10).unwrap().rows[0].track_id;
+        let id = store.queue_page(None, 0, 10).unwrap().rows[0].track_id;
         (store, scan, id)
     }
 
@@ -712,7 +712,7 @@ mod tests {
     fn verification_only_rescans_change_members_without_evicting_tracks() {
         let (store, mut scan, id) = queued(record());
         let track = store.track(id).unwrap().unwrap();
-        let page = store.queue_page(0, 10).unwrap();
+        let page = store.queue_page(None, 0, 10).unwrap();
         let state = store.queue_state().unwrap();
         for mtime_only in [true, false] {
             if mtime_only {
@@ -731,7 +731,7 @@ mod tests {
             assert!(store.track_cache.borrow().entries.contains_key(&id));
             assert_eq!(store.track(id).unwrap().unwrap(), track);
             assert_eq!(store.queue_state().unwrap(), state);
-            assert_eq!(store.queue_page(0, 10).unwrap(), page);
+            assert_eq!(store.queue_page(None, 0, 10).unwrap(), page);
             let member = store
                 .duplicate_members_page(scan.records[0].fingerprint.as_deref().unwrap(), 0, 10)
                 .unwrap()
@@ -776,14 +776,14 @@ mod tests {
         store
             .edit_track(id, Some("Override"), None, None, None)
             .unwrap();
-        let page = store.queue_page(0, 10).unwrap();
+        let page = store.queue_page(None, 0, 10).unwrap();
         store.set_queue_current(Some(page.rows[0].id)).unwrap();
         let state = store.queue_state().unwrap();
         let track = store.track(id).unwrap().unwrap();
         for _ in 0..2 {
             assert_eq!(store.apply_scan(&scan).unwrap(), ScanImpacts::default());
             assert_eq!(store.queue_state().unwrap(), state);
-            assert_eq!(store.queue_page(0, 10).unwrap(), page);
+            assert_eq!(store.queue_page(None, 0, 10).unwrap(), page);
             assert_eq!(store.track(id).unwrap().unwrap(), track);
         }
     }
@@ -791,7 +791,7 @@ mod tests {
     #[test]
     fn changed_scan_metadata_invalidates_queue_without_losing_entry_identity() {
         let (store, mut scan, id) = queued(record());
-        let before = store.queue_page(0, 10).unwrap().rows.remove(0);
+        let before = store.queue_page(None, 0, 10).unwrap().rows.remove(0);
         let state = store.queue_state().unwrap();
         scan.records[0].media.title = "Changed title".into();
         scan.records[0].media.artist = "Changed artist".into();
@@ -806,7 +806,7 @@ mod tests {
             }
         );
         assert!(store.queue_state().unwrap().revision > state.revision);
-        let after = store.queue_page(0, 10).unwrap().rows.remove(0);
+        let after = store.queue_page(None, 0, 10).unwrap().rows.remove(0);
         assert_eq!(
             (after.id, after.track_id, after.position),
             (before.id, id, before.position)
@@ -818,7 +818,7 @@ mod tests {
         let state = store.queue_state().unwrap();
         assert_eq!(store.apply_scan(&scan).unwrap(), ScanImpacts::default());
         assert_eq!(store.queue_state().unwrap(), state);
-        assert_eq!(store.queue_page(0, 10).unwrap().rows[0], after);
+        assert_eq!(store.queue_page(None, 0, 10).unwrap().rows[0], after);
     }
 
     #[test]
@@ -833,7 +833,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        let page = store.queue_page(0, 10).unwrap();
+        let page = store.queue_page(None, 0, 10).unwrap();
         let state = store.queue_state().unwrap();
         store.track(id).unwrap();
         scan.records[0].media.title = "New raw title".into();
@@ -848,7 +848,7 @@ mod tests {
         );
         assert!(store.track_cache.borrow().entries.contains_key(&id));
         assert_eq!(store.queue_state().unwrap(), state);
-        assert_eq!(store.queue_page(0, 10).unwrap(), page);
+        assert_eq!(store.queue_page(None, 0, 10).unwrap(), page);
         let known = store.stored_scan_files(&scan.roots).unwrap();
         let raw = known[0].media.as_ref().unwrap();
         assert_eq!(raw.title, "New raw title");
@@ -863,7 +863,7 @@ mod tests {
     #[test]
     fn equal_to_raw_and_repeated_overrides_keep_queue_revision_stable() {
         let (store, mut scan, id) = queued(record());
-        let page = store.queue_page(0, 10).unwrap();
+        let page = store.queue_page(None, 0, 10).unwrap();
         let state = store.queue_state().unwrap();
         for (title, artist, album) in [
             (Some("Title"), None, None),
@@ -874,7 +874,7 @@ mod tests {
             for _ in 0..2 {
                 store.edit_track(id, title, artist, album, None).unwrap();
                 assert_eq!(store.queue_state().unwrap(), state);
-                assert_eq!(store.queue_page(0, 10).unwrap(), page);
+                assert_eq!(store.queue_page(None, 0, 10).unwrap(), page);
             }
         }
         // A later rescan proves equal overrides were retained, not discarded.
@@ -883,7 +883,7 @@ mod tests {
         scan.records[0].media.album = "Changed raw album".into();
         store.apply_scan(&scan).unwrap();
         assert_eq!(store.queue_state().unwrap(), state);
-        assert_eq!(store.queue_page(0, 10).unwrap(), page);
+        assert_eq!(store.queue_page(None, 0, 10).unwrap(), page);
     }
 
     #[test]
@@ -897,11 +897,11 @@ mod tests {
             (None, Some(""), None),
             (None, None, Some("")),
         ] {
-            let before = store.queue_page(0, 10).unwrap().rows.remove(0);
+            let before = store.queue_page(None, 0, 10).unwrap().rows.remove(0);
             let state = store.queue_state().unwrap();
             store.edit_track(id, title, artist, album, None).unwrap();
             assert!(store.queue_state().unwrap().revision > state.revision);
-            let after = store.queue_page(0, 10).unwrap().rows.remove(0);
+            let after = store.queue_page(None, 0, 10).unwrap().rows.remove(0);
             assert_eq!(
                 (after.id, after.track_id, after.position),
                 (before.id, id, before.position)
@@ -912,14 +912,14 @@ mod tests {
             let state = store.queue_state().unwrap();
             store.edit_track(id, title, artist, album, None).unwrap();
             assert_eq!(store.queue_state().unwrap(), state);
-            assert_eq!(store.queue_page(0, 10).unwrap().rows[0], after);
+            assert_eq!(store.queue_page(None, 0, 10).unwrap().rows[0], after);
         }
     }
 
     #[test]
     fn missing_transitions_invalidate_once_and_recovery_preserves_queue_entry() {
         let (store, scan, id) = queued(record());
-        let page = store.queue_page(0, 10).unwrap();
+        let page = store.queue_page(None, 0, 10).unwrap();
         let initial = store.queue_state().unwrap();
         let missing = ScanResult {
             roots: scan.roots.clone(),
@@ -934,20 +934,20 @@ mod tests {
         assert_eq!(store.apply_scan(&missing).unwrap(), expected);
         let state = store.queue_state().unwrap();
         assert!(state.revision > initial.revision);
-        let row = store.queue_page(0, 10).unwrap().rows.remove(0);
+        let row = store.queue_page(None, 0, 10).unwrap().rows.remove(0);
         assert_eq!(row.id, page.rows[0].id);
         assert_eq!(row.track_id, id);
         assert!(row.track.missing);
         assert_eq!(store.apply_scan(&missing).unwrap(), ScanImpacts::default());
         assert_eq!(store.queue_state().unwrap(), state);
-        assert_eq!(store.queue_page(0, 10).unwrap().rows[0], row);
+        assert_eq!(store.queue_page(None, 0, 10).unwrap().rows[0], row);
         assert_eq!(store.apply_scan(&scan).unwrap(), expected);
         let recovered = store.queue_state().unwrap();
         assert!(recovered.revision > state.revision);
-        assert_eq!(store.queue_page(0, 10).unwrap(), page);
+        assert_eq!(store.queue_page(None, 0, 10).unwrap(), page);
         assert_eq!(store.apply_scan(&scan).unwrap(), ScanImpacts::default());
         assert_eq!(store.queue_state().unwrap(), recovered);
-        assert_eq!(store.queue_page(0, 10).unwrap(), page);
+        assert_eq!(store.queue_page(None, 0, 10).unwrap(), page);
     }
 
     #[test]
@@ -961,17 +961,17 @@ mod tests {
         store.apply_scan(&scan).unwrap();
         let cleared = store.queue_state().unwrap();
         assert!(cleared.revision > state.revision);
-        let row = store.queue_page(0, 10).unwrap().rows.remove(0);
+        let row = store.queue_page(None, 0, 10).unwrap().rows.remove(0);
         assert_eq!(row.track.duration, None);
         assert_eq!(row.track.bitrate_bps, None);
         assert_eq!(store.track(id).unwrap().unwrap().fingerprint, None);
         store.apply_scan(&scan).unwrap();
         assert_eq!(store.queue_state().unwrap(), cleared);
-        assert_eq!(store.queue_page(0, 10).unwrap().rows[0], row);
+        assert_eq!(store.queue_page(None, 0, 10).unwrap().rows[0], row);
         scan.records[0] = original;
         store.apply_scan(&scan).unwrap();
         assert!(store.queue_state().unwrap().revision > cleared.revision);
-        let row = store.queue_page(0, 10).unwrap().rows.remove(0);
+        let row = store.queue_page(None, 0, 10).unwrap().rows.remove(0);
         assert_eq!(row.track.duration, Some(60.0));
         assert_eq!(row.track.bitrate_bps, Some(1_536_000));
     }
@@ -986,7 +986,7 @@ mod tests {
             end_frame: Some(4500),
         });
         let (store, mut scan, id) = queued(record);
-        let page = store.queue_page(0, 10).unwrap();
+        let page = store.queue_page(None, 0, 10).unwrap();
         let state = store.queue_state().unwrap();
         let record = &mut scan.records[0];
         record.path = "/music/renamed.wav".into();
@@ -1012,7 +1012,7 @@ mod tests {
             }
         );
         assert_eq!(store.queue_state().unwrap(), state);
-        assert_eq!(store.queue_page(0, 10).unwrap(), page);
+        assert_eq!(store.queue_page(None, 0, 10).unwrap(), page);
         let track = store.track(id).unwrap().unwrap();
         assert_eq!(track.path, scan.records[0].path);
         assert_eq!(track.fingerprint, None);
@@ -1053,7 +1053,7 @@ mod tests {
                 .is_some()
         );
         assert_eq!(store.queue_state().unwrap(), state);
-        assert_eq!(store.queue_page(0, 10).unwrap(), page);
+        assert_eq!(store.queue_page(None, 0, 10).unwrap(), page);
     }
 
     #[test]
@@ -1064,7 +1064,7 @@ mod tests {
         other.fingerprint = Some(blake3::hash(b"other").to_hex().to_string());
         scan.records.push(other);
         store.apply_scan(&scan).unwrap();
-        let page = store.queue_page(0, 10).unwrap();
+        let page = store.queue_page(None, 0, 10).unwrap();
         let state = store.queue_state().unwrap();
         scan.records[1].media.title = "Unqueued title".into();
         store.apply_scan(&scan).unwrap();
@@ -1074,7 +1074,7 @@ mod tests {
             .unwrap();
         assert_eq!(store.track(id).unwrap().unwrap().title, "Unqueued title");
         assert_eq!(store.queue_state().unwrap(), state);
-        assert_eq!(store.queue_page(0, 10).unwrap(), page);
+        assert_eq!(store.queue_page(None, 0, 10).unwrap(), page);
     }
 
     #[test]

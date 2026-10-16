@@ -81,10 +81,58 @@ fn scan_task_query_and_cancel_wire_round_trip_preserve_id() {
 }
 
 #[test]
+fn optional_search_queries_round_trip_and_accept_absent_fields() {
+    let legacy_queries = [
+        serde_json::json!({"AlbumTracks": {"key": {"directory": "/music", "title": "Album"}, "offset": 2, "limit": 3}}),
+        serde_json::json!({"PlaylistSummaries": {"offset": 2, "limit": 3}}),
+        serde_json::json!({"PlaylistEntries": {"playlist_id": 10, "offset": 2, "limit": 3}}),
+        serde_json::json!({"PlaylistEntryLocations": {"playlist_id": 10, "entry_ids": [42, 43]}}),
+        serde_json::json!({"PlaylistSummaryBatch": {"after": 10, "limit": 3, "expected": null}}),
+        serde_json::json!({"PlaylistEntryBatch": {"playlist_id": 10, "after": null, "limit": 3, "expected": null}}),
+        serde_json::json!({"QueuePage": {"offset": 2, "limit": 3}}),
+        serde_json::json!({"QueueBatch": {"after": null, "limit": 3, "expected": null}}),
+        serde_json::json!({"QueueEntries": {"queue_ids": [42, 43]}}),
+    ];
+    let mut encoded = Vec::new();
+    for legacy in legacy_queries {
+        let wire: WireQuery = serde_json::from_value(legacy.clone()).unwrap();
+        let absent = serde_json::to_value(&wire).unwrap();
+        let fields = absent.as_object().unwrap().values().next().unwrap();
+        assert!(fields.get("query").unwrap().is_null());
+        for filter in [None, Some("  MiXeD café / \"quoted\" %_  "), Some("")] {
+            let mut expected = legacy.clone();
+            expected
+                .as_object_mut()
+                .unwrap()
+                .values_mut()
+                .next()
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert("query".into(), serde_json::json!(filter));
+            let wire: WireQuery = serde_json::from_value(expected.clone()).unwrap();
+            let query = Query::try_from(wire).unwrap();
+            encode_request_frame_into(&WireRequest::Query(WireQuery::from(query)), &mut encoded)
+                .unwrap();
+            let WireRequest::Query(decoded) = decode_request_frame(&encoded[4..]).unwrap() else {
+                panic!("expected query");
+            };
+            assert_eq!(serde_json::to_value(&decoded).unwrap(), expected);
+            let query = Query::try_from(decoded).unwrap();
+            assert_eq!(
+                serde_json::to_value(WireQuery::from(query)).unwrap(),
+                expected
+            );
+        }
+    }
+}
+
+#[test]
 fn playlist_group_requests_and_locations_round_trip_stable_identities() {
     let mut encoded = Vec::new();
     for query in [
         Query::PlaylistEntryLocations {
+            query: None,
             playlist_id: 10,
             entry_ids: vec![42, i64::MAX, 42],
         },
@@ -164,6 +212,7 @@ fn playlist_group_requests_and_locations_round_trip_stable_identities() {
                 playlist_id: 10,
                 track_id: 11,
                 position: 1000,
+                offset: 1000,
                 total: 2000,
             },
         ])),
@@ -558,11 +607,13 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
     let server = Server::start(&owner, runtime.handle.clone(), app.clone()).unwrap();
     let mut session = client_session(directory.path()).unwrap();
     let summaries = Query::PlaylistSummaries {
+        query: None,
         offset: 0,
         limit: 2,
     };
     let catalog = session.query(&summaries).unwrap();
     let batch = |playlist_id, expected| Query::PlaylistEntryBatch {
+        query: None,
         playlist_id,
         after: None,
         limit: 1,
@@ -603,6 +654,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
     assert_eq!(
         session
             .query(&Query::PlaylistEntryBatch {
+                query: None,
                 playlist_id: 10,
                 after: Some(first_cursor),
                 limit: 1,
@@ -677,6 +729,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
         if entry.position == 1 && entry.id == 101)
     );
     let location_query = Query::PlaylistEntryLocations {
+        query: None,
         playlist_id: 10,
         entry_ids: vec![101, 201, i64::MAX],
     };
@@ -710,6 +763,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
     );
     let removed = session
         .query(&Query::PlaylistEntryLocations {
+            query: None,
             playlist_id: 10,
             entry_ids: vec![101],
         })
@@ -788,6 +842,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
     );
     let continuation = session
         .query(&Query::PlaylistEntryBatch {
+            query: None,
             playlist_id: 20,
             after: Some(other_cursor),
             limit: 1,
@@ -848,6 +903,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
     assert_eq!(
         session
             .query(&Query::PlaylistEntryBatch {
+                query: None,
                 playlist_id: 20,
                 after: Some(other_cursor),
                 limit: 1,
@@ -1759,6 +1815,7 @@ fn client_session_reuses_connection_after_command_and_request_rejections() {
     let mut session = client_session(directory.path()).unwrap();
     session.bind_instance(1).unwrap();
     let query = Query::PlaylistSummaries {
+        query: None,
         offset: 0,
         limit: 20,
     };
@@ -1772,6 +1829,7 @@ fn client_session_reuses_connection_after_command_and_request_rejections() {
     assert!(!ack.ok);
     assert_eq!(ack.revision, 3);
     let query = Query::PlaylistSummaries {
+        query: None,
         offset: 20,
         limit: 20,
     };
@@ -1935,6 +1993,7 @@ fn pinned_session_rejects_initial_replacement_before_commands_queries_or_state()
     assert!(error.is::<InstanceChanged>());
     let error = session
         .query(&Query::PlaylistSummaries {
+            query: None,
             offset: 0,
             limit: 10,
         })
@@ -2135,6 +2194,7 @@ fn album_queries_and_commands_round_trip_exact_keys() {
             limit: 24,
         },
         Query::AlbumTracks {
+            query: None,
             key: key.clone(),
             offset: 256,
             limit: 256,
@@ -2173,10 +2233,12 @@ fn queue_queries_and_full_queue_playlist_commands_round_trip() {
     use crate::model::QueueCursor;
     for query in [
         Query::QueuePage {
+            query: None,
             offset: 199_936,
             limit: 256,
         },
         Query::QueueBatch {
+            query: None,
             after: Some(QueueCursor {
                 position: 255,
                 id: 1000,
@@ -2188,6 +2250,7 @@ fn queue_queries_and_full_queue_playlist_commands_round_trip() {
             }),
         },
         Query::QueueEntries {
+            query: None,
             queue_ids: vec![1, 3, 3],
         },
     ] {

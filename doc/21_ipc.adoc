@@ -91,9 +91,11 @@ explicit transactions neither use nor populate it, preventing rollback leakage.
 No row payloads or multi-query map are retained. Unfiltered root counts use the
 covering path index. Directory child aggregation remains request-local; offset
 pages still pay the traversal cost of skipping preceding matches.
-Queue and playlist entry pages seek by their contiguous position rather than
-skipping an OFFSET prefix. Playlist entry totals use the indexed maximum position;
-this relies on the same Store-owned contiguous-order invariant.
+Unfiltered queue and playlist entry pages seek by their contiguous position rather
+than skipping an OFFSET prefix. Unfiltered playlist entry totals use the indexed
+maximum position; this relies on the Store-owned contiguous-order invariant.
+Filtered pages count and skip matching rows in the database before projecting the
+requested page; title, artist, album, and file-name filters require track metadata.
 
 Playlist export reads full tracks in playlist order with bounded keyset batches,
 without entry-summary projection, per-track queries, or the interactive track
@@ -219,7 +221,7 @@ The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
 Bodies use Postcard serialization without COBS framing. The current protocol
-version is `25`; clients and servers must use matching wire schemas. The four-byte
+version is `26`; clients and servers must use matching wire schemas. The four-byte
 frame length remains little-endian; body integers follow Postcard's encoding.
 Configuration state and Configure commands include the presentation language
 (`ui_language`: `auto`, `en-US`, or `zh-CN`). Language selection does not translate
@@ -521,8 +523,21 @@ discard results when the captured filters, view, request generation, or library
 and structure revisions no longer match. Filtering display rows does not restrict
 directory source expansion: dragging a directory still adds its complete contents.
 
+`QueuePage`, `QueueBatch`, `QueueEntries`, `PlaylistSummaries`,
+`PlaylistSummaryBatch`, `PlaylistEntries`, `PlaylistEntryBatch`,
+`PlaylistEntryLocations`, and `AlbumTracks` accept an optional `query`.
+Summary searches match playlist names; track searches match effective title,
+artist, album, and file name. Filtering precedes count and pagination; an empty
+query does not restrict membership. Query identity includes the filter so a
+response from an older search cannot satisfy a different projection.
+Queue and playlist entry rows retain their original absolute `position`; their
+`offset` is the matching row's zero-based ordinal in the filtered view. Location
+results likewise distinguish original position from filtered offset, and their
+`total` counts matching entries. Commands continue to target stable occurrence
+or entry identities, not filtered offsets.
+
 `Albums { query, sort, offset, limit }` returns `Page<AlbumSummary>`;
-`AlbumTracks { key, offset, limit }` returns `Page<LibraryRow>`. Both cap returned rows at 256 and
+`AlbumTracks { key, query, offset, limit }` returns `Page<LibraryRow>`. Both cap returned rows at 256 and
 carry library-content revisions. Album identity is the exact effective album
 title plus the immediate parent directory, without a trailing slash except `/`.
 Empty titles remain empty keys and group only within their directory. Artist

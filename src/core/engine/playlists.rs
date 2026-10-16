@@ -142,8 +142,7 @@ impl Core {
 
     fn refresh_playlist_count(&mut self) -> Result<()> {
         self.state.library.playlist_total = self
-            .store
-            .playlist_summary_page(0, 0)
+            .store.playlist_summary_page(None, 0, 0)
             .context("Playlist change committed, but refreshing playlists failed; previous projection retained")?
             .total;
         Ok(())

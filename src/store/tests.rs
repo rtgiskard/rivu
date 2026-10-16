@@ -26,7 +26,7 @@ fn playlist_entries(store: &Store, playlist_id: i64) -> Vec<PlaylistEntryRow> {
     let mut after = None;
     loop {
         let batch = store
-            .playlist_entry_batch(playlist_id, after, crate::model::MAX_QUERY_ROWS)
+            .playlist_entry_batch(playlist_id, None, after, crate::model::MAX_QUERY_ROWS)
             .unwrap();
         after = batch.next;
         entries.extend(batch.rows);
@@ -78,6 +78,292 @@ fn db(name: &str) -> (PathBuf, Store) {
     (p.clone(), Store::open(&p).unwrap())
 }
 
+fn search_store() -> (tempfile::TempDir, Store) {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(&directory.path().join("search.db")).unwrap();
+    for (id, path, title, artist, album) in [
+        (
+            1,
+            "/music/directory-only/a.wav",
+            "Needle Title",
+            "Singer",
+            "Shared",
+        ),
+        (
+            2,
+            "/music/directory-only/b.wav",
+            "Other",
+            "Needle Artist",
+            "Shared",
+        ),
+        (
+            3,
+            "/music/directory-only/c.wav",
+            "Other",
+            "Singer",
+            "Needle Album",
+        ),
+        (
+            4,
+            "/music/directory-only/needle%_\\file.wav",
+            "Other",
+            "Singer",
+            "Shared",
+        ),
+        (
+            5,
+            "/music/directory-only/z.wav",
+            "Other",
+            "Singer",
+            "Shared",
+        ),
+    ] {
+        store
+            .conn
+            .execute(
+                "INSERT INTO tracks(id,path,raw_title,raw_artist,raw_album) VALUES(?1,?2,?3,?4,?5)",
+                params![id, path, title, artist, album],
+            )
+            .unwrap();
+    }
+    store
+        .enqueue_tracks(&[5, 1, 5, 2, 1, 3, 5, 4, 5, 1])
+        .unwrap();
+    (directory, store)
+}
+
+#[test]
+fn filtered_occurrence_pages_keep_ids_positions_and_match_offsets() {
+    let (_directory, store) = search_store();
+    let (playlist, _) = store.create_playlist_from_queue("Needle Mix").unwrap();
+    let original = store.queue_page(None, 0, 20).unwrap();
+    assert_eq!(original.total, 10);
+    let positions = [1, 3, 4, 5, 7, 9];
+    let mut queue_matches = Vec::new();
+    for offset in [0, 2, 4] {
+        let queue = store.queue_page(Some("NEEDLE"), offset, 2).unwrap();
+        assert_eq!(queue.total, 6);
+        for (index, queued) in queue.rows.iter().enumerate() {
+            let matched = offset + index;
+            assert_eq!(
+                (queued.position, queued.offset),
+                (positions[matched], matched)
+            );
+            assert_eq!(queued.id, original.rows[positions[matched]].id);
+        }
+        queue_matches.extend(queue.rows);
+    }
+    assert_ne!(queue_matches[0].id, queue_matches[2].id);
+    assert_eq!(queue_matches[0].track_id, queue_matches[2].track_id);
+    let mut entry_matches = Vec::new();
+    for offset in [0, 2] {
+        let entries = store
+            .playlist_entries_page(playlist, Some("needle"), offset, 2)
+            .unwrap();
+        assert_eq!(entries.total, 4);
+        for (index, entry) in entries.rows.iter().enumerate() {
+            assert_eq!(
+                (entry.position, entry.offset),
+                (offset + index + 1, offset + index)
+            );
+        }
+        entry_matches.extend(entries.rows);
+    }
+    let mut queue_after = None;
+    let mut queue_batches = Vec::new();
+    for _ in 0..3 {
+        let queue = store.queue_batch(Some("needle"), queue_after, 2).unwrap();
+        queue_after = queue.next;
+        if let Some(cursor) = queue_after {
+            assert_eq!(cursor.position, queue.rows.last().unwrap().position);
+        }
+        queue_batches.extend(queue.rows);
+    }
+    assert!(queue_after.is_none());
+    let mut entry_after = None;
+    let mut entry_batches = Vec::new();
+    for _ in 0..2 {
+        let entries = store
+            .playlist_entry_batch(playlist, Some("needle"), entry_after, 2)
+            .unwrap();
+        entry_after = entries.next;
+        if let Some(cursor) = entry_after {
+            assert_eq!(
+                cursor.position as usize,
+                entries.rows.last().unwrap().position
+            );
+        }
+        entry_batches.extend(entries.rows);
+    }
+    assert!(entry_after.is_none());
+    assert_eq!(queue_batches, queue_matches);
+    assert_eq!(entry_batches, entry_matches);
+    let hidden_queue = original.rows[0].id;
+    let lookup = store
+        .queue_entries(
+            Some("needle"),
+            &[
+                queue_matches[4].id,
+                hidden_queue,
+                queue_matches[0].id,
+                queue_matches[0].id,
+            ],
+        )
+        .unwrap();
+    assert_eq!(lookup, [queue_matches[0].clone(), queue_matches[4].clone()]);
+    let original_entries = store.playlist_entries_page(playlist, None, 0, 20).unwrap();
+    let hidden_entry = original_entries.rows[0].id;
+    let lookup = store
+        .playlist_entry_locations(
+            playlist,
+            Some("needle"),
+            &[
+                entry_matches[3].id,
+                hidden_entry,
+                entry_matches[0].id,
+                entry_matches[0].id,
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        lookup
+            .iter()
+            .map(|row| (row.id, row.position, row.offset, row.total))
+            .collect::<Vec<_>>(),
+        [
+            (entry_matches[0].id, 1, 0, 4),
+            (entry_matches[3].id, 4, 3, 4)
+        ]
+    );
+    assert_eq!(store.queue_page(None, 0, 20).unwrap(), original);
+    assert_eq!(
+        store.playlist_entries_page(playlist, None, 0, 20).unwrap(),
+        original_entries
+    );
+    assert!(
+        store
+            .queue_page(Some("absent"), 0, 2)
+            .unwrap()
+            .rows
+            .is_empty()
+    );
+    assert_eq!(store.queue_page(Some("absent"), 0, 0).unwrap().total, 0);
+    assert_eq!(
+        store
+            .playlist_entries_page(playlist, Some("needle"), 0, 0)
+            .unwrap()
+            .total,
+        4
+    );
+    assert!(
+        store
+            .queue_page(Some("needle"), 6, 2)
+            .unwrap()
+            .rows
+            .is_empty()
+    );
+    assert!(
+        store
+            .playlist_entries_page(playlist, Some("needle"), 4, 2)
+            .unwrap()
+            .rows
+            .is_empty()
+    );
+    assert_eq!(
+        store.queue_entries(None, &[hidden_queue]).unwrap()[0].offset,
+        0
+    );
+    let location = store
+        .playlist_entry_locations(playlist, None, &[hidden_entry])
+        .unwrap()[0];
+    assert_eq!(
+        (location.position, location.offset, location.total),
+        (0, 0, 5)
+    );
+}
+
+#[test]
+fn new_list_search_matches_effective_metadata_filename_and_literal_substrings() {
+    let (_directory, store) = search_store();
+    let (first, _) = store.create_playlist_from_queue("Mix %_ one").unwrap();
+    store.create_playlist("Other").unwrap();
+    let last = store.create_playlist("mix %_ two").unwrap();
+    let names = store.playlist_summary_page(Some("MIX %_"), 1, 1).unwrap();
+    assert_eq!(names.total, 2);
+    assert_eq!(names.rows[0].id, last);
+    let batch = store
+        .playlist_summary_batch(Some("mix %_"), None, 1)
+        .unwrap();
+    assert_eq!(batch.rows[0].id, first);
+    let tail = store
+        .playlist_summary_batch(Some("mix %_"), batch.next, 1)
+        .unwrap();
+    assert_eq!(tail.rows[0].id, last);
+    assert!(tail.next.is_none());
+    for query in ["%_", "\\", "needle%_\\file.wav"] {
+        let page = store.queue_page(Some(query), 0, 10).unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.rows[0].track_id, 4);
+        assert_eq!(
+            store
+                .playlist_entries_page(first, Some(query), 0, 10)
+                .unwrap()
+                .rows[0]
+                .track_id,
+            4
+        );
+    }
+    assert_eq!(
+        store
+            .queue_page(Some("directory-only"), 0, 0)
+            .unwrap()
+            .total,
+        0
+    );
+    for (query, expected) in [
+        ("needle title", 3),
+        ("needle artist", 1),
+        ("needle album", 1),
+    ] {
+        assert_eq!(store.queue_page(Some(query), 0, 0).unwrap().total, expected);
+    }
+    store
+        .edit_track(1, Some("Override"), None, None, None)
+        .unwrap();
+    assert_eq!(
+        store.queue_page(Some("needle title"), 0, 0).unwrap().total,
+        0
+    );
+    assert_eq!(store.queue_page(Some("OVERRIDE"), 0, 0).unwrap().total, 3);
+    let key = crate::model::AlbumKey {
+        directory: "/music/directory-only".into(),
+        title: "Shared".into(),
+    };
+    let tracks = store.album_tracks_page(&key, Some("needle"), 1, 1).unwrap();
+    assert_eq!(tracks.total, 2);
+    assert_eq!(tracks.rows.len(), 1);
+    assert_eq!(
+        store
+            .album_tracks_page(&key, Some("directory-only"), 0, 0)
+            .unwrap()
+            .total,
+        0
+    );
+    assert_eq!(
+        store
+            .album_tracks_page(&key, Some("%_"), 0, 1)
+            .unwrap()
+            .rows[0]
+            .id,
+        4
+    );
+    assert_eq!(store.album_tracks_page(&key, None, 0, 0).unwrap().total, 4);
+    assert_eq!(
+        store.queue_page(Some(""), 0, 20).unwrap(),
+        store.queue_page(None, 0, 20).unwrap()
+    );
+}
+
 #[test]
 fn albums_are_directory_scoped_compilations_with_ordered_whole_queue_actions() {
     use crate::model::{AlbumKey, MAX_QUERY_ROWS};
@@ -127,7 +413,7 @@ fn albums_are_directory_scoped_compilations_with_ordered_whole_queue_actions() {
     assert_eq!(compilation.representative.title, "A");
     assert_eq!(
         store
-            .album_tracks_page(&compilation.key, 0, 24)
+            .album_tracks_page(&compilation.key, None, 0, 24)
             .unwrap()
             .rows
             .iter()
@@ -141,14 +427,14 @@ fn albums_are_directory_scoped_compilations_with_ordered_whole_queue_actions() {
         .find(|album| album.key.directory == Path::new("/music/c"))
         .unwrap();
     assert_eq!(unknown.key.title, "");
-    assert_eq!(unknown.artist, "Unknown artist");
+    assert!(unknown.artist.is_empty());
     let large = AlbumKey {
         directory: "/music/large".into(),
         title: "Large".into(),
     };
     assert_eq!(
         store
-            .album_tracks_page(&large, MAX_QUERY_ROWS, 24)
+            .album_tracks_page(&large, None, MAX_QUERY_ROWS, 24)
             .unwrap()
             .rows
             .len(),
@@ -172,7 +458,14 @@ fn albums_are_directory_scoped_compilations_with_ordered_whole_queue_actions() {
             .is_err()
     );
     assert_eq!(store.queue_ids().unwrap(), before);
-    assert_eq!(store.queue_page(MAX_QUERY_ROWS, 24).unwrap().rows.len(), 3);
+    assert_eq!(
+        store
+            .queue_page(None, MAX_QUERY_ROWS, 24)
+            .unwrap()
+            .rows
+            .len(),
+        3
+    );
     store
         .conn
         .execute(
@@ -182,7 +475,7 @@ fn albums_are_directory_scoped_compilations_with_ordered_whole_queue_actions() {
         .unwrap();
     assert_eq!(
         store
-            .album_tracks_page(&compilation.key, 0, 24)
+            .album_tracks_page(&compilation.key, None, 0, 24)
             .unwrap()
             .rows
             .iter()
@@ -205,7 +498,7 @@ fn albums_are_directory_scoped_compilations_with_ordered_whole_queue_actions() {
         .find(|album| album.key.directory == Path::new("/music/b"))
         .unwrap();
     assert_eq!(changed.key.title, "");
-    assert_eq!(changed.artist, "Unknown artist");
+    assert!(changed.artist.is_empty());
 }
 
 #[test]
@@ -233,7 +526,13 @@ fn album_search_matches_effective_metadata_without_filtering_members() {
     let album = &matching.rows[0];
     assert_eq!(album.track_count, 2);
     assert_eq!(album.artist, "Various artists");
-    assert_eq!(store.album_tracks_page(&album.key, 0, 24).unwrap().total, 2);
+    assert_eq!(
+        store
+            .album_tracks_page(&album.key, None, 0, 24)
+            .unwrap()
+            .total,
+        2
+    );
     store.queue_album(&album.key, true).unwrap();
     assert_eq!(store.queue_state().unwrap().total, 2);
     assert_eq!(
@@ -359,7 +658,7 @@ fn album_consumers_preserve_root_unicode_and_direct_parent_boundaries() {
         assert_eq!(album.key.title, "共享·曲集");
         assert_eq!(album.track_count, expected.len());
         assert_eq!(album.representative.title, expected[0]);
-        let page = store.album_tracks_page(&album.key, 0, 24).unwrap();
+        let page = store.album_tracks_page(&album.key, None, 0, 24).unwrap();
         assert_eq!(page.total, expected.len());
         assert_eq!(
             page.rows
@@ -368,11 +667,11 @@ fn album_consumers_preserve_root_unicode_and_direct_parent_boundaries() {
                 .collect::<Vec<_>>(),
             expected
         );
-        let empty = store.album_tracks_page(&album.key, 0, 0).unwrap();
+        let empty = store.album_tracks_page(&album.key, None, 0, 0).unwrap();
         assert_eq!(empty.total, expected.len());
         assert!(empty.rows.is_empty());
         store.queue_album(&album.key, true).unwrap();
-        let queued = store.queue_page(0, 24).unwrap();
+        let queued = store.queue_page(None, 0, 24).unwrap();
         assert_eq!(queued.total, expected.len());
         assert_eq!(
             queued
@@ -403,7 +702,11 @@ fn playback_precision_upgrade_is_source_conditional_and_idempotent() {
     assert!(store.upgrade_bitrate(&source, 128_000, true).unwrap());
     let exact = store.track(track.id).unwrap().unwrap();
     assert!(exact.bitrate_exact);
-    assert!(store.queue_page(0, 10).unwrap().rows[0].track.bitrate_exact);
+    assert!(
+        store.queue_page(None, 0, 10).unwrap().rows[0]
+            .track
+            .bitrate_exact
+    );
     assert!(
         store
             .library_view_page(None, None, None, crate::model::LibrarySort::Id, 0, 10)
@@ -533,7 +836,7 @@ fn decoder_hint_persists_without_overwriting_track_state() {
     expected[0] = store.track(native).unwrap().unwrap(); // populate the cache
     store.enqueue_tracks(&[native, native, ffmpeg]).unwrap();
     let queue_before_hint = store.queue_state().unwrap();
-    let page_before_hint = store.queue_page(0, 10).unwrap();
+    let page_before_hint = store.queue_page(None, 0, 10).unwrap();
     store
         .edit_track(native, None, None, None, Some(DecoderHint::Native))
         .unwrap();
@@ -543,7 +846,7 @@ fn decoder_hint_persists_without_overwriting_track_state() {
     expected[0].decoder_hint = DecoderHint::Native;
     expected[1].decoder_hint = DecoderHint::Ffmpeg;
     assert_eq!(store.queue_state().unwrap(), queue_before_hint);
-    assert_eq!(store.queue_page(0, 10).unwrap(), page_before_hint);
+    assert_eq!(store.queue_page(None, 0, 10).unwrap(), page_before_hint);
     assert!(
         !store
             .edit_track(native, None, None, None, Some(DecoderHint::Native))
@@ -1755,7 +2058,7 @@ fn library_audio_metadata_survives_all_display_projections() {
     store.enqueue_tracks(&ids).unwrap();
     assert_eq!(
         store
-            .queue_page(0, 2)
+            .queue_page(None, 0, 2)
             .unwrap()
             .rows
             .into_iter()
@@ -1795,10 +2098,10 @@ fn bounded_view_queries_filter_order_and_count() {
     let playlist = store.create_playlist("mix").unwrap();
     store.add_playlist(playlist, &ids).unwrap();
     assert_eq!(
-        store.playlist_summary_batch(None, 1).unwrap().rows[0].entry_count,
+        store.playlist_summary_batch(None, None, 1).unwrap().rows[0].entry_count,
         3
     );
-    let entries = store.playlist_entries_page(playlist, 1, 1).unwrap();
+    let entries = store.playlist_entries_page(playlist, None, 1, 1).unwrap();
     assert_eq!(entries.total, 3);
     assert_eq!(entries.rows.len(), 1);
     assert_eq!(entries.rows[0].track_id, ids[1]);
@@ -2750,13 +3053,16 @@ fn directory_selections_deduplicate_atomically_without_capping_playlists() {
     ];
     store.enqueue_sources(&directories, &[1, 1]).unwrap();
     assert_eq!(store.queue_state().unwrap().total, 5000);
-    assert_eq!(store.queue_page(4999, 1).unwrap().rows[0].track_id, 5000);
+    assert_eq!(
+        store.queue_page(None, 4999, 1).unwrap().rows[0].track_id,
+        5000
+    );
     let playlist = store.create_playlist("Unlimited").unwrap();
     store.add_playlist(playlist, &[5000]).unwrap();
     store
         .add_playlist_sources(playlist, &directories, &[1, 1])
         .unwrap();
-    let first = store.playlist_entries_page(playlist, 0, 2).unwrap();
+    let first = store.playlist_entries_page(playlist, None, 0, 2).unwrap();
     assert_eq!(first.total, 5000);
     assert_eq!(
         first
@@ -2766,7 +3072,9 @@ fn directory_selections_deduplicate_atomically_without_capping_playlists() {
             .collect::<Vec<_>>(),
         [5000, 1]
     );
-    let last = store.playlist_entries_page(playlist, 4999, 1).unwrap();
+    let last = store
+        .playlist_entries_page(playlist, None, 4999, 1)
+        .unwrap();
     assert_eq!(last.rows[0].track_id, 4999);
     assert_eq!(
         store
@@ -2783,7 +3091,10 @@ fn directory_selections_deduplicate_atomically_without_capping_playlists() {
         .add_playlist_sources(playlist, &directories, &[])
         .unwrap();
     assert_eq!(
-        store.playlist_entries_page(playlist, 0, 0).unwrap().total,
+        store
+            .playlist_entries_page(playlist, None, 0, 0)
+            .unwrap()
+            .total,
         5000
     );
     let empty = store.create_playlist("Atomic").unwrap();
@@ -2792,7 +3103,13 @@ fn directory_selections_deduplicate_atomically_without_capping_playlists() {
             .add_playlist_sources(empty, &directories, &[99999])
             .is_err()
     );
-    assert_eq!(store.playlist_entries_page(empty, 0, 0).unwrap().total, 0);
+    assert_eq!(
+        store
+            .playlist_entries_page(empty, None, 0, 0)
+            .unwrap()
+            .total,
+        0
+    );
 }
 
 #[test]
@@ -2824,7 +3141,7 @@ fn bulk_missing_cleanup_spans_pages_and_preserves_playlist_reordering() {
             .collect::<Vec<_>>(),
         [1000]
     );
-    let page = store.playlist_entries_page(playlist, 0, 1).unwrap();
+    let page = store.playlist_entries_page(playlist, None, 0, 1).unwrap();
     assert_eq!(page.total, 500);
     assert_eq!(page.rows[0].track_id, 1000);
     assert_eq!(
@@ -2832,7 +3149,11 @@ fn bulk_missing_cleanup_spans_pages_and_preserves_playlist_reordering() {
         Some(playlist)
     );
     assert_eq!(
-        store.playlist_entries_page(playlist, 499, 1).unwrap().rows[0].track_id,
+        store
+            .playlist_entries_page(playlist, None, 499, 1)
+            .unwrap()
+            .rows[0]
+            .track_id,
         1000
     );
 }
@@ -2897,13 +3218,15 @@ fn batches_traverse_stably_validate_bounds_and_break_tied_positions() {
     let third = store.create_playlist("third").unwrap();
     store.add_playlist(first, &[1, 2, 3, 4]).unwrap();
     store.add_playlist(second, &[1]).unwrap();
-    let summaries = store.playlist_summary_batch(None, 2).unwrap();
+    let summaries = store.playlist_summary_batch(None, None, 2).unwrap();
     assert_eq!(
         summaries.rows.iter().map(|row| row.id).collect::<Vec<_>>(),
         [first, second]
     );
     assert_eq!(summaries.rows[0].entry_count, 4);
-    let tail = store.playlist_summary_batch(summaries.next, 2).unwrap();
+    let tail = store
+        .playlist_summary_batch(None, summaries.next, 2)
+        .unwrap();
     assert_eq!(
         tail.rows.iter().map(|row| row.id).collect::<Vec<_>>(),
         [third]
@@ -2917,7 +3240,7 @@ fn batches_traverse_stably_validate_bounds_and_break_tied_positions() {
             [first],
         )
         .unwrap();
-    let entries = store.playlist_entry_batch(first, None, 2).unwrap();
+    let entries = store.playlist_entry_batch(first, None, None, 2).unwrap();
     assert_eq!(
         entries.rows.iter().map(|row| row.id).collect::<Vec<_>>(),
         [1, 2]
@@ -2926,7 +3249,9 @@ fn batches_traverse_stably_validate_bounds_and_break_tied_positions() {
         entries.next,
         Some(PlaylistEntryCursor { position: 0, id: 2 })
     );
-    let tail_entries = store.playlist_entry_batch(first, entries.next, 2).unwrap();
+    let tail_entries = store
+        .playlist_entry_batch(first, None, entries.next, 2)
+        .unwrap();
     assert_eq!(
         tail_entries
             .rows
@@ -2936,7 +3261,7 @@ fn batches_traverse_stably_validate_bounds_and_break_tied_positions() {
         [3, 4]
     );
     assert!(tail_entries.next.is_none());
-    assert!(store.playlist_entry_batch(999, None, 1).is_err());
+    assert!(store.playlist_entry_batch(999, None, None, 1).is_err());
 }
 
 #[test]
@@ -2952,13 +3277,19 @@ fn persistent_queue_accepts_entire_large_library_pages_restarts_and_saves_playli
     let state = store.queue_state().unwrap();
     assert_eq!(state.total, 200_000);
     assert!(serde_json::to_vec(&state).unwrap().len() < 160);
-    let last = store.queue_page(199_936, 256).unwrap();
+    let last = store.queue_page(None, 199_936, 256).unwrap();
     assert_eq!(last.rows.len(), 64);
     assert_eq!(last.rows[63].position, 199_999);
     assert_eq!(last.rows[63].track_id, 200_000);
-    assert!(store.queue_page(200_000, 256).unwrap().rows.is_empty());
-    let first = store.queue_batch(None, 256).unwrap();
-    let second = store.queue_batch(first.next, 256).unwrap();
+    assert!(
+        store
+            .queue_page(None, 200_000, 256)
+            .unwrap()
+            .rows
+            .is_empty()
+    );
+    let first = store.queue_batch(None, None, 256).unwrap();
+    let second = store.queue_batch(None, first.next, 256).unwrap();
     assert_eq!(second.rows[0].position, 256);
     let current = last.rows[63].id;
     store.set_queue_current(Some(current)).unwrap();
@@ -2967,7 +3298,7 @@ fn persistent_queue_accepts_entire_large_library_pages_restarts_and_saves_playli
     assert!(has_members);
     assert_eq!(
         store
-            .playlist_entries_page(playlist, 199_999, 1)
+            .playlist_entries_page(playlist, None, 199_999, 1)
             .unwrap()
             .total,
         200_000
@@ -2980,7 +3311,7 @@ fn persistent_queue_accepts_entire_large_library_pages_restarts_and_saves_playli
     let before = store.queue_state().unwrap();
     assert!(store.enqueue_tracks(&[1, 999_999]).is_err());
     assert_eq!(store.queue_state().unwrap(), before);
-    assert!(store.queue_entries(&vec![current; 257]).is_err());
+    assert!(store.queue_entries(None, &vec![current; 257]).is_err());
     store
         .conn
         .execute("INSERT INTO tracks(path) VALUES('/music/later.wav')", [])
@@ -3024,7 +3355,7 @@ fn queue_interval_deletion_preserves_survivors_positions_and_current_identity() 
             .filter(|(index, _)| !removed.contains(index))
             .map(|(_, &id)| id)
             .collect();
-        let page = store.queue_page(0, 9).unwrap();
+        let page = store.queue_page(None, 0, 9).unwrap();
         assert_eq!(page.total, expected.len());
         assert_eq!(
             page.rows
@@ -3072,7 +3403,7 @@ fn queue_dedup_compacts_original_slots_while_retaining_any_playing_occurrence() 
             })
             .collect();
         store.deduplicate_queue().unwrap();
-        let rows = store.queue_page(0, 8).unwrap().rows;
+        let rows = store.queue_page(None, 0, 8).unwrap().rows;
         assert_eq!(
             rows.iter()
                 .map(|row| (row.id, row.track_id, row.position))
@@ -3115,7 +3446,7 @@ fn queue_dedup_uses_first_position_not_allocation_order_and_track_deletes_remove
     store.remove_tracks(&[1, 1]).unwrap();
     assert_eq!(store.queue_ids().unwrap(), [ids[1]]);
     assert_eq!(store.queue_state().unwrap().current_id, None);
-    assert_eq!(store.queue_page(0, 1).unwrap().rows[0].position, 0);
+    assert_eq!(store.queue_page(None, 0, 1).unwrap().rows[0].position, 0);
     assert_eq!(store.playlist_track_ids(playlist, 2).unwrap(), [2]);
     store
         .conn
@@ -3124,7 +3455,10 @@ fn queue_dedup_uses_first_position_not_allocation_order_and_track_deletes_remove
     store.remove_missing_tracks().unwrap();
     assert_eq!(store.queue_state().unwrap().total, 0);
     assert_eq!(
-        store.playlist_entries_page(playlist, 0, 1).unwrap().total,
+        store
+            .playlist_entries_page(playlist, None, 0, 1)
+            .unwrap()
+            .total,
         0
     );
 }

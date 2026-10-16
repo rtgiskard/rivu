@@ -22,7 +22,7 @@ impl Core {
         match command {
             Command::PlayAlbum { key } => {
                 ensure!(
-                    self.store.album_tracks_page(&key, 0, 0)?.total > 0,
+                    self.store.album_tracks_page(&key, None, 0, 0)?.total > 0,
                     "Album is empty"
                 );
                 self.stop()?;
@@ -66,7 +66,10 @@ impl Core {
             }
             Command::PlayQueue { queue_id } => self.start(queue_id, true)?,
             Command::PlayPlaylist { playlist_id } => {
-                let total = self.store.playlist_entries_page(playlist_id, 0, 0)?.total;
+                let total = self
+                    .store
+                    .playlist_entries_page(playlist_id, None, 0, 0)?
+                    .total;
                 ensure!(total > 0, "Playlist is empty");
                 self.stop()?;
                 self.store.replace_queue_from_playlist(playlist_id)?;

@@ -17,6 +17,20 @@ pub(super) const SOURCE_FILTER: &str = "tracks.id IN (SELECT value FROM json_eac
 const DIRECTORY_SCOPE: &str = " AND tracks.path>=?4 AND tracks.path<(rtrim(?4,'/')||'0')";
 const DIRECTORY_CHILDREN: &str = "(SELECT 0 AS kind,CASE WHEN ?4='' AND instr(rest,'/')=1 THEN '/' ELSE ?4||substr(rest,1,instr(rest,'/')-1) END AS child,MIN(id) AS track_id FROM sources WHERE instr(rest,'/')>0 GROUP BY child UNION ALL SELECT 1,path,id FROM sources WHERE instr(rest,'/')=0)";
 
+/// SQL literal substring matching, shared by occurrence and album projections.
+/// Query normalization follows library search; '%' and '_' are not wildcards.
+pub(super) fn search_query(query: Option<&str>) -> Option<String> {
+    query
+        .filter(|query| !query.is_empty())
+        .map(str::to_lowercase)
+}
+
+pub(super) fn search_filter(table: &str, parameter: &str) -> String {
+    format!(
+        "({parameter} IS NULL OR instr(lower(COALESCE({table}.title_override,{table}.raw_title) || ' ' || COALESCE({table}.artist_override,{table}.raw_artist) || ' ' || COALESCE({table}.album_override,{table}.raw_album) || ' ' || substr({table}.path,length(rtrim({table}.path,replace({table}.path,'/','')))+1)),{parameter})>0)"
+    )
+}
+
 fn directory_prefix(path: &Path) -> Result<String> {
     if path.as_os_str().is_empty() {
         return Ok(String::new());
@@ -1357,7 +1371,7 @@ mod request_tests {
                 &[path.to_path_buf(), path.to_path_buf()],
                 &[included, included],
             )?;
-            let queued = store.queue_page(queue_before, 10)?;
+            let queued = store.queue_page(None, queue_before, 10)?;
             assert_eq!(
                 queued
                     .rows

@@ -1,6 +1,6 @@
 use super::positions::{PositionScope, close_gaps, move_selection};
 use super::rows::{LIBRARY_ROW_COLUMNS_QUALIFIED, library_row_at};
-use super::tracks::SOURCE_FILTER;
+use super::tracks::{SOURCE_FILTER, search_filter, search_query};
 use super::{Store, batch_limit};
 use crate::model::{Batch, MAX_QUERY_ROWS, Page, QueueCursor, QueueRow, QueueState};
 use anyhow::{Context, Result, ensure};
@@ -52,6 +52,7 @@ fn queue_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueueRow> {
         id: integer(row, 0)?,
         track_id: row.get(1)?,
         position: integer(row, 2)?,
+        offset: integer(row, 2)?,
         track: library_row_at(row, 3)?,
     })
 }
@@ -133,54 +134,94 @@ impl Store {
         Ok(())
     }
 
-    pub fn queue_page(&self, offset: usize, limit: usize) -> Result<Page<QueueRow>> {
-        let total = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM queue_entries", [], |row| {
-                integer(row, 0)
-            })?;
-        self.queue_page_with_total(offset, limit, total)
+    pub fn queue_page(
+        &self,
+        query: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Page<QueueRow>> {
+        let total = if query.is_none_or(str::is_empty) {
+            self.conn
+                .query_row("SELECT COUNT(*) FROM queue_entries", [], |row| {
+                    integer(row, 0)
+                })?
+        } else {
+            0
+        };
+        self.queue_page_with_total(query, offset, limit, total)
     }
 
     pub(crate) fn queue_page_with_total(
         &self,
+        query: Option<&str>,
         offset: usize,
         limit: usize,
         total: usize,
     ) -> Result<Page<QueueRow>> {
+        let query = search_query(query);
+        let filter = search_filter("t", "?1");
+        let total = if query.is_some() {
+            self.conn.query_row(&format!("SELECT COUNT(*) FROM queue_entries q JOIN tracks t ON t.id=q.track_id WHERE {filter}"), [query.as_deref()], |row| integer(row, 0))?
+        } else {
+            total
+        };
         if limit == 0 {
             return Ok(Page {
                 total,
                 rows: Vec::new(),
             });
         }
-        let mut statement = self.conn.prepare(&format!("SELECT q.id,q.track_id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED} FROM queue_entries q JOIN tracks t ON t.id=q.track_id WHERE q.position>=?1 ORDER BY q.position,q.id LIMIT ?2"))?;
-        let rows = statement
+        let paging = if query.is_some() {
+            "ORDER BY q.position,q.id LIMIT ?3 OFFSET ?2"
+        } else {
+            "AND q.position>=?2 ORDER BY q.position,q.id LIMIT ?3"
+        };
+        let mut statement = self.conn.prepare(&format!("SELECT q.id,q.track_id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED} FROM queue_entries q JOIN tracks t ON t.id=q.track_id WHERE {filter} {paging}"))?;
+        let mut rows = statement
             .query_map(
                 params![
+                    query,
                     offset.min(i64::MAX as usize) as i64,
                     limit.min(MAX_QUERY_ROWS) as i64
                 ],
                 queue_row,
             )?
-            .collect::<rusqlite::Result<_>>()?;
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if query.is_some() {
+            for (index, row) in rows.iter_mut().enumerate() {
+                row.offset = offset + index;
+            }
+        }
         Ok(Page { total, rows })
     }
 
     pub fn queue_batch(
         &self,
+        query: Option<&str>,
         after: Option<QueueCursor>,
         limit: usize,
     ) -> Result<Batch<QueueRow, QueueCursor>> {
         let limit = batch_limit(limit)?;
-        let mut statement = self.conn.prepare(&format!("SELECT q.id,q.track_id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED} FROM queue_entries q JOIN tracks t ON t.id=q.track_id WHERE (q.position,q.id)>(?1,?2) ORDER BY q.position,q.id LIMIT ?3"))?;
+        let query = search_query(query);
+        let filter = search_filter("t", "?4");
+        let mut statement = self.conn.prepare(&format!("SELECT q.id,q.track_id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED} FROM queue_entries q JOIN tracks t ON t.id=q.track_id WHERE (q.position,q.id)>(?1,?2) AND {filter} ORDER BY q.position,q.id LIMIT ?3"))?;
         let (position, id) = after.map_or((-1, 0), |cursor| {
             (cursor.position.min(i64::MAX as usize) as i64, cursor.id)
         });
         let id = i64::try_from(id).context("Queue cursor ID exceeds database range")?;
+        let start: usize = if query.is_some() && after.is_some() {
+            self.conn.query_row(&format!("SELECT COUNT(*) FROM queue_entries q JOIN tracks t ON t.id=q.track_id WHERE (q.position,q.id)<=(?1,?2) AND {}", search_filter("t", "?3")), params![position, id, query], |row| integer(row, 0))?
+        } else {
+            0
+        };
         let mut rows = statement
-            .query_map(params![position, id, limit + 1], queue_row)?
+            .query_map(params![position, id, limit + 1, query], queue_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        if query.is_some() {
+            for (index, row) in rows.iter_mut().enumerate() {
+                row.offset = start + index;
+            }
+        }
         let next = if rows.len() > limit as usize {
             rows.pop();
             rows.last().map(|row| QueueCursor {
@@ -193,14 +234,34 @@ impl Store {
         Ok(Batch { rows, next })
     }
 
-    pub fn queue_entries(&self, ids: &[u64]) -> Result<Vec<QueueRow>> {
+    pub fn queue_entries(&self, query: Option<&str>, ids: &[u64]) -> Result<Vec<QueueRow>> {
         ensure!(
             ids.len() <= MAX_QUERY_ROWS,
             "Queue entry query exceeds {MAX_QUERY_ROWS} IDs"
         );
-        let mut statement = self.conn.prepare(&format!("SELECT q.id,q.track_id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED} FROM queue_entries q JOIN tracks t ON t.id=q.track_id WHERE q.id IN (SELECT value FROM json_each(?1)) ORDER BY q.position,q.id"))?;
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let query = search_query(query);
+        // Apply identity restriction after ranking only when matches differ from
+        // queue positions. Unfiltered reconciliation remains an indexed lookup.
+        let sql = if query.is_some() {
+            format!(
+                "WITH matched AS (SELECT q.id AS queue_id,q.track_id AS queue_track_id,q.position AS queue_position,{LIBRARY_ROW_COLUMNS_QUALIFIED},row_number() OVER (ORDER BY q.position,q.id)-1 AS match_offset FROM queue_entries q JOIN tracks t ON t.id=q.track_id WHERE {}) SELECT * FROM matched WHERE queue_id IN (SELECT value FROM json_each(?1)) ORDER BY queue_position,queue_id",
+                search_filter("t", "?2")
+            )
+        } else {
+            format!(
+                "SELECT q.id,q.track_id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED},q.position AS match_offset FROM queue_entries q JOIN tracks t ON t.id=q.track_id WHERE q.id IN (SELECT value FROM json_each(?1)) AND ?2 IS NULL ORDER BY q.position,q.id"
+            )
+        };
+        let mut statement = self.conn.prepare(&sql)?;
         Ok(statement
-            .query_map([serde_json::to_string(ids)?], queue_row)?
+            .query_map(params![serde_json::to_string(ids)?, query], |row| {
+                let mut result = queue_row(row)?;
+                result.offset = row.get::<_, i64>("match_offset")? as usize;
+                Ok(result)
+            })?
             .collect::<rusqlite::Result<_>>()?)
     }
 
@@ -328,7 +389,7 @@ mod tests {
     fn assert_invalidated(store: &Store, revision: u64) -> Result<u64> {
         let state = store.queue_state()?;
         assert!(state.revision > revision);
-        let rows = store.queue_page(0, MAX_QUERY_ROWS)?.rows;
+        let rows = store.queue_page(None, 0, MAX_QUERY_ROWS)?.rows;
         assert!(
             rows.iter()
                 .enumerate()
@@ -454,7 +515,7 @@ mod tests {
         let ids = store.queue_ids()?;
         store.set_queue_current(Some(ids[2]))?;
         let before = store.queue_state()?;
-        let rows = store.queue_page(0, 10)?;
+        let rows = store.queue_page(None, 0, 10)?;
         assert!(
             store
                 .reorder_queue(&[ids[0], ids[0], ids[2], ids[3]])
@@ -463,7 +524,7 @@ mod tests {
         assert!(store.remove_queue_entries(&[ids[0], 999]).is_err());
         assert!(store.enqueue_tracks(&[1, 999]).is_err());
         assert_eq!(store.queue_state()?, before);
-        assert_eq!(store.queue_page(0, 10)?, rows);
+        assert_eq!(store.queue_page(None, 0, 10)?, rows);
         let playlist = store.create_playlist("Replacement")?;
         store.add_playlist(playlist, &[2, 3])?;
 
@@ -491,7 +552,7 @@ mod tests {
         assert!(store.replace_queue_from_playlist(playlist).is_err());
         assert!(store.remove_tracks(&[1]).is_err());
         assert_eq!(store.queue_state()?, before);
-        assert_eq!(store.queue_page(0, 10)?, rows);
+        assert_eq!(store.queue_page(None, 0, 10)?, rows);
         assert!(store.track(1)?.is_some());
         store
             .conn
@@ -500,14 +561,14 @@ mod tests {
             .conn
             .execute("UPDATE tracks SET missing=1 WHERE id=1", [])?;
         let before = store.queue_state()?;
-        let rows = store.queue_page(0, 10)?;
+        let rows = store.queue_page(None, 0, 10)?;
         store.conn.execute_batch(
             "CREATE TEMP TRIGGER reject_queue_revision AFTER UPDATE OF revision ON queue_meta
              BEGIN SELECT RAISE(ABORT,'injected invalidation failure'); END;",
         )?;
         assert!(store.remove_missing_tracks().is_err());
         assert_eq!(store.queue_state()?, before);
-        assert_eq!(store.queue_page(0, 10)?, rows);
+        assert_eq!(store.queue_page(None, 0, 10)?, rows);
         assert!(store.track(1)?.is_some());
         Ok(())
     }

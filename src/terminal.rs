@@ -317,8 +317,13 @@ impl QueryKind {
 
     fn into_query(self, offset: usize, limit: usize) -> Query {
         match self {
-            QueryKind::Queue => Query::QueuePage { offset, limit },
+            QueryKind::Queue => Query::QueuePage {
+                query: None,
+                offset,
+                limit,
+            },
             QueryKind::QueueSelection(queue_id) => Query::QueueEntries {
+                query: None,
                 queue_ids: vec![queue_id],
             },
             QueryKind::Search(query) => Query::LibraryPage {
@@ -337,8 +342,13 @@ impl QueryKind {
                 offset,
                 limit,
             },
-            QueryKind::Playlists => Query::PlaylistSummaries { offset, limit },
+            QueryKind::Playlists => Query::PlaylistSummaries {
+                query: None,
+                offset,
+                limit,
+            },
             QueryKind::Playlist(playlist_id) => Query::PlaylistEntries {
+                query: None,
                 playlist_id,
                 offset,
                 limit,
@@ -347,6 +357,7 @@ impl QueryKind {
                 playlist_id,
                 entry_id,
             } => Query::PlaylistEntryLocations {
+                query: None,
                 playlist_id,
                 entry_ids: vec![entry_id],
             },
@@ -685,6 +696,7 @@ impl TuiState {
         };
         let deleted_playlist = if let View::PlaylistDetail { detail, .. } = &mut self.ui.view {
             let compact = Query::PlaylistEntryLocations {
+                query: None,
                 playlist_id: detail.playlist_id,
                 entry_ids: Vec::new(),
             };
@@ -2116,6 +2128,8 @@ mod tests {
             4,
             1,
             vec![PlaylistEntryRow {
+                position: 0,
+                offset: 0,
                 id: 1,
                 track_id: 1,
                 artist: "原始艺人".into(),
@@ -2252,7 +2266,7 @@ mod tests {
         let request = tui.ui.query_request(&state).unwrap();
         assert_eq!(request.kind, QueryKind::QueueSelection(1008));
         assert!(
-            matches!(request.query(), Query::QueueEntries { queue_ids } if queue_ids == vec![1008])
+            matches!(request.query(), Query::QueueEntries { queue_ids, query: None } if queue_ids == vec![1008])
         );
         let relocated = QueryResult {
             revisions: QueryRevisions {
@@ -2322,6 +2336,7 @@ mod tests {
         assert!(matches!(
             delayed.query(),
             Query::QueuePage {
+                query: None,
                 offset: 0,
                 limit: 3
             }
@@ -2374,6 +2389,7 @@ mod tests {
             id,
             track_id: 7,
             position,
+            offset: position,
             track: track(7),
         }
     }
@@ -2466,6 +2482,8 @@ mod tests {
                 total,
                 rows: indices
                     .map(|index| PlaylistEntryRow {
+                        position: index,
+                        offset: index,
                         id: index as i64,
                         track_id: index as i64,
                         title: format!("row-{index}"),
@@ -2483,6 +2501,7 @@ mod tests {
                 id: *entry_id,
                 playlist_id: *playlist_id,
                 position: *entry_id as usize,
+                offset: *entry_id as usize,
                 track_id: *entry_id,
                 total,
             }]),
@@ -3173,6 +3192,7 @@ mod tests {
             limit: 20,
             generation: 0,
             stamp: Query::QueuePage {
+                query: None,
                 offset: 0,
                 limit: 20,
             }
@@ -3357,6 +3377,7 @@ mod tests {
             limit: 20,
             generation: 0,
             stamp: Query::QueuePage {
+                query: None,
                 offset: 0,
                 limit: 20,
             }
@@ -3437,6 +3458,7 @@ mod tests {
             limit: 20,
             generation: 0,
             stamp: Query::QueuePage {
+                query: None,
                 offset: 0,
                 limit: 20,
             }
@@ -3491,6 +3513,7 @@ mod tests {
             limit: 20,
             generation: 0,
             stamp: Query::QueuePage {
+                query: None,
                 offset: 0,
                 limit: 20,
             }

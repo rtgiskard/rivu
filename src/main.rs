@@ -902,6 +902,7 @@ fn list_queue(i18n: &Localizer, data_dir: &Path, json: bool) -> Result<()> {
     }
     loop {
         let response = session.query(&Query::QueueBatch {
+            query: None,
             after,
             limit: MAX_QUERY_ROWS,
             expected,
@@ -1050,6 +1051,7 @@ fn list_playlists(i18n: &Localizer, data_dir: &Path, json: bool) -> Result<()> {
     let mut first_playlist = true;
     loop {
         let response = session.query(&Query::PlaylistSummaryBatch {
+            query: None,
             after,
             limit: MAX_QUERY_ROWS,
             expected,
@@ -1096,6 +1098,7 @@ fn list_playlists(i18n: &Localizer, data_dir: &Path, json: bool) -> Result<()> {
             let mut first_entry = true;
             loop {
                 let response = session.query(&Query::PlaylistEntryBatch {
+                    query: None,
                     playlist_id: playlist.id,
                     after: entry_after,
                     limit: MAX_QUERY_ROWS,

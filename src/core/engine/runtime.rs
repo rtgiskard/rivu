@@ -282,9 +282,17 @@ impl Core {
                 *offset,
                 *limit,
             )?),
-            Query::AlbumTracks { key, offset, limit } => {
-                ViewResponse::AlbumTracks(self.store.album_tracks_page(key, *offset, *limit)?)
-            }
+            Query::AlbumTracks {
+                key,
+                query,
+                offset,
+                limit,
+            } => ViewResponse::AlbumTracks(self.store.album_tracks_page(
+                key,
+                query.as_deref(),
+                *offset,
+                *limit,
+            )?),
             Query::DuplicateGroups { offset, limit } => ViewResponse::DuplicateGroups(
                 self.store
                     .duplicate_groups_page(*offset, (*limit).min(MAX_QUERY_ROWS))?,
@@ -318,15 +326,28 @@ impl Core {
                     .cloned()
                     .context("Unknown or expired relocation task")?,
             ),
-            Query::QueuePage { offset, limit } => ViewResponse::QueuePage(
-                self.store
-                    .queue_page_with_total(*offset, *limit, self.queue_ids.len())?,
-            ),
-            Query::QueueBatch { after, limit, .. } => {
-                ViewResponse::QueueBatch(self.store.queue_batch(*after, *limit)?)
-            }
-            Query::QueueEntries { queue_ids } => {
-                ViewResponse::QueueEntries(self.store.queue_entries(queue_ids)?)
+            Query::QueuePage {
+                query,
+                offset,
+                limit,
+            } => ViewResponse::QueuePage(self.store.queue_page_with_total(
+                query.as_deref(),
+                *offset,
+                *limit,
+                self.queue_ids.len(),
+            )?),
+            Query::QueueBatch {
+                query,
+                after,
+                limit,
+                ..
+            } => ViewResponse::QueueBatch(self.store.queue_batch(
+                query.as_deref(),
+                *after,
+                *limit,
+            )?),
+            Query::QueueEntries { query, queue_ids } => {
+                ViewResponse::QueueEntries(self.store.queue_entries(query.as_deref(), queue_ids)?)
             }
             Query::ScanTask { id } => ViewResponse::ScanTask(
                 self.active_scan
@@ -417,15 +438,23 @@ impl Core {
                 *offset,
                 *limit,
             )?),
-            Query::PlaylistSummaries { offset, limit } => {
-                ViewResponse::PlaylistSummaries(self.store.playlist_summary_page(*offset, *limit)?)
-            }
+            Query::PlaylistSummaries {
+                query,
+                offset,
+                limit,
+            } => ViewResponse::PlaylistSummaries(self.store.playlist_summary_page(
+                query.as_deref(),
+                *offset,
+                *limit,
+            )?),
             Query::PlaylistEntries {
                 playlist_id,
+                query,
                 offset,
                 limit,
             } => ViewResponse::PlaylistEntries(self.store.playlist_entries_page(
                 *playlist_id,
+                query.as_deref(),
                 *offset,
                 *limit,
             )?),
@@ -435,11 +464,13 @@ impl Core {
             }
             Query::PlaylistEntryLocations {
                 playlist_id,
+                query,
                 entry_ids,
-            } => ViewResponse::PlaylistEntryLocations(
-                self.store
-                    .playlist_entry_locations(*playlist_id, entry_ids)?,
-            ),
+            } => ViewResponse::PlaylistEntryLocations(self.store.playlist_entry_locations(
+                *playlist_id,
+                query.as_deref(),
+                entry_ids,
+            )?),
             Query::LibraryStats => ViewResponse::LibraryStats(self.store.library_stats()?),
             Query::TrackBatch {
                 query,
@@ -455,16 +486,25 @@ impl Core {
                 *after,
                 *limit,
             )?),
-            Query::PlaylistSummaryBatch { after, limit, .. } => ViewResponse::PlaylistSummaryBatch(
-                self.store.playlist_summary_batch(*after, *limit)?,
-            ),
+            Query::PlaylistSummaryBatch {
+                query,
+                after,
+                limit,
+                ..
+            } => ViewResponse::PlaylistSummaryBatch(self.store.playlist_summary_batch(
+                query.as_deref(),
+                *after,
+                *limit,
+            )?),
             Query::PlaylistEntryBatch {
                 playlist_id,
+                query,
                 after,
                 limit,
                 ..
             } => ViewResponse::PlaylistEntryBatch(self.store.playlist_entry_batch(
                 *playlist_id,
+                query.as_deref(),
                 *after,
                 *limit,
             )?),

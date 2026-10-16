@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub(super) const PROTOCOL_VERSION: u8 = 25;
+pub(super) const PROTOCOL_VERSION: u8 = 26;
 pub(super) const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub(super) const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub(super) const MAX_CLIENTS: usize = 16;
@@ -111,10 +111,14 @@ pub(super) enum WireQuery {
         limit: u64,
     },
     PlaylistSummaries {
+        #[serde(default)]
+        query: Option<String>,
         offset: u64,
         limit: u64,
     },
     PlaylistEntries {
+        #[serde(default)]
+        query: Option<String>,
         playlist_id: i64,
         offset: u64,
         limit: u64,
@@ -132,11 +136,15 @@ pub(super) enum WireQuery {
         expected: Option<crate::response::QueryRevisions>,
     },
     PlaylistSummaryBatch {
+        #[serde(default)]
+        query: Option<String>,
         after: Option<i64>,
         limit: u64,
         expected: Option<crate::response::QueryRevisions>,
     },
     PlaylistEntryBatch {
+        #[serde(default)]
+        query: Option<String>,
         playlist_id: i64,
         after: Option<crate::model::PlaylistEntryCursor>,
         limit: u64,
@@ -167,15 +175,21 @@ pub(super) enum WireQuery {
         id: u64,
     },
     QueuePage {
+        #[serde(default)]
+        query: Option<String>,
         offset: u64,
         limit: u64,
     },
     QueueBatch {
+        #[serde(default)]
+        query: Option<String>,
         after: Option<crate::model::QueueCursor>,
         limit: u64,
         expected: Option<crate::response::QueryRevisions>,
     },
     QueueEntries {
+        #[serde(default)]
+        query: Option<String>,
         queue_ids: Vec<u64>,
     },
     PlaylistEntry {
@@ -194,6 +208,8 @@ pub(super) enum WireQuery {
         id: u64,
     },
     PlaylistEntryLocations {
+        #[serde(default)]
+        query: Option<String>,
         playlist_id: i64,
         entry_ids: Vec<i64>,
     },
@@ -204,6 +220,8 @@ pub(super) enum WireQuery {
         limit: u64,
     },
     AlbumTracks {
+        #[serde(default)]
+        query: Option<String>,
         key: crate::model::AlbumKey,
         offset: u64,
         limit: u64,
@@ -402,7 +420,13 @@ impl From<Query> for WireQuery {
                 offset: offset as u64,
                 limit: limit as u64,
             },
-            Query::AlbumTracks { key, offset, limit } => Self::AlbumTracks {
+            Query::AlbumTracks {
+                key,
+                query,
+                offset,
+                limit,
+            } => Self::AlbumTracks {
+                query,
                 key,
                 offset: offset as u64,
                 limit: limit as u64,
@@ -450,23 +474,32 @@ impl From<Query> for WireQuery {
                 offset: offset as u64,
                 limit: limit as u64,
             },
-            Query::PlaylistSummaries { offset, limit } => Self::PlaylistSummaries {
+            Query::PlaylistSummaries {
+                query,
+                offset,
+                limit,
+            } => Self::PlaylistSummaries {
+                query,
                 offset: offset as u64,
                 limit: limit as u64,
             },
             Query::PlaylistEntries {
+                query,
                 playlist_id,
                 offset,
                 limit,
             } => Self::PlaylistEntries {
+                query,
                 playlist_id,
                 offset: offset as u64,
                 limit: limit as u64,
             },
             Query::PlaylistEntryLocations {
+                query,
                 playlist_id,
                 entry_ids,
             } => Self::PlaylistEntryLocations {
+                query,
                 playlist_id,
                 entry_ids,
             },
@@ -488,20 +521,24 @@ impl From<Query> for WireQuery {
                 expected,
             },
             Query::PlaylistSummaryBatch {
+                query,
                 after,
                 limit,
                 expected,
             } => Self::PlaylistSummaryBatch {
+                query,
                 after,
                 limit: limit as u64,
                 expected,
             },
             Query::PlaylistEntryBatch {
+                query,
                 playlist_id,
                 after,
                 limit,
                 expected,
             } => Self::PlaylistEntryBatch {
+                query,
                 playlist_id,
                 after,
                 limit: limit as u64,
@@ -543,20 +580,27 @@ impl From<Query> for WireQuery {
             },
             Query::LibraryRootCounts { roots } => Self::LibraryRootCounts { roots },
             Query::ScanTask { id } => Self::ScanTask { id },
-            Query::QueuePage { offset, limit } => Self::QueuePage {
+            Query::QueuePage {
+                query,
+                offset,
+                limit,
+            } => Self::QueuePage {
+                query,
                 offset: offset as u64,
                 limit: limit as u64,
             },
             Query::QueueBatch {
+                query,
                 after,
                 limit,
                 expected,
             } => Self::QueueBatch {
+                query,
                 after,
                 limit: limit as u64,
                 expected,
             },
-            Query::QueueEntries { queue_ids } => Self::QueueEntries { queue_ids },
+            Query::QueueEntries { query, queue_ids } => Self::QueueEntries { query, queue_ids },
             Query::PlaylistEntry { entry_id } => Self::PlaylistEntry { entry_id },
             Query::DuplicateGroups { offset, limit } => Self::DuplicateGroups {
                 offset: offset as u64,
@@ -599,7 +643,13 @@ impl TryFrom<WireQuery> for Query {
                 offset: wire_usize(offset, "offset")?,
                 limit: wire_usize(limit, "limit")?,
             },
-            WireQuery::AlbumTracks { key, offset, limit } => Self::AlbumTracks {
+            WireQuery::AlbumTracks {
+                key,
+                query,
+                offset,
+                limit,
+            } => Self::AlbumTracks {
+                query,
                 key,
                 offset: wire_usize(offset, "offset")?,
                 limit: wire_usize(limit, "limit")?,
@@ -647,23 +697,32 @@ impl TryFrom<WireQuery> for Query {
                 offset: wire_usize(offset, "offset")?,
                 limit: wire_usize(limit, "limit")?,
             },
-            WireQuery::PlaylistSummaries { offset, limit } => Self::PlaylistSummaries {
+            WireQuery::PlaylistSummaries {
+                query,
+                offset,
+                limit,
+            } => Self::PlaylistSummaries {
+                query,
                 offset: wire_usize(offset, "offset")?,
                 limit: wire_usize(limit, "limit")?,
             },
             WireQuery::PlaylistEntries {
+                query,
                 playlist_id,
                 offset,
                 limit,
             } => Self::PlaylistEntries {
+                query,
                 playlist_id,
                 offset: wire_usize(offset, "offset")?,
                 limit: wire_usize(limit, "limit")?,
             },
             WireQuery::PlaylistEntryLocations {
+                query,
                 playlist_id,
                 entry_ids,
             } => Self::PlaylistEntryLocations {
+                query,
                 playlist_id,
                 entry_ids,
             },
@@ -685,20 +744,24 @@ impl TryFrom<WireQuery> for Query {
                 expected,
             },
             WireQuery::PlaylistSummaryBatch {
+                query,
                 after,
                 limit,
                 expected,
             } => Self::PlaylistSummaryBatch {
+                query,
                 after,
                 limit: wire_usize(limit, "limit")?,
                 expected,
             },
             WireQuery::PlaylistEntryBatch {
+                query,
                 playlist_id,
                 after,
                 limit,
                 expected,
             } => Self::PlaylistEntryBatch {
+                query,
                 playlist_id,
                 after,
                 limit: wire_usize(limit, "limit")?,
@@ -740,20 +803,27 @@ impl TryFrom<WireQuery> for Query {
             },
             WireQuery::LibraryRootCounts { roots } => Self::LibraryRootCounts { roots },
             WireQuery::ScanTask { id } => Self::ScanTask { id },
-            WireQuery::QueuePage { offset, limit } => Self::QueuePage {
+            WireQuery::QueuePage {
+                query,
+                offset,
+                limit,
+            } => Self::QueuePage {
+                query,
                 offset: wire_usize(offset, "offset")?,
                 limit: wire_usize(limit, "limit")?,
             },
             WireQuery::QueueBatch {
+                query,
                 after,
                 limit,
                 expected,
             } => Self::QueueBatch {
+                query,
                 after,
                 limit: wire_usize(limit, "limit")?,
                 expected,
             },
-            WireQuery::QueueEntries { queue_ids } => Self::QueueEntries { queue_ids },
+            WireQuery::QueueEntries { query, queue_ids } => Self::QueueEntries { query, queue_ids },
             WireQuery::PlaylistEntry { entry_id } => Self::PlaylistEntry { entry_id },
             WireQuery::DuplicateGroups { offset, limit } => Self::DuplicateGroups {
                 offset: wire_usize(offset, "offset")?,
