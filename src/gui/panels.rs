@@ -212,7 +212,7 @@ impl GuiApp {
         );
         let controls = row()
             .gap_1()
-            .flex_wrap()
+            .flex_shrink_0()
             .justify_center()
             .child(active_control(
                 quiet_icon_button(icon_button(
@@ -403,7 +403,8 @@ impl GuiApp {
                     .w_full()
                     .min_w_0()
                     .flex_shrink_0()
-                    .flex_wrap()
+                    .id(("transport-controls", panel_id))
+                    .overflow_x_scroll()
                     .justify_between()
                     .child(controls)
                     .child(volume_control),

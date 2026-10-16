@@ -10,8 +10,8 @@ next, previous, seek, volume, shuffle, and repeat controls. Seek positions are
 seconds; CLI volume is an integer percentage from 0 to 100.
 
 The desktop Playback panel shows the current title, artist and album, playback
-progress, transport controls, and volume. Controls wrap in narrow panels;
-overflow remains scrollable. Use the separate Album artwork panel for covers.
+progress, transport controls, and volume. Transport controls and volume stay on
+one row with horizontal scrolling in narrow panels. Use Album artwork for covers.
 The crosshair beside its title (*Locate playing entry in Queue*) reveals the
 Queue tab and locates the current occurrence; see <<_queue,Queue>>. If the layout
 has no Queue panel, it adds one only while the layout is unlocked. With a locked
