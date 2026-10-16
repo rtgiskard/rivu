@@ -93,6 +93,14 @@ keeps its buffers; losing all analysis demand also discards the shared spectrum
 copy. Restoring demand waits for a publication with the current display token
 and generation rather than restoring hidden results.
 
+The renderer allocates Path resolve/MSAA targets only when nonempty Path vertices
+are drawn, and drops its references on a successful frame without Path drawing.
+Restoring Path drawing rebuilds targets at the current physical size. Submitted
+GPU work retains its resources; reclamation does not destroy in-flight textures
+or wait for the GPU. Instance storage above its initial capacity shrinks after
+120 successful frames at no more than one-quarter utilization, retaining twice
+the observed peak rounded up to a power of two and never below initial capacity.
+
 After the window is destroyed, the application switches the graphical platform
 to headless mode, releasing the display connection and its shared GPU context.
 Reopening reconnects to the original display before creating a new window;

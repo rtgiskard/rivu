@@ -17,6 +17,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 const MAX_INSTANCE_BUFFER_SIZE: u64 = 256 * 1024 * 1024;
+const INITIAL_INSTANCE_DATA_CAPACITY: u64 = 2 * 1024 * 1024;
+// Require sustained low demand instead of reallocating on transient small frames.
+const INSTANCE_DATA_SHRINK_DELAY_FRAMES: u16 = 120;
 
 const INSTANCE_TEXTURE_TEXEL_SIZE: u64 = 16;
 
@@ -221,6 +224,9 @@ struct WgpuRendererCore {
     path_globals_offset: u64,
     gamma_offset: u64,
     instance_data_capacity: u64,
+    minimum_instance_data_capacity: u64,
+    low_instance_data_frames: u16,
+    low_instance_data_peak: u64,
     max_instance_data_size: u64,
     instance_data_alignment: u64,
     uses_webgl_instance_data: bool,
@@ -1285,7 +1291,7 @@ impl WgpuRendererCore {
             let max_instance_data_size = (u64::from(max_texture_dimension).pow(2)
                 * INSTANCE_TEXTURE_TEXEL_SIZE)
                 .min(MAX_INSTANCE_BUFFER_SIZE);
-            let initial_capacity = (2 * 1024 * 1024).min(max_instance_data_size);
+            let initial_capacity = INITIAL_INSTANCE_DATA_CAPACITY.min(max_instance_data_size);
             let (instance_data, capacity) =
                 Self::create_instance_texture(&device, initial_capacity, max_texture_dimension);
             (
@@ -1300,7 +1306,7 @@ impl WgpuRendererCore {
                 .max_buffer_size
                 .min(device.limits().max_storage_buffer_binding_size)
                 .min(MAX_INSTANCE_BUFFER_SIZE);
-            let initial_capacity = (2 * 1024 * 1024).min(max_buffer_size);
+            let initial_capacity = INITIAL_INSTANCE_DATA_CAPACITY.min(max_buffer_size);
             let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("instance_buffer"),
                 size: initial_capacity,
@@ -1381,6 +1387,9 @@ impl WgpuRendererCore {
             path_globals_offset,
             gamma_offset,
             instance_data_capacity,
+            minimum_instance_data_capacity: instance_data_capacity,
+            low_instance_data_frames: 0,
+            low_instance_data_peak: 0,
             max_instance_data_size,
             instance_data_alignment,
             uses_webgl_instance_data,
@@ -1457,7 +1466,6 @@ impl WgpuRendererCore {
         );
 
         self.atlas.before_frame();
-        self.ensure_intermediate_textures(size);
 
         let gamma_params = GammaParams {
             gamma_ratios: self.rendering_params.gamma_ratios,
@@ -1491,9 +1499,11 @@ impl WgpuRendererCore {
             bytemuck::bytes_of(&gamma_params),
         );
 
-        self.record_frame(scene, target_view, clear_color)
+        self.record_frame(scene, target_view, size, clear_color)
             .inspect_err(|_| {
                 // Queue writes are staged before encoding; flush them even if the frame fails.
+                self.low_instance_data_frames = 0;
+                self.low_instance_data_peak = 0;
                 self.resources.queue.submit(std::iter::empty());
             })
     }
@@ -1502,8 +1512,11 @@ impl WgpuRendererCore {
         &mut self,
         scene: &Scene,
         frame_view: &wgpu::TextureView,
+        size: Size<DevicePixels>,
         clear_color: wgpu::Color,
     ) -> Result<wgpu::SubmissionIndex> {
+        let frame_start_capacity = self.instance_data_capacity;
+        let mut paths_rasterized = false;
         let mut instance_offset = 0;
         let instance_bindings = self
             .write_instances(scene, &mut instance_offset)
@@ -1568,6 +1581,7 @@ impl WgpuRendererCore {
                         let rasterized = self.draw_paths_to_intermediate(
                             &mut encoder,
                             paths,
+                            size,
                             &mut instance_offset,
                         )?;
 
@@ -1587,6 +1601,7 @@ impl WgpuRendererCore {
                         });
 
                         if rasterized {
+                            paths_rasterized = true;
                             self.draw_paths_from_intermediate(
                                 paths,
                                 &mut instance_offset,
@@ -1639,10 +1654,17 @@ impl WgpuRendererCore {
             }
         }
 
+        if !paths_rasterized {
+            // Drop our references, as when unconfiguring the surface. Previously
+            // submitted work keeps its textures alive; destroy() would invalidate it.
+            self.resources.invalidate_intermediate_textures();
+        }
+
         let submission = self
             .resources()
             .queue
             .submit(std::iter::once(encoder.finish()));
+        self.maintain_instance_data_capacity(instance_offset, frame_start_capacity);
         Ok(submission)
     }
 
@@ -1867,6 +1889,7 @@ impl WgpuRendererCore {
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         paths: &[Path<ScaledPixels>],
+        size: Size<DevicePixels>,
         instance_offset: &mut u64,
     ) -> Result<bool> {
         let mut vertices = Vec::new();
@@ -1900,6 +1923,10 @@ impl WgpuRendererCore {
             instance_offset,
             &vertices,
         )?;
+
+        // The existing vertex preparation determines demand without another scan
+        // of scene.paths, which may contain only paths with empty vertex arrays.
+        self.ensure_intermediate_textures(size);
 
         let resources = self.resources();
         let Some(path_intermediate_view) = resources.path_intermediate_view.as_ref() else {
@@ -2119,6 +2146,31 @@ impl WgpuRendererCore {
         }
     }
 
+    fn maintain_instance_data_capacity(&mut self, used: u64, frame_start_capacity: u64) {
+        if self.instance_data_capacity != frame_start_capacity
+            || self.instance_data_capacity <= self.minimum_instance_data_capacity
+            || used > self.instance_data_capacity / 4
+        {
+            self.low_instance_data_frames = 0;
+            self.low_instance_data_peak = 0;
+            return;
+        }
+
+        self.low_instance_data_frames += 1;
+        self.low_instance_data_peak = self.low_instance_data_peak.max(used);
+        if self.low_instance_data_frames < INSTANCE_DATA_SHRINK_DELAY_FRAMES {
+            return;
+        }
+
+        let capacity = (self.low_instance_data_peak * 2)
+            .next_power_of_two()
+            .max(self.minimum_instance_data_capacity)
+            .min(self.max_instance_data_size);
+        self.replace_instance_data(capacity);
+        self.low_instance_data_frames = 0;
+        self.low_instance_data_peak = 0;
+    }
+
     fn grow_instance_data(&mut self, required: u64) -> Result<()> {
         let capacity = (self.instance_data_capacity * 2)
             .max(required.next_power_of_two())
@@ -2137,9 +2189,13 @@ impl WgpuRendererCore {
             "instance data grown from {} to {capacity}",
             self.instance_data_capacity
         );
-        // Bind groups created earlier in the frame keep the previous buffer or
-        // texture alive, so allocations written before the grow remain valid;
-        // only subsequent writes land in the new allocation.
+        self.replace_instance_data(capacity);
+        Ok(())
+    }
+
+    fn replace_instance_data(&mut self, capacity: u64) {
+        // Earlier bind groups and submitted commands retain the old allocation.
+        // Only subsequent writes use the replacement; never destroy or wait here.
         let uses_webgl_instance_data = self.uses_webgl_instance_data;
         let resources = self.resources_mut();
         if uses_webgl_instance_data {
@@ -2158,7 +2214,6 @@ impl WgpuRendererCore {
                 }));
             self.instance_data_capacity = capacity;
         }
-        Ok(())
     }
 }
 
@@ -2846,6 +2901,235 @@ mod tests {
             bounds: path.bounds,
         };
         path
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_no_path_intermediates(renderer: &WgpuHeadlessRenderer) {
+        let resources = &renderer.core.resources;
+        assert!(resources.path_intermediate_texture.is_none());
+        assert!(resources.path_intermediate_view.is_none());
+        assert!(resources.path_msaa_texture.is_none());
+        assert!(resources.path_msaa_view.is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    fn exercise_path_intermediate_lifecycle(multisampled: bool) -> anyhow::Result<()> {
+        let mut renderer = WgpuHeadlessRenderer::new()?;
+        if multisampled {
+            anyhow::ensure!(
+                renderer.core.rendering_params.path_sample_count > 1,
+                "the MSAA lifecycle regression requires a multisampling-capable adapter"
+            );
+        } else {
+            let core = &mut renderer.core;
+            core.rendering_params.path_sample_count = 1;
+            core.resources.pipelines = WgpuRendererCore::create_pipelines(
+                &core.resources.device,
+                &core.resources.bind_group_layouts,
+                core.target_format,
+                wgpu::CompositeAlphaMode::Opaque,
+                1,
+                core.dual_source_blending,
+                core.uses_webgl_instance_data,
+            );
+        }
+
+        // Upload an atlas tile immediately before a pathless frame: its sprite
+        // must still appear even when no intermediate textures are needed.
+        let tile = image_tile(&renderer, 21, 1, 1, &[255, 0, 0, 255])?;
+        let bounds = solid_quad(0.0, 0.0, 32.0, 16.0, gpui::blue()).bounds;
+        let background = PolychromeSprite {
+            order: 0,
+            pad: 0,
+            grayscale: false.into(),
+            opacity: 1.0,
+            bounds,
+            content_mask: ContentMask { bounds },
+            corner_radii: Corners::default(),
+            tile,
+            transformation: gpui::TransformationMatrix::default(),
+        };
+        let mut no_path_scene = Scene::default();
+        no_path_scene.insert_primitive(background);
+        no_path_scene.finish();
+
+        let mut path = rectangle_path(0.0, 0.0, 16.0, 16.0);
+        path.color = gpui::red().into();
+        let mut path_scene = Scene::default();
+        path_scene.insert_primitive(background);
+        path_scene.insert_primitive(path.clone());
+        path_scene.insert_primitive(solid_quad(8.0, 0.0, 4.0, 16.0, gpui::blue()));
+        path_scene.finish();
+
+        path.vertices.clear();
+        let mut empty_path_scene = Scene::default();
+        empty_path_scene.insert_primitive(background);
+        empty_path_scene.insert_primitive(path);
+        empty_path_scene.finish();
+        assert_eq!(empty_path_scene.paths.len(), 1);
+
+        let size = device_size(32, 16);
+        for scene in [&no_path_scene, &empty_path_scene] {
+            let image = renderer.render_scene_to_image(scene, size)?;
+            assert_no_path_intermediates(&renderer);
+            assert_pixel(&image, 4, 8, BLUE);
+        }
+
+        renderer.render_scene(&path_scene, size)?;
+        let resources = &renderer.core.resources;
+        let first_texture = resources.path_intermediate_texture.clone().unwrap();
+        let first_msaa = resources.path_msaa_texture.clone();
+        assert_eq!(first_texture.sample_count(), 1);
+        assert_eq!(first_msaa.is_some(), multisampled);
+        assert_eq!(resources.path_msaa_view.is_some(), multisampled);
+        if let Some(texture) = &first_msaa {
+            assert_eq!(
+                texture.sample_count(),
+                renderer.core.rendering_params.path_sample_count
+            );
+        }
+
+        // Keep an encoded use of the old attachments unsubmitted across release.
+        // Calling destroy() rather than dropping renderer ownership would make
+        // this later submission invalid, including for the MSAA attachment.
+        let mut deferred = resources.device.create_command_encoder(&Default::default());
+        {
+            let resolved = resources.path_intermediate_view.as_ref().unwrap();
+            let msaa = resources.path_msaa_view.as_ref();
+            let _pass = deferred.begin_render_pass(&wgpu::RenderPassDescriptor {
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: msaa.unwrap_or(resolved),
+                    resolve_target: msaa.map(|_| resolved),
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                ..Default::default()
+            });
+        }
+        let deferred = deferred.finish();
+
+        renderer.render_scene(&path_scene, size)?;
+        assert_eq!(
+            renderer.core.resources.path_intermediate_texture.as_ref(),
+            Some(&first_texture)
+        );
+        assert_eq!(renderer.core.resources.path_msaa_texture, first_msaa);
+        renderer.render_scene(&empty_path_scene, size)?;
+        assert_no_path_intermediates(&renderer);
+        renderer.core.resources.queue.submit([deferred]);
+        let image = renderer.read_image()?;
+        assert_pixel(&image, 4, 8, BLUE);
+
+        let resized = device_size(40, 24);
+        renderer.render_scene(&no_path_scene, resized)?;
+        assert_no_path_intermediates(&renderer);
+        let image = renderer.render_scene_to_image(&path_scene, resized)?;
+        let resources = &renderer.core.resources;
+        let restored = resources.path_intermediate_texture.as_ref().unwrap();
+        assert_ne!(restored, &first_texture);
+        assert_eq!((restored.width(), restored.height()), (40, 24));
+        assert_eq!(resources.path_msaa_texture.is_some(), multisampled);
+        if let Some(texture) = &resources.path_msaa_texture {
+            assert_ne!(Some(texture), first_msaa.as_ref());
+            assert_eq!((texture.width(), texture.height()), (40, 24));
+        }
+        assert_pixel(&image, 4, 8, RED);
+        assert_pixel(&image, 10, 8, BLUE);
+        assert_pixel(&image, 20, 8, BLUE);
+        assert_pixel(&image, 39, 23, BLACK);
+        renderer.render_scene(&no_path_scene, resized)?;
+        assert_no_path_intermediates(&renderer);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn path_intermediate_textures_follow_single_sample_draw_demand() -> anyhow::Result<()> {
+        exercise_path_intermediate_lifecycle(false)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn path_intermediate_textures_follow_msaa_draw_demand() -> anyhow::Result<()> {
+        exercise_path_intermediate_lifecycle(true)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn instance_data_reclaims_sustained_low_demand_without_invalidating_draws() -> anyhow::Result<()>
+    {
+        let mut renderer = WgpuHeadlessRenderer::new()?;
+        let minimum = renderer.core.minimum_instance_data_capacity;
+        anyhow::ensure!(
+            renderer.core.max_instance_data_size >= minimum * 4,
+            "instance lifecycle regression requires room for four initial allocations"
+        );
+        let mut path = rectangle_path(2.0, 2.0, 8.0, 8.0);
+        path.color = gpui::red().into();
+        let mut small_scene = Scene::default();
+        small_scene.insert_primitive(path.clone());
+        small_scene.finish();
+
+        // Retain the rectangle, padding with degenerate triangles to exercise
+        // actual path uploads without turning the test into a fill-rate benchmark.
+        let vertex_size = std::mem::size_of::<PathRasterizationVertex>() as u64;
+        let mut medium_path = path.clone();
+        let medium_vertices = (minimum * 3 / 4 / vertex_size).next_multiple_of(3) as usize;
+        medium_path
+            .vertices
+            .resize(medium_vertices, path.vertices[0].clone());
+        let mut medium_scene = Scene::default();
+        medium_scene.insert_primitive(medium_path);
+        medium_scene.finish();
+        let heavy_vertices = (minimum * 2 / vertex_size + 3).next_multiple_of(3) as usize;
+        path.vertices
+            .resize(heavy_vertices, path.vertices[0].clone());
+        let mut heavy_scene = Scene::default();
+        heavy_scene.insert_primitive(path);
+        heavy_scene.finish();
+
+        let size = device_size(16, 16);
+        renderer.render_scene(&heavy_scene, size)?;
+        let grown_capacity = renderer.core.instance_data_capacity;
+        assert!(grown_capacity >= minimum * 4);
+        for _ in 1..INSTANCE_DATA_SHRINK_DELAY_FRAMES {
+            renderer.render_scene(&small_scene, size)?;
+        }
+        assert_eq!(renderer.core.instance_data_capacity, grown_capacity);
+
+        // A large path upload must reset the streak even though the non-path
+        // primitive arrays remain empty and their own instance usage is tiny.
+        renderer.render_scene(&heavy_scene, size)?;
+        assert_eq!(renderer.core.low_instance_data_frames, 0);
+        renderer.render_scene(&medium_scene, size)?;
+        for _ in 2..INSTANCE_DATA_SHRINK_DELAY_FRAMES {
+            renderer.render_scene(&small_scene, size)?;
+        }
+        assert_eq!(renderer.core.instance_data_capacity, grown_capacity);
+        renderer.render_scene(&small_scene, size)?;
+        assert_eq!(renderer.core.instance_data_capacity, minimum * 2);
+        let image = renderer.read_image()?;
+        assert_pixel(&image, 4, 4, RED);
+
+        for _ in 1..INSTANCE_DATA_SHRINK_DELAY_FRAMES {
+            renderer.render_scene(&small_scene, size)?;
+        }
+        assert_eq!(renderer.core.instance_data_capacity, minimum * 2);
+        renderer.render_scene(&small_scene, size)?;
+        assert_eq!(renderer.core.instance_data_capacity, minimum);
+        let image = renderer.read_image()?;
+        assert_pixel(&image, 4, 4, RED);
+        assert_pixel(&image, 0, 0, BLACK);
+        let image = renderer.render_scene_to_image(&small_scene, size)?;
+        assert_pixel(&image, 4, 4, RED);
+
+        let image = renderer.render_scene_to_image(&heavy_scene, size)?;
+        assert!(renderer.core.instance_data_capacity > minimum);
+        assert_pixel(&image, 4, 4, RED);
+        Ok(())
     }
 
     #[cfg(target_os = "linux")]
