@@ -115,7 +115,9 @@ impl Core {
         track_id: i64,
         stats: crate::store::TrackStats,
     ) -> Result<()> {
-        self.state.library.revision = self.state.library.revision.wrapping_add(1);
+        self.state
+            .library
+            .change_metadata(Some(&[track_id]), Some(&[]));
         if let Some(index) =
             self.state.library.history.iter().position(|entry| {
                 entry.track_id == track_id && entry.play_count != stats.play_count

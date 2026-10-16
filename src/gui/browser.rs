@@ -236,6 +236,19 @@ impl LibraryBrowser {
         }
     }
 
+    pub(super) fn root_count_ticket(&mut self) -> crate::core::QueryTicket {
+        self.counts.owner.ticket()
+    }
+
+    pub(super) fn cancel_pending_reads(&mut self) {
+        self.projection.cancel();
+        if !self.counts.pending.is_empty() {
+            self.counts.owner.cancel();
+            self.counts.pending.clear();
+            self.counts.settled = false;
+        }
+    }
+
     pub(super) fn retry_root_counts(&mut self) {
         self.counts.failed.clear();
         self.counts.settled = false;

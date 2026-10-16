@@ -235,6 +235,7 @@ impl GuiApp {
         review.groups_loading = true;
         let query = review.groups_query();
         let (epoch, generation) = (review.epoch, review.groups_projection.generation());
+        let ticket = review.groups_projection.ticket();
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
             cx.background_executor()
@@ -261,7 +262,7 @@ impl GuiApp {
             let worker_query = query.clone();
             let response = cx
                 .background_executor()
-                .spawn(async move { handle.query(worker_query) })
+                .spawn(async move { handle.query_if_current(worker_query, ticket) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.duplicate_review.groups_loading = false;
@@ -349,6 +350,7 @@ impl GuiApp {
             .map(|member| member.track.id)
             .collect::<Vec<_>>();
         let (epoch, generation) = (review.epoch, review.members_projection.generation());
+        let ticket = review.members_projection.ticket();
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
             cx.background_executor()
@@ -376,7 +378,7 @@ impl GuiApp {
             let (response, existence, selected) = cx
                 .background_executor()
                 .spawn(async move {
-                    let response = handle.query(worker_query.clone());
+                    let response = handle.query_if_current(worker_query.clone(), ticket.clone());
                     let existence = member_existence(&response);
                     let selected = match (&worker_query, &response.result) {
                         (
@@ -390,10 +392,13 @@ impl GuiApp {
                             if track_ids.is_empty() {
                                 None
                             } else {
-                                let selected = handle.query(Query::DuplicateMemberSelection {
-                                    fingerprint: fingerprint.clone(),
-                                    track_ids,
-                                });
+                                let selected = handle.query_if_current(
+                                    Query::DuplicateMemberSelection {
+                                        fingerprint: fingerprint.clone(),
+                                        track_ids,
+                                    },
+                                    ticket.clone(),
+                                );
                                 let exists = member_existence(&selected);
                                 Some((selected, exists))
                             }

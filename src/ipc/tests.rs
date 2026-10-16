@@ -149,6 +149,14 @@ fn playlist_group_requests_and_locations_round_trip_stable_identities() {
             }),
             duplicate_groups: 10,
             duplicate_members: 11,
+            track: Some(crate::response::TrackRevision {
+                track_id: 11,
+                revision: 12,
+            }),
+            playlist_metadata: Some(crate::response::PlaylistEntryRevision {
+                playlist_id: 10,
+                revision: 13,
+            }),
         },
         result: Ok(crate::response::ViewResponse::PlaylistEntryLocations(vec![
             crate::model::PlaylistEntryLocation {
@@ -385,6 +393,7 @@ fn library_root_responses_wire_round_trip_preserves_projection_and_revisions() {
                 playlist_entries: None,
                 duplicate_groups: 9,
                 duplicate_members: 10,
+                ..Default::default()
             },
             result: Ok(result),
         };
@@ -667,13 +676,15 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
         matches!(selected.result, Ok(ViewResponse::PlaylistEntry(Some(entry)))
         if entry.position == 1 && entry.id == 101)
     );
-    let locations = session
-        .query(&Query::PlaylistEntryLocations {
-            playlist_id: 10,
-            entry_ids: vec![101, 201, i64::MAX],
-        })
-        .unwrap();
-    assert_eq!(locations.revisions, selected.revisions);
+    let location_query = Query::PlaylistEntryLocations {
+        playlist_id: 10,
+        entry_ids: vec![101, 201, i64::MAX],
+    };
+    let locations = session.query(&location_query).unwrap();
+    assert_eq!(
+        location_query.stamp(locations.revisions),
+        location_query.stamp(selected.revisions)
+    );
     assert!(
         matches!(locations.result, Ok(ViewResponse::PlaylistEntryLocations(rows)) if rows.len() == 1 && rows[0].id == 101 && rows[0].position == 1)
     );
@@ -1302,9 +1313,9 @@ fn request_encoding_rejects_oversized_body_before_completion() {
 fn postcard_frame_headers_and_bodies_preserve_wire_contract() {
     let mut encoded = Vec::new();
     encode_request_frame_into(&WireRequest::Hello(StateSections::ALL), &mut encoded).unwrap();
-    assert_eq!(encoded, [6, 0, 0, 0, 24, 0, 1, 1, 1, 1]);
+    assert_eq!(encoded, [6, 0, 0, 0, PROTOCOL_VERSION, 0, 1, 1, 1, 1]);
     encode_response_frame_into(&WireResponse::Error("x".into()), &mut encoded).unwrap();
-    assert_eq!(encoded, [4, 0, 0, 0, 24, 255, 1, b'x']);
+    assert_eq!(encoded, [4, 0, 0, 0, PROTOCOL_VERSION, 255, 1, b'x']);
 }
 
 #[tokio::test]

@@ -219,7 +219,7 @@ The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
 Bodies use Postcard serialization without COBS framing. The current protocol
-version is `24`; clients and servers must use matching wire schemas. The four-byte
+version is `25`; clients and servers must use matching wire schemas. The four-byte
 frame length remains little-endian; body integers follow Postcard's encoding.
 Configuration state and Configure commands include the presentation language
 (`ui_language`: `auto`, `en-US`, or `zh-CN`). Language selection does not translate
@@ -414,14 +414,24 @@ core dispatch. Publication sequence, four state-section tokens, query-data
 tokens, and consumer request generations have distinct responsibilities.
 
 `Query::stamp` is the sole query dependency contract for scheduling, projection
-identity, result acceptance, and batch validation. Effective-track queries use
-library content; directory/album/location projections also use structure.
-Root counts use structure only. Playlist summaries use the summary catalog only;
-full entry rows use library content plus their scoped content/lifetime token;
-compact entry locations use only their scoped token. Queue queries use queue
-content. Duplicate groups use `duplicate_groups`; members use library,
+identity, result acceptance, and batch validation. Library pages use library
+content; directory/album/location projections also use structure. A single
+Track query uses `track = {track_id, revision}`. Root counts use structure only.
+Playlist summaries use the summary catalog only; full entry rows use
+`playlist_metadata = {playlist_id, revision}` plus their scoped content/lifetime
+token. Compact entry locations use only their content token. Queue queries use
+queue content. Duplicate groups use `duplicate_groups`; members use library,
 `duplicate_members`, and queue content. Playlist reference changes advance member
 facts, while playlist names and order do not.
+
+Track and playlist metadata scopes share a bounded index of at most 256 entries.
+Committed title/artist/album/favorite changes identify affected tracks and playlist
+rows inside the write transaction. Decoder hints, playback statistics, and bitrate
+changes affect Track details without invalidating playlist display rows. Unknown
+bulk effects or index overflow conservatively invalidate all metadata scopes;
+there is no whole-library track-to-playlist reverse cache. Missing targeted
+metadata scopes use the global library token conservatively. A non-scoped
+baseline can bootstrap an entry traversal only while its library token is current.
 
 Entry pages/batches and scoped `PlaylistEntryLocations` (including empty results)
 attach `revisions.playlist_entries = {playlist_id, revision}` when the collection
@@ -433,8 +443,8 @@ fresh data cannot authorize an obsolete operation. Acknowledgements carry succes
 or error plus publication revision, never replacement state.
 
 Playlist entry page and batch rows include `favorite`, the current library
-track's boolean favorite state. Favorite changes invalidate library-content
-revisions, not playlist entry order; consumers reload the affected projections.
+track's boolean favorite state. Favorite changes advance library content and the
+affected track/playlist metadata scopes, not playlist entry order.
 
 Interactive pages return an exact filtered total and at most 256 rows; larger
 limits are clamped, and `limit = 0` returns the count without rows. Offset pages

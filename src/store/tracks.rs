@@ -51,11 +51,20 @@ pub struct TrackRemovalImpact {
     pub playlists: Vec<i64>,
     pub duplicate_groups: bool,
 }
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TrackEditImpact {
     pub changed: bool,
     pub library: bool,
     pub member_facts: bool,
+    /// None means the changed playlist scopes exceeded the publication bound.
+    pub playlists: Option<Vec<i64>>,
+}
+
+#[derive(Debug, Default)]
+pub struct FavoriteImpact {
+    pub changed: bool,
+    pub tracks: Option<Vec<i64>>,
+    pub playlists: Option<Vec<i64>>,
 }
 
 /// Captured before loading audio; bitrate persistence must still match this source.
@@ -168,9 +177,10 @@ impl Store {
         Ok(updated != 0)
     }
 
-    pub fn set_favorite(&self, ids: &[i64], favorite: bool) -> Result<bool> {
+    pub fn set_favorite(&self, ids: &[i64], favorite: bool) -> Result<FavoriteImpact> {
         let tx = self.conn.unchecked_transaction()?;
         let encoded_ids = self.validated_track_ids(ids)?;
+        let mut impact = favorite_metadata(&tx, &encoded_ids, Some(favorite))?;
         let updated = tx.execute(
             "UPDATE tracks SET favorite=?1 WHERE favorite<>?1 AND id IN (SELECT value FROM json_each(?2))",
             params![favorite, encoded_ids],
@@ -188,12 +198,14 @@ impl Store {
                 }
             }
         }
-        Ok(updated != 0)
+        impact.changed = updated != 0;
+        Ok(impact)
     }
 
-    pub fn toggle_favorite(&self, ids: &[i64]) -> Result<bool> {
+    pub fn toggle_favorite(&self, ids: &[i64]) -> Result<FavoriteImpact> {
         let tx = self.conn.unchecked_transaction()?;
         let encoded_ids = self.validated_track_ids(ids)?;
+        let mut impact = favorite_metadata(&tx, &encoded_ids, None)?;
         let updated = tx.execute(
             "UPDATE tracks SET favorite=NOT favorite WHERE id IN (SELECT value FROM json_each(?1))",
             params![encoded_ids],
@@ -205,7 +217,8 @@ impl Store {
                 cache.entries.remove(id);
             }
         }
-        Ok(updated != 0)
+        impact.changed = updated != 0;
+        Ok(impact)
     }
 
     pub fn library_view_page(
@@ -761,12 +774,12 @@ impl Store {
             DecoderHint::Native => 1,
             DecoderHint::Ffmpeg => 2,
         });
-        let mut impact = tx.query_row(
+        let (mut impact, playlist_values_changed) = tx.query_row(
             "SELECT
                 ((?1 IS NOT NULL AND ?1 IS NOT COALESCE(title_override,raw_title))
                  OR (?2 IS NOT NULL AND ?2 IS NOT COALESCE(artist_override,raw_artist))
-                 OR (?3 IS NOT NULL AND ?3 IS NOT COALESCE(album_override,raw_album))
-                 OR (?4 IS NOT NULL AND ?4 IS NOT decoder_hint)),
+                 OR (?3 IS NOT NULL AND ?3 IS NOT COALESCE(album_override,raw_album))),
+                (?4 IS NOT NULL AND ?4 IS NOT decoder_hint),
                 ((title_override IS NOT NULL OR artist_override IS NOT NULL
                   OR album_override IS NOT NULL OR decoder_hint<>0)
                  IS NOT
@@ -774,8 +787,23 @@ impl Store {
                   OR COALESCE(?3,album_override) IS NOT NULL OR COALESCE(?4,decoder_hint)<>0))
              FROM tracks WHERE id=?5",
             params![title, artist, album, decoder_hint, id],
-            |row| Ok(TrackEditImpact { library: row.get(0)?, member_facts: row.get(1)?, ..Default::default() }),
+            |row| {
+                let display: bool = row.get(0)?;
+                let decoder: bool = row.get(1)?;
+                Ok((TrackEditImpact { library: display || decoder, member_facts: row.get(2)?, ..Default::default() }, display))
+            },
         ).optional()?.with_context(|| format!("track {id} does not exist"))?;
+        if impact.library {
+            impact.playlists = if playlist_values_changed {
+                bounded_metadata_ids(
+                    &tx,
+                    "SELECT DISTINCT playlist_id FROM playlist_entries WHERE track_id=?1",
+                    [id],
+                )?
+            } else {
+                Some(Vec::new())
+            };
+        }
         let updated = tx.execute(
             "UPDATE tracks SET title_override=COALESCE(?1,title_override),
              artist_override=COALESCE(?2,artist_override),
@@ -920,6 +948,45 @@ impl Store {
             track.last_played = stats.last_played;
         }
     }
+}
+
+fn bounded_metadata_ids(
+    conn: &Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+) -> Result<Option<Vec<i64>>> {
+    let mut statement = conn.prepare(sql)?;
+    let ids = statement
+        .query_map(params, |row| row.get(0))?
+        .take(crate::model::MAX_METADATA_SCOPES + 1)
+        .collect::<rusqlite::Result<Vec<i64>>>()?;
+    Ok((ids.len() <= crate::model::MAX_METADATA_SCOPES).then_some(ids))
+}
+
+fn favorite_metadata(
+    conn: &Connection,
+    encoded_ids: &str,
+    favorite: Option<bool>,
+) -> Result<FavoriteImpact> {
+    let tracks = bounded_metadata_ids(
+        conn,
+        "SELECT id FROM tracks WHERE id IN (SELECT value FROM json_each(?1)) AND (?2 IS NULL OR favorite<>?2)",
+        params![encoded_ids, favorite],
+    )?;
+    let playlists = match &tracks {
+        Some(ids) if ids.is_empty() => Some(Vec::new()),
+        Some(_) => bounded_metadata_ids(
+            conn,
+            "SELECT DISTINCT p.playlist_id FROM tracks AS t JOIN playlist_entries AS p ON p.track_id=t.id WHERE t.id IN (SELECT value FROM json_each(?1)) AND (?2 IS NULL OR t.favorite<>?2)",
+            params![encoded_ids, favorite],
+        )?,
+        None => None,
+    };
+    Ok(FavoriteImpact {
+        tracks,
+        playlists,
+        ..Default::default()
+    })
 }
 
 pub(super) fn validate_encoded_track_ids(conn: &Connection, ids: &str) -> Result<()> {
@@ -1160,6 +1227,7 @@ mod request_tests {
                 changed: true,
                 member_facts: true,
                 library: false,
+                ..Default::default()
             }
         );
         assert_eq!(store.track(1)?.unwrap(), track);
@@ -1198,9 +1266,9 @@ mod request_tests {
                     row.get(0)
                 })?;
         assert_eq!(favorites, 0);
-        assert!(store.set_favorite(&[2, 1, 2], true)?);
-        assert!(!store.set_favorite(&[2, 1, 2], true)?);
-        assert!(!store.set_favorite(&[], false)?);
+        assert!(store.set_favorite(&[2, 1, 2], true)?.changed);
+        assert!(!store.set_favorite(&[2, 1, 2], true)?.changed);
+        assert!(!store.set_favorite(&[], false)?.changed);
         assert_eq!(store.library_stats()?.total, 2);
         Ok(())
     }

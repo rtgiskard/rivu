@@ -24,6 +24,13 @@ impl ViewRequestKind {
 }
 const DIRECTORY_WORKERS: usize = 4;
 
+struct ViewDemand {
+    query: Query,
+    stamp: crate::model::QueryStamp,
+    selection_generation: u64,
+    quiet_until: Instant,
+}
+
 #[derive(Default)]
 pub(super) struct ViewRequests {
     generation: u64,
@@ -31,6 +38,8 @@ pub(super) struct ViewRequests {
     projections: HashMap<ViewRequestKind, QueryProjection>,
     workers: HashSet<ViewRequestKind>,
     queued: HashMap<ViewRequestKind, (Query, u64)>,
+    // Latest intent outlives logical cancellation, hiding and worker completion.
+    demands: HashMap<ViewRequestKind, ViewDemand>,
     directory_workers: HashSet<library::TreeBranch>,
     directory_queued: std::collections::VecDeque<(library::TreeBranch, usize)>,
     root_count_workers: HashSet<usize>,
@@ -38,6 +47,55 @@ pub(super) struct ViewRequests {
 }
 
 impl ViewRequests {
+    fn prepare_view(
+        &mut self,
+        kind: ViewRequestKind,
+        query: Query,
+        generation: u64,
+        revisions: crate::response::QueryRevisions,
+        selection_generation: u64,
+        now: Instant,
+    ) -> Option<(Query, Duration)> {
+        let stamp = query.stamp(revisions);
+        let selection_generation = if kind == ViewRequestKind::Summaries {
+            0
+        } else {
+            selection_generation
+        };
+        let demand = self.demands.entry(kind).or_insert_with(|| ViewDemand {
+            query: query.clone(),
+            stamp,
+            selection_generation,
+            quiet_until: now + Duration::from_millis(80),
+        });
+        if demand.query != query
+            || demand.stamp != stamp
+            || demand.selection_generation != selection_generation
+        {
+            *demand = ViewDemand {
+                query: query.clone(),
+                stamp,
+                selection_generation,
+                quiet_until: now + Duration::from_millis(80),
+            };
+        }
+        let delay = demand.quiet_until.saturating_duration_since(now);
+        let replaced = self
+            .generations
+            .get(&kind)
+            .is_some_and(|current| *current != generation);
+        self.begin(kind, generation);
+        let owner = self.projections.entry(kind).or_default();
+        if !owner.sync(&query, revisions) && replaced {
+            owner.cancel();
+        }
+        if !self.workers.insert(kind) {
+            self.queued.insert(kind, (query, generation));
+            return None;
+        }
+        Some((query, delay))
+    }
+
     pub(super) fn cancel_directory_demand(&mut self) {
         self.directory_queued.clear();
     }
@@ -103,6 +161,32 @@ impl ViewRequests {
 }
 
 impl GuiApp {
+    pub(super) fn cancel_window_reads(&mut self) {
+        for kind in [
+            ViewRequestKind::Summaries,
+            ViewRequestKind::Entries,
+            ViewRequestKind::Selection,
+        ] {
+            if self.browser.requests.pending(kind) {
+                self.browser.requests.cancel(kind);
+                match kind {
+                    ViewRequestKind::Summaries => self.browser.playlists.cancel_page(false),
+                    ViewRequestKind::Entries => self.browser.playlists.cancel_page(true),
+                    ViewRequestKind::Selection => self.browser.requests.selection_baseline = None,
+                    ViewRequestKind::Queue => {}
+                }
+            }
+        }
+        if !self.browser.requests.directory_workers.is_empty()
+            || !self.browser.requests.root_count_workers.is_empty()
+        {
+            self.browser.library.cancel_pending_reads();
+            self.browser.requests.cancel_directory_demand();
+        }
+        self.browser.queue.cancel_page_demand();
+        self.cancel_metadata_read();
+    }
+
     pub(super) fn start_loading_text(
         &mut self,
         owner: loading::LoadingOwner,
@@ -178,10 +262,13 @@ impl GuiApp {
             let batch =
                 roots[offset..(offset + crate::model::MAX_QUERY_ROWS).min(roots.len())].to_vec();
             let handle = self.handle.clone();
+            let ticket = self.browser.library.root_count_ticket();
             cx.spawn(async move |this, cx| {
                 let response = cx
                     .background_executor()
-                    .spawn(async move { handle.query(Query::LibraryRootCounts { roots: batch }) })
+                    .spawn(async move {
+                        handle.query_if_current(Query::LibraryRootCounts { roots: batch }, ticket)
+                    })
                     .await;
                 let _ = this.update(cx, |this, cx| {
                     this.browser.requests.root_count_workers.remove(&offset);
@@ -229,32 +316,38 @@ impl GuiApp {
         let Some(kind) = ViewRequestKind::for_query(&query) else {
             return;
         };
-        self.browser.requests.begin(kind, generation);
-        if kind != ViewRequestKind::Selection && self.panel_demand("playlists") {
-            self.start_loading_text(loading::LoadingOwner::View(kind), generation, cx);
-        }
         let revisions = self
             .state
             .query_revisions(self.browser.playlists.entries().playlist_id);
-        let owner = self.browser.requests.projections.entry(kind).or_default();
-        owner.sync(&query, revisions);
-        let owner_generation = owner.generation();
-        if !self.browser.requests.workers.insert(kind) {
-            self.browser
-                .requests
-                .queued
-                .insert(kind, (query, generation));
-            return;
-        }
-        let selected_playlist = self.browser.playlists.selected();
         let selection_generation = self.browser.playlists.selection_generation();
+        let delay = self.browser.requests.prepare_view(
+            kind,
+            query,
+            generation,
+            revisions,
+            selection_generation,
+            Instant::now(),
+        );
+        if kind != ViewRequestKind::Selection && self.panel_demand("playlists") {
+            self.start_loading_text(loading::LoadingOwner::View(kind), generation, cx);
+        }
+        let Some((query, delay)) = delay else {
+            return;
+        };
+        let owner_generation = self.browser.requests.projections[&kind].generation();
+        let ticket = self
+            .browser
+            .requests
+            .projections
+            .get_mut(&kind)
+            .expect("prepared view owner")
+            .ticket();
+        let selected_playlist = self.browser.playlists.selected();
         let request_query = query.clone();
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
-            // Coalesce quick changes; generations reject superseded queries.
-            cx.background_executor()
-                .timer(Duration::from_millis(80))
-                .await;
+            // Redispatch consumes only the latest intent's remaining quiet interval.
+            cx.background_executor().timer(delay).await;
             if !this
                 .update(cx, |this, cx| {
                     this.refresh(cx);
@@ -301,7 +394,7 @@ impl GuiApp {
             // The physical gate remains held through cancellation and core completion.
             let response = cx
                 .background_executor()
-                .spawn(async move { handle.query(query) })
+                .spawn(async move { handle.query_if_current(query, ticket) })
                 .await;
             let revisions = response.revisions;
             let result = response.result;
@@ -444,6 +537,7 @@ impl GuiApp {
             .requests
             .directory_workers
             .insert(branch.clone());
+        let ticket = self.browser.library.projection.ticket();
         let handle = self.handle.clone();
         let favorite = self.browser.library.favorites_only().then_some(true);
         let query = self.browser.library.buffer().query.clone();
@@ -497,26 +591,29 @@ impl GuiApp {
             let response = cx
                 .background_executor()
                 .spawn(async move {
-                    handle.query(if tree_active {
-                        Query::DirectoryPage {
-                            path: request_path,
-                            query: request_query,
-                            favorite,
-                            missing,
-                            offset,
-                            limit: page_size,
-                        }
-                    } else {
-                        Query::LibraryRootPage {
-                            path: request_path,
-                            query: request_query,
-                            favorite,
-                            missing,
-                            sort,
-                            offset,
-                            limit: page_size,
-                        }
-                    })
+                    handle.query_if_current(
+                        if tree_active {
+                            Query::DirectoryPage {
+                                path: request_path,
+                                query: request_query,
+                                favorite,
+                                missing,
+                                offset,
+                                limit: page_size,
+                            }
+                        } else {
+                            Query::LibraryRootPage {
+                                path: request_path,
+                                query: request_query,
+                                favorite,
+                                missing,
+                                sort,
+                                offset,
+                                limit: page_size,
+                            }
+                        },
+                        ticket,
+                    )
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -538,6 +635,10 @@ impl GuiApp {
                     ) {
                         return;
                     }
+                    if this.browser.library.projection.generation() != owner_generation {
+                        this.browser.library.cancel_directory(&branch, generation);
+                        return;
+                    }
                     let result = match response.result {
                         Ok(result) => result,
                         Err(error) => {
@@ -552,6 +653,7 @@ impl GuiApp {
                         owner_generation,
                         response.revisions,
                     ) {
+                        this.browser.library.cancel_directory(&branch, generation);
                         return;
                     }
                     let page = match result {
@@ -640,6 +742,10 @@ impl GuiApp {
     }
 
     pub(super) fn request_playlist_summaries(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.browser
+            .requests
+            .demands
+            .remove(&ViewRequestKind::Summaries);
         self.browser.playlists.invalidate_summaries();
         self.load_playlist_summaries(offset, cx);
     }
@@ -660,6 +766,10 @@ impl GuiApp {
         offset: usize,
         cx: &mut Context<Self>,
     ) {
+        self.browser
+            .requests
+            .demands
+            .remove(&ViewRequestKind::Entries);
         self.browser.playlists.prepare_entries(playlist_id);
         self.load_playlist_entries(playlist_id, offset, cx);
     }
@@ -776,6 +886,175 @@ mod tests {
     use super::{ViewRequestKind, ViewRequests};
     use crate::projection::GuiLibrarySnapshot;
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn queued_playlist_demand_uses_elapsed_latest_deadline() {
+        let start = Instant::now();
+        let kind = ViewRequestKind::Entries;
+        let query = |offset| crate::model::Query::PlaylistEntries {
+            playlist_id: 1,
+            offset,
+            limit: 20,
+        };
+        let revisions = Default::default();
+        let mut requests = ViewRequests::default();
+        let (_, delay) = requests
+            .prepare_view(kind, query(0), 1, revisions, 1, start)
+            .unwrap();
+        assert_eq!(delay, Duration::from_millis(80));
+        assert!(
+            requests
+                .prepare_view(
+                    kind,
+                    query(20),
+                    2,
+                    revisions,
+                    1,
+                    start + Duration::from_millis(10)
+                )
+                .is_none()
+        );
+        // Neither replacement nor an elapsed deadline releases the physical gate.
+        assert!(
+            requests
+                .prepare_view(
+                    kind,
+                    query(20),
+                    3,
+                    revisions,
+                    1,
+                    start + Duration::from_millis(100)
+                )
+                .is_none()
+        );
+        assert_eq!(requests.workers.len(), 1);
+        assert!(requests.workers.remove(&kind));
+        let (queued, generation) = requests.queued.remove(&kind).unwrap();
+        let (_, delay) = requests
+            .prepare_view(
+                kind,
+                queued,
+                generation,
+                revisions,
+                1,
+                start + Duration::from_millis(100),
+            )
+            .unwrap();
+        assert_eq!(delay, Duration::ZERO);
+        assert_eq!(requests.workers.len(), 1);
+    }
+
+    #[test]
+    fn playlist_replacement_and_hidden_reopen_preserve_remaining_quiet_interval() {
+        let start = Instant::now();
+        let kind = ViewRequestKind::Summaries;
+        let query = |offset| crate::model::Query::PlaylistSummaries { offset, limit: 20 };
+        let revisions = Default::default();
+        let mut requests = ViewRequests::default();
+        requests
+            .prepare_view(kind, query(0), 1, revisions, 0, start)
+            .unwrap();
+        let retired = requests.projections.get_mut(&kind).unwrap().ticket();
+        assert!(
+            requests
+                .prepare_view(
+                    kind,
+                    query(20),
+                    2,
+                    revisions,
+                    0,
+                    start + Duration::from_millis(20)
+                )
+                .is_none()
+        );
+        assert!(!retired.is_current());
+        assert!(requests.workers.remove(&kind));
+        let (queued, generation) = requests.queued.remove(&kind).unwrap();
+        let (_, delay) = requests
+            .prepare_view(
+                kind,
+                queued,
+                generation,
+                revisions,
+                0,
+                start + Duration::from_millis(50),
+            )
+            .unwrap();
+        assert_eq!(delay, Duration::from_millis(50));
+        // Hiding cancels logical demand/reservations, never the occupied gate or deadline.
+        requests.cancel(kind);
+        assert!(requests.workers.contains(&kind));
+        assert!(requests.workers.remove(&kind));
+        let (_, delay) = requests
+            .prepare_view(
+                kind,
+                query(20),
+                3,
+                revisions,
+                0,
+                start + Duration::from_millis(60),
+            )
+            .unwrap();
+        assert_eq!(delay, Duration::from_millis(40));
+        requests.cancel(kind);
+        assert!(requests.workers.remove(&kind));
+        let (_, delay) = requests
+            .prepare_view(
+                kind,
+                query(20),
+                4,
+                revisions,
+                0,
+                start + Duration::from_millis(150),
+            )
+            .unwrap();
+        assert_eq!(delay, Duration::ZERO);
+    }
+
+    #[test]
+    fn playlist_freshness_and_identity_changes_establish_new_quiet_deadlines() {
+        let start = Instant::now();
+        let kind = ViewRequestKind::Entries;
+        let query = crate::model::Query::PlaylistEntries {
+            playlist_id: 1,
+            offset: 0,
+            limit: 20,
+        };
+        let mut requests = ViewRequests::default();
+        let revisions = Default::default();
+        requests
+            .prepare_view(kind, query.clone(), 1, revisions, 1, start)
+            .unwrap();
+        assert!(requests.workers.remove(&kind));
+        let revisions = crate::response::QueryRevisions {
+            library: 1,
+            ..revisions
+        };
+        let (_, delay) = requests
+            .prepare_view(
+                kind,
+                query.clone(),
+                2,
+                revisions,
+                1,
+                start + Duration::from_millis(100),
+            )
+            .unwrap();
+        assert_eq!(delay, Duration::from_millis(80));
+        assert!(requests.workers.remove(&kind));
+        let (_, delay) = requests
+            .prepare_view(
+                kind,
+                query,
+                3,
+                revisions,
+                2,
+                start + Duration::from_millis(200),
+            )
+            .unwrap();
+        assert_eq!(delay, Duration::from_millis(80));
+    }
 
     #[test]
     fn playlist_query_owners_separate_metadata_catalog_and_occurrences() {

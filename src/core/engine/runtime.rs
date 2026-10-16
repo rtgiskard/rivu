@@ -29,8 +29,8 @@ impl Core {
                 recv(requests) -> request => {
                     let Ok(request) = request else { break; };
                     match request.operation {
-                        Operation::Query(query) => {
-                            let response = self.query_response(&query);
+                        Operation::Query { query, ticket } => {
+                            let response = self.query_response_if_current(&query, ticket.as_ref());
                             if let Some(reply) = request.reply {
                                 let _ = reply.send(CoreResponse::Query(response));
                             }
@@ -214,35 +214,39 @@ impl Core {
         }
         Ok(())
     }
+    /// This is the read dispatch boundary: cancellation never interrupts SQL
+    /// that has passed this check, and its normal reply retires the caller.
+    pub(in crate::core) fn query_response_if_current(
+        &self,
+        query: &Query,
+        ticket: Option<&QueryTicket>,
+    ) -> QueryResponse {
+        if ticket.is_some_and(|ticket| !ticket.is_current()) {
+            return QueryResponse {
+                revisions: self.state.query_revisions_for(query),
+                result: Err(QueryError::Cancelled),
+            };
+        }
+        self.query_response(query)
+    }
+
     pub(in crate::core) fn query_response(&self, query: &Query) -> QueryResponse {
         let result = self.view(query);
-        let playlist_id = match (query, &result) {
-            (
-                Query::PlaylistEntries { playlist_id, .. }
-                | Query::PlaylistEntryBatch { playlist_id, .. }
-                | Query::PlaylistEntryLocations { playlist_id, .. },
-                _,
-            ) => Some(*playlist_id),
-            (Query::PlaylistEntry { .. }, Ok(ViewResponse::PlaylistEntry(Some(entry)))) => {
-                Some(entry.playlist_id)
-            }
-            _ => None,
-        };
-        QueryResponse {
-            revisions: playlist_id
-                .map(|id| self.state.playlist_query_revisions(id))
-                .unwrap_or_else(|| self.state.query_revisions()),
-            result,
+        let mut revisions = self.state.query_revisions_for(query);
+        if let (Query::PlaylistEntry { .. }, Ok(ViewResponse::PlaylistEntry(Some(entry)))) =
+            (query, &result)
+        {
+            // An occurrence lookup only reveals its playlist after reading it.
+            revisions.playlist_entries = self
+                .state
+                .playlist_query_revisions(entry.playlist_id)
+                .playlist_entries;
         }
+        QueryResponse { revisions, result }
     }
 
     pub(in crate::core) fn view(&self, query: &Query) -> Result<ViewResponse, QueryError> {
-        let current = match query {
-            Query::PlaylistEntryBatch { playlist_id, .. } => {
-                self.state.playlist_query_revisions(*playlist_id)
-            }
-            _ => self.state.query_revisions(),
-        };
+        let current = self.state.query_revisions_for(query);
         let expected = match query {
             Query::TrackBatch { expected, .. }
             | Query::PlaylistSummaryBatch { expected, .. }
@@ -256,6 +260,10 @@ impl Core {
                 && after.is_none()
             {
                 // A non-scoped baseline can begin, never continue, a traversal.
+                if expected.library != current.library {
+                    return Err(QueryError::RevisionChanged);
+                }
+                expected.playlist_metadata = current.playlist_metadata;
                 expected.playlist_entries = current.playlist_entries;
             }
             if query.stamp(expected) != query.stamp(current) {

@@ -392,6 +392,11 @@ impl AlbumBrowser {
         };
         self.load_state.worker_pending = true;
         let generation = self.active_projection().generation();
+        let ticket = if self.selected.is_some() {
+            self.tracks_projection.ticket()
+        } else {
+            self.albums_projection.ticket()
+        };
         self.loading_text.begin((), generation, Instant::now());
         self.loading_text
             .schedule(cx, |this| &mut this.loading_text);
@@ -400,7 +405,7 @@ impl AlbumBrowser {
             let worker_query = query.clone();
             let response = cx
                 .background_executor()
-                .spawn(async move { handle.query(worker_query) })
+                .spawn(async move { handle.query_if_current(worker_query, ticket) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.loading_text.finish(&(), generation);

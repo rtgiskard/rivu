@@ -24,6 +24,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+mod query_epoch;
+pub(crate) use query_epoch::{QueryEpoch, QueryTicket};
+
 type Wakeup = Arc<dyn Fn() + Send + Sync>;
 #[expect(
     clippy::large_enum_variant,
@@ -34,7 +37,10 @@ enum CoreResponse {
     Ack(Ack),
 }
 enum Operation {
-    Query(Query),
+    Query {
+        query: Query,
+        ticket: Option<QueryTicket>,
+    },
     Command(Command),
     GuiConfig(GuiConfigChange),
     Navigate(Navigation),
@@ -85,6 +91,10 @@ impl CoreState {
     pub(crate) fn playlist_query_revisions(&self, playlist_id: i64) -> QueryRevisions {
         self.library
             .query_revisions(self.queue.revision, Some(playlist_id))
+    }
+
+    pub(crate) fn query_revisions_for(&self, query: &Query) -> QueryRevisions {
+        self.library.query_revisions_for(query, self.queue.revision)
     }
 
     /// Queue state is constant-size; Arc identity avoids traversing history/config.
@@ -235,9 +245,24 @@ impl CoreHandle {
     }
     /// Query metadata and rows are produced in the same Core dispatch.
     pub fn query(&self, query: Query) -> QueryResponse {
+        self.query_with_ticket(query, None)
+    }
+
+    /// Cancel stale queued reads without interrupting an already executing read.
+    pub(crate) fn query_if_current(&self, query: Query, ticket: QueryTicket) -> QueryResponse {
+        self.query_with_ticket(query, Some(ticket))
+    }
+
+    fn query_with_ticket(&self, query: Query, ticket: Option<QueryTicket>) -> QueryResponse {
+        if ticket.as_ref().is_some_and(|ticket| !ticket.is_current()) {
+            return QueryResponse {
+                revisions: self.state.read().query_revisions_for(&query),
+                result: Err(QueryError::Cancelled),
+            };
+        }
         let (tx, rx) = bounded(1);
         let request = Request {
-            operation: Operation::Query(query),
+            operation: Operation::Query { query, ticket },
             reply: Some(tx),
         };
         let response = self
@@ -2012,6 +2037,117 @@ mod tests {
             subscribers: Arc::new(RwLock::new(Vec::new())),
         };
         (handle, worker, receiver)
+    }
+
+    #[test]
+    fn cancelled_queued_read_skips_store_and_does_not_cancel_another_owner() {
+        let (directory, mut core) = fixture_with_database(Some(10.0), true);
+        core.store.set_track_cache_page_size(0);
+        let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+        connection
+            .execute("UPDATE tracks SET channels='unreadable' WHERE id=1", [])
+            .unwrap();
+        assert!(core.view(&Query::Track { track_id: 1 }).is_err());
+
+        let mut cancelled = QueryEpoch::default();
+        let mut current = QueryEpoch::default();
+        let (sender, requests) = bounded(3);
+        let enqueue = |track_id, ticket| {
+            let (reply, response) = bounded(1);
+            sender
+                .send(Request {
+                    operation: Operation::Query {
+                        query: Query::Track { track_id },
+                        ticket,
+                    },
+                    reply: Some(reply),
+                })
+                .unwrap();
+            response
+        };
+        let stale = enqueue(1, Some(cancelled.ticket()));
+        let independent = enqueue(2, Some(current.ticket()));
+        let unconditional = enqueue(1, None);
+        cancelled.cancel();
+        drop(sender);
+        run_until_disconnected(&mut core, requests);
+
+        assert!(matches!(
+            stale.recv().unwrap(),
+            CoreResponse::Query(QueryResponse {
+                result: Err(QueryError::Cancelled),
+                ..
+            })
+        ));
+        assert!(matches!(
+            independent.recv().unwrap(),
+            CoreResponse::Query(QueryResponse {
+                result: Ok(ViewResponse::Track(Some(track))),
+                ..
+            }) if track.id == 2
+        ));
+        assert!(matches!(
+            unconditional.recv().unwrap(),
+            CoreResponse::Query(QueryResponse {
+                result: Err(QueryError::Message(_)),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn already_cancelled_read_never_enters_the_request_queue() {
+        let (handle, _analysis, requests) = display_fixture();
+        let mut epoch = QueryEpoch::default();
+        let ticket = epoch.ticket();
+        epoch.cancel();
+        assert!(matches!(
+            handle
+                .query_if_current(Query::Track { track_id: 1 }, ticket)
+                .result,
+            Err(QueryError::Cancelled)
+        ));
+        assert!(requests.try_recv().is_err());
+    }
+
+    #[test]
+    fn cancellation_after_dispatch_waits_for_the_physical_reply() {
+        use std::sync::atomic::AtomicBool;
+
+        let (_directory, core) = fixture();
+        let (handle, _analysis, requests) = display_fixture();
+        let mut epoch = QueryEpoch::default();
+        let ticket = epoch.ticket();
+        let gate = Arc::new(AtomicBool::new(true));
+        let worker_gate = Arc::clone(&gate);
+        let (finished, completion) = bounded(1);
+        let worker = thread::spawn(move || {
+            let response = handle.query_if_current(Query::Track { track_id: 1 }, ticket);
+            worker_gate.store(false, Ordering::Release);
+            finished.send(response).unwrap();
+        });
+        let request = requests.recv_timeout(Duration::from_secs(2)).unwrap();
+        let Operation::Query { query, ticket } = request.operation else {
+            panic!("expected a read request");
+        };
+        // Execute the same dispatch boundary as Core::run, then deliberately
+        // hold physical completion delivery until after cancellation.
+        let response = core.query_response_if_current(&query, ticket.as_ref());
+        assert!(matches!(&response.result, Ok(ViewResponse::Track(Some(track))) if track.id == 1));
+        epoch.cancel();
+        assert!(gate.load(Ordering::Acquire));
+        assert!(completion.try_recv().is_err());
+        request
+            .reply
+            .unwrap()
+            .send(CoreResponse::Query(response))
+            .unwrap();
+        assert!(matches!(
+            completion.recv_timeout(Duration::from_secs(2)).unwrap().result,
+            Ok(ViewResponse::Track(Some(track))) if track.id == 1
+        ));
+        worker.join().unwrap();
+        assert!(!gate.load(Ordering::Acquire));
     }
 
     fn display_wait(ready: impl Fn() -> bool) {
@@ -3933,6 +4069,93 @@ mod tests {
         assert!(
             matches!(response.result, Ok(ViewResponse::PlaylistEntries(page))
             if page.rows[0].title == "edited")
+        );
+    }
+
+    #[test]
+    fn targeted_metadata_preserves_unrelated_track_and_playlist_reads() {
+        let (_directory, mut core) = fixture();
+        for (name, track_ids) in [("one", vec![1, 2]), ("two", vec![3, 4])] {
+            core.command(Command::CreatePlaylistWithTracks {
+                name: name.into(),
+                track_ids,
+            })
+            .unwrap();
+        }
+        let track = Query::Track { track_id: 3 };
+        let track_stamp = track.stamp(core.query_response(&track).revisions);
+        let entries = Query::PlaylistEntries {
+            playlist_id: 2,
+            offset: 0,
+            limit: 1,
+        };
+        let baseline = core.query_response(&entries).revisions;
+        let batch = Query::PlaylistEntryBatch {
+            playlist_id: 2,
+            after: None,
+            limit: 1,
+            expected: Some(baseline),
+        };
+        for command in [
+            Command::EditTrack {
+                track_id: 1,
+                title: Some("new title".into()),
+                artist: None,
+                album: None,
+                decoder_hint: None,
+            },
+            Command::SetFavorite {
+                track_ids: vec![1, 1],
+                favorite: true,
+            },
+            Command::ToggleFavorite { track_ids: vec![1] },
+        ] {
+            core.command(command).unwrap();
+            assert_eq!(
+                track.stamp(core.query_response(&track).revisions),
+                track_stamp
+            );
+            let ViewResponse::PlaylistEntryBatch(page) = core.view(&batch).unwrap() else {
+                panic!("expected playlist batch")
+            };
+            assert_eq!(page.rows[0].track_id, 3);
+        }
+        let related = Query::PlaylistEntries {
+            playlist_id: 1,
+            offset: 0,
+            limit: 1,
+        };
+        let before_decoder = core.query_response(&related).revisions;
+        let edited = Query::Track { track_id: 1 };
+        let edited_before = edited.stamp(core.query_response(&edited).revisions);
+        core.command(Command::EditTrack {
+            track_id: 1,
+            title: None,
+            artist: None,
+            album: None,
+            decoder_hint: Some(crate::model::DecoderHint::Native),
+        })
+        .unwrap();
+        assert_eq!(
+            related.stamp(before_decoder),
+            related.stamp(core.query_response(&related).revisions)
+        );
+        assert_ne!(
+            edited_before,
+            edited.stamp(core.query_response(&edited).revisions)
+        );
+        let before_failure = core.state.query_revisions();
+        assert!(
+            core.command(Command::SetFavorite {
+                track_ids: vec![1, -1],
+                favorite: true
+            })
+            .is_err()
+        );
+        assert_eq!(before_failure, core.state.query_revisions());
+        assert_eq!(
+            track.stamp(core.query_response(&track).revisions),
+            track_stamp
         );
     }
 

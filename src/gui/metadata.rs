@@ -16,6 +16,40 @@ use super::{BORDER, Field, GuiApp, PANEL, UI_INSET, column, icon_button, panel_h
 use crate::{model::Query, response::ViewResponse};
 use gpui::{AnyElement, App, Context, div, prelude::*, px, rgb};
 use session::{MetadataDraft, MetadataValues};
+use std::time::{Duration, Instant};
+
+#[derive(Default)]
+pub(in crate::gui) struct MetadataLoadState {
+    // Latest explicit/freshness demand survives hiding and worker completion.
+    quiet_until: Option<Instant>,
+    worker_pending: bool,
+    queued: Option<i64>,
+}
+
+impl MetadataLoadState {
+    fn demand_changed(&mut self, now: Instant) {
+        self.quiet_until = Some(now + Duration::from_millis(80));
+    }
+
+    fn start(&mut self, id: i64, visible: bool, now: Instant) -> Option<Duration> {
+        if !visible {
+            return None;
+        }
+        if self.worker_pending {
+            self.queued = Some(id);
+            return None;
+        }
+        self.worker_pending = true;
+        Some(self.quiet_until.map_or(Duration::ZERO, |deadline| {
+            deadline.saturating_duration_since(now)
+        }))
+    }
+
+    fn cancel_demand(&mut self) {
+        self.quiet_until = None;
+        self.queued = None;
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::gui) struct ManualIntentId(u64);
@@ -332,6 +366,8 @@ impl GuiApp {
             self.set_metadata_values(MetadataValues::default(), cx);
         }
         self.sync_metadata_query();
+        self.metadata_projection.cancel();
+        self.metadata_load.demand_changed(Instant::now());
         self.metadata_needs_refresh = true;
         self.demand_metadata(cx);
     }
@@ -346,14 +382,22 @@ impl GuiApp {
             let query = Query::Track { track_id };
             if self
                 .metadata_projection
-                .sync(&query, self.state.query_revisions(None))
+                .sync(&query, self.state.query_revisions_for(&query))
             {
+                self.metadata_load.demand_changed(Instant::now());
                 self.metadata_needs_refresh = true;
             }
         } else {
             self.metadata_projection.cancel();
             self.metadata_needs_refresh = false;
-            self.metadata_queued = None;
+            self.metadata_load.cancel_demand();
+        }
+    }
+
+    pub(super) fn cancel_metadata_read(&mut self) {
+        if self.metadata_load.worker_pending {
+            self.metadata_projection.cancel();
+            self.metadata_needs_refresh = self.metadata.selected().is_some();
         }
     }
 
@@ -373,20 +417,18 @@ impl GuiApp {
         let token = self.metadata.begin_load(id);
         let query = Query::Track { track_id: id };
         self.metadata_projection
-            .sync(&query, self.state.query_revisions(None));
+            .sync(&query, self.state.query_revisions_for(&query));
         let generation = self.metadata_projection.generation();
-        if self.metadata_worker {
-            self.metadata_queued = Some(id);
+        let visible = self.panel_demand("metadata");
+        let Some(delay) = self.metadata_load.start(id, visible, Instant::now()) else {
             return;
-        }
-        self.metadata_worker = true;
+        };
+        let ticket = self.metadata_projection.ticket();
         self.sync_metadata_inputs(cx);
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
-            // Retain the existing quiet interval without querying superseded selections.
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(80))
-                .await;
+            // Redispatch consumes only the latest intent's remaining quiet interval.
+            cx.background_executor().timer(delay).await;
             if !this
                 .update(cx, |this, cx| {
                     this.refresh(cx);
@@ -396,11 +438,11 @@ impl GuiApp {
                         && this.metadata_projection.accepts(
                             &query,
                             generation,
-                            this.state.query_revisions(None),
+                            this.state.query_revisions_for(&query),
                         );
                     if !current {
-                        this.metadata_worker = false;
-                        this.metadata_queued = None;
+                        this.metadata_load.worker_pending = false;
+                        this.metadata_load.queued = None;
                         this.metadata_needs_refresh = this.metadata.selected().is_some();
                         this.demand_metadata(cx);
                         cx.notify();
@@ -414,17 +456,24 @@ impl GuiApp {
             // Logical cancellation never releases the physical worker gate.
             let response = cx
                 .background_executor()
-                .spawn(async move { handle.query(Query::Track { track_id: id }) })
+                .spawn(
+                    async move { handle.query_if_current(Query::Track { track_id: id }, ticket) },
+                )
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.metadata_worker = false;
+                this.metadata_load.worker_pending = false;
                 this.refresh(cx);
-                if this.metadata_queued.take().is_some() {
+                if this.metadata_load.queued.take().is_some() {
                     this.metadata_needs_refresh = this.metadata.selected().is_some();
                     this.demand_metadata(cx);
                     return;
                 }
                 if !this.metadata.accepts_load(token) {
+                    return;
+                }
+                this.sync_metadata_query();
+                if this.metadata_projection.generation() != generation {
+                    this.demand_metadata(cx);
                     return;
                 }
                 let result = match response.result {
@@ -436,7 +485,6 @@ impl GuiApp {
                         return;
                     }
                 };
-                this.sync_metadata_query();
                 if !this
                     .metadata_projection
                     .accepts(&query, generation, response.revisions)
@@ -572,7 +620,100 @@ impl GuiApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{ManualAction, ManualIntents};
+    use super::{ManualAction, ManualIntents, MetadataLoadState};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn queued_details_demand_uses_elapsed_deadline_without_parallel_workers() {
+        let start = Instant::now();
+        let mut load = MetadataLoadState::default();
+        load.demand_changed(start);
+        assert_eq!(load.start(1, true, start), Some(Duration::from_millis(80)));
+        load.demand_changed(start + Duration::from_millis(10));
+        assert_eq!(load.start(2, true, start + Duration::from_millis(10)), None);
+        assert_eq!(
+            load.start(2, true, start + Duration::from_millis(100)),
+            None
+        );
+        assert!(load.worker_pending);
+        assert_eq!(load.queued.take(), Some(2));
+        // Only completion releases the physical gate; redispatch keeps the deadline.
+        load.worker_pending = false;
+        assert_eq!(
+            load.start(2, true, start + Duration::from_millis(100)),
+            Some(Duration::ZERO)
+        );
+        assert!(load.worker_pending);
+    }
+
+    #[test]
+    fn details_replacement_waits_only_for_remaining_latest_quiet_interval() {
+        let start = Instant::now();
+        let mut load = MetadataLoadState::default();
+        load.demand_changed(start);
+        assert!(load.start(1, true, start).is_some());
+        load.demand_changed(start + Duration::from_millis(20));
+        assert_eq!(load.start(2, true, start + Duration::from_millis(20)), None);
+        load.worker_pending = false;
+        assert_eq!(load.queued.take(), Some(2));
+        assert_eq!(
+            load.start(2, true, start + Duration::from_millis(50)),
+            Some(Duration::from_millis(50))
+        );
+    }
+
+    #[test]
+    fn hidden_details_reopen_preserves_deadline_and_submitted_worker() {
+        let start = Instant::now();
+        let mut load = MetadataLoadState::default();
+        load.demand_changed(start);
+        assert_eq!(
+            load.start(1, false, start + Duration::from_millis(10)),
+            None
+        );
+        assert!(!load.worker_pending);
+        assert_eq!(
+            load.start(1, true, start + Duration::from_millis(30)),
+            Some(Duration::from_millis(50))
+        );
+        assert_eq!(
+            load.start(1, false, start + Duration::from_millis(40)),
+            None
+        );
+        assert!(load.worker_pending);
+        // Hidden pre-submit retirement/completion does not renew the intent.
+        load.worker_pending = false;
+        assert_eq!(
+            load.start(1, false, start + Duration::from_millis(100)),
+            None
+        );
+        assert_eq!(
+            load.start(1, true, start + Duration::from_millis(100)),
+            Some(Duration::ZERO)
+        );
+    }
+
+    #[test]
+    fn details_freshness_demand_renews_deadline_without_releasing_worker() {
+        let start = Instant::now();
+        let mut load = MetadataLoadState::default();
+        load.demand_changed(start);
+        assert!(load.start(1, true, start).is_some());
+        let changed = start + Duration::from_millis(100);
+        load.demand_changed(changed);
+        assert_eq!(load.start(1, true, changed), None);
+        assert!(load.worker_pending);
+        load.worker_pending = false;
+        assert_eq!(load.queued.take(), Some(1));
+        assert_eq!(
+            load.start(1, true, changed),
+            Some(Duration::from_millis(80))
+        );
+        load.cancel_demand();
+        assert!(load.worker_pending);
+        assert!(load.queued.is_none());
+        assert!(load.quiet_until.is_none());
+    }
 
     #[test]
     fn late_range_cannot_replace_newer_exit_or_clean_selection() {

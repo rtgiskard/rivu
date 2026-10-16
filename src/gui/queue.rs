@@ -340,6 +340,16 @@ impl QueueSelection {
         self.page_worker && self.page_projection.generation() == generation
     }
 
+    pub(super) fn cancel_page_demand(&mut self) {
+        if self.page_worker {
+            self.page_projection.cancel();
+            self.rows.cancel_pending();
+        }
+        if self.locate.worker.is_some() {
+            self.locate.invalidate();
+        }
+    }
+
     fn demand_page(&mut self, range: Range<usize>, limit: usize) -> Option<(Query, u64)> {
         if self.page_size != limit {
             self.page_size = limit;
@@ -456,13 +466,17 @@ impl GuiApp {
             return;
         }
         let handle = self.handle.clone();
+        let ticket = self.browser.queue.locate.projection.ticket();
         cx.spawn(async move |this, cx| {
             let response = cx
                 .background_executor()
                 .spawn(async move {
-                    handle.query(Query::QueueEntries {
-                        queue_ids: vec![request.id],
-                    })
+                    handle.query_if_current(
+                        Query::QueueEntries {
+                            queue_ids: vec![request.id],
+                        },
+                        ticket,
+                    )
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -576,6 +590,7 @@ impl GuiApp {
     fn dispatch_queue_reconcile(&mut self, job: QueueReconcileJob, cx: &mut Context<Self>) {
         let handle = self.handle.clone();
         let i18n = std::sync::Arc::clone(&self.i18n);
+        let ticket = self.browser.queue.reconcile_projection.ticket();
         cx.spawn(async move |this, cx| {
             let result: Result<Option<Vec<QueueIdentity>>, String> = async {
                 let mut selected = Vec::with_capacity(job.ids.len());
@@ -593,9 +608,12 @@ impl GuiApp {
                     }
                     let handle = handle.clone();
                     let queue_ids = chunk.to_vec();
+                    let ticket = ticket.clone();
                     let response = cx
                         .background_executor()
-                        .spawn(async move { handle.query(Query::QueueEntries { queue_ids }) })
+                        .spawn(async move {
+                            handle.query_if_current(Query::QueueEntries { queue_ids }, ticket)
+                        })
                         .await;
                     if QueueSelection::reconcile_query().stamp(response.revisions) != job.stamp {
                         return Ok(None);
@@ -653,10 +671,11 @@ impl GuiApp {
         );
         let request = query.clone();
         let handle = self.handle.clone();
+        let ticket = self.browser.queue.page_projection.ticket();
         cx.spawn(async move |this, cx| {
             let response = cx
                 .background_executor()
-                .spawn(async move { handle.query(query) })
+                .spawn(async move { handle.query_if_current(query, ticket) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.finish_loading_text(
@@ -845,6 +864,7 @@ impl GuiApp {
         };
         let handle = self.handle.clone();
         let i18n = std::sync::Arc::clone(&self.i18n);
+        let ticket = self.browser.queue.projection.ticket();
         cx.spawn(async move |this, cx| {
             let result: Result<Option<QueueCommit>, String> = async {
                 if !this
@@ -860,11 +880,13 @@ impl GuiApp {
                     QueueTarget::Row(row) => row,
                     QueueTarget::Offset(offset) => {
                         let handle = handle.clone();
+                        let ticket = ticket.clone();
                         let response = cx
                             .background_executor()
-                            .spawn(
-                                async move { handle.query(Query::QueuePage { offset, limit: 1 }) },
-                            )
+                            .spawn(async move {
+                                handle
+                                    .query_if_current(Query::QueuePage { offset, limit: 1 }, ticket)
+                            })
                             .await;
                         if QueueSelection::query().stamp(response.revisions) != job.stamp {
                             return Err(i18n.text("gl-queue-changed").into());
@@ -902,9 +924,12 @@ impl GuiApp {
                         }
                         let limit = (end - offset).min(crate::model::MAX_QUERY_ROWS);
                         let handle = handle.clone();
+                        let ticket = ticket.clone();
                         let response = cx
                             .background_executor()
-                            .spawn(async move { handle.query(Query::QueuePage { offset, limit }) })
+                            .spawn(async move {
+                                handle.query_if_current(Query::QueuePage { offset, limit }, ticket)
+                            })
                             .await;
                         if QueueSelection::query().stamp(response.revisions) != job.stamp {
                             return Err(i18n.text("gl-queue-changed").into());

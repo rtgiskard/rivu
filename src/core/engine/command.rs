@@ -256,7 +256,9 @@ impl Core {
                         .wrapping_add(1);
                 }
                 if impact.library {
-                    self.state.library.revision = self.state.library.revision.wrapping_add(1);
+                    self.state
+                        .library
+                        .change_metadata(Some(&[track_id]), impact.playlists.as_deref());
                     (|| -> Result<()> {
                         self.refresh_affected_queue_tracks(&[track_id])?;
                         if title.is_some()
@@ -308,8 +310,11 @@ impl Core {
                 track_ids,
                 favorite,
             } => {
-                if self.store.set_favorite(&track_ids, favorite)? {
-                    self.state.library.revision = self.state.library.revision.wrapping_add(1);
+                let impact = self.store.set_favorite(&track_ids, favorite)?;
+                if impact.changed {
+                    self.state
+                        .library
+                        .change_metadata(impact.tracks.as_deref(), impact.playlists.as_deref());
                     for entry in Arc::make_mut(&mut self.state.library.history) {
                         if track_ids.contains(&entry.track_id) {
                             entry.favorite = favorite;
@@ -320,8 +325,11 @@ impl Core {
                 }
             }
             Command::ToggleFavorite { track_ids } => {
-                if self.store.toggle_favorite(&track_ids)? {
-                    self.state.library.revision = self.state.library.revision.wrapping_add(1);
+                let impact = self.store.toggle_favorite(&track_ids)?;
+                if impact.changed {
+                    self.state
+                        .library
+                        .change_metadata(impact.tracks.as_deref(), impact.playlists.as_deref());
                     for entry in Arc::make_mut(&mut self.state.library.history) {
                         if track_ids.contains(&entry.track_id) {
                             entry.favorite = !entry.favorite;

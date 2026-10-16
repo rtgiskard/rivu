@@ -93,7 +93,15 @@ impl Core {
             && let Some(bitrate) = bitrate.filter(|bitrate| *bitrate > 0)
             && self.persist_playback_bitrate(bitrate, true)
         {
-            self.state.library.revision = self.state.library.revision.wrapping_add(1);
+            let track_id = self
+                .state
+                .current_track
+                .as_ref()
+                .expect("playback bitrate has a current track")
+                .id;
+            self.state
+                .library
+                .change_metadata(Some(&[track_id]), Some(&[]));
             self.state.queue = self.store.queue_projection(self.queue_ids.len())
                 .context("Bitrate update committed, but refreshing queue failed; previous queue projection retained")?;
         }

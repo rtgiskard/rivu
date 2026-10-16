@@ -730,11 +730,12 @@ impl GuiApp {
             }
             Ok(RangeStep::Query { token, slice }) => {
                 let query = self.browser.library.range_query(token, &slice);
+                let ticket = self.browser.library.range_selection.projection.ticket();
                 let handle = self.handle.clone();
                 cx.spawn(async move |this, cx| {
                     let response = cx
                         .background_executor()
-                        .spawn(async move { handle.query(query) })
+                        .spawn(async move { handle.query_if_current(query, ticket) })
                         .await;
                     let _ = this.update(cx, |this, cx| {
                         let revisions = this.state.query_revisions(None);

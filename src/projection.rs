@@ -26,6 +26,7 @@ pub struct GuiLibrarySnapshot {
     pub structure_revision: u64,
     pub playlist_revision: u64,
     pub playlist_entry_revisions: Arc<BTreeMap<i64, u64>>,
+    pub metadata_revisions: Arc<crate::model::MetadataRevisions>,
     pub duplicate_groups_revision: u64,
     pub duplicate_members_revision: u64,
     pub history: Arc<Vec<HistoryEntry>>,
@@ -59,6 +60,7 @@ impl GuiSnapshot {
                 structure_revision: state.library.structure_revision,
                 playlist_revision: state.library.playlist_revision,
                 playlist_entry_revisions: Arc::clone(&state.library.playlist_entry_revisions),
+                metadata_revisions: Arc::clone(&state.library.metadata_revisions),
                 duplicate_groups_revision: state.library.duplicate_groups_revision,
                 duplicate_members_revision: state.library.duplicate_members_revision,
                 history: Arc::clone(&state.library.history),
@@ -104,6 +106,7 @@ pub struct TuiLibrarySnapshot {
     pub structure_revision: u64,
     pub playlist_revision: u64,
     pub playlist_entry_revisions: Arc<BTreeMap<i64, u64>>,
+    pub metadata_revisions: Arc<crate::model::MetadataRevisions>,
     pub duplicate_groups_revision: u64,
     pub duplicate_members_revision: u64,
 }
@@ -139,6 +142,7 @@ impl TuiSnapshot {
                 structure_revision: state.library.structure_revision,
                 playlist_revision: state.library.playlist_revision,
                 playlist_entry_revisions: Arc::clone(&state.library.playlist_entry_revisions),
+                metadata_revisions: Arc::clone(&state.library.metadata_revisions),
                 duplicate_groups_revision: state.library.duplicate_groups_revision,
                 duplicate_members_revision: state.library.duplicate_members_revision,
             },
@@ -174,7 +178,7 @@ impl TuiSnapshot {
 pub(crate) struct QueryProjection {
     identity: Option<crate::model::Query>,
     stamp: Option<crate::model::QueryStamp>,
-    generation: u64,
+    generation: crate::core::QueryEpoch,
 }
 
 impl QueryProjection {
@@ -200,7 +204,7 @@ impl QueryProjection {
     }
 
     pub(crate) fn generation(&self) -> u64 {
-        self.generation
+        self.generation.generation()
     }
 
     pub(crate) fn stamp(&self) -> Option<crate::model::QueryStamp> {
@@ -209,7 +213,11 @@ impl QueryProjection {
 
     /// Retiring submissions does not invalidate a still-current cached payload.
     pub(crate) fn cancel(&mut self) {
-        self.generation = self.generation.wrapping_add(1);
+        self.generation.cancel();
+    }
+
+    pub(crate) fn ticket(&mut self) -> crate::core::QueryTicket {
+        self.generation.ticket()
     }
 
     pub(crate) fn accepts(
@@ -218,7 +226,7 @@ impl QueryProjection {
         generation: u64,
         revisions: crate::response::QueryRevisions,
     ) -> bool {
-        self.generation == generation
+        self.generation.generation() == generation
             && self
                 .identity
                 .as_ref()
@@ -238,6 +246,12 @@ impl GuiLibrarySnapshot {
             playlist: self.playlist_revision,
             duplicate_groups: self.duplicate_groups_revision,
             duplicate_members: self.duplicate_members_revision,
+            playlist_metadata: playlist_id
+                .filter(|id| self.playlist_entry_revisions.contains_key(id))
+                .map(|id| crate::response::PlaylistEntryRevision {
+                    playlist_id: id,
+                    revision: self.metadata_revisions.playlist_revision(id, self.revision),
+                }),
             playlist_entries: playlist_id.and_then(|id| {
                 self.playlist_entry_revisions.get(&id).map(|revision| {
                     crate::response::PlaylistEntryRevision {
@@ -256,23 +270,33 @@ impl GuiSnapshot {
         &self,
         playlist_id: Option<i64>,
     ) -> crate::response::QueryRevisions {
-        crate::response::QueryRevisions {
-            library: self.library.revision,
-            structure: self.library.structure_revision,
-            playlist: self.library.playlist_revision,
-            queue: self.queue.revision,
-            duplicate_groups: self.library.duplicate_groups_revision,
-            duplicate_members: self.library.duplicate_members_revision,
-            playlist_entries: playlist_id.and_then(|id| {
-                self.library
-                    .playlist_entry_revisions
-                    .get(&id)
-                    .map(|revision| crate::response::PlaylistEntryRevision {
-                        playlist_id: id,
-                        revision: *revision,
-                    })
-            }),
+        let mut revisions = self.library.query_revisions(playlist_id);
+        revisions.queue = self.queue.revision;
+        revisions
+    }
+
+    pub(crate) fn query_revisions_for(
+        &self,
+        query: &crate::model::Query,
+    ) -> crate::response::QueryRevisions {
+        use crate::model::Query;
+        let playlist_id = match query {
+            Query::PlaylistEntries { playlist_id, .. }
+            | Query::PlaylistEntryBatch { playlist_id, .. }
+            | Query::PlaylistEntryLocations { playlist_id, .. } => Some(*playlist_id),
+            _ => None,
+        };
+        let mut revisions = self.query_revisions(playlist_id);
+        if let Query::Track { track_id } = query {
+            revisions.track = Some(crate::response::TrackRevision {
+                track_id: *track_id,
+                revision: self
+                    .library
+                    .metadata_revisions
+                    .track_revision(*track_id, self.library.revision),
+            });
         }
+        revisions
     }
 }
 
@@ -288,6 +312,16 @@ impl TuiSnapshot {
             queue: self.queue.revision,
             duplicate_groups: self.library.duplicate_groups_revision,
             duplicate_members: self.library.duplicate_members_revision,
+            track: None,
+            playlist_metadata: playlist_id
+                .filter(|id| self.library.playlist_entry_revisions.contains_key(id))
+                .map(|id| crate::response::PlaylistEntryRevision {
+                    playlist_id: id,
+                    revision: self
+                        .library
+                        .metadata_revisions
+                        .playlist_revision(id, self.library.revision),
+                }),
             playlist_entries: playlist_id.and_then(|id| {
                 self.library
                     .playlist_entry_revisions

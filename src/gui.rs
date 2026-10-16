@@ -456,8 +456,7 @@ pub(super) struct GuiApp {
     loading_text: loading::LoadingText<loading::LoadingOwner>,
     metadata: MetadataSession,
     metadata_projection: crate::projection::QueryProjection,
-    metadata_worker: bool,
-    metadata_queued: Option<i64>,
+    metadata_load: metadata::MetadataLoadState,
     metadata_needs_refresh: bool,
     manual_intents: metadata::ManualIntents,
     duplicate_review: duplicates::DuplicateReview,
@@ -949,6 +948,7 @@ impl GuiApp {
                 this.frame_timer.take();
                 if !this.window_visible {
                     this.invalidate_window_interaction(window, cx);
+                    this.cancel_window_reads();
                 }
                 this.refresh(cx);
                 this.sync_analysis(cx);
@@ -1008,8 +1008,7 @@ impl GuiApp {
             loading_text: loading::LoadingText::default(),
             metadata: MetadataSession::default(),
             metadata_projection: Default::default(),
-            metadata_worker: false,
-            metadata_queued: None,
+            metadata_load: metadata::MetadataLoadState::default(),
             metadata_needs_refresh: false,
             manual_intents: metadata::ManualIntents::default(),
             duplicate_review: duplicates::DuplicateReview::default(),

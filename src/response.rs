@@ -69,6 +69,12 @@ pub struct PlaylistEntryRevision {
     pub revision: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackRevision {
+    pub track_id: i64,
+    pub revision: u64,
+}
+
 /// Query data revisions are captured atomically with the query result.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryRevisions {
@@ -77,6 +83,8 @@ pub struct QueryRevisions {
     pub playlist: u64,
     pub queue: u64,
     pub playlist_entries: Option<PlaylistEntryRevision>,
+    pub track: Option<TrackRevision>,
+    pub playlist_metadata: Option<PlaylistEntryRevision>,
     pub duplicate_groups: u64,
     pub duplicate_members: u64,
 }
@@ -114,6 +122,7 @@ pub enum ViewResponse {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QueryError {
     RevisionChanged,
+    Cancelled,
     Message(String),
 }
 
@@ -129,6 +138,7 @@ impl fmt::Display for QueryError {
             Self::RevisionChanged => {
                 formatter.write_str("Query data changed while reading; restart the listing")
             }
+            Self::Cancelled => formatter.write_str("Query demand was cancelled"),
             Self::Message(message) => formatter.write_str(message),
         }
     }

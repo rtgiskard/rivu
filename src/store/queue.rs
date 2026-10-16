@@ -403,7 +403,7 @@ mod tests {
                 .changed
         );
         revision = assert_invalidated(&store, revision)?;
-        assert!(store.set_favorite(&[1], true)?);
+        assert!(store.set_favorite(&[1], true)?.changed);
         revision = assert_invalidated(&store, revision)?;
         store.increment_play_count(1)?;
         revision = assert_invalidated(&store, revision)?;
@@ -412,7 +412,7 @@ mod tests {
                 .edit_track(1, Some("Title"), None, None, None)?
                 .changed
         );
-        assert!(!store.set_favorite(&[1], true)?);
+        assert!(!store.set_favorite(&[1], true)?.changed);
         store.edit_track(4, Some("Unqueued"), None, None, None)?;
         store.set_favorite(&[4], true)?;
         store.increment_play_count(4)?;

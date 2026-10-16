@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::PathBuf,
+    sync::Arc,
+};
 
 /// Shared client state assembled from sectioned IPC responses.
 /// UI-specific projections borrow this contract; it contains no view state.
@@ -282,11 +286,89 @@ pub struct LibrarySnapshot {
     #[serde(default)]
     pub playlist_entry_revisions: Arc<BTreeMap<i64, u64>>,
     #[serde(default)]
+    pub metadata_revisions: Arc<MetadataRevisions>,
+    #[serde(default)]
     pub duplicate_groups_revision: u64,
     #[serde(default)]
     pub duplicate_members_revision: u64,
     #[serde(default)]
     pub history: Arc<Vec<HistoryEntry>>,
+}
+
+/// Exact recent metadata scopes; unknown or overflowing batches reset all scopes.
+/// The bound covers both maps, independently of library and playlist sizes.
+pub(crate) const MAX_METADATA_SCOPES: usize = 256;
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct MetadataRevisions {
+    revision: u64,
+    baseline: u64,
+    tracks: HashMap<i64, u64>,
+    playlists: HashMap<i64, u64>,
+}
+
+impl MetadataRevisions {
+    fn reset(&mut self, revision: u64) {
+        self.revision = revision;
+        self.baseline = revision;
+        self.tracks.clear();
+        self.playlists.clear();
+    }
+
+    fn record(
+        &mut self,
+        previous: u64,
+        revision: u64,
+        tracks: Option<&[i64]>,
+        playlists: Option<&[i64]>,
+    ) {
+        if self.revision != previous {
+            self.reset(previous);
+        }
+        let (Some(tracks), Some(playlists)) = (tracks, playlists) else {
+            self.reset(revision);
+            return;
+        };
+        if tracks.len().saturating_add(playlists.len()) > MAX_METADATA_SCOPES {
+            self.reset(revision);
+            return;
+        }
+        self.revision = revision;
+        for &id in tracks {
+            if !self.tracks.contains_key(&id)
+                && self.tracks.len() + self.playlists.len() == MAX_METADATA_SCOPES
+            {
+                self.reset(revision);
+                return;
+            }
+            self.tracks.insert(id, revision);
+        }
+        for &id in playlists {
+            if !self.playlists.contains_key(&id)
+                && self.tracks.len() + self.playlists.len() == MAX_METADATA_SCOPES
+            {
+                self.reset(revision);
+                return;
+            }
+            self.playlists.insert(id, revision);
+        }
+    }
+
+    pub(crate) fn track_revision(&self, id: i64, library: u64) -> u64 {
+        if self.revision == library {
+            self.tracks.get(&id).copied().unwrap_or(self.baseline)
+        } else {
+            library
+        }
+    }
+
+    pub(crate) fn playlist_revision(&self, id: i64, library: u64) -> u64 {
+        if self.revision == library {
+            self.playlists.get(&id).copied().unwrap_or(self.baseline)
+        } else {
+            library
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -409,6 +491,7 @@ impl Default for LibrarySnapshot {
             structure_revision: 0,
             playlist_revision: 0,
             playlist_entry_revisions: Arc::default(),
+            metadata_revisions: Arc::default(),
             duplicate_groups_revision: 0,
             duplicate_members_revision: 0,
             history: Arc::new(Vec::new()),
@@ -698,9 +781,14 @@ impl Query {
         match self {
             Self::LibraryPage { .. }
             | Self::TrackPage { .. }
-            | Self::Track { .. }
             | Self::TrackBatch { .. }
             | Self::LibraryStats => stamp.library = revisions.library,
+            Self::Track { track_id } => {
+                stamp.track = revisions.track.filter(|scope| scope.track_id == *track_id);
+                if stamp.track.is_none() {
+                    stamp.library = revisions.library;
+                }
+            }
             Self::Albums { .. }
             | Self::AlbumTracks { .. }
             | Self::DirectoryPage { .. }
@@ -715,7 +803,12 @@ impl Query {
             }
             Self::PlaylistEntries { playlist_id, .. }
             | Self::PlaylistEntryBatch { playlist_id, .. } => {
-                stamp.library = revisions.library;
+                stamp.playlist_metadata = revisions
+                    .playlist_metadata
+                    .filter(|scope| scope.playlist_id == *playlist_id);
+                if stamp.playlist_metadata.is_none() {
+                    stamp.library = revisions.library;
+                }
                 stamp.playlist_entries = revisions
                     .playlist_entries
                     .filter(|scope| scope.playlist_id == *playlist_id);
@@ -836,6 +929,13 @@ impl LibrarySnapshot {
             queue: queue_revision,
             duplicate_groups: self.duplicate_groups_revision,
             duplicate_members: self.duplicate_members_revision,
+            track: None,
+            playlist_metadata: playlist_id
+                .filter(|id| self.playlist_entry_revisions.contains_key(id))
+                .map(|id| crate::response::PlaylistEntryRevision {
+                    playlist_id: id,
+                    revision: self.metadata_revisions.playlist_revision(id, self.revision),
+                }),
             playlist_entries: playlist_id.and_then(|id| {
                 self.playlist_entry_revisions.get(&id).map(|revision| {
                     crate::response::PlaylistEntryRevision {
@@ -845,6 +945,40 @@ impl LibrarySnapshot {
                 })
             }),
         }
+    }
+
+    pub(crate) fn change_metadata(&mut self, tracks: Option<&[i64]>, playlists: Option<&[i64]>) {
+        let previous = self.revision;
+        self.revision = previous.wrapping_add(1);
+        Arc::make_mut(&mut self.metadata_revisions).record(
+            previous,
+            self.revision,
+            tracks,
+            playlists,
+        );
+    }
+
+    pub(crate) fn query_revisions_for(
+        &self,
+        query: &Query,
+        queue_revision: u64,
+    ) -> crate::response::QueryRevisions {
+        let playlist_id = match query {
+            Query::PlaylistEntries { playlist_id, .. }
+            | Query::PlaylistEntryBatch { playlist_id, .. }
+            | Query::PlaylistEntryLocations { playlist_id, .. } => Some(*playlist_id),
+            _ => None,
+        };
+        let mut revisions = self.query_revisions(queue_revision, playlist_id);
+        if let Query::Track { track_id } = query {
+            revisions.track = Some(crate::response::TrackRevision {
+                track_id: *track_id,
+                revision: self
+                    .metadata_revisions
+                    .track_revision(*track_id, self.revision),
+            });
+        }
+        revisions
     }
 }
 
@@ -1084,5 +1218,29 @@ mod tests {
                 mode: RepeatMode::Off
             })
         ));
+    }
+
+    #[test]
+    fn metadata_scope_overflow_and_unknown_batches_invalidate_all_prior_scopes() {
+        let mut library = LibrarySnapshot::default();
+        let query = Query::Track { track_id: 10_000 };
+        let initial = query.stamp(library.query_revisions_for(&query, 0));
+        for id in 0..MAX_METADATA_SCOPES as i64 {
+            library.change_metadata(Some(&[id]), Some(&[]));
+        }
+        assert_eq!(query.stamp(library.query_revisions_for(&query, 0)), initial);
+        library.change_metadata(Some(&[MAX_METADATA_SCOPES as i64]), Some(&[]));
+        let overflow = query.stamp(library.query_revisions_for(&query, 0));
+        assert_ne!(overflow, initial);
+        library.change_metadata(Some(&[1]), Some(&[]));
+        assert_eq!(
+            query.stamp(library.query_revisions_for(&query, 0)),
+            overflow
+        );
+        library.change_metadata(None, None);
+        assert_ne!(
+            query.stamp(library.query_revisions_for(&query, 0)),
+            overflow
+        );
     }
 }

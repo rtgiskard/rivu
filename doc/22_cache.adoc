@@ -34,16 +34,20 @@ work and accept results. A projection key is normalized query identity plus its
 stamp, excluding page offsets, limits, batch cursors, and expected revisions.
 Request generations reject obsolete intent independently of data freshness.
 
-Library metadata rows and Details depend on library metadata; directory rows,
-album rows, and library location also depend on structure. Root counts depend
-only on structure and configured root identity. The forest page is synthesized
-locally from configured roots, not another database query. Playlist summaries
-depend only on the playlist catalog. Full playlist rows depend on metadata and
-that playlist's content token; compact occurrence/location queries depend only
-on its content token. Every extant playlist has a token, and absence means
-deletion: rename never invalidates content or compact occurrence selection.
+Library metadata rows depend on library content; Details use their selected
+track's metadata scope. Directory rows, album rows, and library location also
+depend on structure. Root counts depend only on structure and configured root
+identity. The forest page is synthesized locally from configured roots, not
+another database query. Playlist summaries depend only on the playlist catalog.
+Full playlist rows depend on that playlist's metadata and content tokens;
+compact occurrence/location queries depend only on its content token. Every
+extant playlist has a content token, and absence means deletion: rename never
+invalidates content or compact occurrence selection. Unrelated track edits do
+not invalidate Details or playlist rows. Targeted metadata facts are bounded;
+unknown bulk effects and overflow conservatively invalidate all scopes, as
+described in link:21_ipc.adoc#_query_results_and_pagination[the query contract].
 Metadata-only changes preserve the latest navigation target and modifiers;
-an in-flight full-row read drains before retrying against current metadata.
+an already dispatched full-row read drains before retrying against current metadata.
 Queue queries depend only on the queue token. Duplicate groups use their group
 token; duplicate members use metadata, member facts (including playlist reference
 counts), and queue. A catalog rename does not change member facts.
@@ -74,8 +78,15 @@ Debounced directory, playlist, and explicit Details demand is checked again
 before submission. Abandoned unsubmitted demand releases its reservation without
 becoming a failed page or discarding cached rows; submitted reads retain their
 physical gate until completion.
-Album searches retain the latest input's quiet deadline independently of a
-submitted worker; replacement, hiding, and completion do not shorten that delay.
+Reusable owner epochs also accompany cancellable GUI reads into Core. Core skips
+an obsolete queued read before accessing Store; cancellation never interrupts a
+read that has passed dispatch, cancels another owner, or replays a write. Hiding
+a window retires its pending page and explicit Details reads without discarding
+retained rows or drafts. Completion still owns every submitted physical gate.
+Album searches, Playlist pages, and explicit Details selections retain the latest
+demand's absolute quiet deadline independently of a submitted worker. Replacement
+renews that deadline; redispatch, hiding, and completion consume only its remaining
+interval rather than starting another full delay.
 Viewport demand is deferred past prepaint so locally accepted forest pages can
 invalidate the frame that still contains their loading placeholders.
 

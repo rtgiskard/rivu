@@ -19,7 +19,7 @@ use std::cell::RefCell;
 pub use duplicates::{DuplicateGroup, DuplicateMember, PreparedRelocation, RelocationIdentity};
 pub use scan::ScanImpacts;
 pub(crate) use tracks::PlaybackSource;
-pub use tracks::{TrackEditImpact, TrackRemovalImpact};
+pub use tracks::{FavoriteImpact, TrackEditImpact, TrackRemovalImpact};
 
 pub struct Store {
     conn: Connection,

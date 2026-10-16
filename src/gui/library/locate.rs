@@ -126,6 +126,7 @@ impl GuiApp {
             query: locate_query,
             track_id,
         };
+        let ticket = self.browser.library.locate.projection.ticket();
         let handle = self.handle.clone();
         self.browser.library.locate.pending = true;
         cx.spawn(async move |this, cx| {
@@ -142,9 +143,10 @@ impl GuiApp {
                     sort,
                 };
                 let handle = handle.clone();
+                let ticket = ticket.clone();
                 let response = cx
                     .background_executor()
-                    .spawn(async move { handle.query(query) })
+                    .spawn(async move { handle.query_if_current(query, ticket) })
                     .await;
                 let current = this
                     .update(cx, |this, cx| {
