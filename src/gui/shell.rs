@@ -517,8 +517,8 @@ impl Render for GuiApp {
                     ))
                     .child(
                         menu_item(
-                            "app-still-mode",
-                            self.tr("shell-still-mode"),
+                            "app-visualizations",
+                            self.tr("shell-visualizations"),
                             cx,
                             |this, _, cx| {
                                 this.app_menu_open = false;
@@ -533,12 +533,12 @@ impl Render for GuiApp {
                         .child(
                             div()
                                 .ml_auto()
-                                .text_color(rgb(if self.state.system.config.still_mode {
+                                .text_color(rgb(if !self.state.system.config.still_mode {
                                     ACCENT
                                 } else {
                                     MUTED
                                 }))
-                                .child(if self.state.system.config.still_mode {
+                                .child(if !self.state.system.config.still_mode {
                                     self.tr("shell-on")
                                 } else {
                                     self.tr("shell-off")

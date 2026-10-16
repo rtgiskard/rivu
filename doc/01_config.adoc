@@ -178,9 +178,9 @@ merely reopening its window. Media read buffering applies to future source opens
 including full waveform scans; it does not reopen the current track.
 Pause visualizations (Still Mode) is under Visualizations → Shared settings →
 Processing and cache and takes effect when settings are applied, without
-restarting playback. The application menu also offers a Still mode toggle below
-Layouts; it applies and saves immediately. Both controls use the persisted
-`visualizations.still_mode` setting. Neither affects artwork or its animation.
+restarting playback. The application menu also offers a Visualizations toggle below
+Layouts; On enables visualizations and Off pauses them, saving immediately.
+Both controls use `visualizations.still_mode`; neither affects artwork or animation.
 
 Shuffle and Repeat are playback controls, not desktop settings. Applying settings
 preserves their values at the time the core executes the request, including
