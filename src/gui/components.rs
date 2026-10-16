@@ -332,7 +332,7 @@ pub(crate) fn artwork_preview(
 /// Menu item with shared application event handling.
 pub(crate) fn menu_item(
     id: impl Into<ElementId>,
-    label: impl Into<SharedString>,
+    label: impl IntoElement,
     cx: &mut Context<GuiApp>,
     action: impl Fn(&mut GuiApp, &mut Window, &mut Context<GuiApp>) + 'static,
 ) -> Stateful<Div> {
@@ -437,10 +437,7 @@ pub(crate) fn context_menu_container(id: impl Into<ElementId>) -> Stateful<Div> 
 }
 
 /// Standard menu item shell; pages only provide the action callback.
-pub(crate) fn menu_item_style(
-    id: impl Into<ElementId>,
-    label: impl Into<SharedString>,
-) -> Stateful<Div> {
+pub(crate) fn menu_item_style(id: impl Into<ElementId>, label: impl IntoElement) -> Stateful<Div> {
     div()
         .id(id)
         .w_full()
@@ -456,13 +453,7 @@ pub(crate) fn menu_item_style(
         .bg(rgb(PANEL).alpha(0.0))
         .rounded_sm()
         .hover(|style| style.bg(rgb(HIGHLIGHT)))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .whitespace_normal()
-                .child(label.into()),
-        )
+        .child(div().flex_1().min_w_0().whitespace_normal().child(label))
 }
 
 /// Shared shell for anchored dropdowns.

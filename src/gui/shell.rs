@@ -1229,7 +1229,7 @@ impl Render for GuiApp {
                     );
                     if has_selected_queue {
                         if !self.browser.playlists.summaries().rows.is_empty() {
-                            let row_height = components::list_row_height(window);
+                            let row_height = window.rem_size() * 2.0;
                             let height = (row_height
                                 * self.browser.playlists.summaries().rows.len() as f32)
                                 .min(window.rem_size() * components::POPOVER_MAX_REMS)
@@ -1260,7 +1260,10 @@ impl Render for GuiApp {
                                                     let playlist_id = playlist.id;
                                                     menu_item(
                                                         ("queue-playlist", playlist_id as u64),
-                                                        playlist.name.clone(),
+                                                        div()
+                                                            .min_w_0()
+                                                            .truncate()
+                                                            .child(playlist.name.clone()),
                                                         cx,
                                                         move |this, _, cx| {
                                                             let track_ids = this
