@@ -59,6 +59,7 @@ const ALBUM_PAGE: usize = 24;
 struct AlbumGridLayout {
     columns: usize,
     artwork_size: Pixels,
+    metadata_lift: Pixels,
     row_height: Pixels,
 }
 
@@ -67,11 +68,14 @@ impl AlbumGridLayout {
         let columns = ((width / rem) / 12.).floor().max(1.) as usize;
         let card_width = (width - rem * 0.5 * columns.saturating_sub(1) as f32) / columns as f32;
         let artwork_size = (card_width - rem).max(px(0.));
+        let metadata_lift = rem * 0.75 + artwork_size * (1.0 / std::f32::consts::E - 0.25);
         Self {
             columns,
             artwork_size,
-            // Keep extra breathing room below the lifted metadata and card actions.
-            row_height: artwork_size + rem * 7.5,
+            metadata_lift,
+            // Cover, three metadata lines, card padding and the grid-row gap;
+            // metadata follows the fade's upper edge as its coverage increases.
+            row_height: artwork_size + rem * 5.125 - metadata_lift,
         }
     }
 }
@@ -757,6 +761,13 @@ impl AlbumBrowser {
         let directory = key.directory.to_string_lossy().into_owned();
         let title = album_title(&self.i18n, &key);
         let drag_label: SharedString = title.clone().into();
+        let cover_fade = |color: u32| {
+            linear_gradient(
+                0.,
+                linear_color_stop(rgb(color), 0.),
+                linear_color_stop(rgb(color).alpha(0.), 1.),
+            )
+        };
         let actions = row()
             .id(("album-actions", index))
             .absolute()
@@ -803,7 +814,7 @@ impl AlbumBrowser {
             .min_w_0()
             .h_full()
             .p_2()
-            .gap_1()
+            .gap_0()
             .cursor_pointer()
             .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                 if event.click_count() == 2 {
@@ -846,17 +857,31 @@ impl AlbumBrowser {
                             view.child(image.absolute().size_full().object_fit(ObjectFit::Contain))
                         }
                         None => view.child(self.default_album.clone()),
-                    }),
+                    })
+                    .child(
+                        div()
+                            .absolute()
+                            .bottom_0()
+                            .w_full()
+                            .h(self.grid_layout.artwork_size / std::f32::consts::E)
+                            .bg(cover_fade(super::PANEL))
+                            .group_hover("album-card", move |style| {
+                                style.bg(cover_fade(HIGHLIGHT))
+                            }),
+                    ),
             )
             .child(
                 div()
                     .id(("album-title", index))
+                    .relative()
+                    .mt(-self.grid_layout.metadata_lift)
                     .w_full()
-                    .h(rems(1.5))
+                    .h(rems(1.25))
+                    .line_height(rems(1.25))
                     .flex_shrink_0()
                     .text_sm()
                     .text_color(rgb(TEXT))
-                    .text_left()
+                    .text_center()
                     .truncate()
                     .child(title.clone())
                     .tooltip(move |_, cx| {
@@ -867,12 +892,17 @@ impl AlbumBrowser {
                     }),
             )
             .child(
-                caption(album.artist.clone())
-                    .w_full()
-                    .text_left()
-                    .truncate()
-                    .h(rems(1.25))
-                    .flex_shrink_0(),
+                caption(if album.artist.trim().is_empty() {
+                    "-".into()
+                } else {
+                    album.artist.clone()
+                })
+                .w_full()
+                .text_center()
+                .truncate()
+                .h(rems(1.125))
+                .line_height(rems(1.125))
+                .flex_shrink_0(),
             )
             .child(
                 caption(
@@ -880,12 +910,13 @@ impl AlbumBrowser {
                         .format("gl-track-count", &[("count", album.track_count.into())]),
                 )
                 .w_full()
-                .text_left()
-                .h(rems(2.))
-                .pr(rems(3.))
+                .text_center()
+                .h(rems(1.25))
+                .line_height(rems(1.25))
                 .truncate()
                 .flex()
                 .items_center()
+                .justify_center()
                 .flex_shrink_0(),
             )
             .child(actions)
