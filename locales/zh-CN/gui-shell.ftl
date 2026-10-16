@@ -27,7 +27,6 @@ shell-randomize-queue = 打乱队列
 shell-remove-duplicates = 移除重复项
 shell-save-playlist = 另存为播放列表…
 shell-clear-queue = 清空队列
-shell-layout-locked = 布局已锁定
 shell-hide-tab-bar = 隐藏标签栏
 shell-show-tab-bar = 显示标签栏
 shell-track-information = 曲目信息

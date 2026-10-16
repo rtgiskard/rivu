@@ -27,7 +27,6 @@ shell-randomize-queue = Randomize queue
 shell-remove-duplicates = Remove duplicates
 shell-save-playlist = Save as playlist…
 shell-clear-queue = Clear queue
-shell-layout-locked = Layout is locked
 shell-hide-tab-bar = Hide tab bar
 shell-show-tab-bar = Show tab bar
 shell-track-information = Track information

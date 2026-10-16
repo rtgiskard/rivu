@@ -1027,16 +1027,6 @@ impl Render for GuiApp {
                             is_library || is_queue || is_waveform || is_audio_visualizer,
                             |view| view.child(div().h(px(1.)).mx_2().my_1().bg(rgb(BORDER))),
                         )
-                        .when(self.layouts.current().locked, |view| {
-                            view.child(
-                                div()
-                                    .px(gpui::px(UI_INSET))
-                                    .py_1()
-                                    .text_sm()
-                                    .text_color(rgb(MUTED))
-                                    .child(self.tr("shell-layout-locked")),
-                            )
-                        })
                         .child(menu_item(
                             "toggle-tab-bar",
                             if state.tab_bar_visible {
