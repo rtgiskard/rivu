@@ -387,6 +387,30 @@ impl GuiApp {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(80))
                 .await;
+            if !this
+                .update(cx, |this, cx| {
+                    this.refresh(cx);
+                    this.sync_metadata_query();
+                    let current = this.panel_demand("metadata")
+                        && this.metadata.accepts_load(token)
+                        && this.metadata_projection.accepts(
+                            &query,
+                            generation,
+                            this.state.query_revisions(None),
+                        );
+                    if !current {
+                        this.metadata_worker = false;
+                        this.metadata_queued = None;
+                        this.metadata_needs_refresh = this.metadata.selected().is_some();
+                        this.demand_metadata(cx);
+                        cx.notify();
+                    }
+                    current
+                })
+                .unwrap_or(false)
+            {
+                return;
+            }
             // Logical cancellation never releases the physical worker gate.
             let response = cx
                 .background_executor()
@@ -395,12 +419,9 @@ impl GuiApp {
             let _ = this.update(cx, |this, cx| {
                 this.metadata_worker = false;
                 this.refresh(cx);
-                if let Some(id) = this.metadata_queued.take() {
-                    if !this.panel_demand("metadata") {
-                        this.metadata_needs_refresh = true;
-                        return;
-                    }
-                    this.load_metadata_track(id, cx);
+                if this.metadata_queued.take().is_some() {
+                    this.metadata_needs_refresh = this.metadata.selected().is_some();
+                    this.demand_metadata(cx);
                     return;
                 }
                 if !this.metadata.accepts_load(token) {

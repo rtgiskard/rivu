@@ -70,8 +70,10 @@ Root-count batches run one at a time. Tree reads share at most four physical
 workers and four coalesced latest pending branch demands; unscheduled demand
 owns no loading token. Completion re-drives current visible demand, while
 discarded offscreen demand does not accumulate as a visited-branch backlog.
-Debounced directory demand is checked again before submission; abandoned demand
-releases its reservation without becoming a failed page or discarding cached rows.
+Debounced directory, playlist, and explicit Details demand is checked again
+before submission. Abandoned unsubmitted demand releases its reservation without
+becoming a failed page or discarding cached rows; submitted reads retain their
+physical gate until completion.
 Viewport demand is deferred past prepaint so locally accepted forest pages can
 invalidate the frame that still contains their loading placeholders.
 

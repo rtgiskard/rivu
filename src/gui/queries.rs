@@ -208,6 +208,44 @@ impl GuiApp {
             cx.background_executor()
                 .timer(Duration::from_millis(80))
                 .await;
+            if !this
+                .update(cx, |this, cx| {
+                    this.refresh(cx);
+                    let current = this.browser.requests.is_current(kind, generation)
+                        && this.playlist_view_demand(kind)
+                        && (kind != ViewRequestKind::Selection
+                            || this.browser.playlists.selection_generation()
+                                == selection_generation);
+                    let current = current && {
+                        let revisions = this
+                            .state
+                            .query_revisions(this.browser.playlists.entries().playlist_id);
+                        let owner = this.browser.requests.projections.entry(kind).or_default();
+                        owner.sync(&request_query, revisions);
+                        owner.accepts(&request_query, owner_generation, revisions)
+                    };
+                    if !current {
+                        this.browser.requests.workers.remove(&kind);
+                        if this.browser.requests.finish(kind, generation) {
+                            match kind {
+                                ViewRequestKind::Summaries => {
+                                    this.browser.playlists.cancel_page(false)
+                                }
+                                ViewRequestKind::Entries => {
+                                    this.browser.playlists.cancel_page(true)
+                                }
+                                _ => {}
+                            }
+                        }
+                        this.dispatch_queued_view(kind, cx);
+                        cx.notify();
+                    }
+                    current
+                })
+                .unwrap_or(false)
+            {
+                return;
+            }
             // The physical gate remains held through cancellation and core completion.
             let response = cx
                 .background_executor()
