@@ -2864,6 +2864,78 @@ fn library_audio_metadata_survives_all_display_projections() {
 }
 
 #[test]
+fn playlist_pages_and_batches_preserve_effective_audio_metadata() {
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    let mut whole = rec("/music/shared.wav", "shared", "Whole", 180.0);
+    whole.media.codec = "pcm".into();
+    let mut bounded = segment("/music/a.cue", 1, 1500, Some(3750));
+    bounded.media.duration = Some(30.0);
+    bounded.media.codec = "pcm".into();
+    let mut tail = segment("/music/a.cue", 2, 3750, None);
+    tail.media.duration = Some(130.0);
+    tail.media.codec = "pcm".into();
+    let mut unknown = rec("/music/unknown.opus", "unknown", "Unknown", 1.0);
+    unknown.media.duration = None;
+    unknown.media.codec = "opus".into();
+    store
+        .apply_scan(&scan(vec![whole, bounded, tail, unknown]))
+        .unwrap();
+    let tracks = all_tracks(&store);
+    let ids: Vec<_> = ["Track 2", "Unknown", "Track 1", "Whole"]
+        .iter()
+        .map(|title| {
+            tracks
+                .iter()
+                .find(|track| track.title == *title)
+                .unwrap()
+                .id
+        })
+        .collect();
+    store
+        .conn
+        .execute(
+            "UPDATE tracks SET favorite=1,missing=1 WHERE id=?1",
+            [ids[2]],
+        )
+        .unwrap();
+    let playlist = store.create_playlist_with_tracks("metadata", &ids).unwrap();
+    let expected = [
+        (Some(130.0), "pcm"),
+        (None, "opus"),
+        (Some(30.0), "pcm"),
+        (Some(180.0), "pcm"),
+    ];
+    for query in [None, Some("Track")] {
+        let indices: &[usize] = if query.is_some() {
+            &[0, 2]
+        } else {
+            &[0, 1, 2, 3]
+        };
+        let mut after = None;
+        for (offset, &position) in indices.iter().enumerate() {
+            let page = store
+                .playlist_entries_page(playlist, query, offset, 1)
+                .unwrap();
+            assert_eq!(page.total, indices.len());
+            assert_eq!(page.rows.len(), 1);
+            let row = &page.rows[0];
+            assert_eq!(row.track_id, ids[position]);
+            assert_eq!(row.position, position);
+            assert_eq!(row.offset, offset);
+            assert_eq!((row.duration, row.codec.as_str()), expected[position]);
+            assert_eq!(row.favorite, position == 2);
+            assert_eq!(row.missing, position == 2);
+            let batch = store
+                .playlist_entry_batch(playlist, query, after, 1, QueryStamp::default())
+                .unwrap();
+            assert_eq!(batch.rows, page.rows);
+            assert_eq!(batch.next.is_some(), offset + 1 < indices.len());
+            after = batch.next;
+        }
+    }
+}
+
+#[test]
 fn bounded_view_queries_filter_order_and_count() {
     let store = Store::open(Path::new(":memory:")).unwrap();
     store

@@ -31,6 +31,7 @@ pub(crate) enum Context {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Action {
     Help,
+    Details,
     Retry,
     Cancel,
     Close,
@@ -115,6 +116,7 @@ macro_rules! binding {
 }
 static BINDINGS: &[Binding] = &[
     binding!("f1", "F1", 0, GUI | TUI | HELP, Help, "keyboard-help"),
+    binding!("i", "i", 0, TUI & !QUERY, Details, "keyboard-details"),
     binding!(
         "f5",
         "F5",

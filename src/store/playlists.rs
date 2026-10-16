@@ -231,7 +231,7 @@ impl Store {
             after.map_or((-1, 0), |after| (after.cursor.position, after.cursor.id));
         let start = after.map_or(0, |after| after.offset);
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT e.position,e.id,e.track_id,COALESCE(t.title_override,t.raw_title),COALESCE(t.artist_override,t.raw_artist),COALESCE(t.album_override,t.raw_album),COALESCE(t.missing,1),t.favorite FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id WHERE e.playlist_id=?1 AND {filter} AND (e.position,e.id)>(?3,?4) ORDER BY e.position,e.id LIMIT ?5"
+            "SELECT e.position,e.id,e.track_id,COALESCE(t.title_override,t.raw_title),COALESCE(t.artist_override,t.raw_artist),COALESCE(t.album_override,t.raw_album),COALESCE(t.missing,1),t.favorite,t.duration,COALESCE(t.codec,'') FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id WHERE e.playlist_id=?1 AND {filter} AND (e.position,e.id)>(?3,?4) ORDER BY e.position,e.id LIMIT ?5"
         ))?;
         let mut db_rows = stmt.query(params![playlist_id, query, position, id, limit + 1])?;
         let mut rows = Vec::with_capacity(limit as usize);
@@ -260,6 +260,8 @@ impl Store {
                 title: row.get(3)?,
                 artist: row.get(4)?,
                 album: row.get(5)?,
+                duration: row.get(8)?,
+                codec: row.get(9)?,
                 missing: row.get::<_, i64>(6)? != 0,
                 favorite: row.get(7)?,
             });
@@ -349,7 +351,7 @@ impl Store {
         } else {
             "AND e.position>=?3 ORDER BY e.position,e.id LIMIT ?4"
         };
-        let mut stmt = self.conn.prepare(&format!("SELECT e.id,e.track_id,COALESCE(t.title_override,t.raw_title),COALESCE(t.artist_override,t.raw_artist),COALESCE(t.album_override,t.raw_album),COALESCE(t.missing,1),t.favorite,e.position FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id WHERE e.playlist_id=?1 AND {filter} {paging}"))?;
+        let mut stmt = self.conn.prepare(&format!("SELECT e.id,e.track_id,COALESCE(t.title_override,t.raw_title),COALESCE(t.artist_override,t.raw_artist),COALESCE(t.album_override,t.raw_album),COALESCE(t.missing,1),t.favorite,e.position,t.duration,COALESCE(t.codec,'') FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id WHERE e.playlist_id=?1 AND {filter} {paging}"))?;
         let limit = limit.min(crate::model::MAX_QUERY_ROWS) as i64;
         let offset = offset.min(i64::MAX as usize) as i64;
         let mut rows = stmt
@@ -362,6 +364,8 @@ impl Store {
                     title: r.get(2)?,
                     artist: r.get(3)?,
                     album: r.get(4)?,
+                    duration: r.get(8)?,
+                    codec: r.get(9)?,
                     missing: r.get::<_, i64>(5)? != 0,
                     favorite: r.get(6)?,
                 })

@@ -295,6 +295,10 @@ see link:../readme.adoc[build instructions] for requirements and licensing.
 The TUI requires a Nerd Font or Nerd Symbols fallback in the displaying terminal.
 For SSH, configure the local client terminal; installing fonts on the server
 does not supply terminal glyphs. Missing glyphs can appear as boxes or blanks.
+Use the Mono variant of Symbols Nerd Font for single-cell icons. TUI colors and
+width-dependent information columns are built in; desktop font, scale, and Library
+column settings do not configure the terminal client. See
+link:04_playback.adoc#_terminal_client[Terminal client] for browsing and full details.
 
 `interface.library_columns` selects desktop Library information columns. Its
 boolean keys are `artist`, `album`, `duration`, `codec`, and `bitrate`;

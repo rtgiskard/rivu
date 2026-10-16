@@ -182,7 +182,7 @@ pub struct PlaylistSummary {
     pub entry_count: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PlaylistEntryRow {
     pub id: i64,
     pub track_id: i64,
@@ -193,6 +193,8 @@ pub struct PlaylistEntryRow {
     pub title: String,
     pub artist: String,
     pub album: String,
+    pub duration: Option<f64>,
+    pub codec: String,
     pub favorite: bool,
     pub missing: bool,
 }

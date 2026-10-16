@@ -250,12 +250,31 @@ link:01_config.adoc#_desktop_keyboard_navigation[desktop control navigation].
 `/` searches Library, `t` browses directories, and `P` lists playlists.
 Up/Down and PageUp/PageDown navigate; Home/End select the first/last row.
 In Search, Tab or Shift+Tab switches between the query and results; Enter from
-the query focuses results, and Enter on a result plays it. Playback keys apply
+the query focuses results, and Enter on a result plays it. The query keeps the
+insertion point visible when text exceeds its available width. Playback keys apply
 to results, not the query editor. Enter on a directory opens it; Enter on a
 directory track plays it. Right opens playlist entries; Enter plays a selected
 playlist, playlist track, or queue occurrence. In playlist details, `a` enqueues
-the selected track. Delete removes the selected Queue occurrence or playlist entry.
-Queue rows show the track title before the artist.
+the selected track. Delete removes the selected Queue occurrence or playlist entry,
+never media files. Moving the selection does not change the playing occurrence;
+its marker distinguishes playing, paused, and stopped states.
+
+Track lists share title, artist, album, codec, and duration columns. Secondary
+columns hide as the terminal narrows; the title takes priority, and unknown durations
+are shown as `–:––`. Long values are shortened with an ellipsis without changing
+the underlying metadata. These automatic columns are independent of the desktop
+Library column settings.
+
+Outside the query editor, `i` opens read-only details for the selected loaded item,
+including full text hidden by the list's width. Details retain that metadata until
+closed; Up/Down, PageUp/PageDown, and Home/End scroll it, and Esc closes it without
+changing the underlying selection. Playback and removal keys do not operate the
+list while details are open.
+
+The bottom area keeps playback position, duration, volume, and playback modes
+available while browsing. Contextual key hints yield to temporary notifications;
+warnings and failures include distinct symbols, and ordinary playback updates do
+not replace a still-visible failure. F1 opens the complete help for the current view.
 
 Left/Backspace goes to the parent directory; Left/Esc leaves playlist details.
 Esc returns from search, the tree, or the playlist catalog to Queue. `q` exits

@@ -20,7 +20,7 @@ use parking_lot::Mutex;
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, LineGauge, List, ListItem, ListState, Paragraph},
@@ -30,6 +30,7 @@ use signal_hook::{
     consts::{SIGINT, SIGTERM},
 };
 use std::{
+    borrow::Cow,
     collections::HashMap,
     io::{self, Stdout},
     path::{Path, PathBuf},
@@ -40,6 +41,7 @@ use std::{
     thread::JoinHandle,
     time::{Duration, Instant},
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 /// Connect to an existing core over IPC. This never creates an audio engine and
 /// quitting the screen only restores the terminal; the server keeps playing.
@@ -598,13 +600,14 @@ fn run_loop(
         while let Ok(result) = commands.results.try_recv() {
             match result {
                 Ok(ack) if !ack.ok => {
-                    tui.ui.set_message(Some(
+                    tui.ui.set_notice(
                         ack.error
                             .unwrap_or_else(|| i18n.text("terminal-command-rejected").into()),
-                    ));
+                        NoticeKind::Error,
+                    );
                 }
                 Ok(_) => {}
-                Err(error) => tui.ui.set_message(Some(error.into_message()?)),
+                Err(error) => tui.ui.set_notice(error.into_message()?, NoticeKind::Error),
             }
             redraw = true;
             immediate_redraw = true;
@@ -675,8 +678,10 @@ fn run_loop(
                                 .as_ref()
                                 .is_some_and(|sender| sender.try_send(command).is_ok());
                             if !queued {
-                                tui.ui
-                                    .set_message(Some(i18n.text("terminal-command-busy").into()));
+                                tui.ui.set_notice(
+                                    i18n.text("terminal-command-busy").into(),
+                                    NoticeKind::Warning,
+                                );
                                 redraw = true;
                                 immediate_redraw = true;
                             }
@@ -786,9 +791,19 @@ impl TuiState {
             }
         }
         if let Some(message) = snapshot_message(&self.snapshot, &next, &self.ui.i18n) {
-            self.ui.set_message(Some(message));
+            self.ui.set_notice(message, NoticeKind::Information);
         }
         self.snapshot = next;
+    }
+}
+
+fn track_label<'a>(title: &'a str, artist: &'a str) -> Cow<'a, str> {
+    if title.is_empty() {
+        Cow::Borrowed(artist)
+    } else if artist.is_empty() {
+        Cow::Borrowed(title)
+    } else {
+        Cow::Owned(format!("{title} — {artist}"))
     }
 }
 
@@ -806,13 +821,8 @@ fn snapshot_message(
     }
     if previous.queue.current_id != next.queue.current_id {
         return next.current_track().map(|track| {
-            i18n.format(
-                "terminal-now-playing",
-                &[
-                    ("artist", track.artist.as_str().into()),
-                    ("title", track.title.as_str().into()),
-                ],
-            )
+            let label = track_label(&track.title, &track.artist);
+            i18n.format("terminal-now-playing", &[("track", label.as_ref().into())])
         });
     }
     match next.queue.total.cmp(&previous.queue.total) {
@@ -822,9 +832,25 @@ fn snapshot_message(
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NoticeKind {
+    Information,
+    Warning,
+    Error,
+}
+
 struct Notice {
     text: String,
+    kind: NoticeKind,
     expires_at: Instant,
+}
+
+struct Details {
+    text: String,
+    wrapped: Vec<String>,
+    width: u16,
+    scroll: usize,
+    max_scroll: usize,
 }
 
 #[derive(Default)]
@@ -850,6 +876,7 @@ struct UiState {
     show_help: bool,
     help_selection: ListState,
     message: Option<Notice>,
+    details: Option<Details>,
     requested: Option<QueryRequest>,
     projection: QueryProjection,
     failed_request: Option<QueryRequest>,
@@ -868,6 +895,7 @@ impl UiState {
             show_help: false,
             help_selection: ListState::default(),
             message: None,
+            details: None,
             requested: None,
             projection: QueryProjection::default(),
             failed_request: None,
@@ -996,7 +1024,7 @@ impl UiState {
             Err(error) => {
                 self.requested = None;
                 self.failed_request = Some(request.clone());
-                self.set_message(Some(error));
+                self.set_notice(error, NoticeKind::Error);
                 return true;
             }
         };
@@ -1023,7 +1051,10 @@ impl UiState {
                         rows.iter().find(|row| row.id == queue_id).map(|row| row.id);
                     self.queue_anchor = None;
                 } else {
-                    self.set_message(Some(self.i18n.text("terminal-unexpected-response").into()));
+                    self.set_notice(
+                        self.i18n.text("terminal-unexpected-response").into(),
+                        NoticeKind::Error,
+                    );
                 }
             }
             (View::Search(search), ViewResponse::LibraryPage(page)) => {
@@ -1065,11 +1096,17 @@ impl UiState {
                     }
                     detail.entry_anchor = None;
                 } else {
-                    self.set_message(Some(self.i18n.text("terminal-unexpected-response").into()));
+                    self.set_notice(
+                        self.i18n.text("terminal-unexpected-response").into(),
+                        NoticeKind::Error,
+                    );
                 }
             }
             _ => {
-                self.set_message(Some(self.i18n.text("terminal-unexpected-response").into()));
+                self.set_notice(
+                    self.i18n.text("terminal-unexpected-response").into(),
+                    NoticeKind::Error,
+                );
                 return true;
             }
         }
@@ -1081,15 +1118,74 @@ impl UiState {
         self.local_revision = self.local_revision.wrapping_add(1);
     }
 
-    fn set_message(&mut self, message: Option<String>) {
-        let current = self.message.as_ref().map(|notice| notice.text.as_str());
-        if current != message.as_deref() {
-            self.message = message.map(|text| Notice {
-                text,
-                expires_at: Instant::now() + Duration::from_secs(10),
-            });
-            self.mark_local_change();
+    fn open_details(&mut self) {
+        let row = match &self.view {
+            View::Queue => self
+                .queue
+                .selected()
+                .map(|row| RowContent::track(&row.track)),
+            View::Search(search) => search.results.selected().map(RowContent::track),
+            View::PlaylistDetail { detail, .. } => {
+                detail.entries.selected().map(RowContent::playlist)
+            }
+            View::Tree(tree) => tree.entries.selected().map(|entry| match entry {
+                DirectoryRow::Track(track) => RowContent::track(track),
+                DirectoryRow::Directory { path } => RowContent::label(path.to_string_lossy(), ""),
+            }),
+            View::Playlists(playlists) => playlists
+                .selected()
+                .map(|playlist| RowContent::label(Cow::Borrowed(&playlist.name), "󰲋")),
+        };
+        let Some(row) = row else {
+            return;
+        };
+        let mut text = row.title.into_owned();
+        for (label, value) in [
+            ("gl-artist", row.artist),
+            ("gl-album", row.album),
+            ("gl-codec", row.codec),
+        ] {
+            if !value.is_empty() {
+                text.push_str(&format!("\n\n{}\n{value}", self.i18n.text(label)));
+            }
         }
+        if let Some(duration) = row.duration {
+            text.push_str(&format!(
+                "\n\n{}\n{}",
+                self.i18n.text("gl-duration"),
+                fmt_time(duration)
+            ));
+        }
+        if row.favorite {
+            text.push_str(&format!("\n\n {}", self.i18n.text("terminal-favorite")));
+        }
+        if row.missing {
+            text.push_str(&format!("\n\n {}", self.i18n.text("gl-missing")));
+        }
+        self.details = Some(Details {
+            text,
+            wrapped: Vec::new(),
+            width: 0,
+            scroll: 0,
+            max_scroll: 0,
+        });
+    }
+
+    fn set_notice(&mut self, text: String, kind: NoticeKind) {
+        // Keep actionable failures visible when an unrelated playback update arrives.
+        if kind == NoticeKind::Information
+            && self.message.as_ref().is_some_and(|notice| {
+                notice.kind != NoticeKind::Information && Instant::now() < notice.expires_at
+            })
+        {
+            return;
+        }
+        self.message = Some(Notice {
+            text,
+            kind,
+            expires_at: Instant::now() + Duration::from_secs(10),
+        });
+        self.mark_local_change();
     }
 
     fn expire_message(&mut self) -> bool {
@@ -1164,6 +1260,30 @@ impl UiState {
 
     fn key_action(&mut self, key: KeyEvent, state: &TuiSnapshot) -> KeyAction {
         let context = self.keyboard_context();
+        if let Some(details) = &mut self.details {
+            let action = resolve_key(key, KeyboardContext::TuiHelp);
+            match action {
+                Some(Action::Cancel) => self.details = None,
+                Some(Action::Up) => details.scroll = details.scroll.saturating_sub(1),
+                Some(Action::Down) => {
+                    details.scroll = details.scroll.saturating_add(1).min(details.max_scroll)
+                }
+                Some(Action::PageUp) => {
+                    details.scroll = details.scroll.saturating_sub(self.page_size)
+                }
+                Some(Action::PageDown) => {
+                    details.scroll = details
+                        .scroll
+                        .saturating_add(self.page_size)
+                        .min(details.max_scroll)
+                }
+                Some(Action::First) => details.scroll = 0,
+                Some(Action::Last) => details.scroll = details.max_scroll,
+                _ => return KeyAction::Ignored,
+            }
+            self.mark_local_change();
+            return KeyAction::Ignored;
+        }
         if self.show_help {
             let action = resolve_key(key, KeyboardContext::TuiHelp);
             let len = help_bindings(context).count();
@@ -1223,6 +1343,11 @@ impl UiState {
                 return KeyAction::Ignored;
             }
             Action::Close => return KeyAction::Quit,
+            Action::Details => {
+                self.open_details();
+                self.mark_local_change();
+                return KeyAction::Ignored;
+            }
             Action::Search => return KeyAction::Search,
             Action::Library => return KeyAction::Tree,
             Action::Playlists => {
@@ -1785,6 +1910,7 @@ mod theme {
     pub const FOCUS: Color = Color::Rgb(125, 207, 255);
     pub const SELECTION: Color = Color::Rgb(36, 44, 66);
     pub const WARNING: Color = Color::Rgb(224, 175, 104);
+    pub const ERROR: Color = Color::Rgb(247, 118, 142);
 }
 
 fn playback_symbol(status: PlaybackStatus) -> &'static str {
@@ -1797,7 +1923,6 @@ fn playback_symbol(status: PlaybackStatus) -> &'static str {
 
 fn list_selection_style() -> Style {
     Style::default()
-        .fg(theme::FOCUS)
         .bg(theme::SELECTION)
         .add_modifier(Modifier::BOLD)
 }
@@ -1818,26 +1943,81 @@ fn draw_loading(frame: &mut ratatui::Frame<'_>, i18n: &Localizer) {
     );
 }
 
+fn wrap_details(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    for source in text.lines() {
+        let mut line = String::with_capacity(width);
+        let mut cells = 0;
+        for grapheme in source.graphemes(true) {
+            let count = Span::raw(grapheme).width();
+            if cells + count > width && !line.is_empty() {
+                lines.push(line);
+                line = String::with_capacity(width);
+                cells = 0;
+            }
+            line.push_str(grapheme);
+            cells += count;
+        }
+        lines.push(line);
+    }
+    lines
+}
+
 fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
     let area = frame.area();
     frame.render_widget(
         Block::default().style(Style::default().fg(theme::TEXT).bg(theme::BACKGROUND)),
         area,
     );
+    if let Some(details) = &mut ui.details {
+        let block = Block::default()
+            .title(ui.i18n.text("terminal-details"))
+            .title_bottom(ui.i18n.text("terminal-details-help"))
+            .borders(Borders::TOP | Borders::BOTTOM)
+            .border_style(Style::default().fg(theme::BORDER))
+            .title_style(Style::default().fg(theme::FOCUS));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        if details.width != inner.width {
+            details.wrapped = wrap_details(&details.text, inner.width as usize);
+            details.width = inner.width;
+        }
+        details.max_scroll = details.wrapped.len().saturating_sub(inner.height as usize);
+        details.scroll = details.scroll.min(details.max_scroll);
+        ui.page_size = inner.height.max(1) as usize;
+        let lines: Vec<_> = details
+            .wrapped
+            .iter()
+            .skip(details.scroll)
+            .take(inner.height as usize)
+            .map(|line| Line::from(line.as_str()))
+            .collect();
+        frame.render_widget(Paragraph::new(lines), inner);
+        return;
+    }
     if ui.show_help {
         let context = ui.keyboard_context();
         let items = help_bindings(context).map(|binding| {
             ListItem::new(Line::from(vec![
-                Span::styled(format!("{:<22}", binding.label), Style::default().fg(theme::FOCUS)),
+                Span::styled(
+                    format!("{:<22}", binding.label),
+                    Style::default().fg(theme::FOCUS),
+                ),
                 Span::raw(ui.i18n.text(binding.description)),
             ]))
         });
         ui.page_size = area.height.saturating_sub(2).max(1) as usize;
-        let block = Block::default()
+        let mut block = Block::default()
             .title(ui.i18n.text("terminal-keys"))
             .title_style(Style::default().fg(theme::PLAYING))
             .border_style(Style::default().fg(theme::BORDER))
             .borders(Borders::TOP | Borders::BOTTOM);
+        if context == KeyboardContext::TuiSearchQuery {
+            block = block.title_bottom(ui.i18n.text("keyboard-query-input"));
+        }
         let list = List::new(items)
             .block(block)
             .highlight_style(list_selection_style());
@@ -1866,7 +2046,9 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
     ];
     let mut header = vec![Span::styled(
         " RIVU  ",
-        Style::default().fg(theme::PLAYING).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(theme::PLAYING)
+            .add_modifier(Modifier::BOLD),
     )];
     for (index, (symbol, label, key)) in navigation.into_iter().enumerate() {
         if area.width < 90 && index != active {
@@ -1874,7 +2056,11 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
         }
         header.push(Span::styled(
             format!(" {symbol} {}{key}  ", i18n.text(label)),
-            Style::default().fg(if index == active { theme::FOCUS } else { theme::SECONDARY }),
+            Style::default().fg(if index == active {
+                theme::FOCUS
+            } else {
+                theme::SECONDARY
+            }),
         ));
     }
     frame.render_widget(
@@ -1885,9 +2071,14 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
         ),
         outer[0],
     );
-    ui.page_size = outer[1].height.saturating_sub(
-        if matches!(ui.view, View::Search(_)) { 4 } else { 1 },
-    ).max(1) as usize;
+    ui.page_size = outer[1]
+        .height
+        .saturating_sub(match ui.view {
+            View::Search(_) => 3,
+            View::Playlists(_) => 1,
+            _ => 2,
+        })
+        .max(1) as usize;
     match &mut ui.view {
         View::Search(search) => draw_search(frame, outer[1], search, i18n),
         View::Tree(tree) => draw_tree(frame, outer[1], tree, i18n),
@@ -1900,33 +2091,82 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
         .border_style(Style::default().fg(theme::BORDER));
     let playback_area = playback.inner(outer[2]);
     frame.render_widget(playback, outer[2]);
-    let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)])
-        .split(playback_area);
+    let rows =
+        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(playback_area);
     let status = match state.playback.status {
         PlaybackStatus::Playing => "terminal-playing",
         PlaybackStatus::Paused => "terminal-paused",
         PlaybackStatus::Stopped => "terminal-stopped",
     };
     let mut now = vec![
-        Span::styled(format!(" {} ", playback_symbol(state.playback.status)), Style::default().fg(theme::PLAYING)),
+        Span::styled(
+            format!(" {} ", playback_symbol(state.playback.status)),
+            Style::default().fg(theme::PLAYING),
+        ),
         Span::styled(i18n.text(status), Style::default().fg(theme::SECONDARY)),
         Span::raw("  "),
     ];
     if let Some(track) = state.current_track() {
         now.push(Span::raw(track.title.as_str()));
         if !track.artist.is_empty() {
-            now.push(Span::styled(format!(" — {}", track.artist), Style::default().fg(theme::SECONDARY)));
+            now.push(Span::styled(
+                format!(
+                    "{}{}",
+                    if track.title.is_empty() { "" } else { " — " },
+                    track.artist
+                ),
+                Style::default().fg(theme::SECONDARY),
+            ));
         }
     } else {
         now.push(Span::raw(i18n.text("terminal-nothing-playing")));
     }
-    frame.render_widget(Paragraph::new(Line::from(now)), rows[0]);
+    let metadata = state
+        .current_track()
+        .filter(|_| area.width >= 90)
+        .map(|track| {
+            let mut metadata = track.codec.clone();
+            if track.sample_rate != 0 {
+                if !metadata.is_empty() {
+                    metadata.push_str(" · ");
+                }
+                metadata.push_str(&format!("{:.1} kHz", track.sample_rate as f64 / 1000.0));
+            }
+            if let Some(bits) = track.bits_per_sample {
+                if !metadata.is_empty() {
+                    metadata.push_str(" · ");
+                }
+                metadata.push_str(&format!("{bits} bit"));
+            }
+            metadata
+        })
+        .unwrap_or_default();
+    let now_columns = Layout::horizontal([
+        Constraint::Min(1),
+        Constraint::Length(Span::raw(metadata.as_str()).width() as u16),
+    ])
+    .split(rows[0]);
+    frame.render_widget(Paragraph::new(Line::from(now)), now_columns[0]);
+    frame.render_widget(
+        Paragraph::new(metadata).style(Style::default().fg(theme::SECONDARY)),
+        now_columns[1],
+    );
     let position = state.playback.position.max(0.0);
-    let duration = state.playback.duration.filter(|duration| duration.is_finite() && *duration > 0.0);
+    let duration = state
+        .playback
+        .duration
+        .filter(|duration| duration.is_finite() && *duration > 0.0);
     let ratio = duration.map_or(0.0, |duration| (position / duration).clamp(0.0, 1.0));
-    let time = format!(" {} / {} ", fmt_time(position), duration.map_or_else(|| "–:––".into(), fmt_time));
-    let progress = Layout::horizontal([Constraint::Min(1), Constraint::Length(Line::from(time.as_str()).width() as u16)])
-        .split(rows[1]);
+    let time = format!(
+        " {} / {} ",
+        fmt_time(position),
+        duration.map_or_else(|| "–:––".into(), fmt_time)
+    );
+    let progress = Layout::horizontal([
+        Constraint::Min(1),
+        Constraint::Length(Line::from(time.as_str()).width() as u16),
+    ])
+    .split(rows[1]);
     frame.render_widget(
         LineGauge::default()
             .label("")
@@ -1935,27 +2175,315 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
             .ratio(ratio),
         progress[0],
     );
-    frame.render_widget(Paragraph::new(time).style(Style::default().fg(theme::SECONDARY)), progress[1]);
-    let status = format!(
-        " 󰕾 {}%  󰒟 {}  󰑖 {}",
-        (state.playback.volume * 100.0).round() as u8,
-        i18n.text(if state.playback.shuffle { "terminal-on" } else { "terminal-off" }),
-        repeat_label(state.playback.repeat, i18n),
-    );
-    let status_columns = Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)])
-        .split(outer[3]);
-    frame.render_widget(Paragraph::new(status).style(Style::default().fg(theme::SECONDARY)), status_columns[0]);
-    let help = keyboard::bindings(ui.keyboard_context())
-        .find(|binding| binding.action == Action::Help)
-        .expect("Every terminal context declares help");
-    let help_prompt = format!("{}  {}", help.label, i18n.text(help.description));
-    let prompt = ui.message.as_ref().map_or(help_prompt.as_str(), |notice| notice.text.as_str());
     frame.render_widget(
-        Paragraph::new(prompt)
-            .alignment(Alignment::Right)
-            .style(Style::default().fg(if ui.message.is_some() { theme::WARNING } else { theme::SECONDARY })),
-        status_columns[1],
+        Paragraph::new(time).style(Style::default().fg(theme::SECONDARY)),
+        progress[1],
     );
+    draw_status(frame, outer[3], ui, state);
+}
+
+fn draw_status(frame: &mut ratatui::Frame<'_>, area: Rect, ui: &UiState, state: &TuiSnapshot) {
+    let i18n = &ui.i18n;
+    let volume = format!(" 󰕾 {}% ", (state.playback.volume * 100.0).round() as u8);
+    let modes = if area.width >= 85 {
+        format!(
+            " 󰒟 {} {}  󰑖 {} {} ",
+            i18n.text("terminal-shuffle"),
+            i18n.text(if state.playback.shuffle {
+                "terminal-on"
+            } else {
+                "terminal-off"
+            }),
+            i18n.text("terminal-repeat"),
+            repeat_label(state.playback.repeat, i18n)
+        )
+    } else {
+        format!(
+            " 󰒟 {}  󰑖 {} ",
+            i18n.text(if state.playback.shuffle {
+                "terminal-on"
+            } else {
+                "terminal-off"
+            }),
+            repeat_label(state.playback.repeat, i18n)
+        )
+    };
+    let status_width = Line::from(volume.as_str()).width() + Line::from(modes.as_str()).width();
+    let columns = Layout::horizontal([
+        Constraint::Length(status_width.min(area.width.saturating_sub(8) as usize) as u16),
+        Constraint::Min(0),
+    ])
+    .split(area);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw(volume),
+            Span::styled(modes, Style::default().fg(theme::SECONDARY)),
+        ])),
+        columns[0],
+    );
+    let context = ui.keyboard_context();
+    let hints: &[Action] = match context {
+        KeyboardContext::TuiSearchQuery => &[Action::Help, Action::Traverse],
+        KeyboardContext::TuiQueue | KeyboardContext::TuiPlaylistTracks => &[
+            Action::Help,
+            Action::Details,
+            Action::Activate,
+            Action::Remove,
+        ],
+        _ => &[Action::Help, Action::Details, Action::Activate],
+    };
+    let mut prompt = String::new();
+    for action in hints {
+        if let Some(binding) = keyboard::bindings(context).find(|binding| binding.action == *action)
+        {
+            let label = match action {
+                Action::Activate => "terminal-hint-open",
+                Action::Remove => "terminal-hint-remove",
+                Action::Details => "terminal-details",
+                Action::Traverse => "terminal-hint-focus",
+                _ => "terminal-hint-help",
+            };
+            let hint = format!("{} {}", binding.label, i18n.text(label));
+            let extra = usize::from(!prompt.is_empty()) * 3;
+            if Line::from(prompt.as_str()).width() + Line::from(hint.as_str()).width() + extra
+                <= columns[1].width as usize
+            {
+                if !prompt.is_empty() {
+                    prompt.push_str(" · ");
+                }
+                prompt.push_str(&hint);
+            }
+        }
+    }
+    let (prompt, color) = ui
+        .message
+        .as_ref()
+        .map_or((prompt, theme::SECONDARY), |notice| {
+            let (symbol, color) = match notice.kind {
+                NoticeKind::Information => ("", theme::SECONDARY),
+                NoticeKind::Warning => ("", theme::WARNING),
+                NoticeKind::Error => ("", theme::ERROR),
+            };
+            (format!("{symbol} {}", notice.text), color)
+        });
+    frame.render_widget(
+        Paragraph::new(cell_text(&prompt, columns[1].width as usize, true))
+            .style(Style::default().fg(color)),
+        columns[1],
+    );
+}
+
+struct RowContent<'a> {
+    title: Cow<'a, str>,
+    artist: &'a str,
+    album: &'a str,
+    codec: &'a str,
+    duration: Option<f64>,
+    favorite: bool,
+    missing: bool,
+    marker: &'static str,
+    is_track: bool,
+}
+
+impl<'a> RowContent<'a> {
+    fn track(track: &'a LibraryRow) -> Self {
+        Self {
+            title: Cow::Borrowed(&track.title),
+            artist: &track.artist,
+            album: &track.album,
+            codec: &track.codec,
+            duration: track.duration,
+            favorite: track.favorite,
+            missing: track.missing,
+            marker: " ",
+            is_track: true,
+        }
+    }
+
+    fn playlist(entry: &'a PlaylistEntryRow) -> Self {
+        Self {
+            title: Cow::Borrowed(&entry.title),
+            artist: &entry.artist,
+            album: &entry.album,
+            codec: &entry.codec,
+            duration: entry.duration,
+            favorite: entry.favorite,
+            missing: entry.missing,
+            marker: " ",
+            is_track: true,
+        }
+    }
+
+    fn label(title: Cow<'a, str>, marker: &'static str) -> Self {
+        Self {
+            title,
+            artist: "",
+            album: "",
+            codec: "",
+            duration: None,
+            favorite: false,
+            missing: false,
+            marker,
+            is_track: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct BrowserColumns {
+    title: usize,
+    artist: usize,
+    album: usize,
+    codec: usize,
+    duration: usize,
+    markers: usize,
+}
+
+impl BrowserColumns {
+    fn new(width: u16, tracks: bool) -> Self {
+        let width = width.saturating_sub(2) as usize;
+        let artist = if tracks && width >= 62 {
+            (width / 4).min(26)
+        } else {
+            0
+        };
+        let album = if tracks && width >= 108 { 22 } else { 0 };
+        let codec = if tracks && width >= 128 { 10 } else { 0 };
+        let duration = if tracks && width >= 28 { 8 } else { 0 };
+        let markers = width.min(6);
+        Self {
+            title: width.saturating_sub(markers + artist + album + codec + duration),
+            artist,
+            album,
+            codec,
+            duration,
+            markers,
+        }
+    }
+
+    fn line(self, row: RowContent<'_>, selected: bool) -> Line<'static> {
+        let mut spans = Vec::with_capacity(9);
+        spans.push(Span::styled(
+            if selected { "▎ " } else { "  " },
+            Style::default().fg(theme::FOCUS),
+        ));
+        for (index, (symbol, color)) in [
+            (row.marker, theme::PLAYING),
+            (if row.favorite { "" } else { " " }, theme::SECONDARY),
+            (if row.missing { "" } else { " " }, theme::WARNING),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let width = self.markers.saturating_sub(index * 2).min(2);
+            if width != 0 {
+                spans.push(Span::styled(
+                    cell_text(symbol, width, false),
+                    Style::default().fg(color),
+                ));
+            }
+        }
+        let title = if self.artist == 0 {
+            track_label(&row.title, row.artist)
+        } else {
+            Cow::Borrowed(row.title.as_ref())
+        };
+        spans.push(Span::raw(column_text(&title, self.title)));
+        for (text, width) in [
+            (row.artist, self.artist),
+            (row.album, self.album),
+            (row.codec, self.codec),
+        ] {
+            if width != 0 {
+                spans.push(Span::styled(
+                    column_text(text, width),
+                    Style::default().fg(theme::SECONDARY),
+                ));
+            }
+        }
+        if self.duration != 0 {
+            let duration = if row.is_track {
+                row.duration.map_or_else(|| "–:––".into(), fmt_time)
+            } else {
+                String::new()
+            };
+            spans.push(Span::styled(
+                cell_text(&duration, self.duration, true),
+                Style::default().fg(theme::SECONDARY),
+            ));
+        }
+        Line::from(spans)
+    }
+
+    fn header(self, i18n: &Localizer) -> Line<'static> {
+        let mut text = " ".repeat(self.markers + 2);
+        for (label, width, right) in [
+            ("gl-title", self.title, false),
+            ("gl-artist", self.artist, false),
+            ("gl-album", self.album, false),
+            ("gl-codec", self.codec, false),
+            ("gl-duration", self.duration, true),
+        ] {
+            if width != 0 {
+                text.push_str(&if right {
+                    cell_text(i18n.text(label), width, true)
+                } else {
+                    column_text(i18n.text(label), width)
+                });
+            }
+        }
+        Line::styled(text, Style::default().fg(theme::SECONDARY))
+    }
+}
+
+fn column_text(text: &str, width: usize) -> String {
+    let mut cell = cell_text(text, width.saturating_sub(2), false);
+    cell.extend(std::iter::repeat_n(' ', width.min(2)));
+    cell
+}
+
+// Clip whole graphemes by displayed cells. Embedded line breaks and Fluent's
+// bidi isolation controls must not move table columns or hide the right edge.
+fn cell_text(text: &str, width: usize, right: bool) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let mut output = String::with_capacity(width);
+    let mut used = 0;
+    let mut clipped = false;
+    for grapheme in text.graphemes(true) {
+        if grapheme
+            .chars()
+            .any(|ch| ch.is_control() || matches!(ch, '\u{2068}' | '\u{2069}'))
+        {
+            continue;
+        }
+        let cells = Span::raw(grapheme).width();
+        if used + cells > width {
+            clipped = true;
+            break;
+        }
+        output.push_str(grapheme);
+        used += cells;
+    }
+    if clipped {
+        while used >= width {
+            let (index, last) = output
+                .grapheme_indices(true)
+                .next_back()
+                .expect("occupied cell");
+            used -= Span::raw(last).width();
+            output.truncate(index);
+        }
+        output.push('…');
+        used += 1;
+    }
+    if right {
+        output.insert_str(0, &" ".repeat(width - used));
+    } else {
+        output.extend(std::iter::repeat_n(' ', width - used));
+    }
+    output
 }
 
 fn draw_queue(
@@ -1965,71 +2493,43 @@ fn draw_queue(
     queue: &mut PagedList<QueueRow>,
     i18n: &Localizer,
 ) {
-    queue.set_viewport(area.height.saturating_sub(1) as usize);
-    let loading =
-        (queue.selection.offset()..queue.visible_end()).any(|index| queue.get(index).is_none());
-    let title = if state.queue.total == 0 {
-        i18n.text("terminal-empty-queue").into()
-    } else {
-        i18n.format(
-            if loading {
-                "terminal-queue-loading"
-            } else {
-                "terminal-queue-range"
-            },
-            &[
-                (
-                    "selected",
-                    (queue.selection.selected().unwrap_or(0) + 1).into(),
-                ),
-                ("total", state.queue.total.into()),
-            ],
-        )
-    };
-    let items = (queue.selection.offset()..queue.visible_end()).map(|index| {
-        ListItem::new(queue.get(index).map_or_else(
-            || "…".into(),
-            |row| {
-                let marker = if state.queue.current_id == Some(row.id) {
-                    playback_symbol(state.playback.status)
-                } else {
-                    " "
-                };
-                Line::from(vec![
-                    Span::styled(format!("{marker} "), Style::default().fg(theme::PLAYING)),
-                    Span::raw(row.track.title.as_str()),
-                    Span::styled(
-                        if row.track.artist.is_empty() { String::new() } else { format!(" — {}", row.track.artist) },
-                        Style::default().fg(theme::SECONDARY),
-                    ),
-                ])
-            },
-        ))
-    });
-    let mut selection = ListState::default().with_selected(
-        queue
-            .selection
-            .selected()
-            .map(|index| index - queue.selection.offset()),
-    );
-    frame.render_stateful_widget(
-        List::new(items)
-            .block(Block::default().title(title).title_style(Style::default().fg(theme::SECONDARY)))
-            .highlight_style(list_selection_style())
-            .highlight_symbol("▎ "),
+    draw_paged_list(
+        frame,
         area,
-        &mut selection,
+        i18n.text("terminal-queue").into(),
+        queue,
+        |row| {
+            let mut content = RowContent::track(&row.track);
+            if state.queue.current_id == Some(row.id) {
+                content.marker = playback_symbol(state.playback.status);
+            }
+            content
+        },
+        i18n,
+        BrowserMode::Tracks,
     );
 }
+
+#[derive(Clone, Copy)]
+enum BrowserMode {
+    Tracks,
+    UnfocusedTracks,
+    Labels,
+}
+
 fn draw_paged_list<T>(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     title: String,
     page: &mut PagedList<T>,
-    row: impl Fn(&T) -> String,
+    row: impl for<'a> Fn(&'a T) -> RowContent<'a>,
     i18n: &Localizer,
+    mode: BrowserMode,
 ) {
-    page.set_viewport(area.height.saturating_sub(1) as usize);
+    let tracks = !matches!(mode, BrowserMode::Labels);
+    let focused = !matches!(mode, BrowserMode::UnfocusedTracks);
+    let header_height = if tracks { 2 } else { 1 };
+    page.set_viewport(area.height.saturating_sub(header_height) as usize);
     let loading = !page.loaded
         || (page.selection.offset()..page.visible_end()).any(|index| page.get(index).is_none());
     let title = if loading {
@@ -2037,31 +2537,60 @@ fn draw_paged_list<T>(
     } else if page.total == 0 {
         i18n.format("terminal-page-empty", &[("title", title.as_str().into())])
     } else {
-        i18n.format(
-            "terminal-page-range",
-            &[
-                ("title", title.as_str().into()),
-                (
-                    "selected",
-                    (page.selection.selected().unwrap_or(0) + 1).into(),
-                ),
-                ("total", page.total.into()),
-            ],
-        )
+        title
     };
-    let items = (page.selection.offset()..page.visible_end())
-        .map(|index| ListItem::new(page.get(index).map_or_else(|| "…".into(), &row)));
+    let rows =
+        Layout::vertical([Constraint::Length(header_height), Constraint::Min(0)]).split(area);
+    let columns = BrowserColumns::new(area.width, tracks);
+    let count = if page.loaded {
+        format!(
+            " {}/{} ",
+            page.selection.selected().map_or(0, |index| index + 1),
+            page.total
+        )
+    } else {
+        " … ".into()
+    };
+    let count_width = Span::raw(count.as_str()).width().min(area.width as usize);
+    let title_line = Line::from(vec![
+        Span::styled(
+            cell_text(&title, area.width as usize - count_width, false),
+            Style::default().fg(if focused {
+                theme::FOCUS
+            } else {
+                theme::SECONDARY
+            }),
+        ),
+        Span::styled(count, Style::default().fg(theme::SECONDARY)),
+    ]);
+    let mut header = vec![title_line];
+    if tracks {
+        header.push(columns.header(i18n));
+    }
+    frame.render_widget(Paragraph::new(header), rows[0]);
+    let items = (page.selection.offset()..page.visible_end()).map(|index| {
+        ListItem::new(page.get(index).map_or_else(
+            || Line::from("      …"),
+            |item| {
+                columns.line(
+                    row(item),
+                    focused && page.selection.selected() == Some(index),
+                )
+            },
+        ))
+    });
     let mut selection = ListState::default().with_selected(
         page.selection
             .selected()
             .map(|index| index - page.selection.offset()),
     );
     frame.render_stateful_widget(
-        List::new(items)
-            .block(Block::default().title(title).title_style(Style::default().fg(theme::SECONDARY)))
-            .highlight_style(list_selection_style())
-            .highlight_symbol("▎ "),
-        area,
+        List::new(items).highlight_style(if focused {
+            list_selection_style()
+        } else {
+            Style::default().bg(theme::SELECTION)
+        }),
+        rows[1],
         &mut selection,
     );
 }
@@ -2072,28 +2601,14 @@ fn draw_playlist_detail(
     detail: &mut PlaylistDetail,
     i18n: &Localizer,
 ) {
-    let marker = "󰎆 ";
     draw_paged_list(
         frame,
         area,
-        i18n.format(
-            "terminal-playlist-name",
-            &[("name", detail.name.as_str().into())],
-        ),
+        detail.name.clone(),
         &mut detail.entries,
-        |entry| {
-            format!(
-                "{marker}{} — {}{}",
-                entry.artist,
-                entry.title,
-                if entry.missing {
-                    i18n.text("terminal-missing-suffix")
-                } else {
-                    ""
-                }
-            )
-        },
+        |entry| RowContent::playlist(entry),
         i18n,
+        BrowserMode::Tracks,
     );
 }
 
@@ -2103,24 +2618,40 @@ fn draw_playlists(
     playlists: &mut PagedList<PlaylistSummary>,
     i18n: &Localizer,
 ) {
-    let marker = "󰲋 ";
     draw_paged_list(
         frame,
         area,
         i18n.text("terminal-playlists").into(),
         playlists,
         |playlist| {
-            let label = i18n.format(
-                "terminal-playlist-count",
-                &[
-                    ("name", playlist.name.as_str().into()),
-                    ("count", playlist.entry_count.into()),
-                ],
-            );
-            format!("{marker}{label}")
+            RowContent::label(
+                Cow::Owned(i18n.format(
+                    "terminal-playlist-count",
+                    &[
+                        ("name", playlist.name.as_str().into()),
+                        ("count", playlist.entry_count.into()),
+                    ],
+                )),
+                "󰲋",
+            )
         },
         i18n,
+        BrowserMode::Labels,
     );
+}
+
+fn query_tail(query: &str, width: usize) -> (&str, usize) {
+    let mut cells = 0;
+    let mut start = query.len();
+    for (index, grapheme) in query.grapheme_indices(true).rev() {
+        let count = Span::raw(grapheme).width();
+        if cells + count > width {
+            break;
+        }
+        cells += count;
+        start = index;
+    }
+    (&query[start..], cells)
 }
 
 fn draw_search(
@@ -2129,46 +2660,49 @@ fn draw_search(
     search: &mut LibrarySearch,
     i18n: &Localizer,
 ) {
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(0)])
-        .split(area);
-    frame.render_widget(
-        Paragraph::new(search.query.as_str()).block(
-            Block::default()
-                .title(if search.focus == SearchFocus::Query {
-                    i18n.text("terminal-query-to-results")
-                } else {
-                    i18n.text("terminal-query")
-                })
-                .borders(Borders::ALL),
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
+    let focused = search.focus == SearchFocus::Query;
+    let prefix = format!("  {} › ", i18n.text("terminal-search"));
+    let prefix_width = Line::from(prefix.as_str()).width().min(area.width as usize);
+    let input_width = area.width as usize - prefix_width;
+    let (tail, cursor) = query_tail(
+        &search.query,
+        input_width.saturating_sub(usize::from(focused)),
+    );
+    let line = Line::from(vec![
+        Span::styled(
+            prefix,
+            Style::default().fg(if focused {
+                theme::FOCUS
+            } else {
+                theme::SECONDARY
+            }),
         ),
+        Span::raw(tail),
+    ]);
+    frame.render_widget(
+        Paragraph::new(line).style(if focused {
+            Style::default().bg(theme::SELECTION)
+        } else {
+            Style::default()
+        }),
         rows[0],
     );
-    let title = if search.focus == SearchFocus::Results {
-        i18n.text("terminal-library").into()
-    } else {
-        i18n.text("terminal-library-focus").into()
-    };
+    if focused && input_width > 0 && rows[0].height > 0 {
+        frame.set_cursor_position((area.x + (prefix_width + cursor) as u16, rows[0].y));
+    }
     draw_paged_list(
         frame,
         rows[1],
-        title,
+        i18n.text("terminal-library").into(),
         &mut search.results,
-        |track| {
-            format!(
-                "{} — {} [{}]{}",
-                track.artist,
-                track.title,
-                track.album,
-                if track.missing {
-                    i18n.text("terminal-missing-suffix")
-                } else {
-                    ""
-                }
-            )
-        },
+        |track| RowContent::track(track),
         i18n,
+        if focused {
+            BrowserMode::UnfocusedTracks
+        } else {
+            BrowserMode::Tracks
+        },
     );
 }
 
@@ -2176,10 +2710,7 @@ fn draw_tree(frame: &mut ratatui::Frame<'_>, area: Rect, tree: &mut LibraryTree,
     let title = if tree.directory.as_os_str().is_empty() {
         i18n.text("terminal-library-tree").into()
     } else {
-        i18n.format(
-            "terminal-library-directory",
-            &[("path", tree.directory.to_string_lossy().as_ref().into())],
-        )
+        tree.directory.to_string_lossy().into_owned()
     };
     draw_paged_list(
         frame,
@@ -2187,32 +2718,16 @@ fn draw_tree(frame: &mut ratatui::Frame<'_>, area: Rect, tree: &mut LibraryTree,
         title,
         &mut tree.entries,
         |entry| match entry {
-            DirectoryRow::Directory { path } => {
-                let marker = "\u{f07b} ";
-                let name = path
-                    .file_name()
+            DirectoryRow::Directory { path } => RowContent::label(
+                path.file_name()
                     .unwrap_or(path.as_os_str())
-                    .to_string_lossy();
-                format!(
-                    "{marker}{name}{}",
-                    if name.ends_with('/') { "" } else { "/" }
-                )
-            }
-            DirectoryRow::Track(track) => {
-                let marker = "\u{f001} ";
-                format!(
-                    "{marker}{} — {}{}",
-                    track.artist,
-                    track.title,
-                    if track.missing {
-                        i18n.text("terminal-missing-suffix")
-                    } else {
-                        ""
-                    }
-                )
-            }
+                    .to_string_lossy(),
+                "",
+            ),
+            DirectoryRow::Track(track) => RowContent::track(track),
         },
         i18n,
+        BrowserMode::Tracks,
     );
 }
 
@@ -2252,29 +2767,185 @@ mod tests {
     }
 
     #[test]
-    fn search_query_clips_at_terminal_cells_without_changing_input() {
-        let i18n = Localizer::new("zh-CN");
-        let mut search = LibrarySearch {
-            query: "春风A".into(),
-            ..LibrarySearch::default()
-        };
-        for width in [6, 7] {
-            let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
+    fn query_tail_preserves_graphemes_and_keeps_input_cursor_visible() {
+        let query = "春风e\u{301}夜航";
+        for language in ["en-US", "zh-CN"] {
+            let mut search = LibrarySearch {
+                query: query.into(),
+                ..LibrarySearch::default()
+            };
+            let i18n = Localizer::new(language);
+            for width in [1, 8, 18, 24, 60] {
+                let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
+                terminal
+                    .draw(|frame| draw_search(frame, frame.area(), &mut search, &i18n))
+                    .unwrap();
+                let prefix = format!("  {} › ", i18n.text("terminal-search"));
+                if width as usize > Span::raw(prefix.as_str()).width() {
+                    assert!(terminal.backend().cursor_visible());
+                    let cursor = terminal.backend().cursor_position();
+                    assert!(cursor.x < width);
+                    assert_eq!(cursor.y, 0);
+                }
+                assert_eq!(search.query, query);
+            }
+            search.focus = SearchFocus::Results;
+            let mut terminal = Terminal::new(TestBackend::new(60, 8)).unwrap();
+            terminal
+                .draw(|frame| draw_search(frame, frame.area(), &mut search, &i18n))
+                .unwrap();
+            assert!(!terminal.backend().cursor_visible());
+        }
+        assert_eq!(query_tail(query, 5), ("e\u{301}夜航", 5));
+        assert_eq!(query_tail(query, 1), ("", 0));
+    }
+
+    #[test]
+    fn metadata_columns_clip_whole_graphemes_without_shifting_duration() {
+        let title = "春风e\u{301}👩‍💻夜航".repeat(12);
+        let mut track = track(0);
+        track.title = title;
+        track.duration = Some(243.0);
+        track.favorite = true;
+        track.missing = true;
+        for width in [30, 60, 80, 110, 140] {
+            let line = BrowserColumns::new(width, true).line(RowContent::track(&track), true);
+            assert_eq!(line.width(), width as usize);
+            let text = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            assert!(text.ends_with("4:03"), "{text}");
+            assert!(text.contains('…'));
+            assert!(text.contains('') && text.contains(''));
+            assert!(!text.contains('\u{fffd}'));
+        }
+        assert_eq!(cell_text("春风", 3, false), "春…");
+        assert_eq!(cell_text("e\u{301}夜航", 4, false), "e\u{301}夜…");
+    }
+
+    #[test]
+    fn playback_markers_follow_occurrence_and_status_not_selection() {
+        let mut state = TuiSnapshot::default();
+        state.queue.current_id = Some(17);
+        let mut page = PagedList::default();
+        page.set_viewport(2);
+        page.insert(
+            0,
+            2,
+            2,
+            vec![
+                QueueRow {
+                    id: 17,
+                    track_id: 0,
+                    position: 0,
+                    offset: 0,
+                    track: track(0),
+                },
+                QueueRow {
+                    id: 18,
+                    track_id: 0,
+                    position: 1,
+                    offset: 1,
+                    track: track(0),
+                },
+            ],
+        );
+        page.selection.select(Some(1));
+        for (status, symbol) in [
+            (PlaybackStatus::Playing, "󰐊"),
+            (PlaybackStatus::Paused, "󰏤"),
+            (PlaybackStatus::Stopped, "󰓛"),
+        ] {
+            state.playback.status = status;
+            let mut terminal = Terminal::new(TestBackend::new(80, 5)).unwrap();
             terminal
                 .draw(|frame| {
-                    draw_search(frame, frame.area(), &mut search, &i18n);
+                    draw_queue(
+                        frame,
+                        frame.area(),
+                        &state,
+                        &mut page,
+                        &Localizer::new("en-US"),
+                    )
                 })
                 .unwrap();
             let buffer = terminal.backend().buffer();
-            assert_eq!(buffer[(1, 1)].symbol(), "春");
-            assert_eq!(buffer[(3, 1)].symbol(), "风");
-            if width == 7 {
-                assert_eq!(buffer[(5, 1)].symbol(), "A");
-            } else {
-                assert_ne!(buffer[(5, 1)].symbol(), "A");
-            }
-            assert_eq!(search.query, "春风A");
+            assert_eq!(buffer[(2, 2)].symbol(), symbol);
+            assert_eq!(buffer[(2, 3)].symbol(), " ");
+            assert_eq!(buffer[(0, 3)].symbol(), "▎");
+            assert_eq!(buffer[(2, 2)].fg, theme::PLAYING);
+            assert_eq!(buffer[(0, 3)].fg, theme::FOCUS);
+            assert_eq!(buffer[(0, 3)].bg, theme::SELECTION);
+            assert_eq!(page.selected().unwrap().id, 18);
         }
+    }
+
+    #[test]
+    fn details_capture_full_metadata_and_own_keys_without_mutation() {
+        let state = TuiSnapshot::default();
+        let mut ui = UiState::default();
+        let mut row = track(0);
+        row.title = "Long full title 夜航 ".repeat(15);
+        row.album = "End-of-details album".into();
+        ui.queue.set_viewport(2);
+        ui.queue.insert(
+            0,
+            2,
+            1,
+            vec![QueueRow {
+                id: 17,
+                track_id: row.id,
+                position: 0,
+                offset: 0,
+                track: row.clone(),
+            }],
+        );
+        ui.key_action(KeyEvent::from(KeyCode::Char('i')), &state);
+        assert!(ui.details.as_ref().unwrap().text.contains(&row.title));
+        let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
+        terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
+        for key in [
+            KeyCode::Delete,
+            KeyCode::Enter,
+            KeyCode::Char(' '),
+            KeyCode::Char('/'),
+            KeyCode::F(1),
+        ] {
+            assert!(matches!(
+                ui.key_action(KeyEvent::from(key), &state),
+                KeyAction::Ignored
+            ));
+            assert!(ui.details.is_some());
+        }
+        ui.key_action(KeyEvent::from(KeyCode::End), &state);
+        terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
+        assert!(terminal_text(&terminal).contains(&row.album));
+        ui.key_action(KeyEvent::from(KeyCode::Esc), &state);
+        assert!(ui.details.is_none());
+        assert_eq!(ui.queue.selected().unwrap().id, 17);
+        assert!(matches!(
+            ui.key_action(KeyEvent::from(KeyCode::Delete), &state),
+            KeyAction::Command(Command::RemoveQueue { queue_id: 17 })
+        ));
+    }
+
+    #[test]
+    fn notices_preserve_actionable_failures_across_playback_updates() {
+        let mut ui = UiState::default();
+        ui.set_notice("failure".into(), NoticeKind::Error);
+        ui.set_notice("playing".into(), NoticeKind::Information);
+        assert!(matches!(
+            ui.message.as_ref().unwrap().kind,
+            NoticeKind::Error
+        ));
+        ui.message.as_mut().unwrap().expires_at = Instant::now();
+        ui.set_notice("playing".into(), NoticeKind::Information);
+        assert!(matches!(
+            ui.message.as_ref().unwrap().kind,
+            NoticeKind::Information
+        ));
     }
 
     #[test]
@@ -2299,6 +2970,8 @@ mod tests {
                 artist: "原始艺人".into(),
                 title: "Original title".into(),
                 album: "原始专辑".into(),
+                duration: Some(243.0),
+                codec: "FLAC".into(),
                 favorite: false,
                 missing: true,
             }],
@@ -2315,11 +2988,6 @@ mod tests {
             for metadata in ["我的列表", "原始艺人", "Original title"] {
                 assert!(text.contains(metadata), "{text}");
             }
-            let path = "/music/我的专辑";
-            assert!(
-                i18n.format("terminal-library-directory", &[("path", path.into()),])
-                    .contains(path)
-            );
         }
     }
 
@@ -2384,23 +3052,10 @@ mod tests {
             tui.ui.key_action(KeyEvent::from(KeyCode::Delete), &state),
             KeyAction::Command(Command::RemoveQueue { queue_id: 51_000 })
         ));
-        // Every row refers to track 7, but the playing marker follows its occurrence.
         state.queue.current_id = Some(51_000);
         state.playback.position = 42.;
         tui.apply_snapshot(state.clone());
         assert!(tui.ui.query_request(&state).is_none());
-        let mut terminal = Terminal::new(TestBackend::new(60, 6)).unwrap();
-        terminal
-            .draw(|frame| draw_queue(frame, frame.area(), &state, &mut tui.ui.queue, &tui.ui.i18n))
-            .unwrap();
-        let text: String = terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect();
-        assert_eq!(text.matches('▶').count(), 1);
         tui.ui.key_action(KeyEvent::from(KeyCode::PageDown), &state);
         assert_eq!(tui.ui.queue.selection.selected(), Some(50_004));
         tui.ui.key_action(KeyEvent::from(KeyCode::PageUp), &state);
@@ -2560,7 +3215,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_queue_addition_updates_count_message_and_waits_for_occurrence_rows() {
+    fn empty_queue_changes_wait_for_occurrence_rows_before_actions() {
         let mut state = TuiSnapshot::default();
         let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
         assert!(tui.ui.query_request(&state).is_none());
@@ -2568,7 +3223,6 @@ mod tests {
         state.queue.revision = 1;
         tui.apply_snapshot(state.clone());
         assert_eq!(tui.ui.queue.selection.selected(), Some(0));
-        assert_eq!(tui.ui.message.as_ref().unwrap().text, "Added to queue");
         assert!(matches!(
             tui.ui.key_action(KeyEvent::from(KeyCode::Delete), &state),
             KeyAction::Ignored
@@ -2581,7 +3235,6 @@ mod tests {
         state.queue.total = 0;
         state.queue.revision = 2;
         tui.apply_snapshot(state);
-        assert_eq!(tui.ui.message.as_ref().unwrap().text, "Removed from queue");
         assert!(tui.ui.queue.pages.is_empty());
     }
 
@@ -2644,6 +3297,8 @@ mod tests {
                         title: format!("row-{index}"),
                         artist: "artist".into(),
                         album: "album".into(),
+                        duration: None,
+                        codec: String::new(),
                         favorite: false,
                         missing: false,
                     })
@@ -2679,10 +3334,10 @@ mod tests {
     }
 
     fn render_view(ui: &mut UiState) -> String {
-        let height = if matches!(ui.view, View::Search(_)) {
-            9
-        } else {
-            6
+        let height = match ui.view {
+            View::Search(_) => 7,
+            View::Playlists(_) => 5,
+            _ => 6,
         };
         let mut terminal = Terminal::new(TestBackend::new(60, height)).unwrap();
         terminal

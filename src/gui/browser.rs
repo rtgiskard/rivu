@@ -2184,6 +2184,8 @@ mod tests {
                     title: format!("entry {index}"),
                     artist: String::new(),
                     album: String::new(),
+                    duration: None,
+                    codec: String::new(),
                     missing: false,
                     favorite: false,
                 })
