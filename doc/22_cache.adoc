@@ -52,8 +52,10 @@ Owners reconcile keys while hidden, but tree and Details reads require actual
 panel demand. An open Add to playlist chooser also demands playlist summaries,
 independently of the Playlists panel. An unchanged key retains bounded album pages and page failures
 across hiding; covers are released independently. Page-size changes affect demand geometry,
-not query identity. Failed pages stay failed until explicit retry. Cancelling a
-generation cannot release a physical worker gate: completion owns that release,
+not query identity. Failed pages stay failed until explicit retry. A current
+transport error consumes its page reservation even without a query stamp; only
+successful payloads are checked for data freshness. Cancelling a generation
+cannot release a physical worker gate: completion owns that release,
 and only the latest queued demand may then run. Metadata drafts/save baselines,
 occurrence identities, unavailable state, and relocation operations remain
 business-owned rather than being swallowed by a generic payload cache.

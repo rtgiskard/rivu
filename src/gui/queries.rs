@@ -235,10 +235,6 @@ impl GuiApp {
                     this.dispatch_queued_view(kind, cx);
                     return;
                 }
-                if !accepted {
-                    this.dispatch_queued_view(kind, cx);
-                    return;
-                }
                 let result = match result {
                     Ok(result) => result,
                     Err(error) => {
@@ -257,6 +253,10 @@ impl GuiApp {
                         return;
                     }
                 };
+                if !accepted {
+                    this.dispatch_queued_view(kind, cx);
+                    return;
+                }
                 this.dispatch_queued_view(kind, cx);
                 match result {
                     ViewResponse::PlaylistSummaries(page) if kind == ViewRequestKind::Summaries => {
