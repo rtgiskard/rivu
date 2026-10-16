@@ -81,6 +81,14 @@ sink layout without remixing. Both modes validate the actual selected sink and
 its negotiated speaker layout, including changes to links while playing.
 Unsupported routes report an error rather than using an unrelated compatible sink.
 
+The decoded PCM output queue retains a quarter second of audio, with a minimum of
+2048 frames, and is limited to 16 MiB of interleaved 32-bit float samples. Rates
+and channel counts must fit that combined budget; for example, 768 kHz with 16
+channels and 192 kHz with 32 channels fit. The callback's 256-frame scratch buffer
+uses at most another 2 MiB. Invalid formats, capacity arithmetic overflow, formats
+above the queue limit, and PCM or scratch allocation failures report playback
+errors instead of requesting an unbounded buffer or changing the output route.
+
 == Optional FFmpeg decoder
 
 Native decoding is the default. Enable `playback.ffmpeg_enabled` for additional formats,

@@ -2,7 +2,7 @@
 
 use super::Channel;
 use crate::analysis::{AnalysisControl, AnalysisWorker, TapFrame};
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use crossbeam_channel::{Receiver, bounded};
 use ringbuf::{
     HeapCons, HeapProd, HeapRb,
@@ -20,6 +20,29 @@ use std::{
 mod layout;
 
 mod pipewire;
+
+// Preserve the quarter-second queue (at least 2048 frames) without letting
+// decoded metadata request unbounded memory. Callback scratch is at most 1/8
+// of this budget because it holds only 256 frames.
+const MAX_PCM_BUFFER_BYTES: usize = 16 * 1024 * 1024;
+
+fn output_capacity(rate: u32, channels: usize) -> Result<usize> {
+    if rate == 0 || channels == 0 {
+        bail!("Invalid decoded sample rate or speaker layout");
+    }
+    let frames = usize::try_from((rate / 4).max(2048))
+        .context("Audio output frame capacity exceeds addressable memory")?;
+    let samples = frames
+        .checked_mul(channels)
+        .context("Audio output sample capacity overflow")?;
+    let bytes = samples
+        .checked_mul(size_of::<f32>())
+        .context("Audio output PCM buffer size overflow")?;
+    if bytes > MAX_PCM_BUFFER_BYTES {
+        bail!("Audio output PCM buffer exceeds 16 MiB limit ({rate} Hz, {channels} channels)");
+    }
+    Ok(samples)
+}
 
 pub fn devices() -> Result<Vec<String>> {
     let mut names = pipewire::devices()?;
@@ -209,12 +232,19 @@ impl Output {
     ) -> Result<Self> {
         let target = target_name(name)?;
         let rate = source_rate;
-        if rate == 0 || source_layout.is_empty() {
-            bail!("Invalid decoded sample rate or speaker layout");
-        }
         let source_channels = source_layout.len();
-        let (producer, consumer) =
-            HeapRb::new((rate / 4).max(2048) as usize * source_channels).split();
+        let capacity = output_capacity(rate, source_channels)?;
+        let (producer, consumer) = HeapRb::try_new(capacity)
+            .context("Cannot allocate audio output PCM buffer")?
+            .split();
+        let scratch_samples = source_channels
+            .checked_mul(OutputCallback::BLOCK_FRAMES)
+            .context("Audio output callback buffer size overflow")?;
+        let mut scratch = Vec::new();
+        scratch
+            .try_reserve_exact(scratch_samples)
+            .context("Cannot allocate audio output callback buffer")?;
+        scratch.resize(scratch_samples, 0.0);
         let shared = Arc::new(OutputShared::new(volume, paused));
         let (error_send, errors) = bounded(4);
         analyzer.reset(rate);
@@ -225,7 +255,7 @@ impl Output {
             control: analyzer.control.clone(),
             shared: shared.clone(),
             channels: source_channels,
-            scratch: vec![0.0; source_channels * OutputCallback::BLOCK_FRAMES],
+            scratch,
             mapping: Vec::new(),
             analysis_weights: analysis_weights(source_layout),
             rate,
@@ -514,6 +544,41 @@ mod tests {
     use super::*;
     use crate::analysis::AnalysisFrame;
     use parking_lot::RwLock;
+
+    #[test]
+    fn pcm_capacity_preserves_normal_high_rate_and_multichannel_queues() {
+        for (rate, channels, expected) in [
+            (1, 2, 2048 * 2),
+            (8000, 2, 2048 * 2),
+            (44_100, 2, 11_025 * 2),
+            (192_000, 32, 48_000 * 32),
+            (768_000, 16, 192_000 * 16),
+        ] {
+            assert_eq!(output_capacity(rate, channels).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn pcm_capacity_enforces_byte_budget_before_allocation() {
+        // Check the exact boundary without allocating a large buffer.
+        assert_eq!(
+            output_capacity(262_144, 64).unwrap() * size_of::<f32>(),
+            MAX_PCM_BUFFER_BYTES
+        );
+        assert!(output_capacity(262_148, 64).is_err());
+        assert!(output_capacity(262_144, 65).is_err());
+        // A tiny stereo WAV can advertise this rate in its header.
+        let error = output_capacity(1_000_000_000, 2).unwrap_err();
+        assert!(error.to_string().contains("16 MiB limit"));
+    }
+
+    #[test]
+    fn pcm_capacity_rejects_invalid_formats_and_checked_arithmetic_overflow() {
+        assert!(output_capacity(0, 2).is_err());
+        assert!(output_capacity(48_000, 0).is_err());
+        assert!(output_capacity(u32::MAX, usize::MAX).is_err());
+        assert!(output_capacity(1, usize::MAX / 2048).is_err());
+    }
 
     #[test]
     fn volume_changes_apply_perceptual_gain_to_rendered_samples() {
