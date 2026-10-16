@@ -175,6 +175,14 @@ impl WgpuAtlasTextures {
         size: Size<DevicePixels>,
         texture_kind: AtlasTextureKind,
     ) -> Option<AtlasTile> {
+        if size.width.0 <= 0
+            || size.height.0 <= 0
+            || size.width.0 as u32 > self.max_texture_size
+            || size.height.0 as u32 > self.max_texture_size
+        {
+            return None;
+        }
+
         {
             let textures = &mut self.storage[texture_kind];
 
@@ -187,15 +195,14 @@ impl WgpuAtlasTextures {
             }
         }
 
-        let texture = self.push_texture(size, texture_kind);
-        texture.allocate(size)
+        self.allocate_texture(size, texture_kind)
     }
 
-    fn push_texture(
+    fn allocate_texture(
         &mut self,
         min_size: Size<DevicePixels>,
         kind: AtlasTextureKind,
-    ) -> &mut WgpuAtlasTexture {
+    ) -> Option<AtlasTile> {
         const DEFAULT_ATLAS_SIZE: Size<DevicePixels> = Size {
             width: DevicePixels(1024),
             height: DevicePixels(1024),
@@ -206,7 +213,11 @@ impl WgpuAtlasTextures {
             height: DevicePixels(max_texture_size),
         };
 
-        let size = min_size.min(&max_atlas_size).max(&DEFAULT_ATLAS_SIZE);
+        let size = min_size.max(&DEFAULT_ATLAS_SIZE).min(&max_atlas_size);
+        // Bucket alignment can reject even a device-valid size. Reserve the first
+        // tile before creating a GPU texture or consuming a reusable storage slot.
+        let mut allocator = BucketedAtlasAllocator::new(device_size_to_etagere(size));
+        let allocation = allocator.allocate(device_size_to_etagere(min_size))?;
         let format = match kind {
             AtlasTextureKind::Monochrome => wgpu::TextureFormat::R8Unorm,
             AtlasTextureKind::Subpixel | AtlasTextureKind::Polychrome => self.color_texture_format,
@@ -234,34 +245,26 @@ impl WgpuAtlasTextures {
         let generation = self.next_texture_generation;
         self.next_texture_generation = self.next_texture_generation.wrapping_add(1);
 
-        let atlas_texture = WgpuAtlasTexture {
+        let mut atlas_texture = WgpuAtlasTexture {
             id: AtlasTextureId {
                 index: index.unwrap_or(texture_list.textures.len()) as u32,
                 kind,
             },
             generation,
-            allocator: BucketedAtlasAllocator::new(device_size_to_etagere(size)),
+            allocator,
             format,
             texture,
             view,
             live_atlas_keys: 0,
         };
+        let tile = atlas_texture.tile_for_allocation(min_size, allocation);
 
         if let Some(ix) = index {
             texture_list.textures[ix] = Some(atlas_texture);
-            texture_list
-                .textures
-                .get_mut(ix)
-                .and_then(|t| t.as_mut())
-                .expect("texture must exist")
         } else {
             texture_list.textures.push(Some(atlas_texture));
-            texture_list
-                .textures
-                .last_mut()
-                .and_then(|t| t.as_mut())
-                .expect("texture must exist")
         }
+        Some(tile)
     }
 
     fn upload_texture(&mut self, id: AtlasTextureId, bounds: Bounds<DevicePixels>, bytes: &[u8]) {
@@ -359,6 +362,14 @@ struct WgpuAtlasTexture {
 impl WgpuAtlasTexture {
     fn allocate(&mut self, size: Size<DevicePixels>) -> Option<AtlasTile> {
         let allocation = self.allocator.allocate(device_size_to_etagere(size))?;
+        Some(self.tile_for_allocation(size, allocation))
+    }
+
+    fn tile_for_allocation(
+        &mut self,
+        size: Size<DevicePixels>,
+        allocation: etagere::Allocation,
+    ) -> AtlasTile {
         let tile = AtlasTile {
             texture_id: self.id,
             tile_id: allocation.id.into(),
@@ -369,7 +380,7 @@ impl WgpuAtlasTexture {
             },
         };
         self.live_atlas_keys += 1;
-        Some(tile)
+        tile
     }
 
     fn bytes_per_pixel(&self) -> u8 {
@@ -441,6 +452,80 @@ mod tests {
                 .map_err(|error| anyhow::anyhow!("failed to request device: {error}"))?;
             Ok((Arc::new(device), Arc::new(queue)))
         })
+    }
+
+    #[test]
+    fn rejected_insertions_preserve_pages_tiles_and_reusable_slots() -> anyhow::Result<()> {
+        let (device, queue) = test_device_and_queue()?;
+        let atlas = WgpuAtlas::new(device, queue, wgpu::TextureFormat::Bgra8Unorm);
+        let mut state = atlas.0.lock();
+        let backend = &mut state.backend;
+        // Keep the regression bounded and exercise shelf rounding at an odd limit.
+        backend.max_texture_size = 65;
+        let kind = AtlasTextureKind::Monochrome;
+        let size = Size {
+            width: DevicePixels(65),
+            height: DevicePixels(65),
+        };
+        let mut keeper: Option<AtlasTile> = None;
+        for phase in 0..3 {
+            let generation = backend.next_texture_generation;
+            let page_count = backend.storage[kind].textures.len();
+            let free_list = backend.storage[kind].free_list.clone();
+            let pending_upload_count = backend.pending_uploads.len();
+            for _ in 0..8 {
+                for (width, height) in [(0, 1), (1, 0), (-1, 1), (1, -1), (66, 1), (1, 66)] {
+                    let invalid_size = Size {
+                        width: DevicePixels(width),
+                        height: DevicePixels(height),
+                    };
+                    assert!(backend.insert(kind, invalid_size, &[]).is_err());
+                    assert_eq!(backend.storage[kind].textures.len(), page_count);
+                    assert_eq!(backend.storage[kind].free_list, free_list);
+                    assert_eq!(backend.next_texture_generation, generation);
+                    assert_eq!(backend.pending_uploads.len(), pending_upload_count);
+                    if let Some(tile) = keeper {
+                        let texture = backend.storage.get(tile.texture_id).unwrap();
+                        assert_eq!(texture.live_atlas_keys, 1);
+                        assert_eq!(texture.generation, generation - 1);
+                        assert_eq!(backend.pending_uploads[0].bounds, tile.bounds);
+                        assert_eq!(backend.pending_uploads[0].data, [7; 65 * 65]);
+                    }
+                }
+            }
+            match phase {
+                0 => {
+                    let tile = backend.insert(kind, size, &[7; 65 * 65])?;
+                    assert_eq!(tile.bounds.size, size);
+                    keeper = Some(tile);
+                }
+                1 => {
+                    let tile = keeper.take().unwrap();
+                    backend.remove(tile);
+                    assert!(backend.storage.get(tile.texture_id).is_none());
+                    assert_eq!(
+                        backend.storage[kind].free_list,
+                        [tile.texture_id.index as usize]
+                    );
+                    assert!(backend.pending_uploads.is_empty());
+                }
+                _ => {
+                    let tile = backend.insert(kind, size, &[9; 65 * 65])?;
+                    assert_eq!(tile.texture_id.index, free_list[0] as u32);
+                    assert_eq!(backend.storage[kind].textures.len(), page_count);
+                    assert_eq!(
+                        backend.storage.get(tile.texture_id).unwrap().generation,
+                        generation
+                    );
+                    assert!(backend.storage[kind].free_list.is_empty());
+                    backend.remove(tile);
+                    assert!(backend.storage.get(tile.texture_id).is_none());
+                    assert_eq!(backend.storage[kind].free_list.len(), 1);
+                    assert!(backend.pending_uploads.is_empty());
+                }
+            }
+        }
+        Ok(())
     }
 
     #[test]

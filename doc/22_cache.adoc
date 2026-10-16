@@ -203,6 +203,11 @@ after 120 small uses of each buffer (normally 240 draws for double buffering).
 The live frame and replay ranges remain untouched. These policies use existing
 draws, not timers, and do not promise reclamation while drawing is inactive.
 
+Atlas requests with nonpositive dimensions or dimensions beyond the device limit
+are rejected before creating a page. A new page is committed only after its
+first tile reservation succeeds, so failed reservations leave no empty GPU page
+and do not consume reusable page slots.
+
 After the window is destroyed, the application switches the graphical platform
 to headless mode, releasing the display connection and its shared GPU context.
 Reopening reconnects to the original display before creating a new window;
