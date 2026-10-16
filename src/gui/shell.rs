@@ -775,6 +775,33 @@ impl Render for GuiApp {
                                     cx.notify();
                                 },
                             ))
+                            .child(
+                                menu_item(
+                                    "album-artwork-rotation",
+                                    self.tr("shell-artwork-rotation"),
+                                    cx,
+                                    |this, _, cx| {
+                                        this.panel_menu = None;
+                                        if let Err(error) = this.handle.update_gui_config(
+                                            crate::core::GuiConfigChange::ToggleAlbumArtworkRotation,
+                                        ) {
+                                            this.error = Some(format!("{error:#}"));
+                                        }
+                                        cx.notify();
+                                    },
+                                )
+                                .child(
+                                    div().ml_auto().child(self.tr(
+                                        if self.state.system.config.album_artwork_mode
+                                            == crate::config::AlbumArtworkMode::Rotating
+                                        {
+                                            "shell-on"
+                                        } else {
+                                            "shell-off"
+                                        },
+                                    )),
+                                ),
+                            )
                             .child(components::menu_separator());
                     }
                     if is_audio_visualizer

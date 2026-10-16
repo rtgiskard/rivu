@@ -32,6 +32,7 @@ shell-hide-tab-bar = 隐藏标签栏
 shell-show-tab-bar = 显示标签栏
 shell-track-information = 曲目信息
 shell-artwork-style = 封面样式
+shell-artwork-rotation = 旋转
 shell-visualizer-style = 可视化样式
 shell-clear-stops-playback = 同时停止播放。
 shell-cancel = 取消

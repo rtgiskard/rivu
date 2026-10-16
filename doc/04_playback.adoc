@@ -219,9 +219,11 @@ Add *Album artwork* from the panel catalog for a circular preview of the current
 playback track. It is optional and is not added to the default layout. Unlike
 Track details, browsing or selecting a different library track does not change it.
 
-Choose Static or Rotating in link:01_config.adoc#_album_artwork[Settings artwork
-controls]. Rotation runs during playback while the panel is visible. Pause retains
-the angle, and resume continues; stopping or changing tracks resets it. Static
+Toggle Rotation from the Album artwork panel's right-click menu, or choose Static
+or Rotating in link:01_config.adoc#_album_artwork[Settings artwork controls]. The
+menu applies and saves the shared mode immediately without changing style,
+direction, period, or frame rate. Rotation runs during playback while the panel
+is visible. Pause retains the angle, and resume continues; stopping or changing tracks resets it. Static
 mode immediately returns the cover upright. Changing the period or direction
 preserves the current angle. Missing artwork uses the generated default cover,
 with the same animation behavior as a real cover.

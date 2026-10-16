@@ -19,6 +19,13 @@ impl Core {
             GuiConfigChange::ToggleWaveformSeek => {
                 config.waveform_seek_enabled = !config.waveform_seek_enabled
             }
+            GuiConfigChange::ToggleAlbumArtworkRotation => {
+                use crate::config::AlbumArtworkMode;
+                config.album_artwork_mode = match config.album_artwork_mode {
+                    AlbumArtworkMode::Static => AlbumArtworkMode::Rotating,
+                    AlbumArtworkMode::Rotating => AlbumArtworkMode::Static,
+                };
+            }
             GuiConfigChange::ToggleLibraryColumn(column) => config.library_columns.toggle(column),
             GuiConfigChange::AlbumArtworkStyle(style) => config.album_artwork_style = style,
             GuiConfigChange::AddLibraryRoot(path) => {
