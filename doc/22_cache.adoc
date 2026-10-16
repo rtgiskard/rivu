@@ -169,6 +169,16 @@ keeps its buffers; losing all analysis demand also discards the shared spectrum
 copy. Restoring demand waits for a publication with the current display token
 and generation rather than restoring hidden results.
 
+Cached Paths and Scene replay share immutable vertex storage while keeping
+draw order, masks, and other Path metadata independent. Editing a shared Path
+uses copy-on-write. Painting still converts logical coordinates once into
+scaled geometry; Scene insertion and replay do not copy those vertices again.
+The renderer reuses its expanded vertex and Path-sprite upload buffers;
+uploads copy the bytes before either buffer is cleared for the next batch.
+Each buffer above 4096 elements shrinks after 120 successful frames at no more
+than one-quarter utilization, retaining twice the observed peak with a
+1024-element floor. Surface unconfiguration releases both buffers immediately.
+
 The renderer allocates Path resolve/MSAA targets only when nonempty Path vertices
 are drawn, and drops its references on a successful frame without Path drawing.
 Restoring Path drawing rebuilds targets at the current physical size. Submitted
@@ -208,17 +218,18 @@ than immediate release, but keeps scene ownership valid.
 == Design tradeoffs
 
 Caching avoids repeated aggregation, geometry construction, and image creation,
-but does not eliminate scene submission or rendering. Cached Spectrum paths
-still incur ownership copies under GPUI's current painting API; Spectrogram
-still submits its visible images. Disabling reuse reduces retained graphics
-memory at the cost of rebuilding that work.
+but does not eliminate scene submission or rendering. Spectrum painting still
+scales Path coordinates and the renderer still expands vertices for upload;
+sharing removes ownership copies, not those transformations. Spectrogram still
+submits its visible images. Disabling reuse reduces retained graphics memory at
+the cost of rebuilding that work.
 
 Correct invalidation takes precedence over reuse: source or display changes
 must not leave stale graphics, and cache-policy changes must not erase analysis
-or playback state. The design favors bounded application-level caches over a
-second geometry representation or a renderer fork. Shared renderer geometry or
-a combined Spectrogram texture would change that boundary and should be justified
-by profiling real workloads, not assumed hit rates or submission counts alone.
+or playback state. The design favors bounded application-level caches and
+shared immutable geometry over a second geometry representation. A combined
+Spectrogram texture would change that boundary and should be justified by
+profiling real workloads, not assumed hit rates or submission counts alone.
 
 == Settings view reuse
 

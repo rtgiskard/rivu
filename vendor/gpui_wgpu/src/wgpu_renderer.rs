@@ -227,6 +227,16 @@ struct WgpuRendererCore {
     minimum_instance_data_capacity: u64,
     low_instance_data_frames: u16,
     low_instance_data_peak: u64,
+    // CPU expansion scratch belongs to this core, not a scene or submitted GPU
+    // work. Queue writes copy it before it is cleared and reused by the next batch.
+    path_vertices: Vec<PathRasterizationVertex>,
+    path_vertex_peak: usize,
+    low_path_vertex_frames: u16,
+    low_path_vertex_peak: usize,
+    path_sprites: Vec<PathSprite>,
+    path_sprite_peak: usize,
+    low_path_sprite_frames: u16,
+    low_path_sprite_peak: usize,
     max_instance_data_size: u64,
     instance_data_alignment: u64,
     uses_webgl_instance_data: bool,
@@ -1390,6 +1400,14 @@ impl WgpuRendererCore {
             minimum_instance_data_capacity: instance_data_capacity,
             low_instance_data_frames: 0,
             low_instance_data_peak: 0,
+            path_vertices: Vec::new(),
+            path_vertex_peak: 0,
+            low_path_vertex_frames: 0,
+            low_path_vertex_peak: 0,
+            path_sprites: Vec::new(),
+            path_sprite_peak: 0,
+            low_path_sprite_frames: 0,
+            low_path_sprite_peak: 0,
             max_instance_data_size,
             instance_data_alignment,
             uses_webgl_instance_data,
@@ -1504,6 +1522,10 @@ impl WgpuRendererCore {
                 // Queue writes are staged before encoding; flush them even if the frame fails.
                 self.low_instance_data_frames = 0;
                 self.low_instance_data_peak = 0;
+                self.low_path_vertex_frames = 0;
+                self.low_path_vertex_peak = 0;
+                self.low_path_sprite_frames = 0;
+                self.low_path_sprite_peak = 0;
                 self.resources.queue.submit(std::iter::empty());
             })
     }
@@ -1516,6 +1538,10 @@ impl WgpuRendererCore {
         clear_color: wgpu::Color,
     ) -> Result<wgpu::SubmissionIndex> {
         let frame_start_capacity = self.instance_data_capacity;
+        let frame_start_path_capacity = self.path_vertices.capacity();
+        self.path_vertex_peak = 0;
+        let frame_start_sprite_capacity = self.path_sprites.capacity();
+        self.path_sprite_peak = 0;
         let mut paths_rasterized = false;
         let mut instance_offset = 0;
         let instance_bindings = self
@@ -1665,6 +1691,20 @@ impl WgpuRendererCore {
             .queue
             .submit(std::iter::once(encoder.finish()));
         self.maintain_instance_data_capacity(instance_offset, frame_start_capacity);
+        Self::maintain_path_scratch_capacity(
+            &mut self.path_vertices,
+            self.path_vertex_peak,
+            frame_start_path_capacity,
+            &mut self.low_path_vertex_frames,
+            &mut self.low_path_vertex_peak,
+        );
+        Self::maintain_path_scratch_capacity(
+            &mut self.path_sprites,
+            self.path_sprite_peak,
+            frame_start_sprite_capacity,
+            &mut self.low_path_sprite_frames,
+            &mut self.low_path_sprite_peak,
+        );
         Ok(submission)
     }
 
@@ -1847,28 +1887,30 @@ impl WgpuRendererCore {
         instance_offset: &mut u64,
         pass: &mut wgpu::RenderPass<'_>,
     ) -> Result<()> {
+        let Some(path_intermediate_view) = self.resources().path_intermediate_view.clone() else {
+            return Ok(());
+        };
+        self.path_sprites.clear();
         let first_path = &paths[0];
-        let sprites: Vec<PathSprite> = if paths.last().map(|p| &p.order) == Some(&first_path.order)
-        {
-            paths
-                .iter()
-                .map(|p| PathSprite {
-                    bounds: p.clipped_bounds(),
-                })
-                .collect()
+        if paths.last().map(|p| &p.order) == Some(&first_path.order) {
+            self.path_sprites.extend(paths.iter().map(|p| PathSprite {
+                bounds: p.clipped_bounds(),
+            }));
         } else {
             let mut bounds = first_path.clipped_bounds();
             for path in paths.iter().skip(1) {
                 bounds = bounds.union(&path.clipped_bounds());
             }
-            vec![PathSprite { bounds }]
-        };
-
-        let Some(path_intermediate_view) = self.resources().path_intermediate_view.clone() else {
-            return Ok(());
-        };
+            self.path_sprites.push(PathSprite { bounds });
+        }
+        let sprite_count = self.path_sprites.len() as u32;
+        self.path_sprite_peak = self.path_sprite_peak.max(self.path_sprites.len());
+        let mut sprites = std::mem::take(&mut self.path_sprites);
         let instances =
-            self.write_instance_binding("path_sprites_bind_group", instance_offset, &sprites)?;
+            self.write_instance_binding("path_sprites_bind_group", instance_offset, &sprites);
+        sprites.clear();
+        self.path_sprites = sprites;
+        let instances = instances?;
         let texture = self.create_texture_bind_group(
             "path_intermediate_texture_bind_group",
             &path_intermediate_view,
@@ -1880,7 +1922,7 @@ impl WgpuRendererCore {
         pass.set_bind_group(2, &texture, &[]);
         pass.draw(
             0..4,
-            instances.first_instance..instances.first_instance + sprites.len() as u32,
+            instances.first_instance..instances.first_instance + sprite_count,
         );
         Ok(())
     }
@@ -1892,7 +1934,7 @@ impl WgpuRendererCore {
         size: Size<DevicePixels>,
         instance_offset: &mut u64,
     ) -> Result<bool> {
-        let mut vertices = Vec::new();
+        self.path_vertices.clear();
         for path in paths {
             let bounds = path.clipped_bounds();
             let texture_tile_bounds = path
@@ -1902,27 +1944,36 @@ impl WgpuRendererCore {
                     size: tile.bounds.size.map(|p| ScaledPixels(p.0 as f32)),
                 })
                 .unwrap_or_default();
-            vertices.extend(path.vertices.iter().map(|v| PathRasterizationVertex {
-                xy_position: v.xy_position,
-                st_position: v.st_position,
-                color: path.color,
-                bounds,
-                texture_bounds: path.bounds,
-                texture_tile_bounds,
-                opacity: path.texture_opacity,
-                pad: 0.0,
-            }));
+            self.path_vertices
+                .extend(path.vertices.iter().map(|v| PathRasterizationVertex {
+                    xy_position: v.xy_position,
+                    st_position: v.st_position,
+                    color: path.color,
+                    bounds,
+                    texture_bounds: path.bounds,
+                    texture_tile_bounds,
+                    opacity: path.texture_opacity,
+                    pad: 0.0,
+                }));
         }
 
-        if vertices.is_empty() {
+        if self.path_vertices.is_empty() {
             return Ok(false);
         }
 
+        self.path_vertex_peak = self.path_vertex_peak.max(self.path_vertices.len());
+        // Temporarily move only the Vec header to allow the instance transport to
+        // grow. Restore scratch even on upload failure; neither transport retains
+        // a borrow after write_instance_binding returns.
+        let mut vertices = std::mem::take(&mut self.path_vertices);
         let vertex_binding = self.write_instance_binding(
             "path_rasterization_bind_group",
             instance_offset,
             &vertices,
-        )?;
+        );
+        vertices.clear();
+        self.path_vertices = vertices;
+        let vertex_binding = vertex_binding?;
 
         // The existing vertex preparation determines demand without another scan
         // of scene.paths, which may contain only paths with empty vertex arrays.
@@ -2146,6 +2197,30 @@ impl WgpuRendererCore {
         }
     }
 
+    // Match scene scratch's 4096/1024 high/low water and the instance transport's
+    // 120-frame delay. Demand is captured during expansion, never by a scene scan.
+    fn maintain_path_scratch_capacity<T>(
+        scratch: &mut Vec<T>,
+        peak: usize,
+        frame_start_capacity: usize,
+        low_frames: &mut u16,
+        low_peak: &mut usize,
+    ) {
+        let capacity = scratch.capacity();
+        if capacity != frame_start_capacity || capacity <= 4096 || peak > capacity / 4 {
+            *low_frames = 0;
+            *low_peak = 0;
+            return;
+        }
+        *low_frames += 1;
+        *low_peak = (*low_peak).max(peak);
+        if *low_frames >= INSTANCE_DATA_SHRINK_DELAY_FRAMES {
+            scratch.shrink_to((*low_peak * 2).max(1024));
+            *low_frames = 0;
+            *low_peak = 0;
+        }
+    }
+
     fn maintain_instance_data_capacity(&mut self, used: u64, frame_start_capacity: u64) {
         if self.instance_data_capacity != frame_start_capacity
             || self.instance_data_capacity <= self.minimum_instance_data_capacity
@@ -2236,6 +2311,14 @@ impl WgpuRenderer {
         // Drop intermediate textures since they reference the old surface size.
         if let Some(core) = self.core_mut() {
             core.resources.invalidate_intermediate_textures();
+            core.path_vertices = Vec::new();
+            core.path_vertex_peak = 0;
+            core.low_path_vertex_frames = 0;
+            core.low_path_vertex_peak = 0;
+            core.path_sprites = Vec::new();
+            core.path_sprite_peak = 0;
+            core.low_path_sprite_frames = 0;
+            core.low_path_sprite_peak = 0;
         }
     }
 
@@ -2734,6 +2817,53 @@ mod tests {
     #[cfg(target_os = "linux")]
     use gpui::{DevicePixels, PlatformHeadlessRenderer, Scene};
 
+    #[test]
+    fn path_staging_reclaims_only_after_sustained_low_demand() {
+        let mut scratch = Vec::<PathSprite>::with_capacity(8192);
+        let capacity = scratch.capacity();
+        let mut low_frames = 0;
+        let mut low_peak = 0;
+        for _ in 1..INSTANCE_DATA_SHRINK_DELAY_FRAMES {
+            WgpuRendererCore::maintain_path_scratch_capacity(
+                &mut scratch,
+                1,
+                capacity,
+                &mut low_frames,
+                &mut low_peak,
+            );
+        }
+        assert_eq!(scratch.capacity(), capacity);
+        WgpuRendererCore::maintain_path_scratch_capacity(
+            &mut scratch,
+            capacity / 2,
+            capacity,
+            &mut low_frames,
+            &mut low_peak,
+        );
+        assert_eq!(low_frames, 0);
+        for _ in 0..INSTANCE_DATA_SHRINK_DELAY_FRAMES {
+            WgpuRendererCore::maintain_path_scratch_capacity(
+                &mut scratch,
+                1,
+                capacity,
+                &mut low_frames,
+                &mut low_peak,
+            );
+        }
+        assert!(scratch.capacity() <= 1024);
+        scratch.reserve(8192);
+        let capacity = scratch.capacity();
+        WgpuRendererCore::maintain_path_scratch_capacity(
+            &mut scratch,
+            1,
+            1024,
+            &mut low_frames,
+            &mut low_peak,
+        );
+        assert_eq!(scratch.capacity(), capacity);
+        assert_eq!(low_frames, 0);
+    }
+
     #[cfg(target_os = "linux")]
     fn device_size(width: i32, height: i32) -> Size<DevicePixels> {
         Size {
@@ -2961,7 +3091,7 @@ mod tests {
         path_scene.insert_primitive(solid_quad(8.0, 0.0, 4.0, 16.0, gpui::blue()));
         path_scene.finish();
 
-        path.vertices.clear();
+        Arc::make_mut(&mut path.vertices).clear();
         let mut empty_path_scene = Scene::default();
         empty_path_scene.insert_primitive(background);
         empty_path_scene.insert_primitive(path);
@@ -3078,15 +3208,13 @@ mod tests {
         let vertex_size = std::mem::size_of::<PathRasterizationVertex>() as u64;
         let mut medium_path = path.clone();
         let medium_vertices = (minimum * 3 / 4 / vertex_size).next_multiple_of(3) as usize;
-        medium_path
-            .vertices
-            .resize(medium_vertices, path.vertices[0].clone());
+        Arc::make_mut(&mut medium_path.vertices).resize(medium_vertices, path.vertices[0].clone());
         let mut medium_scene = Scene::default();
         medium_scene.insert_primitive(medium_path);
         medium_scene.finish();
         let heavy_vertices = (minimum * 2 / vertex_size + 3).next_multiple_of(3) as usize;
-        path.vertices
-            .resize(heavy_vertices, path.vertices[0].clone());
+        let padding_vertex = path.vertices[0].clone();
+        Arc::make_mut(&mut path.vertices).resize(heavy_vertices, padding_vertex);
         let mut heavy_scene = Scene::default();
         heavy_scene.insert_primitive(path);
         heavy_scene.finish();
@@ -3095,15 +3223,20 @@ mod tests {
         renderer.render_scene(&heavy_scene, size)?;
         let grown_capacity = renderer.core.instance_data_capacity;
         assert!(grown_capacity >= minimum * 4);
+        let grown_path_capacity = renderer.core.path_vertices.capacity();
+        assert!(grown_path_capacity >= heavy_vertices);
+        assert!(renderer.core.path_vertices.is_empty());
         for _ in 1..INSTANCE_DATA_SHRINK_DELAY_FRAMES {
             renderer.render_scene(&small_scene, size)?;
         }
         assert_eq!(renderer.core.instance_data_capacity, grown_capacity);
+        assert_eq!(renderer.core.path_vertices.capacity(), grown_path_capacity);
 
         // A large path upload must reset the streak even though the non-path
         // primitive arrays remain empty and their own instance usage is tiny.
         renderer.render_scene(&heavy_scene, size)?;
         assert_eq!(renderer.core.low_instance_data_frames, 0);
+        assert_eq!(renderer.core.low_path_vertex_frames, 0);
         renderer.render_scene(&medium_scene, size)?;
         for _ in 2..INSTANCE_DATA_SHRINK_DELAY_FRAMES {
             renderer.render_scene(&small_scene, size)?;
@@ -3120,6 +3253,7 @@ mod tests {
         assert_eq!(renderer.core.instance_data_capacity, minimum * 2);
         renderer.render_scene(&small_scene, size)?;
         assert_eq!(renderer.core.instance_data_capacity, minimum);
+        assert!(renderer.core.path_vertices.capacity() <= 1024);
         let image = renderer.read_image()?;
         assert_pixel(&image, 4, 4, RED);
         assert_pixel(&image, 0, 0, BLACK);
@@ -3128,7 +3262,72 @@ mod tests {
 
         let image = renderer.render_scene_to_image(&heavy_scene, size)?;
         assert!(renderer.core.instance_data_capacity > minimum);
+        assert!(renderer.core.path_vertices.capacity() >= heavy_vertices);
         assert_pixel(&image, 4, 4, RED);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn scaled_paths_replay_sorted_layers_across_reused_raster_batches() -> anyhow::Result<()> {
+        let mut renderer = WgpuHeadlessRenderer::new()?;
+        let tile = image_tile(&renderer, 22, 1, 1, &[255, 0, 0, 255])?;
+        let mut logical = Path::new(gpui::point(gpui::px(0.), gpui::px(0.)));
+        for (x, y) in [(8., 0.), (8., 8.), (0., 8.), (0., 0.)] {
+            logical.line_to(gpui::point(gpui::px(x), gpui::px(y)));
+        }
+        let mut textured = logical.scale(2.);
+        textured.texture = Some(tile);
+        textured.texture_opacity = 0.5;
+        textured.content_mask.bounds = solid_quad(4., 0., 8., 16., gpui::blue()).bounds;
+        let mut plain = rectangle_path(16., 0., 16., 16.);
+        plain.color = gpui::red().into();
+        let bounds = solid_quad(0., 0., 32., 16., gpui::blue()).bounds;
+        let mut source = Scene::default();
+        source.push_layer(bounds);
+        source.push_layer(bounds);
+        source.insert_primitive(solid_quad(24., 0., 4., 16., gpui::blue()));
+        source.push_layer(bounds);
+        source.insert_primitive(textured);
+        source.pop_layer();
+        source.pop_layer();
+        source.insert_primitive(plain);
+        source.pop_layer();
+        source.finish();
+        assert_eq!(source.paths[0].id.0, 1);
+        assert_eq!(source.paths[1].id.0, 0);
+        assert_eq!(
+            source
+                .batches()
+                .filter(|batch| matches!(batch, PrimitiveBatch::Paths(_)))
+                .count(),
+            2
+        );
+        let mut replayed = Scene::default();
+        replayed.insert_primitive(solid_quad(36., 0., 4., 16., gpui::red()));
+        replayed.replay(0..source.len(), &source);
+        replayed.finish();
+        let image = renderer.render_scene_to_image(&source, device_size(40, 16))?;
+        assert_pixel(&image, 8, 8, [0, 0, 128, 255]);
+        assert_pixel(&image, 18, 8, RED);
+        assert_pixel(&image, 26, 8, BLUE);
+        let scratch = renderer.core.path_vertices.as_ptr();
+        let sprite_scratch = renderer.core.path_sprites.as_ptr();
+        source.clear();
+        for _ in 0..2 {
+            let image = renderer.render_scene_to_image(&replayed, device_size(40, 16))?;
+            assert_pixel(&image, 2, 8, BLACK);
+            assert_pixel(&image, 8, 8, [0, 0, 128, 255]);
+            assert_pixel(&image, 14, 8, BLACK);
+            assert_pixel(&image, 18, 8, RED);
+            assert_pixel(&image, 26, 8, BLUE);
+            assert_pixel(&image, 30, 8, RED);
+            assert_pixel(&image, 38, 8, RED);
+            assert_eq!(renderer.core.path_vertices.as_ptr(), scratch);
+            assert_eq!(renderer.core.path_sprites.as_ptr(), sprite_scratch);
+            assert!(renderer.core.path_sprites.is_empty());
+            assert!(renderer.core.path_vertices.is_empty());
+        }
         Ok(())
     }
 

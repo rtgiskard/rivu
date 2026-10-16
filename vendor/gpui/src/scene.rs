@@ -13,6 +13,7 @@ use std::{
     iter::Peekable,
     ops::{Add, Range, Sub},
     slice,
+    sync::Arc,
 };
 
 #[allow(non_camel_case_types, unused)]
@@ -147,6 +148,8 @@ impl Scene {
             Primitive::Path(path) => {
                 path.order = order;
                 path.id = PathId(self.paths.len());
+                // Render sorting and paint-order replay need independent metadata,
+                // but share one immutable vertex allocation (also across scenes).
                 self.paths.push(path.clone());
             }
             Primitive::Underline(underline) => {
@@ -862,7 +865,8 @@ pub struct Path<P: Clone + Debug + Default + PartialEq> {
     pub order: DrawOrder,
     pub bounds: Bounds<P>,
     pub content_mask: ContentMask<P>,
-    pub vertices: Vec<PathVertex<P>>,
+    /// Shared geometry; use `Arc::make_mut` before editing a cloned path.
+    pub vertices: Arc<Vec<PathVertex<P>>>,
     pub color: Background,
     /// Atlas tile used as a normalized fill texture, when present.
     pub texture: Option<AtlasTile>,
@@ -879,7 +883,7 @@ impl Path<Pixels> {
         Self {
             id: PathId(0),
             order: DrawOrder::default(),
-            vertices: Vec::new(),
+            vertices: Arc::new(Vec::new()),
             start,
             current: start,
             bounds: Bounds {
@@ -895,17 +899,21 @@ impl Path<Pixels> {
     }
 
     /// Scale this path by the given factor.
+    ///
+    /// Converts coordinates once into a new shared allocation; subsequent scene
+    /// insertion and replay do not copy those scaled vertices again.
     pub fn scale(&self, factor: f32) -> Path<ScaledPixels> {
         Path {
             id: self.id,
             order: self.order,
             bounds: self.bounds.scale(factor),
             content_mask: self.content_mask.scale(factor),
-            vertices: self
-                .vertices
-                .iter()
-                .map(|vertex| vertex.scale(factor))
-                .collect(),
+            vertices: Arc::new(
+                self.vertices
+                    .iter()
+                    .map(|vertex| vertex.scale(factor))
+                    .collect(),
+            ),
             start: self.start.map(|start| start.scale(factor)),
             current: self.current.scale(factor),
             contour_count: self.contour_count,
@@ -972,17 +980,20 @@ impl Path<Pixels> {
                 size: Default::default(),
             });
 
-        self.vertices.push(PathVertex {
+        // A cached/replayed path is an immutable snapshot. Builders with unique
+        // geometry retain their Vec capacity without copying earlier triangles.
+        let vertices = Arc::make_mut(&mut self.vertices);
+        vertices.push(PathVertex {
             xy_position: xy.0,
             st_position: st.0,
             content_mask: Default::default(),
         });
-        self.vertices.push(PathVertex {
+        vertices.push(PathVertex {
             xy_position: xy.1,
             st_position: st.1,
             content_mask: Default::default(),
         });
-        self.vertices.push(PathVertex {
+        vertices.push(PathVertex {
             xy_position: xy.2,
             st_position: st.2,
             content_mask: Default::default(),
@@ -1030,6 +1041,96 @@ impl PathVertex<Pixels> {
 #[cfg(test)]
 mod reclamation_tests {
     use super::*;
+
+    fn triangle() -> Path<Pixels> {
+        let mut path = Path::new(point(Pixels(2.), Pixels(3.)));
+        path.line_to(point(Pixels(6.), Pixels(3.)));
+        path.curve_to(point(Pixels(6.), Pixels(7.)), point(Pixels(8.), Pixels(5.)));
+        path.content_mask = ContentMask {
+            bounds: path.bounds,
+        };
+        path
+    }
+
+    #[test]
+    fn path_scale_preserves_geometry_masks_and_cached_snapshot() {
+        let mut cached = triangle();
+        cached.id = PathId(7);
+        cached.order = 9;
+        cached.color = crate::red().into();
+        cached.texture_opacity = 0.375;
+        Arc::make_mut(&mut cached.vertices)[0].content_mask = cached.content_mask;
+        let snapshot = cached.clone();
+        assert!(Arc::ptr_eq(&snapshot.vertices, &cached.vertices));
+        let scaled = snapshot.scale(1.5);
+        assert_eq!(scaled.id, cached.id);
+        assert_eq!(scaled.order, cached.order);
+        assert_eq!(scaled.bounds, cached.bounds.scale(1.5));
+        assert_eq!(scaled.content_mask, cached.content_mask.scale(1.5));
+        assert_eq!(scaled.start, cached.start.scale(1.5));
+        assert_eq!(scaled.current, cached.current.scale(1.5));
+        assert_eq!(scaled.color, cached.color);
+        assert_eq!(scaled.texture_opacity, 0.375);
+        assert_eq!(scaled.vertices.len(), cached.vertices.len());
+        for (actual, original) in scaled.vertices.iter().zip(cached.vertices.iter()) {
+            assert_eq!(actual.xy_position, original.xy_position.scale(1.5));
+            assert_eq!(actual.st_position, original.st_position);
+            assert_eq!(actual.content_mask, original.content_mask.scale(1.5));
+        }
+        let previous_len = snapshot.vertices.len();
+        cached.line_to(point(Pixels(10.), Pixels(9.)));
+        assert_eq!(snapshot.vertices.len(), previous_len);
+        assert_eq!(cached.vertices.len(), previous_len + 3);
+        assert_ne!(cached.bounds, snapshot.bounds);
+    }
+
+    #[test]
+    fn path_replay_preserves_paint_ranges_after_sort_and_source_clear() {
+        let path = triangle().scale(2.);
+        let bounds = path.bounds;
+        let mut source = Scene::default();
+        source.push_layer(bounds);
+        source.push_layer(bounds);
+        source.insert_primitive(path.clone());
+        source.pop_layer();
+        source.insert_primitive(path.clone());
+        source.pop_layer();
+        source.finish();
+        assert_eq!(
+            source.paths.iter().map(|p| p.id.0).collect::<Vec<_>>(),
+            [1, 0]
+        );
+        let geometry = Arc::downgrade(&source.paths[0].vertices);
+        assert!(Arc::ptr_eq(
+            &source.paths[0].vertices,
+            &source.paths[1].vertices
+        ));
+        let mut replayed = Scene::default();
+        replayed.insert_primitive(path);
+        replayed.replay(0..source.len(), &source);
+        replayed.finish();
+        assert_eq!(replayed.len(), 7);
+        assert_eq!(replayed.paths.len(), 3);
+        // Partial replay addresses paint order, not the sorted path index.
+        let mut partial = Scene::default();
+        partial.replay(2..3, &source);
+        partial.finish();
+        source.clear();
+        assert_eq!(partial.paths[0].id, PathId(0));
+        assert_eq!(partial.paths[0].bounds, bounds);
+        assert_eq!(
+            partial.paths[0].vertices[4].xy_position,
+            point(ScaledPixels(16.), ScaledPixels(10.))
+        );
+        for path in &replayed.paths {
+            assert_eq!(path.bounds, bounds);
+            assert_eq!(path.content_mask.bounds, bounds);
+            assert_eq!(path.vertices.len(), partial.paths[0].vertices.len());
+        }
+        partial.clear();
+        replayed.clear();
+        assert!(geometry.upgrade().is_none());
+    }
 
     fn quad(color: Hsla) -> Quad {
         let bounds = Bounds {
