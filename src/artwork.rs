@@ -51,9 +51,9 @@ impl Artwork {
 
     fn file(&self) -> &ArtworkFile {
         self.0
-            .image
+            .lookup
             .get()
-            .and_then(Option::as_deref)
+            .and_then(|lookup| lookup.image.as_deref())
             .expect("published artwork")
     }
 }
@@ -117,7 +117,30 @@ impl ArtworkIdentity {
 
 struct CachedArtwork {
     identity: ArtworkIdentity,
-    image: OnceLock<Option<Arc<ArtworkFile>>>,
+    lookup: OnceLock<ArtworkLookup>,
+}
+
+struct ArtworkLookup {
+    image: Option<Arc<ArtworkFile>>,
+    failed_path: Option<PathBuf>,
+}
+
+impl ArtworkLookup {
+    fn applies_to(&self, path: &Path) -> bool {
+        self.failed_path
+            .as_deref()
+            .is_none_or(|failed_path| failed_path == path)
+    }
+}
+
+impl CachedArtwork {
+    fn matches(&self, track: &Track) -> bool {
+        self.identity.matches(track)
+            && self
+                .lookup
+                .get()
+                .is_none_or(|lookup| lookup.applies_to(&track.path))
+    }
 }
 
 #[derive(Default)]
@@ -130,11 +153,11 @@ impl ArtworkCache {
     fn find(&self, track: &Track) -> Option<&Arc<CachedArtwork>> {
         self.items
             .get(&track.id)
-            .filter(|entry| entry.identity.matches(track))
+            .filter(|entry| entry.matches(track))
             .or_else(|| {
                 self.insertion_order
                     .iter()
-                    .find(|entry| entry.identity.matches(track))
+                    .find(|entry| entry.matches(track))
             })
     }
 
@@ -166,9 +189,9 @@ impl ArtworkCache {
     fn protects(&self, path: &Path) -> bool {
         self.insertion_order.iter().any(|entry| {
             entry
-                .image
+                .lookup
                 .get()
-                .and_then(Option::as_ref)
+                .and_then(|lookup| lookup.image.as_ref())
                 .is_some_and(|file| file.path.as_ref() == path)
         })
     }
@@ -190,14 +213,17 @@ impl ArtworkManager {
         let default = write_image(&directory.join("default.png"), DEFAULT_IMAGE)
             .ok()
             .map(|uri| {
-                let image = OnceLock::new();
-                let _ = image.set(Some(artwork_file(uri, true)));
+                let lookup = OnceLock::new();
+                let _ = lookup.set(ArtworkLookup {
+                    image: Some(artwork_file(uri, true)),
+                    failed_path: None,
+                });
                 Artwork(Arc::new(CachedArtwork {
                     identity: ArtworkIdentity {
                         id: 0,
                         fingerprint: None,
                     },
-                    image,
+                    lookup,
                 }))
             });
         // Published file URIs are absolute; keep maintenance paths comparable
@@ -216,16 +242,23 @@ impl ArtworkManager {
         let cache = self.entries.lock();
         cache
             .find(track)
-            .filter(|entry| entry.image.get().is_some_and(Option::is_some))
+            .filter(|entry| {
+                entry
+                    .lookup
+                    .get()
+                    .is_some_and(|lookup| lookup.applies_to(&track.path) && lookup.image.is_some())
+            })
             .map(|entry| Artwork(Arc::clone(entry)))
             .or_else(|| self.default.clone())
     }
 
     pub fn is_loaded(&self, track: &Track) -> bool {
-        self.entries
-            .lock()
-            .find(track)
-            .is_some_and(|entry| entry.image.get().is_some())
+        self.entries.lock().find(track).is_some_and(|entry| {
+            entry
+                .lookup
+                .get()
+                .is_some_and(|lookup| lookup.applies_to(&track.path))
+        })
     }
 
     /// Blocking singleflight load; a late old version never replaces its successor.
@@ -236,42 +269,55 @@ impl ArtworkManager {
     fn load_with(
         &self,
         track: &Track,
-        probe: impl FnOnce() -> Option<Arc<ArtworkFile>>,
+        probe: impl FnOnce() -> Result<Option<Arc<ArtworkFile>>, ()>,
     ) -> Option<Artwork> {
         let _acquisition = self.maintenance.read();
-        let cached = {
-            let mut cache = self.entries.lock();
-            if let Some(entry) = cache.find(track) {
-                Arc::clone(entry)
-            } else {
-                let entry = Arc::new(CachedArtwork {
-                    identity: ArtworkIdentity::for_track(track),
-                    image: OnceLock::new(),
-                });
-                cache.items.insert(track.id, Arc::clone(&entry));
-                cache.insertion_order.push_back(Arc::clone(&entry));
-                cache.trim();
-                entry
+        let mut probe = Some(probe);
+        loop {
+            let cached = {
+                let mut cache = self.entries.lock();
+                if let Some(entry) = cache.find(track) {
+                    Arc::clone(entry)
+                } else {
+                    let entry = Arc::new(CachedArtwork {
+                        identity: ArtworkIdentity::for_track(track),
+                        lookup: OnceLock::new(),
+                    });
+                    cache.items.insert(track.id, Arc::clone(&entry));
+                    cache.insertion_order.push_back(Arc::clone(&entry));
+                    cache.trim();
+                    entry
+                }
+            };
+            let lookup = cached.lookup.get_or_init(|| {
+                let result = probe.take().expect("one source probe")();
+                ArtworkLookup {
+                    failed_path: result.is_err().then(|| track.path.clone()),
+                    image: result.ok().flatten().or_else(|| {
+                        self.default.as_ref().map(|artwork| {
+                            Arc::clone(
+                                artwork
+                                    .0
+                                    .lookup
+                                    .get()
+                                    .expect("default initialized")
+                                    .image
+                                    .as_ref()
+                                    .expect("default image"),
+                            )
+                        })
+                    }),
+                }
+            });
+            // A concurrent request may have shared an unfinished old-path probe.
+            // Only its failure is path-bound; successful content remains reusable.
+            if !lookup.applies_to(&track.path) {
+                continue;
             }
-        };
-        let image = cached.image.get_or_init(|| {
-            probe().or_else(|| {
-                self.default.as_ref().map(|artwork| {
-                    Arc::clone(
-                        artwork
-                            .0
-                            .image
-                            .get()
-                            .expect("default initialized")
-                            .as_ref()
-                            .expect("default image"),
-                    )
-                })
-            })
-        });
-        let result = image.as_ref().map(|_| Artwork(Arc::clone(&cached)));
-        self.entries.lock().trim();
-        result
+            let result = lookup.image.as_ref().map(|_| Artwork(Arc::clone(&cached)));
+            self.entries.lock().trim();
+            return result;
+        }
     }
 
     /// Explicit disk inventory/cleanup. Startup and ordinary loads never enumerate
@@ -345,7 +391,7 @@ impl ArtworkManager {
         Ok(report)
     }
 
-    fn embedded_uri(&self, path: &Path) -> Option<Arc<ArtworkFile>> {
+    fn embedded_uri(&self, path: &Path) -> Result<Option<Arc<ArtworkFile>>, ()> {
         let mut options = OpenOptions::new();
         options.read(true);
         #[cfg(unix)]
@@ -354,11 +400,11 @@ impl ArtworkManager {
             // A stale or replaced media path may be a FIFO with no writer.
             options.custom_flags(libc::O_NONBLOCK);
         }
-        let file = options.open(path).ok()?;
+        let file = options.open(path).map_err(|_| ())?;
         // Check the opened object, not the path, so replacement cannot turn a
         // metadata-approved regular file into a blocking stream before probing.
-        if !file.metadata().ok()?.is_file() {
-            return None;
+        if !file.metadata().map_err(|_| ())?.is_file() {
+            return Err(());
         }
         let mut hint = Hint::new();
         if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
@@ -371,11 +417,11 @@ impl ArtworkManager {
                 FormatOptions::default(),
                 MetadataOptions::default(),
             )
-            .ok()?;
+            .map_err(|_| ())?;
         let track_id = format
             .default_track(TrackType::Audio)
             .map(|track| u64::from(track.id));
-        self.metadata_uri(format.metadata(), track_id)
+        Ok(self.metadata_uri(format.metadata(), track_id))
     }
 
     fn metadata_uri(
@@ -484,11 +530,11 @@ fn write_image(path: &Path, data: &[u8]) -> io::Result<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::fs::File;
 
-    fn track(path: PathBuf) -> Track {
+    pub(crate) fn track(path: PathBuf) -> Track {
         Track {
             id: 1,
             path,
@@ -515,7 +561,7 @@ mod tests {
         }
     }
 
-    fn tagged_wav(path: &Path) {
+    pub(crate) fn tagged_wav(path: &Path) {
         tagged_wav_image(path, DEFAULT_IMAGE);
     }
 
@@ -595,6 +641,56 @@ mod tests {
             result_uri(manager.default.clone())
         );
         assert!(manager.cached(&selected).unwrap().is_placeholder());
+    }
+
+    #[test]
+    fn failed_source_paths_retry_after_relocation_without_changing_content_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let cover_source = directory.path().join("available.wav");
+        tagged_wav(&cover_source);
+        for old_path in ["missing.wav", "unprobeable.wav"] {
+            let manager = ArtworkManager::new(directory.path());
+            let mut selected = track(directory.path().join(old_path));
+            if old_path == "unprobeable.wav" {
+                fs::write(&selected.path, b"not an audio file").unwrap();
+            }
+            let failed = manager.load(&selected).unwrap();
+            assert!(failed.is_placeholder());
+            assert!(manager.is_loaded(&selected));
+            assert_eq!(
+                manager.load_with(&selected, || panic!("unchanged failure reprobed")),
+                Some(failed)
+            );
+
+            selected.path = cover_source.clone();
+            assert!(!manager.is_loaded(&selected));
+            assert!(manager.cached(&selected).unwrap().is_placeholder());
+            let recovered = manager.load(&selected).unwrap();
+            assert!(!recovered.is_placeholder());
+            assert_eq!(fs::read(file_path(recovered.uri())).unwrap(), DEFAULT_IMAGE);
+            selected.path = directory.path().join("moved-again.wav");
+            assert_eq!(
+                manager.load_with(&selected, || panic!("successful content reprobed")),
+                Some(recovered)
+            );
+        }
+    }
+
+    #[test]
+    fn successful_no_cover_result_is_reused_after_path_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("no-cover.wav");
+        tagged_wav_image(&source, b"unsupported image bytes");
+        let manager = ArtworkManager::new(directory.path());
+        let mut selected = track(source);
+        let no_cover = manager.load(&selected).unwrap();
+        assert!(no_cover.is_placeholder());
+        selected.path = directory.path().join("moved.wav");
+        assert!(manager.is_loaded(&selected));
+        assert_eq!(
+            manager.load_with(&selected, || panic!("successful no-cover result reprobed")),
+            Some(no_cover)
+        );
     }
 
     #[test]
@@ -683,7 +779,7 @@ mod tests {
                 manager.load_with(selected, || {
                     started.send(()).unwrap();
                     released.recv().unwrap();
-                    None
+                    Ok(None)
                 })
             });
             loading.recv().unwrap();

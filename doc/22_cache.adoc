@@ -293,11 +293,32 @@ boundary; MPRIS retains its published result until replacement or shutdown, and
 its property getter retains the returned result until the next read or shutdown.
 There is no separate file lease counter or session-wide visited-file registry.
 
+Successful probes, including a source with no usable embedded cover, remain
+reusable after a path move that preserves track ID and fingerprint. Source-open
+and probe failures instead belong to the attempted path: a different path retries
+that content identity, while repeated demand at the unchanged failed path stays
+completed. A request sharing an unfinished probe at another path waits for that
+singleflight result, then retries its own path only if the shared probe failed.
+
 Lookup retention targets 64 entries. FIFO eviction selects only idle results;
 active results can temporarily exceed that target. Idle overflow is trimmed on
 subsequent loads. Cache-only reads neither insert entries nor probe on misses.
 Revisiting an evicted identity requires another source probe. Late completions
 cannot replace a newer identity, even when both resolve to identical image bytes.
+
+An album worker carries its completed result lease into the GUI callback. The
+callback delivers real covers directly to still-visible demand with the same
+track ID, fingerprint, and path; shared-cache pressure cannot turn that result
+into a missing cover before delivery. Hidden or obsolete completion cannot
+retain a display owner or start another hidden demand.
+
+Album grids separately remember only explicit negative completions for their
+current visible source identity and path. Those cards keep their generated SVG
+fallback. Evicting an idle negative result from the shared cache does not restart
+that visible lookup, even when visible negatives exceed 64. Positive results
+remain owned by their existing views, not another lookup cache. Scrolling out of
+demand, changing source identity or path, hiding the grid, or closing its window
+releases these negative records; the shared 64-entry retention target is unchanged.
 
 Encoded images use immutable content-hash filenames under `artwork/cache`.
 Identical bytes reuse an existing file, independent of track identity; files
