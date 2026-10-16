@@ -211,8 +211,11 @@ leaves the application running so another open request can retry.
 
 Playback, IPC, tray, MPRIS, and accepted business operations remain independent
 of this transition. The GPUI event loop, executors, font system, and application
-caches remain available; this is not full framework teardown. No allocator trim
-is performed, and closing the window does not promise serve-level process memory.
+caches remain available; this is not full framework teardown. Allocator arenas,
+thread-local state, and backend display bookkeeping can outlive a window or
+display reconnect, so RSS is not a count of live rendering resources. No
+allocator trim is performed, and closing the window does not promise
+serve-level process memory.
 
 An image cannot be dropped merely because the application has stopped reusing
 it: a submitted scene can still reference it. Replaced cached waveform and
