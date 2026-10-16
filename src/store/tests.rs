@@ -848,6 +848,334 @@ fn album_consumers_preserve_root_unicode_and_direct_parent_boundaries() {
 }
 
 #[test]
+fn album_representatives_keep_disc_track_title_and_id_priority_after_updates() {
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    store
+        .conn
+        .execute_batch(
+            "INSERT INTO tracks(id,path,raw_title,raw_album,disc_number,track_number) VALUES
+            (1,'/music/a/1.flac','A','Shared',NULL,1),
+            (2,'/music/a/2.flac','A','Shared',2,1),
+            (3,'/music/a/3.flac','A','Shared',1,NULL),
+            (4,'/music/a/4.flac','Z','Shared',1,2),
+            (5,'/music/a/5.flac','A','Shared',1,2),
+            (6,'/music/a/6.flac','A','Shared',1,2);",
+        )
+        .unwrap();
+    let representative = || {
+        let album = store
+            .albums_page(None, AlbumSort::Title, 0, 1)
+            .unwrap()
+            .rows
+            .remove(0);
+        let members = store.album_tracks_page(&album.key, None, 0, 1).unwrap();
+        assert_eq!(album.representative.id, members.rows[0].id);
+        album.representative.id
+    };
+    assert_eq!(representative(), 5);
+    for (sql, expected) in [
+        ("UPDATE tracks SET title_override='' WHERE id=6", 6),
+        ("UPDATE tracks SET disc_number=NULL WHERE id=6", 5),
+        ("DELETE FROM tracks WHERE id=5", 4),
+        ("UPDATE tracks SET track_number=NULL WHERE id=4", 3),
+        ("UPDATE tracks SET disc_number=NULL WHERE id=3", 4),
+        ("UPDATE tracks SET disc_number=NULL WHERE id=4", 2),
+    ] {
+        store.conn.execute(sql, []).unwrap();
+        assert_eq!(representative(), expected);
+    }
+}
+
+#[test]
+fn album_summaries_follow_artist_counts_transactions_external_commits_and_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("album-transactions.db");
+    let store = Store::open(&path).unwrap();
+    store
+        .conn
+        .execute_batch(
+            "INSERT INTO tracks(id,path,raw_title,raw_album,raw_artist) VALUES
+            (1,'/music/a/1.flac','A One','Shared','ÉTÉ_100%'),
+            (2,'/music/a/2.flac','Two','Shared','ÉTÉ_100%'),
+            (3,'/music/a/3.flac','Three','Shared','Other'),
+            (4,'/music/a/4.flac','Four','Shared','');",
+        )
+        .unwrap();
+    let snapshot = |store: &Store| {
+        let page = store.albums_page(None, AlbumSort::Title, 0, 24).unwrap();
+        (
+            page.total,
+            page.rows
+                .into_iter()
+                .map(|album| {
+                    (
+                        album.key,
+                        album.track_count,
+                        album.artist,
+                        album.representative,
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+    };
+    let before = snapshot(&store);
+    assert_eq!(before.1[0].1, 4);
+    assert_eq!(before.1[0].2, "Various artists");
+    assert_eq!(
+        store
+            .albums_page(Some("été_100%"), AlbumSort::Artist, 0, 24)
+            .unwrap()
+            .total,
+        1
+    );
+    assert_eq!(
+        store
+            .albums_page(Some("Various artists"), AlbumSort::Title, 0, 24)
+            .unwrap()
+            .total,
+        0
+    );
+    assert_eq!(
+        store
+            .albums_page(Some("100x"), AlbumSort::Title, 0, 24)
+            .unwrap()
+            .total,
+        0
+    );
+    let tx = store.conn.unchecked_transaction().unwrap();
+    tx.execute_batch(
+        "UPDATE tracks SET path='/moved.flac',album_override='' WHERE id=1;
+         DELETE FROM tracks WHERE id=3;
+         INSERT INTO tracks(path,raw_album,raw_artist) VALUES('/new/5.flac','New','New');",
+    )
+    .unwrap();
+    assert_eq!(
+        store
+            .albums_page(None, AlbumSort::Title, 0, 24)
+            .unwrap()
+            .total,
+        3
+    );
+    tx.rollback().unwrap();
+    assert_eq!(snapshot(&store), before);
+
+    // This connection has no Rust scalar functions or application invalidation.
+    let external = Connection::open(&path).unwrap();
+    external
+        .execute_batch(
+            "BEGIN;
+         UPDATE tracks SET artist_override='ÉTÉ_100%' WHERE id=3;
+         UPDATE tracks SET raw_artist='Hidden',artist_override='ÉTÉ_100%' WHERE id=1;
+         COMMIT;",
+        )
+        .unwrap();
+    let page = store
+        .albums_page(Some("été_100%"), AlbumSort::Artist, 0, 24)
+        .unwrap();
+    assert_eq!(page.total, 1);
+    assert_eq!(page.rows[0].artist, "ÉTÉ_100%");
+    assert_eq!(page.rows[0].representative.artist, "ÉTÉ_100%");
+    external
+        .execute("DELETE FROM tracks WHERE id=2", [])
+        .unwrap();
+    assert_eq!(snapshot(&store).1[0].2, "ÉTÉ_100%");
+    external
+        .execute("UPDATE tracks SET artist_override='' WHERE id=1", [])
+        .unwrap();
+    assert_eq!(snapshot(&store).1[0].2, "ÉTÉ_100%");
+    external
+        .execute("DELETE FROM tracks WHERE id=3", [])
+        .unwrap();
+    let page = store.albums_page(None, AlbumSort::Title, 0, 24).unwrap();
+    assert_eq!(page.rows[0].track_count, 2);
+    assert_eq!(page.rows[0].artist, "");
+    assert_eq!(
+        store
+            .albums_page(Some("été"), AlbumSort::Title, 0, 24)
+            .unwrap()
+            .total,
+        0
+    );
+    external.execute(
+        "UPDATE tracks SET path='/moved.flac',album_override='',title_override='Moved' WHERE id=1", []
+    ).unwrap();
+    let page = store.albums_page(None, AlbumSort::Title, 0, 24).unwrap();
+    assert_eq!(page.total, 2);
+    assert_eq!(page.rows[0].key.directory, Path::new("/"));
+    assert_eq!(page.rows[0].key.title, "");
+    assert_eq!(page.rows[0].track_count, 1);
+    assert_eq!(page.rows[0].representative.path, Path::new("/moved.flac"));
+    assert_eq!(page.rows[0].representative.title, "Moved");
+    let before_restart = snapshot(&store);
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    assert_eq!(snapshot(&store), before_restart);
+    external.execute("DELETE FROM tracks", []).unwrap();
+    assert_eq!(snapshot(&store).0, 0);
+}
+
+#[test]
+fn album_summaries_follow_scan_edits_removals_and_relocation_rollback() {
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    let mut source = rec("/music/old/source.flac", "same", "Source", 10.0);
+    source.media.album = "Old".into();
+    source.media.artist = "Old artist".into();
+    let mut target = rec("/music/new/target.flac", "same", "Target", 10.0);
+    target.media.album = "Destination".into();
+    target.media.artist = "New artist".into();
+    let mut peer = rec("/music/new/peer.flac", "peer", "Peer", 10.0);
+    peer.media.album = "Destination".into();
+    peer.media.artist = "New artist".into();
+    store
+        .apply_scan(&scan(vec![source, target.clone(), peer.clone()]))
+        .unwrap();
+    let source_id = store
+        .track_id_for_source(Path::new("/music/old/source.flac"), None)
+        .unwrap()
+        .unwrap();
+    let target_id = store
+        .track_id_for_source(&target.path, None)
+        .unwrap()
+        .unwrap();
+    let peer_id = store
+        .track_id_for_source(&peer.path, None)
+        .unwrap()
+        .unwrap();
+    store
+        .edit_track(
+            source_id,
+            None,
+            Some("User artist"),
+            Some("User album"),
+            None,
+        )
+        .unwrap();
+    store
+        .conn
+        .execute("UPDATE tracks SET missing=1 WHERE id=?1", [source_id])
+        .unwrap();
+    let prepared = store.prepare_relocation(source_id, target_id).unwrap();
+    let snapshot = |store: &Store| {
+        store
+            .albums_page(None, AlbumSort::Artist, 0, 24)
+            .unwrap()
+            .rows
+            .into_iter()
+            .map(|album| {
+                (
+                    album.key,
+                    album.track_count,
+                    album.artist,
+                    album.representative,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let before = snapshot(&store);
+    store
+        .conn
+        .execute_batch(
+            "CREATE TRIGGER reject_album_move BEFORE UPDATE OF path ON tracks
+         BEGIN SELECT RAISE(ABORT,'reject relocation'); END;",
+        )
+        .unwrap();
+    assert!(store.commit_relocation(&prepared).is_err());
+    assert_eq!(snapshot(&store), before);
+    store
+        .conn
+        .execute_batch("DROP TRIGGER reject_album_move;")
+        .unwrap();
+    store.commit_relocation(&prepared).unwrap();
+    let albums = snapshot(&store);
+    assert_eq!(albums.len(), 2);
+    assert!(
+        albums
+            .iter()
+            .all(|album| album.0.directory == Path::new("/music/new"))
+    );
+    assert!(albums.iter().all(|album| album.1 == 1));
+    let moved = albums
+        .iter()
+        .find(|album| album.0.title == "User album")
+        .unwrap();
+    assert_eq!(moved.2, "User artist");
+    assert_eq!(moved.3.id, source_id);
+    assert_eq!(moved.3.path, target.path);
+    // Scanned metadata moves an unoverridden member while preserving user edits.
+    target.media.album = "Ignored raw album".into();
+    target.media.artist = "Ignored raw artist".into();
+    peer.media.album = "Rescanned album".into();
+    peer.media.artist = "Rescanned artist".into();
+    store.apply_scan(&scan(vec![target, peer])).unwrap();
+    assert_eq!(
+        store
+            .albums_page(Some("Destination"), AlbumSort::Title, 0, 24)
+            .unwrap()
+            .total,
+        0
+    );
+    assert_eq!(
+        store
+            .albums_page(Some("Rescanned artist"), AlbumSort::Title, 0, 24)
+            .unwrap()
+            .total,
+        1
+    );
+    assert_eq!(
+        store
+            .albums_page(Some("User artist"), AlbumSort::Title, 0, 24)
+            .unwrap()
+            .total,
+        1
+    );
+    store.remove_tracks(&[peer_id]).unwrap();
+    let albums = snapshot(&store);
+    assert_eq!(albums.len(), 1);
+    assert_eq!(albums[0].0.title, "User album");
+    store.remove_tracks(&[source_id]).unwrap();
+    assert!(snapshot(&store).is_empty());
+}
+
+#[test]
+fn album_paging_work_is_independent_of_member_count_and_inserts_are_linear() {
+    let measure =
+        |total: usize| {
+            let store = Store::open(Path::new(":memory:")).unwrap();
+            let counter = SqlVmSteps::new(&store.conn);
+            store.conn.execute(
+            "WITH RECURSIVE ids(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM ids WHERE id<?1)
+             INSERT INTO tracks(path,raw_title,raw_album,raw_artist)
+             SELECT '/music/large/'||id||'.flac','Track '||id,'Large','ÉTÉ_100%' FROM ids",
+            [total as i64]
+        ).unwrap();
+            let insert_steps = counter.take();
+            for _ in 0..2 {
+                for sort in [AlbumSort::Title, AlbumSort::Artist] {
+                    for query in [None, Some("été_100%"), Some("absent")] {
+                        let page = store.albums_page(query, sort, 0, 1).unwrap();
+                        assert_eq!(page.total, usize::from(query != Some("absent")));
+                        if let Some(album) = page.rows.first() {
+                            assert_eq!(album.track_count, total);
+                            assert_eq!(album.representative.title, "Track 1");
+                        }
+                    }
+                }
+            }
+            (insert_steps, counter.take())
+        };
+    let (small_inserts, small_pages) = measure(128);
+    let (large_inserts, large_pages) = measure(1024);
+    assert!(
+        large_inserts < small_inserts * 10,
+        "inserts: {small_inserts} -> {large_inserts}"
+    );
+    assert!(
+        large_pages < small_pages * 2,
+        "pages: {small_pages} -> {large_pages}"
+    );
+}
+
+#[test]
 fn playback_precision_upgrade_is_source_conditional_and_idempotent() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("precision.db");
@@ -3731,7 +4059,7 @@ fn queue_dedup_uses_first_position_not_allocation_order_and_track_deletes_remove
 fn unsupported_database_versions_are_rejected_without_migration() {
     fs::create_dir_all(".cache").unwrap();
     let directory = tempfile::tempdir_in(".cache").unwrap();
-    for version in [6, 13] {
+    for version in [6, 14] {
         let path = directory.path().join(format!("version-{version}.db"));
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection

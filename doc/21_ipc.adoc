@@ -138,6 +138,19 @@ not the requested page limit. Count-only requests instead use a direct count
 without materializing children or building the page. Empty and out-of-range pages
 still return the exact total.
 
+Album pages read persistent SQLite summaries keyed by directory and effective
+album title, rather than regrouping tracks for every count and page. Member
+artist reference counts preserve search across compilation artists. SQLite
+triggers maintain both summaries in the same transaction as track changes,
+including rollback and writes from another connection; unchanged effective
+grouping and artist values require no summary update. Each changed member uses
+indexed counter operations, not a scan of the album. An ordered member index
+selects representatives by disc, track number, effective title, then ID.
+This trades summary and index storage plus write maintenance for cheaper reads;
+opening a version 11 or 12 database performs one atomic schema-13 backfill.
+Exact substring searches and OFFSET traversal still scale with matching album
+and artist summaries, not merely the requested page size.
+
 Playlist deletion-reference lookup has an additional index on
 `(track_id,playlist_id)`. It avoids scanning unrelated playlist entries for sparse
 library deletions. Position is deliberately excluded: capturing removed positions

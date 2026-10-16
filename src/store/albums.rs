@@ -1,15 +1,105 @@
-use super::rows::{LIBRARY_ROW_COLUMNS, library_row_from_row};
+use super::rows::{LIBRARY_ROW_COLUMNS, TRACK_COLUMNS, library_row_from_row, track_from_row};
 use super::tracks::{search_filter, search_query};
 use super::{Store, queue::invalidate_structure};
 use crate::model::{AlbumKey, AlbumSort, AlbumSummary, LibraryRow, MAX_QUERY_ROWS, Page};
 use anyhow::{Context, Result, ensure};
-use rusqlite::params;
+use rusqlite::{Connection, params};
 
 // Paths are logical absolute paths. Keep root '/' while stripping other trailing
 // separators so keys agree with Path::parent(), without recursively merging discs.
 const DIRECTORY: &str = "CASE WHEN rtrim(path,replace(path,'/',''))='/' THEN '/' ELSE rtrim(rtrim(path,replace(path,'/','')),'/') END";
 const TITLE: &str = "COALESCE(album_override,raw_album)";
 const ORDER: &str = "disc_number IS NULL,disc_number,track_number IS NULL,track_number,COALESCE(title_override,raw_title),id";
+
+// SQLite owns these derived tables, including writes from other connections. Only
+// effective grouping/artist changes touch them; stats and representative ordering
+// changes need no rebuild. Each changed track does indexed counter updates, not a
+// scan of its album. The covering member index also bounds representative lookup.
+pub(super) fn create_summary_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(&format!(
+        "CREATE TABLE albums(
+            directory TEXT NOT NULL,title TEXT NOT NULL,
+            track_count INTEGER NOT NULL,artist TEXT,
+            PRIMARY KEY(directory,title)
+        ) WITHOUT ROWID;
+        CREATE INDEX albums_title ON albums(title,directory);
+        CREATE INDEX albums_artist ON albums(COALESCE(artist,'Unknown artist'),title,directory);
+        CREATE TABLE album_artists(
+            directory TEXT NOT NULL,title TEXT NOT NULL,artist TEXT NOT NULL,
+            track_count INTEGER NOT NULL,
+            PRIMARY KEY(directory,title,artist)
+        ) WITHOUT ROWID;
+        CREATE INDEX tracks_album_members ON tracks({DIRECTORY},{TITLE},{ORDER});
+        INSERT INTO albums
+            SELECT {DIRECTORY},{TITLE},COUNT(*),
+                CASE COUNT(DISTINCT NULLIF(COALESCE(artist_override,raw_artist),''))
+                    WHEN 0 THEN NULL
+                    WHEN 1 THEN MAX(NULLIF(COALESCE(artist_override,raw_artist),''))
+                    ELSE 'Various artists' END
+            FROM tracks GROUP BY {DIRECTORY},{TITLE};
+        INSERT INTO album_artists
+            SELECT {DIRECTORY},{TITLE},COALESCE(artist_override,raw_artist),COUNT(*)
+            FROM tracks WHERE COALESCE(artist_override,raw_artist)<>''
+            GROUP BY {DIRECTORY},{TITLE},COALESCE(artist_override,raw_artist);"
+    ))?;
+    let directory = |row: &str| DIRECTORY.replace("path", &format!("{row}.path"));
+    let title = |row: &str| format!("COALESCE({row}.album_override,{row}.raw_album)");
+    let artist = |row: &str| format!("COALESCE({row}.artist_override,{row}.raw_artist)");
+    let refresh_artist = |row: &str| {
+        let d = directory(row);
+        let t = title(row);
+        format!(
+            "UPDATE albums SET artist=CASE
+                WHEN EXISTS(SELECT 1 FROM album_artists
+                    WHERE directory={d} AND title={t} LIMIT 1 OFFSET 1)
+                THEN 'Various artists'
+                ELSE (SELECT artist FROM album_artists
+                    WHERE directory={d} AND title={t} LIMIT 1) END
+             WHERE directory={d} AND title={t};"
+        )
+    };
+    let add = format!(
+        "INSERT INTO albums(directory,title,track_count) VALUES({d},{t},1)
+            ON CONFLICT(directory,title) DO UPDATE SET track_count=track_count+1;
+         INSERT INTO album_artists(directory,title,artist,track_count)
+            SELECT {d},{t},{a},1 WHERE {a}<>''
+            ON CONFLICT(directory,title,artist) DO UPDATE SET track_count=track_count+1;
+         {refresh}",
+        d = directory("new"),
+        t = title("new"),
+        a = artist("new"),
+        refresh = refresh_artist("new"),
+    );
+    let remove = format!(
+        "UPDATE albums SET track_count=track_count-1 WHERE directory={d} AND title={t};
+         UPDATE album_artists SET track_count=track_count-1
+            WHERE directory={d} AND title={t} AND artist={a};
+         DELETE FROM album_artists WHERE directory={d} AND title={t} AND artist={a}
+            AND track_count=0;
+         DELETE FROM albums WHERE directory={d} AND title={t} AND track_count=0;
+         {refresh}",
+        d = directory("old"),
+        t = title("old"),
+        a = artist("old"),
+        refresh = refresh_artist("old"),
+    );
+    conn.execute_batch(&format!(
+        "CREATE TRIGGER albums_insert AFTER INSERT ON tracks BEGIN {add} END;
+         CREATE TRIGGER albums_delete AFTER DELETE ON tracks BEGIN {remove} END;
+         CREATE TRIGGER albums_update AFTER UPDATE OF path,raw_album,album_override,
+            raw_artist,artist_override ON tracks
+         WHEN {old_d} IS NOT {new_d} OR {old_t} IS NOT {new_t}
+            OR {old_a} IS NOT {new_a}
+         BEGIN {remove} {add} END;",
+        old_d = directory("old"),
+        new_d = directory("new"),
+        old_t = title("old"),
+        new_t = title("new"),
+        old_a = artist("old"),
+        new_a = artist("new"),
+    ))?;
+    Ok(())
+}
 
 // A slash-terminated prefix has the exclusive BINARY upper bound ending in '0',
 // including Unicode suffixes. Keep the parent check so child directories do not
@@ -29,11 +119,9 @@ impl Store {
         offset: usize,
         limit: usize,
     ) -> Result<Page<AlbumSummary>> {
-        let groups = format!(
-            "SELECT {DIRECTORY} AS directory,{TITLE} AS title,COUNT(*) AS track_count,CASE COUNT(DISTINCT NULLIF(COALESCE(artist_override,raw_artist),'')) WHEN 0 THEN NULL WHEN 1 THEN MAX(NULLIF(COALESCE(artist_override,raw_artist),'')) ELSE 'Various artists' END AS artist FROM tracks GROUP BY directory,title HAVING ?1 IS NULL OR instr(lower({TITLE}),lower(COALESCE(?1,'')))>0 OR MAX(instr(lower(COALESCE(artist_override,raw_artist)),lower(COALESCE(?1,''))))>0"
-        );
+        let filter = "?1 IS NULL OR instr(lower(title),lower(COALESCE(?1,'')))>0 OR EXISTS(SELECT 1 FROM album_artists WHERE directory=albums.directory AND title=albums.title AND instr(lower(artist),lower(COALESCE(?1,'')))>0)";
         let total = self.conn.query_row(
-            &format!("SELECT COUNT(*) FROM ({groups})"),
+            &format!("SELECT COUNT(*) FROM albums WHERE {filter}"),
             [query],
             |row| row.get::<_, i64>(0),
         )? as usize;
@@ -41,10 +129,9 @@ impl Store {
             AlbumSort::Title => "title,directory",
             AlbumSort::Artist => "COALESCE(artist,'Unknown artist'),title,directory",
         };
-        let mut statement = self.conn.prepare(&format!("SELECT directory,title,track_count,artist FROM ({groups}) ORDER BY {order} LIMIT ?2 OFFSET ?3"))?;
+        let mut statement = self.conn.prepare(&format!("SELECT directory,title,track_count,artist FROM albums WHERE {filter} ORDER BY {order} LIMIT ?2 OFFSET ?3"))?;
         let mut representative = self.conn.prepare(&format!(
-            "SELECT id FROM tracks INDEXED BY tracks_directory WHERE {} ORDER BY {ORDER} LIMIT 1",
-            album_filter()
+            "SELECT {TRACK_COLUMNS} FROM tracks INDEXED BY tracks_album_members WHERE {DIRECTORY}=?1 AND {TITLE}=?2 ORDER BY {ORDER} LIMIT 1"
         ))?;
         let mut rows = statement.query(params![
             query,
@@ -61,11 +148,10 @@ impl Store {
                 .directory
                 .to_str()
                 .context("Album directory is not UTF-8")?;
-            let id = representative.query_row(params![directory, key.title], |row| row.get(0))?;
+            let representative =
+                representative.query_row(params![directory, key.title], track_from_row)?;
             summaries.push(AlbumSummary {
-                representative: self
-                    .track(id)?
-                    .context("Album representative disappeared")?,
+                representative,
                 key,
                 track_count: row.get::<_, i64>(2)? as usize,
                 artist: row.get::<_, Option<String>>(3)?.unwrap_or_default(),

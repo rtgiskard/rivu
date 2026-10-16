@@ -613,12 +613,14 @@ For the JSON history shape and `--limit` behavior, see <<_cli_output,CLI output>
 
 == SQLite maintenance
 
-Rivu creates version 12 library databases and automatically upgrades version 11
-databases to version 12 on open. The upgrade preserves library identities and user
-state; previously stored bitrates remain estimates until an exact value is obtained.
-Other versions and unversioned databases are rejected without an automatic reset.
-Back up the database and any WAL before upgrading or replacing it. Version 12
-databases cannot be opened by versions of Rivu that only support version 11.
+Rivu creates version 13 library databases and automatically upgrades version 11
+or 12 databases on open. The atomic upgrade preserves library identities and user
+state and builds album summaries and their indexes once; a large library may
+take longer to open for this upgrade. Version 11 bitrates remain estimates until
+an exact value is obtained. Other versions and unversioned databases are rejected
+without an automatic reset. Back up the database and any WAL before upgrading
+or replacing it. Version 13 databases cannot be opened by older Rivu versions
+that only support version 11 or 12.
 
 Stop the core before removing `library.db` and its `-wal`/`-shm` sidecars, then scan
 the music files again. This resets playlists, saved queue, favorites, metadata
