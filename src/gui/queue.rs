@@ -336,6 +336,10 @@ impl QueueSelection {
             self.worker = None;
         }
     }
+    pub(super) fn page_loading(&self, generation: u64) -> bool {
+        self.page_worker && self.page_projection.generation() == generation
+    }
+
     fn demand_page(&mut self, range: Range<usize>, limit: usize) -> Option<(Query, u64)> {
         if self.page_size != limit {
             self.page_size = limit;
@@ -642,6 +646,11 @@ impl GuiApp {
         let Some((query, generation)) = self.browser.queue.demand_page(range, limit) else {
             return;
         };
+        self.start_loading_text(
+            super::loading::LoadingOwner::View(ViewRequestKind::Queue),
+            generation,
+            cx,
+        );
         let request = query.clone();
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
@@ -650,6 +659,11 @@ impl GuiApp {
                 .spawn(async move { handle.query(query) })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                this.finish_loading_text(
+                    &super::loading::LoadingOwner::View(ViewRequestKind::Queue),
+                    generation,
+                    cx,
+                );
                 // Only physical completion releases this gate, including obsolete responses.
                 this.browser.queue.page_worker = false;
                 this.refresh(cx);

@@ -79,6 +79,14 @@ submitted worker; replacement, hiding, and completion do not shorten that delay.
 Viewport demand is deferred past prepaint so locally accepted forest pages can
 invalidate the frame that still contains their loading placeholders.
 
+Album, Library tree, Playlist catalog/entries, and Queue page placeholders keep
+their geometry while loading text waits 150 ms. Requests and existing debounce
+start unchanged; failures and retry affordances remain immediate. Presentation
+deadlines belong to current request owners, with one cancellable earliest-deadline
+wake per view entity, retired on completion, cancellation, or hiding. This does
+not retain invalid pages or change empty-result bootstrapping. Metadata and
+selection/duplicate-operation progress retain their separate safety semantics.
+
 Publication revisions and four state-section tokens are distinct from query
 stamps and request generations. A publication with unchanged section tokens does
 not invalidate the GUI root; independent audio frame processing still proceeds.

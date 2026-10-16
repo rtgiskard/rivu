@@ -106,6 +106,7 @@ pub(super) struct AlbumBrowser {
     page_size: usize,
     load_state: AlbumLoadState,
     search_timer: Option<Task<()>>,
+    loading_text: super::loading::LoadingText<()>,
     error: Option<String>,
     selected: Option<AlbumKey>,
     albums: paged::PagedRows<AlbumSummary>,
@@ -184,6 +185,7 @@ impl AlbumBrowser {
             page_size: 1,
             load_state: AlbumLoadState::default(),
             search_timer: None,
+            loading_text: super::loading::LoadingText::default(),
             error: None,
             selected: None,
             albums: paged::PagedRows::default(),
@@ -294,6 +296,11 @@ impl AlbumBrowser {
         if albums_changed {
             self.clear_covers(cx);
         }
+        if (self.selected.is_none() && albums_changed)
+            || (self.selected.is_some() && tracks_changed)
+        {
+            self.loading_text.clear();
+        }
         albums_changed || tracks_changed
     }
 
@@ -308,6 +315,7 @@ impl AlbumBrowser {
     fn cancel(&mut self, cx: &mut App) {
         self.capture_grid_anchor();
         self.search_timer = None;
+        self.loading_text.clear();
         cancel_pages(&mut self.albums_projection, &mut self.albums);
         cancel_pages(&mut self.tracks_projection, &mut self.tracks);
         // The detached worker still owns the physical gate until it completes.
@@ -384,6 +392,9 @@ impl AlbumBrowser {
         };
         self.load_state.worker_pending = true;
         let generation = self.active_projection().generation();
+        self.loading_text.begin((), generation, Instant::now());
+        self.loading_text
+            .schedule(cx, |this| &mut this.loading_text);
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
             let worker_query = query.clone();
@@ -392,6 +403,9 @@ impl AlbumBrowser {
                 .spawn(async move { handle.query(worker_query) })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                this.loading_text.finish(&(), generation);
+                this.loading_text
+                    .schedule(cx, |this| &mut this.loading_text);
                 // Completion, not logical cancellation, releases the physical gate.
                 this.load_state.worker_pending = false;
                 this.revisions = this.handle.gui_snapshot().query_revisions(None);
@@ -448,9 +462,12 @@ impl AlbumBrowser {
         };
         column()
             .overflow_hidden()
-            .child(caption(
-                error.unwrap_or(self.i18n.text("gl-loading")).to_owned(),
-            ))
+            .child(
+                caption(error.unwrap_or(self.i18n.text("gl-loading")).to_owned())
+                    .when(!self.loading_text.show(&(), error.is_some()), |text| {
+                        text.invisible()
+                    }),
+            )
             .when(error.is_some(), |view| {
                 view.child(icon_button(
                     ("album-retry", index),

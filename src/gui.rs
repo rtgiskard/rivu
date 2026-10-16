@@ -8,6 +8,7 @@ mod fonts;
 mod input;
 mod layout;
 mod library;
+mod loading;
 mod metadata;
 mod paged;
 mod panels;
@@ -452,6 +453,7 @@ pub(super) struct GuiApp {
     layout_path: PathBuf,
     inputs: HashMap<Field, Entity<Input>>,
     browser: BrowserState,
+    loading_text: loading::LoadingText<loading::LoadingOwner>,
     metadata: MetadataSession,
     metadata_projection: crate::projection::QueryProjection,
     metadata_worker: bool,
@@ -1003,6 +1005,7 @@ impl GuiApp {
             layout_path,
             inputs,
             browser: BrowserState::default(),
+            loading_text: loading::LoadingText::default(),
             metadata: MetadataSession::default(),
             metadata_projection: Default::default(),
             metadata_worker: false,
@@ -1231,11 +1234,19 @@ impl GuiApp {
             _ => None,
         };
         list_row(("loading-row", index), false)
-            .child(caption(if error.is_some() {
-                self.tr("shell-loading-failed")
-            } else {
-                self.tr("shell-loading")
-            }))
+            .child(
+                caption(if error.is_some() {
+                    self.tr("shell-loading-failed")
+                } else {
+                    self.tr("shell-loading")
+                })
+                .when(
+                    !self
+                        .loading_text
+                        .show(&loading::LoadingOwner::View(kind), error.is_some()),
+                    |text| text.invisible(),
+                ),
+            )
             .when_some(error.map(str::to_owned), |row, error| {
                 row.tooltip(move |_, cx| {
                     cx.new(|_| ButtonTooltip {
@@ -1448,6 +1459,7 @@ impl GuiApp {
             }
         }
         self.sync_album_artwork(cx);
+        self.sync_loading_text(cx);
         if self.state.system.shutting_down {
             return;
         }

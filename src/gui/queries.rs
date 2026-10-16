@@ -103,6 +103,48 @@ impl ViewRequests {
 }
 
 impl GuiApp {
+    pub(super) fn start_loading_text(
+        &mut self,
+        owner: loading::LoadingOwner,
+        token: u64,
+        cx: &mut Context<Self>,
+    ) {
+        self.loading_text.begin(owner, token, Instant::now());
+        self.loading_text
+            .schedule(cx, |this| &mut this.loading_text);
+    }
+
+    pub(super) fn finish_loading_text(
+        &mut self,
+        owner: &loading::LoadingOwner,
+        token: u64,
+        cx: &mut Context<Self>,
+    ) {
+        self.loading_text.finish(owner, token);
+        self.loading_text
+            .schedule(cx, |this| &mut this.loading_text);
+    }
+
+    pub(super) fn sync_loading_text(&mut self, cx: &mut Context<Self>) {
+        let library_visible = self.panel_demand("library");
+        let playlists_visible = self.panel_demand("playlists");
+        let queue_visible = self.panel_demand("queue");
+        let browser = &self.browser;
+        self.loading_text.retain(|owner, token| match owner {
+            loading::LoadingOwner::Branch(branch) => {
+                library_visible && browser.library.tree().request_pending(branch, token)
+            }
+            loading::LoadingOwner::View(ViewRequestKind::Queue) => {
+                queue_visible && browser.queue.page_loading(token)
+            }
+            loading::LoadingOwner::View(kind) => {
+                playlists_visible && browser.requests.is_current(*kind, token)
+            }
+        });
+        self.loading_text
+            .schedule(cx, |this| &mut this.loading_text);
+    }
+
     fn playlist_view_demand(&self, kind: ViewRequestKind) -> bool {
         self.panel_demand("playlists")
             || (kind == ViewRequestKind::Summaries
@@ -188,6 +230,9 @@ impl GuiApp {
             return;
         };
         self.browser.requests.begin(kind, generation);
+        if kind != ViewRequestKind::Selection && self.panel_demand("playlists") {
+            self.start_loading_text(loading::LoadingOwner::View(kind), generation, cx);
+        }
         let revisions = self
             .state
             .query_revisions(self.browser.playlists.entries().playlist_id);
@@ -227,6 +272,11 @@ impl GuiApp {
                         owner.accepts(&request_query, owner_generation, revisions)
                     };
                     if !current {
+                        this.finish_loading_text(
+                            &loading::LoadingOwner::View(kind),
+                            generation,
+                            cx,
+                        );
                         this.browser.requests.workers.remove(&kind);
                         if this.browser.requests.finish(kind, generation) {
                             match kind {
@@ -256,6 +306,7 @@ impl GuiApp {
             let revisions = response.revisions;
             let result = response.result;
             let _ = this.update(cx, |this, cx| {
+                this.finish_loading_text(&loading::LoadingOwner::View(kind), generation, cx);
                 this.browser.requests.workers.remove(&kind);
                 this.refresh(cx);
                 if !this.browser.requests.is_current(kind, generation) {
@@ -384,6 +435,11 @@ impl GuiApp {
             cx.notify();
             return;
         }
+        self.start_loading_text(
+            loading::LoadingOwner::Branch(branch.clone()),
+            generation,
+            cx,
+        );
         self.browser
             .requests
             .directory_workers
@@ -422,6 +478,11 @@ impl GuiApp {
                         return true;
                     }
                     this.browser.library.cancel_directory(&branch, generation);
+                    this.finish_loading_text(
+                        &loading::LoadingOwner::Branch(branch.clone()),
+                        generation,
+                        cx,
+                    );
                     this.browser.requests.directory_workers.remove(&branch);
                     this.dispatch_directory_demand(cx);
                     cx.notify();
@@ -459,6 +520,11 @@ impl GuiApp {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                this.finish_loading_text(
+                    &loading::LoadingOwner::Branch(branch.clone()),
+                    generation,
+                    cx,
+                );
                 this.browser.requests.directory_workers.remove(&branch);
                 this.refresh(cx);
                 (|| {

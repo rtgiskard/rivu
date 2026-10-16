@@ -1359,10 +1359,10 @@ impl GuiApp {
         };
         let pending = self.browser.requests.pending(kind);
         let playlist_id = self.browser.playlists.selected();
-        let message = if pending {
-            self.i18n.text("gl-loading")
-        } else if let Some(error) = rows_error {
+        let message = if let Some(error) = rows_error {
             error
+        } else if pending {
+            self.i18n.text("gl-loading")
         } else if kind == ViewRequestKind::Entries {
             self.i18n.text("gl-playlist-empty")
         } else {
@@ -1379,7 +1379,7 @@ impl GuiApp {
             .child(
                 status_message(
                     message.clone(),
-                    if rows_error.is_some() && !pending {
+                    if rows_error.is_some() {
                         StatusKind::Error
                     } else {
                         StatusKind::Info
@@ -1396,6 +1396,14 @@ impl GuiApp {
                 .flex_1()
                 .min_w_0()
                 .truncate()
+                .when(
+                    pending
+                        && !self.loading_text.show(
+                            &super::loading::LoadingOwner::View(kind),
+                            rows_error.is_some(),
+                        ),
+                    |text| text.invisible(),
+                )
                 .tooltip(move |_, cx| {
                     cx.new(|_| super::ButtonTooltip {
                         text: message.clone(),
@@ -1403,7 +1411,7 @@ impl GuiApp {
                     .into()
                 }),
             )
-            .when(rows_error.is_some() && !pending, |view| {
+            .when(rows_error.is_some(), |view| {
                 view.child(icon_button(
                     (
                         if kind == ViewRequestKind::Entries {

@@ -480,6 +480,7 @@ impl GuiApp {
                                                     .pl(gpui::rems(depth as f32 * 1.25))
                                                     .child(
                                                         super::caption(this.tr(if failed { "gl-unavailable" } else { "gl-loading" }))
+                                                            .when(!this.loading_text.show_branch(&branch, failed), |text| text.invisible())
                                                             .min_w_0()
                                                             .truncate(),
                                                     )
@@ -612,6 +613,7 @@ impl GuiApp {
                                         )
                                         .when(path.is_some() && !detail.is_empty(), |view| {
                                             view.child(super::caption(detail.clone()).min_w_0().truncate()
+                                                .when(visible.status == BranchStatus::Loading && !visible.branch.as_ref().is_some_and(|branch| this.loading_text.show_branch(branch, false)), |text| text.invisible())
                                                 .text_overflow(gpui::TextOverflow::Truncate("..".into())))
                                         })
                                         .when(matches!(entry, DirectoryRow::Track(track) if track.missing), |view| {

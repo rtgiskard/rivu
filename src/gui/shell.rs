@@ -24,6 +24,7 @@ pub(super) struct PanelMenu {
 
 impl Render for GuiApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_loading_text(cx);
         if self.analysis_frame_interval().is_some()
             && !self.frame_pending
             && self.frame_timer.is_none()
