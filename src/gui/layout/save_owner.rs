@@ -201,6 +201,14 @@ mod tests {
     fn named(name: &str) -> LayoutSet {
         let mut set = LayoutSet::default();
         set.rename(name).unwrap();
+        let others: Vec<_> = set
+            .names()
+            .filter(|other| *other != name)
+            .map(str::to_owned)
+            .collect();
+        for other in others {
+            set.remove(&other).unwrap();
+        }
         set
     }
 

@@ -91,6 +91,118 @@ pub struct Layout {
     pub locked: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum LayoutTemplate {
+    Default,
+    Album,
+    Visual,
+}
+
+impl LayoutTemplate {
+    pub const ALL: [Self; 3] = [Self::Default, Self::Album, Self::Visual];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Default => "Default",
+            Self::Album => "Album",
+            Self::Visual => "Visual",
+        }
+    }
+
+    fn layout(self) -> Layout {
+        fn tabs(id: u64, kinds: &[&str]) -> Node {
+            Node::Tabs {
+                id,
+                panels: kinds
+                    .iter()
+                    .enumerate()
+                    .map(|(index, kind)| Panel {
+                        id: id + 1 + index as u64,
+                        kind: (*kind).into(),
+                        show_tab_bar: true,
+                        audio_visualizer: None,
+                        album_artwork: None,
+                    })
+                    .collect(),
+                active: id + 1,
+            }
+        }
+        fn split(id: u64, axis: Axis, boundary: f64, children: Vec<Node>) -> Node {
+            Node::Split {
+                id,
+                axis,
+                boundaries: vec![boundary],
+                children,
+            }
+        }
+        let (children, next_id) = match self {
+            Self::Default => (
+                vec![
+                    split(
+                        2,
+                        Axis::Horizontal,
+                        0.22,
+                        vec![tabs(3, &["album_artwork"]), tabs(5, &["transport"])],
+                    ),
+                    split(
+                        7,
+                        Axis::Horizontal,
+                        0.60,
+                        vec![
+                            tabs(8, &["library", "albums", "playlists"]),
+                            split(
+                                12,
+                                Axis::Vertical,
+                                0.60,
+                                vec![tabs(13, &["queue"]), tabs(15, &["spectrum", "spectrogram"])],
+                            ),
+                        ],
+                    ),
+                ],
+                18,
+            ),
+            Self::Album => (
+                vec![
+                    tabs(2, &["transport"]),
+                    split(
+                        4,
+                        Axis::Horizontal,
+                        0.35,
+                        vec![
+                            tabs(5, &["album_artwork"]),
+                            tabs(7, &["albums", "queue", "metadata"]),
+                        ],
+                    ),
+                ],
+                11,
+            ),
+            Self::Visual => (
+                vec![
+                    tabs(2, &["transport"]),
+                    split(
+                        4,
+                        Axis::Horizontal,
+                        0.70,
+                        vec![
+                            tabs(
+                                5,
+                                &["audio_visualizer", "spectrum", "spectrogram", "waveform"],
+                            ),
+                            tabs(10, &["queue"]),
+                        ],
+                    ),
+                ],
+                12,
+            ),
+        };
+        Layout {
+            root: Some(split(1, Axis::Vertical, 0.28, children)),
+            next_id,
+            locked: true,
+        }
+    }
+}
+
 /// Cheap immutable snapshots; edits copy only the map and the edited layout
 /// when a background save or another named layout still shares them.
 #[derive(Clone, Debug, PartialEq)]
@@ -801,56 +913,7 @@ impl Node {
 
 impl Default for Layout {
     fn default() -> Self {
-        fn tabs(id: u64, panel_id: u64, kind: &str) -> Node {
-            Node::Tabs {
-                id,
-                panels: vec![Panel {
-                    id: panel_id,
-                    kind: kind.into(),
-                    show_tab_bar: true,
-                    audio_visualizer: None,
-                    album_artwork: None,
-                }],
-                active: panel_id,
-            }
-        }
-        Self {
-            root: Some(Node::Split {
-                id: 1,
-                axis: Axis::Vertical,
-                boundaries: vec![0.42],
-                children: vec![
-                    tabs(2, 3, "transport"),
-                    Node::Split {
-                        id: 4,
-                        axis: Axis::Horizontal,
-                        boundaries: Vec::new(),
-                        children: vec![
-                            tabs(5, 6, "library"),
-                            Node::Split {
-                                id: 7,
-                                axis: Axis::Vertical,
-                                boundaries: vec![0.60],
-                                children: vec![
-                                    tabs(8, 9, "queue"),
-                                    Node::Split {
-                                        id: 14,
-                                        axis: Axis::Horizontal,
-                                        boundaries: Vec::new(),
-                                        children: vec![
-                                            tabs(10, 11, "spectrum"),
-                                            tabs(12, 13, "spectrogram"),
-                                        ],
-                                    },
-                                ],
-                            },
-                        ],
-                    },
-                ],
-            }),
-            next_id: 15,
-            locked: true,
-        }
+        LayoutTemplate::Default.layout()
     }
 }
 
@@ -1364,10 +1427,12 @@ impl Default for LayoutSet {
     fn default() -> Self {
         Self {
             active: "Default".into(),
-            layouts: Arc::new(BTreeMap::from([(
-                "Default".into(),
-                Arc::new(Layout::default()),
-            )])),
+            layouts: Arc::new(
+                LayoutTemplate::ALL
+                    .into_iter()
+                    .map(|template| (template.name().into(), Arc::new(template.layout())))
+                    .collect(),
+            ),
         }
     }
 }
@@ -1419,6 +1484,14 @@ impl LayoutSet {
         if self.active.as_ref() != name {
             self.active = name.into();
         }
+        Ok(())
+    }
+
+    pub fn create_from_template(&mut self, template: LayoutTemplate, name: &str) -> Result<()> {
+        let name = self.unused_name(name)?.to_owned();
+        let layout = Arc::new(template.layout());
+        Arc::make_mut(&mut self.layouts).insert(name.clone(), layout);
+        self.active = name.into();
         Ok(())
     }
 
@@ -1552,6 +1625,13 @@ mod tests {
             root: None,
             next_id: 1,
             locked: false,
+        }
+    }
+
+    fn single_layout_set() -> LayoutSet {
+        LayoutSet {
+            active: "Default".into(),
+            layouts: Arc::new(BTreeMap::from([("Default".into(), Arc::new(empty()))])),
         }
     }
 
@@ -2311,8 +2391,62 @@ mod tests {
     }
 
     #[test]
-    fn named_layouts_have_distinct_ownership_and_atomic_name_operations() {
+    fn template_creation_is_independent_and_name_failures_are_atomic() {
+        for template in LayoutTemplate::ALL {
+            let mut set = LayoutSet::default();
+            set.select(template.name()).unwrap();
+            let original = set.current().clone();
+            set.current_mut().add("custom", None);
+            let modified = set.current().clone();
+            let before = set.clone();
+            for invalid in ["", "  ", template.name()] {
+                assert!(set.create_from_template(template, invalid).is_err());
+                assert_eq!(set, before);
+            }
+            set.create_from_template(template, "  Fresh  ").unwrap();
+            assert_eq!(set.active_name(), "Fresh");
+            assert_eq!(set.current(), &original);
+            set.current().validate().unwrap();
+            for panel in set.current().panels() {
+                assert!(
+                    super::super::PANELS
+                        .iter()
+                        .any(|spec| spec.kind == panel.kind)
+                );
+            }
+            set.select(template.name()).unwrap();
+            assert_eq!(set.current(), &modified);
+        }
+    }
+
+    #[test]
+    fn loading_does_not_restore_deleted_templates_or_replace_user_layouts() {
+        let directory = TemporaryDirectory::new();
+        let path = directory.0.join("layout.json");
         let mut set = LayoutSet::default();
+        set.current_mut().add("custom", None);
+        let removed: Vec<_> = set
+            .names()
+            .filter(|name| *name != set.active_name())
+            .map(str::to_owned)
+            .collect();
+        for name in &removed {
+            set.remove(name).unwrap();
+        }
+        let expected = encoded(&set);
+        set.save(&path).unwrap();
+        let loaded = LayoutSet::load(&path).unwrap();
+        assert_eq!(encoded(&loaded), expected);
+        assert!(
+            removed
+                .iter()
+                .all(|name| !loaded.names().any(|actual| actual == name))
+        );
+    }
+
+    #[test]
+    fn named_layouts_have_distinct_ownership_and_atomic_name_operations() {
+        let mut set = single_layout_set();
         let original = set.current().clone();
         set.duplicate("  Work  ").unwrap();
         assert_eq!(set.active_name(), "Work");
@@ -2597,7 +2731,7 @@ mod tests {
     fn atomic_save_failure_preserves_disk_and_valid_named_ui_state() {
         let directory = TemporaryDirectory::new();
         let path = directory.0.join("layout.json");
-        let mut set = LayoutSet::default();
+        let mut set = single_layout_set();
         set.duplicate("Work").unwrap();
         set.current_mut().add("custom", None);
         set.save(&path).unwrap();

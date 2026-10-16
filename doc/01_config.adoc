@@ -418,6 +418,22 @@ The desktop stores named layouts and the current selection in `layout.json` in
 the data directory. Each layout has its own panel tree, relative sizes, tab
 order and selection, tab-bar visibility, instance options, and edit lock.
 
+Without a saved layout collection, Rivu starts in `Default` and also provides
+`Album` and `Visual`. Default keeps artwork, playback, browsing, queue, and a
+frequency view visible; Album emphasizes the cover and album browser; Visual
+provides a large visualization canvas with a queue. Alternative browsers and
+plots share tabs rather than all running visibly at once. The initial selection
+is Library and Spectrum in Default, Albums in Album, and Audio Visualizer in
+Visual. Built-in layouts start locked and use the same global configuration.
+
+Existing layout collections are loaded unchanged. To add one of these layouts,
+open `Menu > Layouts`, choose a template under `New from built-in template`,
+enter a unique name, and choose Create or press Enter. The new layout becomes
+active and is saved as an ordinary editable layout. Renaming or deleting a
+built-in layout does not cause it to be restored on restart; new templates do
+not overwrite existing layouts or change initialized panel options. For initial
+proportions, see link:24_layout.adoc#_scope_and_ownership[Layout design].
+
 Open `Menu > Layouts` to switch layouts, duplicate the current layout under a new
 name, rename it, or delete another layout after confirmation. Hover the layout's
 row to reveal Delete. Names must be

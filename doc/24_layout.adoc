@@ -22,15 +22,28 @@ through their existing owners. It does not preserve hidden graphics merely to
 restore them on a later switch. Renaming and deleting an inactive layout do not
 replace the active panel tree.
 
-New default layouts allocate 42% of the vertical content to Playback and 58%
-to the lower panes. The lower panes divide their width equally between Library
-and the right-hand area; that area assigns 60% of its vertical content to
-Queue and 40% to a row containing Spectrum and Spectrogram at equal widths.
-These proportions exclude separator gutters. Sharing a row gives both plots
-enough height at 1280 by 800 with interface scale 1 without reducing Playback's
-space; Queue retains most of the right-hand height.
-They apply only when creating a default layout: loading a saved tree retains
-its boundaries, including omitted or empty arrays that mean equal division.
+The initial collection contains three ordinary, editable layouts, with Default
+active. All three give 28% of the vertical content to their top row and 72% to
+the lower panes, excluding separator gutters:
+
+* Default splits its top row 22% Album artwork and 78% Playback. Below, 60%
+  belongs to Library/Albums/Playlists tabs, initially Library. The remaining 40%
+  splits vertically into 60% Queue and 40% Spectrum/Spectrogram tabs, initially
+  Spectrum. Grouping plots gives the active view more width while leaving the
+  main browsing and queue operations visible.
+* Album puts Playback above a lower row split into 35% Album artwork and 65%
+  Albums/Queue/Track details tabs, initially Albums.
+* Visual puts Playback above a lower row split into 70% Audio Visualizer/Spectrum/
+  Spectrogram/Waveform tabs, initially Audio Visualizer, and 30% Queue.
+
+Templates construct only panel trees and instance-option slots. Existing
+initialization fills missing artwork and visualizer options from configuration;
+templates do not store global settings or extra UI-session state. New from
+built-in template uses the existing name-validation and save paths and activates
+the new layout. Once created, layouts have no tracked template identity, update
+policy, or special deletion rules. Loading a saved collection never inserts
+missing templates or rewrites its proportions. These defaults apply only when
+creating a collection or explicitly creating a layout from a template.
 
 Visualization sizing uses the actual content canvas, after the 1.75rem tab row,
 panel borders, and 8px content insets. A canvas at most 64px wide or 40px high
