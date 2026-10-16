@@ -842,7 +842,10 @@ impl Render for Input {
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::submit))
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                if event.keystroke.key == "escape" && this.dismiss_composition(cx) {
+                if event.keystroke.key == "escape"
+                    && event.keystroke.modifiers == gpui::Modifiers::default()
+                    && this.dismiss_composition(cx)
+                {
                     cx.stop_propagation();
                 }
             }))

@@ -80,6 +80,10 @@ Text editing and input-method composition retain their own keys; cancelling
 preedit does not also dismiss the containing dialog. Closing a dialog restores
 the invoking control when it is still present, otherwise the layout receives
 focus. Playback shortcuts apply to the layout, not to focused editors or buttons.
+Disabled controls are skipped during focus traversal. Dropdown navigation and
+confirmation accept unmodified keys only; Tab/Shift+Tab closes the dropdown and
+moves focus. Escape cancels preedit, then an open dropdown, then leaves a focused
+editor, before a later Escape closes the containing dialog.
 
 
 === Language

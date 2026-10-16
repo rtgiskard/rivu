@@ -1,7 +1,7 @@
 use super::{
     BORDER, ButtonTooltip, DropdownItem, DropdownState, ERROR, POPOVER_MAX_REMS, StatusKind,
     UI_INSET, active_control, button, caption, column,
-    components::{DROPDOWN_ROW_REMS, FocusScope, activate_control, disabled_control},
+    components::{DROPDOWN_ROW_REMS, FocusScope, activate_control, disabled_control, dropdown_key},
     copyable_message, dropdown_container, dropdown_row, dropdown_trigger, form_field, icon_button,
     input::{Input, InputEvent},
     row, section_group, status_message, toggle_button, two_column,
@@ -1326,16 +1326,9 @@ impl Settings {
                 }),
             )
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                let modifiers = event.keystroke.modifiers;
-                if modifiers.control
-                    || modifiers.platform
-                    || modifiers.alt
-                    || modifiers.shift
-                    || modifiers.function
-                {
+                let Some(key) = dropdown_key(event) else {
                     return;
-                }
-                let key = event.keystroke.key.as_str();
+                };
                 if this.inputs[&Field::Font].read(cx).is_composing() {
                     return;
                 }
@@ -2436,11 +2429,13 @@ impl Settings {
                     .gap_2()
                     .child(two_column(
                         form_field(settings.tr("settings-mode"), mode).min_w(rems(180. / 16.)),
-                        div().min_w(rems(180. / 16.)).child(disabled_control(
-                            form_field(settings.tr("settings-direction"), direction)
-                                .id("settings-artwork-direction-field"),
-                            !rotating,
-                        )),
+                        div().min_w(rems(180. / 16.)).child(
+                            form_field(
+                                settings.tr("settings-direction"),
+                                disabled_control(direction, !rotating),
+                            )
+                            .id("settings-artwork-direction-field"),
+                        ),
                     ))
                     .child(two_column(
                         settings.field_state(Field::AlbumArtworkPeriod, rotating, cx),
@@ -3165,19 +3160,15 @@ impl Render for Settings {
                     if !this.dropdown.is_open() {
                         return;
                     }
-                    let key = event.keystroke.key.as_str();
+                    let Some(key) = dropdown_key(event) else {
+                        return;
+                    };
                     if key == "tab" {
                         this.dropdown.close();
                         cx.notify();
                         return;
                     }
                     if this.settings_font_input_focused(window, cx) {
-                        return;
-                    }
-                    if !matches!(
-                        key,
-                        "up" | "down" | "pageup" | "pagedown" | "enter" | "space" | "escape"
-                    ) {
                         return;
                     }
                     if key == "escape" {
@@ -3216,8 +3207,16 @@ impl Render for Settings {
                             cx.notify();
                         }
                         cx.stop_propagation();
-                    } else if key == "escape" {
-                        this.cancel(cx);
+                    } else if key == "escape" && !modifiers.modified() {
+                        if this
+                            .inputs
+                            .values()
+                            .any(|input| input.read(cx).is_focused(window))
+                        {
+                            this.scope.handle().focus(window, cx);
+                        } else {
+                            this.cancel(cx);
+                        }
                         cx.stop_propagation();
                     }
                 }))
@@ -3315,6 +3314,89 @@ mod tests {
             Err(response.error.unwrap())
         };
         (runtime.handle.config_snapshot(), result)
+    }
+
+    struct SettingsWindow(Entity<Settings>);
+
+    impl Render for SettingsWindow {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(self.0.clone())
+        }
+    }
+
+    #[gpui::test]
+    fn dropdown_ignores_modified_keys_and_escape_closes_only_candidates(cx: &mut TestAppContext) {
+        use gpui::InputEvent as _;
+
+        let (_directory, _runtime, settings) = fixture(cx);
+        let window = cx.add_window({
+            let settings = settings.clone();
+            move |_, _| SettingsWindow(settings)
+        });
+        let handle = window.into();
+        cx.update_window(handle, |_, window, cx| {
+            settings.update(cx, |this, cx| {
+                this.scope.handle().focus(window, cx);
+                this.draft.album_artwork_mode = AlbumArtworkMode::Static;
+                this.open_setting_dropdown(
+                    [AlbumArtworkMode::Static, AlbumArtworkMode::Rotating]
+                        .into_iter()
+                        .map(|value| {
+                            let choice = SettingChoice::AlbumArtworkMode(value);
+                            DropdownItem::new(choice, choice.label(&this.i18n))
+                        })
+                        .collect(),
+                    0,
+                );
+            });
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+        for key in [
+            "ctrl-down",
+            "alt-down",
+            "shift-down",
+            "ctrl-enter",
+            "shift-enter",
+            "alt-escape",
+        ] {
+            cx.update_window(handle, |_, window, cx| {
+                let keystroke = Keystroke::parse(key).unwrap();
+                window.dispatch_event(
+                    KeyDownEvent {
+                        keystroke: keystroke.clone(),
+                        is_held: false,
+                        prefer_character_input: false,
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+                window.dispatch_event(KeyUpEvent { keystroke }.to_platform_input(), cx);
+            })
+            .unwrap();
+        }
+        settings.update(cx, |this, _| {
+            assert!(this.dropdown.is_open());
+            assert_eq!(this.dropdown.selected_index(), Some(0));
+            assert_eq!(this.draft.album_artwork_mode, AlbumArtworkMode::Static);
+            assert!(this.active);
+        });
+        cx.update_window(handle, |_, window, cx| {
+            window.dispatch_event(
+                KeyDownEvent {
+                    keystroke: Keystroke::parse("escape").unwrap(),
+                    is_held: false,
+                    prefer_character_input: false,
+                }
+                .to_platform_input(),
+                cx,
+            );
+        })
+        .unwrap();
+        settings.update(cx, |this, _| {
+            assert!(!this.dropdown.is_open());
+            assert!(this.active);
+        });
     }
 
     #[gpui::test]

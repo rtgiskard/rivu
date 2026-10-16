@@ -115,6 +115,22 @@ pub(crate) fn tab_key(event: &gpui::KeyDownEvent) -> bool {
         && !modifiers.function
 }
 
+/// Dropdown navigation admits only bare keys, with Shift reserved for reverse Tab.
+pub(crate) fn dropdown_key(event: &gpui::KeyDownEvent) -> Option<&str> {
+    if tab_key(event) {
+        return Some("tab");
+    }
+    if event.keystroke.modifiers.modified() {
+        return None;
+    }
+    let key = event.keystroke.key.as_str();
+    matches!(
+        key,
+        "up" | "down" | "pageup" | "pagedown" | "enter" | "space" | "escape"
+    )
+    .then_some(key)
+}
+
 pub(crate) fn context_menu_key(event: &gpui::KeyDownEvent) -> bool {
     let modifiers = event.keystroke.modifiers;
     !modifiers.control

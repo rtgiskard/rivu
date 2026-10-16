@@ -24,7 +24,7 @@ impl Render for KeyboardControls {
             self.scope
                 .menu_surface(div().id("menu").flex().flex_col())
                 .child(first)
-                .child(middle)
+                .child(form_field("Direction", middle))
                 .child(toggle),
         )
     }
@@ -96,6 +96,42 @@ fn native_menu_focus_wraps_skips_disabled_and_activates_shared_controls() {
         })
         .unwrap();
     assert_eq!(counts, [4, 0, 3, 0]);
+}
+
+#[test]
+fn modified_arrows_do_not_move_menu_focus_or_turn_into_activation() {
+    let mut cx = TestAppContext::single();
+    let scope = cx.update(FocusScope::new);
+    let window = cx.add_window({
+        let scope = scope.clone();
+        move |_, _| KeyboardControls {
+            scope,
+            counts: [0; 4],
+            disabled: true,
+        }
+    });
+    let handle = window.into();
+    draw(&mut cx, handle);
+    cx.update_window(handle, |_, window, cx| {
+        scope.handle().focus(window, cx);
+        scope.advance(false, window, cx);
+    })
+    .unwrap();
+    draw(&mut cx, handle);
+    for key in ["shift-down", "ctrl-down", "alt-down", "shift-up"] {
+        press(&mut cx, handle, key);
+    }
+    press(&mut cx, handle, "enter");
+    press(&mut cx, handle, "tab");
+    press(&mut cx, handle, "space");
+    press(&mut cx, handle, "shift-tab");
+    press(&mut cx, handle, "enter");
+    let counts = cx
+        .update_window(handle, |root, _, cx| {
+            root.downcast::<KeyboardControls>().unwrap().read(cx).counts
+        })
+        .unwrap();
+    assert_eq!(counts, [2, 0, 1, 0]);
 }
 
 #[test]
