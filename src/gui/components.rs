@@ -95,8 +95,20 @@ pub(crate) fn scrollable_list(
     scrollbar::scrollable_list(id, child, scroll)
 }
 
+// GPUI renders tooltips and drag views as independent roots after the window root.
+// Read its resolved font now, rather than capturing settings when an overlay is created.
+fn overlay_font(window: &Window, cx: &gpui::App) -> gpui::Font {
+    window
+        .root::<GuiApp>()
+        .flatten()
+        .expect("GUI overlays belong to a GuiApp window")
+        .read(cx)
+        .ui_font
+        .clone()
+}
+
 /// Compact floating surface shared by action and row tooltips.
-fn tooltip_surface(window: &Window, max_width_rems: f32) -> Div {
+fn tooltip_surface(window: &Window, cx: &gpui::App, max_width_rems: f32) -> Div {
     let available = (window.viewport_size().width - px(UI_INSET * 2.)).max(px(0.));
     div()
         .min_w_0()
@@ -108,6 +120,7 @@ fn tooltip_surface(window: &Window, max_width_rems: f32) -> Div {
         .border_1()
         .border_color(rgb(BORDER))
         .shadow_sm()
+        .font(overlay_font(window, cx))
         .text_sm()
         .text_color(rgb(TEXT))
         .whitespace_normal()
@@ -119,8 +132,8 @@ pub(crate) struct ButtonTooltip {
 }
 
 impl Render for ButtonTooltip {
-    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        tooltip_surface(window, 22.5).child(self.text.clone())
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        tooltip_surface(window, cx, 22.5).child(self.text.clone())
     }
 }
 
@@ -579,8 +592,8 @@ struct TrackTooltip {
 }
 
 impl Render for TrackTooltip {
-    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        tooltip_surface(window, 35.)
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        tooltip_surface(window, cx, 35.)
             .child(
                 div()
                     .min_w_0()
