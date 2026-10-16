@@ -73,8 +73,11 @@ pub(crate) fn init(cx: &mut App) -> Result<()> {
 
 const BG: u32 = 0x1a1b26;
 const PANEL: u32 = 0x16161e;
+const CONTROL: u32 = 0x1f2231;
+const STRUCTURE_BORDER: u32 = 0x292e42;
 const BORDER: u32 = 0x3b4261;
 const TEXT: u32 = 0xc0caf5;
+const SECONDARY: u32 = 0x9aa5ce;
 const MUTED: u32 = 0x565f89;
 const ACCENT: u32 = 0x7aa2f7;
 const HIGHLIGHT: u32 = 0x292e42;
@@ -2167,7 +2170,7 @@ impl GuiApp {
                     .py(px(1.))
                     .gap_1()
                     .border_b_1()
-                    .border_color(rgb(BORDER));
+                    .border_color(rgb(STRUCTURE_BORDER));
                 for panel in panels.iter().filter(|_| show_tab_bar) {
                     let panel_id = panel.id;
                     let title = panel_spec(&panel.kind).map_or_else(
@@ -2193,7 +2196,7 @@ impl GuiApp {
                             .text_xs()
                             .when(!self.layouts.current().locked, |view| view.cursor_move())
                             .bg(rgb(if active == panel_id { HIGHLIGHT } else { PANEL }))
-                            .text_color(rgb(if active == panel_id { TEXT } else { MUTED }))
+                            .text_color(rgb(if active == panel_id { TEXT } else { SECONDARY }))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.layouts.current_mut().activate(panel_id);
                                 this.interaction.set_target_group(Some(node_id));
@@ -2299,7 +2302,7 @@ impl GuiApp {
                     .gap_0()
                     .bg(rgb(PANEL))
                     .border_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(STRUCTURE_BORDER))
                     .rounded_md()
                     .overflow_hidden();
                 if show_tab_bar {

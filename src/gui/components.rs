@@ -1,7 +1,7 @@
 mod dropdown;
 mod scrollbar;
 
-use super::{ACCENT, BORDER, GuiApp, HIGHLIGHT, MUTED, PANEL, TEXT, UI_INSET};
+use super::{ACCENT, BORDER, CONTROL, GuiApp, HIGHLIGHT, MUTED, PANEL, SECONDARY, TEXT, UI_INSET};
 
 use gpui::{
     Context, Div, ElementId, Render, SharedString, Stateful, Window, div, prelude::*, px, rgb,
@@ -30,7 +30,7 @@ pub(super) fn visualization_status(message: impl Into<SharedString>) -> Div {
         .w_full()
         .p(gpui::px(UI_INSET))
         .text_sm()
-        .text_color(rgb(super::MUTED))
+        .text_color(rgb(SECONDARY))
         .child(message.into())
 }
 
@@ -44,7 +44,7 @@ pub(crate) enum StatusKind {
 /// Shared inline status text for asynchronous panel and settings actions.
 pub(crate) fn status_message(message: impl Into<SharedString>, kind: StatusKind) -> Div {
     let color = match kind {
-        StatusKind::Info => super::MUTED,
+        StatusKind::Info => SECONDARY,
         StatusKind::Success => ACCENT,
         StatusKind::Error => super::ERROR,
     };
@@ -93,8 +93,7 @@ pub(crate) fn list_viewport(child: impl IntoElement) -> Div {
         .w_full()
         .overflow_hidden()
         .rounded_md()
-        .border_1()
-        .border_color(rgb(BORDER))
+        .p(px(1.))
         .child(child)
 }
 
@@ -182,7 +181,7 @@ fn control_surface(id: impl Into<ElementId>) -> Stateful<Div> {
         .text_sm()
         .text_color(rgb(TEXT))
         .cursor_pointer()
-        .bg(rgb(PANEL))
+        .bg(rgb(CONTROL))
         .border_1()
         .border_color(rgb(BORDER))
         .hover(|style| style.bg(rgb(HIGHLIGHT)).border_color(rgb(ACCENT)))
@@ -406,14 +405,14 @@ pub(crate) fn menu_back(
         })
 }
 
-/// Shared bordered section used by settings and metadata panels.
+/// Shared heading and spacing for settings and metadata sections.
 pub(crate) fn section_group(title: impl Into<SharedString>, content: impl IntoElement) -> Div {
     super::column()
         .gap_2()
         .p_2()
-        .rounded_md()
+        // Retain the established content inset without painting a nested frame.
         .border_1()
-        .border_color(rgb(BORDER))
+        .border_color(gpui::transparent_black())
         .child(caption(title))
         .child(content)
 }
@@ -631,7 +630,7 @@ pub(crate) fn track_list_row(
 pub(crate) fn caption(text: impl Into<SharedString>) -> Div {
     div()
         .text_xs()
-        .text_color(rgb(super::MUTED))
+        .text_color(rgb(SECONDARY))
         .child(text.into())
 }
 
