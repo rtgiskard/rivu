@@ -437,6 +437,17 @@ impl Core {
                 self.stop().with_context(|| message.clone())?;
                 self.state.system.last_error = Some(message);
             }
+            AudioEvent::OutputSettingsFailed {
+                request,
+                device,
+                auto_mix,
+                message,
+            } if request == self.output_settings_request
+                && device == self.state.system.selected_device
+                && auto_mix == self.state.system.config.pipewire_auto_mix =>
+            {
+                self.state.system.last_error = Some(message);
+            }
             AudioEvent::DecoderStopped { generation } if generation == self.generation => {
                 // The worker has already stopped and may still be sending
                 // events while handling Configure; do not wait on a command.

@@ -531,6 +531,7 @@ impl Runtime {
                     wakeup,
                     subscribers,
                     generation: 0,
+                    output_settings_request: 0,
                     queue_ids: Vec::new(),
                     playback: None,
                     scan_tx,
@@ -573,6 +574,7 @@ impl Runtime {
                     core.state.system.config.ffmpeg_enabled,
                 ));
                 let _ = core.engine.commands.send(AudioCommand::OutputSettings {
+                    request: core.output_settings_request,
                     device: core.state.system.selected_device.clone(),
                     auto_mix: core.state.system.config.pipewire_auto_mix,
                 });
@@ -689,6 +691,7 @@ struct Core {
     wakeup: Arc<RwLock<Option<Wakeup>>>,
     subscribers: Arc<RwLock<Vec<Sender<()>>>>,
     generation: u64,
+    output_settings_request: u64,
     // The only full queue projection: compact occurrence IDs, never shared with clients.
     queue_ids: Vec<u64>,
     playback: Option<PlaybackStats>,
@@ -859,6 +862,7 @@ mod tests {
             wakeup: Arc::new(RwLock::new(None)),
             subscribers: Arc::new(RwLock::new(Vec::new())),
             generation: 1,
+            output_settings_request: 0,
             queue_ids: Vec::new(),
             playback: None,
             scan_tx,
@@ -7076,6 +7080,119 @@ mod tests {
             audio.recv_timeout(Duration::from_millis(50)),
             Err(crossbeam_channel::RecvTimeoutError::Timeout)
         ));
+    }
+
+    #[test]
+    fn output_settings_errors_follow_current_request_after_stop() {
+        let (_directory, mut core) = fixture();
+        let _audio = recording_audio(&mut core);
+        core.command(Command::Stop).unwrap();
+        core.command(Command::Device {
+            name: Some("PipeWire: desired".into()),
+        })
+        .unwrap();
+        let auto_mix = core.state.system.config.pipewire_auto_mix;
+        let request = core.output_settings_request;
+        core.command(Command::Device {
+            name: Some("PipeWire: other".into()),
+        })
+        .unwrap();
+        core.command(Command::Device {
+            name: Some("PipeWire: desired".into()),
+        })
+        .unwrap();
+        core.audio_event(AudioEvent::OutputSettingsFailed {
+            request,
+            device: Some("PipeWire: desired".into()),
+            auto_mix,
+            message: "superseded same-target failure".into(),
+        })
+        .unwrap();
+        assert!(core.state.system.last_error.is_none());
+        for (device, mix) in [
+            ("PipeWire: superseded", auto_mix),
+            ("PipeWire: desired", !auto_mix),
+        ] {
+            core.audio_event(AudioEvent::OutputSettingsFailed {
+                request: core.output_settings_request,
+                device: Some(device.into()),
+                auto_mix: mix,
+                message: "obsolete failure".into(),
+            })
+            .unwrap();
+            assert!(core.state.system.last_error.is_none());
+        }
+        core.audio_event(AudioEvent::OutputSettingsFailed {
+            request: core.output_settings_request,
+            device: Some("PipeWire: desired".into()),
+            auto_mix,
+            message: "desired output unavailable".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            core.state.system.last_error.as_deref(),
+            Some("desired output unavailable")
+        );
+        assert_eq!(
+            core.state.system.selected_device.as_deref(),
+            Some("PipeWire: desired")
+        );
+        assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+
+        core.command(Command::Stop).unwrap();
+        let queue_id = core.queue_ids[0];
+        playing(&mut core, queue_id);
+        let playback_generation = core.generation;
+        core.state.system.last_error = None;
+        core.audio_event(AudioEvent::OutputSettingsFailed {
+            request: core.output_settings_request,
+            device: Some("PipeWire: desired".into()),
+            auto_mix,
+            message: "configuration failed before the newer playback".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            core.state.system.last_error.as_deref(),
+            Some("configuration failed before the newer playback")
+        );
+        assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
+        assert_eq!(core.generation, playback_generation);
+    }
+
+    #[test]
+    fn unavailable_output_targets_remain_desired_and_persist_across_entry_points() {
+        let (_directory, mut core) = fixture();
+        let _audio = recording_audio(&mut core);
+        assert!(core.state.system.devices.is_empty());
+        let mut config = core.state.system.config.as_ref().clone();
+        config.ffmpeg_enabled = false;
+        config.output_device = Some("PipeWire: unavailable-configured-sink".into());
+        core.command(Command::Configure {
+            config: Arc::new(config),
+        })
+        .unwrap();
+        assert_eq!(
+            Config::load(&core.state.system.config_path)
+                .unwrap()
+                .output_device,
+            core.state.system.selected_device
+        );
+        assert_eq!(
+            core.state.system.selected_device.as_deref(),
+            Some("PipeWire: unavailable-configured-sink")
+        );
+        core.command(Command::Device {
+            name: Some("PipeWire: unavailable-replacement-sink".into()),
+        })
+        .unwrap();
+        core.flush_config(true).unwrap();
+        assert_eq!(
+            Config::load(&core.state.system.config_path)
+                .unwrap()
+                .output_device
+                .as_deref(),
+            Some("PipeWire: unavailable-replacement-sink")
+        );
     }
 
     #[test]

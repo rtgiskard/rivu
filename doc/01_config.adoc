@@ -281,14 +281,17 @@ right-click menu → `Track information`. Both Library views share the saved
 selection; full tooltip information is unaffected. See
 link:02_library.adoc#_desktop_selection_and_directory_tree[Library display].
 
-Omitted `playback.output_device` uses the default output; a selected device must be available.
+Omitted `playback.output_device` uses the default output. A selected device must
+be available to play, but can remain saved while unavailable; playback reports
+the failure without substituting another device.
 Changing the output device or `playback.pipewire_auto_mix` reopens the current audio
 source and output, unlike display-only settings.
 
 Apply validates and saves all four settings groups together;
 navigation preserves the draft and each page's scroll position. Discard drops unapplied changes and closes
-settings. Invalid input, an unavailable output device, or a save failure is
-reported in settings. Settings opened for one Audio Visualizer instance instead
+settings. Invalid input or a save failure is reported in settings. Saving an
+unavailable output target succeeds; applying it stops playback and reports an
+audio error while retaining the saved selection. Settings opened for one Audio Visualizer instance instead
 apply only that instance's style, reference lines, and labels to `layout.json`;
 applying fails if the instance no longer exists.
 Inactive Spectrum fields retain their values and are still validated by Apply.

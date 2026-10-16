@@ -239,37 +239,62 @@ impl Worker {
                 }
                 self.refresh_analysis();
             }
-            AudioCommand::Seek(seconds) => self.reopen(Some(seconds)),
-            AudioCommand::OutputSettings { device, auto_mix } => {
+            AudioCommand::Seek(seconds) => {
+                if let Err(error) = self.reopen(Some(seconds)) {
+                    self.fail(error);
+                }
+            }
+            AudioCommand::OutputSettings {
+                request,
+                device,
+                auto_mix,
+            } => {
                 let device_changed = self.device != device;
                 let mix_changed = self.pipewire_auto_mix != auto_mix;
-                if device_changed || mix_changed {
-                    if device_changed && let Err(error) = validate_device(device.as_deref()) {
-                        self.fail(error);
+                // Explicit idle applications must produce a fresh validation result,
+                // even for unchanged settings; request zero is startup initialization.
+                let idle_apply = self.playback.is_none() && request != 0;
+                if device_changed || mix_changed || idle_apply {
+                    // Desired settings survive failure; later loads must not use the old sink.
+                    self.device = device;
+                    self.pipewire_auto_mix = auto_mix;
+                    let result = if device_changed || idle_apply {
+                        validate_device(self.device.as_deref())
                     } else {
-                        self.device = device;
-                        self.pipewire_auto_mix = auto_mix;
-                        self.reopen(None);
+                        Ok(())
+                    }
+                    .and_then(|()| self.reopen(None));
+                    if let Err(error) = result {
+                        if self.playback.is_some() {
+                            // A real stream was stopped: its terminal event remains
+                            // valid even if a newer device request supersedes this one.
+                            self.fail(error);
+                        } else {
+                            self.event(AudioEvent::OutputSettingsFailed {
+                                request,
+                                device: self.device.clone(),
+                                auto_mix,
+                                message: format!("{error:#}"),
+                            });
+                        }
                     }
                 }
             }
         }
         true
     }
-    fn reopen(&mut self, target: Option<f64>) {
+    fn reopen(&mut self, target: Option<f64>) -> anyhow::Result<()> {
         if let Some(playback) = self.playback.as_mut() {
-            let result = playback.restart_output(
+            playback.restart_output(
                 target,
                 self.device.as_deref(),
                 self.volume,
                 self.pipewire_auto_mix,
                 &self.analyzer,
-            );
-            if let Err(error) = result {
-                self.fail(error);
-            }
+            )?;
             self.refresh_analysis();
         }
+        Ok(())
     }
     fn fail(&mut self, error: anyhow::Error) {
         let (generation, _) = self.stop();
@@ -415,6 +440,47 @@ mod tests {
     use crossbeam_channel::bounded;
 
     #[test]
+    fn rejected_output_change_keeps_new_target_instead_of_reusing_previous_device() {
+        let (_send, commands) = bounded(1);
+        let (events, receive) = bounded(2);
+        let (_stop, shutdown) = bounded(0);
+        let analyzer = AnalysisWorker::new(Arc::new(RwLock::new(
+            crate::analysis::AnalysisFrame::default(),
+        )))
+        .unwrap();
+        let mut worker = Worker::new(
+            commands,
+            events,
+            shutdown,
+            analyzer,
+            Arc::new(RwLock::new(WaveformFrame::default())),
+            1024,
+        );
+        for (index, target) in [
+            "invalid-first-target",
+            "invalid-first-target",
+            "invalid-replacement-target",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let request = index as u64 + 1;
+            worker.command(AudioCommand::OutputSettings {
+                request,
+                device: Some(target.to_owned()),
+                auto_mix: false,
+            });
+            assert!(matches!(
+                receive.try_recv(),
+                Ok(AudioEvent::OutputSettingsFailed { request: failed_request, .. }) if failed_request == request
+            ));
+            assert_eq!(worker.device.as_deref(), Some(target));
+            assert!(!worker.pipewire_auto_mix);
+            assert!(worker.playback.is_none());
+        }
+    }
+
+    #[test]
     fn stop_snapshot_drains_backpressured_lifecycle_events_before_acknowledging() {
         let (commands, receive) = bounded(1);
         commands.send(AudioCommand::Volume(0.4)).unwrap();
@@ -528,6 +594,7 @@ mod tests {
             AudioCommand::Stop,
             AudioCommand::Volume(0.5),
             AudioCommand::OutputSettings {
+                request: 0,
                 device: None,
                 auto_mix: false,
             },

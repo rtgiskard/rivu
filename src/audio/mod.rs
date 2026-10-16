@@ -170,6 +170,7 @@ pub enum AudioCommand {
     Seek(f64),
     Volume(f32),
     OutputSettings {
+        request: u64,
         device: Option<String>,
         auto_mix: bool,
     },
@@ -203,6 +204,12 @@ pub enum AudioEvent {
     },
     Failed {
         generation: u64,
+        message: String,
+    },
+    OutputSettingsFailed {
+        request: u64,
+        device: Option<String>,
+        auto_mix: bool,
         message: String,
     },
 }
