@@ -220,6 +220,10 @@ impl DirectoryTree {
             .retain(|(candidate, _), page| candidate != key || !page.failed);
     }
 
+    pub(in crate::gui) fn retry_failed(&mut self) {
+        self.pages.retain(|_, page| !page.failed);
+    }
+
     pub(in crate::gui) fn request_pending(&self, key: &TreeBranch, generation: u64) -> bool {
         self.branches
             .get(key)
@@ -785,7 +789,13 @@ impl DirectoryTree {
     ) -> Vec<(TreeBranch, usize)> {
         self.clock += 1;
         let mut demanded = HashSet::new();
-        for segment in &self.segments {
+        let first = self
+            .segments
+            .partition_point(|segment| segment.start + segment.len <= range.start);
+        for segment in self.segments[first..]
+            .iter()
+            .take_while(|segment| segment.start < range.end)
+        {
             let start = range.start.max(segment.start);
             let end = range.end.min(segment.start + segment.len);
             if start >= end {
@@ -1035,6 +1045,29 @@ mod tests {
     ) {
         tree.begin(key.clone(), offset, generation);
         assert!(tree.accept(key, generation, page(paths, total)));
+    }
+
+    #[test]
+    fn viewport_demand_respects_expanded_segment_boundaries_and_empty_ranges() {
+        let mut tree = DirectoryTree::default();
+        tree.configure_page_size(1);
+        let forest = branch("");
+        let a = branch("/a");
+        let b = branch("/b");
+        accept(&mut tree, &forest, 0, 1, &["/a"], 2);
+        accept(&mut tree, &forest, 1, 2, &["/b"], 2);
+        tree.expand(&a);
+        accept(&mut tree, &a, 0, 3, &["/a/first"], 2);
+        tree.expand(&b);
+        accept(&mut tree, &b, 0, 4, &["/b/first"], 2);
+
+        assert_eq!(tree.requests_for_range(2..3), vec![(a.clone(), 1)]);
+        assert!(tree.requests_for_range(3..4).is_empty());
+        assert_eq!(tree.requests_for_range(2..5), vec![(a, 1)]);
+        assert_eq!(tree.requests_for_range(5..6), vec![(b, 1)]);
+        assert!(tree.requests_for_range(6..7).is_empty());
+        assert!(tree.requests_for_range(2..2).is_empty());
+        assert!(tree.requests_for_range(0..0).is_empty());
     }
 
     #[test]
