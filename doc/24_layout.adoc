@@ -7,12 +7,20 @@ playback, queue state, global configuration, and audio analysis; layout edits
 must not replace that ownership. User operations and file syntax are documented
 in link:01_config.adoc#_layout[Configuration and layout].
 
-Switching or duplicating a saved layout rebuilds the GUI root inside the existing
-native window. It intentionally discards GUI-only inputs, selections, scrolling,
-measurements, and visualization history. Before replacement, the host clears the
-old wakeup and visualization demand and releases retained render images. The
-new root installs its own subscriptions and reconciles demand with its active
-panels. Renaming and deleting an inactive layout do not rebuild the root.
+Switching or duplicating a saved layout replaces the panel tree inside the
+existing window and GUI session. Existing owners retain their state naturally;
+switching does not introduce snapshots, state migration, restoration machinery,
+or a separate UI-session state copy for each named layout. Layouts describe panel
+structure and instance preferences, not complete workspace sessions. View-local
+state need not be restored if its owner is replaced.
+
+Playback and accepted business operations keep their independent lifetimes.
+The current editor and in-flight metadata save remain alive even if Details is
+no longer visible. Switching cancels obsolete interactions and invalidates old
+geometry, reconciles visible-panel demand, and retires unused rendering resources
+through their existing owners. It does not preserve hidden graphics merely to
+restore them on a later switch. Renaming and deleting an inactive layout do not
+replace the active panel tree.
 
 New default layouts allocate 42% of the vertical content to Playback and 58%
 to the lower panes. The lower panes divide their width equally between Library
@@ -203,12 +211,46 @@ Serialization borrows runtime data and writes one strict format. Unknown fields,
 duplicate layout names, invalid boundaries, malformed trees, and excess depth
 are errors. There is no legacy weight or wrapper compatibility path.
 
-Saving validates before writing a unique sibling temporary file and renaming it
-over the destination. This prevents failed writes from replacing the existing
-file; it is atomic replacement, not a claim of power-loss durability. Layout
-management persists before rebuilding the interface and restores its in-memory
-selection or owned entry if saving fails. Ordinary panel edits remain visible
-when persistence fails and report the error.
+One save owner belongs to the desktop session, not to an individual window. All
+runtime save paths, including selected tabs, docking, named-layout operations,
+and panel preferences, submit cheap immutable snapshots to that owner. The GUI
+does not validate the whole collection, encode JSON, or perform save I/O. Named
+layouts share immutable trees until an edit copies the affected tree; rendering
+borrows a snapshot rather than temporarily mutating a shared tree.
+
+The worker writes serially, retaining at most one in-flight snapshot and one
+replaceable pending latest snapshot. New submissions replace pending work, not
+the running write. A slow old write cannot finish after a newer write and
+overwrite it. After submissions stop, the latest snapshot is the final attempted
+replacement; there is no unbounded task or request queue.
+
+The worker validates before writing a unique sibling temporary file and renaming
+it over the destination. Failed validation, encoding, or I/O preserves the
+existing destination; this is atomic replacement, not a claim of power-loss
+durability. Only the current revision can publish visible save success or
+failure. Superseded failures are logged instead of overwriting newer feedback.
+A successful current save clears only its own earlier save error, not an
+unrelated GUI error. Panel-settings Apply receives the actual save result for
+the submitted or a later coalesced revision, with the editor-session identity
+checked before publishing feedback.
+
+Named operations validate their names and preserve a valid selected layout
+immediately. Like panel edits, successful switch, duplicate, rename, and delete
+operations remain visible if their asynchronous save fails; they do not roll
+back later user intent. The failure is reported, the old file remains intact,
+and the next layout modification or panel-settings Apply resubmits the complete
+latest collection. There is no automatic retry loop on a persistently failing
+destination.
+
+The session reads the file once at initialization. Closing a window neither
+waits for the writer nor destroys its pending state. Reopening uses the latest
+in-memory snapshot, even while an older snapshot is still being written, and
+resets transient edit mode to locked. Normal Quit and other orderly shutdowns
+flush the latest submitted revision after the GPUI event loop returns, outside
+its deadline-limited quit observer, and propagate a final save failure. Final
+session destruction drains pending work and joins its one worker; this one
+application-teardown boundary can wait for filesystem I/O. It is not a wait on
+each interaction, layout switch, window close, or reopen.
 
 == Rationale and alternatives
 

@@ -548,6 +548,16 @@ impl App {
 
         let mut app = app.borrow_mut();
         app.shutdown_gui();
+        let layout_save = app
+            .gui
+            .as_ref()
+            .expect("graphical application")
+            .session
+            .borrow()
+            .flush_layouts();
+        if let Err(error) = &layout_save {
+            tracing::error!(%error, "Could not save final desktop layout");
+        }
         drop(app.tray.take());
         // Blocking core acknowledgment and worker joins are outside GPUI.
         let shutdown = app.handle.request_shutdown();
@@ -557,7 +567,7 @@ impl App {
             .expect("graphical application")
             .error
             .take();
-        app.finish(error.map_or(shutdown, Err))
+        app.finish(error.map_or(shutdown.and(layout_save), Err))
     }
 
     fn finish(&mut self, interface_result: Result<()>) -> Result<()> {

@@ -37,26 +37,24 @@ impl GuiApp {
         }
         let cancellation = self.interaction.cancel();
         self.apply_interaction_cancellation(cancellation, cx);
-        let old = self.layouts.active_name().to_owned();
-        let result =
-            self.layouts.select(name).and_then(|_| {
-                self.layouts.current_mut().initialize_audio_visualizers(
-                    AudioVisualizerOptions::from(self.state.system.config.as_ref()),
-                );
-                self.layouts.save(&self.layout_path)
-            });
-        if let Err(error) = result {
-            self.layouts
-                .select(&old)
-                .expect("previous layout still exists");
+        if let Err(error) = self.layouts.select(name) {
             self.error = Some(self.i18n.format(
                 "shell-switch-layout-error",
                 &[("error", format!("{error:#}").into())],
             ));
             cx.notify();
-        } else {
-            self.finish_layout_switch(window, cx);
+            return;
         }
+        self.layouts
+            .current_mut()
+            .initialize_audio_visualizers(AudioVisualizerOptions::from(
+                self.state.system.config.as_ref(),
+            ));
+        self.layouts.current_mut().initialize_album_artworks(
+            crate::config::AlbumArtworkOptions::from(self.state.system.config.as_ref()),
+        );
+        self.queue_layout_save();
+        self.finish_layout_switch(window, cx);
     }
 
     fn begin_layout_action(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
@@ -90,46 +88,24 @@ impl GuiApp {
         let Some(action) = self.layout_action.clone() else {
             return;
         };
-        let old = self.layouts.active_name().to_owned();
         let name = self.value(Field::LayoutName, cx).trim().to_owned();
         let (result, switched) = match action {
             Action::Duplicate => {
                 let cancellation = self.interaction.cancel();
                 self.apply_interaction_cancellation(cancellation, cx);
-                let result = self.layouts.duplicate(&name).and_then(|_| {
-                    if let Err(error) = self.layouts.save(&self.layout_path) {
-                        self.layouts
-                            .select(&old)
-                            .expect("original layout still exists");
-                        self.layouts
-                            .remove(&name)
-                            .expect("duplicate exists and is not current");
-                        Err(error)
-                    } else {
-                        Ok(())
-                    }
-                });
+                let result = self.layouts.duplicate(&name);
                 (result, true)
             }
-            Action::Rename => {
-                let result = self.layouts.rename(&name).and_then(|_| {
-                    if let Err(error) = self.layouts.save(&self.layout_path) {
-                        self.layouts
-                            .rename(&old)
-                            .expect("original layout name is available");
-                        Err(error)
-                    } else {
-                        Ok(())
-                    }
-                });
-                (result, false)
-            }
-            Action::Delete(name) => (self.layouts.remove_saved(&name, &self.layout_path), false),
+            Action::Rename => (self.layouts.rename(&name), false),
+            Action::Delete(name) => (self.layouts.remove(&name), false),
         };
         match result {
             Ok(()) => {
+                self.queue_layout_save();
                 self.layout_action = None;
-                self.error = None;
+                if self.error != self.layout_save_error {
+                    self.error = None;
+                }
                 if switched {
                     self.finish_layout_switch(window, cx);
                 } else {

@@ -47,6 +47,7 @@ use layout::interaction::{
     Cancellation, DockGeometry, DockHover, DockRequest, DragCommit, Dragging, LayoutInteraction,
     Measured,
 };
+use layout::save_owner::LayoutSaveHandle;
 use layout::{Axis, Edge, LayoutSet, Node};
 use library::LibraryNode;
 use list_interaction::{ContentDrag, ContentMenuRequest, TrackSource};
@@ -487,6 +488,11 @@ fn stage_analysis_frame(
     true
 }
 
+enum LayoutApply {
+    Visualizer(u64),
+    Artwork(u64),
+}
+
 pub(super) struct GuiApp {
     pub(super) i18n: Arc<Localizer>,
     localized_text: HashMap<String, SharedString>,
@@ -494,7 +500,10 @@ pub(super) struct GuiApp {
     state: GuiSnapshot,
     layouts: LayoutSet,
     session: Weak<RefCell<UiSession>>,
-    layout_path: PathBuf,
+    layout_save: LayoutSaveHandle,
+    layout_save_seen: u64,
+    layout_save_error: Option<String>,
+    layout_apply: Option<(u64, LayoutApply)>,
     inputs: HashMap<Field, Entity<Input>>,
     queue_search: Entity<ListSearch>,
     playlist_search: Entity<ListSearch>,
@@ -876,7 +885,7 @@ impl GuiApp {
     }
     fn new(
         handle: CoreHandle,
-        layout_path: PathBuf,
+        layout_save: LayoutSaveHandle,
         artwork_manager: Arc<crate::artwork::ArtworkManager>,
         session: Weak<RefCell<UiSession>>,
         i18n: Arc<Localizer>,
@@ -888,20 +897,10 @@ impl GuiApp {
             .fixed_texts()
             .map(|(id, text)| (id.to_owned(), SharedString::from(text.to_owned())))
             .collect();
-        let (mut layouts, mut error) = if layout_path.exists() {
-            match LayoutSet::load(&layout_path) {
-                Ok(layouts) => (layouts, None),
-                Err(error) => (
-                    LayoutSet::default(),
-                    Some(i18n.format(
-                        "shell-load-layouts-error",
-                        &[("error", format!("{error:#}").into())],
-                    )),
-                ),
-            }
-        } else {
-            (LayoutSet::default(), None)
-        };
+        let (mut layouts, load_error) = layout_save.snapshot();
+        layouts.reset_edit_mode();
+        let error = load_error
+            .map(|error| i18n.format("shell-load-layouts-error", &[("error", error.into())]));
         if layouts
             .current_mut()
             .initialize_audio_visualizers(AudioVisualizerOptions::from(
@@ -910,12 +909,8 @@ impl GuiApp {
             | layouts.current_mut().initialize_album_artworks(
                 crate::config::AlbumArtworkOptions::from(state.system.config.as_ref()),
             )
-            && let Err(save_error) = layouts.save(&layout_path)
         {
-            error = Some(i18n.format(
-                "shell-save-layouts-error",
-                &[("error", format!("{save_error:#}").into())],
-            ));
+            layout_save.submit(&layouts);
         }
         let ui_font = fonts::resolve(&state.system.config.ui_font, cx);
         let mut inputs = HashMap::new();
@@ -996,32 +991,22 @@ impl GuiApp {
                     options,
                     session,
                 } => {
-                    let previous = this.layouts.current().audio_visualizer_options(*panel_id);
-                    let result = if this
+                    if this
                         .layouts
                         .current_mut()
                         .set_audio_visualizer_options(*panel_id, *options)
                     {
-                        match this.layouts.save(&this.layout_path) {
-                            Ok(()) => Ok(()),
-                            Err(error) => {
-                                if let Some(previous) = previous {
-                                    this.layouts
-                                        .current_mut()
-                                        .set_audio_visualizer_options(*panel_id, previous);
-                                }
-                                Err(this.i18n.format(
-                                    "shell-save-layout-error",
-                                    &[("error", format!("{error:#}").into())],
-                                ))
-                            }
-                        }
+                        let revision = this.queue_layout_save();
+                        this.layout_apply = Some((revision, LayoutApply::Visualizer(*session)));
                     } else {
-                        Err(this.i18n.text("shell-visualizer-gone").to_owned())
-                    };
-                    settings.update(cx, |settings, cx| {
-                        settings.complete_visualizer_apply(*session, result, cx)
-                    });
+                        settings.update(cx, |settings, cx| {
+                            settings.complete_visualizer_apply(
+                                *session,
+                                Err(this.i18n.text("shell-visualizer-gone").to_owned()),
+                                cx,
+                            )
+                        });
+                    }
                     this.sync_analysis(cx);
                     cx.notify();
                 }
@@ -1030,32 +1015,22 @@ impl GuiApp {
                     options,
                     session,
                 } => {
-                    let previous = this.layouts.current().album_artwork_options(*panel_id);
-                    let result = if this
+                    if this
                         .layouts
                         .current_mut()
                         .set_album_artwork_options(*panel_id, *options)
                     {
-                        match this.layouts.save(&this.layout_path) {
-                            Ok(()) => Ok(()),
-                            Err(error) => {
-                                if let Some(previous) = previous {
-                                    this.layouts
-                                        .current_mut()
-                                        .set_album_artwork_options(*panel_id, previous);
-                                }
-                                Err(this.i18n.format(
-                                    "shell-save-layout-error",
-                                    &[("error", format!("{error:#}").into())],
-                                ))
-                            }
-                        }
+                        let revision = this.queue_layout_save();
+                        this.layout_apply = Some((revision, LayoutApply::Artwork(*session)));
                     } else {
-                        Err(this.i18n.text("shell-artwork-gone").to_owned())
-                    };
-                    settings.update(cx, |settings, cx| {
-                        settings.complete_artwork_apply(*session, result, cx)
-                    });
+                        settings.update(cx, |settings, cx| {
+                            settings.complete_artwork_apply(
+                                *session,
+                                Err(this.i18n.text("shell-artwork-gone").to_owned()),
+                                cx,
+                            )
+                        });
+                    }
                     this.sync_analysis(cx);
                     cx.notify();
                 }
@@ -1193,6 +1168,22 @@ impl GuiApp {
             }
         })
         .detach();
+        let (save_sender, mut save_receiver) = mpsc::channel::<()>(1);
+        let save_sender = parking_lot::Mutex::new(save_sender);
+        layout_save.set_wakeup(move || {
+            let _ = save_sender.lock().try_send(());
+        });
+        cx.spawn(async move |this, cx| {
+            while save_receiver.next().await.is_some() {
+                if this
+                    .update(cx, |this, cx| this.sync_layout_save(cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
         let default_album = cx.new(|cx| artwork::Artwork::new(&i18n, cx));
         let album_default = default_album.read(cx).circular();
         let artwork_images = artwork::ArtworkImages::default();
@@ -1204,7 +1195,10 @@ impl GuiApp {
             state,
             layouts,
             session,
-            layout_path,
+            layout_save,
+            layout_save_seen: 0,
+            layout_save_error: error.clone(),
+            layout_apply: None,
             inputs,
             queue_search,
             playlist_search,
@@ -1278,6 +1272,7 @@ impl GuiApp {
         app.browser
             .history
             .sync(&app.state.library.history, app.history_playback());
+        app.sync_layout_save(cx);
         app.sync_analysis(cx);
         // Initialization may have completed before the wakeup callback was
         // installed. Reconcile once so the first frame never keeps the empty snapshot.
@@ -1506,7 +1501,9 @@ impl GuiApp {
         cancellation: Cancellation,
         cx: &mut Context<Self>,
     ) {
-        cancellation.restore_split(self.layouts.current_mut());
+        if cancellation.split.is_some() {
+            cancellation.restore_split(self.layouts.current_mut());
+        }
         self.waveform
             .update(cx, |waveform, _| waveform.cancel_seek());
     }
@@ -2000,6 +1997,56 @@ impl GuiApp {
         })
         .detach();
     }
+    fn queue_layout_save(&self) -> u64 {
+        self.layout_save.submit(&self.layouts)
+    }
+
+    fn sync_layout_save(&mut self, cx: &mut Context<Self>) {
+        let Some(completion) = self.layout_save.completion() else {
+            return;
+        };
+        if completion.revision <= self.layout_save_seen {
+            return;
+        }
+        self.layout_save_seen = completion.revision;
+        let result = completion.result.map_err(|error| {
+            self.i18n
+                .format("shell-save-layout-error", &[("error", error.into())])
+        });
+        match &result {
+            Ok(()) => {
+                if self
+                    .layout_save_error
+                    .as_ref()
+                    .is_some_and(|error| self.error.as_ref() == Some(error))
+                {
+                    self.error = None;
+                }
+                self.layout_save_error = None;
+            }
+            Err(error) => {
+                self.layout_save_error = Some(error.clone());
+                self.error = Some(error.clone());
+            }
+        }
+        if self
+            .layout_apply
+            .as_ref()
+            .is_some_and(|(revision, _)| *revision <= completion.revision)
+        {
+            let (_, apply) = self.layout_apply.take().expect("checked panel apply");
+            self.settings.update(cx, |settings, cx| match apply {
+                LayoutApply::Visualizer(session) => {
+                    settings.complete_visualizer_apply(session, result, cx)
+                }
+                LayoutApply::Artwork(session) => {
+                    settings.complete_artwork_apply(session, result, cx)
+                }
+            });
+        }
+        cx.notify();
+    }
+
     fn persist_layout(&mut self, cx: &mut Context<Self>) {
         self.interaction.clear_docking_preview();
         self.layouts
@@ -2012,12 +2059,7 @@ impl GuiApp {
         );
         self.interaction
             .retain_layout(self.layouts.current().root.as_ref());
-        if let Err(error) = self.layouts.save(&self.layout_path) {
-            self.error = Some(self.i18n.format(
-                "shell-save-layout-error",
-                &[("error", format!("{error:#}").into())],
-            ));
-        }
+        self.queue_layout_save();
         self.sync_analysis(cx);
         cx.notify();
     }

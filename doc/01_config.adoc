@@ -426,9 +426,10 @@ layout, switch to another one first; the collection always retains a layout.
 
 Switching or duplicating updates the panel tree inside the same window. Playback,
 queue, global configuration, window placement, and the active Track details draft
-are unchanged. The current searches, filters, selections, and browser state remain
-available if their panels are shown again. Finish or discard settings before
-changing layouts. Renaming and deleting an inactive layout do not rebuild the interface.
+are unchanged. Layouts do not save separate copies of searches, selections,
+scroll positions, or editing sessions; switching back is not a restore operation.
+Finish or discard settings before changing layouts. Renaming and deleting an
+inactive layout do not rebuild the interface.
 Press `Escape` to close the layout manager,
 including after renaming the current layout.
 
@@ -486,10 +487,15 @@ Layouts support up to 32 nested rows or columns along any path; tab groups do
 not add to this depth. Docking that would exceed this limit leaves the layout
 unchanged. This is not a limit on the number of sibling regions or tabs.
 
-If `layout.json` cannot be read or validated, Rivu reports the load error and
-opens the default collection. Panel edits remain visible when saving fails.
-Failed layout-management operations leave the current selection and saved
-collection unchanged; a failed switch does not rebuild the interface.
+If `layout.json` cannot be read or validated at session startup, Rivu reports the
+load error and opens the default collection. Layout saves run in one background
+worker, coalescing rapid edits to the latest collection. Invalid layout names or
+operations leave the UI unchanged. An asynchronous save failure leaves panel
+edits and valid layout-management changes visible, reports the error, and keeps
+the old file intact; the next layout edit or instance-settings Apply retries the
+latest collection. Closing and reopening the window retains pending changes
+without waiting for disk I/O. Orderly application exit waits for the final save
+and reports a remaining failure.
 Errors and scan progress appear in the footer. Click a message or its copy icon
 to copy the complete text.
 

@@ -1,6 +1,6 @@
 //! Window ownership and release of visual subscriptions and analysis demand.
 
-use super::GuiApp;
+use super::{GuiApp, layout::save_owner::LayoutSaveOwner};
 use crate::{app::AppHandle, artwork::ArtworkManager, core::CoreHandle, i18n::Localizer};
 use anyhow::Result;
 use gpui::*;
@@ -14,7 +14,7 @@ use std::{
 pub(crate) struct UiSession {
     handle: CoreHandle,
     app: AppHandle,
-    layout_path: PathBuf,
+    layout_save: LayoutSaveOwner,
     artwork_manager: Arc<ArtworkManager>,
     i18n: Arc<Localizer>,
     self_weak: Weak<RefCell<UiSession>>,
@@ -33,7 +33,7 @@ impl UiSession {
             RefCell::new(Self {
                 handle,
                 app,
-                layout_path,
+                layout_save: LayoutSaveOwner::new(layout_path),
                 artwork_manager,
                 i18n,
                 self_weak: self_weak.clone(),
@@ -77,7 +77,7 @@ impl UiSession {
         }
         let bounds = Bounds::centered(None, size(px(1200.), px(800.)), cx);
         let handle = self.handle.clone();
-        let layout_path = self.layout_path.clone();
+        let layout_save = self.layout_save.handle();
         let artwork_manager = Arc::clone(&self.artwork_manager);
         let i18n = Arc::clone(&self.i18n);
         let session = self.self_weak.clone();
@@ -96,7 +96,7 @@ impl UiSession {
                 cx.new(|cx| {
                     let view = GuiApp::new(
                         handle,
-                        layout_path,
+                        layout_save,
                         artwork_manager,
                         session,
                         i18n,
@@ -118,6 +118,13 @@ impl UiSession {
         if self.window.is_some_and(|window| window.window_id() == id) {
             self.release_window();
         }
+    }
+
+    /// Called once after the GPUI event loop returns, not by close/reopen or
+    /// the deadline-limited quit observer. The final latest save must finish
+    /// before normal process teardown, and its error must reach the caller.
+    pub(crate) fn flush_layouts(&self) -> Result<()> {
+        self.layout_save.flush().map_err(anyhow::Error::msg)
     }
 
     fn clear_window_state(&self) {

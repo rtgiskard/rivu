@@ -206,8 +206,10 @@ impl Render for GuiApp {
         let paint_visualizer = self.audio_visualizer.clone();
         let paint_waveform = self.waveform.read(cx).image_releaser();
         let paint_artwork_images = self.artwork_images.clone();
-        let root = self.layouts.current_mut().root.take();
-        let layout_view = root
+        let layouts = self.layouts.clone();
+        let layout_view = layouts
+            .current()
+            .root
             .as_ref()
             .map(|root| self.render_node(root, window, cx))
             .unwrap_or_else(|| {
@@ -220,7 +222,6 @@ impl Render for GuiApp {
                     .child(self.tr("shell-empty-layout"))
                     .into_any_element()
             });
-        self.layouts.current_mut().root = root;
         let mut app = column()
             .id("rivu")
             .relative()

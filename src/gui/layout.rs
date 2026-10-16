@@ -14,13 +14,17 @@ mod docking_ui;
 pub(super) mod interaction;
 pub(super) mod layout_geometry;
 pub(super) mod layout_manager;
+pub(super) mod save_owner;
 
 use std::{
     collections::{BTreeMap, HashSet},
     fs::{self, File, OpenOptions},
     io::{BufReader, BufWriter, Write},
     path::Path,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -87,10 +91,12 @@ pub struct Layout {
     pub locked: bool,
 }
 
-#[derive(Debug, PartialEq)]
+/// Cheap immutable snapshots; edits copy only the map and the edited layout
+/// when a background save or another named layout still shares them.
+#[derive(Clone, Debug, PartialEq)]
 pub struct LayoutSet {
-    active: String,
-    layouts: BTreeMap<String, Layout>,
+    active: Arc<str>,
+    layouts: Arc<BTreeMap<String, Arc<Layout>>>,
 }
 
 // Runtime types intentionally do not implement serde: IDs can never leak into
@@ -114,7 +120,7 @@ mod persistence {
         }
     }
 
-    struct LayoutsRef<'a>(&'a BTreeMap<String, Layout>);
+    struct LayoutsRef<'a>(&'a BTreeMap<String, Arc<Layout>>);
     struct NodeRef<'a>(&'a Node);
     struct ChildrenRef<'a>(&'a [Node]);
     struct PanelsRef<'a>(&'a [Panel]);
@@ -401,12 +407,15 @@ mod persistence {
                     locked: true,
                 };
                 layout.validate().map_err(|error| anyhow!(error))?;
-                if layouts.insert(name, layout).is_some() {
+                if layouts.insert(name, Arc::new(layout)).is_some() {
                     return Err(anyhow!("duplicate trimmed layout name"));
                 }
             }
-            let active = checked_name(&self.active)?.to_owned();
-            let set = LayoutSet { active, layouts };
+            let active = Arc::from(checked_name(&self.active)?);
+            let set = LayoutSet {
+                active,
+                layouts: Arc::new(layouts),
+            };
             set.validate()?;
             Ok(set)
         }
@@ -1355,7 +1364,10 @@ impl Default for LayoutSet {
     fn default() -> Self {
         Self {
             active: "Default".into(),
-            layouts: BTreeMap::from([("Default".into(), Layout::default())]),
+            layouts: Arc::new(BTreeMap::from([(
+                "Default".into(),
+                Arc::new(Layout::default()),
+            )])),
         }
     }
 }
@@ -1363,19 +1375,32 @@ impl Default for LayoutSet {
 impl LayoutSet {
     pub fn current(&self) -> &Layout {
         self.layouts
-            .get(&self.active)
+            .get(self.active.as_ref())
             .expect("active layout exists")
     }
     pub fn current_mut(&mut self) -> &mut Layout {
-        self.layouts
-            .get_mut(&self.active)
-            .expect("active layout exists")
+        Arc::make_mut(
+            Arc::make_mut(&mut self.layouts)
+                .get_mut(self.active.as_ref())
+                .expect("active layout exists"),
+        )
     }
     pub fn active_name(&self) -> &str {
         &self.active
     }
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.layouts.keys().map(String::as_str)
+    }
+
+    /// Edit mode is window-local, just as a fresh load starts every tree locked.
+    pub(super) fn reset_edit_mode(&mut self) {
+        if self.layouts.values().any(|layout| !layout.locked) {
+            for layout in Arc::make_mut(&mut self.layouts).values_mut() {
+                if !layout.locked {
+                    Arc::make_mut(layout).locked = true;
+                }
+            }
+        }
     }
 
     fn unused_name<'a>(&self, name: &'a str) -> Result<&'a str> {
@@ -1391,7 +1416,7 @@ impl LayoutSet {
         if !self.layouts.contains_key(name) {
             return Err(anyhow!("layout {name:?} does not exist"));
         }
-        if self.active != name {
+        if self.active.as_ref() != name {
             self.active = name.into();
         }
         Ok(())
@@ -1399,30 +1424,34 @@ impl LayoutSet {
 
     pub fn duplicate(&mut self, name: &str) -> Result<()> {
         let name = self.unused_name(name)?.to_owned();
-        let copy = self.current().clone();
-        self.layouts.insert(name.clone(), copy);
-        self.active = name;
+        let copy = Arc::clone(
+            self.layouts
+                .get(self.active.as_ref())
+                .expect("active layout exists"),
+        );
+        Arc::make_mut(&mut self.layouts).insert(name.clone(), copy);
+        self.active = name.into();
         Ok(())
     }
 
     pub fn rename(&mut self, name: &str) -> Result<()> {
         let name = checked_name(name)?;
-        if name == self.active {
+        if name == self.active.as_ref() {
             return Ok(());
         }
         let name = self.unused_name(name)?.to_owned();
-        let layout = self
-            .layouts
-            .remove(&self.active)
+        let layouts = Arc::make_mut(&mut self.layouts);
+        let layout = layouts
+            .remove(self.active.as_ref())
             .expect("active layout exists");
-        self.layouts.insert(name.clone(), layout);
-        self.active = name;
+        layouts.insert(name.clone(), layout);
+        self.active = name.into();
         Ok(())
     }
 
     fn removable_name<'a>(&self, name: &'a str) -> Result<&'a str> {
         let name = checked_name(name)?;
-        if name == self.active {
+        if name == self.active.as_ref() {
             return Err(anyhow!("cannot remove the current layout"));
         }
         if !self.layouts.contains_key(name) {
@@ -1433,19 +1462,7 @@ impl LayoutSet {
 
     pub fn remove(&mut self, name: &str) -> Result<()> {
         let name = self.removable_name(name)?;
-        self.layouts.remove(name);
-        Ok(())
-    }
-
-    /// Delete and persist as one operation, restoring the owned entry on save
-    /// failure. GUI deletion cannot use a compensating public rename/select.
-    pub fn remove_saved(&mut self, name: &str, path: &Path) -> Result<()> {
-        let name = self.removable_name(name)?.to_owned();
-        let removed = self.layouts.remove(&name).expect("checked layout");
-        if let Err(error) = self.save(path) {
-            self.layouts.insert(name, removed);
-            return Err(error);
-        }
+        Arc::make_mut(&mut self.layouts).remove(name);
         Ok(())
     }
 
@@ -1453,10 +1470,10 @@ impl LayoutSet {
         if self.layouts.is_empty() {
             return Err(anyhow!("layout collection is empty"));
         }
-        if !self.layouts.contains_key(&self.active) {
+        if !self.layouts.contains_key(self.active.as_ref()) {
             return Err(anyhow!("active layout does not exist"));
         }
-        for (name, layout) in &self.layouts {
+        for (name, layout) in self.layouts.iter() {
             if checked_name(name)? != name {
                 return Err(anyhow!("layout name is not trimmed"));
             }
@@ -1475,9 +1492,9 @@ impl LayoutSet {
             .with_context(|| format!("invalid layout {}", path.display()))
     }
 
-    /// Validate, write a unique sibling temporary file, then atomically replace
-    /// the destination. Failed writes never replace the previous collection.
-    pub fn save(&self, path: &Path) -> Result<()> {
+    /// Worker-only atomic replacement. Validation and serialization must never
+    /// run in an interactive GUI callback. Failure preserves the previous file.
+    fn save(&self, path: &Path) -> Result<()> {
         self.validate()?;
         let parent = path
             .parent()
@@ -1646,6 +1663,35 @@ mod tests {
         assert!(value["layouts"]["Default"].get("locked").is_none());
         let reopened = decoded(value).unwrap();
         assert!(reopened.current().locked);
+    }
+
+    #[test]
+    fn save_snapshots_share_then_isolate_edited_trees_and_named_operations() {
+        let mut set = LayoutSet::default();
+        set.current_mut().locked = false;
+        let snapshot = set.clone();
+        assert!(Arc::ptr_eq(&snapshot.layouts, &set.layouts));
+        assert!(Arc::ptr_eq(&snapshot.active, &set.active));
+        let previous = encoded(&snapshot);
+        set.duplicate("Work").unwrap();
+        assert!(Arc::ptr_eq(
+            set.layouts.get("Default").unwrap(),
+            set.layouts.get("Work").unwrap(),
+        ));
+        set.current_mut().add("custom", None);
+        assert!(!Arc::ptr_eq(
+            set.layouts.get("Default").unwrap(),
+            set.layouts.get("Work").unwrap(),
+        ));
+        set.rename("Music").unwrap();
+        set.remove("Default").unwrap();
+        assert_eq!(encoded(&snapshot), previous);
+        assert_eq!(snapshot.active_name(), "Default");
+        let mut reopened = snapshot.clone();
+        reopened.reset_edit_mode();
+        assert!(reopened.current().locked);
+        assert!(!snapshot.current().locked);
+        assert_eq!(encoded(&reopened), previous);
     }
 
     fn wire_tabs(kind: &str) -> Value {
@@ -2548,7 +2594,7 @@ mod tests {
     }
 
     #[test]
-    fn atomic_save_and_failed_deletion_preserve_previous_collection() {
+    fn atomic_save_failure_preserves_disk_and_valid_named_ui_state() {
         let directory = TemporaryDirectory::new();
         let path = directory.0.join("layout.json");
         let mut set = LayoutSet::default();
@@ -2567,13 +2613,14 @@ mod tests {
         let blocked = directory.0.join("blocked");
         fs::create_dir(&blocked).unwrap();
         fs::write(blocked.join("keep"), b"unchanged").unwrap();
-        let before = encoded(&set);
-        assert!(set.remove_saved("Default", &blocked).is_err());
-        assert_eq!(encoded(&set), before);
+        set.remove("Default").unwrap();
+        let intended = encoded(&set);
+        assert!(set.save(&blocked).is_err());
+        assert_eq!(encoded(&set), intended);
         assert_eq!(fs::read(blocked.join("keep")).unwrap(), b"unchanged");
         assert_eq!(fs::read(&path).unwrap(), previous_bytes);
         assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 2);
-        set.remove_saved("Default", &path).unwrap();
+        set.save(&path).unwrap();
         assert_eq!(
             LayoutSet::load(&path).unwrap().names().collect::<Vec<_>>(),
             vec!["Work"]
