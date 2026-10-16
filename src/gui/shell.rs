@@ -1,7 +1,7 @@
 //! Top-level composition and menus; panel content remains in its existing modules.
 
 use super::*;
-use crate::{config::AudioVisualizerStyle, model::playback_key_command};
+use crate::config::AudioVisualizerStyle;
 
 #[derive(Clone, Copy)]
 pub(super) enum PanelMenuPage {
@@ -72,6 +72,9 @@ impl GuiApp {
     }
 
     fn current_keyboard_surface(&self) -> Option<KeyboardSurface> {
+        if self.keyboard_help.is_some() {
+            return Some(KeyboardSurface::Dialog(7));
+        }
         if self.manual_confirmation_open() {
             return Some(KeyboardSurface::Dialog(0));
         }
@@ -155,7 +158,7 @@ impl GuiApp {
         }
     }
 
-    fn menu_key(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn menu_key(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
         match key {
             "down" | "up" => self.keyboard_scope.advance(key == "up", window, cx),
             "escape" | "left" => {
@@ -237,6 +240,7 @@ impl Render for GuiApp {
                     this.keyboard_restore = window.focused(cx);
                 }
                 if event.keystroke.key == "escape"
+                    && event.keystroke.modifiers == gpui::Modifiers::default()
                     && (this.interaction.docking().is_some()
                         || this.interaction.dragging().is_some()
                         || this.interaction.seek_preview().is_some()
@@ -259,206 +263,7 @@ impl Render for GuiApp {
                     cx.stop_propagation();
                 }
             }))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                let key = event.keystroke.key.as_str();
-                if key == "escape" && this.dismiss_input_composition(window, cx) {
-                    cx.stop_propagation();
-                    return;
-                }
-                if matches!(this.keyboard_surface, Some(KeyboardSurface::Menu(..))) {
-                    this.menu_key(key, window, cx);
-                    cx.stop_propagation();
-                    return;
-                }
-                if this.manual_confirmation_open() {
-                    if key == "escape" {
-                        this.cancel_manual_action(cx);
-                    }
-                    cx.stop_propagation();
-                    return;
-                }
-                if components::tab_key(event) {
-                    if event.keystroke.modifiers.shift {
-                        window.focus_prev(cx);
-                    } else {
-                        window.focus_next(cx);
-                    }
-                    cx.stop_propagation();
-                    return;
-                }
-                if this.playlist_action.is_some() {
-                    if key == "escape" {
-                        this.dismiss_playlist_action(window, cx);
-                    }
-                    cx.stop_propagation();
-                    return;
-                }
-                if this.playlist_editor.is_some() {
-                    if key == "escape" {
-                        this.cancel_playlist_name(window, cx);
-                        cx.stop_propagation();
-                    } else if !this.input_focused(window, cx) {
-                        cx.stop_propagation();
-                    }
-                    return;
-                }
-                if this.duplicate_review.open {
-                    if key == "escape" {
-                        this.close_duplicate_review(window, cx);
-                    }
-                    cx.stop_propagation();
-                    return;
-                }
-                if this.about_open {
-                    if key == "escape" {
-                        this.about_open = false;
-                        this.focus_layout(window, cx);
-                        cx.notify();
-                    }
-                    cx.stop_propagation();
-                    return;
-                }
-                if this.settings_open {
-                    // Dialog input, dropdown navigation and cancellation belong to its entity.
-                    return;
-                }
-                if this.layouts_open {
-                    if key == "escape" {
-                        if this.layout_action.is_some() {
-                            this.layout_action = None;
-                        } else {
-                            this.layouts_open = false;
-                        }
-                        this.focus_layout(window, cx);
-                        cx.notify();
-                        cx.stop_propagation();
-                    }
-                    return;
-                }
-                let modifiers = event.keystroke.modifiers;
-                if key == "f"
-                    && (modifiers.control || modifiers.platform)
-                    && !modifiers.alt
-                    && !modifiers.shift
-                    && !modifiers.function
-                    && this.route_search_key(true, window, cx)
-                {
-                    cx.stop_propagation();
-                    return;
-                }
-                if key == "escape" && this.route_search_key(false, window, cx) {
-                    if !this.input_focused(window, cx) {
-                        this.focus_layout(window, cx);
-                    }
-                    cx.stop_propagation();
-                    return;
-                }
-                if this.input_focused(window, cx) {
-                    if key == "escape" {
-                        this.focus_layout(window, cx);
-                        cx.stop_propagation();
-                    }
-                    return;
-                }
-                if !this.layout_focus.is_focused(window) {
-                    // Native controls own Enter/Space; do not also run playback shortcuts.
-                    return;
-                }
-                let modifiers = event.keystroke.modifiers;
-                if this.browser.focus() == Some(BrowserFocus::History)
-                    && key == "a"
-                    && (modifiers.control || modifiers.platform)
-                    && !modifiers.alt
-                    && !modifiers.shift
-                    && !modifiers.function
-                {
-                    this.browser.history.select_all();
-                    cx.notify();
-                    cx.stop_propagation();
-                    return;
-                }
-                if this.active_list_focus() == Some(ListFocus::Queue)
-                    && key == "a"
-                    && (modifiers.control || modifiers.platform)
-                    && !modifiers.alt
-                    && !modifiers.shift
-                    && !modifiers.function
-                {
-                    this.select_all_queue_entries(cx);
-                    cx.stop_propagation();
-                    return;
-                }
-                if this.active_list_focus() == Some(ListFocus::PlaylistTracks)
-                    && !modifiers.alt
-                    && !modifiers.function
-                {
-                    let multi = modifiers.control || modifiers.platform;
-                    if key == "a" && multi && !modifiers.shift {
-                        this.select_all_playlist_entries(cx);
-                        cx.stop_propagation();
-                        return;
-                    }
-                    if matches!(key, "up" | "down") && modifiers.shift {
-                        this.navigate_playlist(key == "down", true, multi, cx);
-                        cx.stop_propagation();
-                        return;
-                    }
-                }
-                let unmodified = !modifiers.control
-                    && !modifiers.platform
-                    && !modifiers.alt
-                    && !modifiers.shift
-                    && !modifiers.function;
-                if !unmodified {
-                    return;
-                }
-                match key {
-                    "escape" => {
-                        this.focus_layout(window, cx);
-                        this.request_clear_selection(cx);
-                    }
-                    "q" => {
-                        this.request_close_window(window, cx);
-                    }
-                    "/" => this.activate_library(window, cx, true),
-                    "t" => this.activate_library(window, cx, false),
-                    "up" | "down" => {
-                        if let Some(focus) = this.active_list_focus() {
-                            this.browser.focus_list(focus);
-                            this.navigate_list(focus, key == "down", cx);
-                        }
-                    }
-                    "pageup" | "pagedown" => {
-                        if this
-                            .scroll_views
-                            .page(key == "pagedown", window.mouse_position())
-                        {
-                            cx.notify();
-                        }
-                    }
-                    "left" | "right" | "space" | " "
-                        if this.active_list_focus() == Some(ListFocus::Library) =>
-                    {
-                        this.library_tree_key(key, cx);
-                    }
-                    "enter" => {
-                        if let Some(focus) = this.active_list_focus() {
-                            this.play_focused_selection(focus, cx);
-                        }
-                    }
-                    "d" | "delete" => {
-                        if let Some(focus) = this.active_list_focus() {
-                            this.remove_focused_queue(focus, cx);
-                        }
-                    }
-                    _ => {
-                        if let Some(command) = playback_key_command(key, &this.state.playback) {
-                            this.send(command, cx);
-                        }
-                    }
-                }
-                cx.stop_propagation();
-            }))
+            .on_key_down(cx.listener(Self::keyboard_input))
             .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, window, cx| {
                 if this.current_keyboard_surface().is_none() {
                     this.keyboard_restore = window.focused(cx);
@@ -466,6 +271,7 @@ impl Render for GuiApp {
                 let modal = this.manual_confirmation_open()
                     || this.settings_open
                     || this.about_open
+                    || this.keyboard_help.is_some()
                     || this.duplicate_review.open
                     || this.playlist_editor.is_some()
                     || this.playlist_action.is_some()
@@ -763,6 +569,15 @@ impl Render for GuiApp {
                                 }),
                         ),
                     )
+                    .child(menu_item(
+                        "app-keyboard-help",
+                        self.tr("shell-keyboard-help"),
+                        cx,
+                        |this, window, cx| {
+                            this.app_menu_open = false;
+                            this.open_keyboard_help(window, cx);
+                        },
+                    ))
                     .child(about)
                     .child(components::menu_separator())
                     .child(menu_item(
@@ -1604,6 +1419,9 @@ impl Render for GuiApp {
                             ),
                     ),
             );
+        }
+        if let Some(context) = self.keyboard_help {
+            app = app.child(self.keyboard_help_overlay(context, cx));
         }
         if let Some(confirmation) = self.render_manual_confirmation(cx) {
             app = app.child(confirmation);

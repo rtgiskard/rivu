@@ -893,6 +893,15 @@ impl GuiApp {
         self.start_queue_navigation(offset, false, cx);
     }
 
+    pub(super) fn jump_queue_edge(&mut self, last: bool, cx: &mut Context<Self>) {
+        self.refresh(cx);
+        let total = self.browser.queue.rows.len();
+        if total == 0 || (self.browser.queue.busy && self.browser.queue.navigation.is_none()) {
+            return;
+        }
+        self.start_queue_navigation(if last { total - 1 } else { 0 }, false, cx);
+    }
+
     pub(super) fn select_all_queue_entries(&mut self, cx: &mut Context<Self>) {
         self.refresh(cx);
         if self

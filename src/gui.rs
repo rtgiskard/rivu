@@ -22,6 +22,7 @@ mod search;
 pub(crate) mod session;
 mod settings;
 mod shell;
+mod shortcuts;
 mod visualization;
 use crate::{
     config::{AudioVisualizerOptions, AudioVisualizerStyle},
@@ -329,25 +330,15 @@ enum BrowserFocus {
     History,
 }
 
-fn visible_list_focus(
-    preferred: Option<BrowserFocus>,
-    visible: impl Iterator<Item = BrowserFocus>,
-) -> Option<ListFocus> {
-    let mut first = None;
-    for focus in visible {
-        let list = match focus {
-            BrowserFocus::List(list) => Some(list),
-            BrowserFocus::Playlists | BrowserFocus::History => None,
-        };
-        if Some(focus) == preferred {
-            // A visible unsupported list owns the keys; never target another panel.
-            return list;
+fn panel_list_focus(kind: &str, preferred: Option<BrowserFocus>) -> Option<ListFocus> {
+    match kind {
+        "library" => Some(ListFocus::Library),
+        "queue" => Some(ListFocus::Queue),
+        "playlists" if preferred == Some(BrowserFocus::List(ListFocus::PlaylistTracks)) => {
+            Some(ListFocus::PlaylistTracks)
         }
-        if first.is_none() {
-            first = list;
-        }
+        _ => None,
     }
-    first
 }
 
 #[derive(Clone, Copy)]
@@ -510,6 +501,7 @@ pub(super) struct GuiApp {
     playlist_entries_search: Entity<ListSearch>,
     history_search: Entity<ListSearch>,
     library_search: Entity<ListSearch>,
+    // Last explicitly targeted panel; unsupported panels own (and suppress) row keys too.
     search_panel: Option<u64>,
     browser: BrowserState,
     loading_text: loading::LoadingText<loading::LoadingOwner>,
@@ -525,6 +517,8 @@ pub(super) struct GuiApp {
     keyboard_surface: Option<shell::KeyboardSurface>,
     keyboard_restore: Option<FocusHandle>,
     scroll_views: scrolling::ScrollViews,
+    keyboard_help: Option<crate::keyboard::Context>,
+    help_scroll: std::rc::Rc<ScrollHandle>,
 
     interaction: LayoutInteraction,
     error: Option<String>,
@@ -740,6 +734,7 @@ impl GuiApp {
         {
             self.layouts.current_mut().activate(panel_id);
             self.browser.focus_list(ListFocus::Library);
+            self.search_panel = Some(panel_id);
             self.catalog_open = false;
             if focus_search {
                 self.library_search
@@ -756,6 +751,7 @@ impl GuiApp {
                 .add("library", self.interaction.target_group());
             self.layouts.current_mut().activate(panel_id);
             self.layout_changed(cx);
+            self.search_panel = Some(panel_id);
             self.browser.focus_list(ListFocus::Library);
             self.catalog_open = false;
             if focus_search {
@@ -775,18 +771,22 @@ impl GuiApp {
             .into_iter()
             .find(|panel| panel.kind == "queue")
             .map(|panel| panel.id);
-        if let Some(panel) = panel {
+        let panel_id = if let Some(panel) = panel {
             self.layouts.current_mut().activate(panel);
+            panel
         } else if self.layouts.current().locked {
             self.error = Some(self.i18n.text("gl-locate-queue-locked").to_owned());
             cx.notify();
             return false;
         } else {
-            self.layouts
+            let panel = self
+                .layouts
                 .current_mut()
                 .add("queue", self.interaction.target_group());
             self.layout_changed(cx);
-        }
+            panel
+        };
+        self.search_panel = Some(panel_id);
         self.catalog_open = false;
         self.browser.focus_list(ListFocus::Queue);
         self.focus_layout(window, cx);
@@ -795,28 +795,8 @@ impl GuiApp {
     }
 
     fn active_list_focus(&self) -> Option<ListFocus> {
-        visible_list_focus(
-            self.browser.focus(),
-            self.layouts
-                .current()
-                .active_panels()
-                .into_iter()
-                .filter_map(|panel| match panel.kind.as_str() {
-                    "library" => Some(BrowserFocus::List(ListFocus::Library)),
-                    "queue" => Some(BrowserFocus::List(ListFocus::Queue)),
-                    "playlists" => Some(
-                        if self.browser.focus()
-                            == Some(BrowserFocus::List(ListFocus::PlaylistTracks))
-                        {
-                            BrowserFocus::List(ListFocus::PlaylistTracks)
-                        } else {
-                            BrowserFocus::Playlists
-                        },
-                    ),
-                    "history" => Some(BrowserFocus::History),
-                    _ => None,
-                }),
-        )
+        let panel = self.keyboard_panel()?;
+        panel_list_focus(&panel.kind, self.browser.focus())
     }
 
     fn directory_row_selected(&self, row: &crate::model::DirectoryRow) -> bool {
@@ -1220,6 +1200,8 @@ impl GuiApp {
             keyboard_surface: None,
             keyboard_restore: None,
             scroll_views: scrolling::ScrollViews::default(),
+            keyboard_help: None,
+            help_scroll: std::rc::Rc::new(ScrollHandle::new()),
             interaction: LayoutInteraction::default(),
             error,
             playlist_editor: None,
@@ -2527,6 +2509,9 @@ impl GuiApp {
                     .child(content);
                 let mut panel = column()
                     .id(("group", node_id))
+                    .capture_key_down(cx.listener(move |this, _, _, _| {
+                        this.search_panel = Some(active);
+                    }))
                     .on_key_down(cx.listener(move |this, event, window, cx| {
                         if components::context_menu_key(event) && !this.input_focused(window, cx) {
                             this.open_keyboard_panel_menu(
@@ -2776,7 +2761,7 @@ mod queue_drag_tests {
 #[cfg(test)]
 mod state_tests {
     use super::{
-        BrowserFocus, ListFocus, retain_analysis_staging, stage_analysis_frame, visible_list_focus,
+        BrowserFocus, ListFocus, panel_list_focus, retain_analysis_staging, stage_analysis_frame,
     };
     use crate::analysis::{
         AnalysisFrame, AnalysisSettings, AnalysisWorker, DisplayDemand, TapFrame, VisualizerDemand,
@@ -2988,66 +2973,18 @@ mod state_tests {
     }
 
     #[test]
-    fn keyboard_focus_uses_only_visible_lists_after_tab_switch() {
+    fn row_keys_belong_to_the_target_panel_without_fallback() {
+        let queue = Some(BrowserFocus::List(ListFocus::Queue));
+        for kind in ["albums", "history", "metadata", "transport", "playlists"] {
+            assert!(panel_list_focus(kind, queue).is_none());
+        }
+        assert!(panel_list_focus("queue", queue) == Some(ListFocus::Queue));
+        assert!(panel_list_focus("library", queue) == Some(ListFocus::Library));
         assert!(
-            visible_list_focus(
-                Some(BrowserFocus::List(ListFocus::Queue)),
-                [BrowserFocus::List(ListFocus::Library)].into_iter(),
-            ) == Some(ListFocus::Library)
-        );
-        assert!(
-            visible_list_focus(Some(BrowserFocus::List(ListFocus::Queue)), [].into_iter())
-                .is_none()
-        );
-        assert!(
-            visible_list_focus(
-                Some(BrowserFocus::List(ListFocus::Queue)),
-                [
-                    BrowserFocus::List(ListFocus::Library),
-                    BrowserFocus::List(ListFocus::Queue),
-                ]
-                .into_iter()
-            ) == Some(ListFocus::Queue)
-        );
-        assert!(
-            visible_list_focus(None, [BrowserFocus::List(ListFocus::Library)].into_iter())
-                == Some(ListFocus::Library)
-        );
-        assert!(
-            visible_list_focus(
-                Some(BrowserFocus::List(ListFocus::PlaylistTracks)),
-                [
-                    BrowserFocus::List(ListFocus::Queue),
-                    BrowserFocus::List(ListFocus::PlaylistTracks)
-                ]
-                .into_iter(),
+            panel_list_focus(
+                "playlists",
+                Some(BrowserFocus::List(ListFocus::PlaylistTracks))
             ) == Some(ListFocus::PlaylistTracks)
         );
-        assert!(
-            visible_list_focus(
-                Some(BrowserFocus::List(ListFocus::PlaylistTracks)),
-                [BrowserFocus::History].into_iter(),
-            )
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn unsupported_visible_list_suppresses_other_panel_shortcuts() {
-        for target in [BrowserFocus::Playlists, BrowserFocus::History] {
-            assert!(
-                visible_list_focus(
-                    Some(target),
-                    [BrowserFocus::List(ListFocus::Queue), target].into_iter(),
-                )
-                .is_none()
-            );
-            assert!(
-                visible_list_focus(
-                    Some(target),
-                    [BrowserFocus::List(ListFocus::Queue)].into_iter(),
-                ) == Some(ListFocus::Queue)
-            );
-        }
     }
 }

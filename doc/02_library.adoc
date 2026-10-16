@@ -530,15 +530,15 @@ automatically while scrolling; there are no page numbers or manual load-more
 controls. Expand a GUI directory to browse its children. Collapsing it preserves
 descendant expansion choices
 for reopening. Loading more rows does not clear selections or metadata drafts.
-Failed GUI loads offer a retry action; press `R` in the TUI to retry.
-Pending keyboard navigation is cancelled when library data, filters, or batch
-size change; an old row index is never applied to the refreshed collection.
-GUI row-navigation and selection keys target only a visible Library or Queue
-list; switching tabs does not let those keys act on the hidden list.
-Clicking a playlist catalog, playlist track, or Recent row suspends Library and
-Queue row shortcuts, including queue deletion, until one of those lists is
-selected again or the clicked panel is hidden. Playlist and Recent row clicks
-do not forward these shortcuts to another panel.
+Failed GUI loads offer a retry action; F5 retries the current browsable view in
+both frontends. Pending keyboard navigation is cancelled when library data,
+filters, or batch size change; an old row index is never applied to the refreshed
+collection.
+GUI row-navigation and selection keys belong to the explicitly targeted visible
+panel. Library, Queue and playlist tracks support row navigation, including
+Home/End. Clicking Albums, a playlist catalog, Recent or any other panel never
+forwards unsupported row actions to an earlier selection in another panel.
+Hidden or removed panels cannot own these actions.
 
 The TUI Library tree starts at the configured library roots only, including empty
 roots. With no configured roots it is empty; it does not add a filesystem-root

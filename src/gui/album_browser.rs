@@ -604,7 +604,7 @@ impl AlbumBrowser {
         }
     }
 
-    fn retry(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn retry(&mut self, cx: &mut Context<Self>) {
         if self.selected.is_some() {
             self.tracks.retry();
         } else {

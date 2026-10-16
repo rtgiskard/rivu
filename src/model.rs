@@ -531,44 +531,6 @@ impl Default for PlaybackState {
     }
 }
 
-///
-/// This is shared by the terminal and GUI frontends so playback controls keep
-/// identical semantics regardless of input surface.
-pub(crate) fn playback_key_command(key: &str, playback: &PlaybackState) -> Option<Command> {
-    let seek = |seconds: f64| {
-        (playback.status != PlaybackStatus::Stopped).then_some(Command::Seek { seconds })
-    };
-    match key {
-        "space" => Some(Command::Toggle),
-        "n" => Some(Command::Next),
-        "p" => Some(Command::Previous),
-        "left" => seek((playback.position - 5.0).max(0.0)),
-        "right" => seek((playback.position + 5.0).max(0.0)),
-        "home" => seek(0.0),
-        "end" => playback
-            .duration
-            .filter(|duration| duration.is_finite())
-            .and_then(seek),
-        "r" => Some(Command::Repeat {
-            mode: match playback.repeat {
-                RepeatMode::Off => RepeatMode::All,
-                RepeatMode::All => RepeatMode::One,
-                RepeatMode::One => RepeatMode::Off,
-            },
-        }),
-        "s" => Some(Command::Shuffle {
-            enabled: !playback.shuffle,
-        }),
-        "]" => Some(Command::Volume {
-            value: (playback.volume + 0.05).min(1.0),
-        }),
-        "[" => Some(Command::Volume {
-            value: (playback.volume - 0.05).max(0.0),
-        }),
-        _ => None,
-    }
-}
-
 /// Exact effective album title scoped to its immediate parent directory.
 /// Directory has no trailing separator, except for the filesystem root.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1374,70 +1336,6 @@ mod tests {
                 query.is_none()
             );
         }
-    }
-
-    #[test]
-    fn playback_seek_respects_status_and_boundaries() {
-        let mut state = PlaybackState {
-            position: 2.0,
-            ..PlaybackState::default()
-        };
-        assert!(playback_key_command("left", &state).is_none());
-        state.status = PlaybackStatus::Playing;
-        assert!(matches!(
-            playback_key_command("left", &state),
-            Some(Command::Seek { seconds }) if seconds == 0.0
-        ));
-        state.position = 12.0;
-        assert!(matches!(
-            playback_key_command("right", &state),
-            Some(Command::Seek { seconds }) if seconds == 17.0
-        ));
-        state.duration = Some(f64::INFINITY);
-        assert!(playback_key_command("end", &state).is_none());
-        state.duration = Some(42.0);
-        assert!(matches!(
-            playback_key_command("end", &state),
-            Some(Command::Seek { seconds }) if seconds == 42.0
-        ));
-        assert!(playback_key_command("unknown", &state).is_none());
-    }
-
-    #[test]
-    fn playback_volume_and_repeat_cycle_are_bounded() {
-        let mut state = PlaybackState {
-            volume: 1.0,
-            ..PlaybackState::default()
-        };
-        assert!(matches!(
-            playback_key_command("]", &state),
-            Some(Command::Volume { value }) if value == 1.0
-        ));
-        state.volume = 0.0;
-        assert!(matches!(
-            playback_key_command("[", &state),
-            Some(Command::Volume { value }) if value == 0.0
-        ));
-        assert!(matches!(
-            playback_key_command("r", &state),
-            Some(Command::Repeat {
-                mode: RepeatMode::All
-            })
-        ));
-        state.repeat = RepeatMode::All;
-        assert!(matches!(
-            playback_key_command("r", &state),
-            Some(Command::Repeat {
-                mode: RepeatMode::One
-            })
-        ));
-        state.repeat = RepeatMode::One;
-        assert!(matches!(
-            playback_key_command("r", &state),
-            Some(Command::Repeat {
-                mode: RepeatMode::Off
-            })
-        ));
     }
 
     #[test]

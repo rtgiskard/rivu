@@ -84,6 +84,7 @@ Disabled controls are skipped during focus traversal. Dropdown navigation and
 confirmation accept unmodified keys only; Tab/Shift+Tab closes the dropdown and
 moves focus. Escape cancels preedit, then an open dropdown, then leaves a focused
 editor, before a later Escape closes the containing dialog.
+Playback, help and retry keys: link:04_playback.adoc#keyboard-controls[Keyboard controls].
 
 
 === Language

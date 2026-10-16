@@ -370,6 +370,15 @@ impl GuiApp {
         self.prepare_tree_row(id, index, cx);
     }
 
+    pub(super) fn jump_library_edge(&mut self, last: bool, cx: &mut Context<Self>) {
+        let count = self.browser.library.tree().row_count();
+        if count == 0 {
+            return;
+        }
+        let intent = self.begin_manual_intent();
+        self.prepare_tree_row(intent, if last { count - 1 } else { 0 }, cx);
+    }
+
     pub(super) fn activate_library_tree(&mut self, cx: &mut Context<Self>) {
         if self.library_range_pending() {
             return;
@@ -422,15 +431,6 @@ impl GuiApp {
                     {
                         self.select_tree_row(index + 1, cx);
                     }
-                }
-            }
-            "space" | " " => {
-                if let Some(branch) = &visible.branch {
-                    self.set_directory_expanded(
-                        branch,
-                        !self.browser.library.tree().expanded(branch),
-                        cx,
-                    );
                 }
             }
             _ => {}

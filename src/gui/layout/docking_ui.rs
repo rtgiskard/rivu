@@ -16,6 +16,7 @@ impl GuiApp {
         self.layouts.current().locked
             || self.settings_open
             || self.about_open
+            || self.keyboard_help.is_some()
             || self.layouts_open
             || self.app_menu_open
             || self.panel_menu.is_some()

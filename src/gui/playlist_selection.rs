@@ -1036,6 +1036,24 @@ impl GuiApp {
         cx.notify();
     }
 
+    pub(super) fn jump_playlist_edge(&mut self, last: bool, cx: &mut Context<Self>) {
+        self.refresh(cx);
+        let Some(scope) = self.playlist_navigation_scope() else {
+            return;
+        };
+        let total = self.browser.playlists.entries().total;
+        let selection = &self.browser.playlists.track_selection;
+        if total == 0 || (!selection.ready() && selection.navigation.is_none()) {
+            return;
+        }
+        let intent = self.begin_manual_intent();
+        let selection = &mut self.browser.playlists.track_selection;
+        selection.navigate_to(scope, if last { total - 1 } else { 0 }, false, false, false);
+        selection.intent = Some(intent);
+        self.dispatch_playlist_navigation(cx);
+        cx.notify();
+    }
+
     fn dispatch_playlist_navigation(&mut self, cx: &mut Context<Self>) {
         let Some(intent) = self.browser.playlists.track_selection.intent else {
             return;
