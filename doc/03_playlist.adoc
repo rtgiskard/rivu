@@ -10,9 +10,9 @@ link:04_playback.adoc#_queue[playback queue].
 Use `rivu playlist` to create, rename, delete, add, remove, move, or play.
 Playlist IDs identify collections; entry IDs identify items for removal or
 movement. Move indices start at zero. `playlist list` shows both kinds of ID.
-Adding no new tracks or moving an entry to its current index leaves playlist
-views valid. These requests still validate the playlist, track IDs, entry ID,
-and move bounds; invalid requests do not change any entries.
+Adding no new tracks or moving an entry to its current index leaves the playlist
+unchanged. These requests still validate the playlist, track IDs, entry ID, and
+move bounds; invalid requests do not change any entries.
 
 Creating a playlist from a queue commits the name and entries together. If an
 entry cannot be saved, no empty playlist is left behind.
@@ -61,12 +61,11 @@ Selecting a playlist shows its tracks below the catalog. The catalog fits its
 content up to about one third of the available list area, leaving the remainder
 for tracks; a short track list can also shrink. With no selection, the catalog
 uses the remaining panel space. Track rows use the Queue's numbering and text
-layout. Click a track to select it; Ctrl/Cmd-click toggles individual entries.
-Shift-click selects the inclusive range from the anchor, including unloaded pages;
-Ctrl/Cmd+Shift-click adds that range to the existing selection. The track count
+layout. Use the
+link:02_library.adoc#_desktop_selection_and_directory_tree[shared selection rules]
+for clicks and ranges, including unloaded pages. The track count
 shows the selection size. Use Delete to remove selected entries together.
 Hover controls for Play, Favorite, and Remove target only that row, never the group.
-Hover row actions are separated by one em, with Play before Favorite.
 Double-click or Enter plays the
 active track individually. With playlist tracks focused, arrows move the active
 track, Shift+arrows extend a range, Ctrl/Cmd+A selects every matching entry, and Delete
@@ -79,11 +78,10 @@ unselected track moves only that entry. Dropping on a row inserts before that
 entry; dropping below the rows appends. The dragged group is fixed at drag start,
 even if track selection changes during the gesture. Dropping on a member of that
 group or pressing Esc leaves playlist order unchanged.
-This saves playlist order without changing the queue. Drags carry stable entry
-identities and a playlist content/lifetime revision, and are rejected after that
-playlist's membership or order changes, after deletion, or after the selection
-switches, including switching away and back. Renaming either playlist or editing
-another playlist does not invalidate the content revision.
+This saves playlist order without changing the queue. A drag is rejected if that
+playlist's membership or order changes, it is deleted, or the selection switches
+before dropping, including switching away and back. Renaming a playlist or editing
+another playlist does not cancel the drag.
 
 Dragging playlist tracks to Queue or another playlist copies their track IDs in
 playlist order without removing source entries. A named catalog row is an
@@ -117,65 +115,37 @@ scrolling and query failure behavior. Switching playlists clears track selection
 Deleting the selected playlist from another client clears its selection on
 refresh. Empty playlists and unloaded pages do not imply deletion.
 
-Ranges stream bounded metadata pages and commit only after the complete range
-is available and any Details draft confirmation is resolved. A failed range
-leaves the previous selection and Details unchanged. Refreshes
-resolve selected, active, and anchor identities in bounded lookup batches,
-relocate still-existing entries, and discard missing entries. Stale range and
-lookup results cannot overwrite a newer selection or playlist revision. Pending
-or failed selection loads disable group actions and show status with Retry;
-loaded row controls stay row-local. Bulk removal is revision-checked and atomic;
-a failed command leaves selection intact until an authoritative refresh.
+Range selection waits for the complete range and any Details draft confirmation.
+A failed range leaves the previous selection and Details unchanged. Refreshes
+retain selected entries that still exist and discard removed entries; old query
+results cannot overwrite a newer selection. Pending or failed selection loads
+disable group actions and show status with Retry; loaded row controls stay row-local.
+Group removal is atomic; a failed command leaves selection intact until refresh.
 
 Selection query failures, including an unavailable core, stop loading and preserve
 the previous selection without automatic retries. Retry reconciles that selection;
 it does not replay the failed range or key command. With no previous selection,
 Retry restores an empty selection so another click or navigation command can proceed.
-
 While keyboard navigation loads, repeated arrows retain only the latest target;
 superseded targets never replace the active track. Repeating an arrow at a list
 boundary does not start another navigation load.
 
-Moving entries refreshes only that playlist's entries and selected locations;
-the unchanged playlist catalog and library views stay loaded. This also applies
-to moves submitted by another client. Renaming, creating, deleting, or changing
-membership refreshes playlist catalogs without invalidating the content or
-selected locations of unrelated playlists. Renaming a playlist also preserves
-its own content revision. Track metadata edits refresh displayed entry metadata
-without relocating unchanged entry identities.
-
 === Playlist query validity
 
-Playlist summaries depend only on the catalog revision: playlist identity, name,
-and entry count. Each existing playlist, including an empty playlist, also has
-its own content/lifetime token. Creation issues a fresh token, committed membership
-or order changes replace it, and deletion removes it. The token map contains only
-existing playlists; a missing playlist never borrows the catalog revision. Tokens
-are issued from a monotonic sequence, so an old scalar mutation token cannot
-become valid for a later playlist lifetime. Reordering alone does not change the
-catalog; renaming alone does not change any playlist content token. Adding only
-existing tracks, removing an empty selection, and moving an already positioned
-group leave both content and catalog revisions unchanged.
+Reordering refreshes only that playlist's entries and selected positions, including
+moves made by another client. Renaming preserves its tracks and selection; changing
+another playlist does not reload the selected playlist's contents. Track metadata
+edits update displayed information without changing entry identities or positions.
+Empty playlists remain valid collections, not deleted or unloaded playlists.
 
-Entry metadata pages and batches depend on the library revision and that
-playlist's content/lifetime token, not the catalog revision. Compact occurrence
-locations depend only on the content/lifetime token: title or favorite edits do
-not change occurrence identity, position, or total. The query-owned stamp is the
-shared validity contract for request scheduling, result acceptance, and batch
-continuation; a separate request generation rejects superseded work even when
-its data remains valid.
-
-A batch continuation must retain the matching scoped token from its first page.
-An unscoped baseline may start a playlist traversal only without a cursor and
-with the same library revision; catalog changes do not prevent that first read.
-Membership or order changes in the traversed playlist invalidate continuation,
-while rename, creation, deletion, or membership changes elsewhere do not.
-Revision-checked group mutations reject a missing playlist or stale token before
-changing entries, including an empty selection. Committed lifecycle and content
-tokens advance before the fallible summary refresh, so a refresh error cannot
-make an obsolete mutation valid again. Playlist reference changes also invalidate
-duplicate-member reference counts; creation and deletion conservatively do so
-even for empty playlists, without an extra membership read.
+If membership or order changes during a listing or export, restart the traversal;
+renaming or changing another playlist does not interrupt it. Stale group operations
+are rejected without partial changes. See
+link:02_library.adoc#_paged_views[Paged views] for incomplete CLI output and retries,
+link:21_ipc.adoc#_revisions_and_watching[IPC revisions] and
+link:21_ipc.adoc#_query_results_and_pagination[query validity] for the internal
+contract, and link:22_cache.adoc#_query_projection_retention[Query projection retention]
+for cached views.
 
 == Import and export
 

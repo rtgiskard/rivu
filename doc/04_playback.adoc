@@ -162,10 +162,9 @@ and display metadata. Listings stop on concurrent queue content changes; repeat
 the listing to obtain a consistent new traversal.
 
 The Queue panel displays occurrences in order and marks the current occurrence.
-Click selects one row; Ctrl/Cmd toggles; Shift selects a contiguous range;
-double-click plays the selected occurrence. A right-click on an already
-selected row preserves the selection; otherwise it selects that row. Up/Down
-navigate the focused queue, Enter plays the selected occurrence, and Delete
+Use the link:02_library.adoc#_desktop_selection_and_directory_tree[shared selection rules]
+for clicks, ranges, and row context menus. Double-click plays that occurrence.
+Up/Down navigate the focused queue, Enter plays the selected occurrence, and Delete
 removes selected occurrences.
 Optional link:02_library.adoc#_desktop_list_search[Desktop list search] filters
 the visible occurrences without changing playback order. Selection actions apply
@@ -252,29 +251,24 @@ Shuffle, Repeat, and Quit. Repeat follows the cycle described under
 
 == Album artwork panel
 
-Add *Album artwork* from the panel catalog for a circular preview of the current
-playback track. It is optional and is not added to the default layout. Unlike
-Track details, browsing or selecting a different library track does not change it.
+The built-in *Default* layout includes Album artwork for the current playback
+track. Existing saved layouts are not overwritten: add *Album artwork* from the
+panel catalog, or create a layout from a built-in template. Unlike Track details,
+browsing or selecting a different library track does not change this panel.
 
-Choose Style from a panel's right-click menu to change only that panel. Artwork
-settings edits its style, rotation mode, direction, and seconds per circle with
-Apply and Discard. These options are saved with the layout and survive docking,
-layout duplication, and reload. New panels use the defaults in Settings →
-Interface → Album artwork; changing defaults leaves existing panels unchanged.
-Animation frame rate remains shared across panels.
+Use the panel's right-click Style or Rotation actions for immediate changes, or
+Artwork settings to edit its options with Apply and Discard. These choices are
+saved with the layout and survive docking, layout duplication, and reload.
+Settings → Interface → Album artwork changes defaults for new panels without
+overwriting existing panels. See
+link:01_config.adoc#_album_artwork[Album artwork configuration] for styles,
+animation parameters, defaults, and shared frame rate.
 
-Toggle Rotation from the panel's right-click menu to apply and save its mode
-immediately without changing style, direction, period, or frame rate. Rotation
-runs during playback while the panel
-is visible. Pause retains the angle, and resume continues; stopping or changing tracks resets it. Static
-mode immediately returns the cover upright. Changing the period or direction
-preserves the current angle. Missing artwork uses the generated default cover,
-with the same animation behavior as a real cover.
-
-Hiding the panel or window suspends animation without advancing hidden time.
-Still Mode does not affect cover loading or rotation. Multiple panels share
-the same cover loading, but retain their own rotation state. The full, static
-Track details preview is unchanged.
+Rotation follows playback while the panel is visible. Pausing or hiding it retains
+the angle without advancing hidden time; stopping, changing tracks, or choosing
+Static resets the cover upright. Missing artwork uses the generated default cover.
+Still Mode does not affect cover loading or rotation. Panels share cover loading
+but retain independent rotation state. Track details keeps its full, static preview.
 
 == MPRIS and artwork
 

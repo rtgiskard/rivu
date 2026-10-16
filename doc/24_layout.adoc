@@ -23,35 +23,34 @@ restore them on a later switch. Renaming and deleting an inactive layout do not
 replace the active panel tree.
 
 The initial collection contains three ordinary, editable layouts, with Default
-active. All three give 28% of the vertical content to their top row and 72% to
-the lower panes, excluding separator gutters:
+active. Each assigns 28% of vertical content to its top row and 72% below,
+excluding gutters. Their starting geometry serves three distinct priorities:
 
-* Default splits its top row 22% Album artwork and 78% Playback. Below, 60%
-  belongs to Library/Albums/Playlists tabs, initially Library. The remaining 40%
-  splits vertically into 60% Queue and 40% Spectrum/Spectrogram tabs, initially
-  Spectrum. Grouping plots gives the active view more width while leaving the
-  main browsing and queue operations visible.
-* Album puts Playback above a lower row split into 35% Album artwork and 65%
-  Albums/Queue/Track details tabs, initially Albums.
-* Visual puts Playback above a lower row split into 70% Audio Visualizer/Spectrum/
-  Spectrogram/Waveform tabs, initially Audio Visualizer, and 30% Queue.
+* Default keeps browsing and Queue visible while tabbing competing plots. Its
+  top row is 22% Album artwork and 78% Playback; below, Library/Albums/Playlists
+  tabs take 60%, and the remaining 40% divides vertically into 60% Queue and
+  40% Spectrum/Spectrogram tabs.
+* Album emphasizes the cover and album browser: below Playback, 35% belongs to
+  Album artwork and 65% to Albums/Queue/Track details tabs.
+* Visual maximizes the plot canvas: below Playback, Audio Visualizer/Spectrum/
+  Spectrogram/Waveform tabs take 70% and Queue takes 30%.
 
-Templates construct only panel trees and instance-option slots. Existing
-initialization fills missing artwork and visualizer options from configuration;
-templates do not store global settings or extra UI-session state. New from
-built-in template uses the existing name-validation and save paths and activates
-the new layout. Once created, layouts have no tracked template identity, update
-policy, or special deletion rules. Loading a saved collection never inserts
-missing templates or rewrites its proportions. These defaults apply only when
-creating a collection or explicitly creating a layout from a template.
+Templates construct only panel trees and instance-option slots; existing
+initialization supplies missing artwork/visualizer options from configuration.
+They store neither global settings nor extra UI-session state. Creation uses
+the ordinary name-validation, activation, and save paths. Created layouts retain
+no template identity, update policy, or special deletion rules. Loading a saved
+collection neither inserts missing templates nor rewrites proportions; defaults
+apply only at collection creation or explicit template creation. Initial tab
+selection and template controls are documented in
+link:01_config.adoc#_layout[Configuration and layout].
 
 Visualization sizing uses the actual content canvas, after the 1.75rem tab row,
 panel borders, and 8px content insets. A canvas at most 64px wide or 40px high
 shows an `Enlarge panel` hint instead of an unreadable plot or unexplained blank
-background. The hint has a tooltip and can scroll when its text does not fit.
-Spectrum omits its axis labels below 78px canvas height, preserving a readable
-compact plot instead of overlapping its four dB labels. This does not change
-the saved label preference.
+background; the hint remains accessible through its tooltip and scrolling.
+Spectrum omits axis labels below 78px canvas height rather than overlapping its
+four dB labels, without changing the saved label preference.
 
 At the supported minimum window size (760 by 480), particularly at interface
 scale 2 (the supported scale range is 0.75 through 2), not every list and plot
@@ -62,20 +61,17 @@ space, unlock layout editing and drag its separator, or dock panels into tabs;
 enlarging the window or reducing interface scale also restores plot space.
 No window-size or scale change rewrites saved proportions.
 
-Each Album artwork panel owns its style, rotation mode, period, and direction,
-saved with the layout and retained by docking and layout duplication. New panels
-and saved panels missing options initialize from `interface.album_artwork` defaults.
-Changing defaults does not overwrite initialized panels. Artwork loading and
-rotation scheduling remain shared; frame rate belongs to application configuration.
+Panel instance preferences belong to the layout and survive docking and
+duplication. Missing artwork options initialize from configuration once;
+later global-default changes do not overwrite initialized panels. Artwork
+acquisition and rotation scheduling remain shared, and frame rate remains
+application configuration, not a per-layout setting.
 
-Hidden windows and inactive tabs still reconcile core state and query-owner keys.
-A query completion synchronizes the GUI snapshot before checking identity,
-generation, and the query-owned dependency stamp. Visibility gates rendering,
-analysis, and new tree/Details reads, not state validity; revealing a panel
-demands only missing current data. Metadata refresh retains dirty input, save
-baseline, unavailable state, and follow intent. Playlist row metadata refresh
-does not relocate compact occurrence selection. Shared projection ownership and
-physical-worker cancellation rules are authoritative in
+Visibility gates rendering, analysis, and new tree/Details reads, not state
+validity. Hidden windows and inactive tabs still reconcile core state and
+query-owner keys; revealing a panel demands only missing current data.
+Projection acceptance, metadata-draft retention, compact occurrence selection,
+and physical-worker cancellation follow
 link:22_cache.adoc#_query_projection_retention[Query projection retention].
 Keyboard list actions target only a visible active panel; see
 link:02_library.adoc#_paged_views[Paged views].
@@ -212,10 +208,10 @@ outside the feasible interval are ignored rather than clamped and misrepresented
 as exact alignment. Physical
 pixel rounding remains the final limit of precision.
 
-The global switch defaults to enabled. Holding Alt temporarily reverses it for
-the current drag; releasing Alt restores it. Modifier changes do not alter the
-configuration draft or saved file. Snapping aligns the current geometry only:
-no persistent cross-container constraint or general constraint solver is stored.
+Alt temporarily reverses the configured snapping switch for the current drag
+without modifying the settings draft or saved file. Snapping aligns current
+geometry only: no persistent cross-container constraint or general constraint
+solver is stored.
 
 == Persistence and failure semantics
 

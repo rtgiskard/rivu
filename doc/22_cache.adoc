@@ -1,56 +1,26 @@
-= Visualization Cache
+= Caching and Resource Lifecycles
 
-== Scope and contract
-
-`visualizations.cache` trades retained graphics memory for less repeated rendering
-work. It does not change audio analysis, waveform samples, spectrum levels,
-palette mapping, or playback state. Settings and display controls are documented
-in link:01_config.adoc[Configuration and layout]; signal continuity and rendering
-rationale are explained in link:23_visuals.adoc[Visualization Rendering Design].
-
-The policy covers Waveform display columns and static images, Spectrum body
-geometry, and Spectrogram history images. Audio Visualizer styles are independent:
-radial styles do not retain reusable graphics, stereo analysis styles retain
-their own result images, and generative styles retain simulation state. The
-setting does not control those resources, album artwork, or font caches.
-
-Disabling the cache bypasses reusable graphics, not the underlying audio data
-or Spectrogram history. Peak hold, smoothing, and display calculations retain
-the same meaning. Re-enabling it requires an initial rebuild before reuse
-resumes. Temporary images still remain alive long enough for their submitted
-scene to render safely.
-
-Still Mode is a destructive suspension, not another cache policy: it stops
-visualization demand and discards results as well as derived graphics. Its
-analysis, waveform-coverage, and late-result invariants are authoritative in
-link:23_visuals.adoc#_still_mode[Visualization Rendering Design]. Graphics that
-have already been submitted still follow the retirement boundary below.
+Query projections, visualization graphics, artwork, and font/renderer resources
+have different owners and retention policies. This document describes their
+scheduling, cancellation, and release boundaries; no single cache switch or
+window-memory total represents all of them. Query stamps and revision semantics
+are authoritative in link:21_ipc.adoc#_query_results_and_pagination[IPC]; rendering
+choices are explained in link:23_visuals.adoc[Visualization Rendering Design].
 
 == Query projection retention
 
-List and tree data are independent of `visualizations.cache`. A query owns its
-dependency stamp; GUI and terminal consumers use that same contract to schedule
-work and accept results. A projection key is normalized query identity plus its
-stamp, excluding page offsets, limits, batch cursors, and expected revisions.
-Request generations reject obsolete intent independently of data freshness.
+List and tree data are independent of `visualizations.cache`. Consumers use
+link:21_ipc.adoc#_query_results_and_pagination[the query-owned stamp contract]
+for dependency selection and result acceptance, and
+link:21_ipc.adoc#_revisions_and_watching[IPC revisions] for state watching.
+A projection key is normalized query identity plus its stamp, excluding page
+offsets, limits, batch cursors, and expected revisions. Request generations
+reject obsolete intent independently of data freshness.
 
-Library metadata rows depend on library content; Details use their selected
-track's metadata scope. Directory rows, album rows, and library location also
-depend on structure. Root counts depend only on structure and configured root
-identity. The forest page is synthesized locally from configured roots, not
-another database query. Playlist summaries depend only on the playlist catalog.
-Full playlist rows depend on that playlist's metadata and content tokens;
-compact occurrence/location queries depend only on its content token. Every
-extant playlist has a content token, and absence means deletion: rename never
-invalidates content or compact occurrence selection. Unrelated track edits do
-not invalidate Details or playlist rows. Targeted metadata facts are bounded;
-unknown bulk effects and overflow conservatively invalidate all scopes, as
-described in link:21_ipc.adoc#_query_results_and_pagination[the query contract].
-Metadata-only changes preserve the latest navigation target and modifiers;
-an already dispatched full-row read drains before retrying against current metadata.
-Queue queries depend only on the queue token. Duplicate groups use their group
-token; duplicate members use metadata, member facts (including playlist reference
-counts), and queue. A catalog rename does not change member facts.
+The forest page is synthesized locally from configured roots, not another
+database query; root-count identity also includes those roots. Metadata-only
+changes preserve the latest navigation target and modifiers; an already
+dispatched full-row read drains before retrying against current metadata.
 Duplicate source/target choices retain track identity across reference-only
 refreshes; command eligibility is checked against current targeted member facts.
 
@@ -102,9 +72,37 @@ Publication revisions and four state-section tokens are distinct from query
 stamps and request generations. A publication with unchanged section tokens does
 not invalidate the GUI root; independent audio frame processing still proceeds.
 
-== Reuse and invalidation
+== Visualization caching
 
-=== Waveform
+=== Scope and contract
+
+`visualizations.cache` trades retained graphics memory for less repeated rendering
+work. It does not change audio analysis, waveform samples, spectrum levels,
+palette mapping, or playback state. Settings and display controls are documented
+in link:01_config.adoc[Configuration and layout]; signal continuity and rendering
+rationale are explained in link:23_visuals.adoc[Visualization Rendering Design].
+
+The policy covers Waveform display columns and static images, Spectrum body
+geometry, and Spectrogram history images. Audio Visualizer styles are independent:
+radial styles do not retain reusable graphics, stereo analysis styles retain
+their own result images, and generative styles retain simulation state. The
+setting does not control those resources, album artwork, or font caches.
+
+Disabling the cache bypasses reusable graphics, not the underlying audio data
+or Spectrogram history. Peak hold, smoothing, and display calculations retain
+the same meaning. Re-enabling it requires an initial rebuild before reuse
+resumes. Temporary images still remain alive long enough for their submitted
+scene to render safely.
+
+Still Mode is a destructive suspension, not another cache policy: it stops
+visualization demand and discards results as well as derived graphics. Its
+analysis, waveform-coverage, and late-result invariants are authoritative in
+link:23_visuals.adoc#_still_mode[Visualization Rendering Design]. Graphics that
+have already been submitted still follow the retirement boundary below.
+
+=== Reuse and invalidation
+
+==== Waveform
 
 Waveform separates display-column aggregation from static image caching.
 Unchanged data and display mapping reuse the columns; incremental waveform
@@ -112,7 +110,7 @@ updates rebuild only affected image tiles. Playback cursor movement does not
 invalidate the static waveform. Source, dimensions, amplitude mapping, and
 palette changes rebuild the affected derived data.
 
-=== Spectrum
+==== Spectrum
 
 Spectrum retains body geometry and frequency-band grouping per panel. Differently
 sized panels do not replace one another's grouping. Repaints can reuse geometry,
@@ -125,7 +123,7 @@ drawing. The benefit depends on the workload, not on a fixed expected hit rate.
 The shared palette ramp is independent of geometry caching; its bounded ownership
 and retirement are described in link:23_visuals.adoc#_spectrum[Spectrum rendering].
 
-=== Spectrogram
+==== Spectrogram
 
 Spectrogram retains images for unchanged history columns. New audio updates the
 recent columns while older columns remain reusable. Palette, display range,
@@ -147,7 +145,7 @@ Other analysis views can continue updating without accumulating Spectrogram
 history. Restoring demand starts with a new analysis publication, not the
 frames received while hidden. This lifetime is independent of the cache setting.
 
-== Resource boundaries
+=== Resource boundaries
 
 Caches are local to active panels or bounded Spectrogram history, not an
 unbounded record of earlier render states. Base waveform storage is bounded
@@ -182,47 +180,6 @@ publication resumes when a slot becomes available. Losing Density demand
 releases its pool and consumer references without stopping a surviving
 Spatial Spectrum consumer.
 
-Cached Paths and Scene replay share immutable vertex storage while keeping
-draw order, masks, and other Path metadata independent. Editing a shared Path
-uses copy-on-write. Painting still converts logical coordinates once into
-scaled geometry; Scene insertion and replay do not copy those vertices again.
-The renderer reuses its expanded vertex and Path-sprite upload buffers;
-uploads copy the bytes before either buffer is cleared for the next batch.
-Each buffer above 4096 elements shrinks after 120 successful frames at no more
-than one-quarter utilization, retaining twice the observed peak with a
-1024-element floor. Surface unconfiguration releases both buffers immediately.
-
-The renderer allocates Path resolve/MSAA targets only when nonempty Path vertices
-are drawn, and drops its references on a successful frame without Path drawing.
-Restoring Path drawing rebuilds targets at the current physical size. Submitted
-GPU work retains its resources; reclamation does not destroy in-flight textures
-or wait for the GPU. Instance storage above its initial capacity shrinks after
-120 successful frames at no more than one-quarter utilization, retaining twice
-the observed peak rounded up to a power of two and never below initial capacity.
-Discarded CPU Frame, Scene, and line-layout buffers reclaim high-water capacity
-after 120 small uses of each buffer (normally 240 draws for double buffering).
-The live frame and replay ranges remain untouched. These policies use existing
-draws, not timers, and do not promise reclamation while drawing is inactive.
-
-Atlas requests with nonpositive dimensions or dimensions beyond the device limit
-are rejected before creating a page. A new page is committed only after its
-first tile reservation succeeds, so failed reservations leave no empty GPU page
-and do not consume reusable page slots.
-
-After the window is destroyed, the application switches the graphical platform
-to headless mode, releasing the display connection and its shared GPU context.
-Reopening reconnects to the original display before creating a new window;
-requests arriving during a connection switch are coalesced. A failed reconnect
-leaves the application running so another open request can retry.
-
-Playback, IPC, tray, MPRIS, and accepted business operations remain independent
-of this transition. The GPUI event loop, executors, font system, and application
-caches remain available; this is not full framework teardown. Allocator arenas,
-thread-local state, and backend display bookkeeping can outlive a window or
-display reconnect, so RSS is not a count of live rendering resources. No
-allocator trim is performed, and closing the window does not promise
-serve-level process memory.
-
 An image cannot be dropped merely because the application has stopped reusing
 it: a submitted scene can still reference it. Replaced cached waveform and
 Spectrogram images retire at a subsequent window-frame boundary; transient
@@ -236,7 +193,7 @@ therefore cannot drive its own redraw loop. The last submitted scene retains its
 images until replacement or window closure. This retains temporary memory longer
 than immediate release, but keeps scene ownership valid.
 
-== Design tradeoffs
+=== Design tradeoffs
 
 Caching avoids repeated aggregation, geometry construction, and image creation,
 but does not eliminate scene submission or rendering. Spectrum painting still
@@ -251,16 +208,6 @@ or playback state. The design favors bounded application-level caches and
 shared immutable geometry over a second geometry representation. A combined
 Spectrogram texture would change that boundary and should be justified by
 profiling real workloads, not assumed hit rates or submission counts alone.
-
-== Settings view reuse
-
-Settings owns its draft, inputs, navigation, and save feedback in a separate
-GPUI entity. Playback and analysis updates do not invalidate that entity's
-cached element tree. Settings interactions and relevant runtime changes do;
-GPUI also invalidates reuse when bounds or inherited text style change.
-This cache is independent of `visualizations.cache`, retains no settings
-bitmap, and does not freeze background visualizations or eliminate window
-composition.
 
 == Artwork lookup retention
 
@@ -399,7 +346,9 @@ a single large image or multi-frame animation can still consume substantial
 memory. Encoded-file maintenance does not measure or reclaim decoded images,
 and the encoded 8 MiB admission limit is not a decoded-pixel memory limit.
 
-== Font data and glyphs
+== Font and rendering resources
+
+=== Font data and glyphs
 
 Font retention is independent of `visualizations.cache` and Still Mode.
 Primary-font selection and fallback behavior are documented in
@@ -445,3 +394,58 @@ System font-file mappings can share kernel file pages, whereas parsed font and
 glyph data also consume process memory. Font discovery alone is not a measure
 of retained memory, and total process memory includes unrelated renderer
 resources.
+
+=== Settings view reuse
+
+Settings owns its draft, inputs, navigation, and save feedback in a separate
+GPUI entity. Playback and analysis updates do not invalidate that entity's
+cached element tree. Settings interactions and relevant runtime changes do;
+GPUI also invalidates reuse when bounds or inherited text style change.
+This cache is independent of `visualizations.cache`, retains no settings
+bitmap, and does not freeze background visualizations or eliminate window
+composition.
+
+
+=== Renderer buffers, atlases, and display lifecycle
+
+Cached Paths and Scene replay share immutable vertex storage while keeping
+draw order, masks, and other Path metadata independent. Editing a shared Path
+uses copy-on-write. Painting still converts logical coordinates once into
+scaled geometry; Scene insertion and replay do not copy those vertices again.
+The renderer reuses its expanded vertex and Path-sprite upload buffers;
+uploads copy the bytes before either buffer is cleared for the next batch.
+Each buffer above 4096 elements shrinks after 120 successful frames at no more
+than one-quarter utilization, retaining twice the observed peak with a
+1024-element floor. Surface unconfiguration releases both buffers immediately.
+
+The renderer allocates Path resolve/MSAA targets only when nonempty Path vertices
+are drawn, and drops its references on a successful frame without Path drawing.
+Restoring Path drawing rebuilds targets at the current physical size. Submitted
+GPU work retains its resources; reclamation does not destroy in-flight textures
+or wait for the GPU. Instance storage above its initial capacity shrinks after
+120 successful frames at no more than one-quarter utilization, retaining twice
+the observed peak rounded up to a power of two and never below initial capacity.
+Discarded CPU Frame, Scene, and line-layout buffers reclaim high-water capacity
+after 120 small uses of each buffer (normally 240 draws for double buffering).
+The live frame and replay ranges remain untouched. These policies use existing
+draws, not timers, and do not promise reclamation while drawing is inactive.
+
+Atlas requests with nonpositive dimensions or dimensions beyond the device limit
+are rejected before creating a page. A new page is committed only after its
+first tile reservation succeeds, so failed reservations leave no empty GPU page
+and do not consume reusable page slots.
+
+After the window is destroyed, the application switches the graphical platform
+to headless mode, releasing the display connection and its shared GPU context.
+Reopening reconnects to the original display before creating a new window;
+requests arriving during a connection switch are coalesced. A failed reconnect
+leaves the application running so another open request can retry.
+
+Playback, IPC, tray, MPRIS, and accepted business operations remain independent
+of this transition. The GPUI event loop, executors, font system, and application
+caches remain available; this is not full framework teardown. Allocator arenas,
+thread-local state, and backend display bookkeeping can outlive a window or
+display reconnect, so RSS is not a count of live rendering resources. No
+allocator trim is performed, and closing the window does not promise
+serve-level process memory.
+

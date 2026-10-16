@@ -5,131 +5,47 @@ terminal, and headless modes that share one playback instance.
 
 == Features
 
-* Local audio and CUE libraries with search, favorites, metadata overrides,
-  missing-track cleanup, play counts, and recent history
-* link:doc/02_library.adoc#_albums[Album browsing] with continuous scrolling,
-  cover grids, track lists, and whole-album playback or queue actions
-* Playlists with M3U/M3U8 import/export and CUE import; database-backed editable
-  queues with duplicate occurrences and no total-size cap
-* PipeWire playback, multichannel routing, seek, volume, shuffle, and repeat
-* Optional FFmpeg decoding for additional formats, including audio in MKV/MP4
-* Desktop GUI, CLI, TUI, and headless mode; optional MPRIS and StatusNotifier tray
-* Named, editable desktop layouts with boundary-based rows and columns, snapping,
-  and configurable appearance
-* Waveform, Spectrum, Spectrogram, and Audio Visualizer with radial, stereo-density,
-  spatial-spectrum, fractal-beam, and fractal-flow styles
-* Optional Album artwork panel with static or configurable rotating covers
-* Generated desktop artwork and embedded-cover support for MPRIS; no network
-  media or cover fetching
+* Local music libraries with search, favorites, metadata editing, play counts,
+  and recent history
+* link:doc/02_library.adoc#_albums[Album browsing], playlists with M3U/M3U8
+  import/export, and editable playback queues
+* PipeWire output with multichannel routing and optional FFmpeg decoding
+* Desktop GUI, CLI, TUI, and headless operation; optional MPRIS and system tray
+* Named desktop layouts with dockable panels and configurable appearance
+* Waveform, spectrum, spectrogram, audio visualizers, and album artwork
+
+Rivu plays local files; it does not fetch network media or cover art.
+The desktop requires Wayland; audio output requires a running PipeWire 1.2 or newer server.
 
 
-== Build and install
+== First use
 
-Rivu currently targets Linux; the desktop UI uses Wayland. On Arch Linux, install
-the build and runtime prerequisites:
+. Build and install using the <<_build_and_install,instructions below>>.
+. Run `rivu` (equivalent to `rivu gui`) to open the desktop UI.
+. Add a music directory with the Library `+` button, then trigger a scan from
+  the Library controls. Adding a directory and starting Rivu do not scan it automatically.
+. Browse Library or Albums and double-click a track to play it.
 
-[source,sh]
-----
-sudo pacman -S --needed rust gcc binutils clang pkgconf libpipewire opus fontconfig libxkbcommon ffmpeg
-cargo build --release
-----
+Music directories can also be set through `library.roots` in `config.toml`;
+use absolute paths, not `~`. See link:doc/02_library.adoc#_roots_and_scanning[Library]
+for scanning and path rules.
 
-Use the repository's Rust toolchain and `Cargo.lock` when building.
-
-Linux builds prefer `mold` when available and otherwise use the toolchain's
-default linker. Install it optionally with `sudo pacman -S --needed mold`.
-
-Audio output requires PipeWire 1.2 or newer and a running PipeWire server;
-there is no direct ALSA backend. PipeWire performs device-rate conversion.
-
-The default Cargo build includes FFmpeg support and needs development headers
-(`libavutil` 61.x, `libavcodec` 63.x, `libavformat` 63.x) and `libclang`.
-FFmpeg libraries are loaded on demand, not during startup or status queries;
-they are not required to start Rivu with native decoding. To build without
-FFmpeg support, omit the FFmpeg package and disable default features:
+=== Other modes and shutdown
 
 [source,sh]
 ----
-cargo build --release --no-default-features
-
-# Build the default variant and install the executable, desktop entry, and icons
-make install PREFIX="$HOME/.local"
-----
-
-`make build` and `make install` use the default features, including FFmpeg.
-For a native-only executable, use `--no-default-features` as above and install
-`.cache/target/release/rivu` into a directory on `PATH`.
-Build outputs default to `.cache/target/`; `CARGO_TARGET_DIR` overrides that path.
-Ensure `~/.local/bin` is on `PATH` when using the install example.
-
-Font embedding is off by default, including `make build` and `make install`.
-Install Symbols Nerd Font Mono on the machine displaying the GUI (on Arch Linux,
-`sudo pacman -S --needed ttf-nerd-fonts-symbols-mono`). To embed a build-host font:
-
-[source,sh]
-----
-cargo build --release --features embed-nerd-font
-----
-
-Embedding requires Fontconfig's `fc-list` and an installed Nerd Font on the build
-host; the build fails if none is available. No font is downloaded during the build.
-After changing the host font selection, rebuild with `cargo clean -p rivu` first.
-Distributions of embedded-font builds must include the selected font's license.
-Embedding affects the GUI only; TUI glyphs come from the displaying terminal.
-
-Release builds strip symbols. For troubleshooting, set
-`CARGO_PROFILE_RELEASE_STRIP=none` when building or installing.
-
-The FFmpeg feature supports little-endian x86-64 and aarch64 Linux with the header
-versions listed above. Cross-compiling is not currently a supported build path.
-
-Compilation makes the extension available; `playback.ffmpeg_enabled = true` enables it
-at runtime. See link:doc/04_playback.adoc[Playback] for runtime dependencies and
-decoding behavior.
-
-The pinned GPUI and WGPU renderer are included under `vendor/` for GPU image
-transforms and custom path-gradient textures; the remaining Zed dependencies
-stay at the same pinned revision. See
-link:doc/23_visuals.adoc#_pinned_gpu_extensions[GPU extension boundaries].
-
-=== Build information
-
-About and `rivu -V` report the build version. `make build` obtains it from Git;
-plain Cargo uses the package version unless `RIVU_GIT_VERSION` is supplied.
-Source archives can set that variable explicitly when Git metadata is absent.
-
-Set `SOURCE_DATE_EPOCH` to nonnegative Unix seconds for a reproducible build
-timestamp. Invalid values fail the build; About displays the timestamp locally.
-
-
-== Start and stop
-
-Before scanning, configure music directories using the Library `+` button or
-`library.roots` in `config.toml`. See link:doc/02_library.adoc[Library] for root
-and path rules.
-
-[source,sh]
-----
-# Open the desktop UI without scanning; use the Library scan controls when ready
-rivu gui
-
-# Alternatively, start a foreground, headless core
+# Run a foreground core without a desktop window
 rivu serve
 
 # Open the terminal client for an existing core
 rivu tui
 
-# The same as `rivu gui` with no paths
-rivu
-
-# Stop the running core and its GUI/MPRIS host
+# Stop the running instance, including its GUI and desktop integrations
 rivu quit
 ----
 
-On startup, the desktop UI does not scan configured roots. Trigger a scan from
-the Library controls, or pass explicit paths to `gui PATH...`; explicit paths
-select what to scan but do not add library roots. On an existing graphical
-instance, `gui PATH...` requests a scan after raising the window.
+Passing explicit paths to `rivu gui PATH...` requests a scan, including when
+raising an existing window, but does not add library roots.
 One core runs per data directory. All clients must use the same `--data-dir` to
 reach the same instance. `--config` selects configuration when starting a core;
 it does not reconfigure an existing instance.
@@ -148,8 +64,6 @@ link:doc/04_playback.adoc[Playback] for tray and MPRIS behavior.
 CLI/TUI controls require a running core; `library probe` and `playback devices`
 can run independently. All commands accept `--data-dir DIRECTORY`, `--config FILE`,
 and `--json`. Use `rivu --help` or a subcommand's `--help` for exact arguments.
-For `quit`, the response confirms acceptance of the shutdown request, not completion
-of cleanup; `--json` prints that acknowledgement as JSON.
 
 [source,sh]
 ----
@@ -162,11 +76,10 @@ rivu playback toggle
 rivu playback volume 50
 ----
 
-Mutating commands normally acknowledge acceptance, not completion. Use `--wait`
-for scan/import completion. `--json` selects machine-readable output whose shape
-depends on the command; library and playlist listings are streamed arrays.
-Paths are relative to the invoking client. The user references below describe
-library, playlist, playback, and queue operations and their failure behavior.
+Mutating commands, including `quit`, normally acknowledge acceptance, not completion.
+Use `--wait` for scan/import completion. Paths are relative to the invoking client.
+`--json` selects command-specific machine-readable output; see
+link:doc/02_library.adoc#_cli_output[CLI output] for shapes and incomplete-listing errors.
 
 == Files and data directories
 
@@ -176,12 +89,10 @@ typical Linux installation: `~/.local/share/rivu`) and
 `--config` is not also supplied, the config becomes `DIR/config.toml`.
 
 The data directory contains `library.db` (library and playback state),
-`layout.json` (desktop layout), and the `artwork/` cache. IPC uses a Linux abstract
-Unix socket without socket or lock files; see link:doc/21_ipc.adoc[IPC] for access,
-namespace, and upgrade constraints. When file logging is enabled, weekly logs are stored in
-`logs/` and old files are retained according to `logging.retention_weeks`. Stop the
-core before operating on `library.db`; see link:doc/02_library.adoc[Library] for
-database maintenance and reset behavior.
+`layout.json` (desktop layouts), the `artwork/` cache, and optional `logs/`.
+Stop the core before operating on `library.db`; see
+link:doc/02_library.adoc[Library] for database maintenance and reset behavior.
+IPC access and upgrade constraints are described in link:doc/21_ipc.adoc[IPC].
 
 
 == Documentation
@@ -189,15 +100,94 @@ database maintenance and reset behavior.
 * User guides
 ** link:doc/01_config.adoc[Configuration, layout, and visualizations]
 ** link:doc/02_library.adoc[Library, metadata, history, and database maintenance]
-** link:doc/03_playlist.adoc[Playlists, M3U/M3U8 exchange, and CUE import]
+** link:doc/03_playlist.adoc[Playlists and import/export]
 ** link:doc/04_playback.adoc[Playback, audio output, queue, TUI, and desktop integration]
 * Design notes
 ** link:doc/21_ipc.adoc[Core and client boundaries, IPC protocol]
-** link:doc/22_cache.adoc[Visualization caching and resource lifecycles]
+** link:doc/22_cache.adoc[Caching and resource lifecycles]
 ** link:doc/23_visuals.adoc[Audio analysis and visualization rendering]
 ** link:doc/24_layout.adoc[Desktop layout and docking]
 * Project status
 ** link:doc/90_open_issues.adoc[Open issues and deferred investigations]
+
+== Build and install
+
+Rivu currently targets Linux; the desktop UI uses Wayland. On Arch Linux, install
+the build and runtime prerequisites:
+
+[source,sh]
+----
+sudo pacman -S --needed rust make gcc binutils clang pkgconf libpipewire opus fontconfig libxkbcommon ffmpeg ttf-nerd-fonts-symbols-mono
+make install PREFIX="$HOME/.local"
+----
+
+Use the repository's Rust toolchain and `Cargo.lock` when building.
+The install command builds the default variant and installs the executable,
+desktop entry, and icons. Ensure `~/.local/bin` is on `PATH`.
+Use `make build` to build without installing, or `cargo build --release` directly.
+Build outputs default to `.cache/target/`; `CARGO_TARGET_DIR` overrides that path.
+
+Linux builds prefer `mold` when available and otherwise use the toolchain's
+default linker. Install it optionally with `sudo pacman -S --needed mold`.
+
+Audio output requires PipeWire 1.2 or newer and a running PipeWire server;
+there is no direct ALSA backend. PipeWire performs device-rate conversion.
+
+=== FFmpeg and native-only builds
+
+The default Cargo build includes FFmpeg support and needs development headers
+(`libavutil` 61.x, `libavcodec` 63.x, `libavformat` 63.x) and `libclang`.
+The extension supports little-endian x86-64 and aarch64 Linux; cross-compiling
+is not currently a supported build path. FFmpeg libraries load on demand, not
+during startup or status queries. Native decoding works without them.
+The compiled extension is disabled at runtime until
+`playback.ffmpeg_enabled = true`; see link:doc/04_playback.adoc#_optional_ffmpeg_decoder[Playback]
+for decoder behavior and runtime dependencies.
+
+To build without FFmpeg support, omit the FFmpeg package and disable default features:
+
+[source,sh]
+----
+cargo build --release --no-default-features
+----
+
+Install the resulting `.cache/target/release/rivu` into a directory on `PATH`
+(or use the corresponding path under `CARGO_TARGET_DIR`). Do not run `make install`
+for this variant: it rebuilds with default features, including FFmpeg.
+
+=== Font embedding
+
+Font embedding is off by default, including `make build` and `make install`.
+Install Symbols Nerd Font Mono on the machine displaying the GUI (on Arch Linux,
+`sudo pacman -S --needed ttf-nerd-fonts-symbols-mono`). To embed a build-host font:
+
+[source,sh]
+----
+cargo build --release --features embed-nerd-font
+----
+
+Embedding requires Fontconfig's `fc-list` and an installed Nerd Font on the build
+host; the build fails if none is available. No font is downloaded during the build.
+After changing the host font selection, rebuild with `cargo clean -p rivu` first.
+Distributions of embedded-font builds must include the selected font's license.
+Embedding affects the GUI only; TUI glyphs come from the displaying terminal.
+
+
+=== Build information
+
+Release builds strip symbols. For troubleshooting, set
+`CARGO_PROFILE_RELEASE_STRIP=none` when building or installing.
+
+The pinned GPUI renderer has local extensions under `vendor/`; see
+link:doc/23_visuals.adoc#_pinned_gpu_extensions[GPU extension boundaries and maintenance].
+
+About and `rivu -V` report the build version. `make build` obtains it from Git;
+plain Cargo uses the package version unless `RIVU_GIT_VERSION` is supplied.
+Source archives can set that variable explicitly when Git metadata is absent.
+
+Set `SOURCE_DATE_EPOCH` to nonnegative Unix seconds for a reproducible build
+timestamp. Invalid values fail the build; About displays the timestamp locally.
+
 
 == License
 

@@ -10,54 +10,69 @@ underlying audio data.
 This document explains rendering choices and their tradeoffs. User controls,
 defaults, and display behavior are documented in
 link:01_config.adoc[Configuration and layout]. Cache ownership, invalidation,
-and resource lifetime are covered by link:22_cache.adoc[Visualization Cache].
+and resource lifetime are covered by link:22_cache.adoc[Caching and Resource Lifecycles].
 
 == Pinned GPU extensions
 
-`vendor/gpui` and `vendor/gpui_wgpu` derive from Zed revision
-`df48a139ce9c292738b523252c12f044697e673f` under the upstream Apache-2.0 license.
-Their standalone manifests resolve upstream workspace dependencies at that same
-revision; this is not a framework upgrade. The local extensions add centered
-image transforms and a caller-owned image texture as a path fill on Rivu's
-Linux/WGPU rendering path. Existing untransformed images and ordinary path
-backgrounds retain their existing behavior.
+`Cargo.toml` overrides `gpui` and `gpui_wgpu` with `vendor/gpui` and
+`vendor/gpui_wgpu`, derived from
+https://github.com/zed-industries/zed/tree/df48a139ce9c292738b523252c12f044697e673f[Zed revision df48a139ce9c292738b523252c12f044697e673f]
+under the upstream Apache-2.0 license. The remaining GPUI platform crates and
+standalone manifests retain that pinned dependency baseline. This is a
+maintained rendering capability patch, not a framework replacement or upgrade.
+The extensions add centered image transforms and caller-owned path textures on
+Rivu's Linux/WGPU rendering path. Existing untransformed images and ordinary
+path backgrounds retain their existing behavior.
 
 Run `cargo test --manifest-path vendor/gpui_wgpu/Cargo.toml --lib` to exercise
 the patched shader and headless GPU regressions in their isolated test workspace.
 Compilation also requires the pinned upstream `assets/fonts/lilex` and
 `assets/fonts/ibm-plex-sans` fixtures under this repository's `assets/fonts/`.
 Upstream test-only font and image fixtures retain their original licenses.
+The isolated regression-test workspace keeps copied upstream crates outside
+Rivu's workspace lint targets, without suppressing upstream warnings or mixing
+framework cleanup into this rendering patch.
+
+=== Why the patch is needed
 
 Album artwork reuses its decoded image and atlas texture while the GPU transforms
 the already-cropped sprite. Rounded clipping follows image-local coordinates;
 the surrounding content mask remains in screen coordinates. No rotated pixel
-buffers or angle-indexed image cache are created. Texture-filled paths map the
-caller's image to path bounds, preserve path coverage and opacity, and leave
-image retirement to the caller's existing window owner. Spectrum's use and
-bounded ramp ownership are described in <<_spectrum,Spectrum>>.
+buffers or angle-indexed image cache are created. `Img` forwards its existing
+transformation matrix through image painting to the WGPU sprite shader.
+`Window::paint_path_with_texture` fills actual path geometry from a caller-owned
+`RenderImage`, mapping it to `path.bounds` while preserving coverage and opacity.
+The pinned plain fill could not express Spectrum's full authored cubic palette;
+the former masked two-stop interval workaround changed its intended transitions
+and multiplied path submissions. Preserving those stitched colors or pixel
+equivalence is not required; preserving the authored smooth palette is.
+Spectrum's mapping and bounded ramp ownership are described in <<_spectrum,Spectrum>>.
+
+Rust scene records, WGPU pipeline/bindings, and WGSL/WebGL shader layouts change
+together so transforms and path texture coordinates reach the fragment shader
+consistently. Textured paths reuse the image atlas, path antialiasing, opacity,
+and intermediate compositing. Adjacent paths with the same atlas texture can
+batch without changing submission order; plain fills keep their untextured
+pipeline. Palette generation and image retirement remain the caller's existing
+window owner's responsibility, not the renderer's.
 
 Color images clamp linear texture sampling to their atlas tile's first and last
 texel centers. This prevents neighboring images from bleeding into magnified
 edges, including Spectrogram's one-pixel-wide history columns, without adding
 atlas padding or disabling interpolation.
 
-Album artwork offers `plain`, `vinyl`, `glass`, `halo` (default), `metal`, `card`,
-and `duotone` styles. New panels default to rotating motion. Metal places a
-fixed brushed radial sheen over the rotating circular cover. Card rotates the
-full square image, rounded frame, and shadow together, reserving enough margin
-for its diagonal; it does not crop away the original composition. Duotone uses a
-fixed blue/purple edge glow behind the circular cover, without color extraction
-or an audio dependency. Real and generated default covers share animation,
-interaction, and lifecycle rules. Changing style or frame pacing does not reset
-the rotation angle.
-Right-click an Album artwork panel and open `Style` to select a style; the current
-style is marked. Changes take effect immediately and are saved with that panel
-in the layout. Motion mode, direction, period, and the shared frame rate are
-unchanged. Global artwork settings supply defaults for new or uninitialized panels.
+Artwork styles change composition, not acquisition or signal analysis. Card
+rotates the full square cover, rounded frame, and shadow together, reserving
+diagonal margin rather than cropping the source composition. Metal's sheen and
+Duotone's blue/purple glow remain fixed over or behind the rotating circular
+cover; neither requires extracted colors or audio data. Real and generated
+default covers share animation, interaction, and lifecycle rules. Style and
+frame-pacing changes preserve the rotation angle. Style controls, per-panel
+persistence, defaults, and the frame-rate range are documented in
+link:01_config.adoc#_album_artwork[Album artwork].
 
-`interface.album_artwork.fps` accepts integers from 0 through 240, default 0.
-Zero follows display callbacks without a timer throttle; positive values cap
-animation requests per second independently of the analysis rate. A lower cap
+Zero frame-rate cap follows display callbacks without a timer throttle; positive
+values cap animation requests per second independently of the analysis rate. A lower cap
 reduces rendering work and resource use at the expense of motion smoothness;
 display-following mode can do more work on high-refresh displays. Each owner has
 at most one pending frame or timer; pausing, hiding, and static mode cancel
@@ -65,6 +80,21 @@ pending work, and resuming does not replay missed frames. Still Mode affects
 only audio visualizations, not artwork. Styles introduce neither per-frame CPU
 geometry rotation nor a new application cache system.
 
+=== Maintenance boundary and removal criteria
+
+The implemented rendering backend is WGPU. Native Metal rejects these new
+painting operations rather than silently substituting a different result;
+Linux/Vulkan runtime evidence does not establish Metal or browser support.
+The extra fields also increase shared vertex/sprite record sizes, so this
+patch is not a universal rendering or memory improvement.
+
+When updating GPUI, compare these extensions against their pinned baseline,
+keep Rust and shader record layouts synchronized, and preserve transformed
+image clipping, path texture mapping, atlas lifetime, and drawing order.
+Revalidate ordinary untransformed images and plain paths as well as the two
+new consumers. Drop the local overrides and obsolete vendor code only when
+the selected upstream revision supplies the required behavior and all Rivu
+callers have migrated; a newer dependency version alone is not sufficient.
 
 == Analysis boundary
 
@@ -273,7 +303,7 @@ are shared by rendering style. Multiple panels of one style do not duplicate its
 field or advance its simulation independently; distinct styles do not overwrite
 each other's state. Overlay toggles are paint-only and do not reset analysis or
 simulation. Hidden styles release result storage; submitted analysis images
-retain the retirement boundary described in link:22_cache.adoc[Visualization Cache].
+retain the retirement boundary described in link:22_cache.adoc[Caching and Resource Lifecycles].
 
 === Radial styles
 

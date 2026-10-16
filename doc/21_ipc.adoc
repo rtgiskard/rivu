@@ -8,6 +8,8 @@ that core; frontends do not maintain independent authoritative playback or
 library state. Audio output and analysis have their own workers, so client
 transport and rendering are outside the audio callback.
 
+=== Ordered collections and transaction ownership
+
 Queue and playlist positions remain contiguous and zero-based. Deletion captures
 only removed positions before changing rows, then closes gaps in ascending,
 disjoint original-position intervals within the same transaction. Gap compaction
@@ -43,6 +45,8 @@ Store transaction, including reference deletion and gap compaction. Metadata
 invalidation remains field-sensitive; failures roll back structural revision and
 content together. Already-unique deduplication leaves content and projections valid.
 
+=== Scanning and metadata ownership
+
 Scan-backed metadata and user overrides skip writes when their stored values are
 unchanged. Setting an override equal to its raw value still records that editing
 intent; an omitted field continues to follow rescanned metadata. No-op edits
@@ -72,6 +76,8 @@ Incomplete scans skip global fingerprint candidates because both relocation and
 missing detection are disabled; exact input identities remain covered by the
 requested scopes and record paths. Fingerprint validation still runs before
 commit, and complete scans retain scope-external missing-source discovery.
+
+=== Transactional inputs and bounded storage queries
 
 Track-ID mutations serialize each input list once. Library deletion validates
 before playback-side effects, then consumes the prepared input in the same
@@ -139,6 +145,8 @@ needs table lookups, but moving or compacting entries does not rewrite the rever
 index in addition to the ordering index. Dense capture alone can be slower; the
 choice reduces storage and favors complete deletion/compaction and movement.
 
+=== Consumer and application lifetimes
+
 The GUI, tray, and MPRIS service use `CoreHandle` for business commands and
 purpose-specific projections. Opening a window and quitting the application use
 the separate App-owned control endpoint. CLI and TUI clients use the local IPC
@@ -191,6 +199,8 @@ reinitializing GPUI. Framework-global resources remain resident; no headless
 memory equivalence is promised. Desktop controls and window operations are
 described in link:04_playback.adoc#_desktop_tray_and_window_lifecycle[Playback].
 
+=== Projection and view costs
+
 Projections expose what a consumer needs without copying the whole library on
 each playback update. Library rows are queried separately; state reads contain
 summary information, compact queue state, playback, and system state. In-process
@@ -207,6 +217,9 @@ Page acceptance indexes borrowed row identities once, then revalidates retained
 selection locations with keyed lookups rather than rescanning the page per
 selection. Expected work is linear in page rows plus retained selections; the
 temporary index is bounded by the accepted page and copies no directory paths.
+Viewport page demand locates its first intersecting preorder segment by binary
+search, then visits only intersecting segments and any stale ancestors that need
+revalidation; offscreen retained expansions do not require a full segment scan.
 The TUI builds queue widgets only for visible rows, retaining global occurrence
 selection and scroll position; position-only updates do not rescan the queue.
 Configured TUI roots reuse their immutable storage until the paths change.
@@ -413,6 +426,8 @@ again after another collection is created. Retention is bounded by extant
 playlists, with no per-track version table or mutation event log.
 Every scoped change advances the Library state-section token, so coalesced
 watches receive current scoped validity, not just a GUI-local command hint.
+Committed lifecycle and content tokens advance before the fallible summary
+refresh, so a refresh error cannot make an obsolete mutation valid again.
 
 Playback-statistics writes return count and activity time directly to the Core.
 The bounded track cache and current/recent snapshots receive these scalar changes

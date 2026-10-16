@@ -36,44 +36,16 @@ level = "warning"
 still_mode = false
 ----
 
-== Migrating an existing file
-
-The old root-level format is no longer accepted. Rewrite it before starting
-Rivu; mixing old flat keys with grouped settings is also an error.
-
-Move an existing `[visualizations.album_artwork]` table to
-`[interface.album_artwork]`, keeping its fields and values. The old location is
-rejected; do not keep both tables.
-
-* Move library fields to `[library]`; rename `library_roots` to `roots`.
-* Move volume, shuffle, repeat, play-count threshold, output device,
-  media read buffer, FFmpeg enablement, and PipeWire auto-mix fields to
-  `[playback]`, keeping their names; the integer `volume` key is migrated as
-  described under <<volume,volume control>>.
-* Move page size, layout snapping, tray, and MPRIS fields to `[interface]`,
-  keeping their names; rename `ui_font` to `font` and `ui_scale` to `scale`.
-* Move logging fields to `[logging]`: `log_level` becomes `level`, `log_to_file`
-  becomes `to_file`, and `log_retention_weeks` becomes `retention_weeks`.
-* Move shared visualization and analysis fields to `[visualizations]`:
-  `visual_background` becomes `background`, `visual_palette` becomes `palette`,
-  `visualization_db_range` becomes `db_range`, and `visualization_cache` becomes
-  `cache`. Keep `still_mode`, `analysis_fps`, `analysis_fft_size`, and
-  `analysis_window` unchanged within that table.
-* Move every view-prefixed field to its corresponding nested view table and
-  remove only its `spectrum_`, `spectrogram_`, `audio_visualizer_`, or `waveform_`
-  prefix. Keep units and subfeature qualifiers, such as `history_seconds`,
-  `sampling_points_scale`, `rms_gain`, and `bloom_intensity`.
-
-Do not invent values for omitted optional fields: `playback.output_device` and
-each view's `db_range` remain unset and are omitted when saving. Other missing
-groups and fields inherit defaults; grouping does not change ranges or behavior.
-
 == Parameters
+
+=== Library roots and scanning
 
 `library.roots` defaults to an empty list; add existing directories before
 scanning. `library.scan_max_depth` defaults to `64` and must be at least `1`. See
 link:02_library.adoc[Library] for root normalization, scan boundaries, and CUE/path
 rules.
+
+=== Browsing and keyboard navigation
 
 `interface.page_size` accepts `20`–`256` and tunes internal GUI/TUI query batches,
 not visible pages or CLI listing/export batches. Browsing scrolls continuously;
@@ -90,7 +62,7 @@ remains available when content overflows.
 The list's upper and lower edges indicate more content beyond the viewport;
 the corresponding fade clears when that end is reached.
 
-*Desktop keyboard navigation:*
+==== Desktop keyboard navigation
 
 Use `Tab` and `Shift+Tab` to move between controls; the focused control has an
 accent highlight. `Enter` or `Space` activates a focused button or switch.
@@ -109,6 +81,8 @@ preedit does not also dismiss the containing dialog. Closing a dialog restores
 the invoking control when it is still present, otherwise the layout receives
 focus. Playback shortcuts apply to the layout, not to focused editors or buttons.
 
+
+=== Language
 
 `interface.language` selects the presentation language: `auto` (default), `en-US`,
 or `zh-CN`. Translations are embedded; no language pack installation is needed.
@@ -131,6 +105,8 @@ Saving the queue suggests an editable `Queue_YYYYMMDD_HHMMSS` playlist name.
 Generated names do not pass through translation or contain presentation-only
 bidirectional isolation characters.
 
+=== Decoding and read buffering
+
 `playback.media_read_buffer_mb` defaults to `2`; accepted sizes are `1`, `2`, `4`, `8`,
 and `16` MiB.
 
@@ -144,6 +120,8 @@ are reported when needed; native decoders continue to work. A load failure is
 retained until restart. Disabling stops a track currently decoded through FFmpeg;
 native-decoded playback is unaffected.
 
+=== Volume and playback controls
+
 [[volume]]
 `playback.volume_percent` accepts a finite percentage from `0` to `100`, including
 fractions, and defaults to `70`. Zero mutes; positive values use a dB-linear
@@ -154,17 +132,15 @@ Settings accept fractional percentages; CLI inputs remain integer percentages.
 Slider, IPC, and MPRIS values use the same curve, with normalized `0–1` levels
 for IPC and MPRIS. Values are not rounded to whole percentages internally.
 
-An existing grouped `playback.volume` integer from `0` to `100` is read once as
-the old linear-gain percentage and converted to the new scale, preserving gain.
-Saving writes only `volume_percent`; its fractional value preserves the
-conversion across restarts. Do not specify both keys. For example, an old 50%
-gain becomes approximately 89.97% on the new scale, without becoming louder.
+For older volume settings, see <<_migrating_an_existing_file,Migrating an existing file>>.
 
 `playback.shuffle` defaults to `false`; `playback.repeat` accepts `off`, `all`, or `one` and defaults
 to `off`. `playback.play_count_threshold_percent` defaults to `20` and must be finite and
 in `[0, 100)`; zero still requires some confirmed heard time. Edit the threshold
 in the configuration file or desktop settings; see
 link:02_library.adoc#_play_counts_and_recent_tracks[Library] for counting semantics.
+
+=== Saving playback settings
 
 Playback-control changes are saved automatically. If saving fails, the running
 values remain active and pending for retry; the error is logged and exposed in
@@ -179,8 +155,12 @@ toggle reports `Configuration saved, but audio application failed`; the saved
 configuration remains committed rather than rolling back partially delivered
 audio commands. Resolve the audio failure before retrying or restarting.
 
+=== Output and desktop integration
+
 `playback.pipewire_auto_mix` controls channel remixing; see link:04_playback.adoc[Playback].
 `interface.tray_enabled` and `interface.mpris_enabled` independently control desktop integration.
+
+=== Logging and diagnostics
 
 `logging.level` accepts `debug`, `info`, `warning`, or `error`. Warnings and errors
 always go to stderr. `logging.to_file` enables weekly logs under the data directory;
@@ -266,7 +246,7 @@ Shared visualization settings apply as follows:
   frames and can be slower when the compositor throttles presentation.
 * Still Mode stops visualization processing and discards results; see
   <<_still_mode,Still Mode>>. `visualizations.cache` controls rendering reuse,
-  separately from media read buffering; see link:22_cache.adoc[Visualization Cache].
+  separately from media read buffering; see link:22_cache.adoc[Caching and Resource Lifecycles].
 
 Each frequency view has a range override; leave it empty to inherit Shared settings,
 or clear an explicit value to restore inheritance. See
@@ -282,6 +262,8 @@ seconds per circle, and direction. Animation frame rate remains shared.
 Apply and Discard follow the same draft rules as the other global settings.
 Changing defaults does not change existing panels. Use a panel's right-click
 Artwork settings entry to edit that instance. Static mode retains rotation parameters.
+
+=== Appearance and library display
 
 Font: type to search installed families, or use the arrow to browse them and
 `serif`, `sans-serif`, and `monospace`. Enter or a click selects a choice; Space
@@ -316,6 +298,8 @@ to `false` for names only. Change them without restarting from the Library
 right-click menu → `Track information`. Both Library views share the saved
 selection; full tooltip information is unaffected. See
 link:02_library.adoc#_desktop_selection_and_directory_tree[Library display].
+
+=== Output and applying changes
 
 Omitted `playback.output_device` uses the default output. A selected device must
 be available to play, but can remain saved while unavailable; playback reports
@@ -610,7 +594,7 @@ shared by Spectrum, Spectrogram, and Waveform. See
 link:../src/config.rs[`Config`] for the full setting ranges and defaults.
 `visualizations.cache` defaults to `true`; disabling it preserves the displayed
 results but rebuilds derived graphics on repaint. It does not affect Radial
-Spectrum. See link:22_cache.adoc[Visualization Cache] for scope and trade-offs,
+Spectrum. See link:22_cache.adoc[Caching and Resource Lifecycles] for scope and trade-offs,
 and link:23_visuals.adoc[Visualization Rendering Design] for rendering choices.
 
 === Still Mode
@@ -747,3 +731,40 @@ pause freezes it. Seeking, signal gaps, hiding the view, and style/FFT changes
 reset the scene. See link:23_visuals.adoc[Visualization Rendering Design] for
 analysis continuity, scene resource boundaries, and rendering trade-offs.
 
+== Migrating an existing file
+
+The old root-level format is no longer accepted. Rewrite it before starting
+Rivu; mixing old flat keys with grouped settings is also an error.
+
+Move an existing `[visualizations.album_artwork]` table to
+`[interface.album_artwork]`, keeping its fields and values. The old location is
+rejected; do not keep both tables.
+
+* Move library fields to `[library]`; rename `library_roots` to `roots`.
+* Move volume, shuffle, repeat, play-count threshold, output device,
+  media read buffer, FFmpeg enablement, and PipeWire auto-mix fields to
+  `[playback]`, keeping their names; the integer `volume` key is migrated as
+  described under <<volume,volume control>>.
+* Move page size, layout snapping, tray, and MPRIS fields to `[interface]`,
+  keeping their names; rename `ui_font` to `font` and `ui_scale` to `scale`.
+* Move logging fields to `[logging]`: `log_level` becomes `level`, `log_to_file`
+  becomes `to_file`, and `log_retention_weeks` becomes `retention_weeks`.
+* Move shared visualization and analysis fields to `[visualizations]`:
+  `visual_background` becomes `background`, `visual_palette` becomes `palette`,
+  `visualization_db_range` becomes `db_range`, and `visualization_cache` becomes
+  `cache`. Keep `still_mode`, `analysis_fps`, `analysis_fft_size`, and
+  `analysis_window` unchanged within that table.
+* Move every view-prefixed field to its corresponding nested view table and
+  remove only its `spectrum_`, `spectrogram_`, `audio_visualizer_`, or `waveform_`
+  prefix. Keep units and subfeature qualifiers, such as `history_seconds`,
+  `sampling_points_scale`, `rms_gain`, and `bloom_intensity`.
+
+Do not invent values for omitted optional fields: `playback.output_device` and
+each view's `db_range` remain unset and are omitted when saving. Other missing
+groups and fields inherit defaults; grouping does not change ranges or behavior.
+
+An existing grouped `playback.volume` integer from `0` to `100` is read once as
+the old linear-gain percentage and converted to the new scale, preserving gain.
+Saving writes only `volume_percent`; its fractional value preserves the
+conversion across restarts. Do not specify both keys. For example, an old 50%
+gain becomes approximately 89.97% on the new scale, without becoming louder.
