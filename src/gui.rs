@@ -428,7 +428,7 @@ fn retain_analysis_staging(
     let visualizer = &mut frame.visualizer;
     if !demand.visualizer.stereo_density {
         visualizer.demand.stereo_density = false;
-        visualizer.density = Vec::new();
+        visualizer.density = crate::analysis::DensitySnapshot::default();
         visualizer.correlation = None;
         visualizer.balance = None;
         visualizer.side_ratio = None;
@@ -441,6 +441,33 @@ fn retain_analysis_staging(
         visualizer.demand.band_energy = false;
         visualizer.band_rms = [0.0; 3];
     }
+}
+
+fn stage_analysis_frame(
+    staging: &mut crate::analysis::AnalysisFrame,
+    sequence: &mut u64,
+    needs_refresh: bool,
+    frame: &crate::analysis::AnalysisFrame,
+    frame_is_current: bool,
+) -> bool {
+    if !frame_is_current
+        || (frame.sequence == *sequence && !(needs_refresh && staging.settings.is_some()))
+    {
+        return false;
+    }
+    staging.frequencies_hz.clone_from(&frame.frequencies_hz);
+    staging.spectrum_db.clone_from(&frame.spectrum_db);
+    staging.sequence = frame.sequence;
+    staging.display_token = frame.display_token;
+    staging.sample_rate = frame.sample_rate;
+    staging.sample_time = frame.sample_time;
+    staging.generation = frame.generation;
+    staging.settings = frame.settings;
+    staging.rms_left = frame.rms_left;
+    staging.rms_right = frame.rms_right;
+    staging.visualizer.clone_from(&frame.visualizer);
+    *sequence = frame.sequence;
+    true
 }
 
 pub(super) struct GuiApp {
@@ -1531,32 +1558,15 @@ impl GuiApp {
         }
         {
             let frame = self.handle.analysis.read();
-            if !self.handle.analysis_frame_is_current(&frame) {
+            if !stage_analysis_frame(
+                &mut self.analysis_staging,
+                &mut self.analysis_sequence,
+                self.analysis_needs_refresh,
+                &frame,
+                self.handle.analysis_frame_is_current(&frame),
+            ) {
                 return;
             }
-            if frame.sequence == self.analysis_sequence
-                && !(self.analysis_needs_refresh && self.analysis_staging.settings.is_some())
-            {
-                return;
-            }
-            self.analysis_staging
-                .frequencies_hz
-                .clone_from(&frame.frequencies_hz);
-            self.analysis_staging
-                .spectrum_db
-                .clone_from(&frame.spectrum_db);
-            self.analysis_staging.sequence = frame.sequence;
-            self.analysis_staging.display_token = frame.display_token;
-            self.analysis_staging.sample_rate = frame.sample_rate;
-            self.analysis_staging.sample_time = frame.sample_time;
-            self.analysis_staging.generation = frame.generation;
-            self.analysis_staging.settings = frame.settings;
-            self.analysis_staging.rms_left = frame.rms_left;
-            self.analysis_staging.rms_right = frame.rms_right;
-            self.analysis_staging
-                .visualizer
-                .clone_from(&frame.visualizer);
-            self.analysis_sequence = frame.sequence;
         }
         self.analysis_needs_refresh = false;
         self.visuals.update(&self.analysis_staging);
@@ -2416,7 +2426,9 @@ impl GuiApp {
 
 #[cfg(test)]
 mod state_tests {
-    use super::{BrowserFocus, ListFocus, retain_analysis_staging, visible_list_focus};
+    use super::{
+        BrowserFocus, ListFocus, retain_analysis_staging, stage_analysis_frame, visible_list_focus,
+    };
     use crate::analysis::{
         AnalysisFrame, AnalysisSettings, AnalysisWorker, DisplayDemand, TapFrame, VisualizerDemand,
     };
@@ -2510,7 +2522,19 @@ mod state_tests {
                 ..Default::default()
             },
         ] {
-            let mut staging = publication.clone();
+            let mut staging = AnalysisFrame::default();
+            let mut sequence = 0;
+            assert!(stage_analysis_frame(
+                &mut staging,
+                &mut sequence,
+                false,
+                &publication,
+                publication.display_token == worker.control.display_token(),
+            ));
+            assert_eq!(
+                staging.visualizer.density.as_ptr(),
+                publication.visualizer.density.as_ptr(),
+            );
             let frequencies = staging.frequencies_hz.as_ptr();
             let spectrum = staging.spectrum_db.as_ptr();
             let density = staging.visualizer.density.as_ptr();
@@ -2533,7 +2557,7 @@ mod state_tests {
                     publication.visualizer.correlation
                 );
             } else {
-                assert_eq!(staging.visualizer.density.capacity(), 0);
+                assert!(staging.visualizer.density.is_empty());
                 assert_eq!(staging.visualizer.correlation, None);
                 assert_eq!(staging.visualizer.balance, None);
                 assert_eq!(staging.visualizer.side_ratio, None);
@@ -2555,19 +2579,31 @@ mod state_tests {
             retain_analysis_staging(&mut staging, DisplayDemand::default());
             assert_eq!(staging.frequencies_hz.capacity(), 0);
             assert_eq!(staging.spectrum_db.capacity(), 0);
-            assert_eq!(staging.visualizer.density.capacity(), 0);
+            assert!(staging.visualizer.density.is_empty());
             assert_eq!(staging.visualizer.spatial.capacity(), 0);
             assert_eq!(staging.settings, None);
             retain_analysis_staging(&mut staging, all);
             assert_eq!(staging.settings, None);
             assert_eq!(staging.visualizer.demand, VisualizerDemand::default());
-            assert_eq!(staging.visualizer.density.capacity(), 0);
+            assert!(staging.visualizer.density.is_empty());
             assert_eq!(staging.visualizer.spatial.capacity(), 0);
         }
 
         worker.control.set_display_demand(DisplayDemand::default());
         worker.control.set_display_demand(all);
         assert_ne!(publication.display_token, worker.control.display_token());
+        let mut staging = AnalysisFrame::default();
+        let mut sequence = publication.sequence;
+        // Even an explicit refresh cannot restore a retained pre-hide snapshot.
+        assert!(!stage_analysis_frame(
+            &mut staging,
+            &mut sequence,
+            true,
+            &publication,
+            publication.display_token == worker.control.display_token(),
+        ));
+        assert!(staging.visualizer.density.is_empty());
+        assert!(staging.settings.is_none());
         let restored = publish(0.0);
         assert!(restored.generation > publication.generation);
         assert_eq!(restored.visualizer.demand, all.visualizer);
@@ -2580,6 +2616,26 @@ mod state_tests {
         );
         assert_eq!(restored.visualizer.band_rms, [0.0; 3]);
         assert_eq!([restored.rms_left, restored.rms_right], [0.0; 2]);
+        assert!(stage_analysis_frame(
+            &mut staging,
+            &mut sequence,
+            false,
+            &restored,
+            restored.display_token == worker.control.display_token(),
+        ));
+        assert_eq!(
+            staging.visualizer.density.as_ptr(),
+            restored.visualizer.density.as_ptr(),
+        );
+        assert_eq!(staging.sample_time, restored.sample_time);
+        assert_eq!(staging.generation, restored.generation);
+        assert!(
+            publication
+                .visualizer
+                .density
+                .iter()
+                .any(|value| *value > 0.0)
+        );
     }
 
     #[test]

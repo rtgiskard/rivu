@@ -60,6 +60,29 @@ impl DisplayDemand {
 }
 
 pub const DENSITY_SIDE: usize = 256;
+// One accumulation field plus three immutable publication slots. Three slots
+// cover a GUI-held frame, the latest publication, and the next worker result.
+const DENSITY_SNAPSHOT_COUNT: usize = 3;
+
+/// Immutable density cells shared by publications, staging, and visible panels.
+/// An empty snapshot owns no allocation; only the analyzer creates live slots.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DensitySnapshot(Option<Arc<Vec<f32>>>);
+
+impl std::ops::Deref for DensitySnapshot {
+    type Target = [f32];
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_deref().map_or(&[], Vec::as_slice)
+    }
+}
+
+#[cfg(test)]
+impl From<Vec<f32>> for DensitySnapshot {
+    fn from(cells: Vec<f32>) -> Self {
+        Self(Some(Arc::new(cells)))
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct SpatialBin {
@@ -72,7 +95,7 @@ pub struct SpatialBin {
 #[derive(Debug, Default)]
 pub struct VisualizerFrame {
     pub demand: VisualizerDemand,
-    pub density: Vec<f32>,
+    pub density: DensitySnapshot,
     pub spatial: Vec<SpatialBin>,
     pub correlation: Option<f32>,
     pub balance: Option<f32>,
@@ -93,7 +116,7 @@ impl Clone for VisualizerFrame {
         if source.demand.stereo_density {
             self.density.clone_from(&source.density);
         } else {
-            self.density = Vec::new();
+            self.density = DensitySnapshot::default();
         }
         if source.demand.spatial_spectrum {
             self.spatial.clone_from(&source.spatial);
@@ -111,6 +134,7 @@ impl Clone for VisualizerFrame {
 /// renormalization. Weights are normalized by accepted sample time (tau=0.5s).
 struct DensityField {
     cells: Vec<f32>,
+    snapshots: [Arc<Vec<f32>>; DENSITY_SNAPSHOT_COUNT],
     scale: f32,
     decay: f32,
     weight: f32,
@@ -121,6 +145,7 @@ impl DensityField {
         let decay = (-2.0 / sample_rate.max(1) as f32).exp();
         Self {
             cells: vec![0.0; DENSITY_SIDE * DENSITY_SIDE],
+            snapshots: std::array::from_fn(|_| Arc::new(vec![0.0; DENSITY_SIDE * DENSITY_SIDE])),
             scale: 1.0,
             decay,
             weight: 1.0 - decay,
@@ -150,6 +175,20 @@ impl DensityField {
         let x = ((side + 1.0) * 0.5 * last).round() as usize;
         let y = ((1.0 - mid) * 0.5 * last).round() as usize;
         self.cells[y * DENSITY_SIDE + x] += self.weight / self.scale;
+    }
+
+    fn snapshot(&mut self) -> DensitySnapshot {
+        for slot in &mut self.snapshots {
+            if let Some(cells) = Arc::get_mut(slot) {
+                for (target, cell) in cells.iter_mut().zip(&self.cells) {
+                    *target = cell * self.scale;
+                }
+                return DensitySnapshot(Some(Arc::clone(slot)));
+            }
+        }
+        // A slow consumer may retain every slot. Coalesce the entire result
+        // rather than allocate, block, or publish old density with new metrics.
+        DensitySnapshot::default()
     }
 }
 
@@ -507,7 +546,7 @@ impl SpectrumAnalyzer {
         if let Some(density) = &mut self.density {
             density.clear();
         }
-        self.visualizer.density.fill(0.0);
+        self.visualizer.density = DensitySnapshot::default();
         self.visualizer.spatial.clear();
         self.visualizer.correlation = None;
         self.visualizer.balance = None;
@@ -519,13 +558,10 @@ impl SpectrumAnalyzer {
         if demand.stereo_density {
             if self.density.is_none() {
                 self.density = Some(DensityField::new(self.sample_rate));
-                self.visualizer
-                    .density
-                    .resize(DENSITY_SIDE * DENSITY_SIDE, 0.0);
             }
         } else {
             self.density = None;
-            self.visualizer.density = Vec::new();
+            self.visualizer.density = DensitySnapshot::default();
             self.visualizer.correlation = None;
             self.visualizer.balance = None;
             self.visualizer.side_ratio = None;
@@ -616,10 +652,10 @@ impl SpectrumAnalyzer {
                 (total > 0.0).then(|| ((right - left) / total).clamp(-1.0, 1.0) as f32);
             self.visualizer.side_ratio = (total > 0.0)
                 .then(|| ((total - 2.0 * cross) / (2.0 * total)).clamp(0.0, 1.0) as f32);
-            if let Some(density) = &self.density {
-                for (target, cell) in self.visualizer.density.iter_mut().zip(&density.cells) {
-                    *target = cell * density.scale;
-                }
+            // Relinquish our previous handle before looking for a reusable slot.
+            self.visualizer.density = DensitySnapshot::default();
+            if let Some(density) = &mut self.density {
+                self.visualizer.density = density.snapshot();
             }
         }
         if self.visualizer.demand.spatial_spectrum {
@@ -659,7 +695,10 @@ impl SpectrumAnalyzer {
         [(rms[0] / n as f32).sqrt(), (rms[1] / n as f32).sqrt()]
     }
 
-    fn publish(&mut self, frame: &mut AnalysisFrame, rms: [f32; 2], sample_time: Duration) {
+    fn publish(&mut self, frame: &mut AnalysisFrame, rms: [f32; 2], sample_time: Duration) -> bool {
+        if self.visualizer.demand.stereo_density && self.visualizer.density.is_empty() {
+            return false;
+        }
         // clone_from reuses storage for steady-state publications.
         if self.metadata_dirty {
             frame.frequencies_hz.clone_from(&self.frequencies);
@@ -674,6 +713,7 @@ impl SpectrumAnalyzer {
         frame.rms_right = rms[1];
         frame.sample_time = sample_time;
         frame.sequence = frame.sequence.wrapping_add(1);
+        true
     }
 }
 
@@ -865,8 +905,8 @@ fn analyze(
                 && control.still_mode.load(Ordering::Acquire) == current_still_token
                 && !control.tap_overflow.load(Ordering::Acquire)
                 && !control.shutdown.load(Ordering::Acquire)
+                && analyzer.publish(&mut frame, rms, sample_time)
             {
-                analyzer.publish(&mut frame, rms, sample_time);
                 frame.display_token = current_demand_token;
             }
         }
@@ -1018,22 +1058,44 @@ mod tests {
                 analyzer.push([tone, -tone]);
             }
             let rms = analyzer.transform();
-            analyzer.publish(&mut frame, rms, Duration::from_millis(100));
+            assert!(analyzer.publish(&mut frame, rms, Duration::from_millis(100)));
             let density = analyzer.visualizer.density.as_ptr();
+            let snapshots = analyzer
+                .density
+                .as_ref()
+                .unwrap()
+                .snapshots
+                .each_ref()
+                .map(|slot| slot.as_ptr());
             let cells = analyzer.density.as_ref().unwrap().cells.as_ptr();
             let spatial = analyzer.visualizer.spatial.as_ptr();
             let published_density = frame.visualizer.density.as_ptr();
+            assert_eq!(published_density, density);
             let published_spatial = frame.visualizer.spatial.as_ptr();
             analyzer.set_visualizer_demand(ALL_DEMAND);
             analyzer.transform();
-            analyzer.publish(&mut frame, rms, Duration::from_millis(100));
-            assert_eq!(analyzer.visualizer.density.as_ptr(), density);
+            assert!(analyzer.publish(&mut frame, rms, Duration::from_millis(100)));
+            assert!(snapshots.contains(&analyzer.visualizer.density.as_ptr()));
+            assert_ne!(analyzer.visualizer.density.as_ptr(), density);
             assert_eq!(analyzer.density.as_ref().unwrap().cells.as_ptr(), cells);
             assert_eq!(analyzer.visualizer.spatial.as_ptr(), spatial);
-            assert_eq!(frame.visualizer.density.as_ptr(), published_density);
+            assert_eq!(
+                frame.visualizer.density.as_ptr(),
+                analyzer.visualizer.density.as_ptr(),
+            );
+            assert_eq!(
+                analyzer
+                    .density
+                    .as_ref()
+                    .unwrap()
+                    .snapshots
+                    .each_ref()
+                    .map(|slot| slot.as_ptr()),
+                snapshots,
+            );
             assert_eq!(frame.visualizer.spatial.as_ptr(), published_spatial);
             assert_eq!(
-                analyzer.visualizer.density.capacity(),
+                analyzer.visualizer.density.len(),
                 DENSITY_SIDE * DENSITY_SIDE
             );
             assert_eq!(analyzer.visualizer.spatial.capacity(), 256);
@@ -1042,7 +1104,7 @@ mod tests {
             frame.visualizer.clone_from(&analyzer.visualizer);
             assert!(analyzer.density.is_none());
             for payload in [&analyzer.visualizer, &frame.visualizer] {
-                assert_eq!(payload.density.capacity(), 0);
+                assert!(payload.density.is_empty());
                 assert_eq!(payload.spatial.capacity(), 0);
                 assert_eq!(payload.correlation, None);
                 assert_eq!(payload.balance, None);
@@ -1056,6 +1118,82 @@ mod tests {
             assert!(Arc::ptr_eq(&analyzer.fft, &fft));
             assert_eq!(analyzer.frequency.as_ptr(), frequency);
         }
+    }
+
+    #[test]
+    fn density_snapshots_isolate_slow_consumers_and_bound_reusable_storage() {
+        let mut analyzer = visualizer_analyzer(ALL_DEMAND);
+        let slots = analyzer
+            .density
+            .as_ref()
+            .unwrap()
+            .snapshots
+            .each_ref()
+            .map(|slot| slot.as_ptr());
+        let mut frame = AnalysisFrame::default();
+        let mut retained = Vec::new();
+        for index in 0..DENSITY_SNAPSHOT_COUNT {
+            for _ in 0..512 {
+                analyzer.push([0.2 * (index + 1) as f32, 0.0]);
+            }
+            let rms = analyzer.transform();
+            assert!(analyzer.publish(
+                &mut frame,
+                rms,
+                Duration::from_millis(100 * (index + 1) as u64),
+            ));
+            assert!(slots.contains(&frame.visualizer.density.as_ptr()));
+            retained.push((frame.clone(), frame.visualizer.density.to_vec()));
+        }
+        let previous = frame.clone();
+        for _ in 0..512 {
+            analyzer.push([0.0, 0.8]);
+        }
+        let rms = analyzer.transform();
+        assert!(analyzer.visualizer.density.is_empty());
+        assert!(!analyzer.publish(&mut frame, rms, Duration::from_millis(400)));
+        assert_eq!(frame.sequence, previous.sequence);
+        assert_eq!(frame.sample_time, previous.sample_time);
+        assert_eq!(frame.generation, previous.generation);
+        assert_eq!(frame.visualizer.density, previous.visualizer.density);
+        assert_eq!(frame.visualizer.balance, previous.visualizer.balance);
+        assert_eq!(frame.visualizer.band_rms, previous.visualizer.band_rms);
+        for (snapshot, cells) in &retained {
+            assert_eq!(&*snapshot.visualizer.density, cells.as_slice());
+        }
+
+        // Releasing one old consumer permits the next result without growing
+        // the pool, and includes all samples accumulated during coalescing.
+        let released = retained.remove(0).0.visualizer.density.as_ptr();
+        let rms = analyzer.transform();
+        assert!(analyzer.publish(&mut frame, rms, Duration::from_millis(400)));
+        assert_eq!(frame.visualizer.density.as_ptr(), released);
+        assert_eq!(frame.sequence, previous.sequence + 1);
+        assert_eq!(frame.sample_time, Duration::from_millis(400));
+        assert_eq!(frame.visualizer.balance, Some(1.0));
+        let density = analyzer.density.as_ref().unwrap();
+        assert_eq!(
+            density.snapshots.each_ref().map(|slot| slot.as_ptr()),
+            slots,
+        );
+        assert!(
+            frame
+                .visualizer
+                .density
+                .iter()
+                .zip(&density.cells)
+                .all(|(actual, cell)| *actual == cell * density.scale)
+        );
+        for (snapshot, cells) in &retained {
+            assert_eq!(&*snapshot.visualizer.density, cells.as_slice());
+        }
+        let weak = density.snapshots.each_ref().map(Arc::downgrade);
+        analyzer.set_visualizer_demand(VisualizerDemand::default());
+        frame = AnalysisFrame::default();
+        assert!(frame.visualizer.density.is_empty());
+        retained.clear();
+        drop(previous);
+        assert!(weak.iter().all(|slot| slot.upgrade().is_none()));
     }
 
     #[test]
@@ -1328,6 +1466,8 @@ mod tests {
         set_test_playback(&worker, true);
         let mut producer = worker.producer();
         let mut sequence = 0;
+        let mut retired = None;
+        let old_token = worker.control.display_token();
         for samples in [[0.7, -0.7], [0.5, 0.5]] {
             if sequence != 0 {
                 worker.control.set_display_demand(DisplayDemand {
@@ -1338,6 +1478,15 @@ mod tests {
                     enabled: true,
                     visualizer: DENSITY_DEMAND,
                 });
+            }
+            if sequence != 0 {
+                // A late pre-transition callback must not restore old density.
+                push_window(
+                    &mut producer,
+                    worker.control.epoch.load(Ordering::Acquire),
+                    old_token,
+                    [0.7, -0.7],
+                );
             }
             let epoch = worker.control.epoch.load(Ordering::Acquire);
             for _ in 0..512 {
@@ -1362,7 +1511,11 @@ mod tests {
                         assert_eq!(frame.visualizer.density[128 * DENSITY_SIDE + 217], 0.0);
                         assert!(frame.visualizer.density[64 * DENSITY_SIDE + 128] > 0.0);
                         assert_eq!(frame.visualizer.correlation, Some(1.0));
+                        let old: &DensitySnapshot = retired.as_ref().unwrap();
+                        assert!(old[128 * DENSITY_SIDE + 217] > 0.0);
+                        assert_eq!(old[64 * DENSITY_SIDE + 128], 0.0);
                     }
+                    retired = Some(frame.visualizer.density.clone());
                     sequence = frame.sequence;
                     break;
                 }
@@ -1461,9 +1614,102 @@ mod tests {
             frame.visualizer.demand == VisualizerDemand::default() && frame.settings.is_none()
         });
         let frame = shared.read();
-        assert_eq!(frame.visualizer.density.capacity(), 0);
+        assert!(frame.visualizer.density.is_empty());
         assert_eq!(frame.visualizer.spatial.capacity(), 0);
         assert_eq!(frame.visualizer.band_rms, [0.0; 3]);
+    }
+
+    #[test]
+    fn worker_density_snapshots_coalesce_when_retained_and_resume_without_overwrite() {
+        let shared = Arc::new(RwLock::new(AnalysisFrame::default()));
+        let worker = AnalysisWorker::new(shared.clone()).unwrap();
+        worker.configure(AnalysisSettings {
+            fps: 60,
+            fft_size: 512,
+            window: AnalysisWindow::None,
+        });
+        worker.control.set_display_demand(DisplayDemand {
+            enabled: true,
+            visualizer: ALL_DEMAND,
+        });
+        set_test_playback(&worker, true);
+        let mut producer = worker.producer();
+        let epoch = worker.control.epoch.load(Ordering::Acquire);
+        let token = worker.control.display_token();
+        let mut retained = Vec::new();
+        for index in 0..DENSITY_SNAPSHOT_COUNT {
+            let sequence = shared.read().sequence;
+            push_window(&mut producer, epoch, token, [0.2 * (index + 1) as f32, 0.0]);
+            worker.control.request_frame();
+            wait_for_frame(&shared, |frame| {
+                frame.sequence > sequence && frame.settings.is_some()
+            });
+            let frame = shared.read().clone();
+            retained.push((
+                frame.visualizer.density.clone(),
+                frame.visualizer.density.to_vec(),
+            ));
+        }
+        let previous = shared.read().clone();
+        push_window(&mut producer, epoch, token, [0.0, 0.8]);
+        worker.control.request_frame();
+        wait_until(|| producer.occupied_len() == 0);
+        // The worker consuming another permit proves the exhausted publication
+        // cycle completed; no sleep or scheduling assumption is needed.
+        worker.control.request_frame();
+        wait_until(|| !worker.control.frame_requested.load(Ordering::Acquire));
+        {
+            let frame = shared.read();
+            assert_eq!(frame.sequence, previous.sequence);
+            assert_eq!(frame.sample_time, previous.sample_time);
+            assert_eq!(frame.visualizer.density, previous.visualizer.density);
+            assert_eq!(frame.visualizer.band_rms, previous.visualizer.band_rms);
+        }
+        let released = retained.remove(0).0.as_ptr();
+        push_window(&mut producer, epoch, token, [0.0, 0.8]);
+        worker.control.request_frame();
+        wait_for_frame(&shared, |frame| frame.sequence > previous.sequence);
+        let frame = shared.read();
+        assert_eq!(frame.visualizer.density.as_ptr(), released);
+        assert_eq!(frame.sequence, previous.sequence + 1);
+        assert_eq!(
+            frame.sample_time - previous.sample_time,
+            Duration::from_secs_f64(512.0 / frame.sample_rate as f64) * 2,
+        );
+        assert_eq!(frame.generation, previous.generation);
+        assert_eq!(frame.rms_left, 0.0);
+        assert!((frame.rms_right - 0.8).abs() < 0.0001);
+        assert_eq!(frame.visualizer.balance, Some(1.0));
+        assert_eq!(frame.visualizer.demand, ALL_DEMAND);
+        assert_eq!(frame.display_token, token);
+        for (snapshot, cells) in &retained {
+            assert_eq!(&**snapshot, cells.as_slice());
+        }
+        drop(frame);
+
+        // Retained old density slots must not block a surviving spatial panel.
+        worker.control.set_display_demand(DisplayDemand {
+            enabled: true,
+            visualizer: SPATIAL_DEMAND,
+        });
+        wait_for_frame(&shared, |frame| {
+            frame.visualizer.demand == SPATIAL_DEMAND && frame.settings.is_none()
+        });
+        let spatial_token = worker.control.display_token();
+        push_window(&mut producer, epoch, token, [0.8, 0.0]);
+        push_window(&mut producer, epoch, spatial_token, [0.0, 0.8]);
+        worker.control.request_frame();
+        wait_for_frame(&shared, |frame| frame.settings.is_some());
+        let frame = shared.read();
+        assert_eq!(frame.display_token, spatial_token);
+        assert_eq!(frame.visualizer.demand, SPATIAL_DEMAND);
+        assert!(frame.visualizer.density.is_empty());
+        assert_eq!(frame.visualizer.spatial.len(), 256);
+        assert_eq!(frame.rms_left, 0.0);
+        assert!((frame.rms_right - 0.8).abs() < 0.0001);
+        for (snapshot, cells) in &retained {
+            assert_eq!(&**snapshot, cells.as_slice());
+        }
     }
 
     fn push_window(
@@ -1907,7 +2153,7 @@ mod tests {
             assert!(shared.read().spectrum_db.is_empty());
             assert_eq!(shared.read().settings, None);
             assert_eq!(shared.read().visualizer.demand, VisualizerDemand::default());
-            assert_eq!(shared.read().visualizer.density.capacity(), 0);
+            assert!(shared.read().visualizer.density.is_empty());
             assert_eq!(shared.read().visualizer.spatial.capacity(), 0);
             worker.control.set_display_demand(DisplayDemand {
                 enabled: true,

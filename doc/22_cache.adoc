@@ -169,6 +169,18 @@ keeps its buffers; losing all analysis demand also discards the shared spectrum
 copy. Restoring demand waits for a publication with the current display token
 and generation rather than restoring hidden results.
 
+Density keeps one 256 by 256 accumulation field and three fixed immutable
+snapshot slots: 1 MiB of cell storage per active analyzer, excluding images and
+small control allocations. A publication materializes into a uniquely held slot;
+the shared frame, GUI staging, and Density renderer then share that payload
+without copying its cells. Spatial Spectrum retains its separate decaying
+field. If slow consumers retain all three slots, the worker coalesces the
+whole publication rather than allocating, blocking, or pairing old Density
+with newer metrics. Accepted sample time and accumulated signal continue;
+publication resumes when a slot becomes available. Losing Density demand
+releases its pool and consumer references without stopping a surviving
+Spatial Spectrum consumer.
+
 Cached Paths and Scene replay share immutable vertex storage while keeping
 draw order, masks, and other Path metadata independent. Editing a shared Path
 uses copy-on-write. Painting still converts logical coordinates once into

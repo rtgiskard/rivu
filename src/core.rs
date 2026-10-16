@@ -2209,7 +2209,7 @@ mod tests {
         {
             let frame = handle.analysis.read();
             assert!(frame.spectrum_db.is_empty());
-            assert_eq!(frame.visualizer.density.capacity(), 0);
+            assert!(frame.visualizer.density.is_empty());
             assert_eq!(frame.visualizer.demand, Default::default());
         }
         handle.set_display_demand(demand);

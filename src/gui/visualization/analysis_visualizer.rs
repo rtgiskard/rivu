@@ -1,6 +1,6 @@
 //! Fixed-scale, analysis-backed stereo plots. Texture storage is independent of panel size.
 use crate::{
-    analysis::{AnalysisFrame, AnalysisSettings, DENSITY_SIDE, SpatialBin},
+    analysis::{AnalysisFrame, AnalysisSettings, DENSITY_SIDE, DensitySnapshot, SpatialBin},
     config::{AudioVisualizerOptions, AudioVisualizerStyle, Config},
     i18n::Localizer,
 };
@@ -77,7 +77,8 @@ struct PlotData {
     sample_rate: u32,
     sample_time: Option<Duration>,
     sequence: Option<u64>,
-    // Density is the backend's fixed-scale field; spatial is linear spectral power.
+    // Density borrows the immutable worker snapshot; spatial owns its decaying field.
+    density: DensitySnapshot,
     field: Vec<f32>,
     spatial_next: Vec<f32>,
     spatial_mapping: SpatialMapping,
@@ -122,6 +123,7 @@ impl AnalysisVisualizer {
                 sample_rate: 0,
                 sample_time: None,
                 sequence: None,
+                density: DensitySnapshot::default(),
                 field: Vec::new(),
                 spatial_next: Vec::new(),
                 spatial_mapping: SpatialMapping::default(),
@@ -160,7 +162,7 @@ impl AnalysisVisualizer {
         data.db_range = config.audio_visualizer_db_range();
         if reset {
             data.clear();
-        } else if recolor && !data.field.is_empty() {
+        } else if recolor && !data.field().is_empty() {
             data.rasterize();
         }
         changed
@@ -264,6 +266,7 @@ impl PlotData {
     }
 
     fn clear(&mut self) {
+        self.density = DensitySnapshot::default();
         self.retire_image();
         if self.visible {
             self.field.clear();
@@ -321,10 +324,11 @@ impl PlotData {
                 if frame.visualizer.density.len() != DENSITY_SIDE * DENSITY_SIDE {
                     return;
                 }
-                if self.field != frame.visualizer.density {
-                    self.field.clone_from(&frame.visualizer.density);
+                if self.density != frame.visualizer.density {
                     changed = true;
                 }
+                // Also replace equal-valued snapshots so obsolete slots can be reused.
+                self.density.clone_from(&frame.visualizer.density);
                 let metrics = [
                     frame.visualizer.correlation,
                     frame.visualizer.balance,
@@ -391,6 +395,14 @@ impl PlotData {
         }
     }
 
+    fn field(&self) -> &[f32] {
+        if self.style == AudioVisualizerStyle::StereoDensity {
+            &self.density
+        } else {
+            &self.field
+        }
+    }
+
     fn rasterize(&mut self) {
         let (width, height) = match self.style {
             AudioVisualizerStyle::StereoDensity => (DENSITY_SIDE, DENSITY_SIDE),
@@ -398,7 +410,7 @@ impl PlotData {
             _ => return,
         };
         let mut pixels = image::RgbaImage::new(width as u32, height as u32);
-        for (pixel, value) in pixels.pixels_mut().zip(&self.field) {
+        for (pixel, value) in pixels.pixels_mut().zip(self.field()) {
             let strength = field_strength(*value, self.db_range);
             let index = (strength * (FIELD_COLOR_COUNT - 1) as f32).round() as usize;
             *pixel = image::Rgba(self.colors[index]);
@@ -861,14 +873,20 @@ mod tests {
                     power_db: -30.0,
                 }],
                 density: if style == AudioVisualizerStyle::StereoDensity {
-                    vec![0.0; DENSITY_SIDE * DENSITY_SIDE]
+                    vec![0.0; DENSITY_SIDE * DENSITY_SIDE].into()
                 } else {
-                    Vec::new()
+                    DensitySnapshot::default()
                 },
                 ..VisualizerFrame::default()
             },
             ..AnalysisFrame::default()
         }
+    }
+
+    fn set_density_cell(frame: &mut AnalysisFrame, index: usize, value: f32) {
+        let mut cells = frame.visualizer.density.to_vec();
+        cells[index] = value;
+        frame.visualizer.density = cells.into();
     }
 
     fn plot(style: AudioVisualizerStyle) -> AnalysisVisualizer {
@@ -999,8 +1017,13 @@ mod tests {
             } else {
                 SPATIAL_WIDTH * SPATIAL_HEIGHT
             };
-            data.field = vec![0.0; cells];
-            data.field[1] = 0.001;
+            let mut field = vec![0.0; cells];
+            field[1] = 0.001;
+            if style == AudioVisualizerStyle::StereoDensity {
+                data.density = field.into();
+            } else {
+                data.field = field;
+            }
             data.rasterize();
             let image = data.image.as_ref().unwrap();
             let bytes = image.as_bytes(0).unwrap();
@@ -1010,7 +1033,13 @@ mod tests {
                 "red tint must be red in GPUI's BGRA texture"
             );
             let moderate: [u8; 4] = bytes[4..8].try_into().unwrap();
-            data.field[2] = 1.0;
+            if style == AudioVisualizerStyle::StereoDensity {
+                let mut field = data.density.to_vec();
+                field[2] = 1.0;
+                data.density = field.into();
+            } else {
+                data.field[2] = 1.0;
+            }
             data.rasterize();
             let bytes = data.image.as_ref().unwrap().as_bytes(0).unwrap();
             assert_eq!(
@@ -1024,7 +1053,8 @@ mod tests {
             plot.configure(&config);
             let data = plot.data.borrow();
             assert_eq!(
-                data.field[1], 0.001,
+                data.field()[1],
+                0.001,
                 "recoloring must preserve measured power"
             );
             let bytes = data.image.as_ref().unwrap().as_bytes(0).unwrap();
@@ -1127,9 +1157,9 @@ mod tests {
         assert!((field_strength(0.001, 60.0) - 0.5).abs() < 1e-6);
         let plot = plot(AudioVisualizerStyle::StereoDensity);
         let mut frame = frame(AudioVisualizerStyle::StereoDensity);
-        frame.visualizer.density[0] = 0.001;
+        set_density_cell(&mut frame, 0, 0.001);
         plot.update(&frame);
-        assert_eq!(plot.data.borrow().field[0], 0.001);
+        assert_eq!(plot.data.borrow().field()[0], 0.001);
         let image = Arc::clone(plot.data.borrow().image.as_ref().unwrap());
         frame.sample_time += Duration::from_millis(100);
         frame.sequence += 1;
@@ -1138,13 +1168,13 @@ mod tests {
             &image,
             plot.data.borrow().image.as_ref().unwrap()
         ));
-        frame.visualizer.density[DENSITY_SIDE * DENSITY_SIDE - 1] = 1.0;
+        set_density_cell(&mut frame, DENSITY_SIDE * DENSITY_SIDE - 1, 1.0);
         frame.sample_time += Duration::from_millis(100);
         frame.sequence += 1;
         plot.update(&frame);
-        assert_eq!(plot.data.borrow().field[0], 0.001);
+        assert_eq!(plot.data.borrow().field()[0], 0.001);
         assert_eq!(
-            plot.data.borrow().field[DENSITY_SIDE * DENSITY_SIDE - 1],
+            plot.data.borrow().field()[DENSITY_SIDE * DENSITY_SIDE - 1],
             1.0
         );
         assert!(!Arc::ptr_eq(
@@ -1154,12 +1184,42 @@ mod tests {
     }
 
     #[test]
+    fn density_panels_share_snapshots_and_release_them_independently() {
+        let first = plot(AudioVisualizerStyle::StereoDensity);
+        let second = plot(AudioVisualizerStyle::StereoDensity);
+        let mut frame = frame(AudioVisualizerStyle::StereoDensity);
+        set_density_cell(&mut frame, 0, 0.25);
+        first.update(&frame);
+        second.update(&frame);
+        let old = frame.visualizer.density.clone();
+        for plot in [&first, &second] {
+            assert_eq!(plot.data.borrow().density.as_ptr(), old.as_ptr());
+            assert_eq!(plot.data.borrow().field.capacity(), 0);
+        }
+        first.set_visible(false);
+        assert!(first.data.borrow().density.is_empty());
+        assert_eq!(second.data.borrow().density.as_ptr(), old.as_ptr());
+        set_density_cell(&mut frame, 0, 0.5);
+        frame.sequence += 1;
+        frame.sample_time += Duration::from_millis(100);
+        first.update(&frame);
+        second.update(&frame);
+        assert!(first.data.borrow().density.is_empty());
+        assert_eq!(second.data.borrow().field()[0], 0.5);
+        assert_eq!(
+            second.data.borrow().density.as_ptr(),
+            frame.visualizer.density.as_ptr(),
+        );
+        assert_eq!(old[0], 0.25);
+    }
+
+    #[test]
     fn only_uploaded_images_need_delayed_retirement() {
         let plot = plot(AudioVisualizerStyle::StereoDensity);
         let mut frame = frame(AudioVisualizerStyle::StereoDensity);
         plot.update(&frame);
         let old = Arc::downgrade(plot.data.borrow().image.as_ref().unwrap());
-        frame.visualizer.density[0] = 1.0;
+        set_density_cell(&mut frame, 0, 1.0);
         frame.sample_time += Duration::from_millis(100);
         frame.sequence += 1;
         plot.update(&frame);
@@ -1180,9 +1240,10 @@ mod tests {
         ] {
             let plot = plot(style);
             plot.update(&frame(style));
-            assert!(plot.data.borrow().field.capacity() > 0);
+            assert!(!plot.data.borrow().field().is_empty());
             plot.set_visible(false);
             assert_eq!(plot.data.borrow().field.capacity(), 0);
+            assert!(plot.data.borrow().density.is_empty());
             assert_eq!(plot.data.borrow().spatial_next.capacity(), 0);
             assert_eq!(plot.data.borrow().spatial_mapping.rows.capacity(), 0);
             plot.configure(&Config {
@@ -1206,10 +1267,10 @@ mod tests {
         let mut frame = frame(AudioVisualizerStyle::StereoDensity);
         frame.visualizer.demand.spatial_spectrum = true;
         frame.visualizer.demand.band_energy = true;
-        frame.visualizer.density[0] = 0.25;
+        set_density_cell(&mut frame, 0, 0.25);
         density.update(&frame);
         spatial.update(&frame);
-        assert_eq!(density.data.borrow().field[0], 0.25);
+        assert_eq!(density.data.borrow().field()[0], 0.25);
         assert!(spatial.data.borrow().field.iter().any(|value| *value > 0.0));
         let density_image = Arc::downgrade(density.data.borrow().image.as_ref().unwrap());
         let spatial_image = Arc::clone(spatial.data.borrow().image.as_ref().unwrap());
